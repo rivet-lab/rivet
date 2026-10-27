@@ -437,7 +437,7 @@ exports:
     let mut arr = [0u8; 16];
     arr.copy_from_slice(bytes);
     assert_eq!(
-        uuid::Uuid::from_bytes(arr).to_hyphenated().to_string(),
+        uuid::Uuid::from_bytes(arr).hyphenated().to_string(),
         "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380011",
         "PostgreSQL canonical uuid bytes must round-trip via FixedSizeBinary(16)"
     );
@@ -1007,7 +1007,7 @@ exports:
     let to_str = |idx: usize| {
         let mut a = [0u8; 16];
         a.copy_from_slice(uid_arr.value(idx));
-        uuid::Uuid::from_bytes(a).to_hyphenated().to_string()
+        uuid::Uuid::from_bytes(a).hyphenated().to_string()
     };
     assert_eq!(to_str(0), "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380011");
     assert_eq!(to_str(3), "d0eebc99-9c0b-4ef8-bb6d-6bb9bd380044");

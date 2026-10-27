@@ -367,7 +367,7 @@ fn sqlite_rows(db: &Path) -> Result<BTreeMap<String, BTreeSet<String>>, String> 
     let mut out = BTreeMap::new();
     for t in tables {
         let mut st = conn.prepare(&format!("SELECT * FROM \"{t}\"")).map_err(e)?;
-        let cols: Vec<String> = st.column_names().iter().map(|c| c.to_string()).collect();
+        let cols: Vec<String> = st.column_names().map(|c| c.to_string()).collect();
         let rows: BTreeSet<String> = st
             .query_map([], |r| {
                 let mut row = serde_json::Map::new();
