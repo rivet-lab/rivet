@@ -291,6 +291,12 @@ FIELD_REPLAY_CARRIER_BIN  ?= $(PREV_RELEASE_DIR)/carrier/rivet-$(FIELD_REPLAY_CA
 # when the previous release writes this tree's schema. Missing is a FAIL in each of them.
 MIGRATION_CARRIER_TAG     ?= v0.31.0
 MIGRATION_CARRIER_BIN     ?= $(PREV_RELEASE_DIR)/field/rivet-$(MIGRATION_CARRIER_TAG)-$(shell uname -m | sed 's/arm64/aarch64/')-apple-darwin/rivet
+# The LEASE carrier: a release that holds the run and load leases this tree's migration waits for
+# (0.32.0+), writes an older state schema (v37), and still advances a Postgres slot past its checkpoint
+# (#649, fixed in 0.32.2). PINNED like the carriers above, and found in the field cache `field_state
+# --fetch` fills below; the cells that run it beside this tree fail the census when it is missing.
+LEASE_CARRIER_TAG         ?= v0.32.1
+LEASE_CARRIER_BIN         ?= $(PREV_RELEASE_DIR)/field/rivet-$(LEASE_CARRIER_TAG)-$(shell uname -m | sed 's/arm64/aarch64/')-apple-darwin/rivet
 # The release whose state `rivet state copy` must carry to PostgreSQL: 0.30.0 (state v31), the one a
 # client moves from. PINNED like the carriers above.
 STATE_COPY_FROM_TAG       ?= v0.30.0
@@ -314,6 +320,7 @@ GATE_ENV = \
   RIVET_GATE_STATE_URL='$(RIVET_GATE_STATE_URL)' \
   RIVET_FIELD_REPLAY_BIN='$(FIELD_REPLAY_CARRIER_BIN)' \
   RIVET_MIGRATION_CARRIER_BIN='$(MIGRATION_CARRIER_BIN)' \
+  RIVET_LEASE_CARRIER_BIN='$(LEASE_CARRIER_BIN)' \
   RIVET_STATE_COPY_FROM_BIN='$(STATE_COPY_FROM_BIN)' \
   RIVET_TEST_STATE_URL='$(RIVET_GATE_STATE_URL)' \
   RIVET_SWEEP_STATE_CONTAINER='$(RIVET_SWEEP_STATE_CONTAINER)' \
