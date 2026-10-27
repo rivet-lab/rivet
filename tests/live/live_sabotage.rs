@@ -1925,7 +1925,7 @@ fn hold_a_lease(rig: &Rig, db: Option<&ScratchStateDb>) -> Box<dyn FnOnce() + Se
     }
 }
 
-/// The previous release holds its run lease, paused after its first fetch (`pg_after_snapshot_open`, so it writes nothing meanwhile), while this build runs the export on the same state (SQLite, or a Postgres state of the cell's own): this build is refused by code with the schema left as it was, the paused run then delivers, and the previous release runs AGAIN on that state and delivers. The refusal is then walked out of beside a lease the cell holds: refused twice, `rivet state reset` is refused the same way, and the remedy (SQLite: run again once the holder ends; Postgres: `--lock-wait`, which waits for it) migrates the state and delivers.
+/// This build refused beside a paused run of the pinned lease-era release leaves the state as it was; that release then runs again, and the refusal is walked out of.
 fn old_runs_again_after_this_build_was_refused_beside_it(engine: SqlEngine, pg_state: bool) {
     if !pg_state
         && not_sqlite_state("the SQLite state beside the config, as the previous release keeps it")
@@ -1933,7 +1933,7 @@ fn old_runs_again_after_this_build_was_refused_beside_it(engine: SqlEngine, pg_s
         return;
     }
     let (_table, mut new, _guard) = shaped(engine, "sab_oldagain", Shape::Full);
-    let Some(old) = new.as_previous_release() else {
+    let Some(old) = new.as_lease_carrier() else {
         return;
     };
     let db = pg_state.then(|| ScratchStateDb::new("sab_oldagain"));
@@ -1964,12 +1964,10 @@ fn old_runs_again_after_this_build_was_refused_beside_it(engine: SqlEngine, pg_s
     ok(old.run_with_envs(&envs));
     let refused = Refused::beside_a_live_run_at_schema(before);
     assert_refused(&beside, refused);
-    if before == this_trees_state_schema() {
-        skip_live(&format!(
-            "RIVET_PREV_RELEASE_BIN writes this tree's state schema v{before}: no migration to refuse or walk out of"
-        ));
-        return recovers(&new, &envs);
-    }
+    assert!(
+        before != this_trees_state_schema(),
+        "the pinned release writes this tree's state schema v{before}: no migration to refuse or walk out of; pin a release from before the last migration"
+    );
     let export = new.export_name().to_string();
     let reset = ["state", "reset", "--export", export.as_str()];
     let release = hold_a_lease(&new, db.as_ref());
@@ -5240,14 +5238,14 @@ fn the_two_releases_taking_turns_deliver_or_refuse_mongo() {
 }
 
 #[test]
-#[ignore = "live: requires docker compose postgres + RIVET_PREV_RELEASE_BIN"]
+#[ignore = "live: requires docker compose postgres + RIVET_LEASE_CARRIER_BIN"]
 fn the_previous_release_runs_again_after_this_build_was_refused_beside_it_on_sqlite_state_postgres()
 {
     old_runs_again_after_this_build_was_refused_beside_it(SqlEngine::Pg, false);
 }
 
 #[test]
-#[ignore = "live: requires docker compose postgres + a PostgreSQL state server + RIVET_PREV_RELEASE_BIN"]
+#[ignore = "live: requires docker compose postgres + a PostgreSQL state server + RIVET_LEASE_CARRIER_BIN"]
 fn the_previous_release_runs_again_after_this_build_was_refused_beside_it_on_postgres_state_postgres()
  {
     old_runs_again_after_this_build_was_refused_beside_it(SqlEngine::Pg, true);
