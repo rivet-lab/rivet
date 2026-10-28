@@ -2144,6 +2144,46 @@ seeds:
         cells:
           - "lib:a_missing_change_log_is_the_first_cycle_by_the_catalog_not_by_an_error_text"
 
+  - name: snowflake-retry-read-from-answer-text
+    class: "whether a Snowflake request is sent again is read from the words of the answer, not from its HTTP status"
+    history: "2026-10-28 - the SQL API transport replaced the `snow` CLI; the retry verdict is the typed status (429, 5xx), and a 422 whose message says `try again` is the warehouse's refusal"
+    scope: source
+    patch: snowflake-retry-read-from-answer-text/shared.patch
+    engines:
+      postgres:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      mysql:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      mssql:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      mongo:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      oracle:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      lib:
+        cells:
+          - "lib:the_verdict_to_retry_is_the_status_never_the_words_of_the_answer"
+
+  - name: snowflake-connection-line-ignored-at-config-load
+    class: "a Snowflake load that still names a `snow` CLI connection is accepted at config load and fails later, far from the line that caused it"
+    history: "2026-10-28 - the SQL API transport replaced the `snow` CLI; a config with only `connection:` must stop at load with the fields that replace it"
+    scope: source
+    patch: snowflake-connection-line-ignored-at-config-load/shared.patch
+    engines:
+      postgres:
+        na: "the load block is read from the config, not by a source adapter"
+      mysql:
+        na: "the load block is read from the config, not by a source adapter"
+      mssql:
+        na: "the load block is read from the config, not by a source adapter"
+      mongo:
+        na: "the load block is read from the config, not by a source adapter"
+      oracle:
+        na: "the load block is read from the config, not by a source adapter"
+      lib:
+        cells:
+          - "lib:a_snowflake_load_that_names_a_snow_cli_connection_is_refused_with_the_fields_that_replace_it"
+
   - name: snowflake-add-column-per-column-keyword
     class: "the ALTER that reconciles a change log repeats ADD COLUMN per column, a syntax error on Snowflake"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; the adopt test and the CDC snapshot cell failed at `unexpected COLUMN`"
@@ -3391,6 +3431,24 @@ seeds:
       oracle:
         na: "Oracle connects through its own session with no proxy probe"
 
+  - name: pg-cdc-bare-name-routes-every-schema
+    class: "a bare PostgreSQL CDC table name is matched against every schema, so a same-named table in another schema refuses the config `rivet init` writes for a `public` table, or routes its rows into the export"
+    history: "2026-10-22 #675 (PostgreSQL half) - a bare `public` table beside a same-named table in a second schema was refused RIVET_SOURCE_CDC_TABLE_UNRESOLVED ('could mean 2 different relations') on every run"
+    scope: source
+    patch: pg-cdc-bare-name-routes-every-schema/postgres.patch
+    engines:
+      postgres:
+        cells:
+        - roast_pg_cdc_a_bare_table_name_beside_a_same_named_relation_gets_no_foreign_row
+      mysql:
+        na: "MySQL's bare-name rule is its own (src/source/mysql/cdc.rs bare_name_database, #677); this seed is the PostgreSQL search_path rule"
+      mssql:
+        na: "SQL Server CDC names its table through the capture instance (`cdc.change_tables`), never by a bare name across schemas"
+      mongo:
+        na: "a MongoDB change stream is opened on the URL's database; a collection is never matched across schemas"
+      oracle:
+        na: "Oracle CDC tables are written OWNER.TABLE by init and LogMiner routes by that qualified name"
+
   - name: parquet-write-call-pins-column-arena
     class: "the Parquet writer is handed a whole batch per call, and parquet 59.1+ keeps the arena of every call's fixed-width columns (Oracle NUMBER(19), decimal(p>18), uuid) alive while a column chunk's min/max statistic lives, so a capped export's memory grows with the row count"
     history: "2026-10-28 - found by the 0.32.2 gate (flat-rss[oracle/full_and_incremental_under_a_row_group_cap], 147 MiB at 5M rows against 107 at 1M) after #702 moved parquet to 60; bisected to parquet 59.0.0 green, 59.3.2 and 60.0.0 red"
@@ -3407,3 +3465,64 @@ seeds:
         cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
       oracle:
         cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+
+  - name: bigquery-transient-job-error-final
+    class: "a BigQuery job that ends with a documented retryable errorResult.reason (backendError, internalError, jobBackendError, jobInternalError, rateLimitExceeded, jobRateLimitExceeded) is coded RIVET_LOAD_WAREHOUSE_REJECTED, exit 1, so a scheduler fails the task for good"
+    history: "2026-10-28 - issue #707, pilot incident: a CDC compact MERGE under airflow-provider-rivet failed with 'Error encountered during execution. Retrying may solve the problem.' and the task failed final"
+    scope: source
+    patch: bigquery-transient-job-error-final/shared.patch
+    engines:
+      postgres:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mysql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mssql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mongo:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      oracle:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      lib:
+        cells:
+          - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"
+          - "lib:a_statement_failed_with_a_transient_reason_is_retryable_and_a_bad_one_is_not"
+
+  - name: transient-warehouse-code-exits-by-text
+    class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
+    history: "2026-10-28 - found while fixing #707: the code existed for the REST layer's transient replies but its exit followed the text, which names no transient word, so a scheduler never retried it"
+    scope: source
+    patch: transient-warehouse-code-exits-by-text/shared.patch
+    engines:
+      postgres:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mysql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mssql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mongo:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      oracle:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      lib:
+        cells:
+          - "lib:a_transient_http_reply_that_outlasts_the_retries_exits_retryable"
+          - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"
+
+  - name: cursor-continued-under-another-source
+    class: an incremental export finds no cursor under the source key its config names now because the same server is reached under another host spelling, and reads the whole table again beside what the old key delivered, exit 0
+    history: "issue #690, 2026-10-28: 127.0.0.1 vs localhost (or IP vs DNS, cron vs a container) changes source_state_key; RED on main (PostgreSQL live cell: the second spelling delivered all 43 rows with exit 0)"
+    scope: source
+    patch: cursor-continued-under-another-source/shared.patch
+    engines:
+      postgres:
+        cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_postgres, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      mysql:
+        cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_mysql, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      mssql:
+        cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_mssql, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      mongo:
+        cells: [a_resume_export_reached_under_another_host_spelling_is_refused_and_walked_out_mongo, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      oracle:
+        cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_oracle, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      lib:
+        cells: ["lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]

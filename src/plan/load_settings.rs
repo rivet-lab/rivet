@@ -261,7 +261,7 @@ mod tests {
              \x20 - name: t\n    table: t\n    mode: cdc\n    format: parquet\n\
              \x20   cdc: { backfill: auto, checkpoint: ./t.ckpt }\n\
              \x20   destination: { type: gcs, bucket: b, prefix: t/ }\n\
-             load:\n  target: snowflake\n  connection: c\n  warehouse: w\n  database: d\n\
+             load:\n  target: snowflake\n  account: a\n  user: u\n  private_key_path: /k.p8\n  warehouse: w\n  database: d\n\
              \x20 schema: s\n  storage_integration: i\n",
         )
         .expect("a config");

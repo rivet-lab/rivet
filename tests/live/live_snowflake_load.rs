@@ -1,4 +1,4 @@
-//! `rivet load` into Snowflake, graded by the rig's DuckDB reader: the loader drives `snow`, the reader an ADBC driver.
+//! `rivet load` into Snowflake, graded by the rig's DuckDB reader: the loader talks to the SQL API, the reader is an ADBC driver.
 
 use crate::common::*;
 

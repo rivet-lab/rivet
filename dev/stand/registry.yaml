@@ -45,7 +45,7 @@ gcs:
 cloud_ttl_hours: 24
 
 snowflake:
-  # The `snow` connection name; each machine keeps its own key-pair login under it, never in the repo.
+  # The `snow` connection name the stand's reader and cleanup use; its account, user and key are also the login rivet signs in with. Each machine keeps its own key-pair login under it, never in the repo.
   connection: rivet
   warehouse: RIVET_LOAD_TEST
   database: RIVET_LOAD_TEST
