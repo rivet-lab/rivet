@@ -25,7 +25,8 @@ pub(crate) fn projection_sql(db: Option<&str>, table: &str, columns: &[String]) 
     format!("SELECT {} FROM {rel}", cols.join(", "))
 }
 
-/// The columns of `db.table` the connected account may `SELECT`, in table order.
+/// The columns of `db.table` the connected account may `SELECT`, in table order;
+/// `INVISIBLE` columns are left out, as `SELECT *` leaves them out.
 ///
 /// Each column is judged by preparing a `SELECT` of it alone, so roles, column grants
 /// and partial revokes are decided by the server, never re-derived from grant text.
@@ -36,7 +37,8 @@ pub(crate) fn readable_columns(
 ) -> Result<Vec<String>> {
     let names: Vec<String> = conn.exec(
         "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND EXTRA NOT LIKE '%INVISIBLE%' \
+         ORDER BY ORDINAL_POSITION",
         (db, table),
     )?;
     let mut readable = Vec::with_capacity(names.len());

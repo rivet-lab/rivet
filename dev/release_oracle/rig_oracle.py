@@ -472,11 +472,18 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         native = {c: "BOOLEAN" if norm_native(t) == "TINYINT(1)" else norm_native(t) for c, t in ora.rows(
             "SELECT * FROM mysql_query('my', " + _lit(
                 f"SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {_lit(schema or db)} "
-                f"AND TABLE_NAME = {_lit(leaf)}"
+                f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA NOT LIKE '%INVISIBLE%'"
             ) + ")"
         )}
         wide = [c for c, n in native.items() if (d := re.match(r"DECIMAL\((\d+)", n)) and int(d.group(1)) > 38]
-        if not wide:
+        # The scanner reads INVISIBLE columns too; `native` holds only the ones `SELECT *` returns.
+        invisible = ora.rows(
+            "SELECT * FROM mysql_query('my', " + _lit(
+                f"SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {_lit(schema or db)} "
+                f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA LIKE '%INVISIBLE%'"
+            ) + ")"
+        )
+        if not wide and not invisible:
             return f"my.{schema or db}.{leaf}", key, native
         # The scanner reads a DECIMAL wider than DuckDB's 38 digits as DOUBLE; MySQL's own text keeps every digit.
         cols = ", ".join(f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide else f"`{c}`" for c in native)

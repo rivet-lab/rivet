@@ -21,16 +21,24 @@ struct GrantUser(String);
 
 impl GrantUser {
     fn new(table: &str, columns: &str) -> Self {
+        let user = Self::select_only(table, columns);
+        root()
+            .query_drop(format!(
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '{}'@'%'",
+                user.0
+            ))
+            .unwrap();
+        user
+    }
+
+    /// An account that may SELECT only `columns` of `table`, with no replication grant.
+    fn select_only(table: &str, columns: &str) -> Self {
         let user = unique_name("cg_u");
         let mut c = root();
         c.query_drop(format!("DROP USER IF EXISTS '{user}'@'%'"))
             .unwrap();
         c.query_drop(format!("CREATE USER '{user}'@'%' IDENTIFIED BY 'pw'"))
             .unwrap();
-        c.query_drop(format!(
-            "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '{user}'@'%'"
-        ))
-        .unwrap();
         c.query_drop(format!(
             "GRANT SELECT ({columns}) ON rivet.{table} TO '{user}'@'%'"
         ))
@@ -240,7 +248,7 @@ fn assert_no_hidden(parts: &[arrow::record_batch::RecordBatch], what: &str) -> V
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_column_grant_account_reads_only_its_columns_in_every_batch_mode_mysql() {
     let (table, _table) = seeded("cg_batch");
-    let user = GrantUser::new(&table, "id, name");
+    let user = GrantUser::select_only(&table, "id, name");
     for (mode, lines) in [
         ("full", &[][..]),
         ("chunked", &["chunk_by_key: id", "chunk_size: 1"][..]),
@@ -397,4 +405,75 @@ fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
         cells.iter().any(|v| v == "eve") && cells.iter().any(|v| v == "dan"),
         "the rows on both sides of the revoke are delivered: {cells:?}"
     );
+}
+
+/// Column names of every part under `rig`'s output, in part order, without rivet's own columns.
+fn delivered_columns(rig: &Rig) -> Vec<Vec<String>> {
+    parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .map(|b| {
+            b.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .filter(|n| !n.starts_with("__"))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_full_grant_account_delivers_the_columns_select_star_does_mysql() {
+    let table = unique_name("cg_inv");
+    let _table = MysqlCdcTable(table.clone());
+    let mut c = root();
+    c.query_drop(format!(
+        "CREATE TABLE rivet.{table} (id INT PRIMARY KEY, inv VARCHAR(20) INVISIBLE, \
+         name VARCHAR(20), gen VARCHAR(40) AS (CONCAT(name, '-g')) VIRTUAL)"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO rivet.{table} (id, name, inv) VALUES (1, 'ann', 'INV-1')"
+    ))
+    .unwrap();
+    let user = GrantUser::new(&table, "id, name, inv, gen");
+    let want = ["id", "name", "gen"].map(String::from).to_vec();
+
+    let rig = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .source_line("columns_from: grants")
+        .into_full_batch()
+        .restage("full", &[]);
+    rig.run_ok();
+    assert_eq!(delivered_columns(&rig), vec![want.clone()], "batch");
+
+    let rig = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .source_line("columns_from: grants")
+        .cdc("initial: snapshot");
+    rig.run_ok();
+    c.query_drop(format!(
+        "INSERT INTO rivet.{table} (id, name, inv) VALUES (2, 'bob', 'INV-2')"
+    ))
+    .unwrap();
+    rig.run_ok();
+    let parts = delivered_columns(&rig);
+    assert!(parts.len() >= 2, "a snapshot and a change part: {parts:?}");
+    for part in parts {
+        assert_eq!(part, want, "cdc");
+    }
+    let all: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    let (_, cells) = names_and_cells(&all);
+    for value in ["ann-g", "bob-g"] {
+        assert!(
+            cells.iter().any(|v| v == value),
+            "each value stays under its own column: {cells:?}"
+        );
+    }
+    assert!(!cells.iter().any(|v| v.starts_with("INV-")), "{cells:?}");
 }

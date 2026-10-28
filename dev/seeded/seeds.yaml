@@ -3467,6 +3467,23 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB until #715"
 
+  - name: column-grants-invisible-columns-read
+    class: "the readable set under `source.columns_from: grants` includes MySQL `INVISIBLE` columns, which `SELECT *` leaves out: turning the policy on adds columns to a table already delivered"
+    history: "found while checking that the policy changes nothing for a full-SELECT account (2026-10-28); RED from this patch: batch delivers `id, name, inv, gen` where `SELECT *` gives `id, name, gen`"
+    scope: source
+    engines:
+      mysql:
+        patch: column-grants-invisible-columns-read/mysql.patch
+        cells: [a_full_grant_account_delivers_the_columns_select_star_does_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL until #712"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server until #713"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle until #714"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB until #715"
+
   - name: grant-change-not-seen-mid-run
     class: "a `REVOKE` in the binlog of an open MySQL CDC run is not re-read: the run keeps delivering the revoked column"
     history: "the client's DevOps asked that a hidden column never reach BigQuery in any mode (2026-10-28); RED from this patch: the open run ends without RIVET_SOURCE_CDC_GRANTS_CHANGED"
