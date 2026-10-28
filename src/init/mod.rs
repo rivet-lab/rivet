@@ -1279,8 +1279,13 @@ fn init_yaml(
     mode_override: Option<&str>,
 ) -> Result<(yaml_scaffold::Scaffold, Vec<crate::state::StrategySnapshot>)> {
     if let Some(t) = table {
-        let info =
-            introspect_single_table(tls, source_url, t, schema, mode_override == Some("cdc"))?;
+        let info = introspect_single_table(
+            tls,
+            source_url,
+            t,
+            schema,
+            probes_mineability(mode_override),
+        )?;
         let snaps = vec![snapshot_of(&info, mode_override, source_url)];
         let scaffold =
             yaml_scaffold::scaffold_table(&info, source_url, provenance, dest, mode_override, tls)?;
@@ -1291,7 +1296,7 @@ fn init_yaml(
         source_url,
         schema,
         filter,
-        mode_override == Some("cdc"),
+        probes_mineability(mode_override),
     )?;
     if infos.is_empty() {
         return Err(no_tables_error(filter));
@@ -1451,6 +1456,11 @@ fn snapshot_of(
             .map(|p| p.k as i64),
         probe_w: info.density.as_ref().filter(|p| p.w > 0).map(|p| p.w),
     }
+}
+
+/// Whether the scaffold asks the source what its CDC capture can mine: only `--mode cdc` does.
+fn probes_mineability(mode: Option<&str>) -> bool {
+    mode == Some("cdc")
 }
 
 fn init_discovery_json(
@@ -1852,6 +1862,23 @@ fn relation_for_key(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_a_cdc_scaffold_probes_mineability() {
+        assert!(probes_mineability(Some("cdc")));
+        assert!(!probes_mineability(None));
+        assert!(!probes_mineability(Some("full")));
+        assert!(!probes_mineability(Some("incremental")));
+    }
+
+    #[test]
+    fn a_discovery_of_an_unreachable_source_is_an_error_not_an_empty_artifact() {
+        let url = "postgresql://rivet:rivet@127.0.0.1:1/rivet";
+        let one = init_discovery_json(None, url, Some("t"), None, &TableFilter::default());
+        assert!(one.is_err(), "{one:?}");
+        let all = init_discovery_json(None, url, None, None, &TableFilter::default());
+        assert!(all.is_err(), "{all:?}");
+    }
     use super::yaml_scaffold::ScaffoldDecisions;
 
     /// Recording primary keys must not re-load and re-VALIDATE the config.
