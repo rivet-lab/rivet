@@ -171,9 +171,12 @@ config_fields:
       `grants`: the snapshot leg, the binlog row images, the spill and the
       type report all carry only the columns the account may SELECT; a column
       added later is not delivered. MySQL only; refused outside a bounded
-      `initial: snapshot` run. Proven by hand on a column-grant account; the
-      live cell is pending (see #711).
-    also: columns_from_grants_is_refused_outside_a_bounded_mysql_snapshot_shape,
+      `initial: snapshot` run. An update of hidden columns only is not
+      delivered; an unreadable key is refused before the snapshot.
+    also: a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql,
+      a_column_grant_account_is_refused_without_the_policy_or_without_the_key_mysql,
+      only_an_equal_fully_decoded_update_is_hidden_only,
+      columns_from_grants_is_refused_outside_a_bounded_mysql_snapshot_shape,
       a_row_keeps_only_readable_columns_and_their_own_poison,
       an_identifier_is_quoted_for_any_text
   - id: capture_instance

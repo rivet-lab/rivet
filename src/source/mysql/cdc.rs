@@ -1226,6 +1226,14 @@ impl MysqlChangeStream {
                     let (before, after) = row?;
                     let before = before.map(render_row).map(project);
                     let after = after.map(render_row).map(project);
+                    // `columns_from: grants`: an update of hidden columns only is not delivered.
+                    if super::column_grants::changes_only_hidden(
+                        keep.is_some(),
+                        before.as_ref(),
+                        after.as_ref(),
+                    ) {
+                        continue;
+                    }
                     // A cell with no faithful representation is a DEFERRED refusal,
                     // exactly like PostgreSQL's unrecoverable unchanged-TOAST datum:
                     // the binlog dump is server-wide, so bailing here would poison

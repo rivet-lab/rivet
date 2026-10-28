@@ -59,6 +59,19 @@ pub(crate) fn readable_columns(
              read or written"
         );
     }
+    let key: Vec<String> = conn.exec(
+        "SELECT COLUMN_NAME FROM information_schema.STATISTICS \
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX",
+        (db, table),
+    )?;
+    if let Some(missing) = crate::source::cdc::unreadable(&key, &readable) {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_CDC_COLUMNS_UNREADABLE,
+            "mysql cdc: `{db}.{table}`: key column `{missing}` is not readable under \
+             `columns_from: grants`, so changes to a row could not be told apart; nothing was \
+             read or written"
+        );
+    }
     Ok(readable)
 }
 
@@ -99,6 +112,16 @@ pub(crate) fn kept_positions(names: &[String], readable: &[String]) -> Vec<usize
         .filter(|(_, n)| readable.iter().any(|r| r.eq_ignore_ascii_case(n)))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// A projected update whose images are equal and fully decoded: only a hidden column changed.
+pub(crate) fn changes_only_hidden<T: PartialEq>(
+    projected: bool,
+    before: Option<&(Vec<T>, Vec<usize>)>,
+    after: Option<&(Vec<T>, Vec<usize>)>,
+) -> bool {
+    projected
+        && matches!((before, after), (Some((b, bb)), Some((a, ab))) if bb.is_empty() && ab.is_empty() && b == a)
 }
 
 /// `row` cut to `keep`, its undecodable positions renumbered into the cut row.
@@ -151,6 +174,37 @@ mod tests {
         assert_eq!(
             project_row((vec!["1"], vec![]), &[]),
             (Vec::<&str>::new(), vec![])
+        );
+    }
+
+    #[test]
+    fn only_an_equal_fully_decoded_update_is_hidden_only() {
+        let row = |v: &[&'static str], bad: &[usize]| (v.to_vec(), bad.to_vec());
+        let same = row(&["1", "ann"], &[]);
+        assert!(changes_only_hidden(true, Some(&same), Some(&same)));
+        assert!(
+            !changes_only_hidden(false, Some(&same), Some(&same)),
+            "no projection, no hiding"
+        );
+        assert!(!changes_only_hidden(
+            true,
+            Some(&same),
+            Some(&row(&["1", "bob"], &[]))
+        ));
+        assert!(
+            !changes_only_hidden(true, None, Some(&same)),
+            "an insert is delivered"
+        );
+        assert!(
+            !changes_only_hidden(true, Some(&same), None),
+            "a delete is delivered"
+        );
+        let poisoned = row(&["1", "ann"], &[1]);
+        assert!(!changes_only_hidden(true, Some(&poisoned), Some(&poisoned)));
+        assert!(!changes_only_hidden(true, Some(&same), Some(&poisoned)));
+        assert!(
+            !changes_only_hidden(true, Some(&row(&["1"], &[])), Some(&same)),
+            "a thin before image proves nothing"
         );
     }
 }

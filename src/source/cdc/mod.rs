@@ -733,10 +733,15 @@ pub(crate) struct ReadableColumns {
 impl ReadableColumns {
     /// The first of `key` the run may not read (names fold case, as MySQL's do).
     pub(crate) fn unreadable_key<'a>(&self, key: &'a [String]) -> Option<&'a str> {
-        key.iter()
-            .find(|k| !self.columns.iter().any(|c| c.eq_ignore_ascii_case(k)))
-            .map(String::as_str)
+        unreadable(key, &self.columns)
     }
+}
+
+/// The first of `key` missing from `readable` (names fold case, as MySQL's do).
+pub(crate) fn unreadable<'a>(key: &'a [String], readable: &[String]) -> Option<&'a str> {
+    key.iter()
+        .find(|k| !readable.iter().any(|c| c.eq_ignore_ascii_case(k)))
+        .map(String::as_str)
 }
 
 /// The per-engine CDC knobs — each variant carries ONLY the parameters its

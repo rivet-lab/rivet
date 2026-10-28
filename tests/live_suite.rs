@@ -75,6 +75,8 @@ mod live_cdc;
 mod live_cdc_backfill;
 #[path = "live/live_cdc_cli_surface.rs"]
 mod live_cdc_cli_surface;
+#[path = "live/live_cdc_column_grants.rs"]
+mod live_cdc_column_grants;
 #[path = "live/live_cdc_compact.rs"]
 mod live_cdc_compact;
 #[path = "live/live_cdc_full_cycle.rs"]
