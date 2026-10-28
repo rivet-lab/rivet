@@ -1626,7 +1626,10 @@ mod tests {
         }
         assert!(
             !LoadTarget::Snowflake {
-                connection: "c".into(),
+                account: "a".into(),
+                user: "u".into(),
+                private_key_path: "/k.p8".into(),
+                role: None,
                 warehouse: "w".into(),
                 database: "d".into(),
                 schema: "s".into(),
@@ -2985,7 +2988,8 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
     fn load_with(target: &str, extra: serde_json::Value) -> LoadSection {
         let mut v = match target {
             "snowflake" => serde_json::json!({
-                "target": "snowflake", "connection": "c", "warehouse": "w",
+                "target": "snowflake", "account": "a", "user": "u", "private_key_path": "/k.p8",
+                "warehouse": "w",
                 "database": "d", "schema": "s", "storage_integration": "i"
             }),
             "clickhouse" => serde_json::json!({

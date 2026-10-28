@@ -678,11 +678,16 @@ pub struct InitAzureTarget {
     pub endpoint: Option<String>,
 }
 
-/// The five values a Snowflake `load:` block needs — every one is required by the loader.
+/// The values a Snowflake `load:` block needs — every one but the role is required by the loader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitSnowflakeTarget {
-    /// The `snow` CLI connection name.
-    pub connection: String,
+    /// The account identifier: `myorg-myaccount`, or a locator such as `xy12345.us-east-1`.
+    pub account: String,
+    pub user: String,
+    /// The unencrypted PKCS#8 private key file.
+    pub private_key_path: String,
+    /// The role the load runs under; `None` uses the user's default.
+    pub role: Option<String>,
     pub warehouse: String,
     pub database: String,
     pub schema: String,

@@ -2144,6 +2144,46 @@ seeds:
         cells:
           - "lib:a_missing_change_log_is_the_first_cycle_by_the_catalog_not_by_an_error_text"
 
+  - name: snowflake-retry-read-from-answer-text
+    class: "whether a Snowflake request is sent again is read from the words of the answer, not from its HTTP status"
+    history: "2026-10-28 - the SQL API transport replaced the `snow` CLI; the retry verdict is the typed status (429, 5xx), and a 422 whose message says `try again` is the warehouse's refusal"
+    scope: source
+    patch: snowflake-retry-read-from-answer-text/shared.patch
+    engines:
+      postgres:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      mysql:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      mssql:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      mongo:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      oracle:
+        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
+      lib:
+        cells:
+          - "lib:the_verdict_to_retry_is_the_status_never_the_words_of_the_answer"
+
+  - name: snowflake-connection-line-ignored-at-config-load
+    class: "a Snowflake load that still names a `snow` CLI connection is accepted at config load and fails later, far from the line that caused it"
+    history: "2026-10-28 - the SQL API transport replaced the `snow` CLI; a config with only `connection:` must stop at load with the fields that replace it"
+    scope: source
+    patch: snowflake-connection-line-ignored-at-config-load/shared.patch
+    engines:
+      postgres:
+        na: "the load block is read from the config, not by a source adapter"
+      mysql:
+        na: "the load block is read from the config, not by a source adapter"
+      mssql:
+        na: "the load block is read from the config, not by a source adapter"
+      mongo:
+        na: "the load block is read from the config, not by a source adapter"
+      oracle:
+        na: "the load block is read from the config, not by a source adapter"
+      lib:
+        cells:
+          - "lib:a_snowflake_load_that_names_a_snow_cli_connection_is_refused_with_the_fields_that_replace_it"
+
   - name: snowflake-add-column-per-column-keyword
     class: "the ALTER that reconciles a change log repeats ADD COLUMN per column, a syntax error on Snowflake"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; the adopt test and the CDC snapshot cell failed at `unexpected COLUMN`"
@@ -3390,6 +3430,24 @@ seeds:
         na: "MongoDB connects through its driver's own pool with no proxy probe"
       oracle:
         na: "Oracle connects through its own session with no proxy probe"
+
+  - name: pg-cdc-bare-name-routes-every-schema
+    class: "a bare PostgreSQL CDC table name is matched against every schema, so a same-named table in another schema refuses the config `rivet init` writes for a `public` table, or routes its rows into the export"
+    history: "2026-10-22 #675 (PostgreSQL half) - a bare `public` table beside a same-named table in a second schema was refused RIVET_SOURCE_CDC_TABLE_UNRESOLVED ('could mean 2 different relations') on every run"
+    scope: source
+    patch: pg-cdc-bare-name-routes-every-schema/postgres.patch
+    engines:
+      postgres:
+        cells:
+        - roast_pg_cdc_a_bare_table_name_beside_a_same_named_relation_gets_no_foreign_row
+      mysql:
+        na: "MySQL's bare-name rule is its own (src/source/mysql/cdc.rs bare_name_database, #677); this seed is the PostgreSQL search_path rule"
+      mssql:
+        na: "SQL Server CDC names its table through the capture instance (`cdc.change_tables`), never by a bare name across schemas"
+      mongo:
+        na: "a MongoDB change stream is opened on the URL's database; a collection is never matched across schemas"
+      oracle:
+        na: "Oracle CDC tables are written OWNER.TABLE by init and LogMiner routes by that qualified name"
 
   - name: parquet-write-call-pins-column-arena
     class: "the Parquet writer is handed a whole batch per call, and parquet 59.1+ keeps the arena of every call's fixed-width columns (Oracle NUMBER(19), decimal(p>18), uuid) alive while a column chunk's min/max statistic lives, so a capped export's memory grows with the row count"

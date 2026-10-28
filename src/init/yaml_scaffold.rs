@@ -823,10 +823,16 @@ fn load_block_lines(
             "# Review every value below — they are guesses, not decisions.".into(),
             "load:".into(),
             "  target: snowflake".into(),
+            format!("  account: {}", yaml_quote_if_needed(&sf.account)),
+            format!("  user: {}", yaml_quote_if_needed(&sf.user)),
             format!(
-                "  connection: {}  # a `snow` CLI connection (key-pair / JWT auth)",
-                yaml_quote_if_needed(&sf.connection)
+                "  private_key_path: {}  # unencrypted PKCS#8; its public key is registered on the user",
+                yaml_quote_if_needed(&sf.private_key_path)
             ),
+            match &sf.role {
+                Some(role) => format!("  role: {}", yaml_quote_if_needed(role)),
+                None => "  # role: MY_ROLE  # omitted: the user's default role".into(),
+            },
             format!("  warehouse: {}", yaml_quote_if_needed(&sf.warehouse)),
             format!("  database: {}", yaml_quote_if_needed(&sf.database)),
             format!("  schema: {}", yaml_quote_if_needed(&sf.schema)),
@@ -1989,7 +1995,10 @@ mod tests {
         let sf = InitYamlDestination {
             gcs_bucket: Some("b".into()),
             snowflake: Some(crate::init::InitSnowflakeTarget {
-                connection: "c".into(),
+                account: "a".into(),
+                user: "u".into(),
+                private_key_path: "/k.p8".into(),
+                role: None,
                 warehouse: "w".into(),
                 database: "d".into(),
                 schema: "s".into(),
@@ -2143,7 +2152,10 @@ mod tests {
         let sf = InitYamlDestination {
             gcs_bucket: Some("b".into()),
             snowflake: Some(crate::init::InitSnowflakeTarget {
-                connection: "c".into(),
+                account: "a".into(),
+                user: "u".into(),
+                private_key_path: "/k.p8".into(),
+                role: None,
                 warehouse: "w".into(),
                 database: "d".into(),
                 schema: "s".into(),
@@ -3515,7 +3527,10 @@ mod tests {
         };
         let snowflake = InitYamlDestination {
             snowflake: Some(crate::init::InitSnowflakeTarget {
-                connection: "c".into(),
+                account: "a".into(),
+                user: "u".into(),
+                private_key_path: "/k.p8".into(),
+                role: None,
                 warehouse: "w".into(),
                 database: "d".into(),
                 schema: "s".into(),
@@ -4270,16 +4285,19 @@ mod load_block_tests {
         );
     }
 
-    /// A Snowflake scaffold carries the five values the loader requires, promises no
+    /// A Snowflake scaffold carries the values the loader requires, promises no
     /// compaction, and the generated file parses into a Snowflake target with exactly
     /// those values; its per-table partition guess is a date column the loader turns
     /// into a leading `DATE_TRUNC` clustering key.
     #[test]
-    fn a_snowflake_load_block_carries_its_connection_and_parses_into_the_target() {
+    fn a_snowflake_load_block_carries_its_key_pair_login_and_parses_into_the_target() {
         let dest = InitYamlDestination {
             gcs_bucket: Some("my-bucket".into()),
             snowflake: Some(crate::init::InitSnowflakeTarget {
-                connection: "my_conn".into(),
+                account: "myorg-acct".into(),
+                user: "RIVET".into(),
+                private_key_path: "/keys/rivet.p8".into(),
+                role: Some("LOADER".into()),
                 warehouse: "COMPUTE_WH".into(),
                 database: "ANALYTICS".into(),
                 schema: "PUBLIC".into(),
@@ -4323,7 +4341,10 @@ mod load_block_tests {
             assert_eq!(
                 load.target,
                 crate::config::load::LoadTarget::Snowflake {
-                    connection: "my_conn".into(),
+                    account: "myorg-acct".into(),
+                    user: "RIVET".into(),
+                    private_key_path: "/keys/rivet.p8".into(),
+                    role: Some("LOADER".into()),
                     warehouse: "COMPUTE_WH".into(),
                     database: "ANALYTICS".into(),
                     schema: "PUBLIC".into(),

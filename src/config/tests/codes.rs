@@ -246,6 +246,42 @@ fn an_export_load_override_without_a_load_block_is_coded_load_block_invalid() {
 }
 
 #[test]
+fn a_snowflake_load_that_names_a_snow_cli_connection_is_refused_with_the_fields_that_replace_it() {
+    let load = "load:\n  target: snowflake\n  connection: my_conn\n  warehouse: w\n  \
+                database: d\n  schema: s\n  storage_integration: i\n";
+    let text = format!(
+        "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\n{load}\
+         exports:\n  - name: users\n    format: parquet\n    query: \"SELECT 1\"\n    \
+         destination:\n      type: gcs\n      bucket: b\n"
+    );
+    let (code, exit, msg) = refused(&text);
+    assert_eq!(
+        code,
+        Some(crate::error::codes::CONFIG_LOAD_BLOCK_INVALID.id),
+        "{msg}"
+    );
+    assert_eq!(exit, 1, "{msg}");
+    for needle in [
+        "`load.connection` (here `my_conn`) named a `snow` CLI connection, and rivet no longer reads it",
+        "    account: myorg-myaccount\n    user: RIVET_USER\n    private_key_path: /path/to/rsa_key.p8\n    role: RIVET_ROLE\n",
+        "RIVET_SNOWFLAKE_ACCOUNT, RIVET_SNOWFLAKE_USER, RIVET_SNOWFLAKE_KEY (the key file) and RIVET_SNOWFLAKE_ROLE override these four fields.",
+    ] {
+        assert!(msg.contains(needle), "missing `{needle}` in: {msg}");
+    }
+    let other = text.replace("target: snowflake", "target: bigquery");
+    let (code, _, msg) = refused(&other);
+    assert_ne!(
+        code,
+        Some(crate::error::codes::CONFIG_LOAD_BLOCK_INVALID.id),
+        "{msg}"
+    );
+    assert!(
+        !msg.contains("`snow` CLI"),
+        "a connection key on another target is not this refusal: {msg}"
+    );
+}
+
+#[test]
 fn a_traversing_name_or_prefix_is_coded_path_unsafe() {
     let code = crate::error::codes::CONFIG_PATH_UNSAFE;
     assert_refused(

@@ -8,6 +8,7 @@ pub mod load;
 mod notifications;
 pub mod resolve;
 pub mod schema;
+pub(crate) mod snowflake_account;
 mod source;
 pub(crate) mod url;
 
@@ -213,6 +214,7 @@ impl Config {
         Self::check_misplaced_tuning_fields(yaml)?;
         Self::check_csv_compression(yaml)?;
         Self::check_tls_mode_downgrade(yaml)?;
+        Self::check_snowflake_connection(yaml)?;
         let config: Config = serde_yaml_ng::from_str(yaml).map_err(|e| {
             // A well-formed flow map (`prefix: {partition}`) parses as a YAML
             // value but serde then rejects it with `invalid type: map, expected
@@ -417,6 +419,41 @@ impl Config {
             );
         }
         Ok(())
+    }
+
+    /// Refuse a Snowflake `load:` that still names a `snow` CLI `connection:`, with the
+    /// fields that replace it. Read from the raw YAML: the key is no longer a field, and
+    /// the generic unknown-field message does not say what to write instead.
+    fn check_snowflake_connection(yaml: &str) -> crate::error::Result<()> {
+        let root: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+        let Some(load) = root.get("load") else {
+            return Ok(());
+        };
+        if load.get("target").and_then(|t| t.as_str()) != Some("snowflake") {
+            return Ok(());
+        }
+        let Some(connection) = load.get("connection") else {
+            return Ok(());
+        };
+        let was = connection
+            .as_str()
+            .map(|c| format!(" (here `{}`)", c.escape_default()))
+            .unwrap_or_default();
+        crate::config_bail!(
+            crate::error::codes::CONFIG_LOAD_BLOCK_INVALID,
+            "`load.connection`{was} named a `snow` CLI connection, and rivet no longer reads \
+             it: it talks to Snowflake itself and signs in with a key pair. Replace the line \
+             with these under `load:`:\n\n    \
+             account: myorg-myaccount\n    \
+             user: RIVET_USER\n    \
+             private_key_path: /path/to/rsa_key.p8\n    \
+             role: RIVET_ROLE\n\n  \
+             `account` is your account identifier (or a locator such as `xy12345.us-east-1`), \
+             `user` has the public half of the key registered (`ALTER USER ... SET \
+             RSA_PUBLIC_KEY=...`), the key file is an unencrypted PKCS#8 PEM, and `role` is \
+             optional. The env vars RIVET_SNOWFLAKE_ACCOUNT, RIVET_SNOWFLAKE_USER, \
+             RIVET_SNOWFLAKE_KEY (the key file) and RIVET_SNOWFLAKE_ROLE override these four fields."
+        );
     }
 
     /// Detect tuning-related fields placed directly under `source:` or an

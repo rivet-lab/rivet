@@ -187,7 +187,10 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             clickhouse_url,
             clickhouse_database,
             clickhouse_user,
-            snowflake_connection,
+            snowflake_account,
+            snowflake_user,
+            snowflake_private_key_path,
+            snowflake_role,
             snowflake_warehouse,
             snowflake_database,
             snowflake_schema,
@@ -216,7 +219,10 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             clickhouse_database,
             clickhouse_user,
             InitSnowflakeFlags {
-                connection: snowflake_connection,
+                account: snowflake_account,
+                user: snowflake_user,
+                private_key_path: snowflake_private_key_path,
+                role: snowflake_role,
                 warehouse: snowflake_warehouse,
                 database: snowflake_database,
                 schema: snowflake_schema,
@@ -665,7 +671,10 @@ fn report_plan_compatibility(plans: Vec<BatchPlan>, json_output: bool) -> Result
 
 /// The `rivet init --snowflake-*` flags as clap parsed them.
 struct InitSnowflakeFlags {
-    connection: Option<String>,
+    account: Option<String>,
+    user: Option<String>,
+    private_key_path: Option<String>,
+    role: Option<String>,
     warehouse: Option<String>,
     database: Option<String>,
     schema: Option<String>,
@@ -673,12 +682,15 @@ struct InitSnowflakeFlags {
 }
 
 impl InitSnowflakeFlags {
-    /// The Snowflake target to scaffold: all five values, or none. Clap already
+    /// The Snowflake target to scaffold: every required value, or none. Clap already
     /// ties the flags together; a blank value is refused here, since the loader
-    /// needs every one of them to name a real object.
+    /// needs every one of them to name a real object. The role stays optional.
     fn target(self) -> Result<Option<init::InitSnowflakeTarget>> {
+        let role = self.role;
         let flags = [
-            ("--snowflake-connection", self.connection),
+            ("--snowflake-account", self.account),
+            ("--snowflake-user", self.user),
+            ("--snowflake-private-key-path", self.private_key_path),
             ("--snowflake-warehouse", self.warehouse),
             ("--snowflake-database", self.database),
             ("--snowflake-schema", self.schema),
@@ -699,15 +711,32 @@ impl InitSnowflakeFlags {
                 None => crate::rivet_bail!(
                     crate::error::codes::CLI_OPTION_UNSUPPORTED,
                     "{flag} is missing: a Snowflake `load:` block needs all of \
-                     --snowflake-connection, --snowflake-warehouse, --snowflake-database, \
-                     --snowflake-schema and --snowflake-storage-integration"
+                     --snowflake-account, --snowflake-user, --snowflake-private-key-path, \
+                     --snowflake-warehouse, --snowflake-database, --snowflake-schema and \
+                     --snowflake-storage-integration"
                 ),
             }
         }
-        let [connection, warehouse, database, schema, storage_integration]: [String; 5] =
-            values.try_into().expect("five flags, five values");
+        if role.as_deref().is_some_and(|r| r.trim().is_empty()) {
+            crate::rivet_bail!(
+                crate::error::codes::CLI_VALUE_INVALID,
+                "--snowflake-role is empty: leave the flag out to use the user's default role"
+            );
+        }
+        let [
+            account,
+            user,
+            private_key_path,
+            warehouse,
+            database,
+            schema,
+            storage_integration,
+        ]: [String; 7] = values.try_into().expect("seven flags, seven values");
         Ok(Some(init::InitSnowflakeTarget {
-            connection,
+            account,
+            user,
+            private_key_path,
+            role,
             warehouse,
             database,
             schema,
@@ -1353,7 +1382,10 @@ mod init_tls_tests {
             None,
             "default".into(),
             super::InitSnowflakeFlags {
-                connection: None,
+                account: None,
+                user: None,
+                private_key_path: None,
+                role: None,
                 warehouse: None,
                 database: None,
                 schema: None,
@@ -1499,11 +1531,22 @@ mod error_code_tests {
 mod init_snowflake_flags_tests {
     use super::InitSnowflakeFlags;
 
-    fn flags(v: [Option<&str>; 5]) -> InitSnowflakeFlags {
-        let [connection, warehouse, database, schema, storage_integration] =
-            v.map(|s| s.map(str::to_string));
+    fn flags(v: [Option<&str>; 8]) -> InitSnowflakeFlags {
+        let [
+            account,
+            user,
+            private_key_path,
+            role,
+            warehouse,
+            database,
+            schema,
+            storage_integration,
+        ] = v.map(|s| s.map(str::to_string));
         InitSnowflakeFlags {
-            connection,
+            account,
+            user,
+            private_key_path,
+            role,
             warehouse,
             database,
             schema,
@@ -1511,28 +1554,52 @@ mod init_snowflake_flags_tests {
         }
     }
 
-    /// No flag, no target; all five, the target with those values; a blank or a
-    /// missing value is a coded usage refusal naming the flag.
+    /// No flag, no target; every required one, the target with those values; a blank or a
+    /// missing value is a coded usage refusal naming the flag; the role is optional.
     #[test]
     fn the_snowflake_flags_become_a_target_only_when_every_value_is_given() {
-        assert_eq!(flags([None; 5]).target().unwrap(), None);
-        let t = flags([Some("c"), Some("w"), Some("d"), Some("s"), Some("i")])
-            .target()
-            .unwrap()
-            .unwrap();
+        assert_eq!(flags([None; 8]).target().unwrap(), None);
+        let all = [
+            Some("a"),
+            Some("u"),
+            Some("/k.p8"),
+            None,
+            Some("w"),
+            Some("d"),
+            Some("s"),
+            Some("i"),
+        ];
+        let t = flags(all).target().unwrap().unwrap();
         assert_eq!(
             (
-                t.connection.as_str(),
+                t.account.as_str(),
+                t.user.as_str(),
+                t.private_key_path.as_str(),
+                t.role.as_deref(),
                 t.warehouse.as_str(),
                 t.database.as_str(),
                 t.schema.as_str(),
                 t.storage_integration.as_str()
             ),
-            ("c", "w", "d", "s", "i")
+            ("a", "u", "/k.p8", None, "w", "d", "s", "i")
         );
-        let blank = flags([Some("c"), Some("w"), Some(" "), Some("s"), Some("i")])
-            .target()
-            .unwrap_err();
+        let mut with_role = all;
+        with_role[3] = Some("R");
+        assert_eq!(
+            flags(with_role).target().unwrap().unwrap().role.as_deref(),
+            Some("R")
+        );
+        let mut blank_role = all;
+        blank_role[3] = Some(" ");
+        let e = flags(blank_role).target().unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_CLI_VALUE_INVALID")
+        );
+        assert!(e.to_string().contains("--snowflake-role"), "{e}");
+        let mut blank = all;
+        blank[5] = Some(" ");
+        let blank = flags(blank).target().unwrap_err();
         assert_eq!(
             crate::error::error_code(&blank),
             Some("RIVET_CLI_VALUE_INVALID")
@@ -1541,19 +1608,23 @@ mod init_snowflake_flags_tests {
             blank.to_string().contains("--snowflake-database"),
             "{blank}"
         );
-        let missing = flags([Some("c"), Some("w"), Some("d"), Some("s"), None])
-            .target()
-            .unwrap_err();
-        assert_eq!(
-            crate::error::error_code(&missing),
-            Some("RIVET_CLI_OPTION_UNSUPPORTED")
-        );
-        assert!(
-            missing
-                .to_string()
-                .contains("--snowflake-storage-integration"),
-            "{missing}"
-        );
+        for (at, flag) in [
+            (1, "--snowflake-user"),
+            (2, "--snowflake-private-key-path"),
+            (7, "--snowflake-storage-integration"),
+        ] {
+            let mut gap = all;
+            gap[at] = None;
+            let missing = flags(gap).target().unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&missing),
+                Some("RIVET_CLI_OPTION_UNSUPPORTED")
+            );
+            assert!(
+                missing.to_string().contains(&format!("{flag} is missing")),
+                "{missing}"
+            );
+        }
     }
 }
 
