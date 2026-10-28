@@ -1930,8 +1930,20 @@ fn run_export_job_inner(
         export
     };
     let mut meta = MetaConn::open(&config.source);
+    // `columns_from: grants` plans on a connection, so a failed connect fails here, with its hint.
+    let probe = if config.source.columns_from_grants() {
+        match meta.require() {
+            Ok(src) => Some(src),
+            Err(e) => {
+                let summary = synthetic_failed_summary(&export.name, &e);
+                return (Err(e), summary);
+            }
+        }
+    } else {
+        meta.get()
+    };
     let plan = match crate::plan::build::build_plan_on(
-        meta.get().map(|s| s as &mut dyn crate::source::Source),
+        probe.map(|s| s as &mut dyn crate::source::Source),
         config,
         export,
         config_dir,

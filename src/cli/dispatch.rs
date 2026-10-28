@@ -603,14 +603,35 @@ fn batch_plans(
         Some(name) => config.exports.iter().filter(|e| e.name == name).collect(),
         None => config.exports.iter().collect(),
     };
-    Ok(selected
+    // `columns_from: grants` plans on a connection: one for every export, its connect hint on failure.
+    let mut probe = if config.source.columns_from_grants() {
+        Some(
+            crate::source::create_source(&config.source)
+                .map_err(|e| crate::pipeline::attach_connect_hint(e, &config.source))?,
+        )
+    } else {
+        None
+    };
+    let mut plans = Vec::new();
+    for e in selected
         .into_iter()
         .filter(|e| e.mode != crate::config::ExportMode::Cdc)
-        .map(|e| {
-            let plan = crate::plan::build_plan(&config, e, config_dir, false, false, false, params);
-            (e.name.clone(), plan)
-        })
-        .collect())
+    {
+        let plan = crate::plan::build::build_plan_on(
+            probe
+                .as_deref_mut()
+                .map(|s| s as &mut dyn crate::source::Source),
+            &config,
+            e,
+            config_dir,
+            false,
+            false,
+            false,
+            params,
+        );
+        plans.push((e.name.clone(), plan));
+    }
+    Ok(plans)
 }
 
 /// The `--target` of `rivet check`, refused by code when it names no warehouse rivet types for.

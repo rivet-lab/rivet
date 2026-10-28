@@ -477,3 +477,33 @@ fn a_full_grant_account_delivers_the_columns_select_star_does_mysql() {
     }
     assert!(!cells.iter().any(|v| v.starts_with("INV-")), "{cells:?}");
 }
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_denied_connect_under_the_policy_carries_the_connect_hint_in_every_batch_mode_mysql() {
+    let (table, _table) = seeded("cg_auth");
+    let user = GrantUser::select_only(&table, "id, name");
+    let denied = user.url().replace(":pw@", ":wrong@");
+    for (mode, lines) in [
+        ("full", &[][..]),
+        ("chunked", &["chunk_by_key: id", "chunk_size: 1"][..]),
+    ] {
+        let rig = Rig::mysql_cdc(&table)
+            .source_url(&denied)
+            .source_line("columns_from: grants")
+            .into_full_batch()
+            .restage(mode, lines);
+        for cmd in ["run", "check"] {
+            let out = rig.cli(&[cmd]);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                !out.status.success(),
+                "{mode} {cmd}: a wrong password fails"
+            );
+            assert!(
+                err.contains("Verify the user/password"),
+                "{mode} {cmd}: the denied connect carries its hint:\n{err}"
+            );
+        }
+    }
+}

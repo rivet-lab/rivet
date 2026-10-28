@@ -1,0 +1,12 @@
+diff --git a/src/pipeline/job.rs b/src/pipeline/job.rs
+--- a/src/pipeline/job.rs
++++ b/src/pipeline/job.rs
+@@ -1931,7 +1931,7 @@
+     };
+     let mut meta = MetaConn::open(&config.source);
+     // `columns_from: grants` plans on a connection, so a failed connect fails here, with its hint.
+-    let probe = if config.source.columns_from_grants() {
++    let probe = if false && config.source.columns_from_grants() {
+         match meta.require() {
+             Ok(src) => Some(src),
+             Err(e) => {

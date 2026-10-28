@@ -96,6 +96,7 @@ pub(crate) use job::run_export_job_with_chunk_source;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use retry::is_transient;
+pub(crate) use single::attach_connect_hint;
 
 // ── Test-only surface ──────────────────────────────────────────────────────
 //

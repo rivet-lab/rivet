@@ -3542,6 +3542,23 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB until #715"
 
+  - name: column-grants-connect-hint-lost
+    class: "under `source.columns_from: grants` the plan opens its own connection when the run's failed, so a denied connect surfaces as a bare driver error without the connect hint"
+    history: "found checking a non-default-role account against the policy (2026-10-28); RED from this patch: `rivet run` prints `ERROR 1045 ... Access denied` with no `Verify the user/password`"
+    scope: source
+    engines:
+      mysql:
+        patch: column-grants-connect-hint-lost/mysql.patch
+        cells: [a_denied_connect_under_the_policy_carries_the_connect_hint_in_every_batch_mode_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL until #712"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server until #713"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle until #714"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB until #715"
+
   - name: grant-change-not-seen-mid-run
     class: "a `REVOKE` in the binlog of an open MySQL CDC run is not re-read: the run keeps delivering the revoked column"
     history: "the client's DevOps asked that a hidden column never reach BigQuery in any mode (2026-10-28); RED from this patch: the open run ends without RIVET_SOURCE_CDC_GRANTS_CHANGED"
