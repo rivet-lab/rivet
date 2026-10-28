@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 601cd027..cc0e8a74 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2204,7 +2204,7 @@ fn executable_text(sql: &str) -> String {
+         out.push_str(&rest[..start]);
+         out.push(' ');
+         let body = &rest[start + 2..];
+-        let executable = body.starts_with('!');
++        let executable = false && body.starts_with('!');
+         let (text, after) = match body.find("*/") {
+             Some(end) => (&body[..end], &body[end + 2..]),
+             None => (body, ""),

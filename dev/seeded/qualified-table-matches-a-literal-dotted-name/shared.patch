@@ -1,0 +1,18 @@
+diff --git a/src/source/cdc/identity.rs b/src/source/cdc/identity.rs
+index eeab7c92..f0baf4be 100644
+--- a/src/source/cdc/identity.rs
++++ b/src/source/cdc/identity.rs
+@@ -248,9 +248,12 @@ pub(crate) fn table_matches(
+     // A SQL store reads a dotted string as `schema.table` ONLY. Matching the whole string
+     // against the table first let `db.t` capture a table literally named `db.t` in another
+     // database, delivering rows of a relation the config never named.
++    if cfg == table {
++        return true;
++    }
+     match cfg.split_once('.') {
+         Some((cs, ct)) => cs == schema && ct == table,
+-        None => cfg == table,
++        None => false,
+     }
+ }
+ 
