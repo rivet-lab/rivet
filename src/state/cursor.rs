@@ -166,6 +166,8 @@ pub enum Accepted {
         was: String,
         now: String,
     },
+    /// The progress `held`, stored under the source `from`, was moved onto the key's source.
+    Rekeyed { held: String, from: String },
 }
 
 /// The progress a run would continue from, worded for a message: an interrupted run's anchor, else the cursor a clean run seeks from.
@@ -413,27 +415,90 @@ impl StateStore {
             .iter()
             .filter(|p| crate::config::canonical_source_key(p) == scope)
         {
-            for sql in [
-                "UPDATE export_state SET prefix = ?2 WHERE export_name = ?1 AND prefix = ?3 \
-                 AND NOT EXISTS (SELECT 1 FROM export_state WHERE export_name = ?1 AND prefix = ?2)",
-                "UPDATE chunk_run SET source = ?2 WHERE export_name = ?1 AND source = ?3 \
-                 AND (status <> 'in_progress' OR NOT EXISTS (SELECT 1 FROM chunk_run c \
-                 WHERE c.export_name = ?1 AND c.source = ?2 AND c.status = 'in_progress'))",
-                "UPDATE keyset_range SET source = ?2 WHERE export_name = ?1 AND source = ?3 \
-                 AND NOT EXISTS (SELECT 1 FROM keyset_range k \
-                 WHERE k.export_name = ?1 AND k.source = ?2)",
-            ] {
-                self.execute(
-                    sql,
-                    &[export_name.into(), scope.into(), respelled.as_str().into()],
-                )?;
-            }
-            self.execute(
-                "DELETE FROM export_state WHERE export_name = ?1 AND prefix = ?2",
-                &[export_name.into(), respelled.as_str().into()],
-            )?;
+            self.rekey_source(export_name, respelled, scope)?;
         }
         Ok(())
+    }
+
+    /// Move the progress `export_name` holds under the source `from` onto `to`, except what `to` already holds; the cursor row of `from` is deleted.
+    fn rekey_source(&self, export_name: &str, from: &str, to: &str) -> Result<()> {
+        for sql in [
+            "UPDATE export_state SET prefix = ?2 WHERE export_name = ?1 AND prefix = ?3 \
+             AND NOT EXISTS (SELECT 1 FROM export_state WHERE export_name = ?1 AND prefix = ?2)",
+            "UPDATE chunk_run SET source = ?2 WHERE export_name = ?1 AND source = ?3 \
+             AND (status <> 'in_progress' OR NOT EXISTS (SELECT 1 FROM chunk_run c \
+             WHERE c.export_name = ?1 AND c.source = ?2 AND c.status = 'in_progress'))",
+            "UPDATE keyset_range SET source = ?2 WHERE export_name = ?1 AND source = ?3 \
+             AND NOT EXISTS (SELECT 1 FROM keyset_range k \
+             WHERE k.export_name = ?1 AND k.source = ?2)",
+        ] {
+            self.execute(sql, &[export_name.into(), to.into(), from.into()])?;
+        }
+        self.execute(
+            "DELETE FROM export_state WHERE export_name = ?1 AND prefix = ?2",
+            &[export_name.into(), from.into()],
+        )?;
+        Ok(())
+    }
+
+    /// The cursors `key`'s export holds under other sources that deliver to the destination `key` delivers to, newest first, while it holds no progress under its own source: the signature of one server reached under another address.
+    fn progress_elsewhere(&self, key: &ProgressKey) -> Result<Vec<(String, String)>> {
+        let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
+        let here = key.landing.destination.as_str();
+        if !key.continues_high_water || here.is_empty() {
+            return Ok(vec![]);
+        }
+        let holds_here = self.query_opt(
+            "SELECT 1 FROM export_state WHERE export_name = ?1 AND prefix IN (?2, '') \
+             AND (last_cursor_value IS NOT NULL OR resume_run_id IS NOT NULL)",
+            &[export_name.into(), scope.into()],
+            |r| r.i64(0),
+        )?;
+        if holds_here.is_some() {
+            return Ok(vec![]);
+        }
+        let rows = self.query(
+            "SELECT prefix, last_cursor_value, destination FROM export_state \
+             WHERE export_name = ?1 AND prefix NOT IN ('', ?2) \
+             AND last_cursor_value IS NOT NULL AND destination IS NOT NULL \
+             ORDER BY last_run_at DESC, prefix",
+            &[export_name.into(), scope.into()],
+            |r| (r.text(0), r.text(1), r.text(2)),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, _, landing)| {
+                Landing::stored(landing).is_some_and(|was| {
+                    !was.destination.is_empty() && same_place(&was.destination, here)
+                })
+            })
+            .map(|(other, cursor, _)| (other, cursor))
+            .collect())
+    }
+
+    /// Refuse a first run of `key`'s source when the export holds a cursor under another source that delivers to the same destination: it would read the whole table again and deliver it there beside what that cursor delivered.
+    pub fn refuse_respelled_source(&self, key: &ProgressKey) -> Result<()> {
+        let Some((other, cursor)) = self.progress_elsewhere(key)?.into_iter().next() else {
+            return Ok(());
+        };
+        let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
+        let destination = &key.landing.destination;
+        crate::rivet_bail!(
+            crate::error::codes::STATE_CURSOR_SOURCE_RESPELLED,
+            "export '{export_name}': it holds no progress on source `{scope}`, but holds \
+             cursor `{cursor}` on source `{other}`, which delivers to the same destination \
+             `{destination}` — if both name one server (a host spelled another way, an IP for a DNS name, \
+             a config moved into a container or a scheduler), a run would read the whole \
+             table again and deliver it there beside what that cursor delivered; nothing was \
+             read or written.\n  \
+             Hint: if both are one server, `rivet state accept -c <config> --export \
+             {export_name}` moves the progress from `{other}` to `{scope}` and the next run \
+             continues from cursor `{cursor}`. If they are two servers, `rivet state accept` \
+             followed by `rivet state reset -c <config> --export {export_name}` starts \
+             `{scope}` over with a full pass and discards the progress held on `{other}` \
+             (the parts already at `{destination}` stay: empty it first if the full pass lands in it \
+             too); or point this export at a destination of its own."
+        )
     }
 
     /// Read the cursor for a run progressing on `expected`, refusing one written for another column.
@@ -557,6 +622,7 @@ impl StateStore {
     pub fn claim(&self, key: ProgressKey) -> Result<ProgressClaim<'_>> {
         let (export_name, scope, stream) = (&key.export_name, &key.source, &key.stream);
         self.adopt_respelled_source(export_name, scope)?;
+        self.refuse_respelled_source(&key)?;
         let StoredProgress {
             anchor,
             held,
@@ -920,6 +986,18 @@ impl StateStore {
     pub fn accept(&self, key: &ProgressKey) -> Result<Accepted> {
         let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
         self.claim_legacy_row(export_name, scope)?;
+        if let Some((from, cursor)) = self.progress_elsewhere(key)?.into_iter().next() {
+            self.execute(
+                "DELETE FROM export_state WHERE export_name = ?1 AND prefix = ?2 \
+                 AND last_cursor_value IS NULL AND resume_run_id IS NULL",
+                &[export_name.into(), scope.into()],
+            )?;
+            self.rekey_source(export_name, &from, scope)?;
+            return Ok(Accepted::Rekeyed {
+                held: format!("cursor `{cursor}`"),
+                from,
+            });
+        }
         let Some((held, stored)) = self.stored_progress(key)?.held else {
             return Ok(Accepted::NoProgress);
         };
@@ -1771,6 +1849,253 @@ mod tests {
         }
         let kept = s.get("orders", OTHER_PORT).unwrap();
         assert_eq!(kept.last_cursor_value.as_deref(), Some("7"));
+    }
+
+    const LOOPBACK: &str = "postgres://127.0.0.1:5432/app";
+    const LOCALHOST: &str = "postgres://localhost:5432/app";
+    const LANDING: &str = "s3://bucket/orders";
+
+    fn delivering(scope: &str, destination: &str) -> ProgressKey {
+        ProgressKey {
+            landing: Landing {
+                destination: destination.into(),
+                format: "parquet".into(),
+            },
+            ..as_mode("incremental", scope)
+        }
+    }
+
+    fn cursor_of(s: &StateStore, scope: &str) -> Option<String> {
+        s.get("orders", scope).unwrap().last_cursor_value
+    }
+
+    /// P-19: two sources that deliver to their own destinations keep their own cursors, in any order, however often they run.
+    #[test]
+    fn neighbour_two_sources_with_their_own_destinations_are_not_refused() {
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, "s3://bucket/a"), "100")
+            .unwrap();
+        for cycle in 1..=2 {
+            let claim = s.claim(delivering(LOCALHOST, "s3://bucket/b")).unwrap();
+            assert_eq!(
+                claim.cursor().unwrap().last_cursor_value,
+                None,
+                "cycle {cycle}"
+            );
+        }
+        s.update_with_column(&delivering(LOCALHOST, "s3://bucket/b"), "7")
+            .unwrap();
+        assert_eq!(cursor_of(&s, LOOPBACK).as_deref(), Some("100"));
+        assert_eq!(cursor_of(&s, LOCALHOST).as_deref(), Some("7"));
+        assert_eq!(scopes(&s), [LOOPBACK, LOCALHOST]);
+    }
+
+    /// A key that names no destination, a strategy with no stored cursor and a row written before destinations were recorded are no evidence of one dataset.
+    #[test]
+    fn neighbour_no_destination_signal_is_no_refusal() {
+        let s = store();
+        put(&s, "orders", LOOPBACK, "100", "id", "orders_a").unwrap();
+        assert!(s.claim(as_mode("incremental", LOCALHOST)).is_ok());
+
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        for mode in ["full", "chunked", "timewindow"] {
+            let key = ProgressKey {
+                continues_high_water: false,
+                mode: match mode {
+                    "full" => "full",
+                    "chunked" => "chunked",
+                    _ => "timewindow",
+                },
+                ..delivering(LOCALHOST, LANDING)
+            };
+            assert!(s.claim(key).is_ok(), "{mode}");
+        }
+
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        s.execute("UPDATE export_state SET destination = NULL", &[])
+            .unwrap();
+        assert!(s.claim(delivering(LOCALHOST, LANDING)).is_ok());
+    }
+
+    /// A source that holds progress of its own continues from it, whatever else the export holds elsewhere.
+    #[test]
+    fn neighbour_a_source_with_its_own_progress_continues() {
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        s.update_with_column(&delivering(LOCALHOST, LANDING), "7")
+            .unwrap();
+        for cycle in 1..=2 {
+            let claim = s.claim(delivering(LOCALHOST, LANDING)).unwrap();
+            assert_eq!(
+                claim.cursor().unwrap().last_cursor_value.as_deref(),
+                Some("7"),
+                "cycle {cycle}"
+            );
+        }
+        assert_eq!(cursor_of(&s, LOOPBACK).as_deref(), Some("100"));
+    }
+
+    /// Another export's progress under another source is nothing of this export's.
+    #[test]
+    fn neighbour_another_exports_progress_is_not_evidence() {
+        let s = store();
+        let users = ProgressKey {
+            export_name: "users".into(),
+            ..delivering(LOOPBACK, LANDING)
+        };
+        s.update_with_column(&users, "55").unwrap();
+        assert!(s.claim(delivering(LOCALHOST, LANDING)).is_ok());
+    }
+
+    #[test]
+    fn a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted()
+     {
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        for cycle in 1..=2 {
+            let said = refusal(
+                s.claim(delivering(LOCALHOST, LANDING)),
+                "RIVET_STATE_CURSOR_SOURCE_RESPELLED",
+            );
+            for want in [
+                LOOPBACK,
+                LOCALHOST,
+                "cursor `100`",
+                LANDING,
+                "`rivet state accept -c <config> --export orders` moves the progress from `postgres://127.0.0.1:5432/app` to `postgres://localhost:5432/app`",
+                "`rivet state accept` followed by `rivet state reset -c <config> --export orders` starts `postgres://localhost:5432/app` over",
+                "nothing was read or written",
+            ] {
+                assert!(said.contains(want), "cycle {cycle}: {want}\n{said}");
+            }
+            assert_eq!(
+                scopes(&s),
+                [LOOPBACK],
+                "cycle {cycle}: a refusal writes nothing"
+            );
+        }
+        let accepted = s.accept(&delivering(LOCALHOST, LANDING)).unwrap();
+        assert_eq!(
+            accepted,
+            Accepted::Rekeyed {
+                held: "cursor `100`".into(),
+                from: LOOPBACK.into()
+            }
+        );
+        assert_eq!(scopes(&s), [LOCALHOST]);
+        let claim = s.claim(delivering(LOCALHOST, LANDING)).unwrap();
+        assert_eq!(
+            claim.cursor().unwrap().last_cursor_value.as_deref(),
+            Some("100")
+        );
+        assert_eq!(
+            s.accept(&delivering(LOCALHOST, LANDING)).unwrap(),
+            Accepted::Unchanged
+        );
+    }
+
+    /// The remedy for two servers works from the refused state: accept, reset, then a full pass is allowed; the progress it writes makes the old address the refused one.
+    #[test]
+    fn two_servers_sharing_a_destination_start_over_by_accept_then_reset() {
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        refusal(
+            s.claim(delivering(LOCALHOST, LANDING)),
+            "RIVET_STATE_CURSOR_SOURCE_RESPELLED",
+        );
+        s.accept(&delivering(LOCALHOST, LANDING)).unwrap();
+        s.reset("orders", LOCALHOST).unwrap();
+        assert_eq!(scopes(&s), Vec::<String>::new());
+        let claim = s.claim(delivering(LOCALHOST, LANDING)).unwrap();
+        assert_eq!(claim.cursor().unwrap().last_cursor_value, None);
+        s.update_with_column(&delivering(LOCALHOST, LANDING), "5")
+            .unwrap();
+        assert!(s.claim(delivering(LOCALHOST, LANDING)).is_ok());
+        refusal(
+            s.claim(delivering(LOOPBACK, LANDING)),
+            "RIVET_STATE_CURSOR_SOURCE_RESPELLED",
+        );
+    }
+
+    /// Accept moves the checkpoint rows of the old source with its cursor.
+    #[test]
+    fn accept_moves_the_checkpoints_with_the_cursor() {
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        s.persist_keyset_ranges("orders", LOOPBACK, "k1", "id", &[(None, None)])
+            .unwrap();
+        s.create_chunk_run("c1", "orders", "plan", 3).unwrap();
+        s.execute("UPDATE chunk_run SET source = ?1", &[LOOPBACK.into()])
+            .unwrap();
+        s.accept(&delivering(LOCALHOST, LANDING)).unwrap();
+        assert_eq!(column(&s, "SELECT source FROM keyset_range"), [LOCALHOST]);
+        assert_eq!(column(&s, "SELECT source FROM chunk_run"), [LOCALHOST]);
+        assert_eq!(scopes(&s), [LOCALHOST]);
+    }
+
+    /// With several sources delivering to the destination, accept takes the one that ran last and leaves the rest.
+    #[test]
+    fn accept_takes_the_newest_source() {
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        s.update_with_column(
+            &delivering("postgres://db.internal:5432/app", LANDING),
+            "900",
+        )
+        .unwrap();
+        let accepted = s.accept(&delivering(LOCALHOST, LANDING)).unwrap();
+        assert_eq!(
+            accepted,
+            Accepted::Rekeyed {
+                held: "cursor `900`".into(),
+                from: "postgres://db.internal:5432/app".into()
+            }
+        );
+        assert_eq!(scopes(&s), [LOOPBACK, LOCALHOST]);
+        assert_eq!(cursor_of(&s, LOCALHOST).as_deref(), Some("900"));
+    }
+
+    /// A row under the new source that holds no progress yet does not swallow the progress accept moves onto it.
+    #[test]
+    fn accept_moves_the_progress_over_an_empty_row_of_the_new_source() {
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        s.update_with_column(&delivering(LOCALHOST, LANDING), "1")
+            .unwrap();
+        s.clear_cursor_value("orders", LOCALHOST).unwrap();
+        refusal(
+            s.claim(delivering(LOCALHOST, LANDING)),
+            "RIVET_STATE_CURSOR_SOURCE_RESPELLED",
+        );
+        s.accept(&delivering(LOCALHOST, LANDING)).unwrap();
+        assert_eq!(cursor_of(&s, LOCALHOST).as_deref(), Some("100"));
+        assert_eq!(scopes(&s), [LOCALHOST]);
+    }
+
+    /// `plan` asks the refusal without claiming: the same verdict as a run, and a source with progress passes.
+    #[test]
+    fn plan_reads_the_same_refusal_as_a_run() {
+        let s = store();
+        s.update_with_column(&delivering(LOOPBACK, LANDING), "100")
+            .unwrap();
+        refusal(
+            s.refuse_respelled_source(&delivering(LOCALHOST, LANDING)),
+            "RIVET_STATE_CURSOR_SOURCE_RESPELLED",
+        );
+        assert!(
+            s.refuse_respelled_source(&delivering(LOOPBACK, LANDING))
+                .is_ok()
+        );
     }
 
     const SPENT_1: &str = "from ? where spent = 1";

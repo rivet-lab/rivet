@@ -887,6 +887,11 @@ pub mod codes {
         "RIVET_STATE_CURSOR_DESTINATION_MISMATCH",
         "restore the `destination` and `format` the export had to continue from the stored progress, or `rivet state reset -c <config> --export <name>` starts over with a full pass delivered where the config points now (the parts already delivered stay where they are: empty that location first if the full pass lands in it too)",
     );
+    /// An export with no progress on its source holds a cursor on another source that delivers to the same destination: one server reached under another address would re-read the whole table.
+    pub const STATE_CURSOR_SOURCE_RESPELLED: Code = refusal(
+        "RIVET_STATE_CURSOR_SOURCE_RESPELLED",
+        "if the two sources are one server, `rivet state accept -c <config> --export <name>` moves the progress onto the source the config names now and the next run continues from it; if they are two servers, `rivet state accept` followed by `rivet state reset -c <config> --export <name>` starts the export over with a full pass (the progress held on the other source is discarded), or give the export a destination of its own",
+    );
     /// An export met an unfinished checkpointed run it does not continue: another mode opened it, its checkpoint setting is off now, or its parts are in another format.
     pub const STATE_INTERRUPTED_RUN_OWNER_MISMATCH: Code = refusal(
         "RIVET_STATE_INTERRUPTED_RUN_OWNER_MISMATCH",
@@ -1745,6 +1750,7 @@ pub mod codes {
         STATE_CURSOR_PAST_MANIFEST,
         STATE_CURSOR_STREAM_MISMATCH,
         STATE_CURSOR_DESTINATION_MISMATCH,
+        STATE_CURSOR_SOURCE_RESPELLED,
         STATE_INTERRUPTED_RUN_OWNER_MISMATCH,
         STATE_CDC_TABLE_REJOINED,
         STATE_CHUNK_RUN_OWNER_UNKNOWN,

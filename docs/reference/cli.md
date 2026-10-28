@@ -770,6 +770,8 @@ rivet state accept --config <PATH> --export <NAME> [--param KEY=VALUE ...]
 
 A run refuses stored progress that was written reading another table, another schema or other rows (`RIVET_STATE_CURSOR_STREAM_MISMATCH`). `state accept` is the answer "the edit is meant, go on from where the export was": it records the stored progress of that one export as belonging to what the config reads now, and leaves the cursor value, its column and an interrupted run's anchor as they are. The next run continues from the cursor under the new query, so rows of the new query below the cursor are not delivered; `rivet state reset` is the command that delivers them.
 
+`state accept` also answers `RIVET_STATE_CURSOR_SOURCE_RESPELLED`: when the export holds no progress on the source the config names, and holds a cursor on another source that delivers to the same destination, it moves that cursor (with its checkpoint rows) onto the source the config names, and the next run continues from it. With several such sources it takes the one that ran last. The move is recorded as a `run_journal` row with status `accepted`. To start the export over instead, follow it with `rivet state reset`.
+
 - It acts on the one export named, on the source this config names, once. A later edit is refused again until it is accepted too; there is no setting that accepts edits in advance.
 - It reads the config as `rivet run` does, so pass the same `--param` values.
 - A cursor written for another `cursor_column` or keyset key is not accepted: the command stops with `RIVET_STATE_CURSOR_OWNER_MISMATCH` (exit 5) and changes nothing.

@@ -3507,3 +3507,22 @@ seeds:
         cells:
           - "lib:a_transient_http_reply_that_outlasts_the_retries_exits_retryable"
           - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"
+
+  - name: cursor-continued-under-another-source
+    class: an incremental export finds no cursor under the source key its config names now because the same server is reached under another host spelling, and reads the whole table again beside what the old key delivered, exit 0
+    history: "issue #690, 2026-10-28: 127.0.0.1 vs localhost (or IP vs DNS, cron vs a container) changes source_state_key; RED on main (PostgreSQL live cell: the second spelling delivered all 43 rows with exit 0)"
+    scope: source
+    patch: cursor-continued-under-another-source/shared.patch
+    engines:
+      postgres:
+        cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_postgres, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      mysql:
+        cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_mysql, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      mssql:
+        cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_mssql, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      mongo:
+        cells: [a_resume_export_reached_under_another_host_spelling_is_refused_and_walked_out_mongo, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      oracle:
+        cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_oracle, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+      lib:
+        cells: ["lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
