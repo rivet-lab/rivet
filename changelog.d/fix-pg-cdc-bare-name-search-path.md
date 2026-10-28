@@ -9,9 +9,6 @@
 - **Behaviour change: a bare PostgreSQL CDC table name that two schemas hold is no longer refused as
   ambiguous.** With `orders` in both the `$user` schema and `public` and `table: orders`, a run stopped
   with `RIVET_SOURCE_CDC_TABLE_UNRESOLVED` (0.32.2 and earlier). **Now** rivet captures the table the
-  connections resolves, without a refusal, as MySQL does since- **Behaviour change: a bare PostgreSQL CDC table name that two schemas hold is no longer refused as
-  ambiguous.** With `orders` in both the `$user` schema and `public` and `table: orders`, a run stopped
-  with `RIVET_SOURCE_CDC_TABLE_UNRESOLVED` (0.32.2 and earlier). **Now** rivet captures the table the
   connection's `search_path` resolves, without a refusal, as MySQL does since #677; the other schema's
   table is not captured. **What to do:** if the stream should read the other schema's table, write the
   name qualified (`schema.orders`); a config that relied on the refusal to catch a wrong search_path
