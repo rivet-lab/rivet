@@ -2118,7 +2118,7 @@ mod tests {
             has_load: text.contains("\nload:"),
             compacts: text.contains("\n  layout: base_buffer")
                 || text.contains("\n  # layout: base_buffer is the default"),
-            cdc_without_baseline: text.contains("\n  layout: log_view"),
+            cdc_without_baseline: text.contains("# no baseline: a table named `snapshot`"),
             has_delta: text
                 .lines()
                 .any(|l| matches!(l.trim(), "mode: cdc" | "mode: incremental")),
