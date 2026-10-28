@@ -393,6 +393,11 @@ impl Rig {
     }
 
     /// Drop every top-level line, to restage the same export with a different one.
+    /// Swap the top-level lines of a rig already built, for a scenario that changes its load block between runs.
+    pub fn set_top_line(&mut self, line: &str) {
+        self.top_lines = vec![line.to_string()];
+    }
+
     pub fn clear_top_lines(mut self) -> Self {
         self.top_lines.clear();
         self

@@ -158,6 +158,12 @@ scenarios:
     incremental: { na: "an incremental export has no baseline leg; its empty run stays a no-op (lib: a_whole_table_pass_is_a_full_load_or_a_base_and_buffer_baseline_leg)" }
     cdc:         { test: a_table_empty_at_baseline_takes_its_first_changes_mysql }
 
+  - id: a_baseline_staged_without_the_flag_lands_live
+    what: "a Snowflake base loaded from a baseline Parquet that carries no `__is_deleted` (staged under `layout: log_view`, or by a config whose layout differs from the load's) lands the flag FALSE on every row: the COPY transform reads the flag as `COALESCE($1:__is_deleted::BOOLEAN, FALSE)`, because a column absent from the file reads NULL and `WHERE NOT __is_deleted` drops a NULL row. Graded by a second client: five live rows, no NULL flag (2026-10-28: the BigQuery-config extract of warehouse_cell_cdc_backfill_snapshot_mysql loaded into Snowflake read 0 live rows of 2000)."
+    full:        { na: "a full load has no delete flag" }
+    incremental: { na: "an incremental base carries no `__is_deleted` unless `load.delete_flag` asks for it, and the extract then writes it" }
+    cdc:         { test: snowflake_baseline_without_the_flag_lands_live_postgres }
+
   - id: compact_merges_the_buffer_and_drops_it
     what: "`rivet compact`: one MERGE per table (per ≤4,000-partition window) upserts the latest change per key into the base, flags a tombstone instead of deleting, un-flags a re-insert, then DROPs the buffer; both MERGE sides are bounded by the same constants so the base prunes; a crash between MERGE and DROP re-merges idempotently. Live: 8 rows / 7 live / 1 flagged with its last values, buffer gone, second compact a no-op, crash-and-retry merges once Snowflake (2026-10-28) runs the same contract as one transaction of `DELETE ... USING` winners, `INSERT` and a tombstone `UPDATE` on a transient buffer renamed to `__changes__merging` and dropped after the commit; graded by snowflake_compact_cycle_{postgres,mysql,mssql,mongo} and snowflake_incremental_buffer_compacts_into_its_base_{postgres,mysql} (live_snowflake_compact.rs)."
     full:        { na: "nothing to compact" }
