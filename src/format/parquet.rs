@@ -88,9 +88,13 @@ impl SpanSink for ArrowWriter<Box<dyn Write + Send>> {
 ///
 /// Parquet 59.1+ pins a call's whole decimal/fixed-width arena for as long as a chunk's min/max
 /// statistic lives, so a call stays small; the cuts match the library's own, the bytes stay equal.
+/// Every pass moves at least one row, so the row count bounds the passes.
 fn write_in_spans(sink: &mut impl SpanSink, batch: &RecordBatch, group_rows: usize) -> Result<()> {
     let mut at = 0;
-    while at < batch.num_rows() {
+    for _ in 0..batch.num_rows() {
+        if at == batch.num_rows() {
+            break;
+        }
         let room = group_rows.saturating_sub(sink.in_progress_rows()).max(1);
         let len = (batch.num_rows() - at)
             .min(room)
