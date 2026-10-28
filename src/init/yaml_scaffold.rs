@@ -277,6 +277,19 @@ pub(super) fn scaffold_schema(
 /// Maximum column width for scaffolded comment lines.
 const COMMENT_WRAP_WIDTH: usize = 100;
 
+/// `text` as one comment line: every line break or control character, including the Unicode line separators, becomes a space.
+fn one_line_comment(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Word-wrap every comment in the scaffolded YAML so no line exceeds
 /// [`COMMENT_WRAP_WIDTH`]. A standalone comment (`<indent># text`) wraps onto
 /// continuation comment lines at the same indent; an inline comment
@@ -946,8 +959,9 @@ fn export_block_lines(
         if let Some(why) = info.cdc_unmineable.as_deref() {
             d.skipped.push(info.table.clone());
             return vec![format!(
-                "  # SKIPPED {}: {why}",
-                yaml_quote_if_needed(&info.table)
+                "  # SKIPPED {}: {}",
+                yaml_quote_if_needed(&info.table),
+                one_line_comment(why)
             )];
         }
         let ident = ident.map_or_else(|| cdc_ident(&info.table), str::to_string);
@@ -2854,6 +2868,42 @@ mod tests {
         let batch = scaffold(None);
         assert!(batch.decisions.skipped.is_empty(), "{}", batch.text);
         assert!(!batch.text.contains("SKIPPED"), "{}", batch.text);
+    }
+
+    #[test]
+    fn a_skip_reason_holding_line_breaks_stays_one_comment_and_injects_no_yaml() {
+        let url = "oracle://u@localhost:1521/FREEPDB1";
+        let mut bad = make_table(vec![col("ID", "bigint")]);
+        bad.table = "DOCS".into();
+        bad.cdc_unmineable = Some(
+            "column \"A\nexports:\n- name: injected\r\u{2028}b: 1\u{85}c: 2\" cannot be mined"
+                .into(),
+        );
+        let mut plain = make_table(vec![col("ID", "bigint")]);
+        plain.table = "ORDERS".into();
+        let out = scaffold_schema(
+            &[bad, plain],
+            url,
+            &crate::init::SourceProvenance::Inline,
+            "schema APP",
+            &InitYamlDestination::default(),
+            Some("cdc"),
+            None,
+        )
+        .unwrap();
+        let cfg = crate::config::Config::from_yaml(&out.text)
+            .unwrap_or_else(|e| panic!("{e:#}\n{}", out.text));
+        assert_eq!(cfg.exports.len(), 1, "{}", out.text);
+        assert!(!out.text.contains("injected\n"), "{}", out.text);
+        assert_eq!(
+            out.text
+                .lines()
+                .filter(|l| l.contains("SKIPPED DOCS"))
+                .count(),
+            1,
+            "{}",
+            out.text
+        );
     }
 
     #[test]

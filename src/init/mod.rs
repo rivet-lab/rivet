@@ -1157,6 +1157,7 @@ fn introspect_single_table(
     source_url: &str,
     table: &str,
     schema_flag: Option<&str>,
+    cdc: bool,
 ) -> Result<TableInfo> {
     let (eff_schema, table_name) = resolve_single_table_schema(table, schema_flag)?;
     Ok(match source_type(source_url)? {
@@ -1221,6 +1222,7 @@ fn introspect_single_table(
                 &mut conn,
                 &owner,
                 &crate::sql::oracle_catalog_name(table_name),
+                cdc,
             )?
         }
         "mongo" => {
@@ -1272,13 +1274,20 @@ fn init_yaml(
     mode_override: Option<&str>,
 ) -> Result<(yaml_scaffold::Scaffold, Vec<crate::state::StrategySnapshot>)> {
     if let Some(t) = table {
-        let info = introspect_single_table(tls, source_url, t, schema)?;
+        let info =
+            introspect_single_table(tls, source_url, t, schema, mode_override == Some("cdc"))?;
         let snaps = vec![snapshot_of(&info, mode_override, source_url)];
         let scaffold =
             yaml_scaffold::scaffold_table(&info, source_url, provenance, dest, mode_override, tls)?;
         return Ok((scaffold, snaps));
     }
-    let infos = introspect_all(tls, source_url, schema, filter)?;
+    let infos = introspect_all(
+        tls,
+        source_url,
+        schema,
+        filter,
+        mode_override == Some("cdc"),
+    )?;
     if infos.is_empty() {
         return Err(no_tables_error(filter));
     }
@@ -1447,7 +1456,7 @@ fn init_discovery_json(
     filter: &TableFilter,
 ) -> Result<String> {
     let (infos, scope) = if let Some(t) = table {
-        let info = introspect_single_table(tls, source_url, t, schema)?;
+        let info = introspect_single_table(tls, source_url, t, schema, false)?;
         let scope = match source_type(source_url)? {
             "postgres" => format!("table \"{}\".\"{}\"", info.schema, info.table),
             "mysql" => format!("table `{}`", info.table),
@@ -1458,7 +1467,7 @@ fn init_discovery_json(
         };
         (vec![info], scope)
     } else {
-        let infos = introspect_all(tls, source_url, schema, filter)?;
+        let infos = introspect_all(tls, source_url, schema, filter, false)?;
         if infos.is_empty() {
             return Err(no_tables_error(filter));
         }
@@ -1536,6 +1545,7 @@ fn introspect_all(
     source_url: &str,
     schema: Option<&str>,
     filter: &TableFilter,
+    cdc: bool,
 ) -> Result<Vec<TableInfo>> {
     match source_type(source_url)? {
         "postgres" => {
@@ -1623,7 +1633,7 @@ fn introspect_all(
             names.retain(|n| filter.matches_folded(n));
             let mut out = Vec::with_capacity(names.len());
             for n in names {
-                if let Some(info) = scan_step(oracle::introspect(&mut conn, &owner, &n))? {
+                if let Some(info) = scan_step(oracle::introspect(&mut conn, &owner, &n, cdc))? {
                     out.push(info)
                 }
             }

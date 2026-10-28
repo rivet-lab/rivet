@@ -54,8 +54,13 @@ pub(super) fn list_tables(conn: &mut OracleSource, schema: &str) -> Result<Vec<S
     ))
 }
 
-/// Introspect `schema.table` (catalog-exact names); a private or PUBLIC synonym is followed to its local base table.
-pub(super) fn introspect(conn: &mut OracleSource, schema: &str, table: &str) -> Result<TableInfo> {
+/// Introspect `schema.table` (catalog-exact names), asking LogMiner's catalog only for a CDC scaffold; a private or PUBLIC synonym is followed to its local base table.
+pub(super) fn introspect(
+    conn: &mut OracleSource,
+    schema: &str,
+    table: &str,
+    cdc: bool,
+) -> Result<TableInfo> {
     let mut columns = columns_of(conn, schema, table)?;
     let (mut schema, mut table) = (schema.to_string(), table.to_string());
     if columns.is_empty()
@@ -104,7 +109,7 @@ pub(super) fn introspect(conn: &mut OracleSource, schema: &str, table: &str) -> 
             .unwrap_or(0)
             .max(0),
     };
-    let cdc_unmineable = cdc_unmineable(conn, &schema, &table)?;
+    let cdc_unmineable = asked_for_cdc(cdc, || cdc_unmineable(conn, &schema, &table))?;
     Ok(TableInfo {
         cdc_capture_instance: None,
         cdc_unmineable,
@@ -115,6 +120,14 @@ pub(super) fn introspect(conn: &mut OracleSource, schema: &str, table: &str) -> 
         total_bytes: None,
         columns,
     })
+}
+
+/// The mineability probe's answer for a CDC scaffold; any other init never runs it.
+fn asked_for_cdc(
+    cdc: bool,
+    probe: impl FnOnce() -> Result<Option<String>>,
+) -> Result<Option<String>> {
+    if cdc { probe() } else { Ok(None) }
 }
 
 /// Why LogMiner cannot capture `schema.table`, asked through the predicate the capture itself
@@ -290,6 +303,23 @@ fn catalog_type(data_type: &str, precision: Option<u32>, scale: Option<i32>) -> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_a_cdc_scaffold_runs_the_mineability_probe() {
+        let ran = std::cell::Cell::new(0);
+        let probe = || {
+            ran.set(ran.get() + 1);
+            Ok(Some("why".to_string()))
+        };
+        assert_eq!(asked_for_cdc(false, probe).unwrap(), None);
+        assert_eq!(
+            ran.get(),
+            0,
+            "a batch init must not touch the LogMiner catalog"
+        );
+        assert_eq!(asked_for_cdc(true, probe).unwrap().as_deref(), Some("why"));
+        assert_eq!(ran.get(), 1);
+    }
     /// Init leaves out exactly what the capture refuses, with the refusal's own text: one predicate.
     /// The catalog rows the capture reads decide init's verdict: the reason the capture gives for
     /// each unmineable cause, word for word, and none for a table LogMiner mines.
