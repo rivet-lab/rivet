@@ -361,6 +361,36 @@ source:
   password_secret: projects/my-project/secrets/mysql-pw/versions/3   # a pinned version
 ```
 
+The reference is a resource name, not a credential: only an identity holding the role below can
+read the value. To keep one config for every environment, leave the name to a `${VAR}`, filled from
+`--param` or the environment (an unset one stops the run with `RIVET_CONFIG_SECRET_UNSET`):
+
+```yaml
+source:
+  type: postgres
+  url_secret: ${DB_SECRET}
+```
+
+```bash
+rivet run -c rivet.yaml -p DB_SECRET=projects/my-project/secrets/pg-url-prod
+```
+
+From Airflow (`airflow-provider-rivet`) the task passes the name only, so the value never enters
+Airflow, its rendered templates or its logs; `cloud_credentials=["gcp"]` hands the worker's
+`GOOGLE_APPLICATION_CREDENTIALS` to rivet, which the provider does not pass otherwise:
+
+```python
+RivetRunOperator(
+    task_id="users",
+    config="/opt/rivet/rivet.yaml",
+    extra_args=["-p", "DB_SECRET={{ var.value.pg_url_secret }}"],
+    cloud_credentials=["gcp"],
+)
+```
+
+On a worker inside Google Cloud, prefer the attached service account or Workload Identity over a
+key file: rivet reads it through ADC with no file on disk.
+
 Grant the credential read access on each secret, not on the project:
 
 ```bash
