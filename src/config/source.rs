@@ -948,6 +948,35 @@ mod tests {
         }
     }
 
+    /// `url_secret` is a URL method and `password_secret` a structured one; each value is trimmed.
+    #[test]
+    fn a_secret_supplies_the_url_or_the_password() {
+        super::super::gcp_secret::prime(
+            "projects/p/secrets/url-of-test",
+            "  postgresql://u:p@db.host:5432/app\n",
+        );
+        super::super::gcp_secret::prime("projects/p/secrets/pw-of-test", "s3cret\r\n");
+
+        let mut src = make_source(SourceType::Postgres);
+        src.url_secret = Some("projects/p/secrets/url-of-test".into());
+        assert!(src.has_url_fields() && !src.has_structured_fields());
+        assert_eq!(
+            src.resolve_url().unwrap(),
+            "postgresql://u:p@db.host:5432/app"
+        );
+        src.host = Some("h".into());
+        let err = src.resolve_url().unwrap_err().to_string();
+        assert!(err.contains("not both"), "{err}");
+
+        let mut src = make_source(SourceType::Postgres);
+        src.host = Some("db.host".into());
+        src.user = Some("u".into());
+        src.database = Some("app".into());
+        src.password_secret = Some("projects/p/secrets/pw-of-test".into());
+        let url = src.resolve_url().unwrap();
+        assert!(url.contains(":s3cret@db.host"), "{url}");
+    }
+
     /// `url_file` is read from disk and trimmed; a missing file is named in the error.
     #[test]
     fn a_url_file_is_read_and_trimmed() {

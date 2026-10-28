@@ -640,6 +640,12 @@ mod tests {
             .expect("password_env recovers");
         reject_unrecoverable_inline_url(&set(redacted, None, None, Some("h"), Some("u")))
             .expect("host+user recovers");
+        let mut a = set(redacted, None, None, None, None);
+        a.resolved_plan.source.url_secret = Some("projects/p/secrets/s".into());
+        reject_unrecoverable_inline_url(&a).expect("url_secret recovers");
+        let mut a = set(redacted, None, None, None, None);
+        a.resolved_plan.source.password_secret = Some("projects/p/secrets/s".into());
+        reject_unrecoverable_inline_url(&a).expect("password_secret recovers");
         // …but host WITHOUT user is not enough (`&&`, not `||`).
         reject_unrecoverable_inline_url(&set(redacted, None, None, Some("h"), None))
             .expect_err("host without user cannot rebuild the connection");

@@ -19,12 +19,8 @@ const ENDPOINT: &str = "https://secretmanager.googleapis.com/v1";
 /// `projects/<project>/secrets/<secret>/versions/<n|latest>`. The token comes from the
 /// same ADC credential the BigQuery and GCS legs use (`GOOGLE_APPLICATION_CREDENTIALS`).
 pub(crate) fn gcp_secret(reference: &str) -> Result<Zeroizing<String>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Zeroizing<String>>>> = OnceLock::new();
     let name = version_name(reference)?;
-    let mut cache = CACHE
-        .get_or_init(Default::default)
-        .lock()
-        .expect("secret cache poisoned");
+    let mut cache = cache().lock().expect("secret cache poisoned");
     if let Some(value) = cache.get(&name) {
         return Ok(value.clone());
     }
@@ -38,6 +34,21 @@ pub(crate) fn gcp_secret(reference: &str) -> Result<Zeroizing<String>> {
     };
     cache.insert(name, fetched.clone());
     Ok(fetched)
+}
+
+fn cache() -> &'static Mutex<HashMap<String, Zeroizing<String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Zeroizing<String>>>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Seeds the process cache so a test resolves `reference` to `value` without Secret Manager.
+#[cfg(test)]
+pub(crate) fn prime(reference: &str, value: &str) {
+    let name = version_name(reference).expect("a valid secret name");
+    cache()
+        .lock()
+        .expect("secret cache poisoned")
+        .insert(name, Zeroizing::new(value.to_string()));
 }
 
 /// The full version resource name `reference` names; refuses anything else.
