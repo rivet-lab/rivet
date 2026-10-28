@@ -38,7 +38,7 @@ pub enum ExitClass {
     /// identical command will fail the same way.
     Generic = 1,
     /// `2` — transient failure (connection reset, lock-wait timeout, capacity), or a
-    /// [`Busy`](ErrorKind::Busy) stop. Safe to retry the same command after a backoff.
+    /// [`Busy`](ErrorKind::Busy) / [`Transient`](ErrorKind::Transient) stop. Safe to retry the same command after a backoff.
     Retryable = 2,
     /// `3` — data-integrity failure (quality gate, reconcile mismatch, `validate`
     /// verification failure, duplicate-guard, manifest inconsistency). The
@@ -385,6 +385,8 @@ pub enum ErrorKind {
     Refusal,
     /// A live rivet process holds the lease or lock this command needs: the same command succeeds once it ends.
     Busy,
+    /// The warehouse answered with a failure it documents as retryable: the same command succeeds later.
+    Transient,
     /// A verification found the data wrong.
     Integrity,
     /// An invariant did not hold: a bug.
@@ -399,6 +401,7 @@ impl ErrorKind {
             ErrorKind::Environment => "environment",
             ErrorKind::Refusal => "refusal",
             ErrorKind::Busy => "busy",
+            ErrorKind::Transient => "transient",
             ErrorKind::Integrity => "integrity",
             ErrorKind::Internal => "internal",
         }
@@ -555,7 +558,7 @@ pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
     // connection retries, a denied permission does not).
     match err.downcast_ref::<CodedError>()?.kind() {
         ErrorKind::Refusal => Some(ExitClass::Refusal),
-        ErrorKind::Busy => Some(ExitClass::Retryable),
+        ErrorKind::Busy | ErrorKind::Transient => Some(ExitClass::Retryable),
         ErrorKind::Internal => Some(ExitClass::Internal),
         ErrorKind::Integrity => Some(ExitClass::DataIntegrity),
         ErrorKind::Usage => Some(ExitClass::Generic),
@@ -789,6 +792,13 @@ pub mod codes {
             action,
         }
     }
+    const fn transient(id: &'static str, action: &'static str) -> Code {
+        Code {
+            id,
+            kind: ErrorKind::Transient,
+            action,
+        }
+    }
     const fn integrity(id: &'static str, action: &'static str) -> Code {
         Code {
             id,
@@ -876,6 +886,11 @@ pub mod codes {
     pub const STATE_CURSOR_DESTINATION_MISMATCH: Code = refusal(
         "RIVET_STATE_CURSOR_DESTINATION_MISMATCH",
         "restore the `destination` and `format` the export had to continue from the stored progress, or `rivet state reset -c <config> --export <name>` starts over with a full pass delivered where the config points now (the parts already delivered stay where they are: empty that location first if the full pass lands in it too)",
+    );
+    /// An export with no progress on its source holds a cursor on another source that delivers to the same destination: one server reached under another address would re-read the whole table.
+    pub const STATE_CURSOR_SOURCE_RESPELLED: Code = refusal(
+        "RIVET_STATE_CURSOR_SOURCE_RESPELLED",
+        "if the two sources are one server, `rivet state accept -c <config> --export <name>` moves the progress onto the source the config names now and the next run continues from it; if they are two servers, `rivet state accept` followed by `rivet state reset -c <config> --export <name>` starts the export over with a full pass (the progress held on the other source is discarded), or give the export a destination of its own",
     );
     /// An export met an unfinished checkpointed run it does not continue: another mode opened it, its checkpoint setting is off now, or its parts are in another format.
     pub const STATE_INTERRUPTED_RUN_OWNER_MISMATCH: Code = refusal(
@@ -1207,10 +1222,10 @@ pub mod codes {
         "RIVET_LOAD_WAREHOUSE_REJECTED",
         "read the warehouse's reason in the message and fix what it names, then re-run",
     );
-    /// The warehouse kept answering with a transient failure.
-    pub const LOAD_WAREHOUSE_UNAVAILABLE: Code = environment(
+    /// The warehouse kept answering with a transient failure, or a job failed with a reason it documents as retryable.
+    pub const LOAD_WAREHOUSE_UNAVAILABLE: Code = transient(
         "RIVET_LOAD_WAREHOUSE_UNAVAILABLE",
-        "re-run the load later; the warehouse answered with a transient failure on every retry",
+        "re-run the same command later; the warehouse failed with a transient error (HTTP 5xx or 429, or a job reason it documents as retryable) that rivet's retries did not outlast",
     );
     /// The warehouse answered in a shape rivet does not read.
     pub const LOAD_WAREHOUSE_ANSWER_UNREADABLE: Code = internal(
@@ -1735,6 +1750,7 @@ pub mod codes {
         STATE_CURSOR_PAST_MANIFEST,
         STATE_CURSOR_STREAM_MISMATCH,
         STATE_CURSOR_DESTINATION_MISMATCH,
+        STATE_CURSOR_SOURCE_RESPELLED,
         STATE_INTERRUPTED_RUN_OWNER_MISMATCH,
         STATE_CDC_TABLE_REJOINED,
         STATE_CHUNK_RUN_OWNER_UNKNOWN,
@@ -1912,7 +1928,7 @@ fn kind_exit(kind: ErrorKind) -> &'static str {
         ErrorKind::Usage => "1",
         ErrorKind::Environment => "2 if transient, else 1",
         ErrorKind::Refusal => "5",
-        ErrorKind::Busy => "2",
+        ErrorKind::Busy | ErrorKind::Transient => "2",
         ErrorKind::Integrity => "3",
         ErrorKind::Internal => "6",
     }
@@ -2189,6 +2205,11 @@ mod tests {
         };
         assert_eq!(with(ErrorKind::Refusal), 5);
         assert_eq!(with(ErrorKind::Busy), 2, "busy, whatever its text says");
+        assert_eq!(
+            with(ErrorKind::Transient),
+            2,
+            "a documented-transient stop, whatever its text says"
+        );
         assert_eq!(with(ErrorKind::Internal), 6);
         assert_eq!(with(ErrorKind::Integrity), 3);
         assert_eq!(with(ErrorKind::Usage), 1);

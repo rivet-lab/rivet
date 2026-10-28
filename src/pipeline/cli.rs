@@ -316,34 +316,43 @@ pub fn accept_state(
         &source,
         "accept its edited query",
     )?;
-    match state.accept(&plan.progress_key())? {
-        crate::state::Accepted::NoProgress => println!(
-            "Export '{export_name}' holds no stored progress on this source that a run would continue from; nothing to accept."
-        ),
-        crate::state::Accepted::Unchanged => println!(
-            "The stored progress of export '{export_name}' already belongs to what it reads now; nothing changed."
-        ),
-        crate::state::Accepted::Rebound { held, was, now } => {
-            let message = format!(
-                "stored progress ({held}) written reading `{was}` is kept for `{now}` by `rivet state accept`"
-            );
-            let at = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3f");
-            let mut journal =
-                crate::journal::RunJournal::new(format!("{export_name}_accept_{at}"), export_name);
-            journal.record(RunEvent::Warning {
-                context: ACCEPTED.into(),
-                message: message.clone(),
-            });
-            journal.record(RunEvent::RunCompleted {
-                status: ACCEPTED.into(),
-                error_message: None,
-                duration_ms: 0,
-            });
-            state.store_journal(&journal)?;
+    let kept = match state.accept(&plan.progress_key())? {
+        crate::state::Accepted::NoProgress => {
             println!(
-                "Accepted for export '{export_name}': {message}. The next run continues from it; `rivet journal -c <config> --export {export_name}` shows this acceptance."
+                "Export '{export_name}' holds no stored progress on this source that a run would continue from; nothing to accept."
             );
+            None
         }
+        crate::state::Accepted::Unchanged => {
+            println!(
+                "The stored progress of export '{export_name}' already belongs to what it reads now; nothing changed."
+            );
+            None
+        }
+        crate::state::Accepted::Rebound { held, was, now } => Some(format!(
+            "stored progress ({held}) written reading `{was}` is kept for `{now}` by `rivet state accept`"
+        )),
+        crate::state::Accepted::Rekeyed { held, from } => Some(format!(
+            "stored progress ({held}) held on source `{from}` is moved onto source `{source}` by `rivet state accept`"
+        )),
+    };
+    if let Some(message) = kept {
+        let at = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3f");
+        let mut journal =
+            crate::journal::RunJournal::new(format!("{export_name}_accept_{at}"), export_name);
+        journal.record(RunEvent::Warning {
+            context: ACCEPTED.into(),
+            message: message.clone(),
+        });
+        journal.record(RunEvent::RunCompleted {
+            status: ACCEPTED.into(),
+            error_message: None,
+            duration_ms: 0,
+        });
+        state.store_journal(&journal)?;
+        println!(
+            "Accepted for export '{export_name}': {message}. The next run continues from it; `rivet journal -c <config> --export {export_name}` shows this acceptance."
+        );
     }
     Ok(())
 }

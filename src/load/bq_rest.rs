@@ -318,7 +318,7 @@ impl BigQueryApi {
         }
         self.journal.record(record);
         match job_outcome(&terminal) {
-            JobOutcome::Failed(detail) => Err(job_failed(&job_ref.job_id, &detail)),
+            JobOutcome::Failed(detail) => Err(job_failed(&job_ref.job_id, &detail, &terminal)),
             JobOutcome::Done | JobOutcome::Running => Ok(job_ref),
         }
     }
@@ -456,7 +456,7 @@ impl BigQueryApi {
     fn await_job(&self, job_ref: &JobRef, budget: Duration) -> Result<String> {
         let job = self.await_terminal(job_ref, budget)?;
         match job_outcome(&job) {
-            JobOutcome::Failed(detail) => Err(job_failed(&job_ref.job_id, &detail)),
+            JobOutcome::Failed(detail) => Err(job_failed(&job_ref.job_id, &detail, &job)),
             JobOutcome::Done | JobOutcome::Running => Ok(job_ref.job_id.clone()),
         }
     }
@@ -957,12 +957,29 @@ pub(crate) fn job_failed_message(job_id: &str, detail: &str) -> String {
     format!("BigQuery job {job_id} failed: {detail}")
 }
 
-/// A job that reached DONE with an `errorResult`: the warehouse rejected its statement.
-fn job_failed(job_id: &str, detail: &str) -> anyhow::Error {
-    crate::error::coded(
-        crate::error::codes::LOAD_WAREHOUSE_REJECTED,
-        job_failed_message(job_id, detail),
-    )
+/// The `errorResult.reason`s BigQuery documents as retryable (<https://docs.cloud.google.com/bigquery/docs/error-messages>); `quotaExceeded` is not one.
+const TRANSIENT_JOB_REASONS: [&str; 6] = [
+    "backendError",
+    "internalError",
+    "jobBackendError",
+    "jobInternalError",
+    "rateLimitExceeded",
+    "jobRateLimitExceeded",
+];
+
+/// A job that reached DONE with an `errorResult`: unavailable when its `reason` is a documented retryable one, else the warehouse rejected its statement.
+fn job_failed(job_id: &str, detail: &str, job: &Value) -> anyhow::Error {
+    let message = job_failed_message(job_id, detail);
+    let reason = job
+        .pointer("/status/errorResult/reason")
+        .and_then(Value::as_str);
+    match reason.filter(|r| TRANSIENT_JOB_REASONS.contains(r)) {
+        Some(reason) => crate::error::coded(
+            crate::error::codes::LOAD_WAREHOUSE_UNAVAILABLE,
+            format!("{message} (reason {reason}, which BigQuery documents as retryable)"),
+        ),
+        None => crate::error::coded(crate::error::codes::LOAD_WAREHOUSE_REJECTED, message),
+    }
 }
 
 /// One transient answer of a retried request; the last one is what the caller reports.
@@ -2111,6 +2128,189 @@ mod tests {
 
     fn code_and_exit(e: &anyhow::Error) -> (Option<&'static str>, i32) {
         (crate::error::error_code(e), crate::error::classify_exit(e))
+    }
+
+    /// A stand whose every job ends in `errorResult`: the reason and mode ride in the statement (`now:<reason>` answers DONE at the insert, `later:<reason>` is polled to it), `-` is no reason at all.
+    fn failing_jobs(message: &'static str) -> stand::Stand {
+        use stand::{Stand, json};
+        let reasons = std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
+        let job = move |id: &str, reason: &str, done: bool| {
+            let reason = match reason {
+                "-" => String::new(),
+                r => format!(r#""reason":"{r}","#),
+            };
+            let status = match done {
+                true => {
+                    format!(r#"{{"state":"DONE","errorResult":{{{reason}"message":"{message}"}}}}"#)
+                }
+                false => r#"{"state":"RUNNING"}"#.to_string(),
+            };
+            json(
+                200,
+                &format!(
+                    r#"{{"jobReference":{{"projectId":"p","jobId":"{id}"}},"status":{status}}}"#
+                ),
+            )
+        };
+        Stand::start(move |seen, _| {
+            if let Some(id) = seen.path.strip_prefix("/bigquery/v2/projects/p/jobs/") {
+                let reason = reasons.lock().unwrap().get(id).cloned().unwrap_or_default();
+                return job(id, &reason, true);
+            }
+            let id = seen.body["jobReference"]["jobId"]
+                .as_str()
+                .unwrap_or("none");
+            let configuration = &seen.body["configuration"];
+            let statement = configuration["query"]["query"]
+                .as_str()
+                .or(configuration["copy"]["destinationTable"]["tableId"].as_str())
+                .unwrap_or("later:-");
+            let (mode, reason) = statement.split_once(':').unwrap_or(("now", "-"));
+            reasons.lock().unwrap().insert(id.into(), reason.into());
+            job(id, reason, mode == "now")
+        })
+    }
+
+    /// Every way a job is run, each with the job ending at the insert and after a poll.
+    fn each_job_failing(
+        stand: &stand::Stand,
+        statement: &str,
+    ) -> Vec<(&'static str, anyhow::Error)> {
+        let api = stand.api();
+        let mut failures = Vec::new();
+        for mode in ["now", "later"] {
+            let sql = format!("{mode}:{statement}");
+            failures.push(("run_query", api.run_query(&sql, &labels()).unwrap_err()));
+            failures.push((
+                "run_query_scalar",
+                api.run_query_scalar(&sql, &labels()).unwrap_err(),
+            ));
+            failures.push((
+                "run_query_first_row",
+                api.run_query_first_row(&sql, &labels()).unwrap_err(),
+            ));
+            failures.push((
+                "copy_append",
+                api.copy_append("d", "src", &sql, &labels()).unwrap_err(),
+            ));
+        }
+        failures
+    }
+
+    /// A job BigQuery documents as retryable (`errorResult.reason`) is unavailable and exits 2, whichever way it was run; the job id and BigQuery's words stay in the text.
+    #[test]
+    fn a_job_failed_with_a_transient_reason_is_unavailable_and_retryable() {
+        let message = "Error encountered during execution. Retrying may solve the problem.";
+        let stand = failing_jobs(message);
+        for reason in [
+            "backendError",
+            "internalError",
+            "jobBackendError",
+            "jobInternalError",
+            "rateLimitExceeded",
+            "jobRateLimitExceeded",
+        ] {
+            for (via, e) in each_job_failing(&stand, reason) {
+                assert_eq!(
+                    code_and_exit(&e),
+                    (Some("RIVET_LOAD_WAREHOUSE_UNAVAILABLE"), 2),
+                    "{reason} via {via}: {e:#}"
+                );
+                let text = format!("{e:#}");
+                assert!(
+                    text.contains("rivet_") && text.contains(message) && text.contains(reason),
+                    "{reason} via {via}: {text}"
+                );
+            }
+        }
+    }
+
+    /// Next to a transient reason: a rejection keeps BigQuery's words exactly, only `errorResult.reason` is read (not `errors[]`), and the text of a rejection still decides its exit as it did.
+    #[test]
+    fn the_neighbours_of_a_transient_reason_keep_their_verdict() {
+        let message = "Error encountered during execution. Retrying may solve the problem.";
+        let stand = failing_jobs(message);
+        let api = stand.api();
+        let e = api.run_query("now:invalidQuery", &labels()).unwrap_err();
+        let job = stand.seen()[0].body["jobReference"]["jobId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            format!("{e:#}"),
+            format!("BigQuery job {job} failed: {message}")
+        );
+
+        let other_reason_in_the_list = serde_json::json!({"status": {
+            "state": "DONE",
+            "errorResult": {"reason": "invalidQuery", "message": "Syntax error"},
+            "errors": [{"reason": "backendError", "message": "Syntax error"}]
+        }});
+        assert_eq!(
+            code_and_exit(&job_failed("j", "Syntax error", &other_reason_in_the_list)),
+            (Some("RIVET_LOAD_WAREHOUSE_REJECTED"), 1)
+        );
+
+        let timed_out = failing_jobs("Operation timed out after 6.0 hours");
+        let e = timed_out
+            .api()
+            .run_query("now:timeout", &labels())
+            .unwrap_err();
+        assert_eq!(
+            code_and_exit(&e),
+            (Some("RIVET_LOAD_WAREHOUSE_REJECTED"), 2),
+            "{e:#}"
+        );
+    }
+
+    /// A transient HTTP answer that outlasts the retries is unavailable and exits 2, on the insert and on the poll.
+    #[test]
+    fn a_transient_http_reply_that_outlasts_the_retries_exits_retryable() {
+        use stand::{Stand, json};
+        let stand = Stand::start(|seen, _| match seen.method.as_str() {
+            "POST" => json(503, r#"{"error":{"message":"The service is unavailable"}}"#),
+            _ => json(500, r#"{"error":{"message":"Internal error"}}"#),
+        });
+        let api = stand.api();
+        let inserted = api.run_query("SELECT 1", &labels()).unwrap_err();
+        assert_eq!(
+            code_and_exit(&inserted),
+            (Some("RIVET_LOAD_WAREHOUSE_UNAVAILABLE"), 2),
+            "{inserted:#}"
+        );
+        let polled = api.table_metadata("d", "t").unwrap_err();
+        assert_eq!(
+            code_and_exit(&polled),
+            (Some("RIVET_LOAD_WAREHOUSE_UNAVAILABLE"), 2),
+            "{polled:#}"
+        );
+    }
+
+    /// Every other reason, and a failure with none, stays a rejection that exits 1: the reason decides, never the words of the message.
+    #[test]
+    fn a_job_failed_with_any_other_reason_stays_rejected() {
+        let stand =
+            failing_jobs("Error encountered during execution. Retrying may solve the problem.");
+        for reason in [
+            "invalidQuery",
+            "invalid",
+            "quotaExceeded",
+            "resourcesExceeded",
+            "accessDenied",
+            "notFound",
+            "duplicate",
+            "stopped",
+            "BACKENDERROR",
+            "-",
+        ] {
+            for (via, e) in each_job_failing(&stand, reason) {
+                assert_eq!(
+                    code_and_exit(&e),
+                    (Some("RIVET_LOAD_WAREHOUSE_REJECTED"), 1),
+                    "{reason} via {via}: {e:#}"
+                );
+            }
+        }
     }
 
     /// Every job the client finishes is journaled with what BigQuery reported of it: the

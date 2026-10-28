@@ -1435,6 +1435,8 @@ enum Job {
     Scalar(u64),
     /// Done with BigQuery's error.
     Fails(&'static str),
+    /// Done with BigQuery's error and its `errorResult.reason`.
+    FailsWith(&'static str, &'static str),
 }
 
 /// A scripted project `p`, dataset `d`: `tables` are (name, `tables.get` resource), a name not listed is absent, and each query job ends as `job` says for its statement.
@@ -1473,6 +1475,9 @@ fn world(tables: &'static [(&'static str, &'static str)], job: fn(&str) -> Job) 
                 r#"{"state":"DONE"}"#.to_string()
             }
             Job::Fails(why) => format!(r#"{{"state":"DONE","errorResult":{{"message":"{why}"}}}}"#),
+            Job::FailsWith(reason, why) => format!(
+                r#"{{"state":"DONE","errorResult":{{"reason":"{reason}","message":"{why}"}}}}"#
+            ),
         };
         json(
             200,
@@ -1557,6 +1562,52 @@ fn a_statement_is_sent_under_its_operation_and_table() {
     assert_eq!(sent["labels"]["rivet_op"], "merge");
     assert_eq!(sent["labels"]["rivet_table"], "orders");
     assert!(loader.run_sql("BROKEN", "load", "orders").is_err());
+}
+
+/// A MERGE, a load statement and a count that BigQuery fails with a documented retryable reason are unavailable and exit 2 with the job's words; a syntax error stays a rejection that exits 1.
+#[test]
+fn a_statement_failed_with_a_transient_reason_is_retryable_and_a_bad_one_is_not() {
+    let stand = world(&[], |sql| match sql {
+        s if s.starts_with("MERGE") => Job::FailsWith(
+            "backendError",
+            "Error encountered during execution. Retrying may solve the problem.",
+        ),
+        s if s.starts_with("LOAD DATA") => Job::FailsWith("jobInternalError", "Internal error"),
+        s if s.starts_with("SELECT COUNT") => Job::FailsWith("rateLimitExceeded", "Too many"),
+        _ => Job::FailsWith("invalidQuery", "Syntax error at [1:1]"),
+    });
+    let loader = on(&stand).run_id("r1");
+    let exit = |e: &anyhow::Error| (crate::error::error_code(e), crate::error::classify_exit(e));
+    let merge = loader.run_sql("MERGE `p.d.t` T USING s ON FALSE", "merge", "t");
+    let merge = merge.unwrap_err();
+    assert_eq!(
+        exit(&merge),
+        (Some("RIVET_LOAD_WAREHOUSE_UNAVAILABLE"), 2),
+        "{merge:#}"
+    );
+    let text = format!("{merge:#}");
+    assert!(
+        text.contains("rivet_")
+            && text.contains("Error encountered during execution. Retrying may solve the problem.")
+            && text.contains("backendError"),
+        "{text}"
+    );
+    let load = loader.run_sql("LOAD DATA INTO `p.d.t` FROM FILES ()", "load", "t");
+    assert_eq!(
+        exit(&load.unwrap_err()),
+        (Some("RIVET_LOAD_WAREHOUSE_UNAVAILABLE"), 2)
+    );
+    let count = loader.row_count("absent_view_counted");
+    assert_eq!(
+        exit(&count.unwrap_err()),
+        (Some("RIVET_LOAD_WAREHOUSE_UNAVAILABLE"), 2)
+    );
+    let broken = loader.run_sql("SELEC 1", "load", "t").unwrap_err();
+    assert_eq!(
+        exit(&broken),
+        (Some("RIVET_LOAD_WAREHOUSE_REJECTED"), 1),
+        "{broken:#}"
+    );
 }
 
 /// The shape of an existing table is read from its metadata; no table has no shape and no conflict.
