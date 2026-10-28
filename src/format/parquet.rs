@@ -521,6 +521,27 @@ mod tests {
         out
     }
 
+    /// Fails at the first byte past the whole-batch file, so a runaway writer stops at once.
+    struct CappedSink {
+        out: Arc<std::sync::Mutex<Vec<u8>>>,
+        max: usize,
+    }
+
+    impl std::io::Write for CappedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut out = self.out.lock().unwrap();
+            out.extend_from_slice(buf);
+            if out.len() > self.max {
+                return Err(std::io::Error::other("past the whole-batch file"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn spans_leave_the_file_byte_identical_to_whole_batch_writes() {
         // Batches straddle row group ends, and a group holds several 20,000-row pages.
@@ -537,19 +558,21 @@ mod tests {
             (None, CompressionType::Zstd),
         ] {
             let fmt = ParquetFormat::new(codec, None, groups);
-            let tmp = tempfile::NamedTempFile::new().unwrap();
+            let expected = whole_batch_bytes(&fmt, &batches);
+            let out = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = CappedSink {
+                out: out.clone(),
+                max: expected.len(),
+            };
             let mut w = fmt
-                .create_writer(
-                    &batches[0].schema(),
-                    Box::new(std::fs::File::create(tmp.path()).unwrap()),
-                )
+                .create_writer(&batches[0].schema(), Box::new(sink))
                 .unwrap();
             for b in &batches {
                 w.write_batch(b).unwrap();
             }
             w.finish().unwrap();
             assert!(
-                std::fs::read(tmp.path()).unwrap() == whole_batch_bytes(&fmt, &batches),
+                *out.lock().unwrap() == expected,
                 "row groups {groups:?}: spans changed the bytes"
             );
         }
