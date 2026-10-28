@@ -60,9 +60,16 @@ struct RawLoadSection {
     /// BigQuery: the dataset the tables are created in.
     #[serde(default)]
     dataset: Option<String>,
-    /// Snowflake: the `snow` CLI connection name.
+    /// Snowflake: the account identifier — `myorg-myaccount`, or a locator such as
+    /// `xy12345.us-east-1`.
     #[serde(default)]
-    connection: Option<String>,
+    account: Option<String>,
+    /// Snowflake: the unencrypted PKCS#8 private key file of the user's key pair.
+    #[serde(default)]
+    private_key_path: Option<String>,
+    /// Snowflake: the role the statements run under; the user's default when omitted.
+    #[serde(default)]
+    role: Option<String>,
     /// Snowflake: the virtual warehouse the load runs on.
     #[serde(default)]
     warehouse: Option<String>,
@@ -78,7 +85,7 @@ struct RawLoadSection {
     /// ClickHouse: the HTTP endpoint, e.g. `http://localhost:8123`.
     #[serde(default)]
     url: Option<String>,
-    /// ClickHouse: the user the load authenticates as.
+    /// Snowflake / ClickHouse: the user the load authenticates as.
     #[serde(default)]
     user: Option<String>,
     /// ClickHouse: the env var holding that user's password.
@@ -155,10 +162,15 @@ impl TryFrom<RawLoadSection> for LoadSection {
     fn try_from(r: RawLoadSection) -> Result<Self, String> {
         let name = r.target.name();
         // (field, value, the warehouses it belongs to); `database` is shared.
-        let fields: [(&str, &Option<String>, &[LoadTargetKind]); 10] = [
+        let fields: [(&str, &Option<String>, &[LoadTargetKind]); 11] = [
             ("project", &r.project, &[LoadTargetKind::Bigquery]),
             ("dataset", &r.dataset, &[LoadTargetKind::Bigquery]),
-            ("connection", &r.connection, &[LoadTargetKind::Snowflake]),
+            ("account", &r.account, &[LoadTargetKind::Snowflake]),
+            (
+                "private_key_path",
+                &r.private_key_path,
+                &[LoadTargetKind::Snowflake],
+            ),
             ("warehouse", &r.warehouse, &[LoadTargetKind::Snowflake]),
             (
                 "database",
@@ -172,14 +184,19 @@ impl TryFrom<RawLoadSection> for LoadSection {
                 &[LoadTargetKind::Snowflake],
             ),
             ("url", &r.url, &[LoadTargetKind::Clickhouse]),
-            ("user", &r.user, &[LoadTargetKind::Clickhouse]),
+            (
+                "user",
+                &r.user,
+                &[LoadTargetKind::Snowflake, LoadTargetKind::Clickhouse],
+            ),
             (
                 "password_env",
                 &r.password_env,
                 &[LoadTargetKind::Clickhouse],
             ),
         ];
-        let optional: [(&str, &Option<String>, &[LoadTargetKind]); 2] = [
+        let optional: [(&str, &Option<String>, &[LoadTargetKind]); 3] = [
+            ("role", &r.role, &[LoadTargetKind::Snowflake]),
             (
                 "named_collection",
                 &r.named_collection,
@@ -210,13 +227,22 @@ impl TryFrom<RawLoadSection> for LoadSection {
                 project: take(&r.project),
                 dataset: take(&r.dataset),
             },
-            LoadTargetKind::Snowflake => LoadTarget::Snowflake {
-                connection: take(&r.connection),
-                warehouse: take(&r.warehouse),
-                database: take(&r.database),
-                schema: take(&r.schema),
-                storage_integration: take(&r.storage_integration),
-            },
+            LoadTargetKind::Snowflake => {
+                let account = take(&r.account);
+                if let Err(why) = super::snowflake_account::Account::parse(&account) {
+                    return Err(format!("`load.account`: {why}"));
+                }
+                LoadTarget::Snowflake {
+                    account,
+                    user: take(&r.user),
+                    private_key_path: take(&r.private_key_path),
+                    role: r.role.clone(),
+                    warehouse: take(&r.warehouse),
+                    database: take(&r.database),
+                    schema: take(&r.schema),
+                    storage_integration: take(&r.storage_integration),
+                }
+            }
             LoadTargetKind::Clickhouse => {
                 if let Some(nc) = r.named_collection.as_deref()
                     && !crate::types::ident::is_safe_load_ident(nc)
@@ -291,7 +317,10 @@ pub enum LoadTarget {
         dataset: String,
     },
     Snowflake {
-        connection: String,
+        account: String,
+        user: String,
+        private_key_path: String,
+        role: Option<String>,
         warehouse: String,
         database: String,
         schema: String,
@@ -323,7 +352,7 @@ impl LoadTarget {
     }
 
     /// Whether this warehouse names each job or statement rivet runs (a BigQuery job id, a
-    /// ClickHouse query id); the `snow` CLI rivet drives Snowflake through prints none.
+    /// ClickHouse query id); the Snowflake loader does not record its statement handles.
     pub(crate) fn names_jobs(&self) -> bool {
         matches!(
             self,
@@ -770,8 +799,9 @@ mod tests {
         let e = section(serde_json::json!({ "target": "bigquery", "project": "p" })).unwrap_err();
         assert!(e.contains("has no `dataset`"), "{e}");
         let e = section(serde_json::json!({
-            "target": "snowflake", "connection": "c", "warehouse": "w", "database": "db",
-            "schema": "s", "storage_integration": "si", "project": "p"
+            "target": "snowflake", "account": "a", "user": "u", "private_key_path": "/k.p8",
+            "warehouse": "w", "database": "db", "schema": "s", "storage_integration": "si",
+            "project": "p"
         }))
         .unwrap_err();
         assert!(
@@ -782,6 +812,61 @@ mod tests {
         assert!(e.contains("target"), "{e}");
         let e = section(serde_json::json!({ "target": "redshift" })).unwrap_err();
         assert!(e.contains("redshift"), "{e}");
+    }
+
+    fn snowflake(drop: &[&str], extra: serde_json::Value) -> Result<LoadSection, String> {
+        let mut v = serde_json::json!({
+            "target": "snowflake", "account": "myorg-acct", "user": "RIVET",
+            "private_key_path": "/keys/rsa.p8", "warehouse": "w", "database": "db",
+            "schema": "s", "storage_integration": "si"
+        });
+        let map = v.as_object_mut().unwrap();
+        map.extend(extra.as_object().unwrap().clone());
+        for key in drop {
+            map.remove(*key);
+        }
+        section(v)
+    }
+
+    /// A Snowflake block is the key-pair login plus where the load runs; the role is optional.
+    #[test]
+    fn a_snowflake_block_carries_a_key_pair_login_and_an_optional_role() {
+        let want = |role: Option<&str>| LoadTarget::Snowflake {
+            account: "myorg-acct".into(),
+            user: "RIVET".into(),
+            private_key_path: "/keys/rsa.p8".into(),
+            role: role.map(str::to_string),
+            warehouse: "w".into(),
+            database: "db".into(),
+            schema: "s".into(),
+            storage_integration: "si".into(),
+        };
+        assert_eq!(
+            snowflake(&[], serde_json::json!({})).unwrap().target,
+            want(None)
+        );
+        assert_eq!(
+            snowflake(&[], serde_json::json!({ "role": "LOADER" }))
+                .unwrap()
+                .target,
+            want(Some("LOADER"))
+        );
+        for field in ["account", "user", "private_key_path"] {
+            let e = snowflake(&[field], serde_json::json!({})).unwrap_err();
+            assert!(e.contains(&format!("has no `{field}`")), "{field}: {e}");
+        }
+        let e = snowflake(&[], serde_json::json!({ "account": "not an account" })).unwrap_err();
+        assert!(e.contains("`load.account`: "), "{e}");
+        let e = section(serde_json::json!({
+            "target": "bigquery", "project": "p", "dataset": "d", "role": "R"
+        }))
+        .unwrap_err();
+        assert!(e.contains("`role`"), "{e}");
+        let e = section(serde_json::json!({
+            "target": "bigquery", "project": "p", "dataset": "d", "private_key_path": "/k"
+        }))
+        .unwrap_err();
+        assert!(e.contains("`private_key_path`"), "{e}");
     }
 
     #[test]
@@ -1050,7 +1135,10 @@ mod partition_form_tests {
             dataset: "d".into(),
         };
         let sf = LoadTarget::Snowflake {
-            connection: "c".into(),
+            account: "a".into(),
+            user: "u".into(),
+            private_key_path: "/k.p8".into(),
+            role: None,
             warehouse: "w".into(),
             database: "d".into(),
             schema: "s".into(),
@@ -1071,7 +1159,7 @@ mod partition_form_tests {
         assert_eq!(
             [bq.names_jobs(), sf.names_jobs(), ch.names_jobs()],
             [true, false, true],
-            "the snow CLI prints no query id"
+            "the Snowflake loader records no statement handle"
         );
         assert_eq!(
             [

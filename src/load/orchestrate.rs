@@ -6299,7 +6299,10 @@ mod overwritten_delta_tests {
         assert_eq!(address(&log, "r", "compacted"), at("p.d.orders", None));
         let mut snowflake = test_plan(LoadMode::Full, "gs://b/p/");
         snowflake.load.target = crate::load::plan::LoadTarget::Snowflake {
-            connection: "c".into(),
+            account: "a".into(),
+            user: "u".into(),
+            private_key_path: "/k.p8".into(),
+            role: None,
             warehouse: "w".into(),
             database: "DB".into(),
             schema: "SC".into(),
@@ -6320,7 +6323,7 @@ mod overwritten_delta_tests {
         assert_eq!(
             journals.iter().map(ids).collect::<Vec<_>>(),
             [Some(vec![]), None],
-            "BigQuery names its jobs, the snow CLI none"
+            "BigQuery names its jobs, Snowflake none"
         );
         assert_eq!(address(&snowflake, "r", "loaded"), at("DB.SC.orders", None));
         assert_eq!(

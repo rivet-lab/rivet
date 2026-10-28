@@ -135,3 +135,8 @@ scenarios:
     what: "`layout: base_buffer` promises a `rivet compact`, which is BigQuery-only: on Snowflake the base froze at the backfill while the buffer grew for ever, with no view and every load prescribing a command that could only fail. Refused at config load wherever the key is written (section, export, `load.tables.<t>`) outside BigQuery; BigQuery takes it; Snowflake without the key makes no promise (the `backfill:` derivation yields the changelog and its view there)."
     rejected_wrong_mode: { test: a_base_and_buffer_layout_needs_a_compacting_warehouse }
     valid_form_accepted: { test: a_base_and_buffer_layout_needs_a_compacting_warehouse }
+
+  - id: snowflake_connection_names_a_cli_login
+    what: "a Snowflake `load:` that still names a `snow` CLI connection (`connection: my_conn`): rivet no longer drives the CLI and signs in with a key pair, so the line would be read by nothing. Refused at config load with `RIVET_CONFIG_LOAD_BLOCK_INVALID`, printing the `account` / `user` / `private_key_path` / `role` fragment that replaces it; a Snowflake block with the new fields loads, a non-Snowflake target never meets the refusal."
+    rejected_wrong_mode: { test: a_snowflake_load_that_names_a_snow_cli_connection_is_refused_with_the_fields_that_replace_it }
+    valid_form_accepted: { test: a_snowflake_block_carries_a_key_pair_login_and_an_optional_role }

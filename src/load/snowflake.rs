@@ -17,15 +17,19 @@
 //! warehouse credits can be summed after the fact.
 
 use super::TargetLoader;
+use super::snowflake_rest::SnowflakeApi;
 use crate::types::target::{SfType, TargetColumnSpec, TargetType};
 use anyhow::{Context, Result};
-use std::process::Command;
 
 /// Loads Rivet Parquet from GCS into Snowflake.
 #[derive(Debug, Default, Clone)]
 pub struct SnowflakeLoader {
-    /// The `snow` CLI connection name (e.g. `rivet`).
-    pub connection: String,
+    /// The account identifier: `myorg-myaccount`, or a locator such as `xy12345.us-east-1`.
+    pub account: String,
+    /// The user the load authenticates as, with the key pair registered on it.
+    pub user: String,
+    /// The role the statements run under; `None` uses the user's default.
+    pub role: Option<String>,
     pub warehouse: String,
     pub database: String,
     pub schema: String,
@@ -42,23 +46,24 @@ pub struct SnowflakeLoader {
     /// The `load.partition` mapped to a leading clustering expression
     /// (`DATE_TRUNC('DAY', c)`), ahead of `cluster_by` — Snowflake has no partitions.
     pub partition_expr: Option<String>,
-    /// Absolute path to the connection's private key. The `snow` CLI does not
-    /// expand `~`, so a `~`-relative `private_key_path` in the connection file
-    /// must be overridden with an absolute path via env.
-    pub private_key_path: Option<String>,
+    /// The unencrypted PKCS#8 private key file, read once when the first statement runs.
+    pub private_key_path: String,
     /// Load-run correlation id, emitted in the `QUERY_TAG` JSON as `rivet_run`
     /// so every statement of one `rivet load` invocation shares a run key —
     /// cost slices per run (across tables) as well as per table. `None` omits it.
     pub run_id: Option<String>,
-    /// The program run in place of `snow`, with its leading arguments; empty runs `snow`.
-    pub(crate) cli: Vec<String>,
+    /// The SQL API client, built when the first statement runs.
+    api: std::sync::OnceLock<SnowflakeApi>,
 }
 
 impl SnowflakeLoader {
-    pub fn new(connection: impl Into<String>) -> Self {
+    /// A loader for `user` at `account`, signing in with the key file at `private_key_path`.
+    pub fn new(account: &str, user: &str, private_key_path: &str) -> Self {
         Self {
-            connection: connection.into(),
-            ..Default::default()
+            account: account.to_string(),
+            user: user.to_string(),
+            private_key_path: private_key_path.to_string(),
+            ..Self::default()
         }
     }
 
@@ -144,41 +149,28 @@ impl SnowflakeLoader {
         )
     }
 
-    /// Run a SQL script through `snow sql`, returning parsed JSON blocks.
-    fn run_snow(&self, sql: &str) -> Result<serde_json::Value> {
-        let mut cmd = match self.cli.split_first() {
-            Some((program, leading)) => {
-                let mut cmd = Command::new(program);
-                cmd.args(leading);
-                cmd
-            }
-            None => Command::new("snow"),
-        };
-        cmd.args(["sql", "-c", &self.connection, "--format", "json", "-q", sql]);
-        if let Some(key) = &self.private_key_path {
-            // snow reads SNOWFLAKE_CONNECTIONS_<CONN>_PRIVATE_KEY_PATH.
-            let env_key = format!(
-                "SNOWFLAKE_CONNECTIONS_{}_PRIVATE_KEY_PATH",
-                self.connection.to_uppercase()
-            );
-            cmd.env(env_key, key);
+    /// Run a SQL script through the SQL API, returning one block of row objects per statement.
+    fn run_sql(&self, sql: &str) -> Result<serde_json::Value> {
+        if self.api.get().is_none() {
+            let api = SnowflakeApi::connect(
+                &self.account,
+                &self.user,
+                &self.private_key_path,
+                super::snowflake_rest::Context {
+                    database: self.database.clone(),
+                    schema: self.schema.clone(),
+                    role: self.role.clone(),
+                },
+            )?;
+            let _ = self.api.set(api);
         }
-        let out = cmd
-            .output()
-            .context("running `snow sql` — is the Snowflake CLI installed?")?;
-        if !out.status.success() {
-            crate::rivet_bail!(
-                crate::error::codes::LOAD_WAREHOUSE_REJECTED,
-                "snow sql failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+        match self.api.get() {
+            Some(api) => api.run(sql),
+            None => Err(crate::error::coded(
+                crate::error::codes::INTERNAL_LOAD_INVARIANT,
+                "the Snowflake client was not built",
+            )),
         }
-        serde_json::from_slice(&out.stdout).with_context(|| {
-            format!(
-                "parsing snow sql JSON output: {}",
-                String::from_utf8_lossy(&out.stdout)
-            )
-        })
     }
 }
 
@@ -206,11 +198,11 @@ impl TargetLoader for SnowflakeLoader {
         }
         let staging = staging_table(table);
         let sql = super::before_write(self.build_materialize_sql(table, &staging, specs, uris))?;
-        let landed = self.run_snow(&sql).and_then(|result| {
+        let landed = self.run_sql(&sql).and_then(|result| {
             let rows = extract_count(&result)
-                .context("COPY ran but the row count could not be read from snow output")?;
+                .context("COPY ran but the row count could not be read from the answer")?;
             super::check_loaded_rows(&self.fqtn(table), rows, expected_rows)?;
-            self.run_snow(&self.build_clone_in_sql(table, &staging))?;
+            self.run_sql(&self.build_clone_in_sql(table, &staging))?;
             Ok(rows)
         });
         if landed.is_err() {
@@ -227,7 +219,7 @@ impl TargetLoader for SnowflakeLoader {
         _pk: &[String],
     ) -> Result<u64> {
         let sql = super::before_write(self.build_append_changelog_sql(table, specs, uris))?;
-        let result = self.run_snow(&sql)?;
+        let result = self.run_sql(&sql)?;
         let before = extract_named(&result, "BEFORE_")
             .context("CDC load ran but the pre-append count (BEFORE_) could not be read")?;
         let after = extract_named(&result, "AFTER_")
@@ -237,9 +229,8 @@ impl TargetLoader for SnowflakeLoader {
 
     fn changes_has_prior_changes(&self, table: &str) -> Result<bool> {
         // A missing `__changes` table is the FIRST cycle, and the catalog says whether it is
-        // there. The text of a failed SELECT is not asked: `snow` draws it in an 80-column box
-        // and wraps it by words, so "does not exist" was split across two lines for a table name
-        // of 21 to 30 characters and the first cycle read as an error.
+        // there. The text of a failed SELECT is not asked: a wording is not a verdict, and the
+        // catalog answers the same on every client.
         //
         // The catalog lists only what the role may see, so a log the role cannot SELECT reads as
         // absent here; the residual is SELF-LIMITING (round-9): append_changelog's own
@@ -248,28 +239,28 @@ impl TargetLoader for SnowflakeLoader {
         if self.object_kind(&format!("{table}__changes"))? == super::ObjectKind::Absent {
             return Ok(false);
         }
-        // FAIL-CLOSED (round-8): a `snow` JSON-shape drift must not read as "first cycle" and
+        // FAIL-CLOSED (round-8): a drift in the answer's shape must not read as "first cycle" and
         // silently disarm the refusal. BigQuery's scalar path already errors; parity.
-        let v = self.run_snow(&self.build_prior_changes_sql(table))?;
+        let v = self.run_sql(&self.build_prior_changes_sql(table))?;
         extract_named(&v, "PROBE_")
             .map(|n| n > 0)
-            .context("re-baseline probe ran but PROBE_ was not in snow's output")
+            .context("re-baseline probe ran but PROBE_ was not in the answer")
     }
 
     fn object_kind(&self, table: &str) -> Result<super::ObjectKind> {
-        let v = self.run_snow(&self.build_object_kind_sql(table))?;
+        let v = self.run_sql(&self.build_object_kind_sql(table))?;
         super::ObjectKind::from_probe(
             extract_named(&v, "KIND_")
-                .context("object-kind probe ran but KIND_ was not in snow's output")?,
+                .context("object-kind probe ran but KIND_ was not in the answer")?,
         )
     }
 
     fn column_overlap(&self, table: &str, names: &[&str]) -> Result<(u64, u64)> {
-        let v = self.run_snow(&self.build_column_overlap_sql(table, names))?;
+        let v = self.run_sql(&self.build_column_overlap_sql(table, names))?;
         let total = extract_named(&v, "TOTAL_")
-            .context("column probe ran but TOTAL_ was not in snow's output")?;
+            .context("column probe ran but TOTAL_ was not in the answer")?;
         let matched = extract_named(&v, "MATCHED_")
-            .context("column probe ran but MATCHED_ was not in snow's output")?;
+            .context("column probe ran but MATCHED_ was not in the answer")?;
         Ok((total, matched))
     }
 
@@ -282,12 +273,12 @@ impl TargetLoader for SnowflakeLoader {
             wh = self.warehouse,
             fqtn = self.fqtn(table),
         );
-        extract_named(&self.run_snow(&sql)?, "N_")
-            .context("row count ran but N_ was not in snow's output")
+        extract_named(&self.run_sql(&sql)?, "N_")
+            .context("row count ran but N_ was not in the answer")
     }
 
     fn adopt_as_changelog(&self, table: &str) -> Result<()> {
-        self.run_snow(&self.build_adoption_sql(table))?;
+        self.run_sql(&self.build_adoption_sql(table))?;
         Ok(())
     }
 
@@ -302,7 +293,7 @@ impl TargetLoader for SnowflakeLoader {
             "ALTER SESSION SET QUERY_TAG = '{tag}';\n{view_sql}",
             tag = self.query_tag(table),
         );
-        self.run_snow(&sql)?;
+        self.run_sql(&sql)?;
         Ok(())
     }
 }
@@ -367,12 +358,12 @@ impl SnowflakeLoader {
     /// Drop a load's staging table after a failure; one that cannot be dropped is named for the operator.
     fn drop_staging(&self, staging: &str) {
         let fq = self.fqtn(staging);
-        if let Err(e) = self.run_snow(&format!("DROP TABLE IF EXISTS {fq};")) {
+        if let Err(e) = self.run_sql(&format!("DROP TABLE IF EXISTS {fq};")) {
             eprintln!("  note: could not drop the staging table `{fq}` ({e:#}); drop it by hand");
         }
     }
 
-    /// The re-baseline probe, as one `snow` invocation.
+    /// The re-baseline probe, as one request.
     ///
     /// Behind a `build_*` seam like its siblings — and now carrying `USE WAREHOUSE`
     /// like them too. This was the ONE query in the adapter that omitted it, so on a
@@ -676,13 +667,13 @@ fn copy_files_clause(gcs_url: &str, uris: &[String]) -> Result<String> {
     Ok(format!("FILES=({files})"))
 }
 
-/// Pull the `ROWS_` count out of snow's JSON (array of statement result blocks).
+/// Pull the `ROWS_` count out of the answer (an array of statement result blocks).
 fn extract_count(value: &serde_json::Value) -> Option<u64> {
     extract_named(value, "ROWS_")
 }
 
 /// Pull a named integer column (e.g. `BEFORE_` / `AFTER_` / `ROWS_`) out of
-/// snow's JSON — an array of statement result blocks, each an array of row
+/// the answer — an array of statement result blocks, each an array of row
 /// objects. Returns the first block carrying the key.
 fn extract_named(value: &serde_json::Value, key: &str) -> Option<u64> {
     let blocks = value.as_array()?;
@@ -810,7 +801,7 @@ mod tests {
 
     #[test]
     fn a_partition_expression_leads_the_clustering_key() {
-        let mut l = SnowflakeLoader::new("c");
+        let mut l = SnowflakeLoader::new("acct", "rivet", "/key.p8");
         l.cluster_by = vec!["customer".into()];
         l.partition_expr = Some("DATE_TRUNC('DAY', created)".into());
         assert_eq!(
@@ -900,7 +891,7 @@ mod tests {
     #[test]
     fn the_append_script_alters_between_the_create_and_the_copy() {
         let specs = vec![spec("id", SfType::Number), spec("__op", SfType::Varchar)];
-        let mut l = SnowflakeLoader::new("c");
+        let mut l = SnowflakeLoader::new("acct", "rivet", "/key.p8");
         l.database = "DB".into();
         l.schema = "SC".into();
         let sql = l
@@ -931,7 +922,7 @@ mod tests {
 
     #[test]
     fn fqtn_qualifies_database_schema_table() {
-        let mut l = SnowflakeLoader::new("c");
+        let mut l = SnowflakeLoader::new("acct", "rivet", "/key.p8");
         l.database = "DB".into();
         l.schema = "SC".into();
         assert_eq!(l.fqtn("orders"), "DB.SC.orders");
@@ -939,7 +930,7 @@ mod tests {
 
     #[test]
     fn query_tag_carries_run_id_when_set_and_omits_it_otherwise() {
-        let mut l = SnowflakeLoader::new("c");
+        let mut l = SnowflakeLoader::new("acct", "rivet", "/key.p8");
         assert_eq!(
             l.query_tag("Orders"),
             r#"{"managed_by":"rivet","rivet_op":"load","rivet_table":"Orders"}"#
@@ -1011,7 +1002,7 @@ mod tests {
     }
 
     fn adoption_loader() -> SnowflakeLoader {
-        let mut l = SnowflakeLoader::new("rivet".to_string());
+        let mut l = SnowflakeLoader::new("acct", "rivet", "/key.p8");
         l.warehouse = "WH".into();
         l.database = "DB".into();
         l.schema = "SC".into();
@@ -1070,66 +1061,105 @@ mod tests {
         );
     }
 
-    /// A scripted `snow`: a Python file that answers each statement by the first rule whose text the statement holds, and logs every statement it was sent.
+    /// A scripted Snowflake: answers each statement by the first rule whose text the statement holds, and logs every statement it was sent.
     struct Stand {
-        dir: tempfile::TempDir,
+        inner: crate::load::snowflake_rest::stand::Stand,
+    }
+
+    /// A rule's block as the SQL API gives it: a result set typed by column, every cell as text.
+    fn result_set(block: &serde_json::Value) -> serde_json::Value {
+        let rows = block.as_array().cloned().unwrap_or_default();
+        let names: Vec<String> = rows
+            .first()
+            .and_then(|r| r.as_object())
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        let row_type: Vec<_> = names
+            .iter()
+            .map(|n| {
+                let whole = rows.iter().all(|r| r[n].is_null() || r[n].is_u64());
+                serde_json::json!({ "name": n, "type": if whole { "fixed" } else { "text" }, "scale": 0 })
+            })
+            .collect();
+        let data: Vec<Vec<serde_json::Value>> = rows
+            .iter()
+            .map(|r| {
+                names
+                    .iter()
+                    .map(|n| match &r[n] {
+                        serde_json::Value::Null => serde_json::Value::Null,
+                        serde_json::Value::String(t) => serde_json::Value::String(t.clone()),
+                        other => serde_json::Value::String(other.to_string()),
+                    })
+                    .collect()
+            })
+            .collect();
+        serde_json::json!({
+            "resultSetMetaData": { "numRows": data.len(), "rowType": row_type,
+                                   "partitionInfo": [{ "rowCount": data.len() }] },
+            "data": data,
+            "statementHandle": "block",
+        })
     }
 
     impl Stand {
-        /// Answer by `rules`: `(text the statement holds, exit code, stdout, stderr)`.
+        /// Answer by `rules`: `(text the statement holds, exit code, the blocks one per statement, the error text)`; a non-zero exit is the API refusing the request with that text.
         fn scripted(rules: &[(&str, i32, &str, &str)]) -> Self {
-            let dir = tempfile::tempdir().unwrap();
-            let script: Vec<serde_json::Value> = rules
+            let rules: Vec<(String, i32, serde_json::Value, String)> = rules
                 .iter()
                 .map(|(when, exit, out, err)| {
-                    serde_json::json!({ "when": when, "exit": exit, "stdout": out, "stderr": err })
+                    let blocks = if out.is_empty() {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::from_str(out).expect("the rule's blocks")
+                    };
+                    (when.to_string(), *exit, blocks, err.to_string())
                 })
                 .collect();
-            std::fs::write(
-                dir.path().join("script.json"),
-                serde_json::to_vec(&script).unwrap(),
-            )
-            .unwrap();
-            std::fs::write(
-                dir.path().join("snow.py"),
-                "import json, pathlib, sys\n\
-                 here = pathlib.Path(__file__).parent\n\
-                 sql = sys.argv[sys.argv.index('-q') + 1]\n\
-                 with open(here / 'calls.jsonl', 'a') as f:\n\
-                 \x20   f.write(json.dumps(sql) + '\\n')\n\
-                 for rule in json.load(open(here / 'script.json')):\n\
-                 \x20   if rule['when'] in sql:\n\
-                 \x20       sys.stderr.write(rule['stderr'])\n\
-                 \x20       sys.stdout.write(rule['stdout'])\n\
-                 \x20       sys.exit(rule['exit'])\n\
-                 sys.stderr.write('stand: no rule for this statement\\n')\n\
-                 sys.exit(97)\n",
-            )
-            .unwrap();
-            Self { dir }
+            let inner = crate::load::snowflake_rest::stand::Stand::start(move |req, _| {
+                let refuse = |message: &str| {
+                    let body = serde_json::json!({
+                        "code": "000000", "sqlState": "XX000", "message": message
+                    });
+                    (422, body.to_string())
+                };
+                if req.method == "POST" {
+                    let sql = req.statement().unwrap_or_default();
+                    let Some((at, rule)) =
+                        rules.iter().enumerate().find(|(_, r)| sql.contains(&r.0))
+                    else {
+                        return refuse("stand: no rule for this statement");
+                    };
+                    if rule.1 != 0 {
+                        return refuse(&rule.3);
+                    }
+                    let handles: Vec<String> = (0..rule.2.as_array().map_or(0, Vec::len))
+                        .map(|b| format!("h{at}_{b}"))
+                        .collect();
+                    let body = serde_json::json!({ "statementHandle": "parent", "statementHandles": handles });
+                    return (200, body.to_string());
+                }
+                let handle = req.path.rsplit('/').next().unwrap_or_default();
+                let (at, block) = handle
+                    .strip_prefix('h')
+                    .and_then(|h| h.split_once('_'))
+                    .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
+                    .expect("a handle of this stand");
+                (200, result_set(&rules[at].2[block]).to_string())
+            });
+            Self { inner }
         }
 
         /// A loader of `DB.SC` that talks to this stand.
         fn loader(&self) -> SnowflakeLoader {
-            let mut l = adoption_loader();
-            l.cli = vec![
-                "python3".to_string(),
-                self.dir
-                    .path()
-                    .join("snow.py")
-                    .to_string_lossy()
-                    .into_owned(),
-            ];
+            let l = adoption_loader();
+            l.api.set(self.inner.api()).expect("a fresh loader");
             l
         }
 
         /// Every statement the stand was sent, in order.
         fn sent(&self) -> Vec<String> {
-            std::fs::read_to_string(self.dir.path().join("calls.jsonl"))
-                .unwrap_or_default()
-                .lines()
-                .map(|l| serde_json::from_str(l).unwrap())
-                .collect()
+            self.inner.statements()
         }
     }
 
@@ -1261,12 +1291,12 @@ mod tests {
             && crate::load::is_safe_load_ident(n)));
     }
 
-    /// What Snowflake's catalog answers for a name: `[[status], [status], [row]]`, as `snow sql --format json` prints three statements.
+    /// What Snowflake's catalog answers for a name: `[[status], [status], [row]]`, as the loader reads three statements.
     fn answer(row: &str) -> String {
         format!(r#"[[{{"status":"ok"}}],[{{"status":"ok"}}],[{row}]]"#)
     }
 
-    /// What `snow` prints on stderr for a table that is not there: an 80-column box, the text wrapped by words.
+    /// What an old CLI printed for a table that is not there: an 80-column box, the text wrapped by words.
     const BOXED_MISSING: &str = "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n\
         │ 002003 (42S02): SQL compilation error:                                       │\n\
         │ Object 'DB.SC.SF_PROBE_WRAP_AAAAAAAAAA__CHANGES' does not                    │\n\
@@ -1295,14 +1325,14 @@ mod tests {
         )]);
         let err = stand.loader().object_kind("orders").unwrap_err();
         assert!(
-            format!("{err:#}").contains("KIND_ was not in snow's output"),
+            format!("{err:#}").contains("KIND_ was not in the answer"),
             "{err:#}"
         );
         let stand = Stand::scripted(&[("INFORMATION_SCHEMA.TABLES", 1, "", "denied")]);
         assert!(stand.loader().object_kind("orders").is_err());
     }
 
-    /// Whether a change log holds prior changes is asked of the catalog first: a log that is not there is the first cycle and is never selected from, whatever `snow` would print about it.
+    /// Whether a change log holds prior changes is asked of the catalog first: a log that is not there is the first cycle and is never selected from, whatever the warehouse would say about it.
     #[test]
     fn a_missing_change_log_is_the_first_cycle_by_the_catalog_not_by_an_error_text() {
         let absent = Stand::scripted(&[
@@ -1379,7 +1409,7 @@ mod tests {
             .changes_has_prior_changes("orders")
             .unwrap_err();
         assert!(
-            format!("{err:#}").contains("PROBE_ was not in snow's output"),
+            format!("{err:#}").contains("PROBE_ was not in the answer"),
             "{err:#}"
         );
     }
@@ -1445,23 +1475,28 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "live: requires SNOWFLAKE_TEST_CONNECTION"]
+    #[ignore = "live: requires RIVET_SNOWFLAKE_ACCOUNT, RIVET_SNOWFLAKE_USER and RIVET_SNOWFLAKE_KEY"]
     fn snowflake_live_adopts_a_full_load_table_as_the_changelog_baseline() {
-        let Ok(connection) = std::env::var("SNOWFLAKE_TEST_CONNECTION") else {
-            return crate::test_hook::skip_live("SNOWFLAKE_TEST_CONNECTION unset");
+        let (Ok(account), Ok(user), Ok(key)) = (
+            std::env::var("RIVET_SNOWFLAKE_ACCOUNT"),
+            std::env::var("RIVET_SNOWFLAKE_USER"),
+            std::env::var("RIVET_SNOWFLAKE_KEY"),
+        ) else {
+            return crate::test_hook::skip_live(
+                "RIVET_SNOWFLAKE_ACCOUNT, RIVET_SNOWFLAKE_USER or RIVET_SNOWFLAKE_KEY unset",
+            );
         };
         let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
-        let mut loader = SnowflakeLoader::new(connection);
+        let mut loader = SnowflakeLoader::new(&account, &user, &key);
         loader.warehouse = env("RIVET_SF_TEST_WAREHOUSE", "RIVET_LOAD_TEST");
         loader.database = env("RIVET_SF_TEST_DATABASE", "RIVET_LOAD_TEST");
         loader.schema = env("RIVET_SF_TEST_SCHEMA", "PUBLIC");
-        loader.private_key_path = std::env::var("RIVET_SNOWFLAKE_KEY").ok();
         let table = format!("RIVET_SF_LIVE_ADOPT_{}", std::process::id());
         let changes = format!("{table}__changes");
         let (fq, changes_fq) = (loader.fqtn(&table), loader.fqtn(&changes));
 
         loader
-            .run_snow(&format!(
+            .run_sql(&format!(
                 "USE WAREHOUSE {};\nCREATE OR REPLACE TABLE {fq} AS \
                  SELECT column1 AS id, 'v' || column1 AS v FROM VALUES (1), (2), (3);",
                 loader.warehouse
@@ -1494,7 +1529,7 @@ mod tests {
             format!("DROP TABLE IF EXISTS {fq};"),
             format!("DROP TABLE IF EXISTS {changes_fq};"),
         ] {
-            let _ = loader.run_snow(&drop);
+            let _ = loader.run_sql(&drop);
         }
 
         assert_eq!(adopted.unwrap(), Some(3));
@@ -1502,5 +1537,75 @@ mod tests {
         assert_eq!(kind.unwrap(), crate::load::ObjectKind::View);
         assert_eq!(copied.unwrap(), 3);
         assert_eq!(viewed.unwrap(), 3);
+    }
+
+    #[test]
+    #[ignore = "live: requires RIVET_SNOWFLAKE_ACCOUNT, RIVET_SNOWFLAKE_USER and RIVET_SNOWFLAKE_KEY"]
+    fn snowflake_live_a_multi_statement_request_is_one_transaction_and_a_failure_stops_the_rest() {
+        let (Ok(account), Ok(user), Ok(key)) = (
+            std::env::var("RIVET_SNOWFLAKE_ACCOUNT"),
+            std::env::var("RIVET_SNOWFLAKE_USER"),
+            std::env::var("RIVET_SNOWFLAKE_KEY"),
+        ) else {
+            return crate::test_hook::skip_live(
+                "RIVET_SNOWFLAKE_ACCOUNT, RIVET_SNOWFLAKE_USER or RIVET_SNOWFLAKE_KEY unset",
+            );
+        };
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let make = || {
+            let mut l = SnowflakeLoader::new(&account, &user, &key);
+            l.warehouse = env("RIVET_SF_TEST_WAREHOUSE", "RIVET_LOAD_TEST");
+            l.database = env("RIVET_SF_TEST_DATABASE", "RIVET_LOAD_TEST");
+            l.schema = env("RIVET_SF_TEST_SCHEMA", "PUBLIC");
+            l
+        };
+        let (writer, reader) = (make(), make());
+        let table = format!("RIVET_SF_LIVE_TXN_{}", std::process::id());
+        let fq = writer.fqtn(&table);
+        let wh = &writer.warehouse;
+        let ids = |l: &SnowflakeLoader| -> Vec<u64> {
+            let v = l
+                .run_sql(&format!(
+                    "USE WAREHOUSE {wh};\nSELECT id AS ID_ FROM {fq} ORDER BY id;"
+                ))
+                .expect("a second session reads the table");
+            let rows = v
+                .as_array()
+                .and_then(|b| b.last())
+                .and_then(|b| b.as_array());
+            rows.expect("a result block")
+                .iter()
+                .map(|r| r["ID_"].as_u64().expect("an integer id"))
+                .collect()
+        };
+
+        writer
+            .run_sql(&format!(
+                "USE WAREHOUSE {wh};\nCREATE OR REPLACE TABLE {fq} (id NUMBER(38,0) NOT NULL);"
+            ))
+            .expect("fixture table");
+        let committed = writer.run_sql(&format!(
+            "USE WAREHOUSE {wh};\nBEGIN;\nINSERT INTO {fq} VALUES (1);\nINSERT INTO {fq} VALUES (2);\nCOMMIT;"
+        ));
+        let after_commit = ids(&reader);
+        let failed = writer.run_sql(&format!(
+            "USE WAREHOUSE {wh};\nBEGIN;\nINSERT INTO {fq} VALUES (3);\n\
+             INSERT INTO {fq} VALUES ('not a number');\nINSERT INTO {fq} VALUES (4);\nCOMMIT;"
+        ));
+        let after_failure = ids(&reader);
+        let _ = writer.run_sql(&format!("DROP TABLE IF EXISTS {fq};"));
+
+        committed.expect("BEGIN .. COMMIT in one request");
+        assert_eq!(
+            after_commit,
+            vec![1, 2],
+            "a committed request is visible to a second session"
+        );
+        assert!(failed.is_err(), "the failing statement fails the request");
+        assert_eq!(
+            after_failure,
+            vec![1, 2],
+            "a failing statement leaves the open transaction uncommitted and runs nothing after it"
+        );
     }
 }

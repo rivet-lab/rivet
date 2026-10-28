@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Behaviour change: the Snowflake load no longer drives the `snow` CLI; it talks to Snowflake's SQL API
+  itself and signs in with a key pair.** `snow` is no longer needed on the machine that runs `rivet load`.
+  **A config that names `load.connection:` now stops at config load** with
+  `RIVET_CONFIG_LOAD_BLOCK_INVALID` (exit 1, nothing loaded), and the message prints the
+  lines to put under `load:` instead of `connection:`:
+
+  ```yaml
+  load:
+    target: snowflake
+    account: myorg-myaccount        # was inside the snow connection
+    user: RIVET_USER                # was inside the snow connection
+    private_key_path: /path/to/rsa_key.p8   # an unencrypted PKCS#8 PEM, read once
+    role: RIVET_ROLE                # optional; omitted, the user's default role
+  ```
+
+  The values are the ones `snow connection list` shows for the connection you used (`account`, `user`,
+  `private_key_file`, `role`); the public half of the key must already be registered on the user
+  (`ALTER USER … SET RSA_PUBLIC_KEY`), as it was for `snow`. `RIVET_SNOWFLAKE_ACCOUNT`,
+  `RIVET_SNOWFLAKE_USER`, `RIVET_SNOWFLAKE_KEY` and `RIVET_SNOWFLAKE_ROLE` override the four fields
+  (`RIVET_SNOWFLAKE_KEY` keeps its meaning: the key file). An encrypted key is refused with
+  `RIVET_LOAD_WAREHOUSE_AUTH_FAILED` and the `openssl pkcs8 -nocrypt` remedy. `rivet init` takes
+  `--snowflake-account`, `--snowflake-user`, `--snowflake-private-key-path` and an optional
+  `--snowflake-role` in place of `--snowflake-connection`. State, tables and staged files written before
+  the upgrade are untouched: the load spec does not record the login, so the next `rivet load` with the
+  new fields continues from the same ledger. Rate limits (429) and 503/5xx answers are retried under the
+  same request id, decided by the HTTP status and never by the message text.
+
 - **Homebrew moved to `brew install rivet-lab/tap/rivet`** (the tap is now `rivet-lab/homebrew-tap`;
   `panchenkoai/rivet/rivet` keeps working through GitHub's redirect). **On Linux the formula installs
   the glibc 2.28 build:** the one it installed before needed glibc 2.38+ and exited on Ubuntu 22.04,

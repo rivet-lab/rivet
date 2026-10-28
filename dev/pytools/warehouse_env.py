@@ -33,8 +33,18 @@ def bigquery() -> str:
     return f"warehouse: BigQuery {os.environ['BQ_ORACLE_PROJECT']} ({location}), GCS bucket {os.environ['BQ_ORACLE_BUCKET']}"
 
 
+def _snow_login(conn: str) -> dict:
+    """The key-pair parameters of one `snow` connection (rivet signs in with the same account, user and key)."""
+    listing = shell.run(["snow", "connection", "list", "--format", "json"], timeout=120)
+    try:
+        rows = json.loads((listing.stdout or "")[(listing.stdout or "").index("["):])
+    except ValueError:
+        return {}
+    return next((r.get("parameters") or {} for r in rows if r.get("connection_name") == conn), {})
+
+
 def snowflake() -> str:
-    """Fill the Snowflake env where empty when the `snow` connection logs in and sees the schema; the line saying which."""
+    """Fill the Snowflake env where empty when the `snow` connection logs in and sees the schema (rivet's own login comes from that connection's account, user and key); the line saying which."""
     sf = registry.snowflake()
     conn = os.environ.get("RIVET_SF_CONNECTION") or sf["connection"]
     database = os.environ.get("RIVET_SF_DATABASE") or sf["database"]
@@ -51,6 +61,16 @@ def snowflake() -> str:
         found = []
     if not found:
         return f"Snowflake legs SKIP: no schema {database}.{schema} for the `snow` connection `{conn}`"
+    login = _snow_login(conn)
+    for var, value in (("RIVET_SNOWFLAKE_ACCOUNT", login.get("account")), ("RIVET_SNOWFLAKE_USER", login.get("user")),
+                       ("RIVET_SNOWFLAKE_KEY", os.path.expanduser(login.get("private_key_file") or "") or None),
+                       ("RIVET_SNOWFLAKE_ROLE", login.get("role"))):
+        if value:
+            os.environ[var] = os.environ.get(var) or value
+    missing = [v for v in ("RIVET_SNOWFLAKE_ACCOUNT", "RIVET_SNOWFLAKE_USER", "RIVET_SNOWFLAKE_KEY") if not os.environ.get(v)]
+    if missing:
+        return (f"Snowflake legs SKIP: the `snow` connection `{conn}` carries no key-pair login for rivet "
+                f"(set {', '.join(missing)}, or add account, user and private_key_file to the connection)")
     for var, value in (("RIVET_SF_CONNECTION", conn), ("RIVET_SF_WAREHOUSE", sf["warehouse"]),
                        ("RIVET_SF_DATABASE", database), ("RIVET_SF_SCHEMA", schema),
                        ("RIVET_SF_STORAGE_INTEGRATION", sf["storage_integration"]),

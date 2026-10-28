@@ -175,7 +175,7 @@ class Oracle:
 
             # The driver is the wheel uv.lock pins, not whatever sits in ~/.duckdb.
             os.environ[SF_DRIVER_ENV] = adbc_driver_snowflake._driver_path()
-            login = snowflake_login(str(snowflake["connection"]))
+            login = snowflake_login(str(snowflake["connection"])) if snowflake.get("connection") else snowflake
             # Community extension: first use downloads it into ~/.duckdb.
             self.db.sql("INSTALL snowflake FROM community; LOAD snowflake;")
             self.db.sql(snowflake_secret(login, str(snowflake["database"]), str(snowflake["warehouse"])))
