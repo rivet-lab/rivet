@@ -444,7 +444,7 @@ fn already_applied_report(
 /// `PlanArtifact::new` redacts plaintext credentials (PA9): an inline
 /// `url: "postgresql://user:pass@host/db"` becomes `postgresql://REDACTED@host/db`.
 /// That is recoverable only if the source *also* carries a reference apply can
-/// resolve (`url_env` / `url_file` / `password_env`, or structured `host`+`user`).
+/// resolve (`url_env` / `url_file` / `url_secret` / `password_env` / `password_secret`, or structured `host`+`user`).
 /// When none of those exist, connecting later fails deep in the driver with an
 /// opaque auth error; surface the fix instead.
 fn reject_unrecoverable_inline_url(artifact: &PlanArtifact) -> Result<()> {
@@ -463,7 +463,9 @@ fn reject_unrecoverable_inline_url(artifact: &PlanArtifact) -> Result<()> {
     // structured fields to rebuild the connection.
     let has_recovery = source.url_env.is_some()
         || source.url_file.is_some()
+        || source.url_secret.is_some()
         || source.password_env.is_some()
+        || source.password_secret.is_some()
         || (source.host.is_some() && source.user.is_some());
     if has_recovery {
         return Ok(());
@@ -546,11 +548,13 @@ mod tests {
                 url: Some("postgresql://127.0.0.2:9999/nonexistent".into()),
                 url_env: None,
                 url_file: None,
+                url_secret: None,
                 host: None,
                 port: None,
                 user: None,
                 password: None,
                 password_env: None,
+                password_secret: None,
                 database: None,
                 environment: None,
                 tuning: None,

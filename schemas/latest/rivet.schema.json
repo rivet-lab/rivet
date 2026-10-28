@@ -74,6 +74,13 @@
             "null"
           ]
         },
+        "url_secret": {
+          "description": "Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "host": {
           "type": [
             "string",
@@ -102,6 +109,13 @@
           ]
         },
         "password_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password_secret": {
+          "description": "Google Secret Manager secret holding the password: `projects/<p>/secrets/<s>[/versions/<n>]`.",
           "type": [
             "string",
             "null"

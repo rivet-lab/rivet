@@ -339,6 +339,43 @@ your own risk, and verify the upload end-to-end if you do.
 
 ---
 
+## Source credentials from Google Secret Manager
+
+Keep the database URL or password in Secret Manager instead of on the machine that runs rivet.
+rivet reads the secret with the same Google credential the GCS and BigQuery legs use: the
+service-account key `GOOGLE_APPLICATION_CREDENTIALS` points at, or gcloud ADC. The secret is read
+once per process and never written to the plan, the state or the logs.
+
+```yaml
+source:
+  type: postgres
+  url_secret: projects/my-project/secrets/pg-url          # the whole URL, latest version
+```
+
+```yaml
+source:
+  type: mysql
+  host: db.internal
+  user: rivet
+  database: shop
+  password_secret: projects/my-project/secrets/mysql-pw/versions/3   # a pinned version
+```
+
+Grant the credential read access on each secret, not on the project:
+
+```bash
+gcloud secrets add-iam-policy-binding pg-url --project=my-project \
+  --member="serviceAccount:rivet@my-project.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+A secret rivet cannot read stops the run with `RIVET_CONFIG_GCP_SECRET_UNREADABLE`, naming the
+secret; HTTP 403 means the role is missing, 404 a wrong project, name or version. On a host outside
+Google Cloud the key file is the one credential left on disk: keep it `chmod 600`, owned by the
+user rivet runs as.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

@@ -2561,6 +2561,11 @@ pub(crate) mod stand {
             }
         }
 
+        /// The stand's base URL.
+        pub(crate) fn endpoint(&self) -> &str {
+            &self.endpoint
+        }
+
         /// Every request so far, in order.
         pub(crate) fn seen(&self) -> Vec<Seen> {
             self.seen.lock().unwrap().clone()

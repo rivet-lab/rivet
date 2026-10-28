@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Source credentials from Google Secret Manager.** `source:` takes `url_secret:` (the whole URL) or
+  `password_secret:` (with structured `host`/`user`/`database`), each naming a secret as
+  `projects/<project>/secrets/<secret>` (the latest version) or `.../versions/<n>`. rivet reads it with
+  the Google credential it already uses for BigQuery and GCS (`GOOGLE_APPLICATION_CREDENTIALS` or
+  gcloud ADC), once per process, so the database password is never stored on the machine. The
+  credential needs `roles/secretmanager.secretAccessor` on the secret. A secret that cannot be read
+  stops the run with the new `RIVET_CONFIG_GCP_SECRET_UNREADABLE` (exit 1), naming the secret and the
+  role to grant; a sealed plan keeps the secret name, never its value.
+- A config refusal raised while connecting to the source is no longer relabelled a connectivity or
+  auth error from words in its text; it keeps its own hint.
+
 - **Behaviour change: the Snowflake load no longer drives the `snow` CLI; it talks to Snowflake's SQL API
   itself and signs in with a key pair.** `snow` is no longer needed on the machine that runs `rivet load`.
   **A config that names `load.connection:` now stops at config load** with
