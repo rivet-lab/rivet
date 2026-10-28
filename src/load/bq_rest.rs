@@ -991,7 +991,7 @@ fn transient_reply(status: u16) -> anyhow::Error {
 }
 
 /// The placeholder a retry loop starts from; every loop replaces it on its first attempt.
-fn no_attempt_made() -> anyhow::Error {
+pub(super) fn no_attempt_made() -> anyhow::Error {
     crate::error::coded(
         crate::error::codes::INTERNAL_LOAD_INVARIANT,
         "no attempt made",
@@ -1018,7 +1018,7 @@ pub(crate) fn api_error_detail(status: u16, body: &str) -> String {
     format!("HTTP {status}: {}", truncate(trimmed, 500))
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(super) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -1086,7 +1086,7 @@ fn location_query(location: Option<&str>) -> String {
 /// Backoff for poll attempt `n`: exponential from [`POLL_MIN`], capped at
 /// [`POLL_MAX`]. Attempt 0 waits the minimum, so a sub-second metadata job is
 /// not billed a full second of latency.
-fn poll_interval(attempt: u32) -> Duration {
+pub(super) fn poll_interval(attempt: u32) -> Duration {
     let scaled = POLL_MIN.saturating_mul(1u32 << attempt.min(16));
     scaled.min(POLL_MAX)
 }
@@ -1094,7 +1094,7 @@ fn poll_interval(attempt: u32) -> Duration {
 /// HTTP statuses worth retrying an IDEMPOTENT request on: rate limiting and
 /// any server-side fault. Everything else (401, 403, 404, 400) is a decision
 /// BigQuery has made and repeating it changes nothing.
-fn is_transient_status(code: u16) -> bool {
+pub(super) fn is_transient_status(code: u16) -> bool {
     code == 429 || (500..600).contains(&code)
 }
 
@@ -1106,7 +1106,7 @@ fn is_transient_status(code: u16) -> bool {
 /// wrong) and `>` → `>=` pays `POLL_MIN` before the first request of every call.
 /// Neither is visible to any test while the decision lives inside a body that only
 /// a real HTTP round trip reaches.
-fn should_back_off(attempt: u32) -> bool {
+pub(super) fn should_back_off(attempt: u32) -> bool {
     attempt > 0
 }
 

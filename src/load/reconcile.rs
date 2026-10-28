@@ -2640,7 +2640,7 @@ mod tests {
     // gap against fsouza/fake-gcs-server (the GCS JSON API emulator the extract
     // side already uses), so a GCS-only regression — listing pagination, prefix
     // handling, `remove_all` recursion — fails HERE, not in production. The
-    // warehouse half (bq/snow COPY) can't be emulated; it stays the live BigQuery
+    // warehouse half (bq/Snowflake COPY) can't be emulated; it stays the live BigQuery
     // matrix (`smoke_batch_mysql` / `StagingWiped`). This owns the BUCKET half.
     const FAKE_GCS_ENDPOINT: &str = "http://127.0.0.1:4443";
     const FAKE_GCS_BUCKET: &str = "rivet-load-emulator";

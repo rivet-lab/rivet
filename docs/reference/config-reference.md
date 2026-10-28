@@ -187,13 +187,15 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `target` | `bigquery` \| `snowflake` \| `clickhouse` | **yes** | The warehouse: `bigquery`, `snowflake` or `clickhouse`. |
 | `project` | `string` |  | BigQuery: the project the dataset lives in. |
 | `dataset` | `string` |  | BigQuery: the dataset the tables are created in. |
-| `connection` | `string` |  | Snowflake: the `snow` CLI connection name. |
+| `account` | `string` |  | Snowflake: the account identifier — `myorg-myaccount`, or a locator such as `xy12345.us-east-1`. |
+| `private_key_path` | `string` |  | Snowflake: the unencrypted PKCS#8 private key file of the user's key pair. |
+| `role` | `string` |  | Snowflake: the role the statements run under; the user's default when omitted. |
 | `warehouse` | `string` |  | Snowflake: the virtual warehouse the load runs on. |
 | `database` | `string` |  | Snowflake / ClickHouse: the database the tables are created in. |
 | `schema` | `string` |  | Snowflake: the schema the tables are created in. |
 | `storage_integration` | `string` |  | Snowflake: a pre-created GCS `STORAGE INTEGRATION`. |
 | `url` | `string` |  | ClickHouse: the HTTP endpoint, e.g. `http://localhost:8123`. |
-| `user` | `string` |  | ClickHouse: the user the load authenticates as. |
+| `user` | `string` |  | Snowflake / ClickHouse: the user the load authenticates as. |
 | `password_env` | `string` |  | ClickHouse: the env var holding that user's password. |
 | `named_collection` | `string` |  | ClickHouse: a server-side named collection holding the bucket's URL and HMAC keys; ClickHouse then reads the Parquet itself instead of rivet sending it. |
 | `ca_file` | `string` |  | ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed by a private CA, beside the built-in public roots. |

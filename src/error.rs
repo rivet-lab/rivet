@@ -290,6 +290,19 @@ impl JobWaitTimeout {
             ),
         }
     }
+
+    /// The Snowflake poll loop gave up on statement `handle` after `seconds`.
+    pub fn snowflake(handle: &str, seconds: u64) -> Self {
+        Self {
+            message: format!(
+                "snowflake: stopped waiting for statement `{handle}` after {seconds}s — the \
+                 statement may still be RUNNING in Snowflake, so check it there before \
+                 re-running: SELECT execution_status, error_message FROM \
+                 TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_USER()) WHERE query_id = '{handle}'. \
+                 An append mode that re-consumes the same runs would double them"
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for JobWaitTimeout {

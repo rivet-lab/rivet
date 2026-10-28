@@ -450,13 +450,17 @@ pub enum Commands {
             requires = "clickhouse_url"
         )]
         clickhouse_user: String,
-        /// Scaffold a `load:` block for Snowflake through this `snow` CLI connection
-        /// (key-pair / JWT auth). Needs the four companion `--snowflake-*` flags
-        /// (the loader requires every one) and `--gcs-bucket`: Snowflake reads the
-        /// export through a GCS external stage, so S3 or a local scaffold is refused.
+        /// Scaffold a `load:` block for Snowflake at this account (`myorg-myaccount`, or a
+        /// locator such as `xy12345.us-east-1`). rivet signs in with a key pair, so it also
+        /// needs `--snowflake-user` and `--snowflake-private-key-path`, the other three
+        /// `--snowflake-*` flags (the loader requires every one) and `--gcs-bucket`:
+        /// Snowflake reads the export through a GCS external stage, so S3 or a local
+        /// scaffold is refused.
         #[arg(
-            long = "snowflake-connection",
-            value_name = "NAME",
+            long = "snowflake-account",
+            value_name = "ACCOUNT",
+            requires = "snowflake_user",
+            requires = "snowflake_private_key_path",
             requires = "snowflake_warehouse",
             requires = "snowflake_database",
             requires = "snowflake_schema",
@@ -464,34 +468,56 @@ pub enum Commands {
             requires = "gcs_bucket",
             conflicts_with_all = ["s3_bucket", "bigquery_project", "clickhouse_url"]
         )]
-        snowflake_connection: Option<String>,
-        /// The virtual warehouse the load runs on (with `--snowflake-connection`).
+        snowflake_account: Option<String>,
+        /// The Snowflake user the load signs in as (with `--snowflake-account`).
+        #[arg(
+            long = "snowflake-user",
+            value_name = "USER",
+            requires = "snowflake_account"
+        )]
+        snowflake_user: Option<String>,
+        /// The unencrypted PKCS#8 private key file whose public key is registered on the user
+        /// (with `--snowflake-account`).
+        #[arg(
+            long = "snowflake-private-key-path",
+            value_name = "PATH",
+            requires = "snowflake_account"
+        )]
+        snowflake_private_key_path: Option<String>,
+        /// The role the load runs under; omitted, the user's default role (with `--snowflake-account`).
+        #[arg(
+            long = "snowflake-role",
+            value_name = "ROLE",
+            requires = "snowflake_account"
+        )]
+        snowflake_role: Option<String>,
+        /// The virtual warehouse the load runs on (with `--snowflake-account`).
         #[arg(
             long = "snowflake-warehouse",
             value_name = "WAREHOUSE",
-            requires = "snowflake_connection"
+            requires = "snowflake_account"
         )]
         snowflake_warehouse: Option<String>,
-        /// The database the load creates its tables in (with `--snowflake-connection`).
+        /// The database the load creates its tables in (with `--snowflake-account`).
         #[arg(
             long = "snowflake-database",
             value_name = "DATABASE",
-            requires = "snowflake_connection"
+            requires = "snowflake_account"
         )]
         snowflake_database: Option<String>,
-        /// The schema the load creates its tables in (with `--snowflake-connection`).
+        /// The schema the load creates its tables in (with `--snowflake-account`).
         #[arg(
             long = "snowflake-schema",
             value_name = "SCHEMA",
-            requires = "snowflake_connection"
+            requires = "snowflake_account"
         )]
         snowflake_schema: Option<String>,
         /// A pre-created GCS `STORAGE INTEGRATION` granting Snowflake read on the
-        /// `--gcs-bucket` (with `--snowflake-connection`).
+        /// `--gcs-bucket` (with `--snowflake-account`).
         #[arg(
             long = "snowflake-storage-integration",
             value_name = "INTEGRATION",
-            requires = "snowflake_connection"
+            requires = "snowflake_account"
         )]
         snowflake_storage_integration: Option<String>,
         /// TLS posture for BOTH the introspection connection init opens AND the
@@ -938,15 +964,19 @@ mod tests {
         );
     }
 
-    /// The Snowflake loader needs all five values and reads GCS only (a GCS external
+    /// The Snowflake loader needs every one of these values and reads GCS only (a GCS external
     /// stage), and one config loads into one warehouse: every combination that
     /// cannot become a loadable config is refused at the flag.
     #[test]
     fn init_clap_ties_the_snowflake_flags_together_and_to_a_gcs_bucket() {
         let src = ["--source", "postgresql://localhost/db"];
         let sf = [
-            "--snowflake-connection",
-            "c",
+            "--snowflake-account",
+            "a",
+            "--snowflake-user",
+            "u",
+            "--snowflake-private-key-path",
+            "/k.p8",
             "--snowflake-warehouse",
             "w",
             "--snowflake-database",
@@ -971,7 +1001,7 @@ mod tests {
             clap::error::ErrorKind::ArgumentConflict,
             "--snowflake-* with --s3-bucket only",
         );
-        // Each companion flag missing in turn, and each companion without the connection.
+        // Each companion flag missing in turn, and each companion without the account.
         for i in (0..sf.len()).step_by(2) {
             let mut partial: Vec<&str> = [src.as_slice(), gcs.as_slice()].concat();
             partial.extend(

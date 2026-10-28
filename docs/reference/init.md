@@ -272,7 +272,8 @@ place the load reads them — not on the per-table recipes, which the load never
 
 ## Warehouse scaffold: `--snowflake-*` / `--gcs-bucket`
 
-The same for Snowflake: `--snowflake-connection` (a `snow` CLI connection),
+The same for Snowflake: `--snowflake-account`, `--snowflake-user` and
+`--snowflake-private-key-path` (the key-pair login; `--snowflake-role` is optional),
 `--snowflake-warehouse`, `--snowflake-database`, `--snowflake-schema` and
 `--snowflake-storage-integration` (a pre-created GCS `STORAGE INTEGRATION`) write a
 `load:` block with `target: snowflake`, `pk: auto`, `cluster_by: auto`,
@@ -283,7 +284,8 @@ Clustering, so drop the line to cluster by the key alone).
 
 ```bash
 rivet init --source "$MYSQL_URL" --mode incremental --gcs-bucket my-bucket \
-  --snowflake-connection my_conn --snowflake-warehouse COMPUTE_WH \
+  --snowflake-account myorg-myaccount --snowflake-user RIVET_USER \
+  --snowflake-private-key-path /path/to/rsa_key.p8 --snowflake-warehouse COMPUTE_WH \
   --snowflake-database ANALYTICS --snowflake-schema PUBLIC \
   --snowflake-storage-integration MY_GCS_INT -o rivet.yaml
 rivet run  -c rivet.yaml   # Parquet → gs://my-bucket/exports/<table>/
