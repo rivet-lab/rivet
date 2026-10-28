@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -367,7 +368,7 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None) -> None:
 
 
 def recall(led: Ledger, rows: list[Row]) -> list[Verdict]:
-    """Grade every row: STALE check, one CONTROL run on the unpatched tree, then one build+run per patch."""
+    """Grade every row: STALE check, one CONTROL run on the unpatched tree, then every patch built in a worker's tree and run in order."""
     t0 = time.perf_counter()
     led.phase("Seeded-defect recall — does the harness catch known bug classes re-introduced?")
     verdicts: dict[Row, Verdict] = {}
@@ -404,30 +405,127 @@ def recall(led: Ledger, rows: list[Row]) -> list[Verdict]:
             for c, v in control.items():
                 (led.ok if v == "PASS" else led.bad)(f"control {c}: {v}")
 
-    for patch in sorted({r.patch for r in live}):
-        group = [r for r in live if r.patch == patch]
-        cells = sorted({c for r in group for c in r.cells if control.get(c) == "PASS"})
-        name = patch.replace("/", "__").removesuffix(".patch")
-        led.phase(f"SEED {patch} — {', '.join(r.engine for r in group)} ({len(cells)} control-green cell(s))")
-        snap = apply_seed(tree, HERE / patch)
-        try:
-            b = cargo.build(cells, logs / f"{name}.build.log")
-            if b.returncode != 0 or not recompiled(b.stdout):
-                why = "build failed" if b.returncode != 0 else "cargo did not recompile rivet-cli"
-                led.bad(f"{why} (see {logs / f'{name}.build.log'})")
-                seeded = None
-            else:
-                seeded = cargo.run(cells, logs / f"{name}.log") if cells else {}
-        finally:
-            restore(tree, snap)
-        for r in group:
-            verdicts[r] = grade(r, control, seeded, control_skips)
+    patches = sorted({r.patch for r in live})
+    workers = []
+    for k in range(min(BUILD_WORKERS, len(patches))):
+        wbase = base / f"w{k}"
+        wtree, _ = prepare_tree(wbase)
+        workers.append(Worker(wtree, Cargo(wtree, wbase, state_url)))
+    verdicts.update(grade_seeds(led, live, control, control_skips, workers, logs))
 
     out = [verdicts.get(r) or grade(r, control, {}, control_skips) for r in rows]
     record(led, out)
     print(render(out))
     print(f"  seeded-defect recall took {(time.perf_counter() - t0) / 60:.1f} min; logs under {logs}")
     return out
+
+
+#: Scratch build workers: each owns a tree and a target dir; one runner grades their builds, one patch at a time.
+BUILD_WORKERS = 3
+
+
+@dataclass(frozen=True)
+class Worker:
+    """A scratch tree and the Cargo that builds and runs in it."""
+
+    tree: Path
+    cargo: Cargo
+
+
+class Slot:
+    """One patch's build, parked in its worker's tree until the runner has graded it and restored the tree."""
+
+    def __init__(self) -> None:
+        self.worker: Worker | None = None
+        self.snap: dict[Path, bytes] | None = None
+        self.why = ""
+        self.error: BaseException | None = None
+        self.built = threading.Event()
+        self.released = threading.Event()
+        self.restored = False
+
+
+class SeedPool:
+    """Workers apply and build patches in table order ahead of the runner; a worker's tree stays busy until its slot is released."""
+
+    def __init__(self, workers: list[Worker], patches: list[str], cells_of, logs: Path) -> None:
+        self.slots = {p: Slot() for p in patches}
+        self._todo, self._lock, self._stop = iter(patches), threading.Lock(), threading.Event()
+        self._threads = [threading.Thread(target=self._work, args=(w, cells_of, logs), daemon=True) for w in workers]
+        for t in self._threads:
+            t.start()
+
+    def _work(self, w: Worker, cells_of, logs: Path) -> None:
+        """Take the next patch, apply and build it in this tree, park it, and wait for the runner to hand the tree back."""
+        while not self._stop.is_set():
+            with self._lock:
+                patch = next(self._todo, None)
+            if patch is None:
+                return
+            slot, name = self.slots[patch], patch.replace("/", "__").removesuffix(".patch")
+            slot.worker = w
+            try:
+                slot.snap = apply_seed(w.tree, HERE / patch)
+                b = w.cargo.build(cells_of(patch), logs / f"{name}.build.log")
+                if b.returncode != 0 or not recompiled(b.stdout):
+                    slot.why = (("build failed" if b.returncode != 0 else "cargo did not recompile rivet-cli")
+                                + f" (see {logs / f'{name}.build.log'})")
+            except BaseException as e:  # parked: the runner raises it where the serial loop would have
+                slot.error = e
+            slot.built.set()
+            slot.released.wait()
+            if slot.snap is not None and not slot.restored:
+                try:
+                    restore(w.tree, slot.snap)
+                except BaseException as e:  # the next run's prepare_tree refuses a tree left dirty
+                    print(f"  seeded recall: could not restore {w.tree}: {e}")
+
+    def close(self) -> None:
+        """Stop taking patches, hand every tree back and wait for the workers."""
+        self._stop.set()
+        for slot in self.slots.values():
+            slot.released.set()
+        for t in self._threads:
+            t.join()
+
+
+def grade_seeds(led: Ledger, live: list[Row], control: dict[str, str], control_skips: dict[str, str],
+                workers: list[Worker], logs: Path) -> dict[Row, Verdict]:
+    """Grade every patch in sorted order: workers build ahead, this runner alone runs each seed's cells, in the tree it was built in."""
+    patches = sorted({r.patch for r in live})
+
+    def cells_of(patch: str) -> list[str]:
+        return sorted({c for r in live if r.patch == patch for c in r.cells if control.get(c) == "PASS"})
+
+    pool = SeedPool(workers, patches, cells_of, logs)
+    verdicts: dict[Row, Verdict] = {}
+    try:
+        for patch in patches:
+            group = [r for r in live if r.patch == patch]
+            cells, slot = cells_of(patch), pool.slots[patch]
+            name = patch.replace("/", "__").removesuffix(".patch")
+            led.phase(f"SEED {patch} — {', '.join(r.engine for r in group)} ({len(cells)} control-green cell(s))")
+            slot.built.wait()
+            try:
+                if slot.error is not None:
+                    raise slot.error
+                if slot.why:
+                    led.bad(slot.why)
+                    seeded = None
+                else:
+                    seeded = slot.worker.cargo.run(cells, logs / f"{name}.log") if cells else {}
+            finally:
+                try:
+                    if slot.snap is not None:
+                        restore(slot.worker.tree, slot.snap)
+                        slot.restored = True
+                finally:
+                    slot.released.set()
+            for r in group:
+                verdicts[r] = grade(r, control, seeded, control_skips)
+    finally:
+        pool.close()
+    return verdicts
 
 
 def render(verdicts: list[Verdict]) -> str:
@@ -576,8 +674,79 @@ def self_test() -> int:
         if p.returncode != 0:
             stale.append(stale_message(patch.split("/")[0], (HERE / patch).read_text(), p.stdout))
     assert not stale, "a seed that no longer applies is a STALE row in the gate; re-cut it on this tree: " + "; ".join(stale)
-    print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, stale and build checks")
+    _pool_self_test()
+    print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, stale and build checks, "
+          f"build pool of {BUILD_WORKERS} equals the serial path")
     return 0
+
+
+def _pool_self_test() -> None:
+    """The build pool grades each seed in the tree it was built in, one cell run at a time, in the serial order: same verdicts and ledger lines as one worker."""
+    import tempfile
+
+    class Fake:
+        """Stands in for Cargo: what it builds and runs is whatever its own tree holds."""
+
+        def __init__(self, tree: Path, probe: dict) -> None:
+            self.tree, self.probe = tree, probe
+
+        def seed(self) -> str:
+            return (self.tree / "src" / "x.rs").read_text().strip()
+
+        def build(self, cells, log):
+            with self.probe["lock"]:
+                self.probe["building"] += 1
+                self.probe["peak_builds"] = max(self.probe["peak_builds"], self.probe["building"])
+            time.sleep(0.4 if self.seed() == "seed-a" else 0.02)
+            with self.probe["lock"]:
+                self.probe["building"] -= 1
+            out = "" if self.seed() == "seed-d" else "   Compiling rivet-cli v0 (/x)\n"
+            return subprocess.CompletedProcess([], 1 if self.seed() == "seed-c" else 0, out)
+
+        def run(self, cells, log):
+            with self.probe["lock"]:
+                self.probe["running"] += 1
+                assert self.probe["running"] == 1, "two cell runs at once"
+                self.probe["order"].append(self.seed())
+            time.sleep(0.02)
+            with self.probe["lock"]:
+                self.probe["running"] -= 1
+            return {c: "FAIL" if self.seed() == "seed-" + c.removeprefix(LIB).split("_")[1] else "PASS" for c in cells}
+
+    names = "abcdefg"
+    want = {"a": CAUGHT, "b": CAUGHT, "c": BROKEN, "d": BROKEN, "e": CAUGHT, "f": CAUGHT, "g": CAUGHT}
+    with tempfile.TemporaryDirectory() as d:
+        pd = Path(d)
+        trees = []
+        for k in range(BUILD_WORKERS):
+            t = pd / f"w{k}" / "tree"
+            (t / "src").mkdir(parents=True)
+            (t / "src" / "x.rs").write_text("base\n")
+            for argv in (["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]):
+                git(t, *argv)
+            trees.append(t)
+        rows = []
+        for n in names:
+            patch = pd / f"{n}.patch"
+            patch.write_text(f"--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1 +1 @@\n-base\n+seed-{n}\n")
+            cell = f"{'lib:' if n in 'bf' else ''}t_{n}"  # b and f are lib-only seeds
+            rows.append(Row(n, "postgres", str(patch), (cell,)))
+        control = {c: "PASS" for r in rows for c in r.cells}
+
+        def go(k: int):
+            probe = {"lock": threading.Lock(), "building": 0, "running": 0, "peak_builds": 0, "order": []}
+            led = Ledger(colour=False)
+            led._buf = []
+            got = grade_seeds(led, rows, control, {}, [Worker(t, Fake(t, probe)) for t in trees[:k]], pd / "logs")
+            assert all((t / "src" / "x.rs").read_text() == "base\n" for t in trees), "a tree was left patched"
+            return [(r.seed, got[r].status, got[r].detail) for r in rows], probe["order"], led._buf, probe["peak_builds"]
+
+        serial, pooled = go(1), go(BUILD_WORKERS)
+        assert [s for _, s, _ in pooled[0]] == [want[n] for n in names], (
+            "a seed was graded against the wrong tree", pooled[0])
+        assert pooled[:3] == serial[:3], ("the pool differs from the serial path", serial, pooled)
+        assert pooled[1] == [f"seed-{n}" for n in names if want[n] == CAUGHT], pooled[1]
+        assert serial[3] == 1 and pooled[3] > 1, ("builds must overlap only with workers", serial[3], pooled[3])
 
 
 def main(argv: list[str] | None = None) -> int:

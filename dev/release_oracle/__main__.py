@@ -480,14 +480,15 @@ def _stage_table_self_test() -> None:
                       "previous-release differential", "field symptom replay", "scale memory", "flat rss"]
     for argv in (["--max-parallel", "--with-seeded-recall"], ["--max-parallel=2", "--no-cloud"]):
         ns = parse_args(argv)
-        prefix, overlap, tail, measuring = maxpar_split(gate_stages(ns))
+        (_, _, prefix), (_, _, overlap), (_, _, tail), (_, _, recall), (_, _, measuring) = maxpar_plan(gate_stages(ns))
         assert [s.name for s in measuring] == measured_names, [s.name for s in measuring]
         assert [s.name for s in tail] == ["live modules"], [s.name for s in tail]
         assert [s.name for s in prefix] == ["release build path", "release hygiene"], [s.name for s in prefix]
         assert not [s.name for s in overlap if ALONE in s.needs], "a measuring stage is overlapped"
         held = [s.name for s in overlap if (s.needs | s.uses) & SERIAL]
         assert not held, f"under --max-parallel no overlapped stage holds the stand or cargo: {held}"
-        assert ("seeded recall" in {s.name for s in overlap}) == ("--with-seeded-recall" in argv), argv
+        assert [s.name for s in recall] == (["seeded recall"] if "--with-seeded-recall" in argv else []), argv
+        assert "seeded recall" not in {s.name for s in overlap + tail + measuring}, "recall shares a phase with a stage"
     active, seen = set(), []
     lock = threading.Lock()
 
@@ -508,6 +509,30 @@ def _stage_table_self_test() -> None:
                              Stage("r", body("r"), frozenset({"y"}))], cap=3)
     assert not any({"p", "q"} <= snap for snap in seen), f"two conflicting stages ran together: {seen}"
     assert [c.scenario for c in probe.cells] == ["p", "q", "r"], [c.scenario for c in probe.cells]
+    ns = parse_args(["--max-parallel", "--with-seeded-recall"])
+    plan = maxpar_plan(gate_stages(ns))
+    started: list[tuple[str, frozenset[str]]] = []
+
+    def record(name: str) -> Callable[[Ledger], None]:
+        def run(led: Ledger) -> None:
+            with lock:
+                active.add(name)
+                started.append((name, frozenset(active)))
+            time.sleep(0.01)
+            with lock:
+                active.discard(name)
+        return run
+
+    active.clear()
+    run_gate(Ledger(colour=False), ns, [Stage(s.name, record(s.name), s.needs, s.uses) for s in gate_stages(ns)])
+    order = [n for n, _ in started]
+    first = {label: min(order.index(s.name) for s in group) for label, _, group in plan if group}
+    last = {label: max(order.index(s.name) for s in group) for label, _, group in plan if group}
+    labels = [label for label, _, group in plan if group]
+    assert all(last[a] < first[b] for a, b in zip(labels, labels[1:])), ("a phase starts before the previous one ended", order)
+    alone_at_start = [snap for n, snap in started if n == "seeded recall"]
+    assert alone_at_start == [frozenset({"seeded recall"})], f"seeded recall ran beside another stage: {alone_at_start}"
+    assert plan[3][2] and plan[3][2][0].name == "seeded recall" and plan[1][2][-1].name != "seeded recall"
     print(f"self-test ok: the stage table keeps every stage in order, measurement stages run alone; overlapping: {overlapping}; "
           f"--max-parallel puts {len(measured_names)} measuring stages last, alone, and never overlaps a named conflict "
           f"(scheduler probe: {len(seen)} starts)")
@@ -1182,7 +1207,6 @@ SLOTS = "the replication-slot budget"
 INIT_LOCKS = "the ClickHouse engine locks"
 MAXPAR_HOLDS: dict[str, frozenset[str]] = {
     "network faults": frozenset({TOXI}), "pool e2e": frozenset({TOXI}), "transient retry": frozenset({TOXI}),
-    "seeded recall": frozenset({TOXI, SLOTS}),
     "cdc standby": frozenset({SLOTS}), "cdc e2e": frozenset({SLOTS}), "cdc differential": frozenset({SLOTS}),
     "cdc harm": frozenset({SLOTS}), "cdc schema drift": frozenset({SLOTS}), "engine matrix": frozenset({SLOTS}),
     "init delta": frozenset({INIT_LOCKS}), "clickhouse load": frozenset({INIT_LOCKS}),
@@ -1225,25 +1249,32 @@ def run_stages(led: Ledger, stages: Sequence[Stage]) -> None:
             run_concurrently(led, " + ".join(st.name for st in wave), [(st.name, st.run) for st in wave])
 
 
-def maxpar_split(stages: Sequence[Stage]) -> tuple[list[Stage], list[Stage], list[Stage], list[Stage]]:
-    """Under --max-parallel: (checkout writers, overlapped stages, live modules, measuring stages), each in table order."""
+def maxpar_plan(stages: Sequence[Stage]) -> list[tuple[str, bool, list[Stage]]]:
+    """Under --max-parallel: (label, overlapped?, stages) per phase, in run order; each phase's stages in table order."""
     prefix = [s for s in stages if s.name in MAXPAR_PREFIX]
     rest = [s for s in stages if s.name not in MAXPAR_PREFIX]
     measuring = [s for s in rest if ALONE in s.needs]
     tail = [s for s in rest if s.name == "live modules"]
-    return prefix, [s for s in rest if s not in measuring and s not in tail], tail, measuring
+    recall = [s for s in rest if s.name == "seeded recall"]
+    overlap = [s for s in rest if s not in measuring + tail + recall]
+    return [("checkout writers, alone", False, prefix), ("A: non-measuring stages, overlapped", True, overlap),
+            ("B: live modules, alone", False, tail), ("B2: seeded recall, alone (its build workers beside it)", False, recall),
+            ("C: measuring stages, alone", False, measuring)]
 
 
 def run_gate(led: Ledger, ns: argparse.Namespace, stages: Sequence[Stage]) -> None:
-    """The table in order; under --max-parallel the checkout writers, then every non-measuring stage overlapped, live modules, then the measuring stages alone."""
+    """The table in order; under --max-parallel the phases of `maxpar_plan`, seeded recall never beside another stage's cells."""
     if not ns.max_parallel:
         run_stages(led, stages)
         return
-    prefix, overlap, tail, measuring = maxpar_split(stages)
-    run_stages(led, prefix)
-    run_max_parallel(led, overlap, ns.max_parallel)
-    run_stages(led, tail)
-    run_stages(led, measuring)
+    plan = maxpar_plan(stages)
+    for label, _, group in plan:
+        print(f"  [max-parallel] {label}: {', '.join(s.name for s in group) or '-'}")
+    for _, overlapped, group in plan:
+        if overlapped:
+            run_max_parallel(led, group, ns.max_parallel)
+        else:
+            run_stages(led, group)
 
 
 def run_max_parallel(led: Ledger, stages: Sequence[Stage], cap: int) -> None:
@@ -1370,8 +1401,8 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
             led, keep=ns.keep, parallel=ns.engine_parallel, bring_up=bring_up, seed_engine=seed_engine),
             frozenset({"the BigQuery golden's containers"})))
     if maxpar and ns.with_seeded_recall:
-        # Beside the stage table under --max-parallel; its own scratch tree, and the named collisions it has.
-        table.append(Stage("seeded recall", lambda led: verify_seeded_recall(led, True), MAXPAR_HOLDS["seeded recall"]))
+        # Under --max-parallel: its own phase after the overlap, alone (see maxpar_plan); it holds nothing, its cells own the machine.
+        table.append(Stage("seeded recall", lambda led: verify_seeded_recall(led, True), frozenset()))
     # The cells a fix added or edited since the baseline, through the baseline: each must fail there.
     table.append(serial("fix cells", lambda led: fix_cells.verify_fix_cells(led)))
     # Last: it runs every live_suite test no stage above already ran.
@@ -1800,6 +1831,17 @@ def _snowflake_env() -> str:
     return warehouse_env.snowflake()
 
 
+def keep_maxpar_logs(work: Path) -> None:
+    """Under --max-parallel the gate keeps its own oracle log and timings history under target/maxpar/ in this checkout."""
+    from .core import TIMINGS_HISTORY
+
+    out = ROOT / "target" / "maxpar"
+    out.mkdir(parents=True, exist_ok=True)
+    for src in (work / "rivet-oracle.log", TIMINGS_HISTORY):
+        if src.is_file():
+            shutil.copy2(src, out / src.name)
+
+
 def main(argv: list[str] | None = None) -> int:
     if (argv if argv is not None else sys.argv[1:]) == ["--self-test"]:
         from ..pytools import evidence
@@ -1963,6 +2005,8 @@ def main(argv: list[str] | None = None) -> int:
             print(footer)
         return rc
     finally:
+        if ns.max_parallel:
+            keep_maxpar_logs(work)
         if not ns.keep:
             remove_engine_containers()
             shutil.rmtree(work, ignore_errors=True)
