@@ -54,8 +54,13 @@ pub(super) fn list_tables(conn: &mut OracleSource, schema: &str) -> Result<Vec<S
     ))
 }
 
-/// Introspect `schema.table` (catalog-exact names); a private or PUBLIC synonym is followed to its local base table.
-pub(super) fn introspect(conn: &mut OracleSource, schema: &str, table: &str) -> Result<TableInfo> {
+/// Introspect `schema.table` (catalog-exact names), asking LogMiner's catalog only for a CDC scaffold; a private or PUBLIC synonym is followed to its local base table.
+pub(super) fn introspect(
+    conn: &mut OracleSource,
+    schema: &str,
+    table: &str,
+    cdc: bool,
+) -> Result<TableInfo> {
     let mut columns = columns_of(conn, schema, table)?;
     let (mut schema, mut table) = (schema.to_string(), table.to_string());
     if columns.is_empty()
@@ -104,8 +109,12 @@ pub(super) fn introspect(conn: &mut OracleSource, schema: &str, table: &str) -> 
             .unwrap_or(0)
             .max(0),
     };
+    let cdc_unmineable = asked_for_cdc(cdc, || {
+        cdc_unmineable(&schema, &table, |sql| conn.query_rows(sql))
+    })?;
     Ok(TableInfo {
         cdc_capture_instance: None,
+        cdc_unmineable,
         density,
         schema,
         table,
@@ -113,6 +122,44 @@ pub(super) fn introspect(conn: &mut OracleSource, schema: &str, table: &str) -> 
         total_bytes: None,
         columns,
     })
+}
+
+/// The mineability probe's answer for a CDC scaffold; any other init never runs it.
+fn asked_for_cdc(
+    cdc: bool,
+    probe: impl FnOnce() -> Result<Option<String>>,
+) -> Result<Option<String>> {
+    if cdc { probe() } else { Ok(None) }
+}
+
+/// Why LogMiner cannot capture `schema.table`, asked through the predicate the capture itself
+/// refuses by, over the catalog rows it reads ([`crate::source::oracle::cdc::unmineable`]).
+fn cdc_unmineable(
+    schema: &str,
+    table: &str,
+    mut read: impl FnMut(&str) -> Result<Vec<Vec<Option<String>>>>,
+) -> Result<Option<String>> {
+    use crate::source::oracle::cdc;
+    let sql = cdc::catalog_columns_sql(&format!("'{}'", lit(schema)), &format!("'{}'", lit(table)));
+    let rows = read(&sql)?;
+    let major = read(cdc::MAJOR_VERSION_SQL)?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    Ok(unmineable_of(schema, table, &rows, major))
+}
+
+/// [`crate::source::oracle::cdc::unmineable`] over the catalog rows the capture reads.
+fn unmineable_of(
+    schema: &str,
+    table: &str,
+    rows: &[Vec<Option<String>>],
+    major: u32,
+) -> Option<String> {
+    use crate::source::oracle::cdc;
+    let catalog: Vec<cdc::CatalogColumn> = rows.iter().map(|r| cdc::catalog_column(r)).collect();
+    cdc::unmineable(schema, table, &catalog, major)
 }
 
 /// Rows a never-analyzed table's estimate counts up to: past the 100K mode threshold, cheap to read.
@@ -263,6 +310,113 @@ fn catalog_type(data_type: &str, precision: Option<u32>, scale: Option<i32>) -> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_a_cdc_scaffold_runs_the_mineability_probe() {
+        let ran = std::cell::Cell::new(0);
+        let probe = || {
+            ran.set(ran.get() + 1);
+            Ok(Some("why".to_string()))
+        };
+        assert_eq!(asked_for_cdc(false, probe).unwrap(), None);
+        assert_eq!(
+            ran.get(),
+            0,
+            "a batch init must not touch the LogMiner catalog"
+        );
+        assert_eq!(asked_for_cdc(true, probe).unwrap().as_deref(), Some("why"));
+        assert_eq!(ran.get(), 1);
+    }
+    #[test]
+    fn the_mineability_probe_reads_the_capture_catalog_and_names_the_refusal() {
+        let version = crate::source::oracle::cdc::MAJOR_VERSION_SQL;
+        let cells = |ty: &str| {
+            ["APP", "T", "C", ty, "NO", "NO"]
+                .map(|c| Some(c.to_string()))
+                .to_vec()
+        };
+        let mut asked = Vec::new();
+        let why = super::cdc_unmineable("APP", "T", |sql| {
+            asked.push(sql.to_string());
+            Ok(if sql == version {
+                vec![vec![Some("19".to_string())]]
+            } else {
+                vec![cells("BLOB")]
+            })
+        })
+        .unwrap()
+        .expect("a BLOB table is unmineable");
+        assert!(
+            why.starts_with("oracle cdc: `APP.T`") && why.contains("C BLOB"),
+            "{why}"
+        );
+        assert!(
+            asked[0].contains("'APP'") && asked[0].contains("'T'"),
+            "{asked:?}"
+        );
+        let none = super::cdc_unmineable("APP", "T", |sql| {
+            Ok(if sql == version {
+                vec![vec![Some("19".to_string())]]
+            } else {
+                vec![cells("NUMBER")]
+            })
+        });
+        assert_eq!(none.unwrap(), None);
+    }
+    /// Init leaves out exactly what the capture refuses, with the refusal's own text: one predicate.
+    /// The catalog rows the capture reads decide init's verdict: the reason the capture gives for
+    /// each unmineable cause, word for word, and none for a table LogMiner mines.
+    #[test]
+    fn init_names_each_unmineable_cause_as_the_capture_does() {
+        let row = |name: &str, ty: &str, identity: &str, virt: &str| {
+            ["APP", "T", name, ty, identity, virt]
+                .map(|c| Some(c.to_string()))
+                .to_vec()
+        };
+        let mineable = [row("ID", "NUMBER", "NO", "NO")];
+        assert_eq!(super::unmineable_of("APP", "T", &mineable, 19), None);
+        let cases = [
+            (row("B", "BLOB", "NO", "NO"), "B BLOB"),
+            (row("V", "NUMBER", "NO", "YES"), "V (a virtual column"),
+            (row("ID", "NUMBER", "YES", "NO"), "ID (an identity column"),
+        ];
+        for (r, says) in cases {
+            let why = super::unmineable_of("APP", "T", &[row("K", "NUMBER", "NO", "NO"), r], 19)
+                .expect("an unmineable table");
+            assert!(why.starts_with("oracle cdc: `APP.T`"), "{why}");
+            assert!(why.contains(says), "{why}");
+        }
+        let wide: Vec<_> = (0..=300)
+            .map(|i| row(&format!("C{i}"), "NUMBER", "NO", "NO"))
+            .collect();
+        let why = super::unmineable_of("APP", "T", &wide, 19).expect("too many columns");
+        assert!(why.contains("301 columns"), "{why}");
+    }
+
+    #[test]
+    fn init_and_the_capture_refuse_a_table_by_one_predicate() {
+        let row = |name: &str, ty: &str| {
+            vec![
+                Some("APP".to_string()),
+                Some("DOCS".to_string()),
+                Some(name.to_string()),
+                Some(ty.to_string()),
+                Some("NO".to_string()),
+                Some("NO".to_string()),
+            ]
+        };
+        let rows = [row("ID", "NUMBER"), row("BODY", "BLOB")];
+        let why = super::unmineable_of("APP", "DOCS", &rows, 19).expect("a BLOB is refused");
+        let catalog: Vec<_> = rows
+            .iter()
+            .map(|r| crate::source::oracle::cdc::catalog_column(r))
+            .collect();
+        let refusal = crate::source::oracle::cdc::refuse_unmineable("APP", "DOCS", &catalog, 19)
+            .expect_err("the capture refuses it too");
+        assert_eq!(format!("{refusal}"), why);
+        assert_eq!(super::unmineable_of("APP", "DOCS", &rows[..1], 19), None);
+    }
+
     use super::*;
 
     fn col(name: &str, nullable: bool, pk: bool) -> ColumnInfo {
@@ -368,6 +522,7 @@ mod tests {
         };
         let table = |pk: [&str; 7], stamp: [&str; 7]| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             schema: "RIVET".into(),
             table: "T".into(),
             row_estimate: 500_000,
