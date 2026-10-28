@@ -186,7 +186,7 @@ pub(crate) fn run_capture(
             return (
                 Vec::new(),
                 Err(crate::error::coded(
-                    crate::error::codes::SOURCE_CDC_COLUMNS_UNREADABLE,
+                    crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
                     format!(
                         "export '{}' table '{}': key column `{missing}` is not readable under \
                          `columns_from: grants`, so changes to a row could not be told apart; \

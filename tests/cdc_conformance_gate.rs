@@ -934,7 +934,7 @@ const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
 // 2026-10-21: +1 shared codec - the hot ADD COLUMN cells (#644) read the added column's values from their parts
 // with arrow (`read_all_parts`); the rig oracle grades every run against the source, and the BigQuery / ClickHouse
 // cells read the warehouse back through `bq` / its HTTP client.
-const PIN_SHARED_CODEC: usize = 120; // ratchet-pin: cdc-census-shared-codec
+const PIN_SHARED_CODEC: usize = 123; // ratchet-pin: cdc-census-shared-codec
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.

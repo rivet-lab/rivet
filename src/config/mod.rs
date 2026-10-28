@@ -672,6 +672,9 @@ impl Config {
                  resume, or drop `resume`.",
             );
         }
+        if let Some(why) = source::columns_from_refusal(&self.source) {
+            crate::config_bail!(crate::error::codes::CONFIG_SOURCE_MODE_UNSUPPORTED, "{why}");
+        }
         Ok(())
     }
 

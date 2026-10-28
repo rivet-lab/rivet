@@ -61,6 +61,19 @@ pub struct SourceConfig {
     /// `type: mongo`; ignored by the SQL engines. See [`MongoConfig`].
     #[serde(default)]
     pub mongo: Option<MongoConfig>,
+
+    /// `grants`: every export reads and delivers only the columns the source account may
+    /// `SELECT`, in batch reads, baselines and the change stream (MySQL only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns_from: Option<ColumnsFrom>,
+}
+
+/// Where the source's column list comes from.
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ColumnsFrom {
+    /// The columns the source account may `SELECT`, as the server judges each one.
+    Grants,
 }
 
 /// MongoDB read-path knobs. All three address completeness/fidelity of a `full`
@@ -271,7 +284,21 @@ fn bracket_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Why this source cannot take `columns_from: grants`, if it cannot.
+pub(crate) fn columns_from_refusal(source: &SourceConfig) -> Option<String> {
+    (source.columns_from_grants() && source.source_type != SourceType::Mysql).then(|| {
+        "`source.columns_from: grants` is supported on MySQL sources only (other engines: \
+         rivet-lab/rivet#711)"
+            .to_string()
+    })
+}
+
 impl SourceConfig {
+    /// `columns_from: grants` — only the columns the account may read are read and delivered.
+    pub fn columns_from_grants(&self) -> bool {
+        self.columns_from == Some(ColumnsFrom::Grants)
+    }
+
     /// Return a copy of this config with **all plaintext credential material stripped**,
     /// safe to embed in a persisted [`crate::plan::PlanArtifact`] (ADR-0005 PA9).
     ///
@@ -715,6 +742,33 @@ pub(super) fn mixed_connection_methods() -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn columns_from_grants_is_refused_on_every_engine_but_mysql() {
+        for engine in [
+            SourceType::Mysql,
+            SourceType::Postgres,
+            SourceType::Mssql,
+            SourceType::Oracle,
+            SourceType::Mongo,
+        ] {
+            let mut source = make_source(engine);
+            assert_eq!(
+                columns_from_refusal(&source),
+                None,
+                "{engine:?} without the policy"
+            );
+            source.columns_from = Some(ColumnsFrom::Grants);
+            let why = columns_from_refusal(&source);
+            assert_eq!(
+                why.is_none(),
+                engine == SourceType::Mysql,
+                "{engine:?}: {why:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_source_state_key_names_the_server_and_database_without_credentials() {
         use super::{SourceType, source_state_key};
@@ -851,8 +905,6 @@ mod tests {
         assert_eq!(b, "postgres://h2:5432/b");
     }
 
-    use super::*;
-
     // ── TlsMode::is_enforced ────────────────────────────────────────────────
 
     #[test]
@@ -885,6 +937,7 @@ mod tests {
             tuning: None,
             tls: None,
             mongo: None,
+            columns_from: None,
         }
     }
 

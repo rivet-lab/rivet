@@ -1,4 +1,4 @@
-//! `cdc.columns_from: grants`: the columns a MySQL account may `SELECT`, asked of the server.
+//! `source.columns_from: grants`: the columns a MySQL account may `SELECT`, asked of the server.
 
 use std::collections::HashMap;
 
@@ -53,8 +53,8 @@ pub(crate) fn readable_columns(
     }
     if readable.is_empty() {
         crate::rivet_bail!(
-            crate::error::codes::SOURCE_CDC_COLUMNS_UNREADABLE,
-            "mysql cdc: `{db}.{table}`: `columns_from: grants` found no column this account \
+            crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+            "mysql: `{db}.{table}`: `columns_from: grants` found no column this account \
              may SELECT (or no such table), so nothing of it could be delivered; nothing was \
              read or written"
         );
@@ -66,8 +66,8 @@ pub(crate) fn readable_columns(
     )?;
     if let Some(missing) = crate::source::cdc::unreadable(&key, &readable) {
         crate::rivet_bail!(
-            crate::error::codes::SOURCE_CDC_COLUMNS_UNREADABLE,
-            "mysql cdc: `{db}.{table}`: key column `{missing}` is not readable under \
+            crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+            "mysql: `{db}.{table}`: key column `{missing}` is not readable under \
              `columns_from: grants`, so changes to a row could not be told apart; nothing was \
              read or written"
         );
@@ -91,7 +91,7 @@ pub(crate) fn readable_columns_of(
             None => match bare_db.get(cfg).map(String::as_str).unwrap_or(own_db) {
                 "" => crate::rivet_bail!(
                     crate::error::codes::SOURCE_CDC_TABLE_UNRESOLVED,
-                    "mysql cdc: `{cfg}` is a bare name and the source URL names no database, so \
+                    "mysql: `{cfg}` is a bare name and the source URL names no database, so \
                      `columns_from: grants` cannot tell whose grants to read: write `db.{cfg}`"
                 ),
                 db => (db.to_string(), cfg.clone()),

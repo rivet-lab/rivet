@@ -48,7 +48,7 @@ const NO_ORACLE_CEILING: usize = 22; // ratchet-pin: no-oracle-opt-outs
 // 45 -> 46 (2026-10-16): a Snowflake full load whose COPY fails on a corrupted part (snowflake_full_load_that_fails_keeps_the_last_table_*): the load reached the warehouse write (the staging table), so its load_run row is `failed`, which the ledger counts as ownership by design.
 // 2026-10-21: +1 - the SQL Server hot ADD COLUMN stop (#644) comes at the end of a drain whose parts were
 // committed before the column was added; they and the checkpoint stay, as on every mid-drain CDC stop.
-const FAILED_RUN_LEFTOVER_CEILING: usize = 47; // ratchet-pin: failed-run-leftover-declarations
+const FAILED_RUN_LEFTOVER_CEILING: usize = 48; // ratchet-pin: failed-run-leftover-declarations
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs): product defects every failed run may show.
 // 2 -> 1 (2026-10-08): a run that fails before its first write leaves the prefix alone, so a failed manifest before a write is a failure, no longer an excuse.

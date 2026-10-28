@@ -63,7 +63,11 @@ fn expand_one(
     params: Option<&HashMap<String, String>>,
     out: &mut Vec<ExportConfig>,
 ) -> Result<()> {
-    let base_query = export.resolve_query(config_dir, params)?;
+    let projected = crate::plan::build::project_table_read(None, source, export)?;
+    let base_query = projected
+        .as_ref()
+        .unwrap_or(export)
+        .resolve_query(config_dir, params)?;
     let st = source.source_type;
 
     let mut src = crate::source::create_source(source)?;

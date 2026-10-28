@@ -33,6 +33,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `tuning` | [TuningConfig](#tuningconfig) |  |  |
 | `tls` | [TlsConfig](#tlsconfig) |  | Transport security settings (ADR: SecOps). When absent, Rivet connects without TLS — a warning is emitted so operators are aware. See [`TlsConfig`]. |
 | `mongo` | [MongoConfig](#mongoconfig) |  | MongoDB-specific read options (`source.mongo:`). Honoured only when `type: mongo`; ignored by the SQL engines. See [`MongoConfig`]. |
+| `columns_from` | `grants` |  | `grants`: every export reads and delivers only the columns the source account may `SELECT`, in batch reads, baselines and the change stream (MySQL only). |
 
 ### `source.mongo` (MongoDB read options)
 
@@ -120,7 +121,6 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `slot` | `string` |  | PostgreSQL logical replication slot name (default `rivet_slot`). |
 | `capture_instance` | `string` |  | SQL Server CDC capture instance, e.g. `dbo_orders` — required for `sqlserver://` sources. |
 | `backfill` | `auto` |  | Which EXPORTS supply the baseline read (see [`CdcBackfill`]). Absent ⇒ no baseline: the stream captures changes only, and the operator owns the initial load. |
-| `columns_from` | `grants` |  | `grants`: deliver only the columns the source account may `SELECT`, in the snapshot and in the change stream; read once at run start (MySQL only). |
 
 ### `exports[].tuning`
 

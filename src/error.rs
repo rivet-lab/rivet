@@ -1459,9 +1459,14 @@ pub mod codes {
         "export the table in batch (`mode: full`), or capture a table the message's supported list covers",
     );
     /// A `columns_from: grants` table whose account may read no column, or not its key.
-    pub const SOURCE_CDC_COLUMNS_UNREADABLE: Code = usage(
-        "RIVET_SOURCE_CDC_COLUMNS_UNREADABLE",
+    pub const SOURCE_COLUMNS_UNREADABLE: Code = usage(
+        "RIVET_SOURCE_COLUMNS_UNREADABLE",
         "grant the account `SELECT` on the columns the message names (at least the key), or drop the table from the export",
+    );
+    /// A `columns_from: grants` stream met a grant change that alters what it may deliver.
+    pub const SOURCE_CDC_GRANTS_CHANGED: Code = transient(
+        "RIVET_SOURCE_CDC_GRANTS_CHANGED",
+        "re-run: the next run reads the new grants and resumes from the checkpoint, so nothing is lost",
     );
     /// One source transaction larger than the in-memory buffer cap.
     pub const SOURCE_CDC_TRANSACTION_TOO_LARGE: Code = usage(
@@ -1844,7 +1849,8 @@ pub mod codes {
         CONFIG_SOURCE_FEATURE_MISSING,
         SOURCE_CDC_TABLE_UNRESOLVED,
         SOURCE_CDC_TABLE_UNSUPPORTED,
-        SOURCE_CDC_COLUMNS_UNREADABLE,
+        SOURCE_COLUMNS_UNREADABLE,
+        SOURCE_CDC_GRANTS_CHANGED,
         SOURCE_CDC_TRANSACTION_TOO_LARGE,
         SOURCE_QUERY_COLUMN_UNREFERENCEABLE,
         SOURCE_RUNTIME_UNAVAILABLE,

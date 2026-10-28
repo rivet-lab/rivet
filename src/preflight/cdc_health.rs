@@ -142,7 +142,7 @@ fn run_refusals(config: &Config, exports: &[&ExportConfig], url: &str) -> Vec<Do
                     config.source.tls.as_ref(),
                     &tables,
                     drain,
-                    cdc.columns_from_grants(),
+                    config.source.columns_from_grants(),
                 )
                 .err()?;
             Some(run_refusal_check(&e.name, &refused))

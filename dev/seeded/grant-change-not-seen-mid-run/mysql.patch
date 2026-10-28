@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -1457,7 +1457,7 @@
+                 ));
+             }
+             // `columns_from: grants`: a grant change is re-read where the binlog records it.
+-            Some(EventData::QueryEvent(qe)) if is_privilege_statement(&qe.query()) => {
++            Some(EventData::QueryEvent(qe)) if false && is_privilege_statement(&qe.query()) => {
+                 self.refuse_changed_grants(log_pos)?;
+             }
+             Some(EventData::QueryEvent(qe)) if is_commit_statement(&qe.query()) => {

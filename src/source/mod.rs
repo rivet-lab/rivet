@@ -292,6 +292,12 @@ pub trait Source: Send {
         )
     }
 
+    /// The `SELECT` of `table` naming only the columns this account may read (`columns_from:
+    /// grants`); `None` on an engine without column grants.
+    fn readable_select(&mut self, _table: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Return `TypeMapping` for every column in `query` without fetching rows.
     ///
     /// Used by `rivet check --type-report` to show the full type provenance

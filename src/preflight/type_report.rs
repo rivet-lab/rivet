@@ -408,9 +408,7 @@ fn resolved_units(
         }
     }
     // `columns_from: grants`: probe the columns the run delivers, not `SELECT *` the account may not run.
-    if config.source.source_type == SourceType::Mysql
-        && export.cdc.as_ref().is_some_and(|c| c.columns_from_grants())
-    {
+    if config.source.source_type == SourceType::Mysql && config.source.columns_from_grants() {
         let tables: Vec<String> = units.iter().filter_map(|u| u.relation.clone()).collect();
         let readable =
             crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, &tables)?;

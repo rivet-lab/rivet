@@ -544,12 +544,12 @@ pub(super) fn initial_snapshot_pending(
             tls,
             &tables,
             DrainMode::from_until_current(cdc.until_current),
-            cdc.columns_from_grants(),
+            config.source.columns_from_grants(),
         )?;
     }
 
     // `columns_from: grants`: each leg reads only its readable columns, refused before the anchor.
-    let readable = if legs_read_grants(cdc.columns_from_grants(), pending_idx.len()) {
+    let readable = if legs_read_grants(config.source.columns_from_grants(), pending_idx.len()) {
         let reads: Vec<String> = pending_idx
             .iter()
             .map(|&i| table_dests[i].1.clone())
@@ -957,7 +957,7 @@ fn run_cdc_inner(
                             .unwrap_or(crate::config::DEFAULT_MYSQL_SERVER_ID),
                         // The same strings the sink will route by — see the field's doc.
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        columns_from_grants: cdc.columns_from_grants(),
+                        columns_from_grants: config.source.columns_from_grants(),
                     },
                     crate::config::SourceType::Postgres => CdcEngineOpts::Postgres {
                         slot: cdc

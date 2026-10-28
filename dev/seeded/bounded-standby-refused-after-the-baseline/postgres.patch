@@ -7,6 +7,6 @@ diff --git a/src/pipeline/cdc_job.rs b/src/pipeline/cdc_job.rs
              &tables,
 -            DrainMode::from_until_current(cdc.until_current),
 +            DrainMode::Continuous,
-             cdc.columns_from_grants(),
+             config.source.columns_from_grants(),
          )?;
      }

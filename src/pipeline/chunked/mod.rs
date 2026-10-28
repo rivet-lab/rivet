@@ -1020,6 +1020,7 @@ mod tests {
                 tuning: None,
                 tls: None,
                 mongo: None,
+                columns_from: None,
             },
             column_overrides: Default::default(),
             verify: crate::config::VerifyMode::Size,

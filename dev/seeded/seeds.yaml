@@ -3449,3 +3449,37 @@ seeds:
         cells:
           - "lib:a_transient_http_reply_that_outlasts_the_retries_exits_retryable"
           - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"
+
+  - name: column-grants-batch-read-unprojected
+    class: "a batch `table:` read under `source.columns_from: grants` builds `SELECT *` instead of the readable columns: MySQL refuses it (1142) or, with a wider grant, a hidden column is read"
+    history: "the client's DevOps asked that a hidden column never reach BigQuery in any mode (2026-10-28); RED from this patch: `ERROR 1142 ... SELECT command denied` on the full batch run"
+    scope: source
+    engines:
+      mysql:
+        patch: column-grants-batch-read-unprojected/mysql.patch
+        cells: [a_column_grant_account_reads_only_its_columns_in_every_batch_mode_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL until #712"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server until #713"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle until #714"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB until #715"
+
+  - name: grant-change-not-seen-mid-run
+    class: "a `REVOKE` in the binlog of an open MySQL CDC run is not re-read: the run keeps delivering the revoked column"
+    history: "the client's DevOps asked that a hidden column never reach BigQuery in any mode (2026-10-28); RED from this patch: the open run ends without RIVET_SOURCE_CDC_GRANTS_CHANGED"
+    scope: source
+    engines:
+      mysql:
+        patch: grant-change-not-seen-mid-run/mysql.patch
+        cells: [a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL until #712"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server until #713"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle until #714"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB until #715"

@@ -48,22 +48,6 @@ pub const DEFAULT_PG_SLOT: &str = "rivet_slot";
 /// [`DEFAULT_PG_SLOT`] for why this is a shared const).
 pub const DEFAULT_MYSQL_SERVER_ID: u32 = 4271;
 
-/// Why `columns_from: grants` cannot run in this export's shape, if it cannot.
-fn columns_from_grants_refusal(export: &ExportConfig, source: SourceType) -> Option<String> {
-    let cdc = export.cdc.as_ref().filter(|c| c.columns_from_grants())?;
-    let name = &export.name;
-    let why = if source != SourceType::Mysql {
-        "is supported on MySQL sources only (other engines: rivet-lab/rivet#711)"
-    } else if cdc.runs_until_stopped() {
-        "reads the grants once at run start, so it needs a bounded run: omit `until_current: false`"
-    } else if cdc.backfill.is_some() {
-        "covers the `initial: snapshot` baseline only: replace `backfill:` with `initial: snapshot`"
-    } else {
-        return None;
-    };
-    Some(format!("export '{name}': `cdc.columns_from: grants` {why}"))
-}
-
 /// What the FIRST CDC run does before draining changes.
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -159,18 +143,6 @@ pub struct CdcExportConfig {
     /// initial load.
     #[serde(default, deserialize_with = "backfill_written_means_a_value")]
     pub backfill: Option<CdcBackfill>,
-    /// `grants`: deliver only the columns the source account may `SELECT`, in the
-    /// snapshot and in the change stream; read once at run start (MySQL only).
-    #[serde(default)]
-    pub columns_from: Option<CdcColumnsFrom>,
-}
-
-/// Where a CDC export takes its column list from.
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum CdcColumnsFrom {
-    /// The columns the source account may `SELECT`, as the server judges each one.
-    Grants,
 }
 
 /// The exports whose read strategy the baseline legs borrow.
@@ -282,11 +254,6 @@ impl CdcExportConfig {
     /// Whether the stream has a baseline leg (`initial: snapshot` or `backfill:`) and so writes the `snapshot/` child.
     pub fn has_baseline(&self) -> bool {
         self.initial == Some(CdcInitialMode::Snapshot) || self.backfill.is_some()
-    }
-
-    /// `columns_from: grants` — the run delivers only the columns the account may read.
-    pub fn columns_from_grants(&self) -> bool {
-        self.columns_from == Some(CdcColumnsFrom::Grants)
     }
 
     /// `until_current: false` — a continuous stream the operator stops, never a bounded drain.
@@ -631,7 +598,6 @@ impl Default for CdcExportConfig {
             slot: None,
             capture_instance: None,
             backfill: None,
-            columns_from: None,
         }
     }
 }
@@ -951,10 +917,6 @@ impl Config {
                 export.name,
                 ORACLE_CONTINUOUS_REFUSAL
             );
-        }
-
-        if let Some(why) = columns_from_grants_refusal(export, self.source.source_type) {
-            crate::config_bail!(crate::error::codes::CONFIG_CDC_SHAPE_INVALID, "{why}");
         }
 
         // `cdc.backfill` is the other way to get a baseline, and it is the same
@@ -1452,49 +1414,6 @@ mod tests {
                 Some("decimal(12,4)")
             );
         }
-    }
-
-    #[test]
-    fn columns_from_grants_is_refused_outside_a_bounded_mysql_snapshot_shape() {
-        use crate::config::SourceType;
-        let with = |f: fn(&mut CdcExportConfig)| {
-            let mut e = stream(&["orders"], CdcBackfill::Auto(AutoWord::Auto));
-            let mut c = CdcExportConfig {
-                columns_from: Some(CdcColumnsFrom::Grants),
-                ..Default::default()
-            };
-            f(&mut c);
-            e.cdc = Some(c);
-            e
-        };
-        let plain = with(|_| {});
-        assert_eq!(columns_from_grants_refusal(&plain, SourceType::Mysql), None);
-        for engine in [
-            SourceType::Postgres,
-            SourceType::Mssql,
-            SourceType::Oracle,
-            SourceType::Mongo,
-        ] {
-            let why = columns_from_grants_refusal(&plain, engine).expect("other engines refuse");
-            assert!(why.contains("MySQL sources only"), "{why}");
-        }
-        let daemon = with(|c| c.until_current = false);
-        assert!(
-            columns_from_grants_refusal(&daemon, SourceType::Mysql)
-                .unwrap()
-                .contains("bounded")
-        );
-        let backfill = with(|c| c.backfill = Some(CdcBackfill::Auto(AutoWord::Auto)));
-        assert!(
-            columns_from_grants_refusal(&backfill, SourceType::Mysql)
-                .unwrap()
-                .contains("backfill")
-        );
-        let off = with(|c| c.columns_from = None);
-        assert_eq!(
-            columns_from_grants_refusal(&off, SourceType::Postgres),
-            None
-        );
     }
 
     /// One predicate for "a baseline on this engine needs a checkpoint": both ways to

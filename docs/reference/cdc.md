@@ -385,10 +385,10 @@ Notes:
   The filenames are the tell: `mysql-bin-changelog.NNNNNN` is RDS's naming, so an
   `ERROR 1236` naming one of those is this, not `PURGE BINARY LOGS`.
 
-#### MySQL — column grants (`columns_from: grants`)
+#### MySQL — column grants (`source.columns_from: grants`)
 
-The binlog carries every column of a row. Under `columns_from: grants` rivet
-delivers only the columns the account may `SELECT`.
+The binlog carries every column of a row. Under `source.columns_from: grants` rivet
+reads and delivers only the columns the account may `SELECT`, in every mode.
 
 ```sql
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'rivet_cdc'@'%';
@@ -396,27 +396,37 @@ GRANT SELECT (id, name, email) ON `app`.`users` TO 'rivet_cdc'@'%';  -- not `pas
 ```
 
 ```yaml
-cdc:
-  initial: snapshot
+source:
+  type: mysql
+  url_env: DATABASE_URL
   columns_from: grants
 ```
 
+| Mode | What is read |
+|---|---|
+| Batch `table:` (full, chunked, incremental, time_window, partition, split) | `SELECT <readable columns>` |
+| Batch `query:` | The query as written; a hidden column is refused by MySQL (`1142`) |
+| `cdc` + `initial: snapshot` | `SELECT <readable columns>`, then the stream projected to them |
+| `cdc` + `backfill: auto` | Each recipe export reads `SELECT <readable columns>` |
+| `cdc` + `until_current: false` | The stream projected; a grant change in the binlog stops the run (below) |
+
 | What | Behaviour |
 |---|---|
-| Readable set | Each column is judged by the server: a `PREPARE SELECT <col>` per column, read once at run start |
+| Readable set | Each column is judged by the server: a `PREPARE SELECT <col>` per column, read at run start |
 | Hidden column | Never in a Parquet part, a schema, the spill, the state DB, `check --target` or the load plan |
 | Column added later | Not delivered (fail-closed) until a grant covers it and a new run starts |
-| Grant change | Takes effect on the next run |
+| Grant change between runs | Takes effect on the next run |
+| Grant change during a run | `GRANT`/`REVOKE`/user/role statement in the binlog → grants re-read; changed → `RIVET_SOURCE_CDC_GRANTS_CHANGED`, nothing past it delivered; re-run resumes under the new grants |
 | Update of hidden columns only | Not delivered; its position still advances |
-| Key column not readable | Refused with `RIVET_SOURCE_CDC_COLUMNS_UNREADABLE` before anything is read |
-| No readable column | Refused with `RIVET_SOURCE_CDC_COLUMNS_UNREADABLE` |
+| Key column not readable | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` before anything is read |
+| No readable column | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` |
 | Without `columns_from` | A column-grant account is refused by MySQL (`1142`) at the `SELECT *` |
 
 Limits:
 
-- MySQL only; PostgreSQL, SQL Server, Oracle and MongoDB: see #711.
-- Bounded runs only (not `until_current: false`); the baseline is `initial: snapshot`, not `backfill:`.
+- MySQL only; PostgreSQL, SQL Server, Oracle and MongoDB are refused with `RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED` (see #711).
 - The binlog still leaves the server in full: the filter is in rivet, not in MySQL.
+- A grant change not written to the binlog (`sql_log_bin = 0`, a direct `mysql.*` edit without `FLUSH PRIVILEGES`) takes effect on the next run only.
 
 ### PostgreSQL — the logical slot
 

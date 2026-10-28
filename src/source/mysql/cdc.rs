@@ -100,6 +100,8 @@ pub(crate) struct MysqlChangeStream {
     row_image: crate::source::cdc::RowImage,
     /// `columns_from: grants`: each configured table's readable columns; `None` = every column.
     readable: Option<HashMap<String, crate::source::cdc::ReadableColumns>>,
+    /// `columns_from: grants`: the source the readable columns are re-read from at a grant change.
+    grants_source: Option<(String, Option<TlsConfig>)>,
 }
 
 impl MysqlChangeStream {
@@ -702,6 +704,30 @@ impl MysqlChangeStream {
         super::column_grants::readable_columns_of(conn, configured, &own_db, &bare_db).map(Some)
     }
 
+    /// Refuse at `log_pos` when a configured table's readable columns differ from the ones this run delivers.
+    fn refuse_changed_grants(&self, log_pos: u64) -> Result<()> {
+        let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
+            return Ok(());
+        };
+        let now = Self::readable_columns_at(url, tls.as_ref(), &self.configured_tables)?;
+        let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
+            r.get(t).map(|c| c.columns.clone())
+        };
+        let Some(table) = self
+            .configured_tables
+            .iter()
+            .find(|t| columns(before, t) != columns(&now, t))
+        else {
+            return Ok(());
+        };
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            "mysql cdc: the columns this account may SELECT of `{table}` changed at {}:{log_pos} \
+             (a grant change); nothing past it was delivered",
+            self.file
+        );
+    }
+
     /// The readable columns of `tables` on a fresh connection: the snapshot legs' read, asked before the anchor.
     pub(crate) fn readable_columns_at(
         url: &str,
@@ -798,6 +824,7 @@ impl MysqlChangeStream {
             identity,
             row_image,
             readable: None,
+            grants_source: None,
         })
     }
 
@@ -953,6 +980,7 @@ impl MysqlChangeStream {
         // Before the anchor is written: a refused first run leaves no checkpoint.
         Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
         let readable = Self::readable_on(&mut conn, &configured_tables, columns_from_grants)?;
+        let grants_source = readable.is_some().then(|| (url.to_string(), tls.cloned()));
         if let Some(path) = ckpt
             && let Some(pos) = Position::load(path)?
             && let Some((file, p)) =
@@ -980,8 +1008,15 @@ impl MysqlChangeStream {
             );
             verdict.verdict().enforce()?;
             let identity = (server_uuid, server_gtid);
-            return Self::open_on(conn, server_id, file, p, mode, identity, configured_tables)
-                .map(|s| with_dir(Self { readable, ..s }));
+            return Self::open_on(conn, server_id, file, p, mode, identity, configured_tables).map(
+                |s| {
+                    with_dir(Self {
+                        readable,
+                        grants_source,
+                        ..s
+                    })
+                },
+            );
         }
         // First run (no checkpoint yet): anchor at the current position and persist
         // it IMMEDIATELY. PostgreSQL pins its anchor server-side at open (slot
@@ -1030,7 +1065,13 @@ impl MysqlChangeStream {
             identity?,
             configured_tables,
         )
-        .map(|s| with_dir(Self { readable, ..s }))
+        .map(|s| {
+            with_dir(Self {
+                readable,
+                grants_source,
+                ..s
+            })
+        })
     }
 
     /// One row of a spilled tail: decode it through the general frame, stamp it,
@@ -1414,6 +1455,10 @@ impl MysqlChangeStream {
                 return Err(crate::source::cdc::checkpoint_identity::undecodable(
                     statement_dml_refusal_message(target.as_ref()),
                 ));
+            }
+            // `columns_from: grants`: a grant change is re-read where the binlog records it.
+            Some(EventData::QueryEvent(qe)) if is_privilege_statement(&qe.query()) => {
+                self.refuse_changed_grants(log_pos)?;
             }
             Some(EventData::QueryEvent(qe)) if is_commit_statement(&qe.query()) => {
                 if !self.close_transaction_at(log_pos) {
@@ -2153,6 +2198,27 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
 /// treating one as "discard the buffer" would DELETE rows that are still in the
 /// source. `roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_
 /// transaction` pins the real contract instead.
+/// A statement that can change what an account may read: `GRANT`, `REVOKE`, a user or role
+/// change, `SET DEFAULT ROLE`, `FLUSH PRIVILEGES`. Leading comments and case are ignored.
+fn is_privilege_statement(sql: &str) -> bool {
+    let mut t = sql.trim_start();
+    while let Some(rest) = t.strip_prefix("/*") {
+        t = rest.split_once("*/").map_or("", |(_, r)| r).trim_start();
+    }
+    let mut w = t.split_whitespace().map(str::to_ascii_uppercase);
+    match (
+        w.next().as_deref(),
+        w.next().as_deref(),
+        w.next().as_deref(),
+    ) {
+        (Some("GRANT" | "REVOKE"), ..) => true,
+        (Some("CREATE" | "DROP" | "ALTER" | "RENAME"), Some("USER" | "ROLE"), _) => true,
+        (Some("SET"), Some("DEFAULT"), Some("ROLE")) => true,
+        (Some("FLUSH"), Some(p), _) => p.trim_end_matches(';') == "PRIVILEGES",
+        _ => false,
+    }
+}
+
 fn is_commit_statement(sql: &str) -> bool {
     let t = sql.trim().trim_end_matches(';').trim();
     if t.eq_ignore_ascii_case("commit") {
@@ -2369,6 +2435,38 @@ mod tests {
     /// the re-read stops at), on a refusal that can legitimately persist for
     /// hours. Each pinned phrase below is a CLAIM the code makes true; drift the
     /// message and this names which promise broke.
+    #[test]
+    fn privilege_statements_are_told_from_every_other_statement() {
+        for sql in [
+            "GRANT SELECT (id) ON rivet.t TO 'u'@'%'",
+            "  revoke select (pass) on rivet.t from u",
+            "/* xid=1 */ /*!80000 x */ GRANT r TO u",
+            "CREATE USER 'u'@'%' IDENTIFIED BY 'p'",
+            "drop role r",
+            "ALTER USER u DEFAULT ROLE r",
+            "RENAME USER a TO b",
+            "SET DEFAULT ROLE r TO u",
+            "FLUSH PRIVILEGES;",
+        ] {
+            assert!(is_privilege_statement(sql), "{sql}");
+        }
+        for sql in [
+            "",
+            "/* unterminated",
+            "BEGIN",
+            "COMMIT",
+            "CREATE TABLE grants (id INT)",
+            "INSERT INTO grant_log VALUES (1)",
+            "FLUSH TABLES",
+            "SET ROLE r",
+            "ALTER TABLE t ADD COLUMN revoke_at INT",
+            "/* GRANT */ UPDATE t SET a = 1",
+            "ГРАНТ", // allow-cyrillic
+        ] {
+            assert!(!is_privilege_statement(sql), "{sql}");
+        }
+    }
+
     #[test]
     fn the_xa_spill_refusal_names_the_stop_the_loop_and_the_ladder() {
         let msg = xa_prepare_spilled_tail_refusal_message(7);

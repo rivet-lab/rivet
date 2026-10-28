@@ -12,13 +12,14 @@ pub(super) fn check_mysql(
     url: &str,
     tls: Option<&TlsConfig>,
     exports: &[&ExportConfig],
+    grants: bool,
 ) -> Result<Vec<ExportDiagnostic>> {
     let pool = crate::source::mysql::connect_pool(url, tls)?;
     let mut conn = pool.get_conn()?;
     let db_max_connections = fetch_max_connections_mysql(&mut conn);
 
     super::collect_diagnostics(exports, |export| {
-        diagnose_mysql(&mut conn, export, db_max_connections)
+        diagnose_mysql(&mut conn, export, db_max_connections, grants)
     })
 }
 
@@ -27,11 +28,12 @@ pub(super) fn diagnose_export_mysql(
     url: &str,
     tls: Option<&TlsConfig>,
     export: &ExportConfig,
+    grants: bool,
 ) -> Result<super::ExportDiagnostic> {
     let pool = crate::source::mysql::connect_pool(url, tls)?;
     let mut conn = pool.get_conn()?;
     let db_max_connections = fetch_max_connections_mysql(&mut conn);
-    diagnose_mysql(&mut conn, export, db_max_connections)
+    diagnose_mysql(&mut conn, export, db_max_connections, grants)
 }
 
 fn fetch_max_connections_mysql(conn: &mut mysql::PooledConn) -> Option<u32> {
@@ -65,17 +67,15 @@ fn mysql_schema_error(e: mysql::Error, export: &ExportConfig) -> Option<anyhow::
     None
 }
 
-/// The `columns_from: grants` projection of a CDC `table:`, which the run reads instead of `SELECT *`.
+/// The `columns_from: grants` projection of a `table:`, which the run reads instead of `SELECT *`.
 fn grants_projection(
     conn: &mut mysql::PooledConn,
     export: &ExportConfig,
+    grants: bool,
 ) -> Result<Option<String>> {
-    let (Some(cdc), Some(table)) = (&export.cdc, &export.table) else {
+    let Some(table) = export.table.as_ref().filter(|_| grants) else {
         return Ok(None);
     };
-    if !cdc.columns_from_grants() {
-        return Ok(None);
-    }
     let tables = [table.clone()];
     let readable =
         crate::source::mysql::cdc::MysqlChangeStream::readable_on(conn.as_mut(), &tables, true)?;
@@ -86,10 +86,11 @@ fn diagnose_mysql(
     conn: &mut mysql::PooledConn,
     export: &ExportConfig,
     db_max_connections: Option<u32>,
+    grants: bool,
 ) -> Result<ExportDiagnostic> {
     use mysql::prelude::Queryable;
 
-    let base_query = match grants_projection(conn, export)? {
+    let base_query = match grants_projection(conn, export, grants)? {
         Some(select) => select,
         None => resolve_preflight_base_query(export),
     };

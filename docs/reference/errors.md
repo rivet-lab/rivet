@@ -182,7 +182,8 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CONFIG_SOURCE_FEATURE_MISSING` | usage | 1 | run a rivet built with the feature the message names (the release binaries include it) |
 | `RIVET_SOURCE_CDC_TABLE_UNRESOLVED` | usage | 1 | set `table:` to the one base table the capture follows, qualified `schema.table` as the catalog spells it, as the message explains |
 | `RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | usage | 1 | export the table in batch (`mode: full`), or capture a table the message's supported list covers |
-| `RIVET_SOURCE_CDC_COLUMNS_UNREADABLE` | usage | 1 | grant the account `SELECT` on the columns the message names (at least the key), or drop the table from the export |
+| `RIVET_SOURCE_COLUMNS_UNREADABLE` | usage | 1 | grant the account `SELECT` on the columns the message names (at least the key), or drop the table from the export |
+| `RIVET_SOURCE_CDC_GRANTS_CHANGED` | transient | 2 | re-run: the next run reads the new grants and resumes from the checkpoint, so nothing is lost |
 | `RIVET_SOURCE_CDC_TRANSACTION_TOO_LARGE` | usage | 1 | split the source transaction, or raise RIVET_CDC_MAX_TX_ROWS / RIVET_CDC_MAX_TX_BYTES when a transaction this large is expected |
 | `RIVET_SOURCE_QUERY_COLUMN_UNREFERENCEABLE` | usage | 1 | give the column an alias in the export's `query:` (e.g. `... AS row_id`) |
 | `RIVET_SOURCE_RUNTIME_UNAVAILABLE` | environment | 2 if transient, else 1 | the process could not start the async runtime its driver needs (out of file descriptors or threads): raise the open-files limit (`ulimit -n`) or lower parallelism, then rerun |

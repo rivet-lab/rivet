@@ -78,6 +78,36 @@ pub fn build_plan(
     )
 }
 
+/// `export` reading only the columns the account may `SELECT`: its `table:` read under
+/// `source.columns_from: grants`, asked on `probe` when the caller holds one; `None` when
+/// there is nothing to project.
+pub(crate) fn project_table_read(
+    probe: Option<&mut (dyn crate::source::Source + '_)>,
+    source: &crate::config::SourceConfig,
+    export: &ExportConfig,
+) -> Result<Option<ExportConfig>> {
+    let Some(table) = export
+        .table
+        .as_ref()
+        .filter(|_| source.columns_from_grants() && export.table_select.is_none())
+    else {
+        return Ok(None);
+    };
+    let select = match probe {
+        Some(src) => src.readable_select(table)?,
+        None => crate::source::connect(
+            source.source_type,
+            &source.resolve_url()?,
+            source.tls.as_ref(),
+            source.mongo.as_ref(),
+        )?
+        .readable_select(table)?,
+    };
+    let mut out = export.clone();
+    out.table_select = select;
+    Ok(Some(out))
+}
+
 /// [`build_plan`], with the chunk planner's catalog probe asked on `probe` when the caller holds one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_plan_on(
@@ -103,6 +133,9 @@ pub(crate) fn build_plan_on(
             export.name
         );
     }
+    let mut probe = probe;
+    let projected = project_table_read(probe.as_deref_mut(), &config.source, export)?;
+    let export = projected.as_ref().unwrap_or(export);
     let (resolved, written) = export.resolve_query_and_template(config_dir, params)?;
     let bounded = |q: String| {
         // #167: a `--split` range sub-export restricts the whole export to its key
@@ -1077,6 +1110,7 @@ mod tests {
             tuning: None,
             tls: None,
             mongo: None,
+            columns_from: None,
         }
     }
 

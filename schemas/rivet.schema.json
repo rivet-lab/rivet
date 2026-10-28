@@ -159,6 +159,17 @@
             }
           ],
           "default": null
+        },
+        "columns_from": {
+          "description": "`grants`: every export reads and delivers only the columns the source account may\n`SELECT`, in batch reads, baselines and the change stream (MySQL only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColumnsFrom"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -480,6 +491,16 @@
           "description": "`snapshot` — a consistent point-in-time read for the whole cursor\n(MongoDB 5.0+ replica set only).",
           "type": "string",
           "const": "snapshot"
+        }
+      ]
+    },
+    "ColumnsFrom": {
+      "description": "Where the source's column list comes from.",
+      "oneOf": [
+        {
+          "description": "The columns the source account may `SELECT`, as the server judges each one.",
+          "type": "string",
+          "const": "grants"
         }
       ]
     },
@@ -945,18 +966,6 @@
             }
           ],
           "default": null
-        },
-        "columns_from": {
-          "description": "`grants`: deliver only the columns the source account may `SELECT`, in the\nsnapshot and in the change stream; read once at run start (MySQL only).",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CdcColumnsFrom"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         }
       },
       "additionalProperties": false
@@ -985,16 +994,6 @@
           "items": {
             "type": "string"
           }
-        }
-      ]
-    },
-    "CdcColumnsFrom": {
-      "description": "Where a CDC export takes its column list from.",
-      "oneOf": [
-        {
-          "description": "The columns the source account may `SELECT`, as the server judges each one.",
-          "type": "string",
-          "const": "grants"
         }
       ]
     },

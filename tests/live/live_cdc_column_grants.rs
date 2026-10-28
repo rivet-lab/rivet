@@ -1,5 +1,5 @@
-//! Live `cdc.columns_from: grants` (MySQL): a column-grant account delivers only
-//! the columns it may SELECT — by name and by value, in the snapshot and the stream.
+//! Live `source.columns_from: grants` (MySQL): a column-grant account delivers only
+//! the columns it may SELECT — by name and by value, in batch reads, baselines and the stream.
 
 use std::path::Path;
 
@@ -112,7 +112,7 @@ fn a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql() {
     let rig = Rig::mysql_cdc(&table)
         .source_url(&user.url())
         .cdc("initial: snapshot")
-        .cdc("columns_from: grants");
+        .source_line("columns_from: grants");
 
     let check = rig.cli(&["check"]);
     assert!(
@@ -197,10 +197,204 @@ fn a_column_grant_account_is_refused_without_the_policy_or_without_the_key_mysql
     let said = Rig::mysql_cdc(&table)
         .source_url(&keyless.url())
         .cdc("initial: snapshot")
-        .cdc("columns_from: grants")
+        .source_line("columns_from: grants")
         .run_expect_fail();
     assert!(
-        said.contains("RIVET_SOURCE_CDC_COLUMNS_UNREADABLE") && said.contains("`id`"),
+        said.contains("RIVET_SOURCE_COLUMNS_UNREADABLE") && said.contains("`id`"),
         "an unreadable key is refused by code and named:\n{said}"
+    );
+}
+
+/// `table` holding `(1,'ann',SECRET)`, `(2,'bob',SECRET)`, `(3,'cid',SECRET)`, dropped on Drop.
+fn seeded(label: &str) -> (String, MysqlCdcTable) {
+    let table = unique_name(label);
+    let guard = MysqlCdcTable(table.clone());
+    let mut c = root();
+    c.query_drop(format!(
+        "CREATE TABLE rivet.{table} (id INT PRIMARY KEY, name VARCHAR(20), pass VARCHAR(20))"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO rivet.{table} VALUES (1, 'ann', '{SECRET}1'), (2, 'bob', '{SECRET}2'), \
+         (3, 'cid', '{SECRET}3')"
+    ))
+    .unwrap();
+    (table, guard)
+}
+
+/// No hidden column by name and no hidden value in `parts`; returns the delivered cells.
+fn assert_no_hidden(parts: &[arrow::record_batch::RecordBatch], what: &str) -> Vec<String> {
+    let (names, cells) = names_and_cells(parts);
+    assert!(
+        !names.iter().any(|n| n.eq_ignore_ascii_case("pass")),
+        "{what}: `pass` is a column of the delivered parts: {names:?}"
+    );
+    assert!(
+        !cells.iter().any(|v| v.contains(SECRET)),
+        "{what}: a hidden value was delivered: {cells:?}"
+    );
+    cells
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_grant_account_reads_only_its_columns_in_every_batch_mode_mysql() {
+    let (table, _table) = seeded("cg_batch");
+    let user = GrantUser::new(&table, "id, name");
+    for (mode, lines) in [
+        ("full", &[][..]),
+        ("chunked", &["chunk_by_key: id", "chunk_size: 1"][..]),
+        ("incremental", &["cursor_column: id"][..]),
+    ] {
+        let rig = Rig::mysql_cdc(&table)
+            .source_url(&user.url())
+            .source_line("columns_from: grants")
+            .into_full_batch()
+            .restage(mode, lines);
+        let check = rig.cli(&["check"]);
+        assert!(
+            check.status.success(),
+            "{mode}: check under a column grant:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        rig.run_ok();
+        let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect();
+        let cells = assert_no_hidden(&parts, mode);
+        for name in ["ann", "bob", "cid"] {
+            assert!(
+                cells.iter().any(|v| v == name),
+                "{mode}: every row is read: {cells:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_grant_account_backfills_through_its_recipes_without_a_hidden_column_mysql() {
+    let (table, _table) = seeded("cg_bf");
+    let user = GrantUser::new(&table, "id, name");
+    let rig = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .source_line("columns_from: grants")
+        .cdc("backfill: auto")
+        .also_batch_export("baseline", &table, "chunked")
+        .also_export_line("chunk_by_key: id")
+        .also_export_line("chunk_size: 1");
+    rig.run_ok();
+    root()
+        .query_drop(format!(
+            "UPDATE rivet.{table} SET name = 'ann2', pass = '{SECRET}u' WHERE id = 1"
+        ))
+        .unwrap();
+    rig.run_ok();
+
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    let cells = assert_no_hidden(&parts, "backfill");
+    for name in ["ann", "bob", "cid", "ann2"] {
+        assert!(
+            cells.iter().any(|v| v == name),
+            "the baseline and the change are both delivered: {cells:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
+    let (table, _table) = seeded("cg_rev");
+    let user = GrantUser::new(&table, "id, name, pass");
+    let mut rig = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .source_line("columns_from: grants")
+        .cdc("initial: snapshot")
+        .cdc("rollover: 3")
+        .cdc("max_events: 4")
+        .a_failed_run_may_leave(
+            &[
+                Leftover::OrphanPart,
+                Leftover::FileLog,
+                Leftover::CdcFlush,
+                Leftover::CdcCheckpoint,
+            ],
+            "the stop comes at the grant change: the span committed before it stays, and the checkpoint follows it",
+        );
+    rig.run_ok();
+    let mut c = root();
+    c.query_drop(format!(
+        "INSERT INTO rivet.{table} VALUES (4, 'dan', 'open'), (5, 'eli', 'open'), (6, 'fay', 'open')"
+    ))
+    .unwrap();
+    rig.replace_cdc_line("until_current", "until_current: false");
+    let marker = rig.out_dir().join("..").join("revoke.paused");
+    let marker_env = marker.display().to_string();
+    let mut child = rig.spawn_args_env(
+        &[],
+        &[
+            ("RIVET_TEST_PAUSE_AT", "cdc_after_parts_before_ack:20000"),
+            ("RIVET_TEST_PAUSE_MARKER", &marker_env),
+        ],
+    );
+    let opened = std::time::Instant::now();
+    while !marker.is_file() {
+        if let Ok(Some(_)) = child.try_wait() {
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "the open run exited before it parked:\n{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        if opened.elapsed() > std::time::Duration::from_secs(30) {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "the open run never parked after its first part:\n{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    c.query_drop(format!(
+        "REVOKE SELECT (pass) ON rivet.{table} FROM '{}'@'%'",
+        user.0
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO rivet.{table} VALUES (7, 'eve', 'REVOKED-7')"
+    ))
+    .unwrap();
+    let out = child.wait_with_output().expect("reap the open run");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success() && said.contains("RIVET_SOURCE_CDC_GRANTS_CHANGED"),
+        "a revoke inside the open run stops it by code:\n{said}"
+    );
+
+    rig.replace_cdc_line("until_current", "until_current: true");
+    rig.run_ok();
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    let (_, cells) = names_and_cells(&parts);
+    assert!(
+        !cells.iter().any(|v| v.contains("REVOKED-")),
+        "a value written after the revoke was delivered: {cells:?}"
+    );
+    assert!(
+        cells.iter().any(|v| v == "eve") && cells.iter().any(|v| v == "dan"),
+        "the rows on both sides of the revoke are delivered: {cells:?}"
     );
 }
