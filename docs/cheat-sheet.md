@@ -381,7 +381,7 @@ load:
   allow_source_drift: false     # load even if the manifest's source count ≠ extracted
   layout: base_buffer           # log_view (default for incremental / capture-only CDC) | base_buffer
                                 #   base_buffer: `<table>` is a PHYSICAL table, `<table>__changes` a
-                                #   per-cycle buffer that `rivet compact` MERGEs in and drops. BigQuery only.
+                                #   per-cycle buffer that `rivet compact` merges in and drops. BigQuery and Snowflake.
                                 #   Absent: a CDC stream with `backfill:` gets base_buffer, the rest log_view.
   deleted_flag: true            # whether the base carries `__is_deleted`; absent: true for cdc, false otherwise
 exports:

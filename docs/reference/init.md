@@ -293,10 +293,11 @@ rivet load -c rivet.yaml   # COPY → ANALYTICS.PUBLIC.<table>
 All five flags are required together (the loader needs every value), and
 `--gcs-bucket` is required: Snowflake reads the export through a GCS external stage,
 so `--s3-bucket` is refused. One config loads into one warehouse, so the Snowflake
-flags are refused beside `--bigquery-*` or `--clickhouse-*`. There is no
-`rivet compact` on Snowflake: no `layout: base_buffer` is written, and an
-incremental or CDC table is a `<table>__changes` log read through the deduplicated
-`<table>` view.
+flags are refused beside `--bigquery-*` or `--clickhouse-*`. On Snowflake an
+incremental or CDC export is scaffolded with
+`layout: base_buffer` (a physical `<table>` plus a `<table>__changes` buffer that
+`rivet compact` folds in); delete the key to read a `<table>__changes` log through
+the deduplicated `<table>` view instead.
 
 ---
 

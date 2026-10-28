@@ -101,8 +101,9 @@ struct RawLoadSection {
     pk: KeyColumns,
     /// `log_view` or `base_buffer` — where the current state lives. Absent derives
     /// it from the mode: a CDC stream with a `backfill:` is base+buffer, the rest
-    /// changelog+view. `base_buffer` needs `target: bigquery` — `rivet compact` is
-    /// what merges the buffer into the base, and it is BigQuery-only.
+    /// changelog+view (BigQuery only; Snowflake takes a base only when `base_buffer`
+    /// is written). `base_buffer` needs `target: bigquery` or `snowflake` — `rivet
+    /// compact` merges the buffer into the base, and ClickHouse has none.
     #[serde(default)]
     layout: Option<LayoutChoice>,
     /// Whether the base carries a `__is_deleted` column. Absent derives it from the
@@ -307,6 +308,17 @@ pub enum LoadTarget {
     },
 }
 
+/// How far a warehouse takes the base-and-buffer layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaseSupport {
+    /// No compaction: the changelog and its view are the only layout.
+    Never,
+    /// A base only where `load.layout: base_buffer` is written; a stream's `backfill:` leaves the layout alone.
+    Written,
+    /// A written `base_buffer`, or a stream's `backfill:`, makes the base.
+    Derived,
+}
+
 impl LoadTarget {
     /// The target name the type resolver is keyed on (`ExportTarget::parse`).
     pub fn name(&self) -> &'static str {
@@ -317,9 +329,18 @@ impl LoadTarget {
         }
     }
 
+    /// How far this warehouse takes a base and a buffer.
+    pub(crate) fn base_support(&self) -> BaseSupport {
+        match self {
+            LoadTarget::Bigquery { .. } => BaseSupport::Derived,
+            LoadTarget::Snowflake { .. } => BaseSupport::Written,
+            LoadTarget::Clickhouse { .. } => BaseSupport::Never,
+        }
+    }
+
     /// Whether `rivet compact` can merge a buffer into a base on this warehouse.
     pub(crate) fn compacts(&self) -> bool {
-        matches!(self, LoadTarget::Bigquery { .. })
+        self.base_support() != BaseSupport::Never
     }
 
     /// Whether this warehouse names each job or statement rivet runs (a BigQuery job id, a
@@ -1066,7 +1087,7 @@ mod partition_form_tests {
         };
         assert_eq!(
             [bq.compacts(), sf.compacts(), ch.compacts()],
-            [true, false, false]
+            [true, true, false]
         );
         assert_eq!(
             [bq.names_jobs(), sf.names_jobs(), ch.names_jobs()],

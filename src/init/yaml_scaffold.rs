@@ -734,6 +734,31 @@ fn recipe_mode(info: &TableInfo) -> &'static str {
     }
 }
 
+/// The `layout:` lines of a warehouse that compacts: `base_buffer` only for a mode that
+/// carries DELTAS — a `full` / `chunked` export overwrites its table every pass, so the key
+/// there would promise what `rivet compact` openly skips.
+fn base_buffer_lines(compactable: bool, d: &mut ScaffoldDecisions) -> Vec<String> {
+    if compactable {
+        d.compacts = true;
+        vec![
+            "  # base_buffer: `<table>` is a physical table and `<table>__changes` a".to_string(),
+            "  # disposable buffer `rivet compact` merges into it. Drop this key to keep"
+                .to_string(),
+            "  # a changelog plus a dedup view instead (no compaction, full scan per read)."
+                .to_string(),
+            "  layout: base_buffer".to_string(),
+        ]
+    } else {
+        vec![
+            "  # No export here takes deltas, so there is nothing to compact: each load"
+                .to_string(),
+            "  # OVERWRITES the table. Re-run init with `--mode incremental` (a cursor".to_string(),
+            "  # column is required) for the base + buffer cycle `rivet compact` merges."
+                .to_string(),
+        ]
+    }
+}
+
 /// The comment that stands in for a `load:` block the config loader would refuse.
 const NO_LOAD_BLOCK: &str = "# No `load:` block: ";
 
@@ -800,13 +825,11 @@ fn load_block_lines(
             return lines;
         }
         d.has_load = true;
-        return vec![
+        let mut lines = vec![
             String::new(),
             "# The warehouse half of the cycle: `rivet load` COPYs into Snowflake from a GCS"
                 .into(),
-            "# external stage. There is no `rivet compact` on Snowflake: an incremental or CDC"
-                .into(),
-            "# table is a change log read through the deduplicated `<table>` view.".into(),
+            "# external stage, `rivet compact` merges.".into(),
             "# Review every value below — they are guesses, not decisions.".into(),
             "load:".into(),
             "  target: snowflake".into(),
@@ -823,8 +846,10 @@ fn load_block_lines(
             ),
             "  pk: auto  # the source primary key `rivet run` recorded".into(),
             "  cluster_by: auto".into(),
-            "  cleanup_source: true".into(),
         ];
+        lines.extend(base_buffer_lines(compactable, d));
+        lines.push("  cleanup_source: true".into());
+        return lines;
     }
     let (Some(project), Some(dataset)) = (
         dest.bigquery_project.as_deref(),
@@ -848,29 +873,7 @@ fn load_block_lines(
         "  pk: auto  # the source primary key `rivet run` recorded".into(),
         "  cluster_by: auto".into(),
     ];
-    // `layout: base_buffer` is only meaningful for a mode that carries DELTAS.
-    // A `full` / `chunked` export overwrites its table every pass, so promising a
-    // base and a buffer here would put a key in the file that `rivet compact`
-    // openly skips ("a full load overwrites its table; nothing to merge").
-    if compactable {
-        d.compacts = true;
-        lines.extend([
-            "  # base_buffer: `<table>` is a physical table and `<table>__changes` a".to_string(),
-            "  # disposable buffer `rivet compact` merges into it. Drop this key to keep"
-                .to_string(),
-            "  # a changelog plus a dedup view instead (no compaction, full scan per read)."
-                .to_string(),
-            "  layout: base_buffer".to_string(),
-        ]);
-    } else {
-        lines.extend([
-            "  # No export here takes deltas, so there is nothing to compact: each load"
-                .to_string(),
-            "  # OVERWRITES the table. Re-run init with `--mode incremental` (a cursor".to_string(),
-            "  # column is required) for the base + buffer cycle `rivet compact` merges."
-                .to_string(),
-        ]);
-    }
+    lines.extend(base_buffer_lines(compactable, d));
     lines.push("  cleanup_source: true".to_string());
     lines
 }
@@ -2049,7 +2052,7 @@ mod tests {
                         assert!(steps.contains("rivet load    -c"), "{steps}\n{ctx}");
                         assert_eq!(
                             steps.contains("rivet compact -c"),
-                            warehouse == "bigquery",
+                            warehouse != "clickhouse",
                             "{steps}\n{ctx}"
                         );
                     }
@@ -4136,8 +4139,9 @@ mod load_block_tests {
         );
     }
 
-    /// A Snowflake scaffold carries the five values the loader requires, promises no
-    /// compaction, and the generated file parses into a Snowflake target with exactly
+    /// A Snowflake scaffold carries the five values the loader requires, writes
+    /// `layout: base_buffer` for a mode that takes deltas (and only there), and the
+    /// generated file parses into a Snowflake target with exactly
     /// those values; its per-table partition guess is a date column the loader turns
     /// into a leading `DATE_TRUNC` clustering key.
     #[test]
@@ -4173,14 +4177,16 @@ mod load_block_tests {
             )
             .unwrap();
             let yaml = &s.text;
+            let takes_deltas = mode != "full";
             assert!(
-                s.decisions.has_load && !s.decisions.compacts,
+                s.decisions.has_load && s.decisions.compacts == takes_deltas,
                 "{mode}:\n{yaml}"
             );
             assert!(yaml.contains("Review every value"), "{mode}:\n{yaml}");
-            assert!(
-                !yaml.contains("layout:"),
-                "{mode}: no compaction on Snowflake:\n{yaml}"
+            assert_eq!(
+                yaml.contains("  layout: base_buffer"),
+                takes_deltas,
+                "{mode}: the key is written exactly where deltas are taken:\n{yaml}"
             );
             let cfg = crate::config::Config::from_yaml(yaml)
                 .unwrap_or_else(|e| panic!("{mode}: the scaffold must load: {e:#}\n{yaml}"));
@@ -4197,8 +4203,15 @@ mod load_block_tests {
                 "{mode}:\n{yaml}"
             );
             assert!(load.cleanup_source, "{mode}");
-            assert!(!load.target.compacts(), "{mode}");
+            assert!(load.target.compacts(), "{mode}");
             let export = &cfg.exports[0];
+            // The written key is what makes the base on Snowflake; no key leaves the log + view.
+            assert_eq!(
+                crate::plan::load_settings::resolved_layout(&cfg, export, None)
+                    == crate::load::plan::CdcLayout::BaseAndBuffer,
+                takes_deltas,
+                "{mode}:\n{yaml}"
+            );
             assert_eq!(
                 export.destination.destination_type,
                 crate::config::DestinationType::Gcs,

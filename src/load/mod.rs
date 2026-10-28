@@ -162,7 +162,7 @@ pub trait TargetLoader {
     ) -> Result<CompactReport> {
         crate::rivet_bail!(
             crate::error::codes::INTERNAL_LOAD_INVARIANT,
-            "`rivet compact` is BigQuery-only in this release — `{}` targets {:?}",
+            "`rivet compact` reached `{}`, which {:?} never compacts",
             self.fqtn(table),
             self.warehouse()
         )
@@ -1195,6 +1195,7 @@ pub fn build_loader(
             l.cluster_by = plan.clustering.columns().to_vec();
             l.partition_expr = plan.partition.as_ref().map(|p| p.expr.clone());
             l.run_id = Some(run_id.to_string());
+            l.layout = plan.layout;
             // Snowflake's external stage wants the `gcs://` scheme, not `gs://`.
             l.gcs_url = plan.gcs_prefix.replacen("gs://", "gcs://", 1);
             // The `snow` CLI does not expand `~`; pass an absolute key path.

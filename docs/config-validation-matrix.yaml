@@ -132,6 +132,6 @@ scenarios:
     valid_form_accepted: { test: a_multiplex_export_takes_per_table_load_overrides }
 
   - id: layout_base_buffer_needs_a_compacting_warehouse
-    what: "`layout: base_buffer` promises a `rivet compact`, which is BigQuery-only: on Snowflake the base froze at the backfill while the buffer grew for ever, with no view and every load prescribing a command that could only fail. Refused at config load wherever the key is written (section, export, `load.tables.<t>`) outside BigQuery; BigQuery takes it; Snowflake without the key makes no promise (the `backfill:` derivation yields the changelog and its view there)."
+    what: "`layout: base_buffer` promises a `rivet compact`, which BigQuery and Snowflake run and ClickHouse does not: on ClickHouse the base would freeze at the backfill while the buffer grew for ever, with no view and every load prescribing a command that could only fail. Refused at config load wherever the key is written (section, export, `load.tables.<t>`) for ClickHouse, naming the remedy (drop the key); BigQuery and Snowflake take it. On Snowflake only a written key makes a base: `cdc.backfill:` alone keeps the changelog and its view."
     rejected_wrong_mode: { test: a_base_and_buffer_layout_needs_a_compacting_warehouse }
     valid_form_accepted: { test: a_base_and_buffer_layout_needs_a_compacting_warehouse }

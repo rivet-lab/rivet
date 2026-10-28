@@ -519,8 +519,8 @@ impl Config {
         Ok(())
     }
 
-    /// `layout: base_buffer` promises a `rivet compact`, which is BigQuery-only: on
-    /// another warehouse the base would freeze at the backfill while the buffer grew.
+    /// `layout: base_buffer` promises a `rivet compact`, which ClickHouse has none of: there
+    /// the base would freeze at the backfill while the buffer grew.
     fn validate_layout_has_a_compacting_warehouse(&self) -> crate::error::Result<()> {
         use crate::config::load::LayoutChoice;
         let Some(load) = &self.load else {
@@ -547,9 +547,9 @@ impl Config {
         if let Some(site) = written {
             crate::config_bail!(
                 crate::error::codes::CONFIG_LOAD_BLOCK_INVALID,
-                "{site}: `base_buffer` needs `target: bigquery` — `rivet compact` is \
-                 BigQuery-only in this release, so the base would never take its buffer. \
-                 Drop the key to keep the changelog and its dedup view"
+                "{site}: `base_buffer` needs `target: bigquery` or `target: snowflake` — \
+                 `rivet compact` does not run on ClickHouse, so the base would never take its \
+                 buffer. Drop the key to keep the changelog and its dedup view"
             );
         }
         Ok(())

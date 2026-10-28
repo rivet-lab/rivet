@@ -1722,7 +1722,13 @@ fn a_rebaseline_buffers_a_tombstone_for_each_base_row_the_buffer_does_not_hold()
         .expect("the tombstones are inserted");
     assert_eq!(
         insert,
-        crate::load::cdc::absent_as_deleted_sql("p.d.t", "p.d.t__changes", &["id"], &["id"])
+        crate::load::cdc::absent_as_deleted_sql(
+            crate::load::cdc::Warehouse::BigQuery,
+            "p.d.t",
+            "p.d.t__changes",
+            &["id"],
+            &["id"],
+        )
     );
     assert!(inserted.load(std::sync::atomic::Ordering::SeqCst));
 }

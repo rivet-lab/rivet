@@ -808,7 +808,12 @@ fn build_plans_keyed(
             specs,
             gcs_prefix,
             destination: export.destination.clone(),
-            layout: cdc_layout(export, mode, eff_load.layout, eff_load.target.compacts()),
+            layout: cdc_layout(
+                export,
+                mode,
+                eff_load.layout,
+                eff_load.target.base_support(),
+            ),
             // A CDC stream can express a delete, a query cannot — so the flag is a
             // column a batch base does not pay for unless its operator asks.
             deleted_flag: eff_load

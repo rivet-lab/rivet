@@ -50,6 +50,9 @@ pub struct SnowflakeLoader {
     /// so every statement of one `rivet load` invocation shares a run key —
     /// cost slices per run (across tables) as well as per table. `None` omits it.
     pub run_id: Option<String>,
+    /// The CDC layout: under `BaseAndBuffer`, `<table>__changes` is a per-cycle buffer
+    /// `rivet compact` drops, created transient with no time travel.
+    pub layout: crate::load::plan::CdcLayout,
     /// The program run in place of `snow`, with its leading arguments; empty runs `snow`.
     pub(crate) cli: Vec<String>,
 }
@@ -133,13 +136,18 @@ impl SnowflakeLoader {
     /// Carries `rivet_run` too when a load-run id is set, so credits summed from
     /// `QUERY_ATTRIBUTION_HISTORY` slice per run as well as per table.
     fn query_tag(&self, table: &str) -> String {
+        self.query_tag_for("load", table)
+    }
+
+    /// [`Self::query_tag`] for the operation `op` (`load`, `compact`).
+    fn query_tag_for(&self, op: &str, table: &str) -> String {
         let run = self
             .run_id
             .as_deref()
             .map(|r| format!(r#","rivet_run":"{}""#, sanitize_tag(r)))
             .unwrap_or_default();
         format!(
-            r#"{{"managed_by":"rivet","rivet_op":"load","rivet_table":"{}"{run}}}"#,
+            r#"{{"managed_by":"rivet","rivet_op":"{op}","rivet_table":"{}"{run}}}"#,
             sanitize_tag(table)
         )
     }
@@ -284,6 +292,89 @@ impl TargetLoader for SnowflakeLoader {
         );
         extract_named(&self.run_snow(&sql)?, "N_")
             .context("row count ran but N_ was not in snow's output")
+    }
+
+    fn flag_absent_from_buffer(
+        &self,
+        table: &str,
+        specs: &[TargetColumnSpec],
+        pk: &[String],
+    ) -> Result<u64> {
+        let sql = self.build_flag_absent_sql(table, specs, pk);
+        let result = self.run_snow(&sql)?;
+        let before = extract_named(&result, "BEFORE_")
+            .context("tombstones ran but the pre-insert count (BEFORE_) could not be read")?;
+        let after = extract_named(&result, "AFTER_")
+            .context("tombstones ran but the post-insert count (AFTER_) could not be read")?;
+        Ok(after.saturating_sub(before))
+    }
+
+    fn compact(
+        &self,
+        table: &str,
+        specs: &[TargetColumnSpec],
+        pk: &[String],
+        order: crate::load::cdc::CompactOrder,
+    ) -> Result<crate::load::CompactReport> {
+        let base = self.fqtn(table);
+        let kinds = [
+            (format!("{table}__changes"), "the buffer"),
+            (
+                format!("{table}__changes__merging"),
+                "the leftover of a merge",
+            ),
+        ];
+        let mut found = [false; 2];
+        for (i, (name, what)) in kinds.iter().enumerate() {
+            match super::before_write(self.object_kind(name))? {
+                super::ObjectKind::Absent => {}
+                super::ObjectKind::Table => found[i] = true,
+                _ => {
+                    return Err(super::refused(
+                        crate::error::codes::LOAD_TARGET_OBJECT_CONFLICT,
+                        format!(
+                            "refusing to compact `{base}`: `{}`, {what}, exists and is not a table. \
+                             Drop or rename it, then run `rivet compact` again; nothing was merged",
+                            self.fqtn(name)
+                        ),
+                    ));
+                }
+            }
+        }
+        let [buffer, leftover] = found;
+        if !buffer && !leftover {
+            return Ok(crate::load::CompactReport {
+                base,
+                changes_rows: 0,
+                merge_jobs: 0,
+                had_buffer: false,
+            });
+        }
+        if leftover {
+            eprintln!(
+                "  note: `{}` is left over from a compaction that did not complete — merging it \
+                 before this run's buffer",
+                self.fqtn(&kinds[1].0)
+            );
+        }
+        let sql = self.build_compact_sql(table, specs, pk, &order, buffer, leftover);
+        let result = self.run_snow(&sql)?;
+        let named = |key: &str, wanted: bool| -> Result<u64> {
+            if !wanted {
+                return Ok(0);
+            }
+            extract_named(&result, key)
+                .with_context(|| format!("compaction ran but {key} was not in snow's output"))
+        };
+        let rows = named("CHANGES_", buffer)?;
+        let recovered = named("RECOVERED_", leftover)?;
+        Ok(crate::load::CompactReport {
+            base,
+            changes_rows: rows,
+            merge_jobs: usize::from(rows > 0),
+            had_buffer: buffer,
+        }
+        .with_recovered(recovered, usize::from(recovered > 0)))
     }
 
     fn adopt_as_changelog(&self, table: &str) -> Result<()> {
@@ -452,6 +543,128 @@ impl SnowflakeLoader {
         )
     }
 
+    /// The `<table>__changes` columns: rivet's meta columns ahead of the data columns.
+    fn changes_specs(specs: &[TargetColumnSpec]) -> Vec<TargetColumnSpec> {
+        let mut full = crate::load::cdc::meta_column_specs(crate::load::cdc::Warehouse::Snowflake);
+        full.extend(
+            specs
+                .iter()
+                .filter(|s| !is_meta_column(&s.column_name))
+                .cloned(),
+        );
+        full
+    }
+
+    /// Ensure the change log exists: a permanent clustered table, or under a base and buffer a
+    /// transient one with no time travel and no clustering — it is read once and dropped.
+    fn build_create_changes_sql(&self, changes_fqtn: &str, ddl: &str) -> String {
+        if self.layout.log_is_disposable() {
+            format!(
+                "CREATE TRANSIENT TABLE IF NOT EXISTS {changes_fqtn} (\n{ddl}\n) \
+                 DATA_RETENTION_TIME_IN_DAYS = 0;\n"
+            )
+        } else {
+            let cluster = Self::cluster_clause(&self.cluster_keys());
+            format!("CREATE TABLE IF NOT EXISTS {changes_fqtn} (\n{ddl}\n){cluster};\n")
+        }
+    }
+
+    /// The re-baseline script: ensure the buffer, then buffer a tombstone for every live base row
+    /// the buffer holds no key for, counting the buffer around the insert.
+    fn build_flag_absent_sql(
+        &self,
+        table: &str,
+        specs: &[TargetColumnSpec],
+        pk: &[String],
+    ) -> String {
+        use crate::load::cdc::Warehouse;
+        let full = Self::changes_specs(specs);
+        let changes = format!("{table}__changes");
+        let changes_fqtn = self.fqtn(&changes);
+        let create = self.build_create_changes_sql(&changes_fqtn, &Self::build_schema_ddl(&full));
+        let columns: Vec<&str> = specs
+            .iter()
+            .map(|s| s.column_name.as_str())
+            .filter(|c| !is_meta_column(c) && *c != crate::load::cdc::DELETE_FLAG_COLUMN)
+            .collect();
+        let keys: Vec<&str> = pk.iter().map(String::as_str).collect();
+        let insert = crate::load::cdc::absent_as_deleted_sql(
+            Warehouse::Snowflake,
+            &self.fqtn(table),
+            &changes_fqtn,
+            &columns,
+            &keys,
+        );
+        format!(
+            "ALTER SESSION SET QUERY_TAG = '{tag}';\n\
+             USE WAREHOUSE {wh};\n\
+             USE SCHEMA {db}.{sc};\n\
+             {create}{alter}\
+             SELECT COUNT(*) AS BEFORE_ FROM {changes_fqtn};\n\
+             {insert};\n\
+             SELECT COUNT(*) AS AFTER_ FROM {changes_fqtn};",
+            tag = self.query_tag(&changes),
+            wh = self.warehouse,
+            db = self.database,
+            sc = self.schema,
+            alter = build_alter_add_columns_sql(&changes_fqtn, &full),
+        )
+    }
+
+    /// The compaction script, one `snow` invocation (one warehouse resume): reconcile the base's
+    /// columns, merge a leftover `__merging` table, then rename the buffer to `__merging`, count
+    /// it, replace its winners into the base in one transaction, and drop it AFTER the commit
+    /// (a DDL commits implicitly). A failure anywhere leaves the renamed table to be merged
+    /// again by the next compaction, which is safe because the replace is idempotent.
+    fn build_compact_sql(
+        &self,
+        table: &str,
+        specs: &[TargetColumnSpec],
+        pk: &[String],
+        order: &crate::load::cdc::CompactOrder,
+        buffer: bool,
+        leftover: bool,
+    ) -> String {
+        use crate::load::cdc::{Warehouse, merge_inputs, replace_compact_sql};
+        let base = self.fqtn(table);
+        let changes_fqtn = self.fqtn(&format!("{table}__changes"));
+        let merging = format!("{table}__changes__merging");
+        let merging_fqtn = self.fqtn(&merging);
+        let (columns, keys, deleted_flag) = merge_inputs(specs, pk);
+        let merge = replace_compact_sql(
+            Warehouse::Snowflake,
+            &base,
+            &merging_fqtn,
+            &columns,
+            &keys,
+            order,
+            deleted_flag,
+        );
+        let base_specs: Vec<TargetColumnSpec> = specs
+            .iter()
+            .filter(|s| !is_meta_column(&s.column_name))
+            .cloned()
+            .collect();
+        let mut sql = format!(
+            "ALTER SESSION SET QUERY_TAG = '{tag}';\nUSE WAREHOUSE {wh};\n{alter}",
+            tag = self.query_tag_for("compact", table),
+            wh = self.warehouse,
+            alter = build_alter_add_columns_sql(&base, &base_specs),
+        );
+        if leftover {
+            sql.push_str(&format!(
+                "SELECT COUNT(*) AS RECOVERED_ FROM {merging_fqtn};\n{merge}DROP TABLE {merging_fqtn};\n"
+            ));
+        }
+        if buffer {
+            sql.push_str(&format!(
+                "ALTER TABLE {changes_fqtn} RENAME TO {merging_fqtn};\n\
+                 SELECT COUNT(*) AS CHANGES_ FROM {merging_fqtn};\n{merge}DROP TABLE {merging_fqtn};\n"
+            ));
+        }
+        sql
+    }
+
     /// The append script for one CDC load, separated from its EXECUTION so the
     /// schema-reconciliation step can be asserted without a Snowflake account.
     /// The reconciling `ALTER` shipped on BigQuery only, so "the builder exists"
@@ -462,23 +675,16 @@ impl SnowflakeLoader {
         specs: &[TargetColumnSpec],
         uris: &[String],
     ) -> Result<String> {
-        use crate::load::cdc::Warehouse;
         // Full change-log schema: rivet's `__op`/`__pos`/`__seq` meta columns
         // (not reported by `rivet check`) ahead of the resolved data columns.
-        let mut full = crate::load::cdc::meta_column_specs(Warehouse::Snowflake);
-        full.extend(
-            specs
-                .iter()
-                .filter(|s| !is_meta_column(&s.column_name))
-                .cloned(),
-        );
+        let full = Self::changes_specs(specs);
 
         let changes = format!("{table}__changes");
         let changes_fqtn = self.fqtn(&changes);
         let ddl = Self::build_schema_ddl(&full);
         let select = Self::build_copy_select(&full);
         let columns = Self::build_column_list(&full);
-        let cluster = Self::cluster_clause(&self.cluster_keys());
+        let create = self.build_create_changes_sql(&changes_fqtn, &ddl);
         let stage = format!("rivet_stage_{}", sanitize_tag(&changes));
         let files = copy_files_clause(&self.gcs_url, uris)?;
 
@@ -490,8 +696,7 @@ impl SnowflakeLoader {
              USE WAREHOUSE {wh};\n\
              USE SCHEMA {db}.{sc};\n\
              CREATE OR REPLACE STAGE {stage} URL='{url}' STORAGE_INTEGRATION={si} FILE_FORMAT={PARQUET_FORMAT};\n\
-             CREATE TABLE IF NOT EXISTS {changes_fqtn} (\n{ddl}\n){cluster};\n\
-             {alter}\
+             {create}{alter}\
              SELECT COUNT(*) AS BEFORE_ FROM {changes_fqtn};\n\
              COPY INTO {changes_fqtn} ({columns})\n\
              \x20 FROM (SELECT {select} FROM @{stage})\n\
@@ -1502,5 +1707,284 @@ mod tests {
         assert_eq!(kind.unwrap(), crate::load::ObjectKind::View);
         assert_eq!(copied.unwrap(), 3);
         assert_eq!(viewed.unwrap(), 3);
+    }
+
+    fn compact_specs(flag: bool) -> Vec<TargetColumnSpec> {
+        let mut specs = vec![
+            col("id", SfType::Number),
+            col("v", SfType::Varchar),
+            col("__op", SfType::Varchar),
+            col("__pos", SfType::Varchar),
+        ];
+        if flag {
+            specs.push(col("__is_deleted", SfType::Boolean));
+        }
+        specs
+    }
+
+    fn base_buffer_loader() -> SnowflakeLoader {
+        let mut l = adoption_loader();
+        l.layout = crate::load::plan::CdcLayout::BaseAndBuffer;
+        l
+    }
+
+    fn order() -> crate::load::cdc::CompactOrder {
+        crate::load::cdc::CompactOrder::Cdc(crate::load::cdc::SourceEngine::MySql)
+    }
+
+    fn pos(sql: &str, needle: &str) -> usize {
+        sql.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` missing from:\n{sql}"))
+    }
+
+    /// The buffer is renamed, replaced into the base inside one transaction, and dropped only after the COMMIT: a DDL commits implicitly, so a DROP inside would end the transaction early.
+    #[test]
+    fn the_compact_script_renames_then_replaces_then_drops_after_the_commit() {
+        let l = base_buffer_loader();
+        let sql = l.build_compact_sql(
+            "orders",
+            &compact_specs(true),
+            &["id".into()],
+            &order(),
+            true,
+            false,
+        );
+        let steps = [
+            pos(&sql, "USE WAREHOUSE WH;"),
+            pos(
+                &sql,
+                "ALTER TABLE DB.SC.orders__changes RENAME TO DB.SC.orders__changes__merging;",
+            ),
+            pos(
+                &sql,
+                "SELECT COUNT(*) AS CHANGES_ FROM DB.SC.orders__changes__merging;",
+            ),
+            pos(&sql, "BEGIN;"),
+            pos(&sql, "DELETE FROM DB.SC.orders USING"),
+            pos(&sql, "INSERT INTO DB.SC.orders"),
+            pos(&sql, "UPDATE DB.SC.orders SET __is_deleted = TRUE"),
+            pos(&sql, "COMMIT;"),
+            pos(&sql, "DROP TABLE DB.SC.orders__changes__merging;"),
+        ];
+        assert!(steps.windows(2).all(|w| w[0] < w[1]), "{sql}");
+        assert!(sql.contains(r#""rivet_op":"compact""#), "{sql}");
+        assert!(
+            !sql.contains("RECOVERED_"),
+            "no leftover, no recovery: {sql}"
+        );
+        assert!(!sql.contains("MERGE"), "{sql}");
+    }
+
+    /// A leftover `__merging` table is merged and dropped before this run's buffer is renamed onto the same name.
+    #[test]
+    fn a_leftover_merging_table_is_merged_and_dropped_before_the_buffer_is_renamed() {
+        let l = base_buffer_loader();
+        let sql = l.build_compact_sql(
+            "orders",
+            &compact_specs(true),
+            &["id".into()],
+            &order(),
+            true,
+            true,
+        );
+        let recovered = pos(
+            &sql,
+            "SELECT COUNT(*) AS RECOVERED_ FROM DB.SC.orders__changes__merging;",
+        );
+        let first_drop = pos(&sql, "DROP TABLE DB.SC.orders__changes__merging;");
+        let rename = pos(&sql, "RENAME TO DB.SC.orders__changes__merging;");
+        let first_commit = pos(&sql, "COMMIT;");
+        assert!(
+            recovered < first_commit && first_commit < first_drop && first_drop < rename,
+            "{sql}"
+        );
+        assert_eq!(sql.matches("BEGIN;").count(), 2, "{sql}");
+        assert_eq!(sql.matches("DROP TABLE").count(), 2, "{sql}");
+
+        let only = l.build_compact_sql(
+            "orders",
+            &compact_specs(true),
+            &["id".into()],
+            &order(),
+            false,
+            true,
+        );
+        assert!(!only.contains("RENAME"), "{only}");
+        assert_eq!(only.matches("BEGIN;").count(), 1, "{only}");
+    }
+
+    /// The base is reconciled to the data columns before the replace names them, and a base without the flag column never names it.
+    #[test]
+    fn the_compact_script_adds_new_columns_first_and_names_no_flag_without_one() {
+        let l = base_buffer_loader();
+        let sql = l.build_compact_sql(
+            "orders",
+            &compact_specs(false),
+            &["id".into()],
+            &order(),
+            true,
+            false,
+        );
+        let alter = pos(
+            &sql,
+            "ALTER TABLE DB.SC.orders ADD COLUMN\n  IF NOT EXISTS id",
+        );
+        assert!(alter < pos(&sql, "BEGIN;"), "{sql}");
+        assert!(!sql.contains("__is_deleted"), "{sql}");
+        assert!(!sql.contains("UPDATE"), "{sql}");
+    }
+
+    /// A buffer is disposable under a base and buffer: transient, no time travel, not clustered; the log+view table is the permanent clustered table it always was.
+    #[test]
+    fn the_buffer_is_transient_only_under_a_base_and_buffer() {
+        let specs = compact_specs(false);
+        let pk = vec!["id".to_string()];
+        let mut buffer = base_buffer_loader();
+        buffer.cluster_by = vec!["id".into()];
+        let sql = buffer.build_flag_absent_sql("orders", &specs, &pk);
+        assert!(
+            sql.contains("CREATE TRANSIENT TABLE IF NOT EXISTS DB.SC.orders__changes")
+                && sql.contains("DATA_RETENTION_TIME_IN_DAYS = 0;"),
+            "{sql}"
+        );
+        assert!(!sql.contains("CLUSTER BY"), "{sql}");
+
+        let mut log = adoption_loader();
+        log.cluster_by = vec!["id".into()];
+        let sql = log.build_flag_absent_sql("orders", &specs, &pk);
+        assert!(
+            sql.contains("CREATE TABLE IF NOT EXISTS DB.SC.orders__changes")
+                && !sql.contains("TRANSIENT")
+                && !sql.contains("DATA_RETENTION"),
+            "{sql}"
+        );
+        assert!(sql.contains("CLUSTER BY"), "{sql}");
+    }
+
+    /// No buffer and no leftover is a result: no script is sent, only the two catalog probes.
+    #[test]
+    fn compacting_nothing_sends_no_script() {
+        let stand = Stand::scripted(&[(
+            "INFORMATION_SCHEMA.TABLES",
+            0,
+            &answer(r#"{"KIND_":0}"#),
+            "",
+        )]);
+        let report = stand
+            .loader()
+            .compact("orders", &compact_specs(true), &["id".into()], order())
+            .unwrap();
+        assert!(!report.had_buffer && report.changes_rows == 0 && report.merge_jobs == 0);
+        let sent = stand.sent();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(
+            sent.iter().all(|s| s.contains("INFORMATION_SCHEMA.TABLES")),
+            "{sent:?}"
+        );
+    }
+
+    /// The counts are read by name from the script's answer, and an empty buffer is zero merge jobs.
+    #[test]
+    fn a_compaction_reads_its_counts_by_name() {
+        let table = answer(r#"{"KIND_":1}"#);
+        let absent = answer(r#"{"KIND_":0}"#);
+        let stand = Stand::scripted(&[
+            ("UPPER('orders__changes__merging')", 0, &absent, ""),
+            ("UPPER('orders__changes')", 0, &table, ""),
+            (
+                "RENAME TO",
+                0,
+                r#"[[{"CHANGES_":7}],[{"number of rows inserted":3}]]"#,
+                "",
+            ),
+        ]);
+        let report = stand
+            .loader()
+            .compact("orders", &compact_specs(true), &["id".into()], order())
+            .unwrap();
+        assert_eq!(
+            (report.changes_rows, report.merge_jobs, report.had_buffer),
+            (7, 1, true)
+        );
+        let sent = stand.sent();
+        assert_eq!(sent.len(), 3, "two probes and ONE script: {sent:?}");
+
+        let stand = Stand::scripted(&[
+            ("UPPER('orders__changes__merging')", 0, &absent, ""),
+            ("UPPER('orders__changes')", 0, &table, ""),
+            ("RENAME TO", 0, r#"[[{"CHANGES_":0}]]"#, ""),
+        ]);
+        let report = stand
+            .loader()
+            .compact("orders", &compact_specs(true), &["id".into()], order())
+            .unwrap();
+        assert_eq!((report.changes_rows, report.merge_jobs), (0, 0));
+    }
+
+    /// A leftover from an interrupted compaction is merged, and reported as recovered.
+    #[test]
+    fn a_leftover_is_recovered_by_the_next_compaction() {
+        let table = answer(r#"{"KIND_":1}"#);
+        let absent = answer(r#"{"KIND_":0}"#);
+        let stand = Stand::scripted(&[
+            ("UPPER('orders__changes__merging')", 0, &table, ""),
+            ("UPPER('orders__changes')", 0, &absent, ""),
+            ("RECOVERED_", 0, r#"[[{"RECOVERED_":4}]]"#, ""),
+        ]);
+        let report = stand
+            .loader()
+            .compact("orders", &compact_specs(true), &["id".into()], order())
+            .unwrap();
+        assert_eq!(
+            (report.changes_rows, report.merge_jobs, report.had_buffer),
+            (4, 1, true)
+        );
+        assert_eq!(stand.sent().len(), 3);
+        let script = &stand.sent()[2];
+        assert!(!script.contains("RENAME"), "{script}");
+    }
+
+    /// A view or an external table where the buffer should be is refused with its code, before any script.
+    #[test]
+    fn a_buffer_that_is_not_a_table_is_refused_before_any_statement_that_writes() {
+        let stand = Stand::scripted(&[
+            (
+                "UPPER('orders__changes__merging')",
+                0,
+                &answer(r#"{"KIND_":0}"#),
+                "",
+            ),
+            ("UPPER('orders__changes')", 0, &answer(r#"{"KIND_":2}"#), ""),
+        ]);
+        let err = stand
+            .loader()
+            .compact("orders", &compact_specs(true), &["id".into()], order())
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("is not a table") && text.contains("nothing was merged"),
+            "{text}"
+        );
+        assert_eq!(
+            stand.sent().len(),
+            1,
+            "the first non-table stops the probes"
+        );
+    }
+
+    /// The re-baseline tombstones are counted around the insert, by name.
+    #[test]
+    fn the_tombstones_are_the_buffer_growth_around_the_insert() {
+        let stand = Stand::scripted(&[(
+            "BEFORE_",
+            0,
+            r#"[[{"BEFORE_":2}],[{"number of rows inserted":5}],[{"AFTER_":7}]]"#,
+            "",
+        )]);
+        let n = stand
+            .loader()
+            .flag_absent_from_buffer("orders", &compact_specs(true), &["id".into()])
+            .unwrap();
+        assert_eq!(n, 5);
     }
 }

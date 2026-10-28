@@ -179,7 +179,7 @@ fn an_incremental_load_starts_a_table_then_a_change_log(e: SqlEngine) {
         "the view is the current state"
     );
 
-    // `rivet compact` has nothing to merge on Snowflake: it skips by name on every attempt, exit 0, and leaves the log and the view as they are.
+    // Without `layout: base_buffer` there is nothing to merge on Snowflake: `rivet compact` skips by name on every attempt, exit 0, and leaves the log and the view as they are.
     let said: Vec<String> = (0..2)
         .map(|_| {
             let out = rig.cli(&["compact"]);
@@ -194,7 +194,7 @@ fn an_incremental_load_starts_a_table_then_a_change_log(e: SqlEngine) {
     assert_eq!(said[0], said[1], "the second attempt answers as the first");
     assert!(said[0].starts_with("exit Some(0)"), "{}", said[0]);
     assert!(
-        said[0].contains("skipped") && said[0].contains("never compacts"),
+        said[0].contains("skipped") && said[0].contains("a changelog + view table"),
         "{}",
         said[0]
     );

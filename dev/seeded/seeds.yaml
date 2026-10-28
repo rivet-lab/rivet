@@ -2103,6 +2103,25 @@ seeds:
       lib:
         cells: ["lib:the_open_sends_no_statement_before_its_first_read"]
 
+  - name: snowflake-compact-ranks-baseline-first
+    class: "a compaction picks each key's winner with an ORDER BY that sorts NULL first, so on Snowflake a re-loaded baseline row (NULL position) outranks every change and the base keeps the old value"
+    history: "2026-10-28 - Snowflake gained `rivet compact` (`load.layout: base_buffer`); Snowflake sorts NULL first in DESC where BigQuery sorts it last, so the winner order needs the explicit `__pos IS NOT NULL` rank the current-state view already carries"
+    scope: source
+    patch: snowflake-compact-ranks-baseline-first/shared.patch
+    engines:
+      postgres:
+        cells: [snowflake_compact_cycle_postgres, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+      mysql:
+        cells: [snowflake_compact_cycle_mysql, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+      mssql:
+        cells: [snowflake_compact_cycle_mssql, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+      mongo:
+        cells: [snowflake_compact_cycle_mongo, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+      oracle:
+        na: "SourceEngine, which orders a change log for the compaction, has no Oracle variant, so no Oracle change log is ordered or compacted by this path"
+      lib:
+        cells: ["lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+
   - name: snowflake-probe-counts-by-count-if
     class: "a catalog probe sums COUNT_IF terms, which are NULL over zero rows, so a free table name has no kind and the load stops before any write"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; every load onto a free name failed in 0.26.0 through 0.31.0"

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Snowflake takes `rivet compact`: `load.layout: base_buffer` on `target: snowflake` gives a base table
+  plus a buffer, with no view and no MERGE.** One compact is one script on one warehouse resume: the
+  buffer is renamed to `<table>__changes__merging`, then one transaction deletes the winning keys from the
+  base, inserts their live rows and flags deleted keys (`__is_deleted`, when the base carries it), and the
+  renamed table is dropped after the commit. A script that died before the drop is finished by the next
+  compact; replaying it leaves the base unchanged. Under `base_buffer` the buffer is a transient table with
+  `DATA_RETENTION_TIME_IN_DAYS = 0` (no time travel, no fail-safe); the log-and-view layout is unchanged.
+  `base_rows_after` is the base's `COUNT(*)` (Snowflake answers it from metadata).
+  **Behaviour changes, with the remedy:**
+  - a Snowflake config that writes `load.layout: base_buffer` was refused at load before; it now loads.
+    A Snowflake config that does not write it, including one with `cdc.backfill:`, keeps the changelog and
+    its view exactly as before (no remedy needed);
+  - `rivet compact` on such a Snowflake table says "a changelog + view table (no `load.layout:
+    base_buffer`); nothing to merge" where it said it "never compacts"; scripts that match the old words
+    should match `nothing to merge`;
+  - `rivet init` for Snowflake now writes `layout: base_buffer` for incremental and CDC exports; delete
+    the key to keep the changelog and view;
+  - the ClickHouse refusal of `load.layout: base_buffer` now reads "`base_buffer` needs `target: bigquery`
+    or `target: snowflake` ... Drop the key to keep the changelog and its dedup view"; the code and exit
+    are unchanged.
+
 - **Homebrew moved to `brew install rivet-lab/tap/rivet`** (the tap is now `rivet-lab/homebrew-tap`;
   `panchenkoai/rivet/rivet` keeps working through GitHub's redirect). **On Linux the formula installs
   the glibc 2.28 build:** the one it installed before needed glibc 2.38+ and exited on Ubuntu 22.04,

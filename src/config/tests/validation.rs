@@ -1691,10 +1691,11 @@ exports:
     assert!(err.contains("allow_source_drfit"), "{err}");
 }
 
-/// `layout: base_buffer` promises `rivet compact`, which is BigQuery-only: on Snowflake
-/// the base would freeze at the backfill while the buffer grew, and every load would
-/// prescribe a command that can only fail. Refused where the key is written, at every
-/// layer; BigQuery takes it, and Snowflake without the key makes no promise.
+/// `layout: base_buffer` promises `rivet compact`, which BigQuery and Snowflake run: on
+/// ClickHouse the base would freeze at the backfill while the buffer grew, and every load
+/// would prescribe a command that can only fail. Refused where the key is written, at
+/// every layer; BigQuery and Snowflake take it, and ClickHouse without the key makes no
+/// promise.
 #[test]
 fn a_base_and_buffer_layout_needs_a_compacting_warehouse() {
     let cfg = |target: &str, export_load: &str| {
@@ -1707,24 +1708,32 @@ fn a_base_and_buffer_layout_needs_a_compacting_warehouse() {
     let snowflake = "  target: snowflake\n  connection: c\n  warehouse: w\n  database: d\n  \
                      schema: s\n  storage_integration: i\n";
     let bigquery = "  target: bigquery\n  project: p\n  dataset: d\n";
+    let clickhouse = "  target: clickhouse\n  url: \"http://localhost:8123\"\n  database: d\n  \
+                      user: u\n  password_env: CH_PW\n";
 
     let err = format!(
         "{:#}",
-        Config::from_yaml(&cfg(&format!("{snowflake}  layout: base_buffer\n"), "")).unwrap_err()
+        Config::from_yaml(&cfg(&format!("{clickhouse}  layout: base_buffer\n"), "")).unwrap_err()
     );
     assert!(
-        err.contains("`load.layout`") && err.contains("BigQuery-only"),
+        err.contains("`load.layout`")
+            && err.contains("`base_buffer` needs `target: bigquery` or `target: snowflake`")
+            && err.contains("does not run on ClickHouse"),
         "{err}"
     );
     let err = format!(
         "{:#}",
-        Config::from_yaml(&cfg(snowflake, "    load: { layout: base_buffer }\n")).unwrap_err()
+        Config::from_yaml(&cfg(clickhouse, "    load: { layout: base_buffer }\n")).unwrap_err()
     );
     assert!(err.contains("export 't': `load.layout`"), "{err}");
 
     Config::from_yaml(&cfg(&format!("{bigquery}  layout: base_buffer\n"), ""))
         .expect("BigQuery compacts, so it may promise a base and a buffer");
-    Config::from_yaml(&cfg(snowflake, "")).expect("no key written, no promise made");
+    Config::from_yaml(&cfg(&format!("{snowflake}  layout: base_buffer\n"), ""))
+        .expect("Snowflake compacts, so it may promise a base and a buffer");
+    Config::from_yaml(&cfg(snowflake, "    load: { layout: base_buffer }\n"))
+        .expect("an export's own key is taken on Snowflake too");
+    Config::from_yaml(&cfg(clickhouse, "")).expect("no key written, no promise made");
 }
 
 /// A ClickHouse `load:` carries `url`, `database`, `user` and `password_env`; a
@@ -1773,5 +1782,5 @@ fn a_clickhouse_load_names_its_own_fields_and_refuses_foreign_ones() {
         load::LoadTarget::Clickhouse { ca_file: Some(ref f), .. } if f == "/etc/rivet/ca.pem"
     ));
     let layout = err(&format!("{own}  layout: base_buffer\n"));
-    assert!(layout.contains("BigQuery-only"), "{layout}");
+    assert!(layout.contains("does not run on ClickHouse"), "{layout}");
 }

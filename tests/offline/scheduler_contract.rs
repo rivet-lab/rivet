@@ -53,6 +53,10 @@ const COMPACT_SKIP_TEXT: &[(&str, &str)] = &[
     ("log_view", "\"a changelog + view table (no `cdc.backfill:`"),
     (
         "log_view",
+        "\"a changelog + view table (no `load.layout: base_buffer`);",
+    ),
+    (
+        "log_view",
         "\"a changelog + view table; `load.layout: base_buffer`",
     ),
     (
