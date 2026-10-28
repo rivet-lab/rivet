@@ -132,9 +132,14 @@ scenarios:
     valid_form_accepted: { test: a_multiplex_export_takes_per_table_load_overrides }
 
   - id: layout_base_buffer_needs_a_compacting_warehouse
-    what: "`layout: base_buffer` promises a `rivet compact`, which is BigQuery-only: on Snowflake the base froze at the backfill while the buffer grew for ever, with no view and every load prescribing a command that could only fail. Refused at config load wherever the key is written (section, export, `load.tables.<t>`) outside BigQuery; BigQuery takes it; Snowflake without the key makes no promise (the `backfill:` derivation yields the changelog and its view there)."
+    what: "`layout: base_buffer` promises a `rivet compact`, which BigQuery and Snowflake run and ClickHouse does not: on ClickHouse the base would freeze at the backfill while the buffer grew for ever, with no view and every load prescribing a command that could only fail. Refused at config load wherever the key is written (section, export, `load.tables.<t>`) for ClickHouse, naming the remedy (drop the key); BigQuery and Snowflake take it. On Snowflake the base is the default, so the key is only ever written as `log_view` to keep the changelog and its view."
     rejected_wrong_mode: { test: a_base_and_buffer_layout_needs_a_compacting_warehouse }
     valid_form_accepted: { test: a_base_and_buffer_layout_needs_a_compacting_warehouse }
+
+  - id: snowflake_cdc_base_needs_a_baseline
+    what: "on `target: snowflake` a `mode: cdc` export keeps a base and a buffer by default, so one that names neither `cdc.backfill:` nor `cdc.initial: snapshot` (and does not write `load.layout: log_view`, section, export or per table) would start an empty base: refused at config load with `RIVET_CONFIG_LOAD_BLOCK_INVALID` (exit 1), printing both remedies. A stream with a baseline, a written `log_view`, an incremental export, and the same stream on BigQuery or ClickHouse load as before"
+    rejected_wrong_mode: { test: a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load }
+    valid_form_accepted: { test: a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load }
 
   - id: snowflake_connection_names_a_cli_login
     what: "a Snowflake `load:` that still names a `snow` CLI connection (`connection: my_conn`): rivet no longer drives the CLI and signs in with a key pair, so the line would be read by nothing. Refused at config load with `RIVET_CONFIG_LOAD_BLOCK_INVALID`, printing the `account` / `user` / `private_key_path` / `role` fragment that replaces it; a Snowflake block with the new fields loads, a non-Snowflake target never meets the refusal."

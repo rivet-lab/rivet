@@ -162,7 +162,18 @@ appear in `INFORMATION_SCHEMA.JOBS` under `parent_job_id` with the same labels.
 
 Consumers read `<table>` directly, `WHERE NOT __is_deleted` for live rows. The
 buffer holds no history — `__is_deleted` in the base is the record that a row
-was deleted. BigQuery only in this release; Snowflake keeps the view layout.
+was deleted.
+
+Snowflake takes the same layout by default for every incremental and CDC export; `load.layout: log_view`
+keeps the changelog and view. A Snowflake CDC stream with neither `cdc.backfill:` nor
+`cdc.initial: snapshot` would start an empty base, so the config is refused at load; add a baseline
+or write `log_view`. `rivet compact` there runs one
+script per table, one warehouse resume: the buffer is renamed to `<table>__changes__merging`, its
+latest change per key replaces the base rows in one transaction (`DELETE`, `INSERT`, and an `UPDATE`
+of `__is_deleted` for a tombstone), and the renamed table is dropped after the commit. A run that
+stopped in between leaves `__merging` behind; the next `rivet compact` merges it first, which is
+safe because replaying a buffer leaves the base as it was. The buffer is a transient table with no
+time travel.
 
 ## Every billed step carries its own label
 

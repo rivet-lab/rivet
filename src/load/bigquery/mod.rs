@@ -618,6 +618,7 @@ impl TargetLoader for BigQueryLoader {
             .collect();
         let keys: Vec<&str> = pk.iter().map(String::as_str).collect();
         let sql = crate::load::cdc::absent_as_deleted_sql(
+            crate::load::cdc::Warehouse::BigQuery,
             &self.fqtn(table),
             &self.fqtn(&changes),
             &columns,

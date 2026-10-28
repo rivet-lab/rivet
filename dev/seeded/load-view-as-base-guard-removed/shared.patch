@@ -1,0 +1,11 @@
+--- a/src/load/mod.rs
++++ b/src/load/mod.rs
+@@ -431,7 +431,7 @@
+ }
+ 
+ fn view_as_base_check(loader: &dyn TargetLoader, table: &str, base_and_buffer: bool) -> Result<()> {
+-    if !base_and_buffer || loader.object_kind(table)? != ObjectKind::View {
++    if true || !base_and_buffer || loader.object_kind(table)? != ObjectKind::View {
+         return Ok(());
+     }
+     let (base, buffer) = (

@@ -533,6 +533,7 @@ impl Config {
         self.validate_csv_exports_are_not_loaded()?;
         self.validate_load_overrides()?;
         self.validate_layout_has_a_compacting_warehouse()?;
+        self.validate_a_default_base_has_a_baseline()?;
         self.validate_cdc_has_a_loadable_target()?;
         Ok(())
     }
@@ -557,8 +558,8 @@ impl Config {
         Ok(())
     }
 
-    /// `layout: base_buffer` promises a `rivet compact`, which is BigQuery-only: on
-    /// another warehouse the base would freeze at the backfill while the buffer grew.
+    /// `layout: base_buffer` promises a `rivet compact`, which ClickHouse has none of: there
+    /// the base would freeze at the backfill while the buffer grew.
     fn validate_layout_has_a_compacting_warehouse(&self) -> crate::error::Result<()> {
         use crate::config::load::LayoutChoice;
         let Some(load) = &self.load else {
@@ -585,10 +586,51 @@ impl Config {
         if let Some(site) = written {
             crate::config_bail!(
                 crate::error::codes::CONFIG_LOAD_BLOCK_INVALID,
-                "{site}: `base_buffer` needs `target: bigquery` — `rivet compact` is \
-                 BigQuery-only in this release, so the base would never take its buffer. \
-                 Drop the key to keep the changelog and its dedup view"
+                "{site}: `base_buffer` needs `target: bigquery` or `target: snowflake` — \
+                 `rivet compact` does not run on ClickHouse, so the base would never take its \
+                 buffer. Drop the key to keep the changelog and its dedup view"
             );
+        }
+        Ok(())
+    }
+
+    /// Where a base is the default layout, a `mode: cdc` export needs a baseline to build it from: without `cdc.backfill:` or `cdc.initial: snapshot` the base would start empty and miss every row the stream never touched.
+    fn validate_a_default_base_has_a_baseline(&self) -> crate::error::Result<()> {
+        use crate::config::load::{BaseSupport, LayoutChoice};
+        let Some(load) = &self.load else {
+            return Ok(());
+        };
+        if load.target.base_support() != BaseSupport::Default {
+            return Ok(());
+        }
+        for e in self.exports.iter().filter(|e| e.mode == ExportMode::Cdc) {
+            if e.cdc.as_ref().is_some_and(|c| c.has_baseline()) {
+                continue;
+            }
+            let units: Vec<Option<&str>> = match e.multiplex_tables() {
+                Some(tables) => tables.iter().map(|t| Some(t.as_str())).collect(),
+                None => vec![None],
+            };
+            for unit in units {
+                if load.overlay(e, unit).layout == Some(LayoutChoice::LogView) {
+                    continue;
+                }
+                let site = match unit {
+                    Some(t) => format!("export '{}' (table '{t}')", e.name),
+                    None => format!("export '{}'", e.name),
+                };
+                crate::config_bail!(
+                    crate::error::codes::CONFIG_LOAD_BLOCK_INVALID,
+                    "{site}: on `target: {}` a `mode: cdc` export keeps a base table and a buffer, \
+                     and this stream names nothing to build the base from — neither \
+                     `cdc.backfill:` nor `cdc.initial: snapshot` — so the base would start empty \
+                     and miss every row the stream never changes. Either add `cdc.backfill:` (or \
+                     `cdc.initial: snapshot`) to build the base from a snapshot of the table, or \
+                     write `load.layout: log_view` to keep the change log and its current-state \
+                     view",
+                    load.target.name()
+                );
+            }
         }
         Ok(())
     }

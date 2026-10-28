@@ -2103,6 +2103,82 @@ seeds:
       lib:
         cells: ["lib:the_open_sends_no_statement_before_its_first_read"]
 
+  - name: snowflake-compact-ranks-baseline-first
+    class: "a compaction picks each key's winner with an ORDER BY that sorts NULL first, so on Snowflake a re-loaded baseline row (NULL position) outranks every change and the base keeps the old value"
+    history: "2026-10-28 - Snowflake gained `rivet compact` (`load.layout: base_buffer`); Snowflake sorts NULL first in DESC where BigQuery sorts it last, so the winner order needs the explicit `__pos IS NOT NULL` rank the current-state view already carries"
+    scope: source
+    patch: snowflake-compact-ranks-baseline-first/shared.patch
+    engines:
+      postgres:
+        cells: [snowflake_compact_cycle_postgres, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+      mysql:
+        cells: [snowflake_compact_cycle_mysql, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+      mssql:
+        cells: [snowflake_compact_cycle_mssql, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+      mongo:
+        cells: [snowflake_compact_cycle_mongo, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+      oracle:
+        na: "SourceEngine, which orders a change log for the compaction, has no Oracle variant, so no Oracle change log is ordered or compacted by this path"
+      lib:
+        cells: ["lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
+
+  - name: snowflake-base-buffer-not-the-default
+    class: "a warehouse whose base table is the default layout resolves an unwritten `load.layout` to log+view, so the base is never built and `rivet compact` has nothing to merge into"
+    history: "2026-10-28 - Snowflake's base-and-buffer layout became the default for every incremental and cdc export; written `layout: log_view` keeps the log and the view"
+    scope: source
+    patch: snowflake-base-buffer-not-the-default/shared.patch
+    engines:
+      postgres:
+        cells: [snowflake_compact_cycle_postgres, snowflake_incremental_buffer_compacts_into_its_base_postgres, "lib:snowflake_takes_a_base_unless_log_view_is_written"]
+      mysql:
+        cells: [snowflake_compact_cycle_mysql, snowflake_incremental_buffer_compacts_into_its_base_mysql, "lib:snowflake_takes_a_base_unless_log_view_is_written"]
+      mssql:
+        cells: [snowflake_compact_cycle_mssql, "lib:snowflake_takes_a_base_unless_log_view_is_written"]
+      mongo:
+        cells: [snowflake_compact_cycle_mongo, "lib:snowflake_takes_a_base_unless_log_view_is_written"]
+      oracle:
+        na: "an Oracle cdc export into a warehouse is refused at config load, and an Oracle incremental export reaches the same cdc_layout seam the lib cell grades"
+      lib:
+        cells: ["lib:snowflake_takes_a_base_unless_log_view_is_written"]
+
+  - name: load-view-as-base-guard-removed
+    class: "a base-and-buffer load meets a VIEW under the base name and goes on, appending to the buffer or failing in the warehouse instead of stopping with the coded conflict"
+    history: "2026-10-28 - with base-and-buffer the default on Snowflake, a table left as a log+view view must stop every load leg and compact; BigQuery shared the silent append"
+    scope: source
+    patch: load-view-as-base-guard-removed/shared.patch
+    engines:
+      postgres:
+        cells: [snowflake_view_under_the_base_name_stops_load_and_compact_postgres, "lib:a_view_under_the_base_name_stops_every_load_leg_with_the_coded_conflict"]
+      mysql:
+        cells: [snowflake_view_under_the_base_name_stops_load_and_compact_mysql, "lib:a_view_under_the_base_name_stops_every_load_leg_with_the_coded_conflict"]
+      mssql:
+        na: "the guard sits in execute_load, which every source engine reaches the same way; the live cell runs on two source engines"
+      mongo:
+        na: "the guard sits in execute_load, which every source engine reaches the same way; the live cell runs on two source engines"
+      oracle:
+        na: "the guard sits in execute_load, which every source engine reaches the same way; the live cell runs on two source engines"
+      lib:
+        cells: ["lib:a_view_under_the_base_name_stops_every_load_leg_with_the_coded_conflict"]
+
+  - name: snowflake-cdc-base-without-baseline-accepted
+    class: "a cdc stream into a warehouse whose base is the default layout names nothing to build the base from, and config load accepts it: the base starts empty and misses every row the stream never touches"
+    history: "2026-10-28 - Snowflake's default layout made a baseline a prerequisite of a cdc export; `cdc.backfill:`, `cdc.initial: snapshot` or `load.layout: log_view` are the three ways out"
+    scope: source
+    patch: snowflake-cdc-base-without-baseline-accepted/shared.patch
+    engines:
+      postgres:
+        na: "config load reads the YAML, never a source"
+      mysql:
+        na: "config load reads the YAML, never a source"
+      mssql:
+        na: "config load reads the YAML, never a source"
+      mongo:
+        na: "config load reads the YAML, never a source"
+      oracle:
+        na: "config load reads the YAML, never a source"
+      lib:
+        cells: ["lib:a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load"]
+
   - name: snowflake-probe-counts-by-count-if
     class: "a catalog probe sums COUNT_IF terms, which are NULL over zero rows, so a free table name has no kind and the load stops before any write"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; every load onto a free name failed in 0.26.0 through 0.31.0"

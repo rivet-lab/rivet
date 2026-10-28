@@ -253,7 +253,7 @@ the cycle — a top-level `load:` block (`target: bigquery`, `pk: auto`,
 creation stamp — `created_at` / `CreatedDate` … — at `granularity: day`, never a
 mutation stamp, which would move a row between partitions on every update) and,
 for a mode that carries deltas (`incremental`, `cdc`), `layout: base_buffer` so
-`rivet compact` has a base to merge into. Every value is a guess from the catalog:
+`rivet compact` has a base to merge into (BigQuery; Snowflake takes it by default and the block writes no line). Every value is a guess from the catalog:
 review the block before the first load.
 
 ```bash
@@ -295,10 +295,12 @@ rivet load -c rivet.yaml   # COPY → ANALYTICS.PUBLIC.<table>
 All five flags are required together (the loader needs every value), and
 `--gcs-bucket` is required: Snowflake reads the export through a GCS external stage,
 so `--s3-bucket` is refused. One config loads into one warehouse, so the Snowflake
-flags are refused beside `--bigquery-*` or `--clickhouse-*`. There is no
-`rivet compact` on Snowflake: no `layout: base_buffer` is written, and an
-incremental or CDC table is a `<table>__changes` log read through the deduplicated
-`<table>` view.
+flags are refused beside `--bigquery-*` or `--clickhouse-*`. On Snowflake an
+incremental or CDC export gets the default layout, which writes no `layout:` line (a physical
+`<table>` plus a `<table>__changes` buffer that `rivet compact` folds in); write
+`layout: log_view` to read a `<table>__changes` log through the deduplicated `<table>` view
+instead. A CDC stream with no baseline (a table named `snapshot`) is scaffolded with
+`layout: log_view`, because the default base would start empty and the config is refused.
 
 ---
 

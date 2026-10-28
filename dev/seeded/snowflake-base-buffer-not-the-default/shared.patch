@@ -1,0 +1,11 @@
+--- a/src/plan/load_settings.rs
++++ b/src/plan/load_settings.rs
+@@ -166,7 +166,7 @@
+         (_, Some(LayoutChoice::BaseBuffer)) if support != BaseSupport::Never => {
+             CdcLayout::BaseAndBuffer
+         }
+-        (_, None) if support == BaseSupport::Default => CdcLayout::BaseAndBuffer,
++        (_, None) if false && support == BaseSupport::Default => CdcLayout::BaseAndBuffer,
+         (LoadMode::Cdc, None) if support == BaseSupport::Derived => {
+             match export.cdc.as_ref().and_then(|c| c.backfill.as_ref()) {
+                 Some(_) => CdcLayout::BaseAndBuffer,
