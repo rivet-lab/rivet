@@ -159,7 +159,7 @@ scenarios:
     cdc:         { test: a_table_empty_at_baseline_takes_its_first_changes_mysql }
 
   - id: compact_merges_the_buffer_and_drops_it
-    what: "`rivet compact`: one MERGE per table (per ≤4,000-partition window) upserts the latest change per key into the base, flags a tombstone instead of deleting, un-flags a re-insert, then DROPs the buffer; both MERGE sides are bounded by the same constants so the base prunes; a crash between MERGE and DROP re-merges idempotently. Live: 8 rows / 7 live / 1 flagged with its last values, buffer gone, second compact a no-op, crash-and-retry merges once"
+    what: "`rivet compact`: one MERGE per table (per ≤4,000-partition window) upserts the latest change per key into the base, flags a tombstone instead of deleting, un-flags a re-insert, then DROPs the buffer; both MERGE sides are bounded by the same constants so the base prunes; a crash between MERGE and DROP re-merges idempotently. Live: 8 rows / 7 live / 1 flagged with its last values, buffer gone, second compact a no-op, crash-and-retry merges once Snowflake (2026-10-28) runs the same contract as one transaction of `DELETE ... USING` winners, `INSERT` and a tombstone `UPDATE` on a transient buffer renamed to `__changes__merging` and dropped after the commit; graded by snowflake_compact_cycle_{postgres,mysql,mssql,mongo} and snowflake_incremental_buffer_compacts_into_its_base_{postgres,mysql} (live_snowflake_compact.rs)."
     full:        { na: "nothing to compact" }
     incremental: { test: a_generated_config_drives_run_load_compact_into_the_warehouse_postgres }
     cdc:         { test: compact_merge_flags_deletes_and_prunes_both_sides_by_constants }

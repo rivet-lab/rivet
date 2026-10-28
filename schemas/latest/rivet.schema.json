@@ -74,6 +74,13 @@
             "null"
           ]
         },
+        "url_secret": {
+          "description": "Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "host": {
           "type": [
             "string",
@@ -102,6 +109,13 @@
           ]
         },
         "password_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password_secret": {
+          "description": "Google Secret Manager secret holding the password: `projects/<p>/secrets/<s>[/versions/<n>]`.",
           "type": [
             "string",
             "null"
@@ -1800,7 +1814,7 @@
           "$ref": "#/$defs/KeyColumns"
         },
         "layout": {
-          "description": "`log_view` or `base_buffer` — where the current state lives. Absent derives\nit from the mode: a CDC stream with a `backfill:` is base+buffer, the rest\nchangelog+view. `base_buffer` needs `target: bigquery` — `rivet compact` is\nwhat merges the buffer into the base, and it is BigQuery-only.",
+          "description": "`log_view` or `base_buffer` — where the current state lives. Absent derives\nit from the target: on Snowflake an incremental or CDC export is base+buffer\n(`log_view` keeps the changelog and its view); on BigQuery a CDC stream with a\n`backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs\n`target: bigquery` or `snowflake` — `rivet compact` merges the buffer into the\nbase, and ClickHouse has none.",
           "anyOf": [
             {
               "$ref": "#/$defs/LayoutChoice"

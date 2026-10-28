@@ -1,0 +1,11 @@
+--- a/src/load/cdc.rs
++++ b/src/load/cdc.rs
+@@ -145,7 +145,7 @@
+                 // Snowflake sorts NULL first in DESC, so a baseline row (NULL `__pos`)
+                 // would outrank every change: rank it last, as the view does.
+                 let baseline_last =
+-                    (warehouse == Warehouse::Snowflake).then(|| "__pos IS NOT NULL".to_string());
++                    (false).then(|| "__pos IS NOT NULL".to_string());
+                 baseline_last
+                     .into_iter()
+                     .chain(engine.order_exprs(warehouse))

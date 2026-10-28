@@ -114,7 +114,7 @@ impl Warehouse {
             WarehouseKind::Snowflake => {
                 let sf = self.sf.as_ref().expect("a Snowflake schema");
                 rig.dest_gcs_live(&sf.bucket, &sf.prefix)
-                    .top_line(&sf.load_line(&format!(", pk: [{pk}]")))
+                    .top_line(&sf.load_line(&format!(", pk: [{pk}], layout: log_view")))
             }
         }
     }

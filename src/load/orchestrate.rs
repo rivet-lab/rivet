@@ -1377,12 +1377,19 @@ fn execute_load<R>(
     let budgeted = budgeted_uris(job.plan.layout, &inputs.runs, &inputs.uris);
     // Asked before the `writing` marker below, which the next load reads as rivet's claim.
     let appends = job.mode != load::plan::LoadMode::Full;
-    let (rows, report) = match load::before_write(load::ensure_target_own(
+    let (rows, report) = match load::refuse_view_as_base(
         &**loader,
         &job.plan.table,
-        appends,
-        inputs.ownership,
-    ))
+        job.plan.layout.log_is_disposable(),
+    )
+    .and_then(|()| {
+        load::before_write(load::ensure_target_own(
+            &**loader,
+            &job.plan.table,
+            appends,
+            inputs.ownership,
+        ))
+    })
     .and_then(|()| load::before_write(partition_budget_ok(store, job.plan, &budgeted)))
     .and_then(|()| {
         // The crash marker, written between the LAST pre-write check and the
@@ -4004,6 +4011,89 @@ mod load_ledger_tests {
         }
         let stop = (true, Vec::<String>::new(), "refused".to_string(), true);
         assert_eq!(seen, [stop.clone(), stop]);
+    }
+
+    /// A base name that is a VIEW stops every leg of a base-and-buffer load with the coded
+    /// conflict before a write, on every cycle; under the changelog+view layout the same view
+    /// is the log's own and the load goes on.
+    #[test]
+    fn a_view_under_the_base_name_stops_every_load_leg_with_the_coded_conflict() {
+        use load::ObjectKind::View;
+        use load::plan::{CdcLayout, LoadMode};
+        let conflict = Some((5, Some("RIVET_LOAD_TARGET_OBJECT_CONFLICT")));
+        type Leg = fn(&tempfile::TempDir, &StateStore, &load::plan::LoadPlan) -> Cycle;
+        let legs: [(&str, Leg); 4] = [
+            ("inc_whole", |d, s, p| {
+                stage_incremental_run(d, "r1", "2026-08-21T00:00:00Z", None);
+                incremental_cycle(
+                    d,
+                    s,
+                    p,
+                    "L1",
+                    load::tests::fake_loader(1).with_kind(&p.table, View),
+                )
+            }),
+            ("inc_delta", |d, s, p| {
+                stage_incremental_run(d, "r1", "2026-08-22T00:00:00Z", Some("3"));
+                incremental_cycle(
+                    d,
+                    s,
+                    p,
+                    "L1",
+                    load::tests::fake_loader(1).with_kind(&p.table, View),
+                )
+            }),
+            ("cdc_baseline", |d, s, p| {
+                stage_run(d, "r1", "full");
+                cdc_base_cycle(
+                    d,
+                    s,
+                    p,
+                    "L1",
+                    load::tests::fake_loader(1).with_kind(&p.table, View),
+                )
+            }),
+            ("cdc_stream", |d, s, p| {
+                stage_run(d, "r1", "cdc");
+                cdc_base_cycle(
+                    d,
+                    s,
+                    p,
+                    "L1",
+                    load::tests::fake_loader(1).with_kind(&p.table, View),
+                )
+            }),
+        ];
+        for (table, run_leg) in legs {
+            let mode = if table.starts_with("inc") {
+                LoadMode::Incremental
+            } else {
+                LoadMode::Cdc
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let state = StateStore::open_in_memory().unwrap();
+            let plan = plan_of(&dir, table, mode, CdcLayout::BaseAndBuffer);
+            let c = run_leg(&dir, &state, &plan);
+            assert!(
+                c.stopped_saying("refusing to load `db.") && c.exit == conflict,
+                "{table}: {c:#?}"
+            );
+            assert!(
+                c.refusal
+                    .as_deref()
+                    .is_some_and(|m| m.contains("`load.layout: log_view`")),
+                "{table}: the remedy is named: {c:#?}"
+            );
+
+            let dir = tempfile::tempdir().unwrap();
+            let state = StateStore::open_in_memory().unwrap();
+            let plan = plan_of(&dir, table, mode, CdcLayout::LogAndView);
+            let c = run_leg(&dir, &state, &plan);
+            assert!(
+                c.exit != conflict,
+                "{table}: the view of a changelog+view layout is not refused: {c:#?}"
+            );
+        }
     }
 
     /// A part that vanishes between the ledger read and the write stops the load as a

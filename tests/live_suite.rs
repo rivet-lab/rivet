@@ -263,6 +263,8 @@ mod live_shape_drift;
 mod live_shared_state_same_name;
 #[path = "live/live_skip_empty.rs"]
 mod live_skip_empty;
+#[path = "live/live_snowflake_compact.rs"]
+mod live_snowflake_compact;
 #[path = "live/live_snowflake_load.rs"]
 mod live_snowflake_load;
 #[path = "live/live_source_conformance.rs"]

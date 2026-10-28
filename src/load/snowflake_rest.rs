@@ -664,7 +664,7 @@ pub(crate) mod stand {
     /// The signer every stand client uses: the throwaway test key, for `MYORG-ACCT` and `RIVET`.
     pub(crate) fn test_signer() -> KeyPairSigner {
         let account = Account::parse("myorg-acct").expect("the test account");
-        let pem = Zeroizing::new(crate::destination::gcs_auth::TEST_RSA_PKCS8_PEM.to_string());
+        let pem = Zeroizing::new(crate::gcp_auth::TEST_RSA_PKCS8_PEM.to_string());
         KeyPairSigner::new(&account, "rivet", &pem).expect("the test key")
     }
 
@@ -787,8 +787,8 @@ pub(crate) mod stand {
 mod tests {
     use super::stand::{Seen, Stand, test_signer};
     use super::*;
-    use crate::destination::gcs_auth::TEST_RSA_PKCS8_PEM;
     use crate::error::{codes, error_code};
+    use crate::gcp_auth::TEST_RSA_PKCS8_PEM;
 
     /// The SHA-256 fingerprint of the test key's public half, computed with `openssl` and not by this module.
     const FINGERPRINT: &str = "SHA256:d2NBmwH552sXWCQPWGmKNzUj0TZo2HKZ0AMrBo4LxO4=";

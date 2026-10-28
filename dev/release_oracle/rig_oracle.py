@@ -1533,7 +1533,7 @@ def grade_load(spec: dict) -> dict:
         elif target == "snowflake":
             sf_db, sf_schema = fq.split(".")[:2]
             sql = (f"SELECT table_name, table_type FROM {sf_db}.INFORMATION_SCHEMA.TABLES "
-                   f"WHERE table_schema = {_lit(sf_schema.upper())} AND table_name IN ({_lit(leaf.upper())}, {_lit(leaf.upper() + '__CHANGES')})")
+                   f"WHERE table_schema = {_lit(sf_schema.upper())} AND table_name IN ({_lit(leaf.upper())}, {_lit(leaf.upper() + '__CHANGES')}, {_lit(leaf.upper() + '__CHANGES__MERGING')})")
             kinds = dict(ora.rows(f"SELECT * FROM {ora.snowflake(sql)}"))
             if leaf.upper() not in kinds:
                 if not ora.scalar(f"SELECT count(*) FROM {_state_table(ora, spec, 'load_run')} "
@@ -1542,11 +1542,24 @@ def grade_load(spec: dict) -> dict:
                 return {"failures": [f"WAREHOUSE: `{fq}` does not exist in Snowflake ({sorted(kinds)} do)"], "notes": notes}
             # Snowflake folds an unquoted name to upper case; each column is read under the source's own spelling.
             spelled = {c.upper(): c for c, _ in _columns(ora, "source_rows")}
-            cols = [r[0] for r in ora.rows(f"SELECT * FROM {ora.snowflake(f'SELECT column_name FROM {sf_db}.INFORMATION_SCHEMA.COLUMNS WHERE table_schema = {_lit(sf_schema.upper())} AND table_name = {_lit(leaf.upper())} ORDER BY ordinal_position')}")]
-            named = ", ".join(f"{_qi(c)} AS {_qi(spelled.get(c, c.lower()))}" for c in cols)
-            rel = f"(SELECT {named} FROM {ora.snowflake(f'SELECT * FROM {fq}')})"
+
+            def sf_relation(name: str) -> str:
+                """The Snowflake table `name` of this schema, every column renamed to the source's spelling."""
+                catalog = (f"SELECT column_name FROM {sf_db}.INFORMATION_SCHEMA.COLUMNS WHERE table_schema = "
+                           f"{_lit(sf_schema.upper())} AND table_name = {_lit(name.upper())} ORDER BY ordinal_position")
+                cols = [r[0] for r in ora.rows(f"SELECT * FROM {ora.snowflake(catalog)}")]
+                named = ", ".join(f"{_qi(c)} AS {_qi(spelled.get(c, c.lower()))}" for c in cols)
+                return f"(SELECT {named} FROM {ora.snowflake(f'SELECT * FROM {sf_db}.{sf_schema}.{name}')})"
+
+            rel = sf_relation(leaf)
             wh_types = {}
-            buffered = 0
+            # `<table>__changes` beside a VIEW is the changelog+view layout; beside a base TABLE it is base_buffer's uncompacted buffer.
+            buffered = leaf.upper() + "__CHANGES" in kinds and kinds[leaf.upper()] != "VIEW"
+            base = True
+            if buffered:
+                buffer_rel = sf_relation(f"{leaf}__changes")
+            if spec.get("verb") == "compact" and leaf.upper() + "__CHANGES__MERGING" in kinds:
+                return {"failures": [f"WAREHOUSE snowflake `{fq}`: `rivet compact` exited 0 and left `{leaf}__changes__merging` behind"], "notes": notes}
         else:
             ds = str(load.get("dataset"))
             # One catalog listing (seconds); a BigQuery query job costs ~10 s, a storage read ~2 s and reads tables only.
@@ -1560,6 +1573,7 @@ def grade_load(spec: dict) -> dict:
             rel = f"bq.{ds}.{leaf}" if leaf in tables else f"bigquery_query('bq', {_lit(f'SELECT * FROM `{fq}`')})"
             wh_types = {}
             buffered = f"{leaf}__changes" in tables
+            buffer_rel = f"bq.{ds}.{leaf}__changes"
             if buffered:
                 # `<table>__changes` beside a VIEW is the changelog+view layout (the view is the current state);
                 # beside a base TABLE (or no base yet) it is base_buffer's uncompacted buffer.
@@ -1575,13 +1589,13 @@ def grade_load(spec: dict) -> dict:
         if not wh_types and target == "clickhouse":
             return {"failures": [f"WAREHOUSE: `{fq}` does not exist in ClickHouse database `{db}`"], "notes": notes}
         if buffered and spec.get("verb") == "compact":
-            return {"failures": [f"WAREHOUSE bigquery `{fq}`: `rivet compact` exited 0 and left `{leaf}__changes` behind"], "notes": notes}
+            return {"failures": [f"WAREHOUSE {target} `{fq}`: `rivet compact` exited 0 and left `{leaf}__changes` behind"], "notes": notes}
         if buffered and not key:
             return {"skip": f"`{fq}__changes` holds an uncompacted buffer and the relation names no key to fold it into the base by"}
         try:
             if buffered:
                 # base ∪ buffer, folded per key below the way `rivet compact` merges them: a buffer row beats the base.
-                legs = ([f"(SELECT *, 0 AS _rivet_src FROM {rel})"] if base else []) + [f"(SELECT *, 1 AS _rivet_src FROM bq.{ds}.{leaf}__changes)"]
+                legs = ([f"(SELECT *, 0 AS _rivet_src FROM {rel})"] if base else []) + [f"(SELECT *, 1 AS _rivet_src FROM {buffer_rel})"]
                 ora.db.sql(f"CREATE OR REPLACE TEMP TABLE wh_all AS {' UNION ALL BY NAME '.join(legs)}")
                 partial.append("base_buffer before `rivet compact`: graded base ∪ buffer folded per key, not the merge compact performs")
             else:

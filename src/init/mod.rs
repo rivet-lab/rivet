@@ -947,7 +947,7 @@ fn next_steps_block(
     }
     // A scaffold that names a warehouse has more steps: the extract alone leaves
     // Parquet in a bucket. The cycle is run -> load -> compact only where the file
-    // declares a base and a buffer (`layout: base_buffer`); a `full` scaffold's load
+    // gives the tables a base and a buffer; a `full` scaffold's load
     // OVERWRITES its table every pass and `rivet compact` would only say "skipped".
     if has_load && has_compact {
         s.push_str(&format!(

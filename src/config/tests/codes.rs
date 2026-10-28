@@ -69,7 +69,7 @@ fn a_half_structured_source_is_coded_source_connection_invalid() {
     assert_refused(
         &yaml("  url_env: SOME_URL\n", QUERY),
         code,
-        "specify exactly one of 'url', 'url_env', or 'url_file'",
+        "specify exactly one of 'url', 'url_env', 'url_file' or 'url_secret'",
     );
 }
 
