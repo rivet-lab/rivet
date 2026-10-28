@@ -4,7 +4,9 @@ use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, GzipLevel, ZstdLevel};
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{
+    DEFAULT_MAX_ROW_GROUP_ROW_COUNT, DEFAULT_WRITE_BATCH_SIZE, WriterProperties,
+};
 
 use crate::config::CompressionType;
 use crate::error::Result;
@@ -27,6 +29,16 @@ impl ParquetFormat {
             compression_level,
             row_group_rows,
         }
+    }
+
+    fn writer_properties(&self) -> WriterProperties {
+        let mut builder = WriterProperties::builder()
+            .set_compression(self.build_compression())
+            .set_created_by("rivet".to_string());
+        if self.row_group_rows.is_some() {
+            builder = builder.set_max_row_group_row_count(self.row_group_rows);
+        }
+        builder.build()
     }
 
     fn build_compression(&self) -> Compression {
@@ -52,6 +64,45 @@ impl ParquetFormat {
 
 pub struct ParquetFormatWriter {
     inner: ArrowWriter<Box<dyn Write + Send>>,
+    group_rows: usize,
+}
+
+/// The two calls `write_in_spans` needs of an `ArrowWriter`.
+trait SpanSink {
+    fn in_progress_rows(&self) -> usize;
+    fn write(&mut self, batch: &RecordBatch) -> Result<()>;
+}
+
+impl SpanSink for ArrowWriter<Box<dyn Write + Send>> {
+    fn in_progress_rows(&self) -> usize {
+        ArrowWriter::in_progress_rows(self)
+    }
+
+    fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+        ArrowWriter::write(self, batch)?;
+        Ok(())
+    }
+}
+
+/// Writes `batch` in calls of at most one column-writer mini-batch, none past a row group end.
+///
+/// Parquet 59.1+ pins a call's whole decimal/fixed-width arena for as long as a chunk's min/max
+/// statistic lives, so a call stays small; the cuts match the library's own, the bytes stay equal.
+/// Every pass moves at least one row, so the row count bounds the passes.
+fn write_in_spans(sink: &mut impl SpanSink, batch: &RecordBatch, group_rows: usize) -> Result<()> {
+    let mut at = 0;
+    for _ in 0..batch.num_rows() {
+        if at == batch.num_rows() {
+            break;
+        }
+        let room = group_rows.saturating_sub(sink.in_progress_rows()).max(1);
+        let len = (batch.num_rows() - at)
+            .min(room)
+            .min(DEFAULT_WRITE_BATCH_SIZE);
+        sink.write(&batch.slice(at, len))?;
+        at += len;
+    }
+    Ok(())
 }
 
 impl super::Format for ParquetFormat {
@@ -90,16 +141,11 @@ impl super::Format for ParquetFormat {
         // as a *cross-release* dedup key. A constant keeps identical rows
         // byte-identical across rivet/parquet-rs versions. Writer provenance
         // lives in the run manifest/journal, not the file footer.
-        let mut builder = WriterProperties::builder()
-            .set_compression(self.build_compression())
-            .set_created_by("rivet".to_string());
-        if self.row_group_rows.is_some() {
-            builder = builder.set_max_row_group_row_count(self.row_group_rows);
-        }
-        let props = builder.build();
-
-        let inner = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
-        Ok(Box::new(ParquetFormatWriter { inner }))
+        let inner = ArrowWriter::try_new(writer, schema.clone(), Some(self.writer_properties()))?;
+        let group_rows = self
+            .row_group_rows
+            .unwrap_or(DEFAULT_MAX_ROW_GROUP_ROW_COUNT);
+        Ok(Box::new(ParquetFormatWriter { inner, group_rows }))
     }
 
     fn file_extension(&self) -> &str {
@@ -109,8 +155,7 @@ impl super::Format for ParquetFormat {
 
 impl super::FormatWriter for ParquetFormatWriter {
     fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
-        self.inner.write(batch)?;
-        Ok(())
+        write_in_spans(&mut self.inner, batch, self.group_rows)
     }
 
     fn finish(self: Box<Self>) -> Result<()> {
@@ -364,5 +409,172 @@ mod tests {
             !cb.contains("version") && !cb.contains("parquet"),
             "created_by must not embed the library version: {cb:?}"
         );
+    }
+
+    // ── write spans: bounded arena pins, unchanged bytes ─────────────────────
+
+    struct Recorder {
+        group_rows: usize,
+        in_group: usize,
+        calls: Vec<usize>,
+    }
+
+    impl SpanSink for Recorder {
+        fn in_progress_rows(&self) -> usize {
+            self.in_group
+        }
+
+        fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+            assert!(
+                self.in_group + batch.num_rows() <= self.group_rows,
+                "a call crossed a group end"
+            );
+            self.in_group = (self.in_group + batch.num_rows()) % self.group_rows;
+            self.calls.push(batch.num_rows());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end() {
+        for (rows, group_rows) in [
+            (150_000, 275_000),
+            (150_000, 7),
+            (10, 275_000),
+            (5_000, 1_024),
+            (3_000, 1_000),
+        ] {
+            let mut sink = Recorder {
+                group_rows,
+                in_group: 0,
+                calls: vec![],
+            };
+            write_in_spans(&mut sink, &mixed_batch(1, rows), group_rows).unwrap();
+            assert_eq!(sink.calls.iter().sum::<usize>(), rows);
+            assert!(
+                sink.calls
+                    .iter()
+                    .all(|&n| (1..=DEFAULT_WRITE_BATCH_SIZE).contains(&n))
+            );
+            assert_eq!(sink.in_group, rows % group_rows);
+        }
+    }
+
+    fn mixed_batch(lo: i64, n: usize) -> arrow::record_batch::RecordBatch {
+        use arrow::array::{
+            Decimal128Array, FixedSizeBinaryArray, StringArray, TimestampMicrosecondArray,
+        };
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        let ids = || (lo..lo + n as i64).map(i128::from);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("d19", DataType::Decimal128(19, 0), false),
+            Field::new("d38", DataType::Decimal128(38, 2), true),
+            Field::new("u", DataType::FixedSizeBinary(16), false),
+            Field::new("t", DataType::Timestamp(TimeUnit::Microsecond, None), false),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from_iter_values(lo..lo + n as i64)),
+                Arc::new(StringArray::from_iter(
+                    (lo..lo + n as i64).map(|i| (i % 7 != 0).then(|| format!("v{}", i % 40))),
+                )),
+                Arc::new(
+                    Decimal128Array::from_iter_values(ids())
+                        .with_precision_and_scale(19, 0)
+                        .unwrap(),
+                ),
+                Arc::new(
+                    Decimal128Array::from_iter(ids().map(|i| (i % 5 != 0).then_some(i * 7)))
+                        .with_precision_and_scale(38, 2)
+                        .unwrap(),
+                ),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(
+                        ids().map(|i| (i.wrapping_mul(0x9E37_79B9) as u128).to_le_bytes()),
+                    )
+                    .unwrap(),
+                ),
+                Arc::new(TimestampMicrosecondArray::from_iter_values(
+                    (lo..lo + n as i64).map(|i| i * 1_000_003),
+                )),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The same batches handed to a bare ArrowWriter whole, as before the span split.
+    fn whole_batch_bytes(
+        fmt: &ParquetFormat,
+        batches: &[arrow::record_batch::RecordBatch],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut w =
+            ArrowWriter::try_new(&mut out, batches[0].schema(), Some(fmt.writer_properties()))
+                .unwrap();
+        for b in batches {
+            w.write(b).unwrap();
+        }
+        w.close().unwrap();
+        out
+    }
+
+    /// Fails at the first byte past the whole-batch file, so a runaway writer stops at once.
+    struct CappedSink {
+        out: Arc<std::sync::Mutex<Vec<u8>>>,
+        max: usize,
+    }
+
+    impl std::io::Write for CappedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut out = self.out.lock().unwrap();
+            out.extend_from_slice(buf);
+            if out.len() > self.max {
+                return Err(std::io::Error::other("past the whole-batch file"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn spans_leave_the_file_byte_identical_to_whole_batch_writes() {
+        // Batches straddle row group ends, and a group holds several 20,000-row pages.
+        let batches = [
+            mixed_batch(1, 30_000),
+            mixed_batch(30_001, 50_000),
+            mixed_batch(80_001, 30_000),
+            mixed_batch(110_001, 9_000),
+        ];
+        for (groups, codec) in [
+            (Some(45_000), CompressionType::Zstd),
+            (Some(26_000), CompressionType::None),
+            (Some(777), CompressionType::Snappy),
+            (None, CompressionType::Zstd),
+        ] {
+            let fmt = ParquetFormat::new(codec, None, groups);
+            let expected = whole_batch_bytes(&fmt, &batches);
+            let out = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = CappedSink {
+                out: out.clone(),
+                max: expected.len(),
+            };
+            let mut w = fmt
+                .create_writer(&batches[0].schema(), Box::new(sink))
+                .unwrap();
+            for b in &batches {
+                w.write_batch(b).unwrap();
+            }
+            w.finish().unwrap();
+            assert!(
+                *out.lock().unwrap() == expected,
+                "row groups {groups:?}: spans changed the bytes"
+            );
+        }
     }
 }
