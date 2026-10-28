@@ -1009,4 +1009,11 @@ exclude_re = [
     #   patch migration-without-a-way-back, which removes exactly this call: seeded recall
     #   postgres-state CAUGHT, 2026-10-17.
     "replace copy_pg_state_before_migration -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
+    # - pause (snowflake_rest.rs): the unit tests run its cfg(test) twin (one millisecond) so they do
+    #   not sleep, and a zero Duration is the same wait to the stand; the production twin is a one-line
+    #   delegate to poll_interval, whose growth and cap are unit-tested in bq_rest.
+    "replace pause -> Duration with Default::default\\(\\)$",
+    # - new_request_id (snowflake_rest.rs): the version and variant bits are set with `(n & !mask) | bits`,
+    #   so the OR operands never share a bit and `^` yields the same UUID; no input distinguishes them.
+    "replace \\| with \\^ in new_request_id$",
 ]

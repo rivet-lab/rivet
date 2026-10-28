@@ -45,10 +45,7 @@ fn jwt_account_name(name: &str) -> String {
     } else {
         name.find('.')
     };
-    let account = match cut {
-        Some(at) if at > 0 => &name[..at],
-        _ => name,
-    };
+    let account = cut.and_then(|at| name.get(..at)).unwrap_or(name);
     account.to_ascii_uppercase()
 }
 

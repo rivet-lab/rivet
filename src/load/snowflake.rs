@@ -1448,6 +1448,78 @@ mod tests {
         );
     }
 
+    /// The rows an append added are the post-append count less the pre-append count, both read by name.
+    #[test]
+    fn an_append_reports_the_rows_it_added_from_the_two_counts() {
+        let specs = vec![spec("id", SfType::Number), spec("__op", SfType::Varchar)];
+        let uris = ["gs://b/p/part-0.parquet".to_string()];
+        let stand =
+            Stand::scripted(&[("BEFORE_", 0, &answer(r#"{"BEFORE_":10,"AFTER_":14}"#), "")]);
+        assert_eq!(
+            stand
+                .loader()
+                .append_changelog("t", &specs, &uris, &[])
+                .unwrap(),
+            4
+        );
+        let lost = Stand::scripted(&[("BEFORE_", 0, &answer(r#"{"BEFORE_":14,"AFTER_":10}"#), "")]);
+        assert_eq!(
+            lost.loader()
+                .append_changelog("t", &specs, &uris, &[])
+                .unwrap(),
+            0
+        );
+        let unread = Stand::scripted(&[("BEFORE_", 0, &answer(r#"{"AFTER_":10}"#), "")]);
+        let err = unread
+            .loader()
+            .append_changelog("t", &specs, &uris, &[])
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("pre-append count (BEFORE_)"),
+            "{err:#}"
+        );
+    }
+
+    /// Adopting a table and creating a view each send their statement, and a refusal comes back.
+    #[test]
+    fn adoption_and_a_view_send_their_statements_and_surface_a_refusal() {
+        let stand = Stand::scripted(&[
+            ("RENAME TO", 0, "", ""),
+            ("CREATE OR REPLACE VIEW", 0, "", ""),
+        ]);
+        let l = stand.loader();
+        l.adopt_as_changelog("orders").unwrap();
+        l.create_view("orders", "CREATE OR REPLACE VIEW DB.SC.v AS SELECT 1")
+            .unwrap();
+        let sent = stand.sent();
+        assert!(
+            sent[0].contains("ALTER TABLE DB.SC.orders RENAME TO DB.SC.orders__changes;"),
+            "{}",
+            sent[0]
+        );
+        assert!(
+            sent[1].starts_with("ALTER SESSION SET QUERY_TAG = '"),
+            "{}",
+            sent[1]
+        );
+        assert!(
+            sent[1].ends_with("CREATE OR REPLACE VIEW DB.SC.v AS SELECT 1"),
+            "{}",
+            sent[1]
+        );
+        let refused = Stand::scripted(&[
+            ("RENAME TO", 1, "", "denied"),
+            ("CREATE OR REPLACE VIEW", 1, "", "denied"),
+        ]);
+        assert!(refused.loader().adopt_as_changelog("orders").is_err());
+        assert!(
+            refused
+                .loader()
+                .create_view("orders", "CREATE OR REPLACE VIEW v AS SELECT 1")
+                .is_err()
+        );
+    }
+
     #[test]
     fn column_overlap_probe_lowercases_the_export_names() {
         let sql = adoption_loader().build_column_overlap_sql("orders", &["Id", "amount"]);

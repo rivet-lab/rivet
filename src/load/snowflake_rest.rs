@@ -640,6 +640,7 @@ pub(crate) mod stand {
         pub(crate) query: String,
         pub(crate) authorization: String,
         pub(crate) token_type: String,
+        pub(crate) user_agent: String,
         /// The JSON body, `null` when there was none.
         pub(crate) body: serde_json::Value,
     }
@@ -650,6 +651,10 @@ pub(crate) mod stand {
             self.body.get("statement").and_then(|s| s.as_str())
         }
     }
+
+    /// A client that never stops asking is answered once with a plain success, so a runaway loop fails an assertion instead of hanging the run.
+    const STAND_REQUEST_CAP: usize = 64;
+    const STAND_RUNAWAY_ANSWER: &str = r#"{"resultSetMetaData":{"numRows":0,"rowType":[],"partitionInfo":[{}]},"data":[],"statementHandle":"runaway"}"#;
 
     pub(crate) struct Stand {
         endpoint: String,
@@ -681,14 +686,18 @@ pub(crate) mod stand {
                     let Some(request) = read_request(&mut stream) else {
                         continue;
                     };
-                    let nth = {
+                    let (nth, total) = {
                         let mut log = log.lock().unwrap();
                         let same = |r: &&Seen| r.method == request.method && r.path == request.path;
                         let nth = log.iter().filter(same).count();
                         log.push(request.clone());
-                        nth
+                        (nth, log.len())
                     };
-                    let (status, body) = script(&request, nth);
+                    let (status, body) = if total > STAND_REQUEST_CAP {
+                        (200, STAND_RUNAWAY_ANSWER.to_string())
+                    } else {
+                        script(&request, nth)
+                    };
                     let _ = write!(
                         stream,
                         "HTTP/1.1 {status} stand\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -703,7 +712,7 @@ pub(crate) mod stand {
         pub(crate) fn api(&self) -> SnowflakeApi {
             SnowflakeApi {
                 endpoint: self.endpoint.clone(),
-                http: reqwest::blocking::Client::new(),
+                http: super::shared_http().expect("the shared client"),
                 signer: Arc::new(test_signer()),
                 context: Context {
                     database: "DB".into(),
@@ -741,8 +750,8 @@ pub(crate) mod stand {
         reader.read_line(&mut line).ok()?;
         let mut first = line.split_whitespace();
         let (method, target) = (first.next()?.to_string(), first.next()?.to_string());
-        let (mut length, mut authorization, mut token_type) =
-            (0usize, String::new(), String::new());
+        let (mut length, mut authorization, mut token_type, mut user_agent) =
+            (0usize, String::new(), String::new(), String::new());
         loop {
             let mut header = String::new();
             reader.read_line(&mut header).ok()?;
@@ -755,6 +764,7 @@ pub(crate) mod stand {
                 "content-length" => length = value.trim().parse().ok()?,
                 "authorization" => authorization = value.trim().to_string(),
                 "x-snowflake-authorization-token-type" => token_type = value.trim().to_string(),
+                "user-agent" => user_agent = value.trim().to_string(),
                 _ => {}
             }
         }
@@ -767,6 +777,7 @@ pub(crate) mod stand {
             query: query.to_string(),
             authorization,
             token_type,
+            user_agent,
             body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
         })
     }
@@ -850,6 +861,33 @@ mod tests {
         );
         assert_eq!(super::JWT_LIFETIME_SECS, 3300);
         const _: () = assert!(super::JWT_LIFETIME_SECS <= 3600);
+    }
+
+    #[test]
+    fn the_client_names_rivet_and_a_single_partition_needs_no_handle() {
+        let mut answer: Value = serde_json::from_str(&count_result(7)).unwrap();
+        answer.as_object_mut().unwrap().remove("statementHandle");
+        let body = answer.to_string();
+        let stand = Stand::start(move |_, _| (200, body.clone()));
+        let api = stand.api();
+        let rows = api.run("SELECT 1").unwrap();
+        assert_eq!(rows[0][0]["ROWS_"], json!(7));
+        let agent = &stand.seen()[0].user_agent;
+        assert_eq!(*agent, format!("rivet/{}", env!("CARGO_PKG_VERSION")));
+        let shown = format!("{api:?}");
+        assert!(
+            shown.starts_with("SnowflakeApi {") && shown.contains(&stand.api().endpoint),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn the_clock_and_the_poll_budget_are_the_ones_the_loader_documents() {
+        assert!(super::unix_now() > 1_700_000_000, "{}", super::unix_now());
+        assert_eq!(
+            super::STATEMENT_POLL_DEADLINE,
+            std::time::Duration::from_secs(4 * 3600)
+        );
     }
 
     #[test]
