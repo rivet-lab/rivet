@@ -20,8 +20,10 @@ pub(crate) struct ScaffoldDecisions {
     pub has_baseline: bool,
     /// A top-level `load:` block was written.
     pub has_load: bool,
-    /// The `load:` block declares `layout: base_buffer`.
+    /// The `load:` block gives the tables a base and a buffer (written, or the warehouse default).
     pub compacts: bool,
+    /// A CDC export names no baseline (a table called `snapshot`).
+    pub cdc_without_baseline: bool,
     /// An export runs in a delta mode (`cdc` / `incremental`).
     pub has_delta: bool,
     /// The `load:` block was left out because the loader refuses this CDC stream.
@@ -759,6 +761,28 @@ fn base_buffer_lines(compactable: bool, d: &mut ScaffoldDecisions) -> Vec<String
     }
 }
 
+/// The `layout:` lines on Snowflake, where `base_buffer` is the default and is not written.
+fn snowflake_layout_lines(compactable: bool, d: &mut ScaffoldDecisions) -> Vec<String> {
+    if compactable && d.cdc_without_baseline {
+        return vec![
+            "  # A CDC stream here names no baseline, so a base would start empty:".to_string(),
+            "  # keep the change log and its current-state view instead.".to_string(),
+            "  layout: log_view".to_string(),
+        ];
+    }
+    if compactable {
+        d.compacts = true;
+        return vec![
+            "  # layout: base_buffer is the default here: `<table>` is a physical table and"
+                .to_string(),
+            "  # `<table>__changes` a disposable buffer `rivet compact` merges into it. Write"
+                .to_string(),
+            "  # `layout: log_view` to keep a changelog plus a dedup view instead.".to_string(),
+        ];
+    }
+    base_buffer_lines(false, d)
+}
+
 /// The comment that stands in for a `load:` block the config loader would refuse.
 const NO_LOAD_BLOCK: &str = "# No `load:` block: ";
 
@@ -833,10 +857,16 @@ fn load_block_lines(
             "# Review every value below — they are guesses, not decisions.".into(),
             "load:".into(),
             "  target: snowflake".into(),
+            format!("  account: {}", yaml_quote_if_needed(&sf.account)),
+            format!("  user: {}", yaml_quote_if_needed(&sf.user)),
             format!(
-                "  connection: {}  # a `snow` CLI connection (key-pair / JWT auth)",
-                yaml_quote_if_needed(&sf.connection)
+                "  private_key_path: {}  # unencrypted PKCS#8; its public key is registered on the user",
+                yaml_quote_if_needed(&sf.private_key_path)
             ),
+            match &sf.role {
+                Some(role) => format!("  role: {}", yaml_quote_if_needed(role)),
+                None => "  # role: MY_ROLE  # omitted: the user's default role".into(),
+            },
             format!("  warehouse: {}", yaml_quote_if_needed(&sf.warehouse)),
             format!("  database: {}", yaml_quote_if_needed(&sf.database)),
             format!("  schema: {}", yaml_quote_if_needed(&sf.schema)),
@@ -847,7 +877,7 @@ fn load_block_lines(
             "  pk: auto  # the source primary key `rivet run` recorded".into(),
             "  cluster_by: auto".into(),
         ];
-        lines.extend(base_buffer_lines(compactable, d));
+        lines.extend(snowflake_layout_lines(compactable, d));
         lines.push("  cleanup_source: true".into());
         return lines;
     }
@@ -1266,6 +1296,7 @@ omitting differ per engine — see cdc.md)",
     ];
     lines.push(
         if qualified_table.rsplit('.').next() == Some("snapshot") {
+            d.cdc_without_baseline = true;
             "      # no baseline: a table named `snapshot` collides with the baseline's `snapshot/` sub-prefix — capture-only"
         } else {
             d.has_baseline = true;
@@ -1968,7 +1999,10 @@ mod tests {
         let sf = InitYamlDestination {
             gcs_bucket: Some("b".into()),
             snowflake: Some(crate::init::InitSnowflakeTarget {
-                connection: "c".into(),
+                account: "a".into(),
+                user: "u".into(),
+                private_key_path: "/k.p8".into(),
+                role: None,
                 warehouse: "w".into(),
                 database: "d".into(),
                 schema: "s".into(),
@@ -2082,7 +2116,9 @@ mod tests {
                 l.starts_with("      backfill: auto") || l.starts_with("      initial: snapshot")
             }),
             has_load: text.contains("\nload:"),
-            compacts: text.contains("\n  layout: base_buffer"),
+            compacts: text.contains("\n  layout: base_buffer")
+                || text.contains("\n  # layout: base_buffer is the default"),
+            cdc_without_baseline: text.contains("\n  layout: log_view"),
             has_delta: text
                 .lines()
                 .any(|l| matches!(l.trim(), "mode: cdc" | "mode: incremental")),
@@ -2121,7 +2157,10 @@ mod tests {
         let sf = InitYamlDestination {
             gcs_bucket: Some("b".into()),
             snowflake: Some(crate::init::InitSnowflakeTarget {
-                connection: "c".into(),
+                account: "a".into(),
+                user: "u".into(),
+                private_key_path: "/k.p8".into(),
+                role: None,
                 warehouse: "w".into(),
                 database: "d".into(),
                 schema: "s".into(),
@@ -3392,7 +3431,10 @@ mod tests {
         };
         let snowflake = InitYamlDestination {
             snowflake: Some(crate::init::InitSnowflakeTarget {
-                connection: "c".into(),
+                account: "a".into(),
+                user: "u".into(),
+                private_key_path: "/k.p8".into(),
+                role: None,
                 warehouse: "w".into(),
                 database: "d".into(),
                 schema: "s".into(),
@@ -4139,17 +4181,20 @@ mod load_block_tests {
         );
     }
 
-    /// A Snowflake scaffold carries the five values the loader requires, writes
-    /// `layout: base_buffer` for a mode that takes deltas (and only there), and the
+    /// A Snowflake scaffold carries the five values the loader requires, writes no `layout:`
+    /// (a base and a buffer are the default for a mode that takes deltas), and the
     /// generated file parses into a Snowflake target with exactly
     /// those values; its per-table partition guess is a date column the loader turns
     /// into a leading `DATE_TRUNC` clustering key.
     #[test]
-    fn a_snowflake_load_block_carries_its_connection_and_parses_into_the_target() {
+    fn a_snowflake_load_block_carries_its_key_pair_login_and_parses_into_the_target() {
         let dest = InitYamlDestination {
             gcs_bucket: Some("my-bucket".into()),
             snowflake: Some(crate::init::InitSnowflakeTarget {
-                connection: "my_conn".into(),
+                account: "myorg-acct".into(),
+                user: "RIVET".into(),
+                private_key_path: "/keys/rivet.p8".into(),
+                role: Some("LOADER".into()),
                 warehouse: "COMPUTE_WH".into(),
                 database: "ANALYTICS".into(),
                 schema: "PUBLIC".into(),
@@ -4183,10 +4228,14 @@ mod load_block_tests {
                 "{mode}:\n{yaml}"
             );
             assert!(yaml.contains("Review every value"), "{mode}:\n{yaml}");
+            assert!(
+                !yaml.contains("\n  layout:"),
+                "{mode}: base_buffer is the default on Snowflake and is not written:\n{yaml}"
+            );
             assert_eq!(
-                yaml.contains("  layout: base_buffer"),
+                yaml.contains("# layout: base_buffer is the default here"),
                 takes_deltas,
-                "{mode}: the key is written exactly where deltas are taken:\n{yaml}"
+                "{mode}: the default is explained exactly where deltas are taken:\n{yaml}"
             );
             let cfg = crate::config::Config::from_yaml(yaml)
                 .unwrap_or_else(|e| panic!("{mode}: the scaffold must load: {e:#}\n{yaml}"));
@@ -4194,7 +4243,10 @@ mod load_block_tests {
             assert_eq!(
                 load.target,
                 crate::config::load::LoadTarget::Snowflake {
-                    connection: "my_conn".into(),
+                    account: "myorg-acct".into(),
+                    user: "RIVET".into(),
+                    private_key_path: "/keys/rivet.p8".into(),
+                    role: Some("LOADER".into()),
                     warehouse: "COMPUTE_WH".into(),
                     database: "ANALYTICS".into(),
                     schema: "PUBLIC".into(),
@@ -4205,7 +4257,7 @@ mod load_block_tests {
             assert!(load.cleanup_source, "{mode}");
             assert!(load.target.compacts(), "{mode}");
             let export = &cfg.exports[0];
-            // The written key is what makes the base on Snowflake; no key leaves the log + view.
+            // No key is written: the default gives a delta mode its base and buffer.
             assert_eq!(
                 crate::plan::load_settings::resolved_layout(&cfg, export, None)
                     == crate::load::plan::CdcLayout::BaseAndBuffer,
@@ -4234,6 +4286,52 @@ mod load_block_tests {
                 "{mode}: {spec:?}"
             );
         }
+    }
+
+    /// A CDC stream with no baseline (a table named `snapshot`) cannot start a base on Snowflake,
+    /// so the scaffold writes `layout: log_view` and the file still loads.
+    #[test]
+    fn a_snowflake_cdc_scaffold_without_a_baseline_writes_log_view_and_loads() {
+        let dest = InitYamlDestination {
+            gcs_bucket: Some("my-bucket".into()),
+            snowflake: Some(crate::init::InitSnowflakeTarget {
+                account: "myorg-acct".into(),
+                user: "RIVET".into(),
+                private_key_path: "/keys/rivet.p8".into(),
+                role: None,
+                warehouse: "WH".into(),
+                database: "DB".into(),
+                schema: "PUBLIC".into(),
+                storage_integration: "INT".into(),
+            }),
+            ..Default::default()
+        };
+        let info = TableInfo {
+            cdc_capture_instance: None,
+            table: "snapshot".into(),
+            ..super::tests::make_table(vec![super::tests::pk("id", "bigint")])
+        };
+        let s = scaffold_table(
+            &info,
+            "postgresql://u:p@localhost/db",
+            &crate::init::SourceProvenance::Inline,
+            &dest,
+            Some("cdc"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            s.decisions.cdc_without_baseline && !s.decisions.compacts,
+            "{}",
+            s.text
+        );
+        assert!(s.text.contains("\n  layout: log_view"), "{}", s.text);
+        let cfg = crate::config::Config::from_yaml(&s.text)
+            .unwrap_or_else(|e| panic!("the scaffold must load: {e:#}\n{}", s.text));
+        assert_eq!(
+            crate::plan::load_settings::resolved_layout(&cfg, &cfg.exports[0], None),
+            crate::load::plan::CdcLayout::LogAndView
+        );
     }
 
     /// An Oracle CDC stream cannot load into any warehouse: the Snowflake scaffold

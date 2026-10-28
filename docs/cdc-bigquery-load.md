@@ -164,8 +164,10 @@ Consumers read `<table>` directly, `WHERE NOT __is_deleted` for live rows. The
 buffer holds no history — `__is_deleted` in the base is the record that a row
 was deleted.
 
-Snowflake takes the same layout when `load.layout: base_buffer` is written (a Snowflake config
-with `cdc.backfill:` and no `layout:` keeps its changelog and view). `rivet compact` there runs one
+Snowflake takes the same layout by default for every incremental and CDC export; `load.layout: log_view`
+keeps the changelog and view. A Snowflake CDC stream with neither `cdc.backfill:` nor
+`cdc.initial: snapshot` would start an empty base, so the config is refused at load; add a baseline
+or write `log_view`. `rivet compact` there runs one
 script per table, one warehouse resume: the buffer is renamed to `<table>__changes__merging`, its
 latest change per key replaces the base rows in one transaction (`DELETE`, `INSERT`, and an `UPDATE`
 of `__is_deleted` for a tombstone), and the renamed table is dropped after the commit. A run that

@@ -87,28 +87,13 @@ pub fn load_mode_of(
     }
 }
 
-/// One export's effective load settings: the shared section, the export's own `load:`
-/// block layered over it, then — for a captured table of a multiplex stream — that
-/// table's `load.tables.<name>` block over both.
-///
-/// THE overlay. It was written out four times (three `resolved_*` readers and the plan
-/// builder), and only the builder's copy applied the third layer, so the load honoured a
-/// per-table override the extract never saw.
+/// One export's effective load settings (see [`LoadSection::overlay`]): the shared section, the export's own `load:` block, then a captured table's block.
 pub(crate) fn overlay(
     section: &LoadSection,
     export: &crate::config::ExportConfig,
     table: Option<&str>,
 ) -> LoadSection {
-    let mut eff = match &export.load {
-        Some(o) => section.with_override(o),
-        None => section.clone(),
-    };
-    if let (Some(o), Some(t)) = (&export.load, table)
-        && let Some(per_table) = o.tables.get(t)
-    {
-        eff = eff.with_override(per_table);
-    }
-    eff
+    section.overlay(export, table)
 }
 
 /// [`overlay`] against the config's shared `load:` block; `None` when there is none.
@@ -175,12 +160,13 @@ pub(crate) fn cdc_layout(
         // accumulated current state to lay out, so the key means nothing here.
         (LoadMode::Full, _) => CdcLayout::LogAndView,
         // A base without a compaction is a snapshot frozen at the backfill and a buffer
-        // that grows for ever (measured on Snowflake before it compacted): only a compacting
-        // warehouse gets one — written, or on BigQuery derived from a stream's `backfill:`
-        // (a Snowflake config that predates its compaction keeps the changelog it has).
+        // that grows for ever: only a compacting warehouse gets one — written, on Snowflake
+        // the default of every incremental and CDC export, on BigQuery derived from a
+        // stream's `backfill:`.
         (_, Some(LayoutChoice::BaseBuffer)) if support != BaseSupport::Never => {
             CdcLayout::BaseAndBuffer
         }
+        (_, None) if support == BaseSupport::Default => CdcLayout::BaseAndBuffer,
         (LoadMode::Cdc, None) if support == BaseSupport::Derived => {
             match export.cdc.as_ref().and_then(|c| c.backfill.as_ref()) {
                 Some(_) => CdcLayout::BaseAndBuffer,
@@ -426,42 +412,44 @@ load:
         );
     }
 
-    /// On Snowflake a stream's `backfill:` alone leaves the changelog and its view in
-    /// place (configs written before Snowflake compacted keep their layout); only a
-    /// written `load.layout: base_buffer` makes the base. RED against deriving the
-    /// layout from `backfill:` on every warehouse that compacts.
+    /// On Snowflake every incremental and CDC export is base+buffer unless `log_view` is written;
+    /// a full load keeps its overwrite. RED against the changelog+view default.
     #[test]
-    fn snowflake_takes_a_base_only_when_base_buffer_is_written() {
+    fn snowflake_takes_a_base_unless_log_view_is_written() {
         use crate::config::load::LayoutChoice;
-        let with = serde_yaml_ng::from_str::<crate::config::ExportConfig>(
+        let plain = serde_yaml_ng::from_str::<crate::config::ExportConfig>(
             "name: t\ntable: t\nmode: cdc\nformat: parquet\n\
-             cdc: { backfill: auto, checkpoint: ./t.ckpt }\n\
+             cdc: { checkpoint: ./t.ckpt }\n\
              destination: { type: local, path: /tmp/t }\n",
         )
         .expect("an export");
+        let layout = |mode, choice| cdc_layout(&plain, mode, choice, BaseSupport::Default);
         assert_eq!(
-            cdc_layout(&with, LoadMode::Cdc, None, BaseSupport::Written),
-            CdcLayout::LogAndView,
-            "an unwritten layout with a backfill stays the changelog + view"
-        );
-        assert_eq!(
-            cdc_layout(
-                &with,
-                LoadMode::Cdc,
-                Some(LayoutChoice::BaseBuffer),
-                BaseSupport::Written
-            ),
+            layout(LoadMode::Cdc, None),
             CdcLayout::BaseAndBuffer,
-            "a written base_buffer is the base and its buffer"
+            "an unwritten layout is the base and its buffer, with or without a backfill"
         );
         assert_eq!(
-            cdc_layout(
-                &with,
-                LoadMode::Incremental,
-                Some(LayoutChoice::BaseBuffer),
-                BaseSupport::Written
-            ),
+            layout(LoadMode::Incremental, None),
             CdcLayout::BaseAndBuffer
+        );
+        assert_eq!(
+            layout(LoadMode::Cdc, Some(LayoutChoice::BaseBuffer)),
+            CdcLayout::BaseAndBuffer
+        );
+        assert_eq!(
+            layout(LoadMode::Cdc, Some(LayoutChoice::LogView)),
+            CdcLayout::LogAndView,
+            "a written log_view keeps the changelog and its view"
+        );
+        assert_eq!(
+            layout(LoadMode::Incremental, Some(LayoutChoice::LogView)),
+            CdcLayout::LogAndView
+        );
+        assert_eq!(
+            layout(LoadMode::Full, None),
+            CdcLayout::LogAndView,
+            "a full load overwrites its table; there is no base"
         );
     }
 

@@ -10,9 +10,13 @@ const SRC: [&str; 4] = [
     "disable",
 ];
 
-const SF: [&str; 10] = [
-    "--snowflake-connection",
-    "my_conn",
+const SF: [&str; 14] = [
+    "--snowflake-account",
+    "myorg-myaccount",
+    "--snowflake-user",
+    "RIVET_USER",
+    "--snowflake-private-key-path",
+    "/keys/rsa_key.p8",
     "--snowflake-warehouse",
     "COMPUTE_WH",
     "--snowflake-database",
@@ -45,10 +49,14 @@ fn init_refuses_every_snowflake_flag_combination_that_cannot_load() {
         (SF.to_vec(), "--gcs-bucket"),
         ([&SF[..], &["--s3-bucket", "b"]].concat(), "--s3-bucket"),
         (
-            [&gcs[..], &SF[..8]].concat(),
+            [&gcs[..], &SF[..12]].concat(),
             "--snowflake-storage-integration",
         ),
-        ([&gcs[..], &SF[2..]].concat(), "--snowflake-connection"),
+        (
+            [&gcs[..], &["--snowflake-role", "RIVET_ROLE"]].concat(),
+            "--snowflake-account",
+        ),
+        ([&gcs[..], &SF[2..]].concat(), "--snowflake-account"),
         (
             [
                 &gcs[..],
@@ -87,7 +95,7 @@ fn init_refuses_every_snowflake_flag_combination_that_cannot_load() {
     }
 
     let mut blank = [&gcs[..], &SF[..]].concat();
-    blank[7] = " ";
+    blank[11] = " ";
     let (code, stderr) = init(&blank);
     assert_eq!(code, Some(1), "{stderr}");
     assert!(

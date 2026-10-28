@@ -5,6 +5,10 @@ use super::bigquery::{gcs_delete_prefix, gcs_list, gcs_put, warehouse_or_skip};
 /// One cell's Snowflake target: a schema the stand owns and the cell's own GCS prefix.
 pub struct SfLive {
     connection: String,
+    account: String,
+    user: String,
+    private_key_path: String,
+    role: Option<String>,
     warehouse: String,
     database: String,
     schema: String,
@@ -38,6 +42,10 @@ impl SfLive {
         };
         Some(Self {
             connection,
+            account: need("RIVET_SNOWFLAKE_ACCOUNT"),
+            user: need("RIVET_SNOWFLAKE_USER"),
+            private_key_path: need("RIVET_SNOWFLAKE_KEY"),
+            role: var("RIVET_SNOWFLAKE_ROLE"),
             warehouse: need("RIVET_SF_WAREHOUSE"),
             database: need("RIVET_SF_DATABASE"),
             schema: need("RIVET_SF_SCHEMA"),
@@ -49,13 +57,24 @@ impl SfLive {
 
     /// The top-level `load:` line for a rig, with `extra` appended inside the mapping.
     pub fn load_line(&self, extra: &str) -> String {
+        let role = self
+            .role
+            .as_ref()
+            .map(|r| format!(", role: {r}"))
+            .unwrap_or_default();
         format!(
-            "load: {{ target: snowflake, connection: {}, warehouse: {}, database: {}, schema: {}, storage_integration: {}{extra} }}",
-            self.connection, self.warehouse, self.database, self.schema, self.integration
+            "load: {{ target: snowflake, account: {}, user: {}, private_key_path: {}{role}, warehouse: {}, database: {}, schema: {}, storage_integration: {}{extra} }}",
+            self.account,
+            self.user,
+            self.private_key_path,
+            self.warehouse,
+            self.database,
+            self.schema,
+            self.integration
         )
     }
 
-    /// Every row of `sql`, read through the DuckDB reader (never through `snow`, the loader's own tool).
+    /// Every row of `sql`, read through the DuckDB reader (a second client, never rivet's own transport).
     pub fn read(&self, sql: &str) -> Vec<Vec<serde_json::Value>> {
         super::sf_reader::snowflake_rows(&self.connection, &self.database, &self.warehouse, sql)
             .unwrap_or_else(|e| panic!("{e}"))

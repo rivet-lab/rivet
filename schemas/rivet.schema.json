@@ -1673,8 +1673,24 @@
           ],
           "default": null
         },
-        "connection": {
-          "description": "Snowflake: the `snow` CLI connection name.",
+        "account": {
+          "description": "Snowflake: the account identifier — `myorg-myaccount`, or a locator such as\n`xy12345.us-east-1`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "private_key_path": {
+          "description": "Snowflake: the unencrypted PKCS#8 private key file of the user's key pair.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "role": {
+          "description": "Snowflake: the role the statements run under; the user's default when omitted.",
           "type": [
             "string",
             "null"
@@ -1722,7 +1738,7 @@
           "default": null
         },
         "user": {
-          "description": "ClickHouse: the user the load authenticates as.",
+          "description": "Snowflake / ClickHouse: the user the load authenticates as.",
           "type": [
             "string",
             "null"
@@ -1763,7 +1779,7 @@
           "$ref": "#/$defs/KeyColumns"
         },
         "layout": {
-          "description": "`log_view` or `base_buffer` — where the current state lives. Absent derives\nit from the mode: a CDC stream with a `backfill:` is base+buffer, the rest\nchangelog+view (BigQuery only; Snowflake takes a base only when `base_buffer`\nis written). `base_buffer` needs `target: bigquery` or `snowflake` — `rivet\ncompact` merges the buffer into the base, and ClickHouse has none.",
+          "description": "`log_view` or `base_buffer` — where the current state lives. Absent derives\nit from the target: on Snowflake an incremental or CDC export is base+buffer\n(`log_view` keeps the changelog and its view); on BigQuery a CDC stream with a\n`backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs\n`target: bigquery` or `snowflake` — `rivet compact` merges the buffer into the\nbase, and ClickHouse has none.",
           "anyOf": [
             {
               "$ref": "#/$defs/LayoutChoice"

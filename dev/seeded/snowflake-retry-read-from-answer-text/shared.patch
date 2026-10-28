@@ -1,0 +1,12 @@
+diff --git a/src/load/snowflake_rest.rs b/src/load/snowflake_rest.rs
+--- a/src/load/snowflake_rest.rs
++++ b/src/load/snowflake_rest.rs
+@@ -415,7 +415,7 @@
+                         self.signer.forget();
+                         continue;
+                     }
+-                    if is_transient_status(status) {
++                    if is_transient_status(status) || text.contains("try again") {
+                         last = transient_reply(status, &text);
+                     } else {
+                         return Ok(Reply { status, body: text });

@@ -47,7 +47,9 @@
     ['Load', [
       ['load', 'Target', ['bigquery', 'snowflake', 'clickhouse']],
       ['dataset', 'Dataset', 'analytics', { load: ['bigquery'] }],
-      ['sf_conn', 'snow connection', 'my_conn', { load: ['snowflake'] }],
+      ['sf_account', 'Account', 'myorg-myaccount', { load: ['snowflake'] }],
+      ['sf_user', 'User', 'RIVET_USER', { load: ['snowflake'] }],
+      ['sf_key', 'Private key path', '/path/to/rsa_key.p8', { load: ['snowflake'] }],
       ['sf_wh', 'Warehouse', 'COMPUTE_WH', { load: ['snowflake'] }],
       ['sf_db', 'Database', 'ANALYTICS', { load: ['snowflake'] }],
       ['sf_schema', 'Schema', 'PUBLIC', { load: ['snowflake'] }],
@@ -184,7 +186,6 @@
       ].join('\n');
     }
     const warn = g('dest') === 'gcs' ? [] : ['# ⚠ BigQuery and Snowflake loads read GCS only: set Destination type to gcs', ''];
-    const conn = g('sf_conn');
     const lines = g('load') === 'bigquery'
       ? [
         ...warn,
@@ -197,11 +198,9 @@
       ]
       : [
         ...warn,
-        '# Snowflake CLI: rivet runs `snow sql` for every load',
-        'pipx install snowflake-cli          # or: pip install snowflake-cli',
-        `snow connection add                  # name it ${conn}; key-pair auth recommended`,
-        `snow connection test -c ${conn}`,
-        '# export RIVET_SNOWFLAKE_KEY=/absolute/path/rsa_key.p8   # only if the private_key_path in the connection uses ~',
+        '# rivet talks to Snowflake itself (SQL API, key-pair JWT): no Snowflake CLI needed',
+        `# register the public half of the key on the load user: ALTER USER ${g('sf_user')} SET RSA_PUBLIC_KEY='<public key, no PEM header lines>';`,
+        `test -r ${g('sf_key')} || echo 'private key not readable: use an unencrypted PKCS#8 .p8 file'`,
         '',
         '# After the SQL below: let the integration\'s service account read the bucket',
         `gcloud storage buckets add-iam-policy-binding gs://${bucket} \\`,
@@ -238,7 +237,7 @@
       `GRANT USAGE ON DATABASE ${db} TO ROLE ${role};`,
       `GRANT USAGE, CREATE TABLE, CREATE VIEW, CREATE STAGE, CREATE FILE FORMAT ON SCHEMA ${sc} TO ROLE ${role};`,
       `GRANT USAGE ON INTEGRATION ${si} TO ROLE ${role};`,
-      `GRANT ROLE ${role} TO USER <user of connection ${g('sf_conn')}>;`,
+      `GRANT ROLE ${role} TO USER ${g('sf_user')};`,
     ].join('\n');
   }
 
@@ -303,7 +302,8 @@
           'password_env: CLICKHOUSE_PASSWORD']
         : bq
           ? ['target: bigquery', `project: ${p}`, `dataset: ${g('dataset')}`]
-          : ['target: snowflake', `connection: ${g('sf_conn')}`, `warehouse: ${g('sf_wh')}`, `database: ${g('sf_db')}`,
+          : ['target: snowflake', `account: ${g('sf_account')}`, `user: ${g('sf_user')}`,
+            `private_key_path: ${g('sf_key')}`, `role: ${g('sf_role')}`, `warehouse: ${g('sf_wh')}`, `database: ${g('sf_db')}`,
             `schema: ${g('sf_schema')}`, `storage_integration: ${g('sf_int')}`]).join('\n  '),
       WAREHOUSE_TABLE: ch ? `${g('ch_db')}.${n}` : bq ? `${p}.${g('dataset')}.${n}` : `${g('sf_db')}.${g('sf_schema')}.${n}`,
       WAREHOUSE_SQL: ch ? `${g('ch_db')}.${n}` : bq ? `\`${p}.${g('dataset')}.${n}\`` : `${g('sf_db')}.${g('sf_schema')}.${n}`,
@@ -312,7 +312,8 @@
           ` \\\n  --clickhouse-url ${g('ch_url')} --clickhouse-database ${g('ch_db')} --clickhouse-user ${g('ch_user')}`
         : ` --gcs-bucket ${bucket}` + (bq
           ? ` --bigquery-project ${p} --bigquery-dataset ${g('dataset')}`
-          : ` \\\n  --snowflake-connection ${g('sf_conn')} --snowflake-warehouse ${g('sf_wh')}` +
+          : ` \\\n  --snowflake-account ${g('sf_account')} --snowflake-user ${g('sf_user')}` +
+            ` --snowflake-private-key-path ${g('sf_key')} --snowflake-role ${g('sf_role')} --snowflake-warehouse ${g('sf_wh')}` +
             ` --snowflake-database ${g('sf_db')} --snowflake-schema ${g('sf_schema')}` +
             ` --snowflake-storage-integration ${g('sf_int')}`),
       BUCKET: bucket,

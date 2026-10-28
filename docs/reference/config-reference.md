@@ -187,19 +187,21 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `target` | `bigquery` \| `snowflake` \| `clickhouse` | **yes** | The warehouse: `bigquery`, `snowflake` or `clickhouse`. |
 | `project` | `string` |  | BigQuery: the project the dataset lives in. |
 | `dataset` | `string` |  | BigQuery: the dataset the tables are created in. |
-| `connection` | `string` |  | Snowflake: the `snow` CLI connection name. |
+| `account` | `string` |  | Snowflake: the account identifier — `myorg-myaccount`, or a locator such as `xy12345.us-east-1`. |
+| `private_key_path` | `string` |  | Snowflake: the unencrypted PKCS#8 private key file of the user's key pair. |
+| `role` | `string` |  | Snowflake: the role the statements run under; the user's default when omitted. |
 | `warehouse` | `string` |  | Snowflake: the virtual warehouse the load runs on. |
 | `database` | `string` |  | Snowflake / ClickHouse: the database the tables are created in. |
 | `schema` | `string` |  | Snowflake: the schema the tables are created in. |
 | `storage_integration` | `string` |  | Snowflake: a pre-created GCS `STORAGE INTEGRATION`. |
 | `url` | `string` |  | ClickHouse: the HTTP endpoint, e.g. `http://localhost:8123`. |
-| `user` | `string` |  | ClickHouse: the user the load authenticates as. |
+| `user` | `string` |  | Snowflake / ClickHouse: the user the load authenticates as. |
 | `password_env` | `string` |  | ClickHouse: the env var holding that user's password. |
 | `named_collection` | `string` |  | ClickHouse: a server-side named collection holding the bucket's URL and HMAC keys; ClickHouse then reads the Parquet itself instead of rivet sending it. |
 | `ca_file` | `string` |  | ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed by a private CA, beside the built-in public roots. |
 | `cleanup_source` | `boolean` |  | After a successful load, delete the staged Parquet under the export prefix. |
 | `pk` | `auto` \| `none` |  | Dedup key of the incremental/CDC current-state view: `auto` (the source primary key `rivet run` recorded), `none`, or explicit columns; ignored for `full`. |
-| `layout` | `log_view` \| `base_buffer` |  | `log_view` or `base_buffer` — where the current state lives. Absent derives it from the mode: a CDC stream with a `backfill:` is base+buffer, the rest changelog+view (BigQuery only; Snowflake takes a base only when `base_buffer` is written). `base_buffer` needs `target: bigquery` or `snowflake` — `rivet compact` merges the buffer into the base, and ClickHouse has none. |
+| `layout` | `log_view` \| `base_buffer` |  | `log_view` or `base_buffer` — where the current state lives. Absent derives it from the target: on Snowflake an incremental or CDC export is base+buffer (`log_view` keeps the changelog and its view); on BigQuery a CDC stream with a `backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs `target: bigquery` or `snowflake` — `rivet compact` merges the buffer into the base, and ClickHouse has none. |
 | `deleted_flag` | `boolean` |  | Whether the base carries a `__is_deleted` column. Absent derives it from the mode: a CDC stream expresses deletes and gets the flag, a query-based export cannot express one and does not — an extra column per row otherwise. |
 | `allow_source_drift` | `boolean` |  | Load even when a run manifest's source count disagrees with what it extracted (source→file drift): warn instead of blocking. |
 | `gc_orphans` | `boolean` |  | After a successful load, delete staged Parquet under the export prefix that no `Success` manifest references — crash leftovers. Only when no extract writes the prefix concurrently. |

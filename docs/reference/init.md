@@ -253,7 +253,7 @@ the cycle — a top-level `load:` block (`target: bigquery`, `pk: auto`,
 creation stamp — `created_at` / `CreatedDate` … — at `granularity: day`, never a
 mutation stamp, which would move a row between partitions on every update) and,
 for a mode that carries deltas (`incremental`, `cdc`), `layout: base_buffer` so
-`rivet compact` has a base to merge into. Every value is a guess from the catalog:
+`rivet compact` has a base to merge into (BigQuery; Snowflake takes it by default and the block writes no line). Every value is a guess from the catalog:
 review the block before the first load.
 
 ```bash
@@ -272,7 +272,8 @@ place the load reads them — not on the per-table recipes, which the load never
 
 ## Warehouse scaffold: `--snowflake-*` / `--gcs-bucket`
 
-The same for Snowflake: `--snowflake-connection` (a `snow` CLI connection),
+The same for Snowflake: `--snowflake-account`, `--snowflake-user` and
+`--snowflake-private-key-path` (the key-pair login; `--snowflake-role` is optional),
 `--snowflake-warehouse`, `--snowflake-database`, `--snowflake-schema` and
 `--snowflake-storage-integration` (a pre-created GCS `STORAGE INTEGRATION`) write a
 `load:` block with `target: snowflake`, `pk: auto`, `cluster_by: auto`,
@@ -283,7 +284,8 @@ Clustering, so drop the line to cluster by the key alone).
 
 ```bash
 rivet init --source "$MYSQL_URL" --mode incremental --gcs-bucket my-bucket \
-  --snowflake-connection my_conn --snowflake-warehouse COMPUTE_WH \
+  --snowflake-account myorg-myaccount --snowflake-user RIVET_USER \
+  --snowflake-private-key-path /path/to/rsa_key.p8 --snowflake-warehouse COMPUTE_WH \
   --snowflake-database ANALYTICS --snowflake-schema PUBLIC \
   --snowflake-storage-integration MY_GCS_INT -o rivet.yaml
 rivet run  -c rivet.yaml   # Parquet → gs://my-bucket/exports/<table>/
@@ -294,10 +296,11 @@ All five flags are required together (the loader needs every value), and
 `--gcs-bucket` is required: Snowflake reads the export through a GCS external stage,
 so `--s3-bucket` is refused. One config loads into one warehouse, so the Snowflake
 flags are refused beside `--bigquery-*` or `--clickhouse-*`. On Snowflake an
-incremental or CDC export is scaffolded with
-`layout: base_buffer` (a physical `<table>` plus a `<table>__changes` buffer that
-`rivet compact` folds in); delete the key to read a `<table>__changes` log through
-the deduplicated `<table>` view instead.
+incremental or CDC export gets the default layout, which writes no `layout:` line (a physical
+`<table>` plus a `<table>__changes` buffer that `rivet compact` folds in); write
+`layout: log_view` to read a `<table>__changes` log through the deduplicated `<table>` view
+instead. A CDC stream with no baseline (a table named `snapshot`) is scaffolded with
+`layout: log_view`, because the default base would start empty and the config is refused.
 
 ---
 

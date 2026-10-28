@@ -1,0 +1,13 @@
+diff --git a/src/config/mod.rs b/src/config/mod.rs
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -425,6 +425,9 @@
+     /// fields that replace it. Read from the raw YAML: the key is no longer a field, and
+     /// the generic unknown-field message does not say what to write instead.
+     fn check_snowflake_connection(yaml: &str) -> crate::error::Result<()> {
++        if !yaml.is_empty() {
++            return Ok(());
++        }
+         let root: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+         let Some(load) = root.get("load") else {
+             return Ok(());

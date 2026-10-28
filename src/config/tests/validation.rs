@@ -1705,7 +1705,7 @@ fn a_base_and_buffer_layout_needs_a_compacting_warehouse() {
              destination: {{ type: gcs, bucket: b, prefix: t/ }}\n{export_load}load:\n{target}"
         )
     };
-    let snowflake = "  target: snowflake\n  connection: c\n  warehouse: w\n  database: d\n  \
+    let snowflake = "  target: snowflake\n  account: a\n  user: u\n  private_key_path: /k.p8\n  warehouse: w\n  database: d\n  \
                      schema: s\n  storage_integration: i\n";
     let bigquery = "  target: bigquery\n  project: p\n  dataset: d\n";
     let clickhouse = "  target: clickhouse\n  url: \"http://localhost:8123\"\n  database: d\n  \

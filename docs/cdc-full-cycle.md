@@ -146,8 +146,9 @@ Check:
 - Under `load.layout: log_view` (a capture-only stream, or written explicitly)
   there is no compaction: `orders` is a **view** over `orders__changes`, which
   keeps every change, and the same `WHERE NOT __is_deleted` reads live state.
-- On **Snowflake**, `load.layout: base_buffer` (written explicitly; `cdc.backfill:`
-  alone keeps the log and view) gives the same cycle. `rivet compact` runs one
+- On **Snowflake**, base + buffer is the default (no `layout:` to write; `load.layout:
+  log_view` keeps the log and view), and a CDC stream needs `cdc.backfill:` or
+  `cdc.initial: snapshot` to build the base, or the config is refused at load. `rivet compact` runs one
   script on one warehouse resume: it renames `orders__changes` to
   `orders__changes__merging`, then in one transaction deletes the winning keys from
   `orders`, inserts their live rows and flags deleted keys, and drops the renamed
