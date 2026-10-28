@@ -54,7 +54,7 @@ NO_CHECK: dict[str, str] = {  # ratchet-pin: tests-without-a-check strings
     "src/config/tests/validation.rs::query_file_relative_path_accepted_at_load": "must not error",
     "src/connect/mod.rs::hostless_socket_url_with_explicit_tls_disable_is_allowed": "must not error",
     "src/destination/cloud.rs::new_with_retries_zero_builds_no_retry_probe_destination": "must not error",
-    "src/destination/gcs_auth.rs::roast_gcs_adc_loader_plugs_into_opendal_refresh_hook_not_static_token": "compile-time",
+    "src/gcp_auth.rs::roast_gcs_adc_loader_plugs_into_opendal_refresh_hook_not_static_token": "compile-time",
     "src/format/mod.rs::create_format_parquet_uncompressed_finish_ok": "must not error",
     "src/format/parquet.rs::create_writer_gzip_succeeds": "must not error",
     "src/format/parquet.rs::create_writer_lz4_succeeds": "must not error",

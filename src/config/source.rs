@@ -26,12 +26,18 @@ pub struct SourceConfig {
     pub url: Option<String>,
     pub url_env: Option<String>,
     pub url_file: Option<String>,
+    /// Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_secret: Option<String>,
 
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
     pub password: Option<String>,
     pub password_env: Option<String>,
+    /// Google Secret Manager secret holding the password: `projects/<p>/secrets/<s>[/versions/<n>]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_secret: Option<String>,
     pub database: Option<String>,
 
     /// Operational profile of the source database.
@@ -307,8 +313,8 @@ impl SourceConfig {
     /// - `url` containing `user[:password]@` → userinfo segment replaced with `"REDACTED"`.
     /// - `url` query secrets (`password=`, `*_token=`, …) → value replaced with `***`.
     /// - `url` in keyword/value form (`host=… password=…`, `…;PWD=…`) → password value replaced with `***`.
-    /// - `url_env`, `url_file`, `password_env` — kept (env var **names** and file paths
-    ///   are references, not secrets; `apply` needs them to re-resolve credentials).
+    /// - `url_env`, `url_file`, `url_secret`, `password_env`, `password_secret` — kept (env var
+    ///   **names**, file paths and secret names are references, not secrets; `apply` needs them to re-resolve credentials).
     /// - `host`, `port`, `user`, `database` — kept (structured connection metadata).
     ///
     /// If a plaintext `password` or `url` is redacted, callers should surface a warning
@@ -356,10 +362,14 @@ impl SourceConfig {
             || self.database.is_some()
             || self.password.is_some()
             || self.password_env.is_some()
+            || self.password_secret.is_some()
     }
 
     pub(crate) fn has_url_fields(&self) -> bool {
-        self.url.is_some() || self.url_env.is_some() || self.url_file.is_some()
+        self.url.is_some()
+            || self.url_env.is_some()
+            || self.url_file.is_some()
+            || self.url_secret.is_some()
     }
 
     fn build_url_from_fields(&self) -> crate::error::Result<String> {
@@ -385,14 +395,8 @@ impl SourceConfig {
         // wiped on drop (the final URL still lives as a plain String but is
         // shorter-lived and dropped by the driver constructor).
         let password: zeroize::Zeroizing<String> =
-            zeroize::Zeroizing::new(match (&self.password, &self.password_env) {
-                (Some(_), Some(_)) => {
-                    crate::config_bail!(
-                        crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-                        "source: specify 'password' or 'password_env', not both"
-                    );
-                }
-                (Some(p), None) => {
+            zeroize::Zeroizing::new(match (&self.password, &self.password_env, &self.password_secret) {
+                (Some(p), None, None) => {
                     static WARNED: std::sync::Once = std::sync::Once::new();
                     WARNED.call_once(|| {
                         log::warn!(
@@ -401,7 +405,7 @@ impl SourceConfig {
                     });
                     resolve_env_vars(p)?
                 }
-                (None, Some(env)) => std::env::var(env).map_err(|_| {
+                (None, Some(env), None) => std::env::var(env).map_err(|_| {
                     crate::error::coded(
                         crate::error::codes::CONFIG_SECRET_UNSET,
                         format!(
@@ -410,7 +414,14 @@ impl SourceConfig {
                         ),
                     )
                 })?,
-                (None, None) => String::new(),
+                (None, None, Some(secret)) => super::gcp_secret::gcp_secret(secret)?
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string(),
+                (None, None, None) => String::new(),
+                _ => crate::config_bail!(
+                    crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
+                    "source: specify one of 'password', 'password_env' or 'password_secret', not both"
+                ),
             });
 
         let port = self.port.unwrap_or(default_port(self.source_type));
@@ -487,10 +498,11 @@ impl SourceConfig {
             InlineYaml,
             EnvVar(&'a str),
             File(&'a str),
+            Secret(&'a str),
         }
-        let (raw, source) = match (&self.url, &self.url_env, &self.url_file) {
-            (Some(u), None, None) => (u.clone(), UrlSource::InlineYaml),
-            (None, Some(env), None) => (
+        let (raw, source) = match (&self.url, &self.url_env, &self.url_file, &self.url_secret) {
+            (Some(u), None, None, None) => (u.clone(), UrlSource::InlineYaml),
+            (None, Some(env), None, None) => (
                 std::env::var(env).map_err(|_| {
                     crate::error::coded(
                         crate::error::codes::CONFIG_SECRET_UNSET,
@@ -502,7 +514,7 @@ impl SourceConfig {
                 })?,
                 UrlSource::EnvVar(env),
             ),
-            (None, None, Some(file)) => (
+            (None, None, Some(file), None) => (
                 std::fs::read_to_string(file)
                     .map_err(|e| {
                         crate::error::coded(
@@ -517,8 +529,12 @@ impl SourceConfig {
                     .to_string(),
                 UrlSource::File(file),
             ),
+            (None, None, None, Some(secret)) => (
+                super::gcp_secret::gcp_secret(secret)?.trim().to_string(),
+                UrlSource::Secret(secret),
+            ),
             _ => crate::config_bail!(crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-                "source: configure exactly one connection method:\n  url_env: DATABASE_URL                          (URL from env var — recommended)\n  url: 'postgresql://user:pass@host:5432/db'      (inline — not recommended for committed configs)\n  url_file: /etc/rivet/source.url                 (URL from file — rotation-friendly)\n  host/user/database/...                          (structured fields under `source:`)"
+                "source: configure exactly one connection method:\n  url_env: DATABASE_URL                          (URL from env var — recommended)\n  url: 'postgresql://user:pass@host:5432/db'      (inline — not recommended for committed configs)\n  url_file: /etc/rivet/source.url                 (URL from file — rotation-friendly)\n  url_secret: projects/<p>/secrets/<s>            (URL from Google Secret Manager)\n  host/user/database/...                          (structured fields under `source:`)"
             ),
         };
 
@@ -551,7 +567,7 @@ impl SourceConfig {
                         );
                     });
                 }
-                UrlSource::EnvVar(_) | UrlSource::File(_) => {
+                UrlSource::EnvVar(_) | UrlSource::File(_) | UrlSource::Secret(_) => {
                     // The recommended forms — no warning. Operator hygiene
                     // for shell history / file permissions is out of scope.
                 }
@@ -736,7 +752,7 @@ pub(super) fn structured_field_missing(field: &str) -> anyhow::Error {
 pub(super) fn mixed_connection_methods() -> anyhow::Error {
     crate::error::coded(
         crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-        "source: pick either URL-based config (url/url_env/url_file) OR structured fields (host/user/database/port/password_env), not both.\n  Hint: remove whichever block you don't want; mixing the two is ambiguous.",
+        "source: pick either URL-based config (url/url_env/url_file/url_secret) OR structured fields (host/user/database/port/password_env/password_secret), not both.\n  Hint: remove whichever block you don't want; mixing the two is ambiguous.",
     )
 }
 
@@ -927,11 +943,13 @@ mod tests {
             url: None,
             url_env: None,
             url_file: None,
+            url_secret: None,
             host: None,
             port: None,
             user: None,
             password: None,
             password_env: None,
+            password_secret: None,
             database: None,
             environment: None,
             tuning: None,
@@ -962,12 +980,15 @@ mod tests {
     #[test]
     fn any_one_structured_field_beside_a_url_is_refused() {
         type Set = fn(&mut SourceConfig);
-        let fields: [(&str, Set); 5] = [
+        let fields: [(&str, Set); 6] = [
             ("host", |s| s.host = Some("h".into())),
             ("user", |s| s.user = Some("u".into())),
             ("database", |s| s.database = Some("d".into())),
             ("password", |s| s.password = Some("p".into())),
             ("password_env", |s| s.password_env = Some("P".into())),
+            ("password_secret", |s| {
+                s.password_secret = Some("projects/p/secrets/s".into())
+            }),
         ];
         for (name, set) in fields {
             let mut src = make_source(SourceType::Postgres);
@@ -978,6 +999,35 @@ mod tests {
             let err = src.resolve_url().expect_err(name).to_string();
             assert!(err.contains("not both"), "{name}: {err}");
         }
+    }
+
+    /// `url_secret` is a URL method and `password_secret` a structured one; each value is trimmed.
+    #[test]
+    fn a_secret_supplies_the_url_or_the_password() {
+        super::super::gcp_secret::prime(
+            "projects/p/secrets/url-of-test",
+            "  postgresql://u:p@db.host:5432/app\n",
+        );
+        super::super::gcp_secret::prime("projects/p/secrets/pw-of-test", "s3cret\r\n");
+
+        let mut src = make_source(SourceType::Postgres);
+        src.url_secret = Some("projects/p/secrets/url-of-test".into());
+        assert!(src.has_url_fields() && !src.has_structured_fields());
+        assert_eq!(
+            src.resolve_url().unwrap(),
+            "postgresql://u:p@db.host:5432/app"
+        );
+        src.host = Some("h".into());
+        let err = src.resolve_url().unwrap_err().to_string();
+        assert!(err.contains("not both"), "{err}");
+
+        let mut src = make_source(SourceType::Postgres);
+        src.host = Some("db.host".into());
+        src.user = Some("u".into());
+        src.database = Some("app".into());
+        src.password_secret = Some("projects/p/secrets/pw-of-test".into());
+        let url = src.resolve_url().unwrap();
+        assert!(url.contains(":s3cret@db.host"), "{url}");
     }
 
     /// `url_file` is read from disk and trimmed; a missing file is named in the error.

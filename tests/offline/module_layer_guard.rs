@@ -14,6 +14,10 @@ const LAYERS: &[(&str, &str)] = &[
     ("redact", "the credential redaction chokepoint"),
     ("tuning", "source tuning profiles and adaptive sizing"),
     ("types", "the internal type system and delivered text forms"),
+    (
+        "gcp_auth",
+        "Google credentials and the access tokens minted from them",
+    ),
     ("config", "the YAML config model and its validation"),
     (
         "connect",

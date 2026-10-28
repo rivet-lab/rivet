@@ -8,7 +8,6 @@ pub mod azure;
 mod cloud;
 pub use cloud::{add_transient_retries, transient_retries_summary, transient_retries_total};
 pub mod gcs;
-pub(crate) mod gcs_auth;
 pub mod local;
 pub mod placeholder;
 pub mod s3;

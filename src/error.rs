@@ -699,12 +699,17 @@ pub mod codes {
     /// The `source:` block names no connection method, more than one, or an incomplete one.
     pub const CONFIG_SOURCE_CONNECTION_INVALID: Code = usage(
         "RIVET_CONFIG_SOURCE_CONNECTION_INVALID",
-        "give `source:` exactly one connection method (`url_env`, `url`, `url_file` or complete host/user/database fields) and one password setting",
+        "give `source:` exactly one connection method (`url_env`, `url`, `url_file`, `url_secret` or complete host/user/database fields) and one password setting",
     );
     /// An environment variable, `--param` or file a config key points at is not there.
     pub const CONFIG_SECRET_UNSET: Code = environment(
         "RIVET_CONFIG_SECRET_UNSET",
         "export the environment variable (or pass the `--param`) the message names, or make the named file readable",
+    );
+    /// A Secret Manager secret a source setting names could not be read.
+    pub const CONFIG_GCP_SECRET_UNREADABLE: Code = environment(
+        "RIVET_CONFIG_GCP_SECRET_UNREADABLE",
+        "grant the credential rivet runs as `roles/secretmanager.secretAccessor` on the secret the message names, and check its project, name and version",
     );
     /// An export does not name exactly one well-formed `query` / `query_file` / `table` / `tables`.
     pub const CONFIG_EXPORT_SOURCE_INVALID: Code = usage(
@@ -1719,6 +1724,7 @@ pub mod codes {
         CONFIG_YAML_INVALID,
         CONFIG_SOURCE_CONNECTION_INVALID,
         CONFIG_SECRET_UNSET,
+        CONFIG_GCP_SECRET_UNREADABLE,
         CONFIG_EXPORT_SOURCE_INVALID,
         CONFIG_MODE_SETTING_INVALID,
         CONFIG_DESTINATION_AUTH_INVALID,
