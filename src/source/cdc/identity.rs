@@ -240,22 +240,17 @@ pub(crate) fn table_matches(
     schema: &str,
     table: &str,
 ) -> bool {
-    // Full-name match FIRST: a MongoDB collection name may contain dots
-    // (`my.coll`) and has no schema qualifier, so splitting it into a bogus
-    // `schema.table` dropped every event (bug-hunt: 0-row success forever). This
-    // is safe for SQL — no real table is literally named `schema.table`.
-    if cfg == table {
-        return true;
-    }
-    // A document store has no schema to qualify with, so there is no second
-    // reading — the full-name arm above was the whole answer.
+    // A document store has no schema to qualify with: a collection name may hold dots
+    // (`my.coll`), so the whole string is the only reading.
     if engine == super::CdcEngine::Mongo {
-        return false;
+        return cfg == table;
     }
-    // Otherwise a SQL `schema.table` qualifier.
+    // A SQL store reads a dotted string as `schema.table` ONLY. Matching the whole string
+    // against the table first let `db.t` capture a table literally named `db.t` in another
+    // database, delivering rows of a relation the config never named.
     match cfg.split_once('.') {
         Some((cs, ct)) => cs == schema && ct == table,
-        None => false,
+        None => cfg == table,
     }
 }
 
@@ -576,6 +571,40 @@ mod tests {
             "shopdb",
             "my.other"
         ));
+    }
+    #[test]
+    fn a_qualified_sql_config_never_matches_a_table_literally_named_by_it() {
+        for engine in [
+            CdcEngine::Postgres,
+            CdcEngine::Mysql,
+            CdcEngine::Mssql,
+            CdcEngine::Oracle,
+        ] {
+            assert!(
+                !table_matches(engine, "shop.orders", "other", "shop.orders"),
+                "{engine:?}: `shop.orders` is schema `shop` + table `orders`, not a table named `shop.orders`"
+            );
+            assert!(
+                table_matches(engine, "shop.orders", "shop", "orders"),
+                "{engine:?}"
+            );
+            assert!(
+                !table_matches(engine, "shop.orders", "shop", "other"),
+                "{engine:?}"
+            );
+            assert!(
+                !table_matches(engine, "shop.orders", "other", "orders"),
+                "{engine:?}"
+            );
+            assert!(
+                table_matches(engine, "orders", "any", "orders"),
+                "{engine:?}: bare names are unchanged"
+            );
+            assert!(
+                !table_matches(engine, "orders", "any", "orders2"),
+                "{engine:?}"
+            );
+        }
     }
 }
 

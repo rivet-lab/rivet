@@ -126,6 +126,12 @@ pub(crate) fn changes_only_hidden<T: PartialEq>(
         && matches!((before, after), (Some((b, bb)), Some((a, ab))) if bb.is_empty() && ab.is_empty() && b == a)
 }
 
+/// A present image that does not carry one value per column of the table map: the writer's
+/// `binlog_row_image` was MINIMAL or NOBLOB, so positions no longer line up with names.
+pub(crate) fn is_partial<T>(full: usize, row: Option<&(Vec<T>, Vec<usize>)>) -> bool {
+    row.is_some_and(|(vals, _)| vals.len() != full)
+}
+
 /// `row` cut to `keep`, its undecodable positions renumbered into the cut row.
 pub(crate) fn project_row<T>(
     (vals, bad): (Vec<T>, Vec<usize>),
@@ -207,6 +213,22 @@ mod tests {
         assert!(
             !changes_only_hidden(true, Some(&row(&["1"], &[])), Some(&same)),
             "a thin before image proves nothing"
+        );
+    }
+
+    #[test]
+    fn an_image_is_partial_when_it_holds_fewer_values_than_the_table_has_columns() {
+        let full = (vec![1, 2, 3], vec![]);
+        let minimal = (vec![1], vec![]);
+        assert!(!is_partial(3, Some(&full)));
+        assert!(is_partial(3, Some(&minimal)));
+        assert!(
+            !is_partial::<i32>(3, None),
+            "an absent image is not a partial one"
+        );
+        assert!(
+            is_partial(3, Some(&(vec![1, 2, 3, 4], vec![]))),
+            "more values than names is not whole either"
         );
     }
 }

@@ -313,10 +313,12 @@ fn a_column_grant_account_backfills_through_its_recipes_without_a_hidden_column_
     }
 }
 
-#[test]
-#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
-    let (table, _table) = seeded("cg_rev");
+/// An open continuous run, a grant change written as `revoke(table, user)`, a row after it.
+fn a_revoke_stops_an_open_run_before_the_column_leaves(
+    label: &str,
+    revoke: impl Fn(&str, &str) -> String,
+) {
+    let (table, _table) = seeded(label);
     let user = GrantUser::new(&table, "id, name, pass");
     let mut rig = Rig::mysql_cdc(&table)
         .source_url(&user.url())
@@ -370,11 +372,7 @@ fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    c.query_drop(format!(
-        "REVOKE SELECT (pass) ON rivet.{table} FROM '{}'@'%'",
-        user.0
-    ))
-    .unwrap();
+    c.query_drop(revoke(&table, &user.0)).unwrap();
     c.query_drop(format!(
         "INSERT INTO rivet.{table} VALUES (7, 'eve', 'REVOKED-7')"
     ))
@@ -386,8 +384,8 @@ fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !out.status.success() && said.contains("RIVET_SOURCE_CDC_GRANTS_CHANGED"),
-        "a revoke inside the open run stops it by code:\n{said}"
+        out.status.code() == Some(2) && said.contains("RIVET_SOURCE_CDC_GRANTS_CHANGED"),
+        "a revoke inside the open run stops it by code, exit 2:\n{said}"
     );
 
     rig.replace_cdc_line("until_current", "until_current: true");
@@ -405,6 +403,22 @@ fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
         cells.iter().any(|v| v == "eve") && cells.iter().any(|v| v == "dan"),
         "the rows on both sides of the revoke are delivered: {cells:?}"
     );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
+    a_revoke_stops_an_open_run_before_the_column_leaves("cg_rev", |table, user| {
+        format!("REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%'")
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_revoke_written_as_an_executable_comment_stops_an_open_run_too_mysql() {
+    a_revoke_stops_an_open_run_before_the_column_leaves("cg_revx", |table, user| {
+        format!("/*!80000 REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
+    });
 }
 
 /// Column names of every part under `rig`'s output, in part order, without rivet's own columns.
@@ -506,4 +520,248 @@ fn a_denied_connect_under_the_policy_carries_the_connect_hint_in_every_batch_mod
             );
         }
     }
+}
+
+/// A table `(id, bio TEXT, name, pass)` holding three rows, dropped on Drop.
+fn seeded_with_blob(label: &str) -> (String, MysqlCdcTable) {
+    let table = unique_name(label);
+    let guard = MysqlCdcTable(table.clone());
+    let mut c = root();
+    c.query_drop(format!(
+        "CREATE TABLE rivet.{table} (id INT PRIMARY KEY, bio TEXT, name VARCHAR(20), pass VARCHAR(20))"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO rivet.{table} VALUES (1, 'b1', 'ann', '{SECRET}1'), (2, 'b2', 'bob', '{SECRET}2'), \
+         (3, 'b3', 'cid', '{SECRET}3')"
+    ))
+    .unwrap();
+    (table, guard)
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_partial_row_image_is_refused_before_it_is_projected_mysql() {
+    // `blob`: the table also holds a TEXT column before `name`, which NOBLOB leaves out of an image.
+    type Case = (&'static str, &'static str, bool, fn(&str) -> String);
+    let cases: [Case; 4] = [
+        ("MINIMAL", "insert", false, |t| {
+            format!("INSERT INTO rivet.{t} (id, pass) VALUES (9, '{SECRET}ins')")
+        }),
+        (
+            "MINIMAL",
+            "update of a visible and a hidden column",
+            false,
+            |t| format!("UPDATE rivet.{t} SET name = 'bob2', pass = '{SECRET}upd' WHERE id = 2"),
+        ),
+        ("MINIMAL", "update of a hidden column", false, |t| {
+            format!("UPDATE rivet.{t} SET pass = '{SECRET}upd' WHERE id = 2")
+        }),
+        ("NOBLOB", "update", true, |t| {
+            format!("UPDATE rivet.{t} SET name = 'bob2', pass = '{SECRET}upd' WHERE id = 2")
+        }),
+    ];
+    for (image, what, blob, write) in cases {
+        let (table, _table) = if blob {
+            seeded_with_blob("cg_part")
+        } else {
+            seeded("cg_part")
+        };
+        let user = GrantUser::new(&table, "id, name");
+        let rig = Rig::mysql_cdc(&table)
+            .source_url(&user.url())
+            .cdc("initial: snapshot")
+            .source_line("columns_from: grants");
+        rig.run_ok();
+        let mut writer = root();
+        writer
+            .query_drop(format!("SET SESSION binlog_row_image = '{image}'"))
+            .unwrap();
+        writer.query_drop(write(&table)).unwrap();
+        let out = rig.run();
+        assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_PREREQUISITE", 1));
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            said.contains("a PARTIAL image") && said.contains("binlog_row_image = FULL"),
+            "{image} {what}: the refusal names the cause and the remedy:\n{said}"
+        );
+        let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect();
+        assert_no_hidden(&parts, &format!("{image} {what}"));
+        assert_eq!(
+            changes(&parts),
+            vec![],
+            "{image} {what}: a refused image delivers no change, and never overwrites a key"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_partial_image_of_an_uncaptured_table_and_a_full_one_of_a_captured_table_are_delivered_as_before_mysql()
+ {
+    let (table, _table) = seeded("cg_nb");
+    let (other, _other) = seeded("cg_nb_other");
+    let user = GrantUser::new(&table, "id, name");
+    let rig = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .cdc("initial: snapshot")
+        .source_line("columns_from: grants");
+    rig.run_ok();
+    let mut writer = root();
+    writer
+        .query_drop("SET SESSION binlog_row_image = 'MINIMAL'")
+        .unwrap();
+    writer
+        .query_drop(format!(
+            "UPDATE rivet.{other} SET pass = '{SECRET}other' WHERE id = 1"
+        ))
+        .unwrap();
+    writer
+        .query_drop("SET SESSION binlog_row_image = 'FULL'")
+        .unwrap();
+    writer
+        .query_drop(format!(
+            "UPDATE rivet.{table} SET name = 'ann2', pass = '{SECRET}full' WHERE id = 1"
+        ))
+        .unwrap();
+    rig.run_ok();
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    assert_no_hidden(&parts, "uncaptured partial image");
+    assert_eq!(changes(&parts), vec![("update".into(), 1, "ann2".into())]);
+}
+
+/// A database `name`, dropped on Drop.
+struct OtherDb(String);
+
+impl Drop for OtherDb {
+    fn drop(&mut self) {
+        let _ = root().query_drop(format!("DROP DATABASE IF EXISTS `{}`", self.0));
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_qualified_table_does_not_capture_a_table_named_by_its_qualified_string_in_another_database_mysql()
+ {
+    let table = unique_name("cg_q");
+    let _table = MysqlCdcTable(table.clone());
+    let other = OtherDb(unique_name("cg_qdb"));
+    let mut c = root();
+    c.query_drop(format!(
+        "CREATE TABLE rivet.{table} (id INT PRIMARY KEY, name VARCHAR(20))"
+    ))
+    .unwrap();
+    c.query_drop(format!("CREATE DATABASE `{}`", other.0))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE `{}`.`rivet.{table}` (id INT PRIMARY KEY, name VARCHAR(20))",
+        other.0
+    ))
+    .unwrap();
+    c.query_drop(format!("INSERT INTO rivet.{table} VALUES (1, 'ann')"))
+        .unwrap();
+    let rig = Rig::mysql_cdc(&format!("rivet.{table}")).cdc("initial: snapshot");
+    rig.run_ok();
+    c.query_drop(format!(
+        "INSERT INTO `{}`.`rivet.{table}` VALUES (50, 'FOREIGN-ROW')",
+        other.0
+    ))
+    .unwrap();
+    c.query_drop(format!("INSERT INTO rivet.{table} VALUES (2, 'bob')"))
+        .unwrap();
+    rig.run_ok();
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    let (_, cells) = names_and_cells(&parts);
+    assert!(
+        !cells.iter().any(|v| v.contains("FOREIGN")),
+        "a row of another database's table reached the export: {cells:?}"
+    );
+    assert_eq!(changes(&parts), vec![("insert".into(), 2, "bob".into())]);
+}
+
+/// Every command that loads the config refuses `columns_from: grants` off MySQL, by code, before it
+/// connects or writes: a PostgreSQL, SQL Server, Oracle or MongoDB source would deliver every column.
+fn columns_from_grants_is_refused_by_every_command(rigs: Vec<Rig>) {
+    for rig in rigs {
+        let rig = rig.source_line("columns_from: grants");
+        for cmd in [
+            &["check"][..],
+            &["run"],
+            &["plan"],
+            &["doctor"],
+            &["validate"],
+            &["load"],
+            &["state", "show"],
+        ] {
+            let out = rig.cli(cmd);
+            assert_refused(
+                &out,
+                Refused::by_code("RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED", 1),
+            );
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                said.contains("`source.columns_from: grants` is supported on MySQL sources only")
+                    && said.contains("would read and deliver every column")
+                    && said.contains("Remove `columns_from:` from `source:`"),
+                "{cmd:?}: the refusal names the cause and the remedy:\n{said}"
+            );
+        }
+        assert!(
+            parquet_dirs(&rig.out_dir()).is_empty(),
+            "a refused config writes nothing"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: needs only the rig harness env; the refusal comes before any connection"]
+fn columns_from_grants_is_refused_by_every_command_postgres() {
+    columns_from_grants_is_refused_by_every_command(vec![
+        Rig::pg_batch("orders"),
+        Rig::pg_cdc("orders", "cg_slot"),
+    ]);
+}
+
+#[test]
+#[ignore = "live: needs only the rig harness env; the refusal comes before any connection"]
+fn columns_from_grants_is_refused_by_every_command_mssql() {
+    columns_from_grants_is_refused_by_every_command(vec![
+        Rig::mssql_batch("orders"),
+        Rig::mssql_cdc("orders", "dbo_orders"),
+    ]);
+}
+
+#[test]
+#[ignore = "live: needs only the rig harness env; the refusal comes before any connection"]
+fn columns_from_grants_is_refused_by_every_command_oracle() {
+    columns_from_grants_is_refused_by_every_command(vec![
+        Rig::oracle_batch("orders"),
+        Rig::oracle_cdc("orders"),
+    ]);
+}
+
+#[test]
+#[ignore = "live: needs only the rig harness env; the refusal comes before any connection"]
+fn columns_from_grants_is_refused_by_every_command_mongo() {
+    columns_from_grants_is_refused_by_every_command(vec![
+        Rig::mongo_batch("orders").source_url(&MongoTest::url(27018, "cg_refused")),
+        Rig::mongo_cdc("orders").source_url(&MongoTest::url(27018, "cg_refused")),
+    ]);
 }

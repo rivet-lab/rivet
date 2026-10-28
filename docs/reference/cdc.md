@@ -417,6 +417,8 @@ source:
 | Column added later | Not delivered (fail-closed) until a grant covers it and a new run starts |
 | Grant change between runs | Takes effect on the next run |
 | Grant change during a run | `GRANT`/`REVOKE`/user/role statement in the binlog → grants re-read; changed → `RIVET_SOURCE_CDC_GRANTS_CHANGED`, nothing past it delivered; re-run resumes under the new grants |
+| Grant statement in an executable comment | `/*!80000 REVOKE … */` is read as the statement it is (a `/*! … */` body is SQL whatever its version); a plain `/* … */` is a comment |
+| Partial row image | A change written with `binlog_row_image` = `MINIMAL` or `NOBLOB` (a session override counts) is refused with `RIVET_SOURCE_CDC_PREREQUISITE` before it is projected: its values cannot be placed under the table's column names. Set `binlog_row_image = FULL` and re-run; the change is still in the binlog |
 | Update of hidden columns only | Not delivered; its position still advances |
 | Key column not readable | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` before anything is read |
 | No readable column | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` |
@@ -424,7 +426,7 @@ source:
 
 Limits:
 
-- MySQL only; PostgreSQL, SQL Server, Oracle and MongoDB are refused with `RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED` (see #711).
+- MySQL only. On PostgreSQL, SQL Server, Oracle and MongoDB every command that loads the config (`run`, `check`, `plan`, `doctor`, `validate`, `load`, `state`) and `apply` of a plan that carries it refuses it with `RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED` (exit 1, nothing connected or written), because those sources would read and deliver every column (see #711). Remove `columns_from:` from `source:` or point `source:` at a MySQL server.
 - The binlog still leaves the server in full: the filter is in rivet, not in MySQL.
 - A grant change not written to the binlog (`sql_log_bin = 0`, a direct `mysql.*` edit without `FLUSH PRIVILEGES`) takes effect on the next run only.
 

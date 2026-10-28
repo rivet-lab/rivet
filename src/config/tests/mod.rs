@@ -1,5 +1,6 @@
 mod azure;
 mod codes;
+mod columns_from;
 mod compression;
 mod goldens;
 mod parse_helpers;

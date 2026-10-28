@@ -35,8 +35,20 @@ pub fn validate_plan(plan: &ResolvedRunPlan) -> Vec<Diagnostic> {
     check_quality_unique_no_cap(&mut diags, plan);
     check_resume_without_checkpoint(&mut diags, plan);
     check_stdout_manifest(&mut diags, plan);
+    check_columns_from_grants(&mut diags, plan);
 
     diags
+}
+
+/// A sealed plan carrying `columns_from: grants` for an engine that does not enforce it is not applied.
+fn check_columns_from_grants(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
+    if let Some(why) = crate::config::columns_from_refusal(&plan.source) {
+        diags.push(Diagnostic {
+            level: DiagnosticLevel::Rejected,
+            rule: "columns-from-grants-unsupported",
+            message: format!("export '{}': {why}", plan.export_name),
+        });
+    }
 }
 
 fn is_stdout(plan: &ResolvedRunPlan) -> bool {
@@ -282,6 +294,26 @@ mod tests {
 
     fn rules(diags: &[Diagnostic]) -> Vec<&'static str> {
         diags.iter().map(|d| d.rule).collect()
+    }
+
+    #[test]
+    fn a_plan_with_columns_from_grants_is_rejected_off_mysql() {
+        for (engine, rejected) in [
+            (SourceType::Postgres, true),
+            (SourceType::Mssql, true),
+            (SourceType::Oracle, true),
+            (SourceType::Mongo, true),
+            (SourceType::Mysql, false),
+        ] {
+            let mut plan = base_plan();
+            plan.source.source_type = engine;
+            plan.source.columns_from = Some(crate::config::ColumnsFrom::Grants);
+            let hit = validate_plan(&plan).iter().any(|d| {
+                d.rule == "columns-from-grants-unsupported" && d.level == DiagnosticLevel::Rejected
+            });
+            assert_eq!(hit, rejected, "{engine:?}");
+        }
+        assert!(validate_plan(&base_plan()).is_empty());
     }
 
     #[test]

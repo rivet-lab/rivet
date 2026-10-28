@@ -1238,7 +1238,7 @@ impl MysqlChangeStream {
                 }
                 // `columns_from: grants`: only the readable columns of the table the sink routes
                 // this event to; an uncaptured table keeps its commit boundary and no values.
-                let keep = self.readable.as_ref().map(|readable| {
+                let captured_keep = self.readable.as_ref().map(|readable| {
                     self.configured_tables
                         .iter()
                         .find(|cfg| {
@@ -1251,8 +1251,10 @@ impl MysqlChangeStream {
                         })
                         .and_then(|cfg| readable.get(cfg))
                         .map(|r| super::column_grants::kept_positions(&image_names, &r.columns))
-                        .unwrap_or_default()
                 });
+                let captured = matches!(captured_keep, Some(Some(_)));
+                let keep = captured_keep.map(Option::unwrap_or_default);
+                let full_arity = image_names.len();
                 let image_names: std::sync::Arc<[String]> = match &keep {
                     Some(k) => k.iter().map(|&i| image_names[i].clone()).collect(),
                     None => image_names,
@@ -1265,8 +1267,22 @@ impl MysqlChangeStream {
                 let position = self.position_at(log_pos);
                 for row in re.rows(&tme) {
                     let (before, after) = row?;
-                    let before = before.map(render_row).map(project);
-                    let after = after.map(render_row).map(project);
+                    let before = before.map(render_row);
+                    let after = after.map(render_row);
+                    // A partial image is refused BEFORE it is projected: cut by full-table
+                    // positions it would put a hidden value under a visible name.
+                    if captured {
+                        for img in [before.as_ref(), after.as_ref()] {
+                            if super::column_grants::is_partial(full_arity, img) {
+                                let n = img.map_or(0, |(v, _)| v.len());
+                                return Err(crate::source::cdc::partial_image_refusal(
+                                    &schema, &table, n, full_arity,
+                                ));
+                            }
+                        }
+                    }
+                    let before = before.map(project);
+                    let after = after.map(project);
                     // `columns_from: grants`: an update of hidden columns only is not delivered.
                     if super::column_grants::changes_only_hidden(
                         keep.is_some(),
@@ -2177,6 +2193,52 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
     )
 }
 
+/// A statement text as the server executes it: the body of `/*! … */` and `/*!NNNNN … */`
+/// is SQL (a server at or above that version runs it), every other `/* … */` span is a
+/// comment. A `/*!` span is read as text whatever its version, so a gated statement is
+/// at worst a spurious stop, never a missed grant change.
+fn executable_text(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        out.push(' ');
+        let body = &rest[start + 2..];
+        let executable = body.starts_with('!');
+        let (text, after) = match body.find("*/") {
+            Some(end) => (&body[..end], &body[end + 2..]),
+            None => (body, ""),
+        };
+        if executable {
+            let digits = text[1..].bytes().take_while(u8::is_ascii_digit).count();
+            out.push_str(&text[1 + digits..]);
+            out.push(' ');
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A statement that can change what an account may read: `GRANT`, `REVOKE`, a user or role
+/// change, `SET DEFAULT ROLE`, `FLUSH PRIVILEGES`. Comments and case are ignored; executable
+/// comments (`/*!80000 REVOKE … */`) are statement text.
+fn is_privilege_statement(sql: &str) -> bool {
+    let text = executable_text(sql);
+    let mut w = text.split_whitespace().map(str::to_ascii_uppercase);
+    match (
+        w.next().as_deref(),
+        w.next().as_deref(),
+        w.next().as_deref(),
+    ) {
+        (Some("GRANT" | "REVOKE"), ..) => true,
+        (Some("CREATE" | "DROP" | "ALTER" | "RENAME"), Some("USER" | "ROLE"), _) => true,
+        (Some("SET"), Some("DEFAULT"), Some("ROLE")) => true,
+        (Some("FLUSH"), Some(p), _) => p.trim_end_matches(';') == "PRIVILEGES",
+        _ => false,
+    }
+}
+
 /// Does this QUERY event close a transaction?
 ///
 /// `COMMIT` on its own (the non-transactional-engine and binlog-format path) and
@@ -2198,27 +2260,6 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
 /// treating one as "discard the buffer" would DELETE rows that are still in the
 /// source. `roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_
 /// transaction` pins the real contract instead.
-/// A statement that can change what an account may read: `GRANT`, `REVOKE`, a user or role
-/// change, `SET DEFAULT ROLE`, `FLUSH PRIVILEGES`. Leading comments and case are ignored.
-fn is_privilege_statement(sql: &str) -> bool {
-    let mut t = sql.trim_start();
-    while let Some(rest) = t.strip_prefix("/*") {
-        t = rest.split_once("*/").map_or("", |(_, r)| r).trim_start();
-    }
-    let mut w = t.split_whitespace().map(str::to_ascii_uppercase);
-    match (
-        w.next().as_deref(),
-        w.next().as_deref(),
-        w.next().as_deref(),
-    ) {
-        (Some("GRANT" | "REVOKE"), ..) => true,
-        (Some("CREATE" | "DROP" | "ALTER" | "RENAME"), Some("USER" | "ROLE"), _) => true,
-        (Some("SET"), Some("DEFAULT"), Some("ROLE")) => true,
-        (Some("FLUSH"), Some(p), _) => p.trim_end_matches(';') == "PRIVILEGES",
-        _ => false,
-    }
-}
-
 fn is_commit_statement(sql: &str) -> bool {
     let t = sql.trim().trim_end_matches(';').trim();
     if t.eq_ignore_ascii_case("commit") {
@@ -2440,7 +2481,12 @@ mod tests {
         for sql in [
             "GRANT SELECT (id) ON rivet.t TO 'u'@'%'",
             "  revoke select (pass) on rivet.t from u",
-            "/* xid=1 */ /*!80000 x */ GRANT r TO u",
+            "/* xid=1 */ /* note */ GRANT r TO u",
+            "/*!80000 REVOKE SELECT (pass) ON rivet.t FROM u */",
+            "/*!REVOKE SELECT (pass) ON rivet.t FROM u */",
+            "/*!80000 GRANT SELECT (id) ON rivet.t TO u */",
+            "/* xid=1 */ /*!50000 CREATE USER u */",
+            "/*!80000 FLUSH */ PRIVILEGES",
             "CREATE USER 'u'@'%' IDENTIFIED BY 'p'",
             "drop role r",
             "ALTER USER u DEFAULT ROLE r",
@@ -2461,6 +2507,9 @@ mod tests {
             "SET ROLE r",
             "ALTER TABLE t ADD COLUMN revoke_at INT",
             "/* GRANT */ UPDATE t SET a = 1",
+            "/*+ SET_VAR(x=1) */ UPDATE t SET a = 1",
+            "/*!80000 UPDATE t SET revoke_at = 1 */",
+            "/*! unterminated",
             "ГРАНТ", // allow-cyrillic
         ] {
             assert!(!is_privilege_statement(sql), "{sql}");

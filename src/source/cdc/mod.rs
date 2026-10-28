@@ -51,6 +51,29 @@ pub(crate) fn tx_cap_from_env(raw: Option<&str>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// The refusal for a change image that names `names` columns but carries `n` values (a PARTIAL
+/// image). Built once: the sink's flush guard and the MySQL reader's projection both raise it.
+pub(crate) fn partial_image_refusal(
+    schema: &str,
+    table: &str,
+    n: usize,
+    names: usize,
+) -> anyhow::Error {
+    crate::error::coded(
+        crate::error::codes::SOURCE_CDC_PREREQUISITE,
+        format!(
+            "cdc: {schema}.{table}: a row image carries {n} value(s) under {names} column \
+             name(s) — a PARTIAL image, which rivet cannot map without \
+             fabricating the missing cells as NULL. On MySQL this is \
+             `binlog_row_image` set to something other than FULL when the \
+             change was WRITTEN (a session override counts, and the open-time \
+             probe reads only the global). Set `binlog_row_image = FULL` and \
+             re-capture from before the affected DDL/DML; the changes are \
+             still in the binlog, so this is a delay rather than a loss."
+        ),
+    )
+}
+
 /// Default row cap — 5M rows, far above any real OLTP transaction.
 pub(crate) const DEFAULT_MAX_TX_ROWS: usize = 5_000_000;
 /// Default byte cap — 2 GiB, likewise.

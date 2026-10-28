@@ -292,10 +292,13 @@ fn bracket_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
 
 /// Why this source cannot take `columns_from: grants`, if it cannot.
 pub(crate) fn columns_from_refusal(source: &SourceConfig) -> Option<String> {
-    (source.columns_from_grants() && source.source_type != SourceType::Mysql).then(|| {
-        "`source.columns_from: grants` is supported on MySQL sources only (other engines: \
-         rivet-lab/rivet#711)"
-            .to_string()
+    (source.columns_from_grants() && !source.source_type.enforces_columns_from_grants()).then(|| {
+        format!(
+            "`source.columns_from: grants` is supported on MySQL sources only: a {} source would \
+             read and deliver every column of a row, hidden ones included. Remove `columns_from:` \
+             from `source:` or point `source:` at a MySQL server (other engines: rivet-lab/rivet#711)",
+            source.source_type.label()
+        )
     })
 }
 
@@ -618,6 +621,16 @@ impl SourceType {
         !matches!(self, SourceType::Mongo)
     }
 
+    /// Whether this engine reads and delivers only the columns the account may `SELECT` under `columns_from: grants`.
+    pub fn enforces_columns_from_grants(self) -> bool {
+        match self {
+            SourceType::Mysql => true,
+            SourceType::Postgres | SourceType::Mssql | SourceType::Oracle | SourceType::Mongo => {
+                false
+            }
+        }
+    }
+
     /// The engine as `export_metrics.source_type` records it (`postgres`, `mysql`, `mssql`, `mongo`).
     pub fn ledger_label(self) -> String {
         self.label().to_string()
@@ -759,31 +772,6 @@ pub(super) fn mixed_connection_methods() -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn columns_from_grants_is_refused_on_every_engine_but_mysql() {
-        for engine in [
-            SourceType::Mysql,
-            SourceType::Postgres,
-            SourceType::Mssql,
-            SourceType::Oracle,
-            SourceType::Mongo,
-        ] {
-            let mut source = make_source(engine);
-            assert_eq!(
-                columns_from_refusal(&source),
-                None,
-                "{engine:?} without the policy"
-            );
-            source.columns_from = Some(ColumnsFrom::Grants);
-            let why = columns_from_refusal(&source);
-            assert_eq!(
-                why.is_none(),
-                engine == SourceType::Mysql,
-                "{engine:?}: {why:?}"
-            );
-        }
-    }
 
     #[test]
     fn a_source_state_key_names_the_server_and_database_without_credentials() {
