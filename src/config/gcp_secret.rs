@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use base64::Engine as _;
 use zeroize::Zeroizing;
 
-use crate::destination::gcs_auth;
+use crate::gcp_auth;
 use anyhow::{Context as _, Result};
 
 use crate::error::codes;
@@ -34,7 +34,7 @@ pub(crate) fn gcp_secret(reference: &str) -> Result<Zeroizing<String>> {
         let name = name.clone();
         std::thread::spawn(move || fetch_with_adc(ENDPOINT, &name))
             .join()
-            .map_err(|_| anyhow::anyhow!("Secret Manager fetch thread panicked"))??
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?
     };
     cache.insert(name, fetched.clone());
     Ok(fetched)
@@ -73,7 +73,7 @@ fn valid_id(s: &str) -> bool {
 }
 
 fn fetch_with_adc(endpoint: &str, name: &str) -> Result<Zeroizing<String>> {
-    let Some(creds) = gcs_auth::load_adc_credentials()? else {
+    let Some(creds) = gcp_auth::load_adc_credentials()? else {
         crate::rivet_bail!(
             codes::CONFIG_GCP_SECRET_UNREADABLE,
             "source: no Google credentials to read Secret Manager secret '{name}' — point \
@@ -82,7 +82,7 @@ fn fetch_with_adc(endpoint: &str, name: &str) -> Result<Zeroizing<String>> {
         );
     };
     let http = reqwest::blocking::Client::new();
-    let tokens = gcs_auth::shared_blocking_source(creds, &http);
+    let tokens = gcp_auth::shared_blocking_source(creds, &http);
     let project = name.split('/').nth(1).unwrap_or_default();
     let token = tokens.access_token()?;
     fetch(

@@ -146,8 +146,8 @@ destination:
   prefix: exports/
 ```
 
-No `credentials_file:` needed.  See `gcs_auth::try_authorized_user_loader`
-in `src/destination/gcs_auth.rs` for the detection.
+No `credentials_file:` needed.  See `gcp_auth::try_authorized_user_loader`
+in `src/gcp_auth.rs` for the detection.
 
 ### Path B — Service account JSON
 

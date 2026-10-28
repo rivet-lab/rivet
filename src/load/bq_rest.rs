@@ -42,7 +42,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use crate::destination::gcs_auth::{self, BlockingAdcTokenSource};
+use crate::gcp_auth::{self, BlockingAdcTokenSource};
 
 /// BigQuery's JSON API root. Overridable so a live check can be pointed at a
 /// stub; not a config knob.
@@ -113,7 +113,7 @@ enum Auth {
     Static(Zeroizing<String>),
     /// ADC credentials — `authorized_user` (refresh_token grant) or a
     /// `service_account` key file (RS256 jwt-bearer grant), both minted in
-    /// process through the shared `gcs_auth` seam.
+    /// process through the shared `gcp_auth` seam.
     Adc(std::sync::Arc<BlockingAdcTokenSource>),
     /// Documented fallback for the credential shapes rivet has no in-process
     /// minting path for: `external_account` / workload identity (needs an STS
@@ -625,13 +625,13 @@ impl Auth {
         {
             return Ok(Auth::Static(Zeroizing::new(tok.to_string())));
         }
-        let adc = gcs_auth::load_adc_credentials()?;
+        let adc = gcp_auth::load_adc_credentials()?;
         match choose_token_source(static_token.as_deref(), adc.is_some()) {
             TokenSourceKind::Static => Ok(Auth::Static(Zeroizing::new(
                 static_token.expect("a Static choice implies a token"),
             ))),
             TokenSourceKind::Adc => {
-                let src = gcs_auth::shared_blocking_source(
+                let src = gcp_auth::shared_blocking_source(
                     adc.expect("an Adc choice implies credentials"),
                     http,
                 );
@@ -683,7 +683,7 @@ pub(crate) const GCLOUD_TOKEN_ARGV: [&str; 3] =
 ///   the instance metadata server.
 ///
 /// `authorized_user` (refresh_token) and `service_account` (RS256 jwt-bearer)
-/// are BOTH minted in process by `destination::gcs_auth` and never reach here.
+/// are BOTH minted in process by `gcp_auth` and never reach here.
 /// Nothing else about the transport is a subprocess.
 ///
 /// THE VERB IS STILL LOAD-BEARING for the two shapes above: `auth
@@ -1192,16 +1192,16 @@ mod tests {
     #[test]
     fn clients_for_one_principal_share_one_token_source() {
         let adc = |refresh: &str| {
-            crate::destination::gcs_auth::parse_adc_file(&format!(
+            crate::gcp_auth::parse_adc_file(&format!(
                 r#"{{"type":"authorized_user","client_id":"gcloud-shared-client","client_secret":"s","refresh_token":"{refresh}"}}"#
             ))
             .unwrap()
             .unwrap()
         };
         let http = reqwest::blocking::Client::new();
-        let a = gcs_auth::shared_blocking_source(adc("user-a-refresh"), &http);
-        let b = gcs_auth::shared_blocking_source(adc("user-a-refresh"), &http);
-        let other = gcs_auth::shared_blocking_source(adc("user-b-refresh"), &http);
+        let a = gcp_auth::shared_blocking_source(adc("user-a-refresh"), &http);
+        let b = gcp_auth::shared_blocking_source(adc("user-a-refresh"), &http);
+        let other = gcp_auth::shared_blocking_source(adc("user-b-refresh"), &http);
         assert!(std::sync::Arc::ptr_eq(&a, &b), "one identity, one cache");
         assert!(
             !std::sync::Arc::ptr_eq(&a, &other),
