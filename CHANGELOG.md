@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **Behaviour change: Snowflake keeps a base table and a buffer by default, and `rivet compact` merges
+  them.** On `target: snowflake`, an incremental or CDC export now lands `<table>` as a physical base
+  and later deltas in a buffer `<table>__changes`, with no view and no MERGE: `rivet compact` renames the
+  buffer to `<table>__changes__merging`, then in one transaction deletes the winning keys from the base,
+  inserts their live rows and flags deleted keys (`__is_deleted`, when the base carries it), and drops the
+  renamed table after the commit. A script that died before the drop is finished by the next compact;
+  replaying it leaves the base unchanged. The buffer is a transient table with
+  `DATA_RETENTION_TIME_IN_DAYS = 0` (no time travel, no fail-safe). `base_rows_after` is the base's
+  `COUNT(*)` (Snowflake answers it from metadata). `load.layout: log_view` keeps the changelog and its
+  current-state view; a `full` export is unchanged. **Behaviour changes, with the remedy:**
+  - a Snowflake incremental or CDC export that writes no `load.layout:` now gets the base and the buffer
+    where it got the changelog and view. No Snowflake table in use had the view layout, so nothing is
+    migrated; to keep the changelog and view for a config, write `load.layout: log_view` (section, export
+    or `load.tables.<t>`);
+  - **a `mode: cdc` export on Snowflake that names neither `cdc.backfill:` nor `cdc.initial: snapshot`
+    is refused at config load** with `RIVET_CONFIG_LOAD_BLOCK_INVALID` (exit 1, nothing runs), because
+    its base would start empty and miss every row the stream never changes. The message prints the two
+    remedies: add `cdc.backfill:` (or `cdc.initial: snapshot`) to build the base from a snapshot of the
+    table, or write `load.layout: log_view`;
+  - a load or `rivet compact` that meets a VIEW under the base name of a base-and-buffer table (the
+    current-state view of a changelog+view table) stops with `RIVET_LOAD_TARGET_OBJECT_CONFLICT` (exit 5,
+    nothing written) on every load leg and on compact. This holds on BigQuery too, where such a load
+    used to append to the buffer behind the view and leave a buffer `rivet compact` refuses. The message
+    names the two ways out: drop the view and `<table>__changes` and load again for a base, or write
+    `load.layout: log_view` to stay on the view;
+  - `rivet compact` on a Snowflake table that writes `load.layout: log_view` says "a changelog + view
+    table (`load.layout: log_view` is written); nothing to merge" where it said it "never compacts"; scripts
+    that match the old words should match `nothing to merge`;
+  - `rivet init` for Snowflake no longer writes a `layout:` line (the default is the base and buffer); for
+    a CDC stream with no baseline it writes `layout: log_view`;
+  - the ClickHouse refusal of `load.layout: base_buffer` now reads "`base_buffer` needs `target: bigquery`
+    or `target: snowflake` ... Drop the key to keep the changelog and its dedup view"; the code and exit
+    are unchanged.
+
 - **Behaviour change: the Snowflake load no longer drives the `snow` CLI; it talks to Snowflake's SQL API
   itself and signs in with a key pair.** `snow` is no longer needed on the machine that runs `rivet load`.
   **A config that names `load.connection:` now stops at config load** with

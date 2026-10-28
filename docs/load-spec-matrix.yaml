@@ -278,8 +278,14 @@ scenarios:
   - id: buffer_append_beside_a_foreign_base_refused
     what: "a base-and-buffer load whose deltas arrive without a whole-table pass does not create or append `<table>__changes` beside a base (or onto a buffer) the ledger does not know"
     bigquery:   { test: a_buffer_append_onto_a_base_or_buffer_the_ledger_has_no_record_of_is_refused }
-    snowflake:  { na: "`load.layout: base_buffer` is BigQuery-only" }
-    clickhouse: { na: "`load.layout: base_buffer` is BigQuery-only" }
+    snowflake:  { test: a_buffer_append_onto_a_base_or_buffer_the_ledger_has_no_record_of_is_refused }
+    clickhouse: { na: "`load.layout: base_buffer` is refused for ClickHouse: it does not compact" }
+
+  - id: view_under_the_base_name_refused
+    what: "a base-and-buffer load (BigQuery with `backfill:` or a written `base_buffer`; Snowflake by default) that meets a VIEW under the base name (the current-state view of a changelog+view table) stops before any write with exit 5 and `RIVET_LOAD_TARGET_OBJECT_CONFLICT` on every load leg, journaled `refused`; the same view under `log_view` is the log's own and loads"
+    bigquery:   { test: a_view_under_the_base_name_stops_every_load_leg_with_the_coded_conflict }
+    snowflake:  { test: a_view_under_the_base_name_stops_every_load_leg_with_the_coded_conflict }
+    clickhouse: { na: "`load.layout: base_buffer` is refused for ClickHouse: it does not compact" }
 
   - id: stop_before_the_write_is_journaled_refused
     what: "every stop between the ledger read and the first warehouse write (the stale-buffer stop, a staged part that vanished) is journaled `refused`, on every cycle, so it never makes a foreign base rivet's own"

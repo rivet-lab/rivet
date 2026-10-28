@@ -1,5 +1,6 @@
 //! `rivet compact`: merge each base-and-buffer table's buffer into its base and drop the buffer.
 
+use crate::config::load::BaseSupport;
 use crate::error::Result;
 use crate::load;
 use crate::load::ledger::{ledger_load_id, ledger_status, ownership_of};
@@ -72,12 +73,8 @@ pub(crate) fn compact_gate(
         (ObjectKind::View, _) => CompactGate::Refuse(
             crate::error::codes::LOAD_TARGET_OBJECT_CONFLICT,
             format!(
-                "refusing to compact `{buffer_fqtn}` into `{base_fqtn}`: that name is a VIEW — the \
-             current-state view of the changelog+view layout, which has no base to merge into. \
-             To move to base+buffer, drop the view and `{buffer_fqtn}`; to stay on the view, \
-             set `load.layout: log_view` (or delete a written `layout:` key — a written one \
-             WINS over `cdc.backfill:`, and `rivet init` writes it), and remove `cdc.backfill:` \
-             from the export if it has one"
+                "refusing to compact `{buffer_fqtn}` into `{base_fqtn}`: {}",
+                load::view_as_base_refusal(base_fqtn, buffer_fqtn)
             ),
         ),
         (ObjectKind::Other, _) => CompactGate::Refuse(
@@ -117,7 +114,7 @@ pub(crate) fn compact_gate(
 fn compact_skip_reason(
     mode: &load::plan::LoadMode,
     layout: &load::plan::CdcLayout,
-    warehouse_compacts: bool,
+    support: BaseSupport,
 ) -> Option<(&'static str, &'static str)> {
     match mode {
         // A full load OVERWRITES the whole table on every pass, so there is never
@@ -127,7 +124,7 @@ fn compact_skip_reason(
             "a full load overwrites its table; nothing to merge",
         )),
         // No layout makes a base here, so the layout hints below would be refused.
-        _ if !warehouse_compacts => Some((
+        _ if support == BaseSupport::Never => Some((
             "warehouse_never_compacts",
             "this warehouse keeps a change log behind a view and never compacts; nothing to merge",
         )),
@@ -135,6 +132,12 @@ fn compact_skip_reason(
         // as a physical base with a disposable buffer has something to merge. An
         // incremental export asks for that with `load.layout: base_buffer`.
         _ if layout.compacts() => None,
+        // Where a base is the default only a written `log_view` gets here.
+        _ if support == BaseSupport::Default => Some((
+            "log_view",
+            "a changelog + view table (`load.layout: log_view` is written); delete the key to \
+             give it a base to merge into",
+        )),
         load::plan::LoadMode::Cdc => Some((
             "log_view",
             "a changelog + view table (no `cdc.backfill:` and no `load.layout: base_buffer`); \
@@ -265,7 +268,7 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
         |state, idx, plan| {
             let journal = &journals[idx];
             if let Some((word, why)) =
-                compact_skip_reason(&plan.mode, &plan.layout, plan.load.target.compacts())
+                compact_skip_reason(&plan.mode, &plan.layout, plan.load.target.base_support())
             {
                 eprintln!("  compact [{}]: skipped — {why}", plan.table);
                 return Ok(TableDone::Skipped(word));
@@ -535,38 +538,80 @@ mod tests {
     fn compact_passes_by_everything_but_a_base_and_buffer_cdc_table() {
         use crate::load::plan::{CdcLayout, LoadMode};
         assert_eq!(
-            super::compact_skip_reason(&LoadMode::Cdc, &CdcLayout::BaseAndBuffer, true),
+            super::compact_skip_reason(
+                &LoadMode::Cdc,
+                &CdcLayout::BaseAndBuffer,
+                BaseSupport::Derived
+            ),
             None
         );
         // The layout is decided by `cdc.backfill:` / `load.layout:`, never by `initial:`
         // — the reason must name the levers that exist, not one that changes nothing.
         assert!(
-            super::compact_skip_reason(&LoadMode::Cdc, &CdcLayout::LogAndView, true).is_some_and(
-                |(word, w)| word == "log_view"
-                    && w.contains("cdc.backfill:")
-                    && w.contains("load.layout: base_buffer")
-                    && !w.contains("initial:")
+            super::compact_skip_reason(
+                &LoadMode::Cdc,
+                &CdcLayout::LogAndView,
+                BaseSupport::Derived
             )
+            .is_some_and(|(word, w)| word == "log_view"
+                && w.contains("cdc.backfill:")
+                && w.contains("load.layout: base_buffer")
+                && !w.contains("initial:"))
         );
         assert!(
-            super::compact_skip_reason(&LoadMode::Full, &CdcLayout::LogAndView, true)
-                .is_some_and(|(word, w)| word == "full_load" && w.contains("overwrites its table"))
+            super::compact_skip_reason(
+                &LoadMode::Full,
+                &CdcLayout::LogAndView,
+                BaseSupport::Derived
+            )
+            .is_some_and(|(word, w)| word == "full_load" && w.contains("overwrites its table"))
         );
         // The LAYOUT decides, not the mode: an ordinary incremental export that
         // asked for `load.layout: base_buffer` has a buffer to merge, and one that
         // did not is skipped with the key that would give it one.
         assert_eq!(
-            super::compact_skip_reason(&LoadMode::Incremental, &CdcLayout::BaseAndBuffer, true),
+            super::compact_skip_reason(
+                &LoadMode::Incremental,
+                &CdcLayout::BaseAndBuffer,
+                BaseSupport::Derived
+            ),
             None
         );
         assert!(
-            super::compact_skip_reason(&LoadMode::Incremental, &CdcLayout::LogAndView, true)
-                .is_some_and(|(word, w)| word == "log_view" && w.contains("base_buffer"))
+            super::compact_skip_reason(
+                &LoadMode::Incremental,
+                &CdcLayout::LogAndView,
+                BaseSupport::Derived
+            )
+            .is_some_and(|(word, w)| word == "log_view" && w.contains("base_buffer"))
+        );
+        // Snowflake makes a base by default: a skip there means `log_view` is written, and its
+        // hint offers deleting that key, never `backfill:` or a `base_buffer` it already has.
+        for mode in [LoadMode::Cdc, LoadMode::Incremental] {
+            let (word, why) =
+                super::compact_skip_reason(&mode, &CdcLayout::LogAndView, BaseSupport::Default)
+                    .expect("skipped");
+            assert_eq!(word, "log_view");
+            assert!(
+                why.contains("`load.layout: log_view` is written")
+                    && !why.contains("backfill")
+                    && !why.contains("no `load.layout"),
+                "{why}"
+            );
+        }
+        assert_eq!(
+            super::compact_skip_reason(
+                &LoadMode::Cdc,
+                &CdcLayout::BaseAndBuffer,
+                BaseSupport::Default
+            ),
+            None
         );
         // A warehouse that never compacts must not suggest a layout it refuses.
         for mode in [LoadMode::Cdc, LoadMode::Incremental] {
             let (word, why) =
-                super::compact_skip_reason(&mode, &CdcLayout::LogAndView, false).expect("skipped");
+                super::compact_skip_reason(&mode, &CdcLayout::LogAndView, BaseSupport::Never)
+                    .expect("skipped");
             assert_eq!(word, "warehouse_never_compacts");
             assert!(
                 why.contains("never compacts") && !why.contains("base_buffer"),
@@ -578,6 +623,7 @@ mod tests {
 
 #[cfg(test)]
 mod document_tests {
+    use crate::config::load::BaseSupport;
     use crate::load::plan::{CdcLayout, LoadMode};
     use crate::load::result::Address;
     use crate::load::result::tests::{at, journal_of};
@@ -586,8 +632,12 @@ mod document_tests {
     };
 
     /// The word `compact_skip_reason` gives a table of this shape.
-    fn skipped(mode: LoadMode, layout: CdcLayout, compacts: bool) -> anyhow::Result<TableDone> {
-        let (word, _) = super::compact_skip_reason(&mode, &layout, compacts).expect("skipped");
+    fn skipped(
+        mode: LoadMode,
+        layout: CdcLayout,
+        support: BaseSupport,
+    ) -> anyhow::Result<TableDone> {
+        let (word, _) = super::compact_skip_reason(&mode, &layout, support).expect("skipped");
         Ok(TableDone::Skipped(word))
     }
 
@@ -647,12 +697,12 @@ mod document_tests {
                 entry(
                     "countries",
                     "countries",
-                    skipped(LoadMode::Full, CdcLayout::LogAndView, true),
+                    skipped(LoadMode::Full, CdcLayout::LogAndView, BaseSupport::Derived),
                 ),
                 entry(
                     "audit_cdc",
                     "audit",
-                    skipped(LoadMode::Cdc, CdcLayout::LogAndView, true),
+                    skipped(LoadMode::Cdc, CdcLayout::LogAndView, BaseSupport::Derived),
                 ),
                 entry(
                     "events",
@@ -672,7 +722,7 @@ mod document_tests {
                 "orders",
                 &at("analytics.orders", None),
                 "compacted",
-                &skipped(LoadMode::Cdc, CdcLayout::LogAndView, false),
+                &skipped(LoadMode::Cdc, CdcLayout::LogAndView, BaseSupport::Never),
                 &JobJournal::new(true),
             )],
         };

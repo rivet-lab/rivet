@@ -203,6 +203,7 @@ impl Drop for SfCleanup {
                 ("VIEW", t.clone()),
                 ("TABLE", t.clone()),
                 ("TABLE", format!("{t}__changes")),
+                ("TABLE", format!("{t}__changes__merging")),
                 ("STAGE", format!("rivet_stage_{t}")),
                 ("STAGE", format!("rivet_stage_{t}__changes")),
             ] {
