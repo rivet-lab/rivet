@@ -383,14 +383,14 @@ fn a_slot_another_config_advanced_is_refused_instead_of_losing_its_changes() {
     );
 }
 
-/// A PostgreSQL stream the released previous version (`RIVET_PREV_RELEASE_BIN`) left with its
+/// A PostgreSQL stream the pinned older release (`RIVET_LEASE_CARRIER_BIN`, from before #649) left with its
 /// slot past its checkpoint: a change-free transaction on another table between its runs made it
-/// release the empty span by advancing the slot before saving the checkpoint (fixed in #649).
+/// release the empty span by advancing the slot before saving the checkpoint.
 /// This binary's first run takes the slot's position once (a warning names both), delivers, and
 /// writes the checkpoint in its own form; a later advance by a real foreign reader is refused
 /// RIVET_SOURCE_CDC_LOG_GAP on every run (main: refused on the first upgraded run already).
 #[test]
-#[ignore = "live: requires docker compose --profile cdc postgres-cdc + RIVET_PREV_RELEASE_BIN"]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc + RIVET_LEASE_CARRIER_BIN"]
 fn an_upgraded_stream_whose_old_release_advanced_its_slot_past_the_checkpoint_continues() {
     let tbl = unique_name("rivet_pg_upgrade");
     let other = unique_name("rivet_pg_upgrade_other");
@@ -407,7 +407,7 @@ fn an_upgraded_stream_whose_old_release_advanced_its_slot_past_the_checkpoint_co
     let ckpts = tempfile::tempdir().unwrap();
     let ckpt = ckpts.path().join("cdc.ckpt");
     let rig = Rig::pg_cdc(&tbl, &slot).checkpoint_path(ckpt.clone());
-    let Some(old) = rig.as_previous_release() else {
+    let Some(old) = rig.as_lease_carrier() else {
         return;
     };
     old.run_ok();
@@ -416,7 +416,7 @@ fn an_upgraded_stream_whose_old_release_advanced_its_slot_past_the_checkpoint_co
     old.run_ok();
     // A captured change followed by a transaction the stream does not capture: the run that
     // yields the change acks it, and the next one releases the trailing empty span by advancing
-    // the slot without saving the checkpoint (measured on the released 0.32.1).
+    // the slot without saving the checkpoint (measured on the pinned release).
     c.batch_execute(&format!(
         "INSERT INTO {tbl} VALUES (10, 10); INSERT INTO {other} VALUES (1)"
     ))

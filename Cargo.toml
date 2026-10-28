@@ -4,7 +4,7 @@ version = "0.32.2"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
-repository = "https://github.com/panchenkoai/rivet"
+repository = "https://github.com/rivet-lab/rivet"
 description = "Rivet: PostgreSQL/MySQL/SQL Server/MongoDB → Parquet/CSV (local, S3, GCS, Azure). Crate name rivet-cli; binary rivet."
 readme = "README.md"
 default-run = "rivet"
@@ -48,11 +48,11 @@ md-5 = "0.11"
 # (types/mapping.rs), so `meta_columns.row_hash` failed on EVERY temporal column:
 # a real MySQL config lost 63 of 65 exports to it. Offsets and naive timestamps
 # rendered fine, which is why nothing else caught it.
-arrow = { version = "59", features = ["canonical_extension_types", "chrono-tz"] }
+arrow = { version = "60", features = ["canonical_extension_types", "chrono-tz"] }
 # Direct dep on `arrow-schema` so we can use the `extension` module — the
 # `arrow` facade re-exports `DataType` / `Field` but not the `extension`
 # submodule. Version is pinned to match `arrow`'s transitive choice.
-arrow-schema = { version = "59", features = ["canonical_extension_types"] }
+arrow-schema = { version = "60", features = ["canonical_extension_types"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap-markdown = "0.1"
@@ -71,7 +71,7 @@ percent-encoding = "2"
 # work the same way they do on Postgres. Without this feature, the mysql
 # crate panics at connect time with "Client had asked for TLS connection
 # but TLS support is disabled" — operator-facing panic, no recoverable error.
-mysql = { version = "28.0.3", default-features = false, features = ["minimal", "native-tls", "binlog"] }
+mysql = { version = "28.0.4", default-features = false, features = ["minimal", "native-tls", "binlog"] }
 # MongoDB source driver (async, tokio). Bridged to the sync `Source` trait via a
 # per-source tokio runtime + `block_on`, exactly like the MSSQL/tiberius engine
 # (ADR-0011 keeps `Source` sync). Default features pull `rustls-tls` — the SAME
@@ -86,9 +86,9 @@ opendal = { version = "0.55", features = ["blocking", "services-fs", "services-s
 # this flag, those columns would fall back to `String` and our downstream
 # autoload story (DuckDB → native UUID, ClickHouse → Nullable(UUID), …)
 # stays one cast away. See `src/types/mapping.rs` for the emission site.
-parquet = { version = "59", features = ["arrow", "zstd", "lz4", "flate2", "arrow_canonical_extension_types"] }
+parquet = { version = "60", features = ["arrow", "zstd", "lz4", "flate2", "arrow_canonical_extension_types"] }
 clap_complete = "4"
-postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-0_8"] }
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 postgres-native-tls = "0.5"
 # `vendored` statically links OpenSSL on Linux so `cargo install rivet-cli` works
 # on bare systems and our cross-compiled aarch64-unknown-linux-gnu release
@@ -97,11 +97,11 @@ postgres-native-tls = "0.5"
 # is ever compiled or linked there.
 native-tls = { version = "0.2", features = ["vendored"] }
 rand = "0.10"
-postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-0_8"] }
+postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 bigdecimal = "0.4"
 byteorder = "1"
-uuid = "0.8"
-rusqlite = { version = "0.39", features = ["bundled"] }
+uuid = "1"
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"

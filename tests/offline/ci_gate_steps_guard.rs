@@ -6,6 +6,8 @@ use std::path::Path;
 
 const ALWAYS: &str = "${{ !cancelled() }}";
 /// A census step of `E2E matrix`: after an earlier failure too, and only over legs that ran.
+/// The verdict census of `E2E matrix`: its ceilings are whole-matrix totals, so only a full run is graded.
+const ALWAYS_WHEN_FULL: &str = "${{ !cancelled() && needs.e2e-scope.outputs.scope == 'full' }}";
 const ALWAYS_WHEN_RUN: &str = "${{ !cancelled() && needs.e2e-scope.outputs.scope != 'skip' }}";
 /// The E2E job is a matrix; these run on its `pre` leg only, so once per check.
 const PRE_LEG: &str = "${{ !cancelled() && matrix.leg == 'pre' }}";
@@ -88,7 +90,7 @@ const GATES: &[(&str, &str, &str, &str)] = &[
         "e2e-matrix",
         "Rig oracle verdict census",
         "python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci",
-        ALWAYS_WHEN_RUN,
+        ALWAYS_WHEN_FULL,
     ),
 ];
 
@@ -179,7 +181,8 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
     );
     let run = sweep["run"].as_str().unwrap_or_default();
     for flag in [
-        "--partition count:${{ matrix.leg }} ",
+        // Without a measured list (e2e_legs.py) a leg falls back to this partition.
+        "--partition \"count:$LEG\"",
         "--run-ignored only ",
         "--profile pr ",
     ] {

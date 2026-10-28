@@ -53,6 +53,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 from .core import Ledger, port_of, rivet_bin, run
 from .regression import (
     HARM_GRADED,
@@ -789,6 +791,11 @@ CDC_TABLES = 20
 CDC_PER_TABLE = 1000
 
 
+def _failed(why: str) -> Sample:
+    """A failed sample that names what went wrong, so the verdict carries the cause."""
+    return Sample(False, 0.0, 0.0, 0, {}, why=why)
+
+
 def _cdc20_side(binary: Path, prev: Path, root: Path, url: str, tag: str) -> Sample | None:
     """One multiplex stream over CDC_TABLES tables from the previous init: anchor + baseline, then
     the minimum of REPS timed drains of CDC_PER_TABLE changes per table (warm-up first)."""
@@ -802,11 +809,12 @@ def _cdc20_side(binary: Path, prev: Path, root: Path, url: str, tag: str) -> Sam
         p = run([str(prev), "init", "--source-env", "RIVET_PERF_URL", "--include", f"pc20_{os.getpid()}_*",
                  "--mode", "cdc", "-o", "c.yaml"], env=env, cwd=d)
         if not p.ok:
-            return None
-        cdc_export = next((ln.split("name:", 1)[1].strip() for ln in (d / "c.yaml").read_text().splitlines()
-                           if ln.strip().startswith("- name:") and ln.strip().endswith("_cdc")), None)
-        if cdc_export is None:
-            return None
+            return _failed(f"init {p.why}")
+        cdc = next((e for e in yaml.safe_load((d / "c.yaml").read_text()).get("exports", [])
+                    if e.get("mode") == "cdc"), None)
+        if cdc is None:
+            return _failed("init wrote no cdc export")
+        out = d / cdc["destination"]["path"]
         run([str(binary), "run", "-c", "c.yaml"], env=env, cwd=d, timeout=None)
         samples = []
         for i in range(REPS + 1):
@@ -814,16 +822,14 @@ def _cdc20_side(binary: Path, prev: Path, root: Path, url: str, tag: str) -> Sam
             _sql("postgres", url, "".join(
                 f"INSERT INTO {t} SELECT g, md5(g::text) FROM generate_series({lo}, {lo + CDC_PER_TABLE - 1}) g;"
                 for t in tables))
-            s = _timed(binary, d, env, "run", "-c", "c.yaml", "--export", cdc_export, probe=url)
+            s = _timed(binary, d, env, "run", "-c", "c.yaml", "--export", cdc["name"], probe=url)
             if i:
                 samples.append(s)
-        # Every inserted id of every table must have landed: a fast drain that captured
-        # nothing is not a measurement.
         want = (REPS + 1) * CDC_PER_TABLE
         for t in tables:
-            got = _declared(d / "output" / "cdc" / t, "SELECT count(DISTINCT id) FROM {parts}")
+            got = _declared(out / t, "SELECT count(DISTINCT id) FROM {parts}")
             if not got or got[0][0] < want:
-                return None
+                return _failed(f"{t}: {got[0][0] if got else 0} of {want} ids under {out / t}")
         return _best(samples)
     finally:
         _sql("postgres", url, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots "
