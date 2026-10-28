@@ -1157,7 +1157,7 @@ fn introspect_single_table(
     source_url: &str,
     table: &str,
     schema_flag: Option<&str>,
-    cdc: bool,
+    #[cfg_attr(not(feature = "oracle"), allow(unused_variables))] cdc: bool,
 ) -> Result<TableInfo> {
     let (eff_schema, table_name) = resolve_single_table_schema(table, schema_flag)?;
     Ok(match source_type(source_url)? {
@@ -1545,7 +1545,7 @@ fn introspect_all(
     source_url: &str,
     schema: Option<&str>,
     filter: &TableFilter,
-    cdc: bool,
+    #[cfg_attr(not(feature = "oracle"), allow(unused_variables))] cdc: bool,
 ) -> Result<Vec<TableInfo>> {
     match source_type(source_url)? {
         "postgres" => {
