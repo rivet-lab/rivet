@@ -146,8 +146,8 @@ destination:
   prefix: exports/
 ```
 
-No `credentials_file:` needed.  See `gcs_auth::try_authorized_user_loader`
-in `src/destination/gcs_auth.rs` for the detection.
+No `credentials_file:` needed.  See `gcp_auth::try_authorized_user_loader`
+in `src/gcp_auth.rs` for the detection.
 
 ### Path B — Service account JSON
 
@@ -336,6 +336,73 @@ never been tested against R2 / Wasabi / B2; `allow_anonymous: true`
 technically waives the endpoint guard (static keys still sign), but the flag
 targets anonymous emulators and the combination is unvalidated — use it at
 your own risk, and verify the upload end-to-end if you do.
+
+---
+
+## Source credentials from Google Secret Manager
+
+Keep the database URL or password in Secret Manager instead of on the machine that runs rivet.
+rivet reads the secret with the same Google credential the GCS and BigQuery legs use: the
+service-account key `GOOGLE_APPLICATION_CREDENTIALS` points at, or gcloud ADC. The secret is read
+once per process and never written to the plan, the state or the logs.
+
+```yaml
+source:
+  type: postgres
+  url_secret: projects/my-project/secrets/pg-url          # the whole URL, latest version
+```
+
+```yaml
+source:
+  type: mysql
+  host: db.internal
+  user: rivet
+  database: shop
+  password_secret: projects/my-project/secrets/mysql-pw/versions/3   # a pinned version
+```
+
+The reference is a resource name, not a credential: only an identity holding the role below can
+read the value. To keep one config for every environment, leave the name to a `${VAR}`, filled from
+`--param` or the environment (an unset one stops the run with `RIVET_CONFIG_SECRET_UNSET`):
+
+```yaml
+source:
+  type: postgres
+  url_secret: ${DB_SECRET}
+```
+
+```bash
+rivet run -c rivet.yaml -p DB_SECRET=projects/my-project/secrets/pg-url-prod
+```
+
+From Airflow (`airflow-provider-rivet`) the task passes the name only, so the value never enters
+Airflow, its rendered templates or its logs; `cloud_credentials=["gcp"]` hands the worker's
+`GOOGLE_APPLICATION_CREDENTIALS` to rivet, which the provider does not pass otherwise:
+
+```python
+RivetRunOperator(
+    task_id="users",
+    config="/opt/rivet/rivet.yaml",
+    extra_args=["-p", "DB_SECRET={{ var.value.pg_url_secret }}"],
+    cloud_credentials=["gcp"],
+)
+```
+
+On a worker inside Google Cloud, prefer the attached service account or Workload Identity over a
+key file: rivet reads it through ADC with no file on disk.
+
+Grant the credential read access on each secret, not on the project:
+
+```bash
+gcloud secrets add-iam-policy-binding pg-url --project=my-project \
+  --member="serviceAccount:rivet@my-project.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+A secret rivet cannot read stops the run with `RIVET_CONFIG_GCP_SECRET_UNREADABLE`, naming the
+secret; HTTP 403 means the role is missing, 404 a wrong project, name or version. On a host outside
+Google Cloud the key file is the one credential left on disk: keep it `chmod 600`, owned by the
+user rivet runs as.
 
 ---
 

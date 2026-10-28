@@ -605,6 +605,11 @@ pub(super) fn trim_probe_error(err: &anyhow::Error) -> String {
 }
 
 pub(crate) fn categorize_source_error(err: &anyhow::Error) -> &'static str {
+    // A config refusal is raised before any connection and carries its own hint;
+    // no needle below may relabel it from its text.
+    if crate::error::error_code(err).is_some_and(|c| c.starts_with("RIVET_CONFIG_")) {
+        return "error";
+    }
     // `{:#}` (alternate) walks the anyhow cause chain, not just the top
     // Display. Postgres surfaces a wrong password as the bare top-level
     // `"db error"` and buries `"password authentication failed for user …"`
@@ -1120,6 +1125,18 @@ exports:
             source_error_hint("error", &policy, &SourceType::Oracle),
             Some(hint)
         );
+    }
+
+    /// A coded config refusal whose text names a connect needle keeps its own hint.
+    #[test]
+    fn a_config_refusal_is_not_relabelled_by_its_text() {
+        let err = crate::error::coded(
+            crate::error::codes::CONFIG_GCP_SECRET_UNREADABLE,
+            "source: Secret Manager refused 'projects/p/secrets/s/versions/latest' (HTTP 403)",
+        );
+        assert_eq!(categorize_source_error(&err), "error");
+        let uncoded = anyhow::anyhow!("connection refused");
+        assert_eq!(categorize_source_error(&uncoded), "connectivity error");
     }
 
     #[test]
