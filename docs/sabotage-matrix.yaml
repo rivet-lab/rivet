@@ -1106,6 +1106,14 @@ scenarios:
     mongo:    { test: a_resume_export_whose_destination_path_is_edited_is_refused_and_walked_out_mongo }
     oracle:   { test: an_incremental_export_whose_destination_path_is_edited_is_refused_and_walked_out_oracle }
 
+  - id: refusal_state_cursor_source_respelled
+    what: "RIVET_STATE_CURSOR_SOURCE_RESPELLED: an incremental export (MongoDB: a `resume: true` export) that ran once against `127.0.0.1`, then the same server spelled `localhost` and three new source rows; `state accept` moves the progress and the run continues, `state accept` then `state reset` over an emptied destination and a destination of its own deliver the source whole, `state reset` and `state reset-chunks` leave the refusal"
+    postgres: { test: an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_postgres }
+    mysql:    { test: an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_mysql }
+    mssql:    { test: an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_mssql }
+    mongo:    { test: a_resume_export_reached_under_another_host_spelling_is_refused_and_walked_out_mongo }
+    oracle:   { test: an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_oracle }
+
   - id: refusal_plan_artifact_stale
     what: "RIVET_PLAN_ARTIFACT_STALE: a plan artifact older than 24 h, or whose cursor snapshot the state no longer matches, applied without `--force`"
     postgres: { gap: "asserted by its code offline (apply_cmd: stale_error_without_force_is_rejected, cursor_drift_detected_no_prior_state); the walk needs a plan cell: refuse twice, `rivet plan` again, and `--force` as the second remedy" }

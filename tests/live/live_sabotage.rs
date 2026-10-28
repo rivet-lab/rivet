@@ -1662,6 +1662,82 @@ fn cursor_destination_mismatch_mongo(edit: ConfigEdit) {
     walks_out_of_a_cursor_destination_mismatch(&mut rig, edit, first.path());
 }
 
+/// Refuse `rig`'s run twice with RIVET_STATE_CURSOR_SOURCE_RESPELLED, then walk out: `state accept` continues from the moved progress, `state accept` then `state reset` over an emptied destination delivers the source whole, a destination of its own delivers it whole, and neither `state reset` nor `state reset-chunks` lifts the refusal.
+fn walks_out_of_a_respelled_source(rig: &mut Rig) {
+    let export = rig.export_name().to_string();
+    let refused = Refused::by_code("RIVET_STATE_CURSOR_SOURCE_RESPELLED", 5);
+    let fresh = tempfile::tempdir().unwrap();
+    rig.refuses_twice_and_walks_out(
+        &["run"],
+        &[],
+        refused,
+        vec![
+            Remedy::new("moves the progress from", Then::DeliversTheSource, |r| {
+                state(r, "accept", &export)
+            }),
+            Remedy::new(
+                &format!(
+                    "`rivet state accept` followed by `rivet state reset -c <config> --export {export}` starts"
+                ),
+                Then::DeliversTheSource,
+                |r| {
+                    state(r, "accept", &export);
+                    state(r, "reset", &export);
+                    std::fs::remove_dir_all(r.out_dir()).expect("empty the destination");
+                    std::fs::create_dir_all(r.out_dir()).expect("the destination directory");
+                },
+            ),
+            Remedy::new(
+                "or point this export at a destination of its own",
+                Then::DeliversTheSource,
+                |r| r.rebuilt(|r| r.dest_path(fresh.path().to_path_buf())),
+            ),
+            Remedy::wrong(
+                "runs `rivet state reset`, which clears only the progress under the source the config names now",
+                Then::Refuses(refused),
+                |r| state(r, "reset", &export),
+            ),
+            Remedy::wrong(
+                "runs `rivet state reset-chunks`, the sibling of the command the text names",
+                Then::Refuses(refused),
+                |r| state(r, "reset-chunks", &export),
+            ),
+        ],
+    );
+}
+
+/// RIVET_STATE_CURSOR_SOURCE_RESPELLED: an incremental export that ran once against `127.0.0.1`, then the same server spelled `localhost` and three more source rows.
+fn cursor_source_respelled(engine: SqlEngine) {
+    let (table, _guard) = seeded(engine, "sab_respell");
+    let rig = Shape::Incremental.staged(engine, engine.rig(&table));
+    rig.run_ok();
+    engine.insert(&table, N + 1..=N + 3, 170, Some(10));
+    let mut rig = rig.source_url(&engine.url().replace("127.0.0.1", "localhost"));
+    walks_out_of_a_respelled_source(&mut rig);
+}
+
+/// [`cursor_source_respelled`] for a MongoDB `resume` export.
+fn cursor_source_respelled_mongo() {
+    require_alive(LiveService::Mongo);
+    let db = unique_name("sab_respell");
+    let _guard = MongoDbGuard {
+        port: MONGO_PORT,
+        db: db.clone(),
+    };
+    let mongo = MongoTest::connect(MONGO_PORT, &db);
+    mongo.seed_int_id("respelled", N);
+    let url = MongoTest::url(MONGO_PORT, &db);
+    let rig = Rig::mongo_batch("respelled")
+        .source_url(&url)
+        .mongo("page_size: 4, resume: true");
+    rig.run_ok();
+    for id in N + 1..=N + 3 {
+        mongo.upsert_set("respelled", id, "v", "new");
+    }
+    let mut rig = rig.source_url(&url.replace("127.0.0.1", "localhost"));
+    walks_out_of_a_respelled_source(&mut rig);
+}
+
 /// RIVET_STATE_CURSOR_DESTINATION_MISMATCH across stores: an incremental export that delivered to a local directory, then its destination is an S3 bucket; `state reset-chunks` leaves the refusal and `state reset` delivers the source into the bucket.
 fn cursor_destination_moved_to_another_store() {
     let engine = SqlEngine::Pg;
@@ -4969,6 +5045,96 @@ fn an_incremental_export_whose_destination_path_is_edited_is_refused_and_walked_
 #[ignore = "live: requires docker compose mongo"]
 fn a_resume_export_whose_destination_path_is_edited_is_refused_and_walked_out_mongo() {
     cursor_destination_mismatch_mongo(ConfigEdit::DestinationPath);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_postgres() {
+    cursor_source_respelled(SqlEngine::Pg);
+}
+
+/// The sibling entry points read the same record: `rivet plan` and `rivet apply <plan>` under another host spelling are refused with RIVET_STATE_CURSOR_SOURCE_RESPELLED, and nothing is written by either.
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn plan_and_apply_under_another_host_spelling_are_refused_postgres() {
+    let engine = SqlEngine::Pg;
+    let (table, _guard) = seeded(engine, "sab_respell_plan");
+    let rig = Shape::Incremental
+        .staged(engine, engine.rig(&table))
+        .source_url_env("DATABASE_URL");
+    let spelled = engine.url().to_string();
+    let respelled = spelled.replace("127.0.0.1", "localhost");
+    let plan = rig.out_dir().with_file_name("respelled-plan.json");
+    let early = rig.plan_json_env(&plan, &[], &[("DATABASE_URL", &respelled)]);
+    assert!(
+        early.status.success() && plan.is_file(),
+        "a plan before any progress exists is written"
+    );
+    let first = rig.run_args_env(&[], &[("DATABASE_URL", &spelled)]);
+    assert!(first.status.success(), "the first run delivers");
+    engine.insert(&table, N + 1..=N + 3, 170, Some(10));
+    let parts = std::fs::read_dir(rig.out_dir()).unwrap().count();
+    let refused = Refused::by_code("RIVET_STATE_CURSOR_SOURCE_RESPELLED", 5);
+    let applied = rig.apply_env(&plan, &[], &[("DATABASE_URL", &respelled)]);
+    assert_refused(&applied, refused);
+    let planned = rig.plan_json_env(
+        &plan.with_file_name("respelled-plan-2.json"),
+        &[],
+        &[("DATABASE_URL", &respelled)],
+    );
+    assert_refused(&planned, refused);
+    assert_eq!(
+        std::fs::read_dir(rig.out_dir()).unwrap().count(),
+        parts,
+        "neither refusal wrote a part"
+    );
+}
+
+/// Upgrade: a cursor the previous release wrote under `127.0.0.1` is refused by this build under `localhost`, and `state accept` continues it; the cell skips without `RIVET_PREV_RELEASE_BIN`.
+#[test]
+#[ignore = "live: requires docker compose postgres and RIVET_PREV_RELEASE_BIN"]
+fn a_cursor_written_by_the_previous_release_is_refused_under_another_host_spelling_and_walked_out_postgres()
+ {
+    let engine = SqlEngine::Pg;
+    let (table, _guard) = seeded(engine, "sab_respell_up");
+    if state_url_under_test().is_some() {
+        skip_live("the previous release must not meet the shared Postgres state migrated past it");
+        return;
+    }
+    let rig = Shape::Incremental.staged(engine, engine.rig(&table));
+    let Some((rig, old, _)) = two_versions(rig) else {
+        return;
+    };
+    old.run_ok();
+    ok(rig.cli(&["state", "show"]));
+    engine.insert(&table, N + 1..=N + 3, 170, Some(10));
+    let mut rig = rig.source_url(&engine.url().replace("127.0.0.1", "localhost"));
+    walks_out_of_a_respelled_source(&mut rig);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_mysql() {
+    cursor_source_respelled(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_mssql() {
+    cursor_source_respelled(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_oracle() {
+    cursor_source_respelled(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_resume_export_reached_under_another_host_spelling_is_refused_and_walked_out_mongo() {
+    cursor_source_respelled_mongo();
 }
 
 #[test]
