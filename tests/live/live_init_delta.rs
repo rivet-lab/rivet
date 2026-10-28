@@ -1986,7 +1986,7 @@ fn an_oracle_cdc_scaffold_leaves_out_the_tables_the_capture_refuses_and_runs() {
     rivet_ok_in(dir.path(), &["run", "-c", "rivet.yaml"], &db);
     let snap = dir
         .path()
-        .join("output")
+        .join("output/rivet")
         .join(scaffolded_export(&generated))
         .join("snapshot");
     assert_eq!(ids_in(&snap), (1..=10).collect::<Vec<i64>>());
