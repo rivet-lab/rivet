@@ -533,6 +533,11 @@ pub(crate) trait ChangeStream {
         None
     }
 
+    /// `columns_from: grants`: the columns of `configured` this run may deliver; `None` = all.
+    fn readable_columns(&self, _configured: &str) -> Option<ReadableColumns> {
+        None
+    }
+
     /// After a clean drain, a position past everything read that nothing captured can precede.
     fn drained_frontier(&self) -> Option<Position> {
         None
@@ -716,6 +721,24 @@ fn emit_ndjson(
     Ok(())
 }
 
+/// The columns a `columns_from: grants` run delivers for one table, and the `SELECT` that reads them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadableColumns {
+    /// The readable columns, in table order.
+    pub columns: Vec<String>,
+    /// A `SELECT` of exactly those columns, every identifier quoted.
+    pub select: String,
+}
+
+impl ReadableColumns {
+    /// The first of `key` the run may not read (names fold case, as MySQL's do).
+    pub(crate) fn unreadable_key<'a>(&self, key: &'a [String]) -> Option<&'a str> {
+        key.iter()
+            .find(|k| !self.columns.iter().any(|c| c.eq_ignore_ascii_case(k)))
+            .map(String::as_str)
+    }
+}
+
 /// The per-engine CDC knobs — each variant carries ONLY the parameters its
 /// engine reads, so the live set is obvious at a glance (a MySQL run has no
 /// `slot`, a Mongo run has no `server_id`) and a new engine adds a self-contained
@@ -734,6 +757,8 @@ pub(crate) enum CdcEngineOpts {
         /// it is allowed to fail the run — otherwise one PARTIAL_JSON table is a
         /// server-wide outage for exports that never read it.
         configured_tables: Vec<String>,
+        /// `cdc.columns_from: grants`: deliver only the columns the account may `SELECT`.
+        columns_from_grants: bool,
     },
     /// PostgreSQL logical slot name.
     Postgres {
@@ -1061,11 +1086,15 @@ impl CdcEngine {
         tls: Option<&crate::config::TlsConfig>,
         tables: &[String],
         drain: DrainMode,
+        columns_from_grants: bool,
     ) -> Result<()> {
         match self {
             Self::Mysql => {
                 crate::source::mysql::cdc::MysqlChangeStream::refuse_unmet_prerequisites(
-                    url, tls, tables,
+                    url,
+                    tls,
+                    tables,
+                    columns_from_grants,
                 )
             }
             Self::Postgres => {
@@ -1379,6 +1408,7 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Mysql {
             server_id,
             configured_tables,
+            columns_from_grants,
         } => {
             // Validate the checkpoint BEFORE open_or_resume so a corrupt/truncated
             // checkpoint (or a directory path) surfaces cleanly, not blanketed by
@@ -1404,6 +1434,7 @@ pub(crate) fn create_change_stream(
                     cfg.drain,
                     tls,
                     configured_tables.clone(),
+                    *columns_from_grants,
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir),
                 )
                 .map_err(|e| with_setup_hint(e, MYSQL_CDC_HINT))?,
@@ -1608,11 +1639,12 @@ impl<'s> CdcSchemaResolver<'s> {
         &mut self,
         table: &str,
         overrides: &crate::types::ColumnOverrides,
+        readable: Option<&ReadableColumns>,
     ) -> Result<Vec<crate::types::TypeMapping>> {
         validate_table_ident(table)?;
-        let mut mappings = self
-            .source()
-            .type_mappings(&format!("SELECT * FROM {table}"), overrides)?;
+        let select =
+            readable.map_or_else(|| format!("SELECT * FROM {table}"), |r| r.select.clone());
+        let mut mappings = self.source().type_mappings(&select, overrides)?;
         // A source column in the CDC meta namespace collides with the columns the
         // sink prepends, and the collision is silent in the direction that matters.
         // The sink puts `__op`/`__pos`/`__seq` at batch indices 0-2, and
@@ -1715,7 +1747,7 @@ pub(crate) fn resolve_cdc_columns(
 ) -> Result<Vec<crate::types::TypeMapping>> {
     // Validate BEFORE connecting, so a hostile table name needs no database.
     validate_table_ident(table)?;
-    CdcSchemaResolver::connect(url, tls)?.resolve(table, overrides)
+    CdcSchemaResolver::connect(url, tls)?.resolve(table, overrides, None)
 }
 
 /// The table name is interpolated into `SELECT * FROM {table}` for the schema
@@ -2428,6 +2460,7 @@ mod setup_hint {
             super::DrainMode::Continuous,
             None,
             vec![],
+            false,
             None,
         );
         assert_names_refused_port(open.map(drop), super::MYSQL_CDC_HINT);
@@ -2468,6 +2501,7 @@ mod engine_identity {
                 CdcEngineOpts::Mysql {
                     server_id: 1,
                     configured_tables: t(&["a"]),
+                    columns_from_grants: false,
                 },
                 SourceType::Mysql,
                 "mysql://h/d",
@@ -2714,6 +2748,7 @@ mod tests {
             engine: CdcEngineOpts::Mysql {
                 server_id: 4321,
                 configured_tables: Vec::new(),
+                columns_from_grants: false,
             },
         };
         let err = match create_change_stream(&cfg, PeekBound::Unbounded) {
@@ -2746,6 +2781,7 @@ mod tests {
                 engine: CdcEngineOpts::Mysql {
                     server_id: 4321,
                     configured_tables: Vec::new(),
+                    columns_from_grants: false,
                 },
             };
             let Err(err) = create_change_stream(&cfg, PeekBound::Unbounded) else {

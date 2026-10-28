@@ -366,6 +366,11 @@ pub(super) fn claim_checkpoint(config_path: &str, export: &ExportConfig) -> Resu
     crate::source::cdc::checkpoint_identity::claim_checkpoint(&ckpt, config, &export.name)
 }
 
+/// The snapshot legs read grants only under `columns_from: grants` and only when a leg is pending.
+fn legs_read_grants(columns_from_grants: bool, pending_legs: usize) -> bool {
+    columns_from_grants && pending_legs > 0
+}
+
 pub(super) fn initial_snapshot_pending(
     config: &Config,
     export: &ExportConfig,
@@ -539,8 +544,20 @@ pub(super) fn initial_snapshot_pending(
             tls,
             &tables,
             DrainMode::from_until_current(cdc.until_current),
+            cdc.columns_from_grants(),
         )?;
     }
+
+    // `columns_from: grants`: each leg reads only its readable columns, refused before the anchor.
+    let readable = if legs_read_grants(cdc.columns_from_grants(), pending_idx.len()) {
+        let reads: Vec<String> = pending_idx
+            .iter()
+            .map(|&i| table_dests[i].1.clone())
+            .collect();
+        crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(&url, tls, &reads)?
+    } else {
+        std::collections::HashMap::new()
+    };
 
     // The pairing, resolved by the same function config load already admitted — so
     // a reference the run would reject cannot have reached this point, and the
@@ -581,6 +598,7 @@ pub(super) fn initial_snapshot_pending(
     for idx in pending_idx {
         let (label, read, snap_dcfg) = &table_dests[idx];
         let mut synth = synth_snapshot_export(export, label, read, snap_dcfg);
+        synth.table_select = readable.get(read).map(|r| r.select.clone());
         if let Some(recipe) = crate::config::backfill_recipe_for(&recipes, label) {
             apply_backfill_recipe(&mut synth, recipe, export, label)?;
         }
@@ -939,6 +957,7 @@ fn run_cdc_inner(
                             .unwrap_or(crate::config::DEFAULT_MYSQL_SERVER_ID),
                         // The same strings the sink will route by — see the field's doc.
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        columns_from_grants: cdc.columns_from_grants(),
                     },
                     crate::config::SourceType::Postgres => CdcEngineOpts::Postgres {
                         slot: cdc
@@ -1089,6 +1108,13 @@ fn record_metric(state: &StateStore, config: &Config, export: &ExportConfig, sum
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn snapshot_legs_read_grants_only_under_the_policy_with_a_leg_pending() {
+        assert!(super::legs_read_grants(true, 1));
+        assert!(!super::legs_read_grants(true, 0));
+        assert!(!super::legs_read_grants(false, 1));
+    }
 
     /// `resolve_checkpoint`'s three cases, each named by a mutant that survived.
     ///

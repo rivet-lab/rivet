@@ -98,6 +98,8 @@ pub(crate) struct MysqlChangeStream {
     identity: (String, String),
     /// `binlog_row_image`'s verdict, read at open on the connection that dumps.
     row_image: crate::source::cdc::RowImage,
+    /// `columns_from: grants`: each configured table's readable columns; `None` = every column.
+    readable: Option<HashMap<String, crate::source::cdc::ReadableColumns>>,
 }
 
 impl MysqlChangeStream {
@@ -449,9 +451,14 @@ impl MysqlChangeStream {
         url: &str,
         tls: Option<&TlsConfig>,
         configured_tables: &[String],
+        columns_from_grants: bool,
     ) -> Result<()> {
         let mut conn = connect_conn(url, tls)?;
         Self::refuse_unmet_prerequisites_on(&mut conn, configured_tables)?;
+        // Under grants the readable-column read is the probe: `SELECT *` is refused there.
+        if columns_from_grants {
+            return Self::readable_on(&mut conn, configured_tables, true).map(drop);
+        }
         Self::refuse_absent_tables_on(&mut conn, configured_tables)
     }
 
@@ -675,6 +682,46 @@ impl MysqlChangeStream {
         )
     }
 
+    /// The readable columns of each configured table when the run takes them from grants.
+    pub(crate) fn readable_on(
+        conn: &mut mysql::Conn,
+        configured: &[String],
+        columns_from_grants: bool,
+    ) -> Result<Option<HashMap<String, crate::source::cdc::ReadableColumns>>> {
+        if !columns_from_grants {
+            return Ok(None);
+        }
+        if configured.is_empty() {
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_CDC_TABLE_UNRESOLVED,
+                "mysql cdc: `columns_from: grants` needs the captured tables named"
+            );
+        }
+        let own_db = Self::own_db_on(conn);
+        let bare_db = Self::bare_name_databases(conn, &own_db, configured);
+        super::column_grants::readable_columns_of(conn, configured, &own_db, &bare_db).map(Some)
+    }
+
+    /// The readable columns of `tables` on a fresh connection: the snapshot legs' read, asked before the anchor.
+    pub(crate) fn readable_columns_at(
+        url: &str,
+        tls: Option<&TlsConfig>,
+        tables: &[String],
+    ) -> Result<HashMap<String, crate::source::cdc::ReadableColumns>> {
+        let mut conn = connect_conn(url, tls)?;
+        Ok(Self::readable_on(&mut conn, tables, true)?.unwrap_or_default())
+    }
+
+    /// `SELECT DATABASE()`, empty for a db-less URL.
+    fn own_db_on(conn: &mut mysql::Conn) -> String {
+        use mysql::prelude::Queryable as _;
+        conn.query_first::<Option<String>, _>("SELECT DATABASE()")
+            .ok()
+            .flatten()
+            .flatten()
+            .unwrap_or_default()
+    }
+
     /// Open the stream on `conn`: every question asked before the dump rides the
     /// connection that then dumps, so a bounded run costs the server ONE session.
     fn open_on(
@@ -750,6 +797,7 @@ impl MysqlChangeStream {
             bare_db,
             identity,
             row_image,
+            readable: None,
         })
     }
 
@@ -885,6 +933,7 @@ impl MysqlChangeStream {
         mode: DrainMode,
         tls: Option<&TlsConfig>,
         configured_tables: Vec<String>,
+        columns_from_grants: bool,
         spill_dir: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         // PASSED IN, not derived: resolving the directory needs the CONFIG's dir
@@ -903,6 +952,7 @@ impl MysqlChangeStream {
         let mut conn = connect_conn(url, tls)?;
         // Before the anchor is written: a refused first run leaves no checkpoint.
         Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+        let readable = Self::readable_on(&mut conn, &configured_tables, columns_from_grants)?;
         if let Some(path) = ckpt
             && let Some(pos) = Position::load(path)?
             && let Some((file, p)) =
@@ -931,7 +981,7 @@ impl MysqlChangeStream {
             verdict.verdict().enforce()?;
             let identity = (server_uuid, server_gtid);
             return Self::open_on(conn, server_id, file, p, mode, identity, configured_tables)
-                .map(with_dir);
+                .map(|s| with_dir(Self { readable, ..s }));
         }
         // First run (no checkpoint yet): anchor at the current position and persist
         // it IMMEDIATELY. PostgreSQL pins its anchor server-side at open (slot
@@ -939,7 +989,10 @@ impl MysqlChangeStream {
         // at a part commit — so an idle bounded run (zero changes drained) would
         // otherwise leave no checkpoint, the next run would re-anchor to a newer
         // "current" position, and every change in between would be silently skipped.
-        Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
+        // Under grants the readable-column read above is the probe: `SELECT *` is refused there.
+        if readable.is_none() {
+            Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
+        }
         let (file, pos) = Self::current_coordinates(&mut conn)?;
         let identity = Self::server_identity(&mut conn);
         if let Some(path) = ckpt {
@@ -977,7 +1030,7 @@ impl MysqlChangeStream {
             identity?,
             configured_tables,
         )
-        .map(with_dir)
+        .map(|s| with_dir(Self { readable, ..s }))
     }
 
     /// One row of a spilled tail: decode it through the general frame, stamp it,
@@ -1142,12 +1195,37 @@ impl MysqlChangeStream {
                         }
                     }
                 }
+                // `columns_from: grants`: only the readable columns of the table the sink routes
+                // this event to; an uncaptured table keeps its commit boundary and no values.
+                let keep = self.readable.as_ref().map(|readable| {
+                    self.configured_tables
+                        .iter()
+                        .find(|cfg| {
+                            crate::source::cdc::sink::table_matches(
+                                crate::source::cdc::CdcEngine::Mysql,
+                                cfg,
+                                &schema,
+                                &table,
+                            )
+                        })
+                        .and_then(|cfg| readable.get(cfg))
+                        .map(|r| super::column_grants::kept_positions(&image_names, &r.columns))
+                        .unwrap_or_default()
+                });
+                let image_names: std::sync::Arc<[String]> = match &keep {
+                    Some(k) => k.iter().map(|&i| image_names[i].clone()).collect(),
+                    None => image_names,
+                };
+                let project = |r| match &keep {
+                    Some(k) => super::column_grants::project_row(r, k),
+                    None => r,
+                };
                 // Provisional position; rewritten to the commit position at XID.
                 let position = self.position_at(log_pos);
                 for row in re.rows(&tme) {
                     let (before, after) = row?;
-                    let before = before.map(render_row);
-                    let after = after.map(render_row);
+                    let before = before.map(render_row).map(project);
+                    let after = after.map(render_row).map(project);
                     // A cell with no faithful representation is a DEFERRED refusal,
                     // exactly like PostgreSQL's unrecoverable unchanged-TOAST datum:
                     // the binlog dump is server-wide, so bailing here would poison
@@ -2254,6 +2332,10 @@ impl ChangeStream for MysqlChangeStream {
             .map(|db| (db.clone(), configured.to_string()))
     }
 
+    fn readable_columns(&self, configured: &str) -> Option<crate::source::cdc::ReadableColumns> {
+        self.readable.as_ref()?.get(configured).cloned()
+    }
+
     fn engine(&self) -> crate::source::cdc::CdcEngine {
         crate::source::cdc::CdcEngine::Mysql
     }
@@ -3112,7 +3194,8 @@ mod tests {
             DrainMode::BoundedAtOpen,
             None,
             vec!["cdc_idle_first".to_string()], // only its own table: a sibling test's DROP must not reach it
-            None,                               // no spill dir — these tests never cross the cap
+            false,
+            None, // no spill dir — these tests never cross the cap
         )
         .unwrap();
         assert!(
@@ -3140,7 +3223,8 @@ mod tests {
             DrainMode::BoundedAtOpen,
             None,
             vec!["cdc_idle_first".to_string()], // only its own table: a sibling test's DROP must not reach it
-            None,                               // no spill dir — these tests never cross the cap
+            false,
+            None, // no spill dir — these tests never cross the cap
         )
         .unwrap();
         let got = s2
@@ -3199,6 +3283,7 @@ mod tests {
             DrainMode::Continuous,
             None,
             vec!["cdc_resume".to_string()],
+            false,
             None, // no spill dir — these tests never cross the cap
         )
         .unwrap();

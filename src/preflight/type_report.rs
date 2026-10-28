@@ -407,6 +407,19 @@ fn resolved_units(
             (Err(_), None) | (Ok(None), None) => unreachable!("every non-resolution has a reason"),
         }
     }
+    // `columns_from: grants`: probe the columns the run delivers, not `SELECT *` the account may not run.
+    if config.source.source_type == SourceType::Mysql
+        && export.cdc.as_ref().is_some_and(|c| c.columns_from_grants())
+    {
+        let tables: Vec<String> = units.iter().filter_map(|u| u.relation.clone()).collect();
+        let readable =
+            crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, &tables)?;
+        for unit in &mut units {
+            if let Some(r) = unit.relation.as_ref().and_then(|t| readable.get(t)) {
+                unit.query = r.select.clone();
+            }
+        }
+    }
     Ok(units)
 }
 

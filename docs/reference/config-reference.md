@@ -120,6 +120,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `slot` | `string` |  | PostgreSQL logical replication slot name (default `rivet_slot`). |
 | `capture_instance` | `string` |  | SQL Server CDC capture instance, e.g. `dbo_orders` — required for `sqlserver://` sources. |
 | `backfill` | `auto` |  | Which EXPORTS supply the baseline read (see [`CdcBackfill`]). Absent ⇒ no baseline: the stream captures changes only, and the operator owns the initial load. |
+| `columns_from` | `grants` |  | `grants`: deliver only the columns the source account may `SELECT`, in the snapshot and in the change stream; read once at run start (MySQL only). |
 
 ### `exports[].tuning`
 

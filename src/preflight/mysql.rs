@@ -65,6 +65,23 @@ fn mysql_schema_error(e: mysql::Error, export: &ExportConfig) -> Option<anyhow::
     None
 }
 
+/// The `columns_from: grants` projection of a CDC `table:`, which the run reads instead of `SELECT *`.
+fn grants_projection(
+    conn: &mut mysql::PooledConn,
+    export: &ExportConfig,
+) -> Result<Option<String>> {
+    let (Some(cdc), Some(table)) = (&export.cdc, &export.table) else {
+        return Ok(None);
+    };
+    if !cdc.columns_from_grants() {
+        return Ok(None);
+    }
+    let tables = [table.clone()];
+    let readable =
+        crate::source::mysql::cdc::MysqlChangeStream::readable_on(conn.as_mut(), &tables, true)?;
+    Ok(readable.and_then(|mut r| r.remove(table)).map(|r| r.select))
+}
+
 fn diagnose_mysql(
     conn: &mut mysql::PooledConn,
     export: &ExportConfig,
@@ -72,7 +89,10 @@ fn diagnose_mysql(
 ) -> Result<ExportDiagnostic> {
     use mysql::prelude::Queryable;
 
-    let base_query = resolve_preflight_base_query(export);
+    let base_query = match grants_projection(conn, export)? {
+        Some(select) => select,
+        None => resolve_preflight_base_query(export),
+    };
     let base_query = base_query.as_str();
     let base_table_owned = preflight_base_table(export, base_query);
     let base_table = base_table_owned.as_deref();

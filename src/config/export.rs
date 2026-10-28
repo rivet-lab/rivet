@@ -122,6 +122,9 @@ pub struct ExportConfig {
     /// rather than recovering it by splitting the synthesized name.
     #[serde(skip)]
     pub snapshot_label: Option<String>,
+    /// The `SELECT` a `table:` read runs instead of `SELECT *`: a `columns_from: grants` snapshot leg.
+    #[serde(skip)]
+    pub table_select: Option<String>,
     /// Set ONLY on a range sub-export the pool synthesizes under `apply --pool
     /// --split` (#167): a single dominating export is emitted as N units over its
     /// key span, each a first-class scheduler unit the pool places concurrently,
@@ -518,7 +521,11 @@ impl ExportConfig {
         // `validate_business_rules` to be mutually exclusive with query/query_file.
         if let Some(tbl) = &self.table {
             validate_table_shortcut_ident(&self.name, tbl)?;
-            return Ok((format!("SELECT * FROM {tbl}"), None));
+            let select = self.table_select.clone();
+            return Ok((
+                select.unwrap_or_else(|| format!("SELECT * FROM {tbl}")),
+                None,
+            ));
         }
         let (q, written) = match (&self.query, &self.query_file) {
             (Some(q), None) => {
@@ -920,6 +927,7 @@ pub(crate) fn sample_export(name: &str) -> ExportConfig {
     ExportConfig {
         snapshot_parent: None,
         snapshot_label: None,
+        table_select: None,
         split: None,
         partition_window: None,
         query_as_written: None,

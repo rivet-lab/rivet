@@ -945,6 +945,18 @@
             }
           ],
           "default": null
+        },
+        "columns_from": {
+          "description": "`grants`: deliver only the columns the source account may `SELECT`, in the\nsnapshot and in the change stream; read once at run start (MySQL only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CdcColumnsFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -973,6 +985,16 @@
           "items": {
             "type": "string"
           }
+        }
+      ]
+    },
+    "CdcColumnsFrom": {
+      "description": "Where a CDC export takes its column list from.",
+      "oneOf": [
+        {
+          "description": "The columns the source account may `SELECT`, as the server judges each one.",
+          "type": "string",
+          "const": "grants"
         }
       ]
     },

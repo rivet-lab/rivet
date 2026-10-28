@@ -1,8 +1,8 @@
 diff --git a/src/pipeline/cdc/sink.rs b/src/pipeline/cdc/sink.rs
-index facea4ff..adb0c378 100644
+index ec5a360f..e68fc475 100644
 --- a/src/pipeline/cdc/sink.rs
 +++ b/src/pipeline/cdc/sink.rs
-@@ -914,9 +914,7 @@ fn flush(
+@@ -1046,9 +1046,7 @@ fn flush(
          // Engine/native-type cell normalisation (e.g. MySQL binlog quirks: BIT
          // bytes, ENUM indexes, epoch-text TIMESTAMPs, NUL-trimmed BINARY) —
          // computed once per column, applied per cell.
@@ -13,7 +13,7 @@ index facea4ff..adb0c378 100644
          // after-image for insert/update; before-image (the key) for delete.
          // Finding #41: a NAMED key-only image (PG DELETE) maps by COLUMN NAME
          // into the resolved schema — positional mapping put a non-first PK's
-@@ -926,6 +924,8 @@ fn flush(
+@@ -1058,6 +1056,8 @@ fn flush(
          // one names-Arc (same TABLE_MAP / same wire session), so resolve this
          // column's image index once and reuse it by pointer identity.
          let memo = image_name_memo(events, &m.column_name);
@@ -77,10 +77,10 @@ index 96202555..6e1e8740 100644
          assert_eq!(
              t.apply(&V::TimeMicros(1)).unwrap(),
 diff --git a/src/source/mysql/arrow_convert.rs b/src/source/mysql/arrow_convert.rs
-index 87c8a632..fe215224 100644
+index 245c1fd8..679b2985 100644
 --- a/src/source/mysql/arrow_convert.rs
 +++ b/src/source/mysql/arrow_convert.rs
-@@ -609,23 +609,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
+@@ -614,23 +614,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
      Ok(us)
  }
  
@@ -108,7 +108,7 @@ index 87c8a632..fe215224 100644
  fn fmt_micros_as_time(us: i64) -> String {
      let (sign, a) = if us.is_negative() {
 diff --git a/src/source/mysql/mod.rs b/src/source/mysql/mod.rs
-index dfb2df26..53de350d 100644
+index af636b3e..35fde0af 100644
 --- a/src/source/mysql/mod.rs
 +++ b/src/source/mysql/mod.rs
 @@ -19,7 +19,7 @@
@@ -118,5 +118,5 @@ index dfb2df26..53de350d 100644
 -pub(crate) use arrow_convert::time_outside_day;
 +pub(crate) use arrow_convert::time_outside_day_refusal;
  pub(crate) mod cdc;
+ pub(crate) mod column_grants;
  mod proxy;
- 

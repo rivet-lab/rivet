@@ -137,7 +137,13 @@ fn run_refusals(config: &Config, exports: &[&ExportConfig], url: &str) -> Vec<Do
                 .collect();
             let drain = crate::source::cdc::DrainMode::from_until_current(cdc.until_current);
             let refused = engine
-                .refuse_unmet_prerequisites(url, config.source.tls.as_ref(), &tables, drain)
+                .refuse_unmet_prerequisites(
+                    url,
+                    config.source.tls.as_ref(),
+                    &tables,
+                    drain,
+                    cdc.columns_from_grants(),
+                )
                 .err()?;
             Some(run_refusal_check(&e.name, &refused))
         })
