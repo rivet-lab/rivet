@@ -50,6 +50,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_SOURCE_STATEMENT_TIMEOUT` | environment | 2 if transient, else 1 | raise `tuning.statement_timeout_s`, or narrow the chunk |
 | `RIVET_SOURCE_CURSOR_FINER_THAN_MICROSECOND` | refusal | 5 | cursor on a column at microsecond precision or coarser, or cast the cursor to TIMESTAMP(6) in a curated query |
 | `RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT` | refusal | 5 | re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
+| `RIVET_SOURCE_CDC_CHECKPOINT_SHARED` | refusal | 5 | give the export a `cdc.checkpoint` of its own and keep the shared file, the other export's position; with `cdc.initial: snapshot` its first run re-reads every table |
 | `RIVET_SOURCE_CDC_CHECKPOINT_INVALID` | refusal | 5 | restore the checkpoint file, or re-baseline the stream: delete it, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
 | `RIVET_SOURCE_CDC_LOG_GAP` | refusal | 5 | restore the missing log, or re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
 | `RIVET_SOURCE_CDC_TRUNCATED` | refusal | 5 | re-baseline the stream: delete the checkpoint (PostgreSQL: first advance the slot past the truncate), empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
@@ -80,6 +81,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_STATE_CHUNK_RUN_SUPERSEDED` | refusal | 5 | `rivet state reset-chunks -c <config> --export <name>` abandons the run; the next run starts a fresh pass |
 | `RIVET_STATE_KEYSET_SEQUENTIAL_ANCHOR_UNFINISHED` | refusal | 5 | re-run once with `parallel: 1` to finish the interrupted run, then raise `parallel:` |
 | `RIVET_STATE_RUN_IN_PROGRESS` | busy | 2 | wait for the run to finish, or stop its process, then repeat the command |
+| `RIVET_STATE_UPGRADE_BESIDE_LIVE_RUN` | busy | 2 | run again once the rivet process holding a lease on the state ends; the state was not migrated, and the release that process runs still opens it |
 | `RIVET_STATE_LOCK_TIMEOUT` | busy | 2 | the other process still holds it: retry once it ends, or give `--lock-wait` more seconds |
 | `RIVET_STATE_CHUNK_CHECKPOINT_GONE` | refusal | 5 | run the export again: it starts a new chunk run (the parts the lost run wrote stay in the destination, in no manifest) |
 | `RIVET_STATE_CHUNK_PLAN_CHANGED` | refusal | 5 | restore the query and the chunk settings the interrupted run had and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` abandons it and the next run starts over |
@@ -129,7 +131,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_LOAD_WAREHOUSE_ACCESS_DENIED` | environment | 2 if transient, else 1 | grant the load's identity the warehouse permission the message names |
 | `RIVET_LOAD_WAREHOUSE_OBJECT_NOT_FOUND` | environment | 2 if transient, else 1 | create the dataset or database the load writes into, or correct the names of the `load:` target |
 | `RIVET_LOAD_WAREHOUSE_REJECTED` | environment | 2 if transient, else 1 | read the warehouse's reason in the message and fix what it names, then re-run |
-| `RIVET_LOAD_WAREHOUSE_UNAVAILABLE` | environment | 2 if transient, else 1 | re-run the load later; the warehouse answered with a transient failure on every retry |
+| `RIVET_LOAD_WAREHOUSE_UNAVAILABLE` | transient | 2 | re-run the same command later; the warehouse failed with a transient error (HTTP 5xx or 429, or a job reason it documents as retryable) that rivet's retries did not outlast |
 | `RIVET_LOAD_WAREHOUSE_ANSWER_UNREADABLE` | internal | 6 | the warehouse answered in a shape rivet does not read — report it with the message |
 | `RIVET_INTERNAL_LOAD_INVARIANT` | internal | 6 | a load invariant did not hold — a bug; report it with the message |
 | `RIVET_VALIDATE_FAILED` | integrity | 3 | run `rivet validate` on the prefix and settle each failed part before loading it; the export itself completed |
@@ -204,6 +206,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_DEST_CREDENTIALS_INVALID` | environment | 2 if transient, else 1 | issue the destination a fresh, complete credential (a new SAS, service-account key or `gcloud auth application-default login`) |
 | `RIVET_DEST_PREFIX_MODE_MISMATCH` | refusal | 5 | give the export its own destination prefix; a batch and a CDC export must not share one |
 | `RIVET_DEST_IO_RUNTIME_UNAVAILABLE` | environment | 2 if transient, else 1 | raise the process's thread and open-file limits, or lower the export parallelism, then run again |
+| `RIVET_INIT_CDC_NAME_TAKEN` | refusal | 5 | write the config under another `-o` name: the stem names its checkpoint and destination |
 | `RIVET_INIT_CONFIG_EXISTS` | refusal | 5 | move the existing config aside, or write elsewhere with `-o <new-path>` |
 | `RIVET_INIT_TABLE_NOT_FOUND` | usage | 1 | correct `--table` (and `--schema`), or grant the user SELECT on the table |
 | `RIVET_INIT_NO_TABLES` | usage | 1 | point `--schema` at a schema the user can read, and loosen `--include` / `--exclude` |

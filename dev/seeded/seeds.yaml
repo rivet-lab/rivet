@@ -412,6 +412,23 @@ seeds:
       sqlite-state:
         cells: ["lib:a_migration_copies_the_old_state_beside_it_before_the_first_ddl"]
 
+  - name: migration-beside-a-live-lease
+    class: "a rivet with a newer state schema migrates a state that a live run of the older release holds a lease on, even when it is then refused as busy, so the older release is refused RIVET_STATE_SCHEMA_NEWER on its next run"
+    history: "0.32.2 pre-release gate on main 7fba31c4 after v38 (#650): the two previous-release cells of live_load_lease_keeper red at the rig oracle (`resume-point: export_load_spec` gained `source`) after this tree was refused `is writing` beside a 0.32.1 load holding the lease"
+    scope: state
+    patch: migration-beside-a-live-lease/shared.patch
+    engines:
+      postgres-state:
+        cells:
+          - "lib:pg_a_state_behind_this_build_is_not_migrated_while_a_live_holder_keeps_a_lease_row"
+          - the_previous_release_runs_again_after_this_build_was_refused_beside_it_on_postgres_state_postgres
+          - the_pinned_older_schema_release_is_stopped_at_the_schema_before_this_trees_lease
+      sqlite-state:
+        cells:
+          - "lib:a_state_behind_this_build_is_not_migrated_while_a_lease_beside_it_is_held"
+          - the_previous_release_runs_again_after_this_build_was_refused_beside_it_on_sqlite_state_postgres
+          - a_run_beside_a_live_previous_release_run_of_the_export_is_refused
+
   - name: setup-green-over-dead-state
     class: "`rivet check` prints `Looks good.` and exits 0 (and `doctor` / `init` stay green) while the state the config uses does not answer, so setup passes and every run after it fails"
     history: "client simulation on 0.32.0, 2026-10-18 (D2): init WARN + exit 0, check ERROR then `Looks good.` exit 0, doctor `All checks passed.` without a state check; measured on main 8afde974 with RIVET_STATE_URL at a closed port: check `Looks good.`, exit 0"
@@ -480,9 +497,7 @@ seeds:
     engines:
       sqlite-state:
         patch: lease-upgrade-window-unguarded/sqlite-state.patch
-        cells:
-          - "lib:a_holder_of_the_old_lease_name_and_this_release_exclude_each_other"
-          - a_run_beside_a_live_previous_release_run_of_the_export_is_refused
+        cells: ["lib:a_holder_of_the_old_lease_name_and_this_release_exclude_each_other"]
       postgres-state:
         na: "a PostgreSQL-state lease is a row keyed by the raw key, unchanged by the rename"
 
@@ -1675,6 +1690,38 @@ seeds:
         na: "a MongoDB change stream has no server-side slot or replica id; its position is the config's own checkpoint"
       oracle:
         na: "LogMiner keeps no server-side object per reader; the position is the config's own checkpoint"
+  - name: init-cdc-checkpoint-shared-by-name
+    class: "two CDC configs `rivet init -o` writes for one table into one directory name one checkpoint, so each stream resumes where the other stopped and skips what it read, exit 0"
+    history: "0.32.2, owner decision 2026-10-21: `-o a.yaml` and `-o b.yaml` both wrote `checkpoint: ./cdc/<table>.ckpt` and `./output/<table>_cdc/`; fixed by stem-derived names and RIVET_INIT_CDC_NAME_TAKEN"
+    scope: source
+    patch: init-cdc-checkpoint-shared-by-name/shared.patch
+    engines:
+      postgres:
+        cells: [two_init_configs_in_one_dir_keep_their_streams_apart_postgres]
+      mysql:
+        cells: [two_init_configs_in_one_dir_keep_their_streams_apart_mysql]
+      mssql:
+        cells: [two_init_configs_in_one_dir_keep_their_streams_apart_mssql]
+      mongo:
+        cells: ["lib:a_cdc_scaffold_names_its_checkpoint_and_destination_after_the_output_file"]
+      oracle:
+        cells: [two_init_configs_in_one_dir_keep_their_streams_apart_oracle]
+  - name: cdc-checkpoint-read-by-two-configs
+    class: "a CDC run continues from a checkpoint another config still reads, so two streams on one position each skip the changes the other read, exit 0"
+    history: "0.32.2, owner decision 2026-10-21 (\"forbid a shared checkpoint\"): a run recorded no owner of its checkpoint; fixed by `checkpoint_identity::claim_checkpoint` and RIVET_SOURCE_CDC_CHECKPOINT_SHARED"
+    scope: source
+    patch: cdc-checkpoint-read-by-two-configs/shared.patch
+    engines:
+      postgres:
+        cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_postgres]
+      mysql:
+        cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_mysql]
+      mssql:
+        cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_mssql]
+      mongo:
+        cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_mongo]
+      oracle:
+        cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_oracle]
   - name: io-error-classified-by-its-path-text
     class: "an `io::Error` (a missing directory, a read-only file) is retried as transient because a path in its message contains a network word (`dns`, `reset`), so a permanent stop exits 2"
     history: "0.32.2, 2026-10-20: #639's mutation shard baseline failed `an_unwritable_aggregate_path_is_refused_by_code` with exit 2 for 1 because its temp dir was named `.tmprDnsA7`; RED on main c1cf6a92 with a directory named `dns`"
@@ -3149,7 +3196,6 @@ seeds:
       postgres:
         cells:
           - "lib:a_relative_path_has_moved_only_when_the_old_place_alone_holds_the_export"
-          - a_relative_destination_path_moved_by_the_upgrade_is_refused_until_the_files_follow
           - a_relative_path_moved_by_upgrading_the_pinned_release_is_refused_until_the_files_follow
       mysql:
         cells: ["lib:a_relative_path_has_moved_only_when_the_old_place_alone_holds_the_export"]
@@ -3282,3 +3328,124 @@ seeds:
         na: "the session SETs are MySQL's: MongoDB has no session variables"
       oracle:
         na: "the session SETs are MySQL source code; an Oracle read goes through another source and sends none of them"
+
+  - name: cdc-load-reports-the-stream-leg-only
+    class: "a CDC base-and-buffer load reports only its stream leg in `per_table[]`: a first load that landed the baseline in the base says `rows: 0`, `target: <table>__changes` and `no changes buffered`"
+    history: "2026-10-21 - found by the Airflow provider on MySQL CDC -> BigQuery base_buffer: a 6000-row baseline landed in the base and the load's document said rows 0, target the change log"
+    scope: source
+    patch: cdc-load-reports-the-stream-leg-only/shared.patch
+    engines:
+      postgres:
+        na: "engine-agnostic: the per_table entry is built from the load's own report (src/load/orchestrate.rs cdc_work), after the manifests are read; no source or engine type reaches it, so every CDC engine runs the same code; graded once by the lib cells. The live BigQuery cell a_bigquery_load_and_compact_digest_is_what_bq_reads_back asserts it where BigQuery credentials exist"
+      mysql:
+        na: "engine-agnostic: the per_table entry is built from the load's own report (src/load/orchestrate.rs cdc_work), after the manifests are read; no source or engine type reaches it, so every CDC engine runs the same code; graded once by the lib cells. The live BigQuery cell a_bigquery_load_and_compact_digest_is_what_bq_reads_back asserts it where BigQuery credentials exist"
+      mssql:
+        na: "engine-agnostic: the per_table entry is built from the load's own report (src/load/orchestrate.rs cdc_work), after the manifests are read; no source or engine type reaches it, so every CDC engine runs the same code; graded once by the lib cells. The live BigQuery cell a_bigquery_load_and_compact_digest_is_what_bq_reads_back asserts it where BigQuery credentials exist"
+      mongo:
+        na: "engine-agnostic: the per_table entry is built from the load's own report (src/load/orchestrate.rs cdc_work), after the manifests are read; no source or engine type reaches it, so every CDC engine runs the same code; graded once by the lib cells. The live BigQuery cell a_bigquery_load_and_compact_digest_is_what_bq_reads_back asserts it where BigQuery credentials exist"
+      oracle:
+        na: "engine-agnostic: the per_table entry is built from the load's own report (src/load/orchestrate.rs cdc_work), after the manifests are read; no source or engine type reaches it, so every CDC engine runs the same code; graded once by the lib cells. The live BigQuery cell a_bigquery_load_and_compact_digest_is_what_bq_reads_back asserts it where BigQuery credentials exist"
+      lib:
+        cells:
+        - lib:a_first_cdc_load_reports_the_baseline_it_landed_in_the_base
+        - lib:a_cdc_load_of_a_baseline_and_changes_reports_both_legs
+
+  - name: mysql-cdc-bare-name-refused-beside-a-twin
+    class: "a bare MySQL CDC table name is refused (or resolved to another database) when the connection's database holds it and another database holds a table of the same name, so a config `rivet init --mode cdc` generated stops on every run"
+    history: "2026-10-21 #675 - found by the Airflow provider's live gate (MySQL CDC beside a second database with same-named tables): RIVET_SOURCE_CDC_TABLE_UNRESOLVED on every run of the init config"
+    scope: source
+    patch: mysql-cdc-bare-name-refused-beside-a-twin/mysql.patch
+    engines:
+      mysql:
+        cells:
+        - mysql_cdc_a_bare_name_captures_its_own_database_beside_a_same_named_table
+        - mysql_cdc_an_init_config_runs_as_written_beside_a_same_named_table
+      postgres:
+        na: "the bare-name rule is MySQL's (src/source/mysql/cdc.rs bare_name_database); PostgreSQL resolves a bare CDC name through its own path, with the same refusal open as a separate 0.32.3 fix (#675)"
+      mssql:
+        na: "SQL Server CDC names its table through the capture instance (`cdc.change_tables`), never by a bare name across databases"
+      mongo:
+        na: "a MongoDB change stream is opened on the URL's database; a collection name is never matched across databases"
+      oracle:
+        na: "Oracle CDC tables are written OWNER.TABLE by init and LogMiner routes by that qualified name"
+      lib:
+        cells:
+        - lib:a_bare_name_resolves_to_its_own_database_then_to_the_only_other
+
+  - name: mysql-proxy-probe-dials-its-own-connection
+    class: "every MySQL run dials a connection of its own to detect a proxy, so a batch run opens 4 source connections instead of 2 and a CDC run 3 instead of 2"
+    history: "2026-10-22 - found by the 0.32.2 gate (perf[mysql/cdc-conns], perf[mysql/batch-conns-*]) after #661 moved the probe off the pool"
+    scope: source
+    patch: mysql-proxy-probe-dials-its-own-connection/mysql.patch
+    engines:
+      mysql:
+        cells:
+        - a_mysql_batch_run_opens_at_most_two_source_connections
+        - a_mysql_cdc_run_opens_at_most_two_source_connections
+      postgres:
+        na: "the proxy probe is MySQL's (src/source/mysql/mod.rs connect_own); PostgreSQL detects no proxy on connect"
+      mssql:
+        na: "SQL Server's source connects through tiberius with no proxy probe"
+      mongo:
+        na: "MongoDB connects through its driver's own pool with no proxy probe"
+      oracle:
+        na: "Oracle connects through its own session with no proxy probe"
+
+  - name: parquet-write-call-pins-column-arena
+    class: "the Parquet writer is handed a whole batch per call, and parquet 59.1+ keeps the arena of every call's fixed-width columns (Oracle NUMBER(19), decimal(p>18), uuid) alive while a column chunk's min/max statistic lives, so a capped export's memory grows with the row count"
+    history: "2026-10-28 - found by the 0.32.2 gate (flat-rss[oracle/full_and_incremental_under_a_row_group_cap], 147 MiB at 5M rows against 107 at 1M) after #702 moved parquet to 60; bisected to parquet 59.0.0 green, 59.3.2 and 60.0.0 red"
+    scope: source
+    patch: parquet-write-call-pins-column-arena/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+      mysql:
+        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+      mssql:
+        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+      mongo:
+        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+      oracle:
+        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+
+  - name: bigquery-transient-job-error-final
+    class: "a BigQuery job that ends with a documented retryable errorResult.reason (backendError, internalError, jobBackendError, jobInternalError, rateLimitExceeded, jobRateLimitExceeded) is coded RIVET_LOAD_WAREHOUSE_REJECTED, exit 1, so a scheduler fails the task for good"
+    history: "2026-10-28 - issue #707, pilot incident: a CDC compact MERGE under airflow-provider-rivet failed with 'Error encountered during execution. Retrying may solve the problem.' and the task failed final"
+    scope: source
+    patch: bigquery-transient-job-error-final/shared.patch
+    engines:
+      postgres:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mysql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mssql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mongo:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      oracle:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      lib:
+        cells:
+          - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"
+          - "lib:a_statement_failed_with_a_transient_reason_is_retryable_and_a_bad_one_is_not"
+
+  - name: transient-warehouse-code-exits-by-text
+    class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
+    history: "2026-10-28 - found while fixing #707: the code existed for the REST layer's transient replies but its exit followed the text, which names no transient word, so a scheduler never retried it"
+    scope: source
+    patch: transient-warehouse-code-exits-by-text/shared.patch
+    engines:
+      postgres:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mysql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mssql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mongo:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      oracle:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      lib:
+        cells:
+          - "lib:a_transient_http_reply_that_outlasts_the_retries_exits_retryable"
+          - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"

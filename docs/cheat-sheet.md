@@ -70,7 +70,7 @@ More auth paths (MinIO, Azurite, SAS details): [cloud-auth.md](cloud-auth.md) ·
 ### 1.1 Batch (full / incremental / chunked)
 
 ```bash
-brew install panchenkoai/rivet/rivet          # or: cargo install rivet-cli
+brew install rivet-lab/tap/rivet          # or: cargo install rivet-cli
 
 # Credentials: the password is read without echo, never typed into the command line
 printf 'DB password: '; read -rs DB_PASS; echo
@@ -226,7 +226,7 @@ on every update); and, for a mode that carries deltas (`incremental`, `cdc`),
 
 > `--gcs-bucket` is required with the BigQuery flags: a BigQuery load reads GCS only, so a
 > `load:` block over a local or S3 destination is a config its own next step refuses.
-> The ClickHouse flags take `--gcs-bucket` or `--s3-bucket`.
+> The ClickHouse flags take `--gcs-bucket`, `--s3-bucket` or `--azure-container`.
 > On a whole-database CDC scaffold the partition guesses land on the stream's
 > `load.tables.<table>` blocks — the place the load reads them — not on the per-table
 > recipes, which the load never reads.

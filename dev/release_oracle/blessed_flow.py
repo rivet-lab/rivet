@@ -1489,6 +1489,17 @@ def _addressing(cell: Cell, addr: list[str], dest_dir: Path, prefix: str,
 FLAG_EXCUSED = {
     "--help": "surface, not behaviour",
     "--json-errors": "shapes stderr on a failing path; this chain asserts success",
+    "--azure-container": "scaffolds an Azure destination; the chain writes to local and fake-gcs. Graded by "
+                         "live_init_extended::an_azure_scaffold_runs_as_written_into_azurite (the scaffold "
+                         "runs as written into Azurite and DuckDB reads the source's ids back)",
+    "--azure-account": "the account of the --azure-container scaffold; see --azure-container",
+    "--azure-endpoint": "the endpoint of the --azure-container scaffold (Azurite there); see --azure-container",
+    "--lock-wait": "a wait for a lease another live process holds; this chain runs one process at a "
+                   "time. Graded by the walk cells a_state_reset_waiting_beside_a_live_run_times_out_"
+                   "and_is_walked_out_{postgres,mysql,mssql,mongo,oracle} and lib "
+                   "a_waiting_take_times_out_by_code_when_the_wait_runs_out",
+    "--no-notify": "silences notifications; the gate's configs declare none. Graded by "
+                   "cli_contract::no_notify_silences_the_run_and_every_process_child",
     "--config": "carried by every stage as -c",
     "--export": "the configs here declare ONE export — a selector cannot select differently",
     "--param": "owned by the curated-query matrix, which defines substitution",

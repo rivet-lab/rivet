@@ -38,7 +38,7 @@ pub enum ExitClass {
     /// identical command will fail the same way.
     Generic = 1,
     /// `2` — transient failure (connection reset, lock-wait timeout, capacity), or a
-    /// [`Busy`](ErrorKind::Busy) stop. Safe to retry the same command after a backoff.
+    /// [`Busy`](ErrorKind::Busy) / [`Transient`](ErrorKind::Transient) stop. Safe to retry the same command after a backoff.
     Retryable = 2,
     /// `3` — data-integrity failure (quality gate, reconcile mismatch, `validate`
     /// verification failure, duplicate-guard, manifest inconsistency). The
@@ -372,6 +372,8 @@ pub enum ErrorKind {
     Refusal,
     /// A live rivet process holds the lease or lock this command needs: the same command succeeds once it ends.
     Busy,
+    /// The warehouse answered with a failure it documents as retryable: the same command succeeds later.
+    Transient,
     /// A verification found the data wrong.
     Integrity,
     /// An invariant did not hold: a bug.
@@ -386,6 +388,7 @@ impl ErrorKind {
             ErrorKind::Environment => "environment",
             ErrorKind::Refusal => "refusal",
             ErrorKind::Busy => "busy",
+            ErrorKind::Transient => "transient",
             ErrorKind::Integrity => "integrity",
             ErrorKind::Internal => "internal",
         }
@@ -542,7 +545,7 @@ pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
     // connection retries, a denied permission does not).
     match err.downcast_ref::<CodedError>()?.kind() {
         ErrorKind::Refusal => Some(ExitClass::Refusal),
-        ErrorKind::Busy => Some(ExitClass::Retryable),
+        ErrorKind::Busy | ErrorKind::Transient => Some(ExitClass::Retryable),
         ErrorKind::Internal => Some(ExitClass::Internal),
         ErrorKind::Integrity => Some(ExitClass::DataIntegrity),
         ErrorKind::Usage => Some(ExitClass::Generic),
@@ -776,6 +779,13 @@ pub mod codes {
             action,
         }
     }
+    const fn transient(id: &'static str, action: &'static str) -> Code {
+        Code {
+            id,
+            kind: ErrorKind::Transient,
+            action,
+        }
+    }
     const fn integrity(id: &'static str, action: &'static str) -> Code {
         Code {
             id,
@@ -894,6 +904,11 @@ pub mod codes {
         "RIVET_STATE_RUN_IN_PROGRESS",
         "wait for the run to finish, or stop its process, then repeat the command",
     );
+    /// A migration of the state met a lease that a live rivet process on the state's older schema holds.
+    pub const STATE_UPGRADE_BESIDE_LIVE_RUN: Code = busy(
+        "RIVET_STATE_UPGRADE_BESIDE_LIVE_RUN",
+        "run again once the rivet process holding a lease on the state ends; the state was not migrated, and the release that process runs still opens it",
+    );
     /// A resume, reconcile or repair met a stored chunk run planned under another query or other chunk settings.
     pub const STATE_CHUNK_PLAN_CHANGED: Code = refusal(
         "RIVET_STATE_CHUNK_PLAN_CHANGED",
@@ -916,6 +931,11 @@ pub mod codes {
     pub const SOURCE_CDC_FOREIGN_CHECKPOINT: Code = refusal(
         "RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT",
         "re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run",
+    );
+    /// A CDC export's checkpoint is the one another config's export still reads.
+    pub const SOURCE_CDC_CHECKPOINT_SHARED: Code = refusal(
+        "RIVET_SOURCE_CDC_CHECKPOINT_SHARED",
+        "give the export a `cdc.checkpoint` of its own and keep the shared file, the other export's position; with `cdc.initial: snapshot` its first run re-reads every table",
     );
     pub const SOURCE_CDC_CHECKPOINT_INVALID: Code = refusal(
         "RIVET_SOURCE_CDC_CHECKPOINT_INVALID",
@@ -1184,10 +1204,10 @@ pub mod codes {
         "RIVET_LOAD_WAREHOUSE_REJECTED",
         "read the warehouse's reason in the message and fix what it names, then re-run",
     );
-    /// The warehouse kept answering with a transient failure.
-    pub const LOAD_WAREHOUSE_UNAVAILABLE: Code = environment(
+    /// The warehouse kept answering with a transient failure, or a job failed with a reason it documents as retryable.
+    pub const LOAD_WAREHOUSE_UNAVAILABLE: Code = transient(
         "RIVET_LOAD_WAREHOUSE_UNAVAILABLE",
-        "re-run the load later; the warehouse answered with a transient failure on every retry",
+        "re-run the same command later; the warehouse failed with a transient error (HTTP 5xx or 429, or a job reason it documents as retryable) that rivet's retries did not outlast",
     );
     /// The warehouse answered in a shape rivet does not read.
     pub const LOAD_WAREHOUSE_ANSWER_UNREADABLE: Code = internal(
@@ -1559,6 +1579,11 @@ pub mod codes {
         "RIVET_DEST_IO_RUNTIME_UNAVAILABLE",
         "raise the process's thread and open-file limits, or lower the export parallelism, then run again",
     );
+    /// `rivet init -o` would write a CDC checkpoint that exists, or a checkpoint or destination another config names.
+    pub const INIT_CDC_NAME_TAKEN: Code = refusal(
+        "RIVET_INIT_CDC_NAME_TAKEN",
+        "write the config under another `-o` name: the stem names its checkpoint and destination",
+    );
     /// `rivet init -o` met a config at the output path.
     pub const INIT_CONFIG_EXISTS: Code = refusal(
         "RIVET_INIT_CONFIG_EXISTS",
@@ -1682,6 +1707,7 @@ pub mod codes {
         SOURCE_STATEMENT_TIMEOUT,
         SOURCE_CURSOR_FINER_THAN_MICROSECOND,
         SOURCE_CDC_FOREIGN_CHECKPOINT,
+        SOURCE_CDC_CHECKPOINT_SHARED,
         SOURCE_CDC_CHECKPOINT_INVALID,
         SOURCE_CDC_LOG_GAP,
         SOURCE_CDC_TRUNCATED,
@@ -1712,6 +1738,7 @@ pub mod codes {
         STATE_CHUNK_RUN_SUPERSEDED,
         STATE_KEYSET_SEQUENTIAL_ANCHOR_UNFINISHED,
         STATE_RUN_IN_PROGRESS,
+        STATE_UPGRADE_BESIDE_LIVE_RUN,
         STATE_LOCK_TIMEOUT,
         STATE_CHUNK_CHECKPOINT_GONE,
         STATE_CHUNK_PLAN_CHANGED,
@@ -1836,6 +1863,7 @@ pub mod codes {
         DEST_CREDENTIALS_INVALID,
         DEST_PREFIX_MODE_MISMATCH,
         DEST_IO_RUNTIME_UNAVAILABLE,
+        INIT_CDC_NAME_TAKEN,
         INIT_CONFIG_EXISTS,
         INIT_TABLE_NOT_FOUND,
         INIT_NO_TABLES,
@@ -1881,7 +1909,7 @@ fn kind_exit(kind: ErrorKind) -> &'static str {
         ErrorKind::Usage => "1",
         ErrorKind::Environment => "2 if transient, else 1",
         ErrorKind::Refusal => "5",
-        ErrorKind::Busy => "2",
+        ErrorKind::Busy | ErrorKind::Transient => "2",
         ErrorKind::Integrity => "3",
         ErrorKind::Internal => "6",
     }
@@ -2158,6 +2186,11 @@ mod tests {
         };
         assert_eq!(with(ErrorKind::Refusal), 5);
         assert_eq!(with(ErrorKind::Busy), 2, "busy, whatever its text says");
+        assert_eq!(
+            with(ErrorKind::Transient),
+            2,
+            "a documented-transient stop, whatever its text says"
+        );
         assert_eq!(with(ErrorKind::Internal), 6);
         assert_eq!(with(ErrorKind::Integrity), 3);
         assert_eq!(with(ErrorKind::Usage), 1);
@@ -2180,6 +2213,7 @@ mod tests {
             busy.iter().map(|c| c.id).collect::<Vec<_>>(),
             [
                 "RIVET_STATE_RUN_IN_PROGRESS",
+                "RIVET_STATE_UPGRADE_BESIDE_LIVE_RUN",
                 "RIVET_STATE_LOCK_TIMEOUT",
                 "RIVET_STATE_LEASE_LOST",
                 "RIVET_LOAD_TABLE_BUSY"

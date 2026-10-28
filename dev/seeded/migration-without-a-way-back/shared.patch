@@ -1,13 +1,11 @@
 diff --git a/src/state/migrations.rs b/src/state/migrations.rs
-index eabc9fff..24497ce3 100644
 --- a/src/state/migrations.rs
 +++ b/src/state/migrations.rs
-@@ -1483,17 +1483,6 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
-         }
+@@ -1589,16 +1589,6 @@
+     if needs_copy(current) {
+         refuse_beside_a_live_lease(current, sqlite_lease_held(conn)?)?;
      }
- 
--    if current > 0
--        && current < SCHEMA_VERSION
+-    if needs_copy(current)
 -        && let Some(copy) = copy_state_before_migration(conn, current)?
 -    {
 -        log::warn!(
@@ -20,14 +18,11 @@ index eabc9fff..24497ce3 100644
      for &(ver, sql) in MIGRATIONS {
          if ver > current {
              log::debug!("state: applying migration v{}", ver);
-@@ -1621,10 +1610,6 @@ fn migrate_pg_locked(client: &mut postgres::Transaction<'_>) -> Result<()> {
-         })?
-         .get(0);
- 
--    if current > 0 && current < SCHEMA_VERSION {
+@@ -1736,7 +1726,6 @@
+         let held = super::load_lease::pg_lease_held(client)
+             .map_err(|e| leases_unreadable("the PostgreSQL state", &super::pg_detail(&e)))?;
+         refuse_beside_a_live_lease(current, held)?;
 -        copy_pg_state_before_migration(client, current)?;
--    }
--
+     }
+ 
      for &(ver, sql) in PG_MIGRATIONS {
-         if ver > current {
-             log::debug!("state(pg): applying migration v{}", ver);

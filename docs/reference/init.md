@@ -131,6 +131,15 @@ keeps `rivet_<table>` and `server_id: 4271` and says beside each that it is one 
 CDC export of a table is named `<table>_cdc` and writes to `exports/<table>_cdc/`, beside the
 batch export of the table, never inside it.
 
+The checkpoint and the CDC destination are named after the file too (since 0.32.2): `-o
+rivet.yaml` writes `checkpoint: ./cdc/rivet_<table>.ckpt` (`./cdc/rivet_<schema>_cdc.ckpt` for a
+whole-schema stream) and the destination `./output/rivet/<table>_cdc/` (`exports/rivet/<table>_cdc/`
+in a bucket, `rivet/cdc/` / `./output/rivet/cdc/` for a whole-schema stream). init refuses
+`RIVET_INIT_CDC_NAME_TAKEN` (exit 5), writing nothing, when that checkpoint already exists or another
+config in the directory names the same checkpoint or destination: write the config under another
+`-o` name. A run records which config and export own a checkpoint (`<checkpoint>.owner`) and refuses
+`RIVET_SOURCE_CDC_CHECKPOINT_SHARED` (exit 5) for another config while the owner still names it.
+
 ## Flags (summary)
 
 | Flag | Required | Description |
@@ -163,7 +172,7 @@ Exactly one of `--source`, `--source-env`, `--source-file` must be provided (enf
 
 ![rivet init --discover + jq: ranked cursor + chunk candidates per table](../gifs/discover-artifact.gif)
 
-`rivet init --discover` runs the same introspection but emits a machine-readable JSON document (schema described in [`src/init/artifact.rs`](https://github.com/panchenkoai/rivet/blob/main/src/init/artifact.rs)). Intended consumers: external orchestration tools, code review, and automated config generators.
+`rivet init --discover` runs the same introspection but emits a machine-readable JSON document (schema described in [`src/init/artifact.rs`](https://github.com/rivet-lab/rivet/blob/main/src/init/artifact.rs)). Intended consumers: external orchestration tools, code review, and automated config generators.
 
 ```bash
 rivet init --source "$PG_URL" --schema public --discover -o discovery.json
@@ -188,7 +197,7 @@ The artifact is advisory — same policy as plan prioritization (ADR-0006): no r
 
 ## Docker Compose in this repository
 
-The repo root [`docker-compose.yaml`](https://github.com/panchenkoai/rivet/blob/main/docker-compose.yaml) defines **Postgres** and **MySQL** (`rivet` / `rivet` users, database `rivet`) with the same schema as [`dev/postgres/init.sql`](https://github.com/panchenkoai/rivet/blob/main/dev/postgres/init.sql) and [`dev/mysql/init.sql`](https://github.com/panchenkoai/rivet/blob/main/dev/mysql/init.sql).
+The repo root [`docker-compose.yaml`](https://github.com/rivet-lab/rivet/blob/main/docker-compose.yaml) defines **Postgres** and **MySQL** (`rivet` / `rivet` users, database `rivet`) with the same schema as [`dev/postgres/init.sql`](https://github.com/rivet-lab/rivet/blob/main/dev/postgres/init.sql) and [`dev/mysql/init.sql`](https://github.com/rivet-lab/rivet/blob/main/dev/mysql/init.sql).
 
 ```bash
 docker compose up -d postgres mysql
@@ -205,9 +214,36 @@ rivet init --source "$PG_URL" --schema public -o rivet_public.yaml
 rivet init --source "$MY_URL" -o rivet_mysql.yaml
 ```
 
-To refresh many files at once (per-table YAMLs plus combined schema snapshots), run [`python3 -m dev.pytools.dev_scripts regen-docker-configs`](https://github.com/panchenkoai/rivet/blob/main/dev/pytools/dev_scripts.py) from the repo root after the DBs are up (and optionally seeded).
+To refresh many files at once (per-table YAMLs plus combined schema snapshots), run [`python3 -m dev.pytools.dev_scripts regen-docker-configs`](https://github.com/rivet-lab/rivet/blob/main/dev/pytools/dev_scripts.py) from the repo root after the DBs are up (and optionally seeded).
 
 ---
+
+## Bucket destination: `--gcs-bucket` / `--s3-bucket` / `--azure-container`
+
+Each flag writes the export's `destination:` in that store, with the same prefix
+(`exports/<table>/`, `cdc/` for a CDC stream); at most one of them, and none with
+`--discover`. No credential is written. GCS and S3 take their ambient credentials;
+an Azure scaffold names its account and the env var of the account key:
+
+```bash
+rivet init --source "$PG_URL" --table orders \
+  --azure-container exports --azure-account myaccount -o rivet.yaml
+export AZURE_STORAGE_KEY=...   # or put `sas_token_env: <VAR>` in place of account_key_env
+rivet run -c rivet.yaml        # Parquet → az://exports/exports/orders/
+```
+
+```yaml
+    destination:
+      type: azure
+      bucket: exports
+      prefix: exports/orders/
+      account_name: myaccount
+      account_key_env: AZURE_STORAGE_KEY
+```
+
+`--azure-endpoint <URL>` writes `endpoint:` for a store at another address, such as
+Azurite (`http://127.0.0.1:10000/devstoreaccount1`); without it the endpoint is
+derived from the account.
 
 ## Warehouse scaffold: `--bigquery-project` / `--bigquery-dataset` / `--gcs-bucket`
 

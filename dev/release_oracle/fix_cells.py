@@ -38,14 +38,8 @@ SCEN = "fix_cells"
 GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else "git"
 FIX = re.compile(r"fix[(:!]")
 TEST = re.compile(r"^#\[test\]\n(?:#\[[^\n]*\n)*(?:pub )?fn (\w+)\(\) \{\n(.*?)^\}", re.M | re.S)
-#: Controls: the neighbour of a fix that must stay as it was, so it is green on the release without the fix.
-SESSION_ZONE_HONOURED = ("control of 4cd95bab: straight to a `+03:00` MySQL server the `SET time_zone` rivet sends is "
-                         "honoured, so the new guard lets the read through and the value is the source's instant in UTC, "
-                         "as v0.32.0 read it; the proxy that drops the SET is the cell that is red there")
-
 #: Fix cells allowed to pass on the previous release, each with its reason. Shrink-only.
 GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-release strings
-    "a_server_in_another_time_zone_reads_its_timestamps_as_utc_when_the_set_is_honoured": SESSION_ZONE_HONOURED,
 }  # ratchet-pin: end
 
 

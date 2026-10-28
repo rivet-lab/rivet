@@ -291,6 +291,12 @@ FIELD_REPLAY_CARRIER_BIN  ?= $(PREV_RELEASE_DIR)/carrier/rivet-$(FIELD_REPLAY_CA
 # when the previous release writes this tree's schema. Missing is a FAIL in each of them.
 MIGRATION_CARRIER_TAG     ?= v0.31.0
 MIGRATION_CARRIER_BIN     ?= $(PREV_RELEASE_DIR)/field/rivet-$(MIGRATION_CARRIER_TAG)-$(shell uname -m | sed 's/arm64/aarch64/')-apple-darwin/rivet
+# The LEASE carrier: a release that holds the run and load leases this tree's migration waits for
+# (0.32.0+), writes an older state schema (v37), and still advances a Postgres slot past its checkpoint
+# (#649, fixed in 0.32.2). PINNED like the carriers above, and found in the field cache `field_state
+# --fetch` fills below; the cells that run it beside this tree fail the census when it is missing.
+LEASE_CARRIER_TAG         ?= v0.32.1
+LEASE_CARRIER_BIN         ?= $(PREV_RELEASE_DIR)/field/rivet-$(LEASE_CARRIER_TAG)-$(shell uname -m | sed 's/arm64/aarch64/')-apple-darwin/rivet
 # The release whose state `rivet state copy` must carry to PostgreSQL: 0.30.0 (state v31), the one a
 # client moves from. PINNED like the carriers above.
 STATE_COPY_FROM_TAG       ?= v0.30.0
@@ -314,6 +320,7 @@ GATE_ENV = \
   RIVET_GATE_STATE_URL='$(RIVET_GATE_STATE_URL)' \
   RIVET_FIELD_REPLAY_BIN='$(FIELD_REPLAY_CARRIER_BIN)' \
   RIVET_MIGRATION_CARRIER_BIN='$(MIGRATION_CARRIER_BIN)' \
+  RIVET_LEASE_CARRIER_BIN='$(LEASE_CARRIER_BIN)' \
   RIVET_STATE_COPY_FROM_BIN='$(STATE_COPY_FROM_BIN)' \
   RIVET_TEST_STATE_URL='$(RIVET_GATE_STATE_URL)' \
   RIVET_SWEEP_STATE_CONTAINER='$(RIVET_SWEEP_STATE_CONTAINER)' \
@@ -359,7 +366,7 @@ release-oracle-prev-bin:  ## Download the PREVIOUS release binary (the regressio
 	fi
 	@echo "  state-copy source release: $$($(STATE_COPY_FROM_BIN) --version)"
 
-release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## Release gate with the WHOLE environment against the local dev stand. This is the one a release is judged by.
+release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## Release gate with the WHOLE environment against the local dev stand, seeded-defect recall included. This is the one a release is judged by: its green verdict for HEAD is what dev/pytools/release.py requires.
 	@# The gate grades `target/release/rivet`. A stale one grades yesterday's
 	@# code, and `cargo package` poisons the fingerprints so cargo reports
 	@# `Fresh` on a binary that predates your edits — drop the snapshot first.
@@ -373,7 +380,7 @@ release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## 
 	@# reaches here with an empty $$prev is telling you the download failed.
 	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
 	 echo "  previous release: $${prev:-<none — the scale legs will SKIP and the regression / differential / field-replay legs will FAIL; re-run release-oracle-prev-bin, or give the comparison up by name with ARGS=--without-prev-release-comparison>}"; \
-	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle $(ARGS)
+	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --with-seeded-recall $(ARGS)
 	@# A gate that passed leaves the stand and the cloud swept too: no orphaned slot pins WAL into
 	@# the next run, and no test output stays billed in storage.
 	@$(MAKE) --no-print-directory sweep-test-db sweep-test-cloud

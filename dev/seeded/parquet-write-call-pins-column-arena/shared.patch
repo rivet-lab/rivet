@@ -1,0 +1,26 @@
+diff --git a/src/format/parquet.rs b/src/format/parquet.rs
+index 66cfc3f8..d8ea1711 100644
+--- a/src/format/parquet.rs
++++ b/src/format/parquet.rs
+@@ -90,19 +90,8 @@ impl SpanSink for ArrowWriter<Box<dyn Write + Send>> {
+ /// statistic lives, so a call stays small; the cuts match the library's own, the bytes stay equal.
+ /// Every pass moves at least one row, so the row count bounds the passes.
+ fn write_in_spans(sink: &mut impl SpanSink, batch: &RecordBatch, group_rows: usize) -> Result<()> {
+-    let mut at = 0;
+-    for _ in 0..batch.num_rows() {
+-        if at == batch.num_rows() {
+-            break;
+-        }
+-        let room = group_rows.saturating_sub(sink.in_progress_rows()).max(1);
+-        let len = (batch.num_rows() - at)
+-            .min(room)
+-            .min(DEFAULT_WRITE_BATCH_SIZE);
+-        sink.write(&batch.slice(at, len))?;
+-        at += len;
+-    }
+-    Ok(())
++    let _ = (group_rows, sink.in_progress_rows(), DEFAULT_WRITE_BATCH_SIZE);
++    sink.write(batch)
+ }
+ 
+ impl super::Format for ParquetFormat {

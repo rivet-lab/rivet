@@ -665,6 +665,17 @@ pub struct InitYamlDestination {
     /// The `[a-z0-9_]` stem of the `-o` file a CDC scaffold names its slot and `server_id` from, so
     /// two configs on one cluster never share them; `None` writes the default names (stdout).
     pub cdc_name_stem: Option<String>,
+    /// `--azure-container` / `--azure-account` / `--azure-endpoint`: an Azure Blob destination.
+    pub azure: Option<InitAzureTarget>,
+}
+
+/// The Azure Blob container a scaffold stages in, its storage account, and an explicit endpoint
+/// (Azurite's `http://127.0.0.1:10000/devstoreaccount1`); `None` derives it from the account.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InitAzureTarget {
+    pub container: String,
+    pub account: String,
+    pub endpoint: Option<String>,
 }
 
 /// The five values a Snowflake `load:` block needs — every one is required by the loader.
@@ -704,13 +715,23 @@ impl InitYamlDestination {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.gcs_bucket.is_some() && self.s3_bucket.is_some() {
+        let buckets = [
+            self.gcs_bucket.is_some(),
+            self.s3_bucket.is_some(),
+            self.azure.is_some(),
+        ];
+        if buckets.iter().filter(|b| **b).count() > 1 {
             crate::rivet_bail!(
                 crate::error::codes::CLI_OPTION_UNSUPPORTED,
-                "use at most one of --gcs-bucket and --s3-bucket"
+                "use at most one of --gcs-bucket, --s3-bucket and --azure-container"
             );
         }
         Ok(())
+    }
+
+    /// Whether the scaffold stages in a bucket or container rather than a local directory.
+    pub(crate) fn is_bucket(&self) -> bool {
+        self.gcs_bucket.is_some() || self.s3_bucket.is_some() || self.azure.is_some()
     }
 }
 
@@ -817,6 +838,7 @@ pub fn init(
     match output {
         Some(path) => {
             require_explicit_state(path, crate::state::StateStore::names_a_server())?;
+            refuse_cdc_names_taken(path, &text)?;
             write_config_output(path, &text)?;
             record_strategy_snapshots(path, &snapshots);
             record_primary_keys(path, source_url, tls, &snapshots);
@@ -972,6 +994,110 @@ fn no_tables_error(filter: &TableFilter) -> anyhow::Error {
             "No tables or views found (check --schema and privileges)",
         )
     }
+}
+
+/// Where a CDC export of `cfg` (a config in `dir`) keeps its stream: its checkpoint file and its destination.
+fn cdc_places(
+    cfg: &crate::config::Config,
+    dir: &std::path::Path,
+) -> Vec<(String, Option<std::path::PathBuf>, String)> {
+    let canon =
+        |p: std::path::PathBuf| crate::source::cdc::checkpoint_identity::canonical_place(&p);
+    cfg.exports
+        .iter()
+        .filter(|e| e.cdc.is_some())
+        .map(|e| {
+            let ckpt = e
+                .cdc
+                .as_ref()
+                .and_then(|c| c.checkpoint.as_deref())
+                .map(|raw| canon(crate::source::cdc::resolve_checkpoint(raw, dir)));
+            let d = &e.destination;
+            let place = match &d.path {
+                Some(p) => canon(dir.join(p)).display().to_string(),
+                None => format!(
+                    "{:?}://{}/{}",
+                    d.destination_type,
+                    d.bucket.as_deref().unwrap_or(""),
+                    d.prefix.as_deref().unwrap_or("").trim_end_matches('/')
+                ),
+            };
+            (e.name.clone(), ckpt, place)
+        })
+        .collect()
+}
+
+/// Refuse a scaffold whose CDC checkpoint already exists, or whose checkpoint or destination
+/// another config in the same directory names: two streams on one checkpoint each skip what the
+/// other read, and on one destination they mix their runs. Nothing is written.
+fn refuse_cdc_names_taken(path: &str, text: &str) -> Result<()> {
+    let Ok(mine) = crate::config::Config::from_yaml(text) else {
+        return Ok(());
+    };
+    let out = std::path::Path::new(path);
+    let dir = out
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let taken = |what: String| {
+        crate::error::coded(
+            crate::error::codes::INIT_CDC_NAME_TAKEN,
+            format!(
+                "init: {what}. Nothing was written. Write the config under another `-o` name: \
+                 `-o <other>.yaml` names its checkpoint and destination after the file"
+            ),
+        )
+    };
+    let ours = cdc_places(&mine, dir);
+    let siblings = std::fs::read_dir(dir).into_iter().flatten().flatten();
+    for entry in siblings {
+        let other = entry.path();
+        let yaml = other.extension().is_some_and(|x| x == "yaml" || x == "yml");
+        if !yaml || other.file_name() == out.file_name() {
+            continue;
+        }
+        let Ok(cfg) = crate::config::Config::load(&other.display().to_string()) else {
+            continue;
+        };
+        for (theirs, ckpt, place) in cdc_places(&cfg, dir) {
+            for (export, my_ckpt, my_place) in &ours {
+                if my_ckpt.is_some() && my_ckpt == &ckpt {
+                    return Err(taken(format!(
+                        "export '{export}' would share its CDC checkpoint with export '{theirs}' \
+                         of '{}'",
+                        other.display()
+                    )));
+                }
+                if my_place == &place {
+                    return Err(taken(format!(
+                        "export '{export}' would share its CDC destination `{place}` with export \
+                         '{theirs}' of '{}'",
+                        other.display()
+                    )));
+                }
+            }
+        }
+    }
+    for (export, ckpt, _) in &ours {
+        if let Some(c) = ckpt.as_ref().filter(|c| c.exists()) {
+            let owner = crate::source::cdc::checkpoint_identity::owner_of(c).map_or_else(
+                || "a stream of an earlier config".to_string(),
+                |o| {
+                    let gone = match std::path::Path::new(&o.config).exists() {
+                        true => "",
+                        false => ", moved or deleted since",
+                    };
+                    format!("export '{}' of '{}'{gone}", o.export, o.config)
+                },
+            );
+            return Err(taken(format!(
+                "export '{export}' would keep its CDC position in '{}', which already exists: \
+                 the checkpoint of {owner}",
+                c.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Write the scaffold to `-o <path>`, naming the path + cause on failure. The
@@ -2908,6 +3034,7 @@ mod tests {
             clickhouse_user: None,
             snowflake: None,
             cdc_name_stem: None,
+            azure: None,
         };
         let yaml = yaml_scaffold::generate_config(
             &info,
@@ -3065,6 +3192,7 @@ mod tests {
             clickhouse_user: None,
             snowflake: None,
             cdc_name_stem: None,
+            azure: None,
         };
         let yaml = yaml_scaffold::generate_config(
             &info,
@@ -3099,6 +3227,7 @@ mod tests {
             clickhouse_user: None,
             snowflake: None,
             cdc_name_stem: None,
+            azure: None,
         };
         let yaml = yaml_scaffold::generate_config(
             &info,
@@ -3138,6 +3267,7 @@ mod tests {
             clickhouse_user: None,
             snowflake: None,
             cdc_name_stem: None,
+            azure: None,
         };
         let yaml = yaml_scaffold::generate_config(
             &info,
@@ -3166,6 +3296,7 @@ mod tests {
             clickhouse_user: None,
             snowflake: None,
             cdc_name_stem: None,
+            azure: None,
         };
         let err = dest.validate().expect_err("conflict must be rejected");
         let msg = format!("{err}");
@@ -3173,6 +3304,125 @@ mod tests {
             msg.contains("--gcs-bucket") && msg.contains("--s3-bucket"),
             "expected conflict diagnostic, got: {msg}"
         );
+    }
+
+    /// `--azure-container` writes an Azure destination that names the container, the account and
+    /// the env var of the key, never a key, and the endpoint only when one was given.
+    #[test]
+    fn an_azure_scaffold_names_its_container_account_and_key_env_and_no_secret() {
+        let info = make_table(
+            2_000_000,
+            vec![col("id", "bigint", true), col("name", "text", false)],
+        );
+        let at = |endpoint: Option<&str>| InitYamlDestination {
+            azure: Some(InitAzureTarget {
+                container: "rivet-c".into(),
+                account: "acct".into(),
+                endpoint: endpoint.map(str::to_string),
+            }),
+            ..Default::default()
+        };
+        let scaffold = |dest: &InitYamlDestination| {
+            let yaml = yaml_scaffold::generate_config(
+                &info,
+                "postgresql://localhost/db",
+                &super::SourceProvenance::Inline,
+                dest,
+                None,
+                None,
+            )
+            .unwrap();
+            let cfg =
+                crate::config::Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:#}\n{yaml}"));
+            (cfg.exports[0].destination.clone(), yaml)
+        };
+        let (d, yaml) = scaffold(&at(Some("http://127.0.0.1:10000/devstoreaccount1")));
+        assert_eq!(
+            d.destination_type,
+            crate::config::DestinationType::Azure,
+            "{yaml}"
+        );
+        assert_eq!(
+            (
+                d.bucket.as_deref(),
+                d.prefix.as_deref(),
+                d.account_name.as_deref(),
+                d.account_key_env.as_deref(),
+                d.sas_token_env.as_deref(),
+                d.endpoint.as_deref(),
+            ),
+            (
+                Some("rivet-c"),
+                Some("exports/orders/"),
+                Some("acct"),
+                Some("AZURE_STORAGE_KEY"),
+                None,
+                Some("http://127.0.0.1:10000/devstoreaccount1"),
+            ),
+            "{yaml}"
+        );
+        assert!(!d.allow_anonymous, "{yaml}");
+        let (d, yaml) = scaffold(&at(None));
+        assert_eq!(d.endpoint, None, "derived from the account: {yaml}");
+    }
+
+    /// Each destination kind alone is a bucket scaffold; none is a local one.
+    #[test]
+    fn each_bucket_flag_alone_makes_a_bucket_scaffold() {
+        let azure = InitYamlDestination {
+            azure: Some(InitAzureTarget {
+                container: "c".into(),
+                account: "a".into(),
+                endpoint: None,
+            }),
+            ..Default::default()
+        };
+        let gcs = InitYamlDestination {
+            gcs_bucket: Some("g".into()),
+            ..Default::default()
+        };
+        let s3 = InitYamlDestination {
+            s3_bucket: Some("s".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            [&azure, &gcs, &s3, &InitYamlDestination::default()].map(|d| d.is_bucket()),
+            [true, true, true, false]
+        );
+    }
+
+    #[test]
+    fn validate_refuses_azure_beside_another_bucket() {
+        let azure = Some(InitAzureTarget {
+            container: "c".into(),
+            account: "a".into(),
+            endpoint: None,
+        });
+        for dest in [
+            InitYamlDestination {
+                gcs_bucket: Some("g".into()),
+                azure: azure.clone(),
+                ..Default::default()
+            },
+            InitYamlDestination {
+                s3_bucket: Some("s".into()),
+                azure: azure.clone(),
+                ..Default::default()
+            },
+        ] {
+            let err = dest.validate().expect_err("two destinations");
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_CLI_OPTION_UNSUPPORTED")
+            );
+            assert!(format!("{err}").contains("--azure-container"), "{err}");
+        }
+        InitYamlDestination {
+            azure,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
     }
 
     /// Two listings of one catalog in different orders scaffold one order.
@@ -3654,5 +3904,53 @@ mod explicit_state_tests {
             assert!(super::require_explicit_state(gone, true).is_err());
         }
         super::require_explicit_state(gone, false).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cdc_names_taken_tests {
+    /// A one-table MySQL CDC config whose checkpoint is `ckpt` and whose destination is `out`.
+    fn cdc_yaml(ckpt: &str, out: &str) -> String {
+        format!(
+            "source:\n  type: mysql\n  url: \"mysql://u:p@localhost/app\"\nexports:\n  - name: orders_cdc\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: {ckpt}\n      \
+             server_id: 4300\n    destination: {{ type: local, path: {out} }}\n"
+        )
+    }
+
+    /// A scaffold is refused, writing nothing, when its checkpoint exists or a sibling config
+    /// names its checkpoint or its destination; one that shares neither is written.
+    #[test]
+    fn a_scaffold_naming_another_streams_checkpoint_or_destination_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |f: &str| dir.path().join(f).display().to_string();
+        let mine = cdc_yaml("./cdc/b.ckpt", "./output/b/");
+        assert!(super::refuse_cdc_names_taken(&at("b.yaml"), &mine).is_ok());
+        std::fs::write(at("a.yaml"), cdc_yaml("./cdc/b.ckpt", "./output/a/")).unwrap();
+        let shared_ckpt = super::refuse_cdc_names_taken(&at("b.yaml"), &mine).unwrap_err();
+        std::fs::write(at("a.yaml"), cdc_yaml("./cdc/a.ckpt", "./output/b/")).unwrap();
+        let shared_dest = super::refuse_cdc_names_taken(&at("b.yaml"), &mine).unwrap_err();
+        std::fs::write(at("a.yaml"), cdc_yaml("./cdc/a.ckpt", "./output/a/")).unwrap();
+        assert!(super::refuse_cdc_names_taken(&at("b.yaml"), &mine).is_ok());
+        // A `.yml` sibling is a config too; a file of another kind, or this one itself, is not.
+        std::fs::write(at("c.yml"), cdc_yaml("./cdc/b.ckpt", "./output/c/")).unwrap();
+        let yml = super::refuse_cdc_names_taken(&at("b.yaml"), &mine).unwrap_err();
+        assert!(format!("{yml:#}").contains("c.yml"), "{yml:#}");
+        std::fs::remove_file(at("c.yml")).unwrap();
+        std::fs::write(at("c.txt"), cdc_yaml("./cdc/b.ckpt", "./output/c/")).unwrap();
+        std::fs::write(at("b.yaml"), &mine).unwrap();
+        assert!(super::refuse_cdc_names_taken(&at("b.yaml"), &mine).is_ok());
+        std::fs::remove_file(at("b.yaml")).unwrap();
+        std::fs::create_dir_all(dir.path().join("cdc")).unwrap();
+        std::fs::write(dir.path().join("cdc/b.ckpt"), "{}").unwrap();
+        let exists = super::refuse_cdc_names_taken(&at("b.yaml"), &mine).unwrap_err();
+        for (err, says) in [
+            (shared_ckpt, "share its CDC checkpoint"),
+            (shared_dest, "share its CDC destination"),
+            (exists, "already exists"),
+        ] {
+            crate::error::assert_coded(&err, "RIVET_INIT_CDC_NAME_TAKEN", 5);
+            assert!(format!("{err:#}").contains(says), "{err:#}");
+        }
     }
 }

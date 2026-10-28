@@ -282,7 +282,7 @@ jobs:
           key: mutants-outcomes-v2-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
       # Prebuilt binaries: `cargo install` compiled cargo-mutants from source
       # on every cold cache (68s on PR #314).
-      - uses: taiki-e/install-action@v2.87.25
+      - uses: taiki-e/install-action@v2.87.28
         if: steps.scope.outputs.code == 'true'
         with:
           tool: cargo-mutants,cargo-llvm-cov
@@ -547,7 +547,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: mutants
-      - uses: taiki-e/install-action@v2.87.25
+      - uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-mutants
       - uses: actions/download-artifact@v8
@@ -844,7 +844,7 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         with:
           key: mutants
-      - uses: taiki-e/install-action@v2.87.25
+      - uses: taiki-e/install-action@v2.87.28
         if: steps.scope.outputs.code == 'true'
         with:
           tool: cargo-mutants
@@ -1297,14 +1297,22 @@ jobs:
       # have to be true.
       - name: The harness metrics say `unknown`, not `zero`
         run: python3 .github/scripts/harness_metrics.py --self-test
+      - name: The E2E scope skips only docs and E2E-unused harness (self-test)
+        run: python3 .github/scripts/e2e_scope.py --self-test
+      - name: Every selected E2E test lands in exactly one leg (self-test)
+        run: python3 .github/scripts/e2e_legs.py --self-test
       # `--self-test` returns before any stage, container or binary is touched —
       # it grades the argv/env coercion only, so this invocation needs no
       # RIVET_PREV_RELEASE_BIN and is not a gate run (cf. the Makefile-scoped
       # entry-point guard in tests/offline/release_oracle_entrypoint_guard.rs).
       - name: The release oracle's env-flag grammar is one grammar
         run: python3 -m dev.release_oracle --self-test
+      - name: Release tagging refuses a commit without a green full gate (self-test)
+        run: python3 dev/pytools/release.py --self-test
+      - name: The Homebrew formula installs the Linux build Homebrew's image can run (self-test)
+        run: python3 dev/pytools/homebrew_formula.py --self-test
       # uv: the rig oracle's self-test writes and reads parquet through the pinned duckdb/pyarrow.
-      - uses: taiki-e/install-action@v2.87.25
+      - uses: taiki-e/install-action@v2.87.28
         with:
           tool: uv
       - name: The value canon and the rig oracle's graders self-test
@@ -1412,8 +1420,40 @@ jobs:
   # nextest archive; `e2e` runs four legs on a full stack each (`pre`: the small suites, once;
   # `i/N`: one partition of the live sweep); `e2e-matrix` carries the required check name and
   # grades the censuses over the union of the legs' logs.
+  # Which E2E this PR needs (.github/scripts/e2e_scope.py): `skip` only when every changed path is
+  # documentation no test or source reads, or harness the E2E lane never uses; anything else, an
+  # unclassified path or an empty diff included, is the full E2E. A push and the merge queue always
+  # run it in full. A skipped PR still reports every required E2E check, as `e2e-skipped` below.
+  e2e-scope:
+    name: E2E scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+      reason: ${{ steps.scope.outputs.reason }}
+      filter: ${{ steps.scope.outputs.filter }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Classify the changed paths
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            { echo scope=full; echo "reason=a $EVENT runs the full E2E"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A base that cannot be read is never a docs-only PR: the step fails and E2E matrix with it.
+          git cat-file -e "$BASE" 2>/dev/null || git fetch --no-tags origin "$BASE"
+          python3 .github/scripts/e2e_scope.py --base "$BASE" --head HEAD | tee -a "$GITHUB_OUTPUT"
+
   e2e-build:
     name: E2E build (nextest archive)
+    needs: e2e-scope
+    if: needs.e2e-scope.outputs.scope != 'skip'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1427,7 +1467,7 @@ jobs:
         with:
           # One cache for this job and the `pre` leg below, saved here only.
           shared-key: e2e-debug
-      - uses: taiki-e/install-action@v2.87.25
+      - uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-nextest
       - name: Build rivet and every test binary (debug), once
@@ -1437,6 +1477,31 @@ jobs:
           cargo nextest archive --archive-file "$RUNNER_TEMP/e2e-nextest.tar.zst"
           ls -l "$RUNNER_TEMP/e2e-nextest.tar.zst"
           df -h /
+      - name: Leg lists by measured duration
+        # On a PR, the live sweep is split over the legs by the per-test durations the last full
+        # main run measured (its legs upload their junit.xml), longest first into the lightest leg,
+        # every test in exactly one leg (.github/scripts/e2e_legs.py). No timings, no file: the legs
+        # fall back to nextest's count partition.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILTER: ${{ needs.e2e-scope.outputs.filter }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/junit"
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow CI --branch main --event push --status success -L 1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$run" ] && gh run download "$run" --repo "$GITHUB_REPOSITORY" -p 'e2e-junit-*' -D "$RUNNER_TEMP/junit" || true
+          cargo nextest list --archive-file "$RUNNER_TEMP/e2e-nextest.tar.zst" --run-ignored only \
+            ${FILTER:+-E "$FILTER"} --message-format json > "$RUNNER_TEMP/e2e-list.json"
+          python3 .github/scripts/e2e_legs.py --list "$RUNNER_TEMP/e2e-list.json" --junit "$RUNNER_TEMP/junit" \
+            --legs 3 --out "$RUNNER_TEMP/e2e-legs.json"
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'pull_request'
+        with:
+          name: e2e-legs
+          path: ${{ runner.temp }}/e2e-legs.json
+          if-no-files-found: ignore
+          retention-days: 1
       - uses: actions/upload-artifact@v7
         with:
           name: e2e-nextest-archive
@@ -1447,7 +1512,7 @@ jobs:
 
   e2e:
     name: E2E (${{ matrix.leg }})
-    needs: e2e-build
+    needs: [e2e-scope, e2e-build]
     runs-on: ubuntu-latest
     # A leg takes ~20 minutes; anything near this bound is a hang, not a slow run.
     timeout-minutes: 60
@@ -1507,7 +1572,7 @@ jobs:
           shared-key: e2e-debug
           save-if: false
       # uv runs the rig's default oracle (dev/release_oracle/rig_oracle.py, pinned by uv.lock).
-      - uses: taiki-e/install-action@v2.87.25
+      - uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-nextest,uv
 
@@ -1533,6 +1598,12 @@ jobs:
         with:
           name: e2e-nextest-archive
           path: ${{ runner.temp }}
+      - uses: actions/download-artifact@v8
+        if: ${{ matrix.leg != 'pre' && github.event_name == 'pull_request' }}
+        continue-on-error: true
+        with:
+          name: e2e-legs
+          path: ${{ runner.temp }}/legs
 
       - name: Services are up
         # A hung `compose up` (an image pull that never returns) used to hold this step for the
@@ -1754,22 +1825,42 @@ jobs:
         # `open_defect_` is the one term for every cell that pins an OPEN product defect:
         # it asserts the correct behaviour, so it fails until the fix lands, and only the
         # release gate can read that as an acknowledged red (dev/release_oracle/known_red.py).
-        run: >-
-          cargo nextest run --archive-file "$RUNNER_TEMP/e2e-nextest.tar.zst"
-          --extract-to "$GITHUB_WORKSPACE" --extract-overwrite
-          --profile pr --run-ignored only --partition count:${{ matrix.leg }}
-          -- --skip content_export --skip validates --skip edge_cases
-          --skip via_duckdb --skip mongo --skip warehouse_cell
-          --skip readable_secondary --skip mssql_checkpoint_follows_a_failover
-          --skip mssql_checkpoint_from_another_database --skip from_a_standby
-          --skip failover_to_the_standby --skip bounded_on_a_standby --skip on_a_standby
-          --skip doctor_is_not_green_where_the_cdc_run_refuses_a_replica
-          --skip loads_into_bigquery_or_refuses_by_column
-          --skip cleanup_source_never_deletes_parts --skip compact_after_a_source_alter
-          --skip a_non_unicode_database_round_trips
-          --skip range_chunk_shared_name_another_source_oracle
-          --skip a_read_blocked_longer_than_thirty_seconds_still_completes
+        #
+        # `FILTER` (from `e2e-scope`, empty on a full run) narrows the live_suite binary to the live
+        # modules that exercise the engine, target or destination a PR changed.
+        env:
+          FILTER: ${{ needs.e2e-scope.outputs.filter }}
+          LEG: ${{ matrix.leg }}
+        shell: bash
+        run: |
+          # This leg's measured list when e2e-build wrote one; else nextest's count partition.
+          legs="$RUNNER_TEMP/legs/e2e-legs.json"
+          expr=$( [ -f "$legs" ] && python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$legs" "$LEG" || true )
+          if [ -n "$expr" ]; then sel=(-E "$expr"); echo "leg $LEG: measured list"; else
+            sel=(--partition "count:$LEG" ${FILTER:+-E "$FILTER"}); echo "leg $LEG: count partition"; fi
+          cargo nextest run --archive-file "$RUNNER_TEMP/e2e-nextest.tar.zst" \
+          --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
+          --profile pr --run-ignored only "${sel[@]}" \
+          -- --skip content_export --skip validates --skip edge_cases \
+          --skip via_duckdb --skip mongo --skip warehouse_cell \
+          --skip readable_secondary --skip mssql_checkpoint_follows_a_failover \
+          --skip mssql_checkpoint_from_another_database --skip from_a_standby \
+          --skip failover_to_the_standby --skip bounded_on_a_standby --skip on_a_standby \
+          --skip doctor_is_not_green_where_the_cdc_run_refuses_a_replica \
+          --skip loads_into_bigquery_or_refuses_by_column \
+          --skip cleanup_source_never_deletes_parts --skip compact_after_a_source_alter \
+          --skip a_non_unicode_database_round_trips \
+          --skip range_chunk_shared_name_another_source_oracle \
+          --skip a_read_blocked_longer_than_thirty_seconds_still_completes \
           --skip open_defect_
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && github.event_name == 'push' && matrix.leg != 'pre' }}
+        with:
+          name: e2e-junit-${{ strategy.job-index }}
+          path: target/nextest/pr/junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Kernel OOM kills (on failure)
         # A process the kernel kills leaves no stderr of its own; the kernel log names it.
@@ -1798,11 +1889,29 @@ jobs:
         if: always()
         run: docker compose down
 
+  # A PR the scope skipped reports each leg's required check name as a success that says why.
+  e2e-skipped:
+    name: E2E (${{ matrix.leg }})
+    needs: e2e-scope
+    if: needs.e2e-scope.outputs.scope == 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        leg: [pre, 1/3, 2/3, 3/3]
+    steps:
+      - name: Skipped by scope
+        env:
+          REASON: ${{ needs.e2e-scope.outputs.reason }}
+        run: |
+          echo "skipped: $REASON"
+          echo "### E2E (${{ matrix.leg }}) skipped: $REASON" >> "$GITHUB_STEP_SUMMARY"
+
   # The REQUIRED check (branch protection knows this name). `always()`: a job skipped by a failed
   # `needs` counts as passing for a required check, so this one runs and fails instead.
   e2e-matrix:
     name: E2E matrix
-    needs: e2e
+    needs: [e2e-scope, e2e]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1810,19 +1919,28 @@ jobs:
       - name: Every leg passed
         # `needs.<matrix job>.result` is `success` only when every leg succeeded: a failed,
         # cancelled or skipped leg (a failed build skips them all) fails the check.
+        env:
+          SCOPE: ${{ needs.e2e-scope.outputs.scope }}
+          REASON: ${{ needs.e2e-scope.outputs.reason }}
         run: |
+          # Only a scope that SAID skip lets the legs be skipped; a failed scope job says nothing.
+          if [ "${{ needs.e2e-scope.result }}" = success ] && [ "$SCOPE" = skip ]; then
+            echo "skipped: $REASON"
+            echo "### E2E skipped: $REASON" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           echo "e2e legs: ${{ needs.e2e.result }}"
           [ "${{ needs.e2e.result }}" = success ]
       - uses: actions/checkout@v7
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.e2e-scope.outputs.scope != 'skip' }}
       - uses: actions/download-artifact@v8
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.e2e-scope.outputs.scope != 'skip' }}
         with:
           pattern: e2e-logs-*
           path: e2e-logs
       - name: One log of the whole matrix
         # The ceilings below are totals of the whole E2E check, so the censuses read the legs' logs as one.
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.e2e-scope.outputs.scope != 'skip' }}
         run: |
           mkdir -p target
           cat e2e-logs/*/rivet-skips.log > target/rivet-skips.log
@@ -1836,7 +1954,7 @@ jobs:
         # so a reader sees what this job does NOT grade. Any other self-skip is a test this job was to
         # run and did not. (Before this step 10 of the 11 live_pg_state tests, among others, passed here
         # in 0.00 s with no record at all; measured 2026-10-02.)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.e2e-scope.outputs.scope != 'skip' }}
         env:
           # One prerequisite per line; a skip whose reason names it is explained.
           LACKING: |
@@ -1847,6 +1965,7 @@ jobs:
             pg18-batch (:5518)
             RIVET_PREV_RELEASE_BIN
             RIVET_MIGRATION_CARRIER_BIN
+            RIVET_LEASE_CARRIER_BIN
             macOS `hdiutil`
             RIVET_GATE_STATE_URL
           # BIGQUERY_TEST_PROJECT / SNOWFLAKE_TEST_CONNECTION: no warehouse credentials here (same as
@@ -1857,6 +1976,7 @@ jobs:
           # pg18-batch: a service this job's compose line does not start.
           # RIVET_PREV_RELEASE_BIN: no downloaded previous release here; the `versions_*` sabotage cells run in the gate.
           # RIVET_MIGRATION_CARRIER_BIN: nor the pinned older-schema release; the cells that migrate from it run in the gate.
+          # RIVET_LEASE_CARRIER_BIN: nor the pinned lease-era release; the cells that run it beside this build run in the gate.
           # macOS `hdiutil`: the volume-full sabotage cells mount a disk image; a Linux tmpfs needs root.
           # RIVET_GATE_STATE_URL: unset here by design (see the job env); the cells that need the Rig itself on a
           #   Postgres state (a run lease held as a row) run in the gate's Postgres-state pass.
@@ -1868,8 +1988,10 @@ jobs:
       - name: Rig oracle verdict census
         # A passing test's stderr is hidden, so the verdict log is the only proof the oracle ran. The
         # ceilings are skip_census.VERDICT_CEILINGS, the table the release gate's oracle_verdict_census
-        # cell reads too; each count must land within its noise of the ceiling, both ways.
-        if: ${{ !cancelled() }}
+        # cell reads too; each count must land within its noise of the ceiling, both ways. The
+        # ceilings are totals of the WHOLE matrix, so a run the scope narrowed to some live modules
+        # (`select`) cannot reach them and is not graded here; it is graded on the next full run.
+        if: ${{ !cancelled() && needs.e2e-scope.outputs.scope == 'full' }}
         run: python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci
 
 
@@ -1887,7 +2009,7 @@ jobs:
       # MSSQL driver's unavoidable tiberius→rustls-0.21 advisories failed the
       # gate; documenting + tracking them in one place keeps the gate green
       # while still catching every *fixable* future advisory.
-      - uses: taiki-e/install-action@v2.87.25
+      - uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-audit
       - run: cargo audit

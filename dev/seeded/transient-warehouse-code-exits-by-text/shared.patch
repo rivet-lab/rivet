@@ -1,0 +1,13 @@
+diff --git a/src/error.rs b/src/error.rs
+index d874dad0..0730f6b7 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -1205,7 +1205,7 @@ pub mod codes {
+         "read the warehouse's reason in the message and fix what it names, then re-run",
+     );
+     /// The warehouse kept answering with a transient failure, or a job failed with a reason it documents as retryable.
+-    pub const LOAD_WAREHOUSE_UNAVAILABLE: Code = transient(
++    pub const LOAD_WAREHOUSE_UNAVAILABLE: Code = environment(
+         "RIVET_LOAD_WAREHOUSE_UNAVAILABLE",
+         "re-run the same command later; the warehouse failed with a transient error (HTTP 5xx or 429, or a job reason it documents as retryable) that rivet's retries did not outlast",
+     );

@@ -240,7 +240,7 @@ pub(super) fn scaffold_schema(
         });
     }
 
-    let dest_note = if dest.gcs_bucket.is_some() || dest.s3_bucket.is_some() {
+    let dest_note = if dest.is_bucket() {
         "# One export per table/view — per-table prefix `exports/<name>/` under the given bucket; review modes before running."
     } else {
         "# One export per table/view — review modes and destinations before running."
@@ -456,8 +456,39 @@ fn export_segment(info: &TableInfo, source_type: &str) -> String {
 /// sharing the batch prefix clobbers its `manifest.json`/`_SUCCESS` (finding
 /// #44), and nesting inside it (`exports/<table>/cdc/`, through 0.32.0) put the
 /// stream's runs under every recursive read of the batch prefix.
-fn table_export_prefix(info: &TableInfo, source_type: &str, mode: &str) -> String {
-    format!("exports/{}/", mode_segment(info, source_type, mode))
+fn table_export_prefix(
+    info: &TableInfo,
+    source_type: &str,
+    mode: &str,
+    stem: Option<&str>,
+) -> String {
+    format!("exports/{}", export_dir(info, source_type, mode, stem))
+}
+
+/// `<segment>/` of `mode`, under `<stem>/` for a CDC export of an `-o` config: two configs of one
+/// table name their own stream's directory, as they name their own checkpoint.
+fn export_dir(info: &TableInfo, source_type: &str, mode: &str, stem: Option<&str>) -> String {
+    let seg = format!("{}/", mode_segment(info, source_type, mode));
+    match mode {
+        "cdc" => stem_dir(stem, &seg),
+        _ => seg,
+    }
+}
+
+/// `dir` under `<stem>/` when an `-o` stem names the config.
+fn stem_dir(stem: Option<&str>, dir: &str) -> String {
+    match stem {
+        Some(s) => format!("{s}/{dir}"),
+        None => dir.to_string(),
+    }
+}
+
+/// `name` prefixed with the `-o` stem (`<stem>_<name>`), so two configs never name one checkpoint.
+fn stemmed(stem: Option<&str>, name: &str) -> String {
+    match stem {
+        Some(s) => format!("{s}_{name}"),
+        None => name.to_string(),
+    }
 }
 
 /// The per-export path segment of `mode`: [`export_segment`], with `_cdc` for a CDC export.
@@ -1235,7 +1266,7 @@ fn cdc_export_lines(
             // checkpoint re-reads the ENTIRE retained change table every run.
             "      checkpoint: ./cdc/{}.ckpt  # resume position; keep it (semantics of \
 omitting differ per engine — see cdc.md)",
-            ident
+            stemmed(dest.cdc_name_stem.as_deref(), ident)
         ),
         BOUNDED_DRAIN_LINE.to_string(),
     ];
@@ -1349,7 +1380,8 @@ fn cdc_multiplex_export_lines(
         // stream (the same id on two exports is the collision this avoids).
         "mysql" => {
             lines.push(format!(
-                "      checkpoint: ./cdc/{name}.ckpt  # one resume position for the whole stream"
+                "      checkpoint: ./cdc/{}.ckpt  # one resume position for the whole stream",
+                stemmed(dest.cdc_name_stem.as_deref(), &name)
             ));
             lines.push(format!(
                 "      server_id: {}  # ONE replica id for the stream{}; source needs binlog_format=ROW + REPLICATION SLAVE and REPLICATION CLIENT grants",
@@ -1364,7 +1396,8 @@ fn cdc_multiplex_export_lines(
         )),
         // Like MySQL, the anchor is client-side: the checkpoint is the resume position.
         "oracle" => lines.push(format!(
-            "      checkpoint: ./cdc/{name}.ckpt  # one resume position for the whole stream; every table needs ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS"
+            "      checkpoint: ./cdc/{}.ckpt  # one resume position for the whole stream; every table needs ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS",
+            stemmed(dest.cdc_name_stem.as_deref(), &name)
         )),
         _ => {}
     }
@@ -1410,37 +1443,23 @@ fn cdc_multiplex_load_lines(infos: &[TableInfo], dest: &InitYamlDestination) -> 
 /// stream itself appends `<table>/`, so `cdc/` becomes `cdc/orders/`,
 /// `cdc/users/`, … each with its own `manifest.json` + `_SUCCESS`.
 fn cdc_multiplex_destination(dest: &InitYamlDestination) -> Vec<String> {
-    if let Some(bucket) = &dest.gcs_bucket {
-        let mut v = vec![
-            "    destination:".to_string(),
-            "      type: gcs".to_string(),
-            format!("      bucket: {}", yaml_quote_if_needed(bucket)),
-            "      prefix: cdc/".to_string(),
-        ];
-        if let Some(p) = &dest.gcs_credentials_file {
-            v.push(format!(
-                "      credentials_file: {}",
-                yaml_quote_if_needed(p)
-            ));
-        }
-        v
-    } else if let Some(bucket) = &dest.s3_bucket {
-        let mut v = vec![
-            "    destination:".to_string(),
-            "      type: s3".to_string(),
-            format!("      bucket: {}", yaml_quote_if_needed(bucket)),
-            "      prefix: cdc/".to_string(),
-        ];
-        if let Some(r) = &dest.s3_region {
-            v.push(format!("      region: {}", yaml_quote_if_needed(r)));
-        }
+    if let Some(v) = bucket_destination(dest, &stem_dir(dest.cdc_name_stem.as_deref(), "cdc/")) {
         v
     } else {
         vec![
             "    destination:".to_string(),
             "      type: local".to_string(),
-            "      # each table lands under ./output/cdc/<table>/ (manifest.json + _SUCCESS per table)".to_string(),
-            "      path: ./output/cdc/".to_string(),
+            format!(
+                "      # each table lands under ./output/{}<table>/ (manifest.json + _SUCCESS per table)",
+                stem_dir(dest.cdc_name_stem.as_deref(), "cdc/")
+            ),
+            format!(
+                "      path: {}",
+                yaml_quote_if_needed(&format!(
+                    "./output/{}",
+                    stem_dir(dest.cdc_name_stem.as_deref(), "cdc/")
+                ))
+            ),
         ]
     }
 }
@@ -1575,33 +1594,8 @@ fn destination_scaffold(
     dest: &InitYamlDestination,
     mode: &str,
 ) -> Vec<String> {
-    let prefix = yaml_quote_if_needed(&table_export_prefix(info, source_type, mode));
-    if let Some(bucket) = &dest.gcs_bucket {
-        let bucket = yaml_quote_if_needed(bucket);
-        let mut v = vec![
-            "    destination:".to_string(),
-            "      type: gcs".to_string(),
-            format!("      bucket: {bucket}"),
-            format!("      prefix: {prefix}"),
-        ];
-        if let Some(p) = &dest.gcs_credentials_file {
-            v.push(format!(
-                "      credentials_file: {}",
-                yaml_quote_if_needed(p)
-            ));
-        }
-        v
-    } else if let Some(bucket) = &dest.s3_bucket {
-        let bucket = yaml_quote_if_needed(bucket);
-        let mut v = vec![
-            "    destination:".to_string(),
-            "      type: s3".to_string(),
-            format!("      bucket: {bucket}"),
-            format!("      prefix: {prefix}"),
-        ];
-        if let Some(r) = &dest.s3_region {
-            v.push(format!("      region: {}", yaml_quote_if_needed(r)));
-        }
+    let stem = dest.cdc_name_stem.as_deref();
+    if let Some(v) = bucket_destination(dest, &table_export_prefix(info, source_type, mode, stem)) {
         v
     } else {
         // Per-export subdirectory (symmetric with the bucket prefixes above) so
@@ -1609,8 +1603,8 @@ fn destination_scaffold(
         // their manifest.json / _SUCCESS and makes a second run read a sibling's
         // parts (the scary double-count WARN).
         let path = yaml_quote_if_needed(&format!(
-            "./output/{}/",
-            mode_segment(info, source_type, mode)
+            "./output/{}",
+            export_dir(info, source_type, mode, stem)
         ));
         vec![
             "    destination:".to_string(),
@@ -1623,6 +1617,53 @@ fn destination_scaffold(
         ]
     }
 }
+
+/// The `destination:` block of a bucket scaffold (`--gcs-bucket`, `--s3-bucket`, `--azure-container`)
+/// under `prefix`, or `None` for a local one. No credential is written: GCS and S3 take their
+/// ambient credentials, Azure the name of the env var that holds the account key.
+fn bucket_destination(dest: &InitYamlDestination, prefix: &str) -> Option<Vec<String>> {
+    let head = |kind: &str, bucket: &str| {
+        vec![
+            "    destination:".to_string(),
+            format!("      type: {kind}"),
+            format!("      bucket: {}", yaml_quote_if_needed(bucket)),
+            format!("      prefix: {}", yaml_quote_if_needed(prefix)),
+        ]
+    };
+    if let Some(bucket) = &dest.gcs_bucket {
+        let mut v = head("gcs", bucket);
+        if let Some(p) = &dest.gcs_credentials_file {
+            v.push(format!(
+                "      credentials_file: {}",
+                yaml_quote_if_needed(p)
+            ));
+        }
+        Some(v)
+    } else if let Some(bucket) = &dest.s3_bucket {
+        let mut v = head("s3", bucket);
+        if let Some(r) = &dest.s3_region {
+            v.push(format!("      region: {}", yaml_quote_if_needed(r)));
+        }
+        Some(v)
+    } else if let Some(az) = &dest.azure {
+        let mut v = head("azure", &az.container);
+        v.push(format!(
+            "      account_name: {}",
+            yaml_quote_if_needed(&az.account)
+        ));
+        v.push(format!("      account_key_env: {AZURE_KEY_ENV}"));
+        v.push("      # or `sas_token_env: <VAR>` in its place, for a SAS token".to_string());
+        if let Some(e) = &az.endpoint {
+            v.push(format!("      endpoint: {}", yaml_quote_if_needed(e)));
+        }
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// The env var an Azure scaffold names for the account key: the one the `az` CLI reads.
+pub(crate) const AZURE_KEY_ENV: &str = "AZURE_STORAGE_KEY";
 
 /// Suggest `target_row_group_mb` based on column shape.
 /// Wide tables with many text/JSON columns get smaller groups so downstream
@@ -2718,6 +2759,14 @@ mod tests {
                 s3_bucket: Some("b".into()),
                 ..Default::default()
             },
+            InitYamlDestination {
+                azure: Some(crate::init::InitAzureTarget {
+                    container: "b".into(),
+                    account: "a".into(),
+                    endpoint: None,
+                }),
+                ..Default::default()
+            },
         ];
         for url in [
             "postgresql://u@localhost/db",
@@ -2848,6 +2897,61 @@ mod tests {
         assert_ne!(a, server_id(Some("prod"), 0));
     }
 
+    /// Every bucket kind (`--gcs-bucket`, `--s3-bucket`, `--azure-container`) puts a `-o` CDC scaffold under the file's stem.
+    #[test]
+    fn every_bucket_kind_puts_a_named_cdc_scaffold_under_its_stem() {
+        let info = make_table(vec![col("id", "bigint")]);
+        let kinds = [
+            InitYamlDestination {
+                gcs_bucket: Some("b".into()),
+                ..Default::default()
+            },
+            InitYamlDestination {
+                s3_bucket: Some("b".into()),
+                ..Default::default()
+            },
+            InitYamlDestination {
+                azure: Some(crate::init::InitAzureTarget {
+                    container: "b".into(),
+                    account: "a".into(),
+                    endpoint: None,
+                }),
+                ..Default::default()
+            },
+        ];
+        let places: Vec<Vec<String>> = kinds
+            .into_iter()
+            .map(|dest| {
+                let dest = InitYamlDestination {
+                    cdc_name_stem: Some("staging".into()),
+                    ..dest
+                };
+                let yaml = generate_config(
+                    &info,
+                    "postgresql://u@localhost/db",
+                    &crate::init::SourceProvenance::Inline,
+                    &dest,
+                    Some("cdc"),
+                    None,
+                )
+                .unwrap();
+                let places: Vec<String> = names_and_places(&yaml)
+                    .into_iter()
+                    .map(|(_, p)| p)
+                    .collect();
+                assert!(
+                    !places.is_empty() && places.iter().all(|p| p.contains("staging/")),
+                    "{places:?} not under the stem:\n{yaml}"
+                );
+                places
+            })
+            .collect();
+        assert!(
+            places.windows(2).all(|w| w[0] == w[1]),
+            "one prefix per bucket kind: {places:?}"
+        );
+    }
+
     /// `-o staging.yaml` names the stream objects after the file; stdout keeps the default names
     /// and says each is one per cluster.
     #[test]
@@ -2956,6 +3060,101 @@ mod tests {
             Some("time_window"),
             "got:\n{yaml}"
         );
+    }
+
+    /// A CDC scaffold written to `-o <stem>.yaml` names its checkpoint and its destination after
+    /// the stem, per table and for a whole schema, so two configs of one source never share either;
+    /// without a stem (stdout) the names stay as they were.
+    #[test]
+    fn a_cdc_scaffold_names_its_checkpoint_and_destination_after_the_output_file() {
+        let t = |name: &str| TableInfo {
+            cdc_capture_instance: None,
+            cdc_unmineable: None,
+            density: None,
+            schema: "app".into(),
+            table: name.into(),
+            row_estimate: 100,
+            total_bytes: None,
+            columns: vec![pk("id", "bigint")],
+        };
+        let staging = InitYamlDestination {
+            cdc_name_stem: Some("staging".into()),
+            ..Default::default()
+        };
+        let bucket = |stem: Option<&str>| InitYamlDestination {
+            cdc_name_stem: stem.map(str::to_string),
+            gcs_bucket: Some("b".into()),
+            ..Default::default()
+        };
+        let one = |dest: &InitYamlDestination| {
+            generate_config(
+                &t("orders"),
+                "mysql://u:p@localhost/app",
+                &crate::init::SourceProvenance::Inline,
+                dest,
+                Some("cdc"),
+                None,
+            )
+            .unwrap()
+        };
+        let named = one(&staging);
+        assert!(
+            named.contains("checkpoint: ./cdc/staging_orders.ckpt "),
+            "{named}"
+        );
+        assert!(
+            named.contains("path: ./output/staging/orders_cdc/"),
+            "{named}"
+        );
+        assert!(
+            one(&bucket(Some("staging"))).contains("prefix: exports/staging/orders_cdc/"),
+            "{}",
+            one(&bucket(Some("staging")))
+        );
+        let plain = one(&InitYamlDestination::default());
+        assert!(plain.contains("checkpoint: ./cdc/orders.ckpt "), "{plain}");
+        assert!(plain.contains("path: ./output/orders_cdc/"), "{plain}");
+        assert!(one(&bucket(None)).contains("prefix: exports/orders_cdc/"));
+        let schema = |dest: &InitYamlDestination| {
+            generate_schema_config(
+                &[t("orders"), t("invoices")],
+                "mysql://u:p@localhost/app",
+                &crate::init::SourceProvenance::Inline,
+                "MySQL database \"app\"",
+                dest,
+                Some("cdc"),
+                None,
+            )
+            .unwrap()
+        };
+        let named = schema(&staging);
+        assert!(
+            named.contains("checkpoint: ./cdc/staging_app_cdc.ckpt "),
+            "{named}"
+        );
+        assert!(named.contains("path: ./output/staging/cdc/"), "{named}");
+        assert!(schema(&bucket(Some("staging"))).contains("prefix: staging/cdc/"));
+        let plain = schema(&InitYamlDestination::default());
+        assert!(plain.contains("checkpoint: ./cdc/app_cdc.ckpt "), "{plain}");
+        assert!(plain.contains("path: ./output/cdc/"), "{plain}");
+        // An Oracle stream over several tables (one LogMiner window) names its one checkpoint after
+        // the stem too, and keeps the plain name without one.
+        let oracle = |dest: &InitYamlDestination| {
+            cdc_multiplex_export_lines(
+                &[t("orders"), t("invoices")],
+                "oracle",
+                dest,
+                &mut ScaffoldDecisions::default(),
+            )
+            .join("\n")
+        };
+        let named = oracle(&staging);
+        assert!(
+            named.contains("checkpoint: ./cdc/staging_app_cdc.ckpt "),
+            "{named}"
+        );
+        let plain = oracle(&InitYamlDestination::default());
+        assert!(plain.contains("checkpoint: ./cdc/app_cdc.ckpt "), "{plain}");
     }
 
     /// The whole-schema PostgreSQL stream names its one slot after the `-o` stem, and keeps the
@@ -3949,6 +4148,7 @@ mod load_block_tests {
             clickhouse_user: None,
             snowflake: None,
             cdc_name_stem: None,
+            azure: None,
         };
         assert!(
             load_block_lines(&bare, true, None, &mut ScaffoldDecisions::default()).is_empty(),
