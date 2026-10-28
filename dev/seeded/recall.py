@@ -240,8 +240,10 @@ class Cargo:
 
     def __init__(self, tree: Path, base: Path, state_url: str | None) -> None:
         self.tree, self.base = tree, base
+        # RIVET_ORACLE_LOG: the gate's census reads its own log; a seed run's verdict lines must not reach it.
         env = {k: v for k, v in os.environ.items()
-               if k not in ("RIVET_BIN", "RIVET_BIN_OVERRIDE", "RIVET_STATE_URL", "RIVET_TEST_STATE_URL")}
+               if k not in ("RIVET_BIN", "RIVET_BIN_OVERRIDE", "RIVET_STATE_URL", "RIVET_TEST_STATE_URL",
+                            "RIVET_ORACLE_LOG")}
         env["CARGO_TARGET_DIR"] = str(base / "target")
         # The cells run in the scratch tree: a binary the gate names relative to this checkout (`.gate-baseline/...`) is named from here.
         for k, v in list(env.items()):

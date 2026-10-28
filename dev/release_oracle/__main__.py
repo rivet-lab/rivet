@@ -42,6 +42,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -346,7 +347,6 @@ def _verdict_scope_self_test() -> None:
 def _lanes_self_test() -> None:
     """Lanes overlap, one lane's cells never do, rows flush in list order, a raise keeps every row; the upgrade
     cells sharing a source server share a lane; grading a load leaves the process environment alone."""
-    import threading
 
     both, busy, overlap = threading.Barrier(2, timeout=10), {"a": 0, "b": 0}, []
 
@@ -476,7 +476,41 @@ def _stage_table_self_test() -> None:
             "the release build path reads the committed lock before any other cargo stage"
     overlapping = [" + ".join(s.name for s in w) for w in waves(build_stages(parse_args([]), {}) + gate_stages(parse_args([])))
                    if len(w) > 1]
-    print(f"self-test ok: the stage table keeps every stage in order, measurement stages run alone; overlapping: {overlapping}")
+    measured_names = ["release regression", "perf regression", "source harm regression",
+                      "previous-release differential", "field symptom replay", "scale memory", "flat rss"]
+    for argv in (["--max-parallel", "--with-seeded-recall"], ["--max-parallel=2", "--no-cloud"]):
+        ns = parse_args(argv)
+        prefix, overlap, tail, measuring = maxpar_split(gate_stages(ns))
+        assert [s.name for s in measuring] == measured_names, [s.name for s in measuring]
+        assert [s.name for s in tail] == ["live modules"], [s.name for s in tail]
+        assert [s.name for s in prefix] == ["release build path", "release hygiene"], [s.name for s in prefix]
+        assert not [s.name for s in overlap if ALONE in s.needs], "a measuring stage is overlapped"
+        held = [s.name for s in overlap if (s.needs | s.uses) & SERIAL]
+        assert not held, f"under --max-parallel no overlapped stage holds the stand or cargo: {held}"
+        assert ("seeded recall" in {s.name for s in overlap}) == ("--with-seeded-recall" in argv), argv
+    active, seen = set(), []
+    lock = threading.Lock()
+
+    def body(name: str) -> Callable[[Ledger], None]:
+        def run(led: Ledger) -> None:
+            with lock:
+                active.add(name)
+                seen.append(frozenset(active))
+            time.sleep(0.05)
+            with lock:
+                active.discard(name)
+            led.passed("-", "-", name, "-", name)
+        return run
+
+    probe = Ledger(colour=False)
+    probe._buf = []
+    run_max_parallel(probe, [Stage("p", body("p"), frozenset({"x"})), Stage("q", body("q"), frozenset({"x"})),
+                             Stage("r", body("r"), frozenset({"y"}))], cap=3)
+    assert not any({"p", "q"} <= snap for snap in seen), f"two conflicting stages ran together: {seen}"
+    assert [c.scenario for c in probe.cells] == ["p", "q", "r"], [c.scenario for c in probe.cells]
+    print(f"self-test ok: the stage table keeps every stage in order, measurement stages run alone; overlapping: {overlapping}; "
+          f"--max-parallel puts {len(measured_names)} measuring stages last, alone, and never overlaps a named conflict "
+          f"(scheduler probe: {len(seen)} starts)")
 
 
 def _stages_self_test() -> None:
@@ -1029,6 +1063,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="also run the seeded-defect recall stage (dev/seeded): re-introduce each known bug class "
              "as a source patch in a scratch tree, build it, and require its catching cells to go red. "
              "On in `make release-oracle-full` (a run without it is a reduced gate); `make seeded-recall` runs it alone.")
+    ap.add_argument(
+        "--max-parallel", type=int, nargs="?", const=4, default=0, metavar="N",
+        help="experiment: every non-measuring stage overlaps on the one stand (at most N at once, default 4), "
+             "only the named collisions kept; seeded recall beside them; the measuring stages run last, alone.")
     ap.add_argument("--no-cloud", action="store_true", help="local stage only (skip BigQuery)")
     ap.add_argument("--keep", action="store_true", help="leave engine containers up (debug)")
     ap.add_argument(
@@ -1135,6 +1173,22 @@ STAND = "the stand's source servers"
 #: The test-profile build directory and the cores a compile takes.
 CARGO = "cargo"
 SERIAL = frozenset({STAND, CARGO})
+#: `--max-parallel`: the named collisions a stage can have on the one stand. Everything else on STAND/CARGO overlaps.
+#: toxiproxy proxies on the stand's ports: a toxic or a downed proxy hits every client of that proxy.
+TOXI = "the toxiproxy proxies"
+#: The stand's PostgreSQL max_replication_slots budget, shared by every CDC leg.
+SLOTS = "the replication-slot budget"
+#: The ClickHouse engine locks that init delta and clickhouse load queue on.
+INIT_LOCKS = "the ClickHouse engine locks"
+MAXPAR_HOLDS: dict[str, frozenset[str]] = {
+    "network faults": frozenset({TOXI}), "pool e2e": frozenset({TOXI}), "transient retry": frozenset({TOXI}),
+    "seeded recall": frozenset({TOXI, SLOTS}),
+    "cdc standby": frozenset({SLOTS}), "cdc e2e": frozenset({SLOTS}), "cdc differential": frozenset({SLOTS}),
+    "cdc harm": frozenset({SLOTS}), "cdc schema drift": frozenset({SLOTS}), "engine matrix": frozenset({SLOTS}),
+    "init delta": frozenset({INIT_LOCKS}), "clickhouse load": frozenset({INIT_LOCKS}),
+}
+#: `--max-parallel`: stages that write the checkout (lock sync, schema regen) run first, alone, before anything else.
+MAXPAR_PREFIX = frozenset({"clean tree", "release build path", "release hygiene"})
 
 
 @dataclass(frozen=True)
@@ -1171,6 +1225,56 @@ def run_stages(led: Ledger, stages: Sequence[Stage]) -> None:
             run_concurrently(led, " + ".join(st.name for st in wave), [(st.name, st.run) for st in wave])
 
 
+def maxpar_split(stages: Sequence[Stage]) -> tuple[list[Stage], list[Stage], list[Stage], list[Stage]]:
+    """Under --max-parallel: (checkout writers, overlapped stages, live modules, measuring stages), each in table order."""
+    prefix = [s for s in stages if s.name in MAXPAR_PREFIX]
+    rest = [s for s in stages if s.name not in MAXPAR_PREFIX]
+    measuring = [s for s in rest if ALONE in s.needs]
+    tail = [s for s in rest if s.name == "live modules"]
+    return prefix, [s for s in rest if s not in measuring and s not in tail], tail, measuring
+
+
+def run_gate(led: Ledger, ns: argparse.Namespace, stages: Sequence[Stage]) -> None:
+    """The table in order; under --max-parallel the checkout writers, then every non-measuring stage overlapped, live modules, then the measuring stages alone."""
+    if not ns.max_parallel:
+        run_stages(led, stages)
+        return
+    prefix, overlap, tail, measuring = maxpar_split(stages)
+    run_stages(led, prefix)
+    run_max_parallel(led, overlap, ns.max_parallel)
+    run_stages(led, tail)
+    run_stages(led, measuring)
+
+
+def run_max_parallel(led: Ledger, stages: Sequence[Stage], cap: int) -> None:
+    """Start each stage in table order as soon as no running stage conflicts with it, at most `cap` at once; rows flush in table order."""
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    subs = {st.name: led.buffered_child() for st in stages}
+    pending, running, raised = list(stages), {}, []
+    led.phase(f"Parallel phase — {len(stages)} stages, at most {cap} at once on the one stand")
+    with ThreadPoolExecutor(max_workers=cap) as ex:
+        while pending or running:
+            for st in list(pending):
+                if len(running) >= cap:
+                    break
+                if any(st.conflicts(other) for other in running.values()):
+                    continue
+                running[ex.submit(_timed(f"{st.name}: stage-total", st.run), subs[st.name])] = st
+                pending.remove(st)
+                print(f"  [max-parallel] start {st.name} (running {len(running)}, load1 {os.getloadavg()[0]:.1f})")
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for fut in done:
+                st = running.pop(fut)
+                print(f"  [max-parallel] done {st.name} (load1 {os.getloadavg()[0]:.1f})")
+                if fut.exception() is not None:
+                    raised.append(fut.exception())
+    for st in stages:
+        subs[st.name].flush_into(led)
+    if raised:
+        raise raised[0]
+
+
 def build_stages(ns: argparse.Namespace, built: dict) -> list[Stage]:
     """The clean build and what only waits beside it."""
     build = [Stage("clean tree", lambda led: built.update(ok=clean_tree_and_build(led, fast=ns.fast_clean)),
@@ -1187,15 +1291,22 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         src_url=os.environ.get("RIVET_CONC_SRC_URL", "postgresql://rivet:rivet@localhost:5432/rivet"),
     )
 
+    maxpar = ns.max_parallel
+
+    def hold(name: str, default: frozenset[str]) -> frozenset[str]:
+        """What a stage holds: its default, or under --max-parallel only the named collisions it can have."""
+        return MAXPAR_HOLDS.get(name, frozenset()) if maxpar else default
+
     def serial(name: str, run: Callable[[Ledger], None]) -> Stage:
-        return Stage(name, run, SERIAL)
+        return Stage(name, run, hold(name, SERIAL))
 
     def measured(name: str, run: Callable[[Ledger], None]) -> Stage:
         return Stage(name, run, frozenset({ALONE}))
 
     def warehouse(name: str, run: Callable[[Ledger], None]) -> Stage:
         # Four nextest runs side by side since 2026-09: each waits on its own BigQuery dataset.
-        return Stage(name, run, frozenset({f"the BigQuery dataset of {name}"}), SERIAL)
+        return Stage(name, run, frozenset({f"the BigQuery dataset of {name}"}) | hold(name, frozenset()),
+                     frozenset() if maxpar else SERIAL)
 
     table = [
         # FIRST: it reads the committed lock, which any later cargo command reconciles.
@@ -1225,9 +1336,12 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         serial("cdc differential", lambda led: cdc.verify_cdc_differential(led)),
         measured("release regression", lambda led: regression.verify_release_regression(led)),
         # The offline battery under llvm-cov compiles and reads no server; the upgrade cells wait on servers and BigQuery.
-        Stage("live-only coverage", lambda led: scenarios.verify_live_only_coverage(led), frozenset({CARGO})),
-        Stage("upgrade continuity", lambda led: upgrade.verify_upgrade_continuity(led), frozenset({STAND})),
-        Stage("upgrade from a field state", lambda led: field_state.verify_upgrade_from_field_state(led), frozenset({STAND})),
+        Stage("live-only coverage", lambda led: scenarios.verify_live_only_coverage(led),
+              hold("live-only coverage", frozenset({CARGO}))),
+        Stage("upgrade continuity", lambda led: upgrade.verify_upgrade_continuity(led),
+              hold("upgrade continuity", frozenset({STAND}))),
+        Stage("upgrade from a field state", lambda led: field_state.verify_upgrade_from_field_state(led),
+              hold("upgrade from a field state", frozenset({STAND}))),
         measured("perf regression", lambda led: perf.verify_perf_regression(led)),
         measured("source harm regression", lambda led: regression.verify_harm_regression(led)),
         measured("previous-release differential", lambda led: regression.verify_previous_release_differential(led)),
@@ -1246,13 +1360,18 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         serial("concurrent writers", lambda led: concurrency.verify_concurrent_writers_share_a_prefix(
             led, **state, bucket=os.environ.get("BQ_ORACLE_BUCKET", ""))),
         # Its own containers and ports; its CDC cells read the stand's CDC servers (blessed_flow).
-        Stage("engine matrix", lambda led: engine_loop(led, ns), frozenset({"the gate's engine containers"}), SERIAL),
+        Stage("engine matrix", lambda led: engine_loop(led, ns),
+              frozenset({"the gate's engine containers"}) | hold("engine matrix", frozenset()),
+              frozenset() if maxpar else SERIAL),
     ]
     if not ns.no_cloud:
         # Its own `bq`-tagged containers; handed this module's bring_up/seed_engine so readiness has one definition.
         table.append(Stage("bigquery golden", lambda led: bigquery.run_bigquery_golden(
             led, keep=ns.keep, parallel=ns.engine_parallel, bring_up=bring_up, seed_engine=seed_engine),
             frozenset({"the BigQuery golden's containers"})))
+    if maxpar and ns.with_seeded_recall:
+        # Beside the stage table under --max-parallel; its own scratch tree, and the named collisions it has.
+        table.append(Stage("seeded recall", lambda led: verify_seeded_recall(led, True), MAXPAR_HOLDS["seeded recall"]))
     # The cells a fix added or edited since the baseline, through the baseline: each must fail there.
     table.append(serial("fix cells", lambda led: fix_cells.verify_fix_cells(led)))
     # Last: it runs every live_suite test no stage above already ran.
@@ -1815,14 +1934,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         version = rivet("--version").stdout.splitlines()
         print(f"  rivet: {rivet_bin()} ({version[0] if version else 'unknown'})")
-        run_stages(led, gate_stages(ns))
+        run_gate(led, ns, gate_stages(ns))
         # Kept outside the work dir the gate deletes: a census row must name a log that still exists.
         kept = ROOT / "target" / "gate-failures" / f"rivet-oracle-{os.getpid()}.log"
         kept.parent.mkdir(parents=True, exist_ok=True)
         if (work / "rivet-oracle.log").is_file():
             shutil.copy2(work / "rivet-oracle.log", kept)
         skip_census.verify_oracle_verdict_census(led, kept)
-        verify_seeded_recall(led, ns.with_seeded_recall)
+        if not (ns.max_parallel and ns.with_seeded_recall):  # under --max-parallel it ran in the table
+            verify_seeded_recall(led, ns.with_seeded_recall)
         verify_no_invariant_violations(led)
         # Only a FULL run can say a known red no longer fires, and only one writes a verdict line.
         full = not (ns.engines or ns.versions or ns.no_cloud or ns.latest_only)
