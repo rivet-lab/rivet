@@ -27,6 +27,7 @@ pub struct SourceConfig {
     pub url_env: Option<String>,
     pub url_file: Option<String>,
     /// Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_secret: Option<String>,
 
     pub host: Option<String>,
@@ -35,6 +36,7 @@ pub struct SourceConfig {
     pub password: Option<String>,
     pub password_env: Option<String>,
     /// Google Secret Manager secret holding the password: `projects/<p>/secrets/<s>[/versions/<n>]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_secret: Option<String>,
     pub database: Option<String>,
 
