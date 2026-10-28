@@ -133,11 +133,21 @@ fn asked_for_cdc(
 /// Why LogMiner cannot capture `schema.table`, asked through the predicate the capture itself
 /// refuses by, over the catalog rows it reads ([`crate::source::oracle::cdc::unmineable`]).
 fn cdc_unmineable(conn: &mut OracleSource, schema: &str, table: &str) -> Result<Option<String>> {
+    cdc_unmineable_via(schema, table, |sql| conn.query_rows(sql))
+}
+
+/// [`cdc_unmineable`] over any reader of catalog rows: the capture's column query, then its version query.
+fn cdc_unmineable_via(
+    schema: &str,
+    table: &str,
+    mut read: impl FnMut(&str) -> Result<Vec<Vec<Option<String>>>>,
+) -> Result<Option<String>> {
     use crate::source::oracle::cdc;
     let sql = cdc::catalog_columns_sql(&format!("'{}'", lit(schema)), &format!("'{}'", lit(table)));
-    let rows = conn.query_rows(&sql)?;
-    let major = conn
-        .query_scalar(cdc::MAJOR_VERSION_SQL)?
+    let rows = read(&sql)?;
+    let major = read(cdc::MAJOR_VERSION_SQL)?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     Ok(unmineable_of(schema, table, &rows, major))
@@ -319,6 +329,42 @@ mod tests {
         );
         assert_eq!(asked_for_cdc(true, probe).unwrap().as_deref(), Some("why"));
         assert_eq!(ran.get(), 1);
+    }
+    #[test]
+    fn the_mineability_probe_reads_the_capture_catalog_and_names_the_refusal() {
+        let version = crate::source::oracle::cdc::MAJOR_VERSION_SQL;
+        let cells = |ty: &str| {
+            ["APP", "T", "C", ty, "NO", "NO"]
+                .map(|c| Some(c.to_string()))
+                .to_vec()
+        };
+        let mut asked = Vec::new();
+        let why = super::cdc_unmineable_via("APP", "T", |sql| {
+            asked.push(sql.to_string());
+            Ok(if sql == version {
+                vec![vec![Some("19".to_string())]]
+            } else {
+                vec![cells("BLOB")]
+            })
+        })
+        .unwrap()
+        .expect("a BLOB table is unmineable");
+        assert!(
+            why.starts_with("oracle cdc: `APP.T`") && why.contains("C BLOB"),
+            "{why}"
+        );
+        assert!(
+            asked[0].contains("'APP'") && asked[0].contains("'T'"),
+            "{asked:?}"
+        );
+        let none = super::cdc_unmineable_via("APP", "T", |sql| {
+            Ok(if sql == version {
+                vec![vec![Some("19".to_string())]]
+            } else {
+                vec![cells("NUMBER")]
+            })
+        });
+        assert_eq!(none.unwrap(), None);
     }
     /// Init leaves out exactly what the capture refuses, with the refusal's own text: one predicate.
     /// The catalog rows the capture reads decide init's verdict: the reason the capture gives for
