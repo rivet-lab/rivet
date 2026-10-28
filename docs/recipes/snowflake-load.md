@@ -16,7 +16,10 @@ exports:
     destination: { type: gcs, bucket: my-bucket, prefix: exports/orders/ }
 load:
   target: snowflake
-  connection: my_conn                # a `snow` CLI connection (key-pair / JWT auth)
+  account: myorg-myaccount           # <orgname>-<account_name>, or the account locator
+  user: RIVET_USER                   # key-pair login: its RSA_PUBLIC_KEY is registered on the user
+  private_key_path: /path/to/rsa_key.p8   # unencrypted PKCS#8 PEM, read once
+  # role: RIVET_ROLE                 # optional; omitted, the user's default role
   warehouse: COMPUTE_WH
   database: ANALYTICS
   schema: PUBLIC
@@ -30,10 +33,11 @@ $ rivet load -c cfg.yaml     # COPY → ANALYTICS.PUBLIC.orders
   integrity ✓ source ? → files 3 → warehouse 3 rows in ANALYTICS.PUBLIC.orders (source cleaned)
 ```
 
-`rivet init` writes this block for you — `--gcs-bucket my-bucket --snowflake-connection
-my_conn --snowflake-warehouse COMPUTE_WH --snowflake-database ANALYTICS
---snowflake-schema PUBLIC --snowflake-storage-integration MY_GCS_INT` (all five plus
-the GCS bucket; see [`rivet init`](../reference/init.md)),
+`rivet init` writes this block for you — `--gcs-bucket my-bucket --snowflake-account
+myorg-myaccount --snowflake-user RIVET_USER --snowflake-private-key-path /path/to/rsa_key.p8
+--snowflake-warehouse COMPUTE_WH --snowflake-database ANALYTICS
+--snowflake-schema PUBLIC --snowflake-storage-integration MY_GCS_INT` (all seven plus
+the GCS bucket; `--snowflake-role` is optional; see [`rivet init`](../reference/init.md)),
 so the whole extract → load config comes from one command.
 
 **What it handles for you** — every autoload quirk the by-hand appendix below
@@ -371,5 +375,6 @@ BIGQUERY_TEST_PROJECT=<your-gcp-project> make test-types-bigquery
 Skips silently without `BIGQUERY_TEST_PROJECT`. Implementation:
 `tests/type_roundtrip/bigquery_load.rs`. The Snowflake half of this by-hand recipe is
 verified manually; what `rivet load` itself lands is held by the live cells in
-`tests/live/live_snowflake_load.rs`, which need a key-pair `snow` connection
-(`RIVET_SF_CONNECTION` and the `RIVET_SF_*` names beside it).
+`tests/live/live_snowflake_load.rs`, which need a key-pair login
+(`RIVET_SNOWFLAKE_ACCOUNT`, `RIVET_SNOWFLAKE_USER`, `RIVET_SNOWFLAKE_KEY`, `RIVET_SF_CONNECTION` for the stand's
+own reader and cleanup, and the `RIVET_SF_*` names beside it).

@@ -15,9 +15,9 @@
 //! Env vars (only the ones a given cell's warehouse needs are required):
 //!   RIVET_TEST_GCS_BUCKET         GCS bucket exports stage through
 //!   BIGQUERY_TEST_PROJECT         BigQuery project (BigQuery cells)
-//!   RIVET_SF_CONNECTION           `snow` connection name (Snowflake cells)
+//!   RIVET_SF_CONNECTION           `snow` connection name the stand's own reader and cleanup use (Snowflake cells)
 //!   RIVET_SF_WAREHOUSE / _DATABASE / _SCHEMA / _STORAGE_INTEGRATION
-//!   RIVET_SNOWFLAKE_KEY           absolute path to the `snow` private key (optional)
+//!   RIVET_SNOWFLAKE_ACCOUNT / _USER / _KEY   the key-pair login the loaded configs carry (_ROLE optional)
 
 #![allow(dead_code)] // stages fill in cell-by-cell; the scaffold lands first.
 
@@ -319,6 +319,10 @@ impl SoakConfig {
 /// Snowflake connection config (only required by Snowflake cells).
 struct SfEnv {
     connection: String,
+    account: String,
+    user: String,
+    private_key_path: String,
+    role: Option<String>,
     warehouse: String,
     database: String,
     schema: String,
@@ -350,6 +354,15 @@ impl HarnessEnv {
         let sf = match std::env::var("RIVET_SF_CONNECTION") {
             Ok(connection) => Some(SfEnv {
                 connection,
+                account: std::env::var("RIVET_SNOWFLAKE_ACCOUNT")
+                    .context("RIVET_SNOWFLAKE_ACCOUNT unset")?,
+                user: std::env::var("RIVET_SNOWFLAKE_USER")
+                    .context("RIVET_SNOWFLAKE_USER unset")?,
+                private_key_path: std::env::var("RIVET_SNOWFLAKE_KEY")
+                    .context("RIVET_SNOWFLAKE_KEY unset")?,
+                role: std::env::var("RIVET_SNOWFLAKE_ROLE")
+                    .ok()
+                    .filter(|r| !r.is_empty()),
                 warehouse: std::env::var("RIVET_SF_WAREHOUSE")
                     .context("RIVET_SF_WAREHOUSE unset")?,
                 database: std::env::var("RIVET_SF_DATABASE").context("RIVET_SF_DATABASE unset")?,
@@ -1683,10 +1696,18 @@ impl Verification {
             Warehouse::Snowflake => {
                 let sf = env.sf()?;
                 format!(
-                    "load:\n  target: snowflake\n  connection: {conn}\n  warehouse: {wh}\n  \
+                    "load:\n  target: snowflake\n  account: {account}\n  user: {user}\n  \
+                     private_key_path: {key}\n{role}  warehouse: {wh}\n  \
                      database: {db}\n  schema: {sc}\n  storage_integration: {si}\n  \
                      cleanup_source: {cleanup}\n",
-                    conn = sf.connection,
+                    account = sf.account,
+                    user = sf.user,
+                    key = sf.private_key_path,
+                    role = sf
+                        .role
+                        .as_ref()
+                        .map(|r| format!("  role: {r}\n"))
+                        .unwrap_or_default(),
                     wh = sf.warehouse,
                     db = sf.database,
                     sc = sf.schema,
@@ -1894,7 +1915,7 @@ fn snow_json(conn: &str, sql: &str) -> Result<serde_json::Value> {
     serde_json::from_str(&out[start..]).with_context(|| format!("parse snow json from: {out}"))
 }
 
-/// Rows of `sql`, read through DuckDB's `snowflake` extension: the loader drives `snow`, so a read through `snow` would grade the tool with itself.
+/// Rows of `sql`, read through DuckDB's `snowflake` extension: a second client, so the loader's own transport never grades itself.
 fn sf_read(conn: &str, sql: &str) -> Result<Vec<Vec<serde_json::Value>>> {
     let var = |k: &str| std::env::var(k).with_context(|| format!("{k} unset"));
     sf_reader::snowflake_rows(

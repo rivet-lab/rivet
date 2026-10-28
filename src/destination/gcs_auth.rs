@@ -858,6 +858,42 @@ impl BlockingAdcTokenSource {
     }
 }
 
+/// A throwaway 2048-bit RSA key, generated for these tests and used NOWHERE
+/// else. It authorises nothing — no Google project has ever seen the
+/// matching public key, and it is a credential for nothing. It is checked
+/// in because RS256 signing cannot be graded without a key, and generating
+/// one at test time costs seconds per run in a debug build.
+#[cfg(test)]
+pub(crate) const TEST_RSA_PKCS8_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCbCRikdpLmY2r2
+K8M22FPwsBOVNRCBU8wmEBAy1H7ZxNbf5prq+fYh1jeDi4qNpUvtmFslX+5fd1Es
+d8F8xqFNDMKA6kyjjguU+I6JbBWOfZfLROx+8GeILY9aYm62F/ab13xLPxXk/Kn9
+kLCYJjnIuSOGUeluwCwJhb1lhayP3/tLG/zujgqL0JIkQe2M6+3LKCMqhOsScB5Q
+7OAnDaOuteCxzhqoORIbT5+nK4J0CoSbzU7R959y8a4Z1PKeKcJX29y06j3eDEtd
+yvJYX7tfUNyetRtxkbiEd+m+EbnRyaO0Dlynm6NCN7bg0+QsB/qi+1K72EaLL3NK
+LLLWJY5JAgMBAAECggEAL1TPmSY6IuwnM5CYwJ26wrh+wga5S0JyCQzOZTZKo+Fc
+WG7mzOYTJrFnsVlgq23TiG4DJZ3sAGlE9vZ4s8dQZ12F5CWj0CsFji10FrBQxHfD
+Z+Na8EYk1YZTRZzXf/BA8cMPx0kzPf2FSExsHYdODOG43sETKySwTRfvgpcU37df
+8ihI/UzBVTrGZ9+eM2JXdpG6MzW+9mkAhSzNbSZtX+Qlib8hYA+Cki14gX76/tB/
+m80o+KS+isVz0GdhMNe7UBWLTu/I1q5RIG2tdQ0xIazgrkPJoqbVNw8zriUk1SNL
+wp2106FeLAd3QE1NesBd7xefhcd2INsGWc/5sTlfIQKBgQDUmuefmW0+4DoI2xdw
+KV06b2CQpbBfrg676XfxuCW29YosvhyMSYXyYTp8CMlyk/fuZk9osWeQ4dsOb3KK
+JgieaMtHfcnhHojdVNO755ehUGr7R/wZKjVOTDxDI4dP39LmIVtGT2ue/bGMEqbn
+pBI/iFn5e7SN/+M+kT9pfML2PwKBgQC6rg1TVQ36oK93ImWtj8UEUBhtGDpdLMzF
+0W7BrWXlejNPdlirJKaaOqUfvgTBZOPULvtus8jGNIEylAd+KqHApd35XhXsrz/F
+4AmP3hE1m3ZhjfB9ISzR1YCbEjAYVfeMQ0AHsKLXKR9BH2P7TVXwitjYT7YLWTq2
+c6a3XqspdwKBgQCSA7lkYWkoL7Nr9ZzJSX9f7LJzZXgWnmI8KIJaHtC4MTaut/q/
+VpeJ+cDDAv3nlTxIHTgYfQ7V8GgUJ/KQcsKkmPBTr06BMAlriSDKAqqe/a4b2jqH
+xfdKSQ1yRupdrykXKH2Zcl5FmZLg0saSfJqTy7+PmqhMhhu6EuNsPWVg3QKBgGyu
+K9/Z4puItN58zgkvbBnIr4/DzSa1kDmSZhKnam0gqYKXeaOZYMzlW4CRVZ9ppyG+
+gG7AiCCsLJNPjtUq6KSJbCNjXQxAMrZ2adqyA/7blR3STrHqgHdg/tBI1Gs2kTm9
+ZSeU9BijPijhp4mESoYRr5CvR2Jv/jh+OA8FNEydAoGBAKKVDPqomBLp26hdzrVA
+O8M+Hej8+dYLCDO/nllv3S3F1SAJGvd1oNgNVFWBgyr/DqGzYbRbtKQ4quNt2nC2
+xt3980QUv/ltOZmAePNaWyWw4Egr1r5TEnZtDk1JEiMz6k1ulkIDguwVbEb2G4m+
+qPSokX7fAC0Ku7S5xJe4XfPd
+-----END PRIVATE KEY-----
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1160,41 +1196,6 @@ mod tests {
     // The replacement is RFC 7523: a claim set signed RS256 with the file's own
     // `private_key`, exchanged for an access token. Every piece of that is
     // pure, so every piece is graded here without a network or a credential.
-
-    /// A throwaway 2048-bit RSA key, generated for these tests and used NOWHERE
-    /// else. It authorises nothing — no Google project has ever seen the
-    /// matching public key, and it is a credential for nothing. It is checked
-    /// in because RS256 signing cannot be graded without a key, and generating
-    /// one at test time costs seconds per run in a debug build.
-    const TEST_RSA_PKCS8_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCbCRikdpLmY2r2
-K8M22FPwsBOVNRCBU8wmEBAy1H7ZxNbf5prq+fYh1jeDi4qNpUvtmFslX+5fd1Es
-d8F8xqFNDMKA6kyjjguU+I6JbBWOfZfLROx+8GeILY9aYm62F/ab13xLPxXk/Kn9
-kLCYJjnIuSOGUeluwCwJhb1lhayP3/tLG/zujgqL0JIkQe2M6+3LKCMqhOsScB5Q
-7OAnDaOuteCxzhqoORIbT5+nK4J0CoSbzU7R959y8a4Z1PKeKcJX29y06j3eDEtd
-yvJYX7tfUNyetRtxkbiEd+m+EbnRyaO0Dlynm6NCN7bg0+QsB/qi+1K72EaLL3NK
-LLLWJY5JAgMBAAECggEAL1TPmSY6IuwnM5CYwJ26wrh+wga5S0JyCQzOZTZKo+Fc
-WG7mzOYTJrFnsVlgq23TiG4DJZ3sAGlE9vZ4s8dQZ12F5CWj0CsFji10FrBQxHfD
-Z+Na8EYk1YZTRZzXf/BA8cMPx0kzPf2FSExsHYdODOG43sETKySwTRfvgpcU37df
-8ihI/UzBVTrGZ9+eM2JXdpG6MzW+9mkAhSzNbSZtX+Qlib8hYA+Cki14gX76/tB/
-m80o+KS+isVz0GdhMNe7UBWLTu/I1q5RIG2tdQ0xIazgrkPJoqbVNw8zriUk1SNL
-wp2106FeLAd3QE1NesBd7xefhcd2INsGWc/5sTlfIQKBgQDUmuefmW0+4DoI2xdw
-KV06b2CQpbBfrg676XfxuCW29YosvhyMSYXyYTp8CMlyk/fuZk9osWeQ4dsOb3KK
-JgieaMtHfcnhHojdVNO755ehUGr7R/wZKjVOTDxDI4dP39LmIVtGT2ue/bGMEqbn
-pBI/iFn5e7SN/+M+kT9pfML2PwKBgQC6rg1TVQ36oK93ImWtj8UEUBhtGDpdLMzF
-0W7BrWXlejNPdlirJKaaOqUfvgTBZOPULvtus8jGNIEylAd+KqHApd35XhXsrz/F
-4AmP3hE1m3ZhjfB9ISzR1YCbEjAYVfeMQ0AHsKLXKR9BH2P7TVXwitjYT7YLWTq2
-c6a3XqspdwKBgQCSA7lkYWkoL7Nr9ZzJSX9f7LJzZXgWnmI8KIJaHtC4MTaut/q/
-VpeJ+cDDAv3nlTxIHTgYfQ7V8GgUJ/KQcsKkmPBTr06BMAlriSDKAqqe/a4b2jqH
-xfdKSQ1yRupdrykXKH2Zcl5FmZLg0saSfJqTy7+PmqhMhhu6EuNsPWVg3QKBgGyu
-K9/Z4puItN58zgkvbBnIr4/DzSa1kDmSZhKnam0gqYKXeaOZYMzlW4CRVZ9ppyG+
-gG7AiCCsLJNPjtUq6KSJbCNjXQxAMrZ2adqyA/7blR3STrHqgHdg/tBI1Gs2kTm9
-ZSeU9BijPijhp4mESoYRr5CvR2Jv/jh+OA8FNEydAoGBAKKVDPqomBLp26hdzrVA
-O8M+Hej8+dYLCDO/nllv3S3F1SAJGvd1oNgNVFWBgyr/DqGzYbRbtKQ4quNt2nC2
-xt3980QUv/ltOZmAePNaWyWw4Egr1r5TEnZtDk1JEiMz6k1ulkIDguwVbEb2G4m+
-qPSokX7fAC0Ku7S5xJe4XfPd
------END PRIVATE KEY-----
-"#;
 
     const TEST_SA_EMAIL: &str = "rivet-test@rivet-unit.iam.gserviceaccount.com";
 

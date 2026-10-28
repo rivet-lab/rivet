@@ -28,6 +28,7 @@ pub(crate) mod pool;
 pub mod reconcile;
 pub mod result;
 mod snowflake;
+pub(crate) mod snowflake_rest;
 mod staging;
 
 pub use bigquery::BigQueryLoader;
@@ -117,7 +118,7 @@ impl ObjectKind {
 
 /// A warehouse **adapter** — the small, warehouse-specific seam the
 /// [driver](run_load) drives. Dialect + transport (BigQuery's REST API since
-/// #264, Snowflake's `snow` CLI), the external stage,
+/// #264, Snowflake's SQL API), the external stage,
 /// BigQuery's 4,000-partition batch split, and `PARSE_JSON` all live *behind*
 /// these primitives.
 ///
@@ -1181,13 +1182,22 @@ pub fn build_loader(
             .journaled(journal.clone()),
         ),
         LoadTarget::Snowflake {
-            connection,
+            account,
+            user,
+            private_key_path,
+            role,
             warehouse,
             database,
             schema,
             storage_integration,
         } => {
-            let mut l = SnowflakeLoader::new(connection.clone());
+            let mut l = snowflake_login(
+                &|var| std::env::var(var).ok(),
+                account,
+                user,
+                private_key_path,
+                role.as_deref(),
+            );
             l.warehouse = warehouse.clone();
             l.database = database.clone();
             l.schema = schema.clone();
@@ -1197,8 +1207,6 @@ pub fn build_loader(
             l.run_id = Some(run_id.to_string());
             // Snowflake's external stage wants the `gcs://` scheme, not `gs://`.
             l.gcs_url = plan.gcs_prefix.replacen("gs://", "gcs://", 1);
-            // The `snow` CLI does not expand `~`; pass an absolute key path.
-            l.private_key_path = std::env::var("RIVET_SNOWFLAKE_KEY").ok();
             Box::new(l)
         }
         LoadTarget::Clickhouse {
@@ -1226,6 +1234,25 @@ pub fn build_loader(
     }
 }
 
+/// A Snowflake loader signed in with the configured login, each of which RIVET_SNOWFLAKE_ACCOUNT, _USER, _KEY and _ROLE overrides when set and not blank.
+fn snowflake_login(
+    from_env: &dyn Fn(&str) -> Option<String>,
+    account: &str,
+    user: &str,
+    private_key_path: &str,
+    role: Option<&str>,
+) -> SnowflakeLoader {
+    let set = |var: &str| from_env(var).filter(|v| !v.trim().is_empty());
+    let pick = |var: &str, configured: &str| set(var).unwrap_or_else(|| configured.to_string());
+    let mut l = SnowflakeLoader::new(
+        &pick("RIVET_SNOWFLAKE_ACCOUNT", account),
+        &pick("RIVET_SNOWFLAKE_USER", user),
+        &pick("RIVET_SNOWFLAKE_KEY", private_key_path),
+    );
+    l.role = set("RIVET_SNOWFLAKE_ROLE").or_else(|| role.map(str::to_string));
+    l
+}
+
 /// Wire a [`BigQueryLoader`] from a resolved plan's fields — `partition` and
 /// `cluster_by` applied ONLY when set. A concrete return (not the boxed trait)
 /// so the wiring is unit-testable: a mis-guarded key would silently DROP the
@@ -1251,6 +1278,64 @@ fn build_bigquery_loader(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// The four login env vars win over the config when set and not blank; the config holds otherwise.
+    #[test]
+    fn the_snowflake_login_env_vars_override_the_config_unless_blank() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |var: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == var)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let seen = |l: &SnowflakeLoader| {
+            (
+                l.account.clone(),
+                l.user.clone(),
+                l.private_key_path.clone(),
+                l.role.clone(),
+            )
+        };
+        let configured = (
+            "acct".into(),
+            "USR".into(),
+            "/k.p8".into(),
+            Some("R".into()),
+        );
+        let none = env(&[]);
+        assert_eq!(
+            seen(&snowflake_login(&none, "acct", "USR", "/k.p8", Some("R"))),
+            configured
+        );
+        let blank = env(&[
+            ("RIVET_SNOWFLAKE_ACCOUNT", " "),
+            ("RIVET_SNOWFLAKE_USER", ""),
+            ("RIVET_SNOWFLAKE_KEY", "  "),
+            ("RIVET_SNOWFLAKE_ROLE", ""),
+        ]);
+        assert_eq!(
+            seen(&snowflake_login(&blank, "acct", "USR", "/k.p8", Some("R"))),
+            configured
+        );
+        let set = env(&[
+            ("RIVET_SNOWFLAKE_ACCOUNT", "org-env"),
+            ("RIVET_SNOWFLAKE_USER", "ENVUSR"),
+            ("RIVET_SNOWFLAKE_KEY", "/env.p8"),
+            ("RIVET_SNOWFLAKE_ROLE", "ENVROLE"),
+        ]);
+        assert_eq!(
+            seen(&snowflake_login(&set, "acct", "USR", "/k.p8", None)),
+            (
+                "org-env".into(),
+                "ENVUSR".into(),
+                "/env.p8".into(),
+                Some("ENVROLE".into())
+            )
+        );
+        assert_eq!(snowflake_login(&none, "a", "u", "/k", None).role, None);
+    }
 
     /// ClickHouse's note says what it does compare (the log's partition); the others say nothing is.
     #[test]

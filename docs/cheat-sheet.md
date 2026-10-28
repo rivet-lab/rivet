@@ -392,8 +392,8 @@ exports:
 ```
 
 Required target fields: BigQuery takes `project` and `dataset`. Snowflake takes
-`connection` (a `snow` CLI connection), `warehouse`, `database`, `schema` and
-`storage_integration`. ClickHouse takes `url`, `database`, `user` and `password_env`,
+`account`, `user`, `private_key_path` (an unencrypted PKCS#8 key; `role` is optional),
+`warehouse`, `database`, `schema` and `storage_integration`. ClickHouse takes `url`, `database`, `user` and `password_env`,
 plus an optional `named_collection` (ClickHouse then reads the bucket itself). ClickHouse
 refuses `partition:`, `layout: base_buffer` and a MongoDB CDC stream.
 
