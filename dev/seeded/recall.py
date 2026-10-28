@@ -682,6 +682,16 @@ def self_test() -> int:
 
 def _pool_self_test() -> None:
     """The build pool grades each seed in the tree it was built in, one cell run at a time, in the serial order: same verdicts and ledger lines as one worker."""
+    # A hook's GIT_DIR / GIT_INDEX_FILE would point this test's git calls at the outer repo.
+    outer = {k: os.environ.pop(k) for k in [k for k in os.environ if k.startswith("GIT_")]}
+    try:
+        _pool_self_test_body()
+    finally:
+        os.environ.update(outer)
+
+
+def _pool_self_test_body() -> None:
+    """The pool test proper, in a clean git environment."""
     import tempfile
 
     class Fake:
