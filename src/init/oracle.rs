@@ -109,7 +109,9 @@ pub(super) fn introspect(
             .unwrap_or(0)
             .max(0),
     };
-    let cdc_unmineable = asked_for_cdc(cdc, || cdc_unmineable(conn, &schema, &table))?;
+    let cdc_unmineable = asked_for_cdc(cdc, || {
+        cdc_unmineable(&schema, &table, |sql| conn.query_rows(sql))
+    })?;
     Ok(TableInfo {
         cdc_capture_instance: None,
         cdc_unmineable,
@@ -132,12 +134,7 @@ fn asked_for_cdc(
 
 /// Why LogMiner cannot capture `schema.table`, asked through the predicate the capture itself
 /// refuses by, over the catalog rows it reads ([`crate::source::oracle::cdc::unmineable`]).
-fn cdc_unmineable(conn: &mut OracleSource, schema: &str, table: &str) -> Result<Option<String>> {
-    cdc_unmineable_via(schema, table, |sql| conn.query_rows(sql))
-}
-
-/// [`cdc_unmineable`] over any reader of catalog rows: the capture's column query, then its version query.
-fn cdc_unmineable_via(
+fn cdc_unmineable(
     schema: &str,
     table: &str,
     mut read: impl FnMut(&str) -> Result<Vec<Vec<Option<String>>>>,
@@ -339,7 +336,7 @@ mod tests {
                 .to_vec()
         };
         let mut asked = Vec::new();
-        let why = super::cdc_unmineable_via("APP", "T", |sql| {
+        let why = super::cdc_unmineable("APP", "T", |sql| {
             asked.push(sql.to_string());
             Ok(if sql == version {
                 vec![vec![Some("19".to_string())]]
@@ -357,7 +354,7 @@ mod tests {
             asked[0].contains("'APP'") && asked[0].contains("'T'"),
             "{asked:?}"
         );
-        let none = super::cdc_unmineable_via("APP", "T", |sql| {
+        let none = super::cdc_unmineable("APP", "T", |sql| {
             Ok(if sql == version {
                 vec![vec![Some("19".to_string())]]
             } else {
