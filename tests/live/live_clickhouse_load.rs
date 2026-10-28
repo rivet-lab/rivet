@@ -2952,12 +2952,10 @@ fn five_configs_with_one_table_name_on_one_state_each_load_by_their_own_key() {
     }
 }
 
-/// A state the previous release (v37) wrote keeps loading after this release migrates it to v38:
-/// the key that release's `rivet init` recorded by export name alone is read as the key of the
-/// config's source, and the migration leaves its copy for the way back.
+/// A state the pinned older-schema release wrote loads after this tree migrates it, keyed by the source its `rivet init` recorded, and the migration leaves its copy.
 #[test]
-#[ignore = "live: requires clickhouse + fake-gcs + postgres + RIVET_PREV_RELEASE_BIN at a v37 release"]
-fn a_v37_state_the_previous_release_wrote_loads_after_the_v38_migration() {
+#[ignore = "live: requires clickhouse + fake-gcs + postgres + RIVET_MIGRATION_CARRIER_BIN"]
+fn a_state_the_pinned_older_release_wrote_loads_after_this_trees_migration() {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(BUCKET);
@@ -2979,13 +2977,14 @@ fn a_v37_state_the_previous_release_wrote_loads_after_the_v38_migration() {
              user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: auto }}",
             db.0
         ));
-    let Some(old) = rig.as_previous_release() else {
+    let Some(old) = rig.as_migration_carrier() else {
         return;
     };
     let dir = rig.config_path().parent().unwrap().to_path_buf();
-    // The previous release's `rivet init` records the key in the state beside the config.
+    // The pinned release's `rivet init` records the key in the state beside the config.
     let init_out = dir.join("init.yaml");
-    let prev = std::env::var("RIVET_PREV_RELEASE_BIN").expect("checked by as_previous_release");
+    let prev =
+        std::env::var("RIVET_MIGRATION_CARRIER_BIN").expect("checked by as_migration_carrier");
     let (_, init) = crate::common::output_of(&mut crate::common::rivet_command_as(
         &prev,
         &[
@@ -3001,7 +3000,7 @@ fn a_v37_state_the_previous_release_wrote_loads_after_the_v38_migration() {
     ));
     assert!(
         init.status.success(),
-        "the previous release's init: {}",
+        "the pinned release's init: {}",
         String::from_utf8_lossy(&init.stderr)
     );
     old.run_ok();
@@ -3011,22 +3010,20 @@ fn a_v37_state_the_previous_release_wrote_loads_after_the_v38_migration() {
         .flatten()
         .filter(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
-            n.starts_with(".rivet_state.db.v37") && n.ends_with(".bak")
+            n.starts_with(".rivet_state.db.v") && n.ends_with(".bak")
         })
         .count();
-    if copies == 0 {
-        crate::common::skip_live(
-            "RIVET_PREV_RELEASE_BIN writes this tree's state schema: no v37 state to migrate",
-        );
-        return;
-    }
+    assert!(
+        copies > 0,
+        "the pinned release writes this tree's state schema: nothing migrated; pin a release from before the last migration"
+    );
     assert_eq!(
         clickhouse_rows(&format!(
             "SELECT ref_no, v FROM {}.{tbl} ORDER BY ref_no FORMAT TSV",
             db.0
         )),
         vec![(1, 10), (2, 20)],
-        "the load keyed by the key the v37 init recorded"
+        "the load keyed by the key the pinned release's init recorded"
     );
 }
 

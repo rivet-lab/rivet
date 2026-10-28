@@ -267,7 +267,7 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
             let val = arr.value(idx);
             let mut bytes = [0u8; 16];
             bytes.copy_from_slice(val);
-            write!(writer, "{}", uuid::Uuid::from_bytes(bytes).to_hyphenated())?;
+            write!(writer, "{}", uuid::Uuid::from_bytes(bytes).hyphenated())?;
         }
         DataType::Date32 => {
             let arr = array

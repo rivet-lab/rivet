@@ -73,4 +73,19 @@ ignore = [
     # Action: drop both the day reqsign/opendal release on quick-xml >= 0.41.
     "RUSTSEC-2026-0194", # quick-xml: quadratic duplicate-attribute check
     "RUSTSEC-2026-0195", # quick-xml: unbounded namespace-declaration allocation
+
+    # ─── zstd 0.13 via mysql_common binlog (RUSTSEC-2026-0391, -0398, -0403) ──
+    # Path: mysql 28.0.4 -> mysql_common 0.37.3 (binlog feature) -> zstd 0.13.3, zstd-safe 7.3.0.
+    # Status: the fixes need zstd >= 0.14.3 / zstd-safe >= 8.2.0. mysql_common 0.37.3 and
+    #       0.38.2 (latest) both require zstd "0.13", so no upstream path. zstd 0.14 (parquet)
+    #       and zstd-safe 8.2.0 are already in the tree.
+    # Reachability: only CDC on MySQL with compressed binlog transactions. mysql_common builds a
+    #       fresh zstd decoder per payload (no reused context, so 0391 cannot leak across
+    #       streams). 0398 needs the `seekable` feature, which is not compiled (cargo tree -e
+    #       features). 0403 is hit only by a failed legacy-frame decode of a payload from the
+    #       configured MySQL server.
+    # Action: drop all three when mysql_common requires zstd >= 0.14.
+    "RUSTSEC-2026-0391", # zstd: stream context reuse leak (mysql_common binlog)
+    "RUSTSEC-2026-0398", # zstd-safe: Seekable::decompress (seekable feature off)
+    "RUSTSEC-2026-0403", # zstd-safe: uninit memory on failed legacy-frame decode
 ]

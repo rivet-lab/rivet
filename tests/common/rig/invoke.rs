@@ -69,6 +69,14 @@ impl Rig {
         )
     }
 
+    /// The same handle on the pinned lease-era release (`RIVET_LEASE_CARRIER_BIN`): it holds the leases this tree's migration waits for, writes an older state schema, and still advances a slot past its checkpoint (#649).
+    pub fn as_lease_carrier(&self) -> Option<Rig> {
+        self.as_release(
+            "RIVET_LEASE_CARRIER_BIN",
+            "no pinned lease-era release to run beside this tree's",
+        )
+    }
+
     /// A twin that runs the binary `var` names; `None`, with the skip recorded, when it is unset.
     fn as_release(&self, var: &str, what: &str) -> Option<Rig> {
         let Ok(bin) = std::env::var(var) else {
