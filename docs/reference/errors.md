@@ -131,7 +131,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_LOAD_WAREHOUSE_ACCESS_DENIED` | environment | 2 if transient, else 1 | grant the load's identity the warehouse permission the message names |
 | `RIVET_LOAD_WAREHOUSE_OBJECT_NOT_FOUND` | environment | 2 if transient, else 1 | create the dataset or database the load writes into, or correct the names of the `load:` target |
 | `RIVET_LOAD_WAREHOUSE_REJECTED` | environment | 2 if transient, else 1 | read the warehouse's reason in the message and fix what it names, then re-run |
-| `RIVET_LOAD_WAREHOUSE_UNAVAILABLE` | environment | 2 if transient, else 1 | re-run the load later; the warehouse answered with a transient failure on every retry |
+| `RIVET_LOAD_WAREHOUSE_UNAVAILABLE` | transient | 2 | re-run the same command later; the warehouse failed with a transient error (HTTP 5xx or 429, or a job reason it documents as retryable) that rivet's retries did not outlast |
 | `RIVET_LOAD_WAREHOUSE_ANSWER_UNREADABLE` | internal | 6 | the warehouse answered in a shape rivet does not read — report it with the message |
 | `RIVET_INTERNAL_LOAD_INVARIANT` | internal | 6 | a load invariant did not hold — a bug; report it with the message |
 | `RIVET_VALIDATE_FAILED` | integrity | 3 | run `rivet validate` on the prefix and settle each failed part before loading it; the export itself completed |
