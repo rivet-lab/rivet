@@ -959,7 +959,7 @@ RUST_LOG=info rivet run -c my_export.yaml
 |------|---------|
 | 0 | All exports succeeded |
 | 1 | Usage / config error — config parsing/validation, a bad command, or an export error no other class claims. Fix the input; retrying won't help |
-| 2 | Retryable transient failure (connection loss, timeout, throttling), or busy: another live rivet process holds the lease or lock the command needs (`RIVET_STATE_RUN_IN_PROGRESS`, `RIVET_LOAD_TABLE_BUSY`, `RIVET_STATE_LEASE_LOST`) — safe to retry; the retry succeeds once that process ends. Clap argument-parse errors also exit 2 (distinguishable by the usage text and absence of an `Error:` line) |
+| 2 | Retryable transient failure (connection loss, timeout, throttling), or busy: another live rivet process holds the lease or lock the command needs (`RIVET_STATE_RUN_IN_PROGRESS`, `RIVET_LOAD_TABLE_BUSY`, `RIVET_STATE_LEASE_LOST`), or a BigQuery failure Google documents as retryable (`RIVET_LOAD_WAREHOUSE_UNAVAILABLE`) — safe to retry; the retry succeeds once that process ends. Clap argument-parse errors also exit 2 (distinguishable by the usage text and absence of an `Error:` line) |
 | 3 | Data-integrity failure (quality gate / reconcile / validate / duplicate-guard) — stop and investigate |
 | 4 | Schema drift (`on_schema_drift: fail` tripped) |
 | 5 | Protective refusal — rivet stopped on purpose so as not to lose, duplicate or overwrite data (a foreign checkpoint, a newer state DB, a cursor-owner mismatch, ...). Retrying unchanged refuses again; a human decides |

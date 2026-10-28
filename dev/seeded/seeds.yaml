@@ -3407,3 +3407,45 @@ seeds:
         cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
       oracle:
         cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+
+  - name: bigquery-transient-job-error-final
+    class: "a BigQuery job that ends with a documented retryable errorResult.reason (backendError, internalError, jobBackendError, jobInternalError, rateLimitExceeded, jobRateLimitExceeded) is coded RIVET_LOAD_WAREHOUSE_REJECTED, exit 1, so a scheduler fails the task for good"
+    history: "2026-10-28 - issue #707, pilot incident: a CDC compact MERGE under airflow-provider-rivet failed with 'Error encountered during execution. Retrying may solve the problem.' and the task failed final"
+    scope: source
+    patch: bigquery-transient-job-error-final/shared.patch
+    engines:
+      postgres:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mysql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mssql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mongo:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      oracle:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      lib:
+        cells:
+          - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"
+          - "lib:a_statement_failed_with_a_transient_reason_is_retryable_and_a_bad_one_is_not"
+
+  - name: transient-warehouse-code-exits-by-text
+    class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
+    history: "2026-10-28 - found while fixing #707: the code existed for the REST layer's transient replies but its exit followed the text, which names no transient word, so a scheduler never retried it"
+    scope: source
+    patch: transient-warehouse-code-exits-by-text/shared.patch
+    engines:
+      postgres:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mysql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mssql:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      mongo:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      oracle:
+        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
+      lib:
+        cells:
+          - "lib:a_transient_http_reply_that_outlasts_the_retries_exits_retryable"
+          - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"
