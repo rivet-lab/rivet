@@ -1968,6 +1968,25 @@ mod tests {
         assert!(sql.contains("CLUSTER BY"), "{sql}");
     }
 
+    /// The tombstone insert names the data columns only: never the log position, the meta columns or the delete flag.
+    #[test]
+    fn the_tombstone_insert_names_data_columns_only() {
+        let pk = vec!["id".to_string()];
+        let sql = base_buffer_loader().build_flag_absent_sql("orders", &compact_specs(true), &pk);
+        let insert = sql
+            .lines()
+            .skip_while(|l| !l.starts_with("INSERT INTO"))
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            insert,
+            "INSERT INTO DB.SC.orders__changes (id, v, __op)\n\
+             SELECT __rivet_t.id, __rivet_t.v, 'delete'",
+            "{sql}"
+        );
+    }
+
     /// No buffer and no leftover is a result: no script is sent, only the two catalog probes.
     #[test]
     fn compacting_nothing_sends_no_script() {
