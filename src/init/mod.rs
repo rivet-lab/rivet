@@ -75,6 +75,9 @@ pub(crate) struct TableInfo {
     /// The SQL Server CDC capture instance `cdc.change_tables` holds for this table (the newest when two), read at init time.
     #[serde(skip, default)]
     pub cdc_capture_instance: Option<String>,
+    /// Why Oracle LogMiner cannot capture this table, read at init time; a CDC scaffold leaves it out.
+    #[serde(skip, default)]
+    pub cdc_unmineable: Option<String>,
 }
 
 impl TableInfo {
@@ -1159,6 +1162,7 @@ fn introspect_single_table(
     source_url: &str,
     table: &str,
     schema_flag: Option<&str>,
+    #[cfg_attr(not(feature = "oracle"), allow(unused_variables))] cdc: bool,
 ) -> Result<TableInfo> {
     let (eff_schema, table_name) = resolve_single_table_schema(table, schema_flag)?;
     Ok(match source_type(source_url)? {
@@ -1223,6 +1227,7 @@ fn introspect_single_table(
                 &mut conn,
                 &owner,
                 &crate::sql::oracle_catalog_name(table_name),
+                cdc,
             )?
         }
         "mongo" => {
@@ -1274,13 +1279,25 @@ fn init_yaml(
     mode_override: Option<&str>,
 ) -> Result<(yaml_scaffold::Scaffold, Vec<crate::state::StrategySnapshot>)> {
     if let Some(t) = table {
-        let info = introspect_single_table(tls, source_url, t, schema)?;
+        let info = introspect_single_table(
+            tls,
+            source_url,
+            t,
+            schema,
+            probes_mineability(mode_override),
+        )?;
         let snaps = vec![snapshot_of(&info, mode_override, source_url)];
         let scaffold =
             yaml_scaffold::scaffold_table(&info, source_url, provenance, dest, mode_override, tls)?;
         return Ok((scaffold, snaps));
     }
-    let infos = introspect_all(tls, source_url, schema, filter)?;
+    let infos = introspect_all(
+        tls,
+        source_url,
+        schema,
+        filter,
+        probes_mineability(mode_override),
+    )?;
     if infos.is_empty() {
         return Err(no_tables_error(filter));
     }
@@ -1441,6 +1458,11 @@ fn snapshot_of(
     }
 }
 
+/// Whether the scaffold asks the source what its CDC capture can mine: only `--mode cdc` does.
+fn probes_mineability(mode: Option<&str>) -> bool {
+    mode == Some("cdc")
+}
+
 fn init_discovery_json(
     tls: Option<&crate::config::TlsConfig>,
     source_url: &str,
@@ -1449,7 +1471,7 @@ fn init_discovery_json(
     filter: &TableFilter,
 ) -> Result<String> {
     let (infos, scope) = if let Some(t) = table {
-        let info = introspect_single_table(tls, source_url, t, schema)?;
+        let info = introspect_single_table(tls, source_url, t, schema, false)?;
         let scope = match source_type(source_url)? {
             "postgres" => format!("table \"{}\".\"{}\"", info.schema, info.table),
             "mysql" => format!("table `{}`", info.table),
@@ -1460,7 +1482,7 @@ fn init_discovery_json(
         };
         (vec![info], scope)
     } else {
-        let infos = introspect_all(tls, source_url, schema, filter)?;
+        let infos = introspect_all(tls, source_url, schema, filter, false)?;
         if infos.is_empty() {
             return Err(no_tables_error(filter));
         }
@@ -1538,6 +1560,7 @@ fn introspect_all(
     source_url: &str,
     schema: Option<&str>,
     filter: &TableFilter,
+    #[cfg_attr(not(feature = "oracle"), allow(unused_variables))] cdc: bool,
 ) -> Result<Vec<TableInfo>> {
     match source_type(source_url)? {
         "postgres" => {
@@ -1625,7 +1648,7 @@ fn introspect_all(
             names.retain(|n| filter.matches_folded(n));
             let mut out = Vec::with_capacity(names.len());
             for n in names {
-                if let Some(info) = scan_step(oracle::introspect(&mut conn, &owner, &n))? {
+                if let Some(info) = scan_step(oracle::introspect(&mut conn, &owner, &n, cdc))? {
                     out.push(info)
                 }
             }
@@ -1839,6 +1862,23 @@ fn relation_for_key(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_a_cdc_scaffold_probes_mineability() {
+        assert!(probes_mineability(Some("cdc")));
+        assert!(!probes_mineability(None));
+        assert!(!probes_mineability(Some("full")));
+        assert!(!probes_mineability(Some("incremental")));
+    }
+
+    #[test]
+    fn a_discovery_of_an_unreachable_source_is_an_error_not_an_empty_artifact() {
+        let url = "postgresql://rivet:rivet@127.0.0.1:1/rivet";
+        let one = init_discovery_json(None, url, Some("t"), None, &TableFilter::default());
+        assert!(one.is_err(), "{one:?}");
+        let all = init_discovery_json(None, url, None, None, &TableFilter::default());
+        assert!(all.is_err(), "{all:?}");
+    }
     use super::yaml_scaffold::ScaffoldDecisions;
 
     /// Recording primary keys must not re-load and re-VALIDATE the config.
@@ -1876,6 +1916,7 @@ mod tests {
     fn every_skipped_table_is_named_from_the_decision() {
         let named = |n: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             table: n.into(),
             ..make_table(100, vec![col("id", "bigint", true)])
         };
@@ -1967,6 +2008,7 @@ mod tests {
     fn a_schema_init_prints_the_cursor_notice_only_when_an_export_lacks_a_cursor() {
         let table = |n: &str, ty: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             table: n.into(),
             ..make_table(100, vec![col("c", ty, false)])
         };
@@ -1997,11 +2039,13 @@ mod tests {
     fn a_schema_init_prints_the_decimal_note_only_when_it_wrote_the_default_decimal() {
         let plain = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             table: "plain".into(),
             ..make_table(100, vec![col("id", "bigint", true)])
         };
         let ledger = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             table: "ledger".into(),
             ..make_table(
                 100,
@@ -2044,11 +2088,13 @@ mod tests {
     fn exports_needing_a_cursor_names_every_one_of_them() {
         let stamped = |n: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             table: n.into(),
             ..make_table(100, vec![col("updated_at", "timestamp", false)])
         };
         let unstamped = |n: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             table: n.into(),
             ..make_table(100, vec![col("email", "text", false)])
         };
@@ -2304,6 +2350,7 @@ mod tests {
         // And the pass-through, so the extraction cannot quietly drop tables.
         let info = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             schema: "s".into(),
             table: "t".into(),
             row_estimate: 1,
@@ -2372,6 +2419,7 @@ mod tests {
     fn make_table(rows: i64, cols: Vec<ColumnInfo>) -> TableInfo {
         TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".to_string(),
             table: "orders".to_string(),
@@ -2966,6 +3014,7 @@ mod tests {
     fn generate_schema_config_emits_multiple_exports() {
         let a = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".to_string(),
             table: "users".to_string(),
@@ -2975,6 +3024,7 @@ mod tests {
         };
         let b = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".to_string(),
             table: "orders".to_string(),

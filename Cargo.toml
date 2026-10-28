@@ -146,7 +146,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 # tiberius already pulls in.
 futures-util = "0.3"
 # RS256 signing for the Google service-account (`jwt-bearer`) token grant —
-# `src/destination/gcs_auth.rs`. Chosen because it is ALREADY in the tree and
+# `src/gcp_auth.rs`. Chosen because it is ALREADY in the tree and
 # already compiled: `reqsign` (a direct dependency, right below) pulls
 # jsonwebtoken 9 for its own Google signer, so naming it here adds zero crates,
 # zero build time and zero new audit surface. `rsa` + `sha2` would have been the

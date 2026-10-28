@@ -23,6 +23,7 @@ pub mod config;
 pub(crate) mod connect;
 pub mod error;
 pub mod format;
+pub(crate) mod gcp_auth;
 // Fuzz-only entry points (feature = "fuzzing"); not part of the public API.
 #[cfg(feature = "fuzzing")]
 pub mod fuzz;
@@ -87,7 +88,7 @@ pub mod destination_for_tests {
 /// (The consumer is named in docs/adr/0026, not here: the dependency-direction
 /// guard keeps the paid tier out of MIT sources, manifest and comments alike.)
 pub mod google_auth {
-    pub use crate::destination::gcs_auth::{AdcUserTokenLoader, try_authorized_user_loader};
+    pub use crate::gcp_auth::{AdcUserTokenLoader, try_authorized_user_loader};
 }
 
 // Its clap help text indents shell examples, which rustdoc would compile as doctests.

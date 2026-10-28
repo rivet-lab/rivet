@@ -23,11 +23,13 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `url` | `string` |  |  |
 | `url_env` | `string` |  |  |
 | `url_file` | `string` |  |  |
+| `url_secret` | `string` |  | Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`. |
 | `host` | `string` |  |  |
 | `port` | `integer` |  |  |
 | `user` | `string` |  |  |
 | `password` | `string` |  |  |
 | `password_env` | `string` |  |  |
+| `password_secret` | `string` |  | Google Secret Manager secret holding the password: `projects/<p>/secrets/<s>[/versions/<n>]`. |
 | `database` | `string` |  |  |
 | `environment` | `local` \| `replica` \| `production` |  | Operational profile of the source database.  Selects the **default** tuning profile when none is explicitly set in `source.tuning.profile` or `export.tuning.profile`:  | `environment`           | default profile | |-------------------------|------------------| | `production` (default)  | `balanced` (50 ms throttle, 10 k batch, retries) | | `replica`               | `balanced` | | `local`                 | `fast` (no throttle, 50 k batch — saves ~30% wall on localhost) |  Explicit `tuning.profile:` always wins over this hint. |
 | `tuning` | [TuningConfig](#tuningconfig) |  |  |

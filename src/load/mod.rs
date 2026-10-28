@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use staging::maybe_cleanup;
 
 mod bigquery;
-mod bq_rest;
+pub(crate) mod bq_rest;
 pub mod cdc;
 mod clickhouse;
 pub mod compact;

@@ -3,6 +3,7 @@ pub mod cursor;
 pub(crate) mod destination;
 mod export;
 mod format;
+mod gcp_secret;
 mod lints;
 pub mod load;
 mod notifications;
@@ -835,7 +836,7 @@ impl Config {
             // for them.
             crate::config_bail!(
                 crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-                "source: no connection method configured. Add one of:\n  url_env: DATABASE_URL                          (URL from env var — recommended)\n  url: 'postgresql://user:pass@host:5432/db'      (inline — not recommended for committed configs)\n  url_file: /etc/rivet/source.url                 (URL from file — rotation-friendly)\n  host/user/database/...                          (structured fields under `source:`)"
+                "source: no connection method configured. Add one of:\n  url_env: DATABASE_URL                          (URL from env var — recommended)\n  url: 'postgresql://user:pass@host:5432/db'      (inline — not recommended for committed configs)\n  url_file: /etc/rivet/source.url                 (URL from file — rotation-friendly)\n  url_secret: projects/<p>/secrets/<s>            (URL from Google Secret Manager)\n  host/user/database/...                          (structured fields under `source:`)"
             );
         }
 
@@ -844,6 +845,7 @@ impl Config {
                 &self.source.url,
                 &self.source.url_env,
                 &self.source.url_file,
+                &self.source.url_secret,
             ]
             .iter()
             .filter(|u| u.is_some())
@@ -851,7 +853,7 @@ impl Config {
             if url_count > 1 {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-                    "source: specify exactly one of 'url', 'url_env', or 'url_file' (got {} set).\n  Hint: pick one — `url_env` is recommended so credentials never enter the YAML.",
+                    "source: specify exactly one of 'url', 'url_env', 'url_file' or 'url_secret' (got {} set).\n  Hint: pick one — `url_env` is recommended so credentials never enter the YAML.",
                     url_count
                 );
             }
@@ -871,10 +873,15 @@ impl Config {
                     return Err(source::structured_field_missing(field));
                 }
             }
-            if self.source.password.is_some() && self.source.password_env.is_some() {
+            let passwords = [
+                self.source.password.is_some(),
+                self.source.password_env.is_some(),
+                self.source.password_secret.is_some(),
+            ];
+            if passwords.iter().filter(|set| **set).count() > 1 {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-                    "source: specify 'password' OR 'password_env', not both.\n  Hint: prefer `password_env: DB_PASSWORD` so credentials never enter the YAML."
+                    "source: specify one of 'password', 'password_env' or 'password_secret', not both.\n  Hint: prefer `password_env: DB_PASSWORD` so credentials never enter the YAML."
                 );
             }
         }

@@ -279,6 +279,19 @@ pub(super) fn scaffold_schema(
 /// Maximum column width for scaffolded comment lines.
 const COMMENT_WRAP_WIDTH: usize = 100;
 
+/// `text` as one comment line: every line break or control character, including the Unicode line separators, becomes a space.
+fn one_line_comment(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Word-wrap every comment in the scaffolded YAML so no line exceeds
 /// [`COMMENT_WRAP_WIDTH`]. A standalone comment (`<indent># text`) wraps onto
 /// continuation comment lines at the same indent; an inline comment
@@ -974,6 +987,16 @@ fn export_block_lines(
     // CDC reads the transaction log, not a query — a wholly different block
     // (no cursor/chunk/meta_columns; engine-specific stream knobs instead).
     if mode == "cdc" {
+        // The capture refuses this table by the same predicate (`oracle::cdc::unmineable`): a
+        // CDC export of it would be a config whose first run stops, so it is left out, said so.
+        if let Some(why) = info.cdc_unmineable.as_deref() {
+            d.skipped.push(info.table.clone());
+            return vec![format!(
+                "  # SKIPPED {}: {}",
+                yaml_quote_if_needed(&info.table),
+                one_line_comment(why)
+            )];
+        }
         let ident = ident.map_or_else(|| cdc_ident(&info.table), str::to_string);
         return cdc_export_lines(
             info,
@@ -1786,6 +1809,7 @@ mod tests {
         let rel = |schema: &str, table: &str, st: &str| {
             let info = TableInfo {
                 cdc_capture_instance: None,
+                cdc_unmineable: None,
                 density: None,
                 schema: schema.into(),
                 table: table.into(),
@@ -2024,6 +2048,7 @@ mod tests {
                     .iter()
                     .map(|n| TableInfo {
                         cdc_capture_instance: None,
+                        cdc_unmineable: None,
                         schema: schema.into(),
                         table: (*n).into(),
                         ..make_table(vec![pk("id", "bigint")])
@@ -2171,6 +2196,7 @@ mod tests {
         let none = InitYamlDestination::default();
         let named = |n: &str, cols: Vec<ColumnInfo>| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             table: n.into(),
             ..make_table(cols)
         };
@@ -2260,6 +2286,7 @@ mod tests {
                 .iter()
                 .map(|n| TableInfo {
                     cdc_capture_instance: None,
+                    cdc_unmineable: None,
                     schema: "sales".into(),
                     table: (*n).into(),
                     ..make_table(vec![col("id", "bigint")])
@@ -2337,6 +2364,7 @@ mod tests {
     pub(super) fn make_table(cols: Vec<ColumnInfo>) -> TableInfo {
         TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".into(),
             table: "payments".into(),
@@ -2534,6 +2562,7 @@ mod tests {
         };
         let info = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".into(),
             table: "orders".into(),
@@ -2591,6 +2620,7 @@ mod tests {
         };
         let info = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".into(),
             table: "events".into(),
@@ -2831,6 +2861,93 @@ mod tests {
         }
     }
 
+    /// A table the Oracle capture would refuse is left out of a CDC scaffold with the capture's own
+    /// reason, and a schema-wide CDC scaffold keeps the tables it can capture; a batch scaffold keeps it.
+    #[test]
+    fn an_oracle_table_logminer_cannot_mine_is_left_out_of_a_cdc_scaffold() {
+        let url = "oracle://u@localhost:1521/FREEPDB1";
+        let mut blob = make_table(vec![col("ID", "bigint")]);
+        blob.table = "DOCS".into();
+        blob.cdc_unmineable =
+            Some("oracle cdc: `APP.DOCS` cannot be captured in this preview: B BLOB".into());
+        let mut plain = make_table(vec![col("ID", "bigint")]);
+        plain.table = "ORDERS".into();
+        let scaffold = |mode: Option<&str>| {
+            scaffold_schema(
+                &[blob.clone(), plain.clone()],
+                url,
+                &crate::init::SourceProvenance::Inline,
+                "schema APP",
+                &InitYamlDestination::default(),
+                mode,
+                None,
+            )
+            .unwrap()
+        };
+        let cdc = scaffold(Some("cdc"));
+        assert_eq!(cdc.decisions.skipped, ["DOCS"], "{}", cdc.text);
+        assert!(
+            cdc.text.contains("# SKIPPED DOCS: oracle cdc:"),
+            "{}",
+            cdc.text
+        );
+        let cfg = crate::config::Config::from_yaml(&cdc.text)
+            .unwrap_or_else(|e| panic!("{e:#}\n{}", cdc.text));
+        assert_eq!(
+            cfg.exports
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![cfg.exports[0].name.as_str()],
+            "{}",
+            cdc.text
+        );
+        assert!(
+            cfg.exports[0].name.to_lowercase().contains("orders"),
+            "{}",
+            cdc.text
+        );
+        let batch = scaffold(None);
+        assert!(batch.decisions.skipped.is_empty(), "{}", batch.text);
+        assert!(!batch.text.contains("SKIPPED"), "{}", batch.text);
+    }
+
+    #[test]
+    fn a_skip_reason_holding_line_breaks_stays_one_comment_and_injects_no_yaml() {
+        let url = "oracle://u@localhost:1521/FREEPDB1";
+        let mut bad = make_table(vec![col("ID", "bigint")]);
+        bad.table = "DOCS".into();
+        bad.cdc_unmineable = Some(
+            "column \"A\nexports:\n- name: injected\r\u{2028}b: 1\u{85}c: 2\" cannot be mined"
+                .into(),
+        );
+        let mut plain = make_table(vec![col("ID", "bigint")]);
+        plain.table = "ORDERS".into();
+        let out = scaffold_schema(
+            &[bad, plain],
+            url,
+            &crate::init::SourceProvenance::Inline,
+            "schema APP",
+            &InitYamlDestination::default(),
+            Some("cdc"),
+            None,
+        )
+        .unwrap();
+        let cfg = crate::config::Config::from_yaml(&out.text)
+            .unwrap_or_else(|e| panic!("{e:#}\n{}", out.text));
+        assert_eq!(cfg.exports.len(), 1, "{}", out.text);
+        assert!(!out.text.contains("injected\n"), "{}", out.text);
+        assert_eq!(
+            out.text
+                .lines()
+                .filter(|l| l.contains("SKIPPED DOCS"))
+                .count(),
+            1,
+            "{}",
+            out.text
+        );
+    }
+
     #[test]
     fn the_output_stem_is_the_file_name_in_lowercase_letters_digits_and_underscores() {
         assert_eq!(output_stem("staging.yaml").as_deref(), Some("staging"));
@@ -3044,6 +3161,7 @@ mod tests {
     fn a_cdc_scaffold_names_its_checkpoint_and_destination_after_the_output_file() {
         let t = |name: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: name.into(),
@@ -3137,6 +3255,7 @@ mod tests {
     fn a_whole_schema_postgres_stream_names_its_slot_from_the_output_file() {
         let t = |name: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".into(),
             table: name.into(),
@@ -3175,6 +3294,7 @@ mod tests {
         // that would apply to every table).
         let orders = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: "orders".into(),
@@ -3184,6 +3304,7 @@ mod tests {
         };
         let invoices = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: "invoices".into(),
@@ -3245,6 +3366,7 @@ mod tests {
         };
         let t = |name: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: name.into(),
@@ -3291,6 +3413,7 @@ mod tests {
         };
         let orders = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: "orders".into(),
@@ -3302,6 +3425,7 @@ mod tests {
         // `query:` export can never be a baseline) and fall back to `full`.
         let audit = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: "audit".into(),
@@ -3366,6 +3490,7 @@ mod tests {
         };
         let mk = |table: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: table.into(),
@@ -3403,6 +3528,7 @@ mod tests {
     fn whole_db_cdc_puts_each_tables_partition_where_the_load_reads_it() {
         let mk = |table: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: table.into(),
@@ -3502,6 +3628,7 @@ mod tests {
     fn whole_db_cdc_fallback_on_mysql_gives_every_export_its_own_server_id() {
         let mk = |table: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: table.into(),
@@ -3542,6 +3669,7 @@ mod tests {
     fn a_mixed_case_table_scaffolds_a_lowercase_slot() {
         let info = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "sales".into(),
             table: "Orders".into(),
@@ -3597,6 +3725,7 @@ mod tests {
     fn recipe_readability_and_mode_follow_the_engine_and_the_key() {
         let mk = |table: &str, cols: Vec<ColumnInfo>| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "app".into(),
             table: table.into(),
@@ -3635,6 +3764,7 @@ mod tests {
     fn an_oracle_mixed_case_name_is_never_an_unquoted_table() {
         let mk = |schema: &str, table: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: schema.into(),
             table: table.into(),
@@ -3653,6 +3783,7 @@ mod tests {
     fn only_a_multi_table_cdc_scaffold_on_mysql_or_public_postgres_is_one_stream() {
         let mk = |schema: &str, table: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: schema.into(),
             table: table.into(),
@@ -3716,6 +3847,7 @@ mod tests {
     fn whole_db_cdc_with_no_readable_table_falls_back_to_the_per_table_scaffold() {
         let mk = |table: &str| TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".into(),
             table: table.into(),
@@ -3820,6 +3952,7 @@ mod tests {
     fn chunked_table(rows: i64, cols: Vec<ColumnInfo>) -> TableInfo {
         TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "public".into(),
             table: "events".into(),
@@ -3945,6 +4078,7 @@ mod tests {
     fn full_mode_pg_non_public_schema_emits_qualified_table() {
         let info = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             density: None,
             schema: "billing".into(),
             table: "invoices".into(),
@@ -4204,6 +4338,7 @@ mod load_block_tests {
         };
         let info = TableInfo {
             cdc_capture_instance: None,
+            cdc_unmineable: None,
             table: "orders".into(),
             ..super::tests::make_table(vec![
                 super::tests::pk("id", "bigint"),

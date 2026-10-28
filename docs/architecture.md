@@ -307,7 +307,7 @@ src/
     mod.rs, csv.rs, parquet.rs
 
   destination/            Output backends
-    mod.rs, local.rs, s3.rs, gcs.rs, gcs_auth.rs, azure.rs, stdout.rs
+    mod.rs, local.rs, s3.rs, gcs.rs, azure.rs, stdout.rs
 
   pipeline/               Orchestration — the actual export work
     mod.rs, cli.rs            Pipeline entry points called by cli::dispatch
