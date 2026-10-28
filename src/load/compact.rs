@@ -73,12 +73,8 @@ pub(crate) fn compact_gate(
         (ObjectKind::View, _) => CompactGate::Refuse(
             crate::error::codes::LOAD_TARGET_OBJECT_CONFLICT,
             format!(
-                "refusing to compact `{buffer_fqtn}` into `{base_fqtn}`: that name is a VIEW — the \
-             current-state view of the changelog+view layout, which has no base to merge into. \
-             To move to base+buffer, drop the view and `{buffer_fqtn}`; to stay on the view, \
-             set `load.layout: log_view` (or delete a written `layout:` key — a written one \
-             WINS over `cdc.backfill:`, and `rivet init` writes it), and remove `cdc.backfill:` \
-             from the export if it has one"
+                "refusing to compact `{buffer_fqtn}` into `{base_fqtn}`: {}",
+                load::view_as_base_refusal(base_fqtn, buffer_fqtn)
             ),
         ),
         (ObjectKind::Other, _) => CompactGate::Refuse(
@@ -136,10 +132,11 @@ fn compact_skip_reason(
         // as a physical base with a disposable buffer has something to merge. An
         // incremental export asks for that with `load.layout: base_buffer`.
         _ if layout.compacts() => None,
-        // A `backfill:` makes the base only where the warehouse derives one from it.
-        load::plan::LoadMode::Cdc if support == BaseSupport::Written => Some((
+        // Where a base is the default only a written `log_view` gets here.
+        _ if support == BaseSupport::Default => Some((
             "log_view",
-            "a changelog + view table (no `load.layout: base_buffer`); nothing to merge",
+            "a changelog + view table (`load.layout: log_view` is written); delete the key to \
+             give it a base to merge into",
         )),
         load::plan::LoadMode::Cdc => Some((
             "log_view",
@@ -588,23 +585,25 @@ mod tests {
             )
             .is_some_and(|(word, w)| word == "log_view" && w.contains("base_buffer"))
         );
-        // Snowflake makes a base only from a written key: its hint must not offer `backfill:`.
-        let (word, why) = super::compact_skip_reason(
-            &LoadMode::Cdc,
-            &CdcLayout::LogAndView,
-            BaseSupport::Written,
-        )
-        .expect("skipped");
-        assert_eq!(word, "log_view");
-        assert!(
-            why.contains("load.layout: base_buffer") && !why.contains("backfill"),
-            "{why}"
-        );
+        // Snowflake makes a base by default: a skip there means `log_view` is written, and its
+        // hint offers deleting that key, never `backfill:` or a `base_buffer` it already has.
+        for mode in [LoadMode::Cdc, LoadMode::Incremental] {
+            let (word, why) =
+                super::compact_skip_reason(&mode, &CdcLayout::LogAndView, BaseSupport::Default)
+                    .expect("skipped");
+            assert_eq!(word, "log_view");
+            assert!(
+                why.contains("`load.layout: log_view` is written")
+                    && !why.contains("backfill")
+                    && !why.contains("no `load.layout"),
+                "{why}"
+            );
+        }
         assert_eq!(
             super::compact_skip_reason(
                 &LoadMode::Cdc,
                 &CdcLayout::BaseAndBuffer,
-                BaseSupport::Written
+                BaseSupport::Default
             ),
             None
         );

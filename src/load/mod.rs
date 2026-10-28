@@ -409,6 +409,42 @@ pub(crate) fn before_write<T>(r: Result<T>) -> Result<T> {
     })
 }
 
+/// The refusal for a base name that is a VIEW: the current-state view of a changelog+view table, which has no base to land rows in or merge into.
+pub(crate) fn view_as_base_refusal(base_fqtn: &str, buffer_fqtn: &str) -> String {
+    format!(
+        "that name is a VIEW — the current-state view of the changelog+view layout, which has no \
+         base to land rows in or merge into (`{base_fqtn}`, change log `{buffer_fqtn}`). To move \
+         to base+buffer, drop the view and `{buffer_fqtn}` and load again; to stay on the view, \
+         set `load.layout: log_view` (or delete a written `layout:` key — a written one WINS over \
+         `cdc.backfill:`, and `rivet init` writes it), and remove `cdc.backfill:` from the export \
+         if it has one"
+    )
+}
+
+/// Stop a load of a base-and-buffer table whose base name is a view, before any write.
+pub(crate) fn refuse_view_as_base(
+    loader: &dyn TargetLoader,
+    table: &str,
+    base_and_buffer: bool,
+) -> Result<()> {
+    before_write(view_as_base_check(loader, table, base_and_buffer))
+}
+
+fn view_as_base_check(loader: &dyn TargetLoader, table: &str, base_and_buffer: bool) -> Result<()> {
+    if !base_and_buffer || loader.object_kind(table)? != ObjectKind::View {
+        return Ok(());
+    }
+    let (base, buffer) = (
+        loader.fqtn(table),
+        loader.fqtn(&format!("{table}__changes")),
+    );
+    crate::rivet_bail!(
+        crate::error::codes::LOAD_TARGET_OBJECT_CONFLICT,
+        "refusing to load `{base}`: {}",
+        view_as_base_refusal(&base, &buffer)
+    )
+}
+
 /// Stop a whole-table pass over a base whose buffer still holds rows from before it: the
 /// next `rivet compact` would merge those older values over the new base.
 pub(crate) fn refuse_stale_buffer(

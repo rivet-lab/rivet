@@ -1736,6 +1736,111 @@ fn a_base_and_buffer_layout_needs_a_compacting_warehouse() {
     Config::from_yaml(&cfg(clickhouse, "")).expect("no key written, no promise made");
 }
 
+/// On Snowflake `base_buffer` is the default, so a CDC stream that names nothing to build the
+/// base from would start it empty: refused at config load with its two remedies. Every
+/// neighbour that has a baseline, writes `log_view`, is not CDC or loads into another warehouse
+/// loads as before.
+#[test]
+fn a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load() {
+    let snowflake = "  target: snowflake\n  account: a\n  user: u\n  private_key_path: /k.p8\n  warehouse: w\n  database: d\n  \
+                     schema: s\n  storage_integration: i\n";
+    let bigquery = "  target: bigquery\n  project: p\n  dataset: d\n";
+    let clickhouse = "  target: clickhouse\n  url: \"http://localhost:8123\"\n  database: d\n  \
+                      user: u\n  password_env: CH_PW\n";
+    let cfg = |load: &str, stream: &str, extra: &str| {
+        format!(
+            "source:\n  type: postgres\n  url: \"postgresql://localhost/app\"\nexports:\n\
+             \x20 - name: a_base\n    table: a\n    mode: full\n    format: parquet\n    \
+             destination: {{ type: gcs, bucket: b, prefix: a/ }}\n\
+             \x20 - name: b_base\n    table: b\n    mode: full\n    format: parquet\n    \
+             destination: {{ type: gcs, bucket: b, prefix: b/ }}\n\
+             \x20 - name: stream\n    tables: [a, b]\n    mode: cdc\n    format: parquet\n{stream}    \
+             destination: {{ type: gcs, bucket: b, prefix: cdc/ }}\nload:\n{load}{extra}"
+        )
+    };
+    let refused = |yaml: String| {
+        let e = Config::from_yaml(&yaml).expect_err("a base with nothing to start from is refused");
+        (
+            format!("{e:#}"),
+            crate::error::error_code(&e),
+            crate::error::classify_exit(&e),
+        )
+    };
+    let none = "    cdc: { slot: s }\n";
+    let snapshot = "    cdc: { slot: s, initial: snapshot }\n";
+    let backfill = "    cdc: { slot: s, backfill: auto }\n";
+
+    let (said, code, exit) = refused(cfg(snowflake, none, ""));
+    assert_eq!(code, Some("RIVET_CONFIG_LOAD_BLOCK_INVALID"), "{said}");
+    assert_eq!(exit, 1, "a config usage stop exits 1: {said}");
+    for want in [
+        "export 'stream' (table 'a')",
+        "on `target: snowflake` a `mode: cdc` export keeps a base table and a buffer",
+        "neither `cdc.backfill:` nor `cdc.initial: snapshot`",
+        "add `cdc.backfill:` (or `cdc.initial: snapshot`) to build the base from a snapshot of the table",
+        "or write `load.layout: log_view` to keep the change log and its current-state view",
+    ] {
+        assert!(said.contains(want), "missing `{want}` in: {said}");
+    }
+    let (said, _, _) = refused(cfg(snowflake, none, "  layout: base_buffer\n"));
+    assert!(
+        said.contains("export 'stream'"),
+        "a written base_buffer is no baseline: {said}"
+    );
+
+    for (what, yaml) in [
+        ("initial: snapshot", cfg(snowflake, snapshot, "")),
+        ("backfill: auto", cfg(snowflake, backfill, "")),
+        (
+            "layout: log_view written",
+            cfg(snowflake, none, "  layout: log_view\n"),
+        ),
+        (
+            "export load override",
+            cfg(
+                snowflake,
+                &format!("{none}    load: {{ layout: log_view }}\n"),
+                "",
+            ),
+        ),
+        (
+            "every table overridden",
+            cfg(
+                snowflake,
+                &format!(
+                    "{none}    load: {{ tables: {{ a: {{ layout: log_view }}, b: {{ layout: log_view }} }} }}\n"
+                ),
+                "",
+            ),
+        ),
+        ("BigQuery, no baseline", cfg(bigquery, none, "")),
+        (
+            "BigQuery, written base_buffer",
+            cfg(bigquery, none, "  layout: base_buffer\n"),
+        ),
+        ("ClickHouse, no baseline", cfg(clickhouse, none, "")),
+    ] {
+        Config::from_yaml(&yaml)
+            .unwrap_or_else(|e| panic!("{what}: loads as before: {e:#}\n{yaml}"));
+    }
+
+    let (said, _, _) = refused(cfg(
+        snowflake,
+        &format!("{none}    load: {{ tables: {{ a: {{ layout: log_view }} }} }}\n"),
+        "",
+    ));
+    assert!(
+        said.contains("(table 'b')") && !said.contains("(table 'a')"),
+        "only the table left without a baseline or a log_view is named: {said}"
+    );
+
+    let incremental = "source:\n  type: mysql\n  url: \"mysql://localhost/test\"\nexports:\n  - name: t\n    \
+                       table: t\n    mode: incremental\n    cursor_column: updated_at\n    format: parquet\n    \
+                       destination: { type: gcs, bucket: b, prefix: t/ }\nload:\n";
+    Config::from_yaml(&format!("{incremental}{snowflake}"))
+        .expect("an incremental export builds its base from its first pass");
+}
+
 /// A ClickHouse `load:` carries `url`, `database`, `user` and `password_env`; a
 /// missing one, or another warehouse's field, is refused naming it.
 #[test]

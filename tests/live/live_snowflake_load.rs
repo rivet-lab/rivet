@@ -144,7 +144,7 @@ fn an_incremental_load_starts_a_table_then_a_change_log(e: SqlEngine) {
         .rig(&table)
         .restage("incremental", &["cursor_column: id"])
         .dest_gcs_live(&sf.bucket, &sf.prefix)
-        .top_line(&sf.load_line(""));
+        .top_line(&sf.load_line(", layout: log_view"));
     rig.run_ok();
     load_ok(&rig);
     assert_eq!(sf.kind(&table).as_deref(), Some("BASE TABLE"));
@@ -179,7 +179,7 @@ fn an_incremental_load_starts_a_table_then_a_change_log(e: SqlEngine) {
         "the view is the current state"
     );
 
-    // Without `layout: base_buffer` there is nothing to merge on Snowflake: `rivet compact` skips by name on every attempt, exit 0, and leaves the log and the view as they are.
+    // With `layout: log_view` written there is nothing to merge on Snowflake: `rivet compact` skips by name on every attempt, exit 0, and leaves the log and the view as they are.
     let said: Vec<String> = (0..2)
         .map(|_| {
             let out = rig.cli(&["compact"]);

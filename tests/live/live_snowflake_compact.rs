@@ -74,7 +74,7 @@ fn shape(rig: Rig, table: &str, pk: &str, sf: &SfLive) -> Rig {
     rig.cdc("backfill: auto")
         .also_batch_export("baseline", table, "full")
         .dest_gcs_live(&sf.bucket, &sf.prefix)
-        .top_line(&sf.load_line(&format!(", pk: [{pk}], layout: base_buffer")))
+        .top_line(&sf.load_line(&format!(", pk: [{pk}]")))
 }
 
 /// Baseline, a delta of inserts, an update and a delete, a key repeated in the buffer, an insert deleted in the same buffer, then a replay of an already merged buffer from `__merging`: the base ends as the source, once.
@@ -250,7 +250,7 @@ fn snowflake_compact_cycle_mongo() {
     snowflake_compact_cycle(scn, "CAST(_id AS INT)", "CAST(document:v AS INT)", &sf);
 }
 
-/// An incremental export with an explicit `base_buffer`: the first cycle lands the base, later cycles fill the buffer, and `rivet compact` folds it in.
+/// An incremental export under the default layout: the first cycle lands the base, later cycles fill the buffer, and `rivet compact` folds it in.
 fn an_incremental_buffer_compacts_into_its_base(e: SqlEngine) {
     let Some(sf) = SfLive::from_env("sfc_inc") else {
         return;
@@ -264,7 +264,7 @@ fn an_incremental_buffer_compacts_into_its_base(e: SqlEngine) {
         .rig(&table)
         .restage("incremental", &["cursor_column: id"])
         .dest_gcs_live(&sf.bucket, &sf.prefix)
-        .top_line(&sf.load_line(", pk: [id], layout: base_buffer"));
+        .top_line(&sf.load_line(", pk: [id]"));
     rig.run_ok();
     load_ok(&rig);
     assert_eq!(sf.kind(&table).as_deref(), Some("BASE TABLE"));
@@ -305,4 +305,66 @@ fn snowflake_incremental_buffer_compacts_into_its_base_postgres() {
 #[ignore = "live: requires docker compose up -d mysql + Snowflake creds"]
 fn snowflake_incremental_buffer_compacts_into_its_base_mysql() {
     an_incremental_buffer_compacts_into_its_base(SqlEngine::Mysql);
+}
+
+/// A log+view table's view under the base name stops `rivet load` and `rivet compact` once the default layout is back: the coded conflict names `load.layout: log_view`, and the view and the log are as they were.
+fn a_view_under_the_base_name_stops_load_and_compact(e: SqlEngine) {
+    let Some(sf) = SfLive::from_env("sfc_view") else {
+        return;
+    };
+    e.alive();
+    let (table, _guard) = e.table("sfc_view");
+    let changes = format!("{table}__changes");
+    let _cleanup = sf.cleanup(&[&table]);
+    e.insert(&table, 1..=10, 10, Some(1));
+    let rig = e
+        .rig(&table)
+        .restage("incremental", &["cursor_column: id"])
+        .dest_gcs_live(&sf.bucket, &sf.prefix)
+        .top_line(&sf.load_line(", pk: [id], layout: log_view"));
+    rig.run_ok();
+    load_ok(&rig);
+    e.insert(&table, 11..=13, 5, Some(2));
+    rig.run_ok();
+    load_ok(&rig);
+    assert_eq!(sf.kind(&table).as_deref(), Some("VIEW"));
+    assert_eq!(sf.counts(&changes, "id"), (13, 13));
+
+    let rig = rig.clear_top_lines().top_line(&sf.load_line(", pk: [id]"));
+    e.insert(&table, 14..=15, 5, Some(3));
+    rig.run_ok();
+    for cmd in ["load", "compact"] {
+        let out = rig.cli(&[cmd]);
+        assert_refused(
+            &out,
+            Refused::by_code("RIVET_LOAD_TARGET_OBJECT_CONFLICT", 5),
+        );
+        assert!(
+            said_of(&out).contains("`load.layout: log_view`"),
+            "{cmd}: the remedy is named:\n{}",
+            said_of(&out)
+        );
+        assert_eq!(
+            sf.kind(&table).as_deref(),
+            Some("VIEW"),
+            "{cmd} left the view alone"
+        );
+        assert_eq!(
+            sf.counts(&changes, "id"),
+            (13, 13),
+            "{cmd} wrote nothing to the log"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres + Snowflake creds"]
+fn snowflake_view_under_the_base_name_stops_load_and_compact_postgres() {
+    a_view_under_the_base_name_stops_load_and_compact(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d mysql + Snowflake creds"]
+fn snowflake_view_under_the_base_name_stops_load_and_compact_mysql() {
+    a_view_under_the_base_name_stops_load_and_compact(SqlEngine::Mysql);
 }
