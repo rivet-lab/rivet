@@ -472,6 +472,8 @@ With an export named `orders` running on 2026-05-14, this resolves to `exports/2
 
 For an export that continues from a stored cursor (`incremental`, `keyset_incremental`, MongoDB `resume`), the destination and the `format` are compared between runs. The destination is compared as written, with the placeholder in place: `exports/{date}/{export}/` is the same destination on every day. Another bucket, `path` or `prefix`, another store or another `format` is refused (`RIVET_STATE_CURSOR_DESTINATION_MISMATCH`, exit 5), because the new location would hold only the rows past the cursor: restore the setting to continue, or run `rivet state reset -c <config> --export <name>` for a full pass delivered where the config points now. A value that comes from `${VAR}` is compared after substitution, so a destination that should change from run to run is spelled with `{date}`.
 
+A cursor is also tied to the source it was read from. A run whose source key (`engine://host:port/database`, credentials and query left out) holds no progress for the export, while another source key of the same export holds a cursor that delivers to the same destination, is refused (`RIVET_STATE_CURSOR_SOURCE_RESPELLED`, exit 5): it is the same server reached under another address, and the run would read the whole table again beside the rows the cursor delivered. `rivet state accept -c <config> --export <name>` moves the progress onto the source key the config names now; `rivet state accept` followed by `rivet state reset -c <config> --export <name>` starts the export over for two different servers that share a destination. `rivet plan` and `rivet apply <plan>` refuse the same way. A source with a destination of its own is never compared with another.
+
 ---
 
 ## `notifications`

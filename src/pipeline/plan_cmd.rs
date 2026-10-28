@@ -653,6 +653,7 @@ fn compute_plan_data(
         }
 
         ExtractionStrategy::Incremental(_) => {
+            state.refuse_respelled_source(&plan.progress_key())?;
             let cursor_snapshot = state
                 .get(&plan.export_name, &plan.source.state_key())?
                 .last_cursor_value;

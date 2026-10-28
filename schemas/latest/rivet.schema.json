@@ -1694,8 +1694,24 @@
           ],
           "default": null
         },
-        "connection": {
-          "description": "Snowflake: the `snow` CLI connection name.",
+        "account": {
+          "description": "Snowflake: the account identifier — `myorg-myaccount`, or a locator such as\n`xy12345.us-east-1`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "private_key_path": {
+          "description": "Snowflake: the unencrypted PKCS#8 private key file of the user's key pair.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "role": {
+          "description": "Snowflake: the role the statements run under; the user's default when omitted.",
           "type": [
             "string",
             "null"
@@ -1743,7 +1759,7 @@
           "default": null
         },
         "user": {
-          "description": "ClickHouse: the user the load authenticates as.",
+          "description": "Snowflake / ClickHouse: the user the load authenticates as.",
           "type": [
             "string",
             "null"

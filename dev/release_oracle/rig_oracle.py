@@ -1492,7 +1492,7 @@ def grade_load(spec: dict) -> dict:
     if target == "bigquery":
         kw.update(bigquery=True, bq_project=str(load.get("project") or ""), bq_dataset=str(load.get("dataset") or ""))
     if target == "snowflake":
-        kw.update(snowflake={k: load.get(k) for k in ("connection", "database", "warehouse")})
+        kw.update(snowflake={k: load.get(k) for k in ("account", "user", "private_key_path", "database", "warehouse")})
     notes: list[str] = []
     partial: list[str] = []
     with ExitStack() as held:

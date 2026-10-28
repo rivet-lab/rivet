@@ -167,6 +167,11 @@ console = "0.16"
 atoi = "3"
 simdutf8 = "0.1"
 zeroize = "1"
+# Snowflake key-pair auth (`src/load/snowflake_rest.rs`): the public key's SHA-256
+# fingerprint goes into the JWT `iss`. Both crates are already in the tree via `reqsign`.
+# The same two also VERIFY the RS256 signatures of the unit tests (an independent oracle).
+rsa = { version = "0.9", features = ["pem"] }
+sha2 = { version = "0.10", features = ["oid"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.6"
@@ -176,13 +181,6 @@ mach2 = "0.6"
 # exclusion patterns and prove none of them is over-broad. Already in the tree
 # transitively; pinned here so the guard cannot silently lose its engine.
 regex = "1"
-# INDEPENDENT oracle for the service-account assertion
-# (`src/destination/gcs_auth.rs`): RustCrypto VERIFIES the RS256 signature that
-# `jsonwebtoken`/`ring` produced, so the test is not one library round-tripping
-# itself. Both crates are already in the tree via `reqsign`; dev-only, so the
-# feature additions never reach the release binary (resolver v2).
-rsa = { version = "0.9", features = ["pem"] }
-sha2 = { version = "0.10", features = ["oid"] }
 csv = "1"
 serde_json = "1"
 serde_yaml_ng = "0.10"

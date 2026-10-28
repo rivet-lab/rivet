@@ -1,0 +1,17 @@
+diff --git a/src/state/cursor.rs b/src/state/cursor.rs
+--- a/src/state/cursor.rs
++++ b/src/state/cursor.rs
+@@ -478,7 +478,12 @@
+ 
+     /// Refuse a first run of `key`'s source when the export holds a cursor under another source that delivers to the same destination: it would read the whole table again and deliver it there beside what that cursor delivered.
+     pub fn refuse_respelled_source(&self, key: &ProgressKey) -> Result<()> {
+-        let Some((other, cursor)) = self.progress_elsewhere(key)?.into_iter().next() else {
++        let Some((other, cursor)) = self
++            .progress_elsewhere(key)?
++            .into_iter()
++            .next()
++            .filter(|_| false)
++        else {
+             return Ok(());
+         };
+         let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
