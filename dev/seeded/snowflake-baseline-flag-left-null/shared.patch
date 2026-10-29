@@ -1,0 +1,11 @@
+--- a/src/load/snowflake.rs
++++ b/src/load/snowflake.rs
+@@ -98,7 +98,7 @@ impl SnowflakeLoader {
+             .iter()
+             .map(|s| {
+                 let path = format!("$1:{}", s.column_name);
+-                if s.column_name == crate::load::cdc::DELETE_FLAG_COLUMN {
++                if false && s.column_name == crate::load::cdc::DELETE_FLAG_COLUMN {
+                     format!("COALESCE({path}::BOOLEAN, FALSE)")
+                 } else if needs_parse_json(s) {
+                     format!("PARSE_JSON({path})")

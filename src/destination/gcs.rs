@@ -3,9 +3,9 @@ use opendal::services::Gcs;
 use std::sync::Arc;
 
 use super::cloud::{CloudBackend, CloudDestination};
-use super::gcs_auth;
 use crate::config::DestinationConfig;
 use crate::error::Result;
+use crate::gcp_auth;
 
 /// Build the async GCS [`Operator`] for `config`, using the same auth chain
 /// (ADC refreshing loader / credentials_file / anonymous emulator) as the
@@ -243,7 +243,7 @@ impl CloudBackend for GcsBackend {
         } else if let Some(cred_file) = &config.credentials_file {
             builder = builder.credential_path(cred_file);
             log::info!("GCS: using credentials_file from config: {}", cred_file);
-        } else if let Some(loader) = gcs_auth::try_authorized_user_loader()? {
+        } else if let Some(loader) = gcp_auth::try_authorized_user_loader()? {
             // A refreshing loader, not a static `.token()`: opendal pins a
             // static token with a usize::MAX expiry, so exports longer than
             // the ~1h ADC token TTL would 401 mid-run, non-retryably.

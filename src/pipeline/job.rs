@@ -1247,6 +1247,8 @@ struct TailPolicy<'a> {
     strict: bool,
     /// The run path's `--force`: a `--resume` with no chunk run to continue runs as a plain run. Apply's `--force` is another gate.
     force: bool,
+    /// The snapshot leg of a change-stream export: a column denial in it is a grant change, not a stale plan.
+    cdc_leg: bool,
 }
 
 /// Does this run's reconcile leg run? Pure, because the three-input condition
@@ -1523,6 +1525,12 @@ fn execute_resolved_plan(
         Ok(()) => super::finalize::finalize_export(plan, Some(state), &mut summary),
         Err(e) => {
             super::finalize::finalize_export_records(&mut summary);
+            let e = crate::source::code_a_revoked_column(
+                e,
+                &plan.export_name,
+                plan.source.columns_from_grants(),
+                tail.cdc_leg,
+            );
             Err(crate::source::code_a_missing_relation(
                 e,
                 &plan.export_name,
@@ -1863,15 +1871,28 @@ fn run_export_job_inner(
         let cdc_config_dir = std::path::Path::new(config_path)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let pending =
-            match super::cdc_job::initial_snapshot_pending(config, export, state, cdc_config_dir) {
-                Ok(p) => p,
-                Err(e) => {
-                    let summary = synthetic_failed_summary(&export.name, &e);
-                    crate::notify::maybe_send(config.notifications.as_ref(), &summary);
-                    return (Err(e), summary);
-                }
-            };
+        let grants = match super::cdc_job::resolve_grants(config, export) {
+            Ok(g) => g,
+            Err(e) => {
+                let summary = synthetic_failed_summary(&export.name, &e);
+                crate::notify::maybe_send(config.notifications.as_ref(), &summary);
+                return (Err(e), summary);
+            }
+        };
+        let pending = match super::cdc_job::initial_snapshot_pending(
+            config,
+            export,
+            state,
+            cdc_config_dir,
+            grants.as_ref(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                let summary = synthetic_failed_summary(&export.name, &e);
+                crate::notify::maybe_send(config.notifications.as_ref(), &summary);
+                return (Err(e), summary);
+            }
+        };
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
             // The batch pool `--parallel-exports` runs on: every leg runs, each on its
             // own state connection, and a finished snapshot is recorded as it lands.
@@ -1904,7 +1925,7 @@ fn run_export_job_inner(
             done
         };
         let outcome = cdc_outcome_with_legs(&export.name, outcomes, || {
-            super::cdc_job::run_cdc_export(config_path, config, export, state, opts.strict)
+            super::cdc_job::run_cdc_export(config_path, config, export, state, opts.strict, grants)
         });
         // The parent of a child process knows the export's run only by the id reported here.
         outcome.1.emit_finished();
@@ -1930,8 +1951,19 @@ fn run_export_job_inner(
         export
     };
     let mut meta = MetaConn::open(&config.source);
+    let probe = if config.source.columns_from_grants() {
+        match meta.require() {
+            Ok(src) => Some(src),
+            Err(e) => {
+                let summary = synthetic_failed_summary(&export.name, &e);
+                return (Err(e), summary);
+            }
+        }
+    } else {
+        meta.get()
+    };
     let plan = match crate::plan::build::build_plan_on(
-        meta.get().map(|s| s as &mut dyn crate::source::Source),
+        probe.map(|s| s as &mut dyn crate::source::Source),
         config,
         export,
         config_dir,
@@ -2018,6 +2050,7 @@ fn run_export_job_inner(
             plan_warnings,
             strict: opts.strict,
             force: opts.force,
+            cdc_leg: export.snapshot_parent.is_some(),
         },
         meta,
     )
@@ -2101,6 +2134,7 @@ pub(crate) fn run_export_job_with_chunk_source(
             plan_warnings: Vec::new(),
             strict: false,
             force: false,
+            cdc_leg: false,
         },
         MetaConn::open(&plan.source),
     )
@@ -2170,6 +2204,7 @@ mod snapshot_leg_tests {
                     plan_warnings: Vec::new(),
                     strict: false,
                     force: false,
+                    cdc_leg: false,
                 },
                 MetaConn::open(&plan.source),
             );
@@ -2215,6 +2250,7 @@ mod snapshot_leg_tests {
                 plan_warnings: Vec::new(),
                 strict: false,
                 force: false,
+                cdc_leg: false,
             },
             MetaConn::open(&plan.source),
         );
@@ -3785,16 +3821,19 @@ mod tests {
                 url: Some("postgresql://nobody@127.0.0.1:9999/x".into()),
                 url_env: None,
                 url_file: None,
+                url_secret: None,
                 host: None,
                 port: None,
                 user: None,
                 password: None,
                 password_env: None,
+                password_secret: None,
                 database: None,
                 environment: None,
                 tuning: None,
                 tls: None,
                 mongo: None,
+                columns_from: None,
             },
             column_overrides: Default::default(),
             verify: crate::config::VerifyMode::Size,

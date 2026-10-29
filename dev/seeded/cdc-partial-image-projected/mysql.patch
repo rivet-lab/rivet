@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 601cd027..2c39a45b 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -1252,7 +1252,7 @@ impl MysqlChangeStream {
+                         .and_then(|cfg| readable.get(cfg))
+                         .map(|r| super::column_grants::kept_positions(&image_names, &r.columns))
+                 });
+-                let captured = matches!(captured_keep, Some(Some(_)));
++                let captured = false && matches!(captured_keep, Some(Some(_)));
+                 let keep = captured_keep.map(Option::unwrap_or_default);
+                 let full_arity = image_names.len();
+                 let image_names: std::sync::Arc<[String]> = match &keep {

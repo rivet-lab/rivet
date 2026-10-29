@@ -313,8 +313,33 @@ pub struct LoadPlan {
 impl LoadPlan {
     /// This table's plan-time refusal, as its own error.
     pub fn refused(&self) -> Result<()> {
-        match &self.refusal {
-            Some(why) => crate::rivet_bail!(crate::error::codes::LOAD_LOOKALIKE_COLUMN, "{why}"),
+        if let Some(why) = &self.refusal {
+            crate::rivet_bail!(crate::error::codes::LOAD_LOOKALIKE_COLUMN, "{why}");
+        }
+        self.reserved_column_refusal()
+    }
+
+    /// Refuses a source column named like one rivet owns in a delta load's changelog and base tables; `full` builds none.
+    fn reserved_column_refusal(&self) -> Result<()> {
+        if matches!(self.mode, LoadMode::Full) {
+            return Ok(());
+        }
+        match self
+            .specs
+            .iter()
+            .find(|s| crate::load::cdc::is_reserved_column(&s.column_name))
+        {
+            Some(s) => crate::rivet_bail!(
+                crate::error::codes::LOAD_RESERVED_COLUMN,
+                "export `{}`: the source has a column named `{}`, which is a name rivet OWNS in \
+                 a `{}` load's changelog and base tables. Its values would not survive the merge \
+                 (and `__is_deleted` would switch on soft-delete semantics for rows the source \
+                 controls). Rename or exclude the column in the export's query, or load this \
+                 table with `mode: full`, where rivet builds no such columns.",
+                self.export_name,
+                s.column_name,
+                self.mode.ledger_str(),
+            ),
             None => Ok(()),
         }
     }
@@ -536,35 +561,6 @@ const NOT_A_COLUMN: &str = "is not a column of the export";
 /// The strict fit check a deferred plan still owes: every key, clustering and
 /// partition column is a column of the spec it is typed from.
 pub fn check_spec_fit(plan: &LoadPlan) -> Result<()> {
-    // A delta mode writes a changelog or a base+buffer table, and BOTH carry rivet's
-    // reserved `__` columns. A SOURCE column of the same name is silently destructive
-    // there and in two different ways: `__op`/`__pos`/`__seq` are filtered out of a
-    // MERGE's carried set by `is_meta_column`, so their values vanish; `__is_deleted`
-    // is worse, because `merge_inputs` reads that name being PRESENT as "this table
-    // has soft-delete semantics" and turns the tombstone arm on for a column the
-    // source owns. `DELETE_FLAG_COLUMN`'s own doc claimed the `__` namespace meant a
-    // collision "can never" happen — this is what makes that true.
-    //
-    // `full` is exempt: it overwrites with source columns only and never builds the
-    // vocabulary, so refusing there would break configs that work.
-    if !matches!(plan.mode, LoadMode::Full)
-        && let Some(s) = plan
-            .specs
-            .iter()
-            .find(|s| crate::load::cdc::is_reserved_column(&s.column_name))
-    {
-        crate::rivet_bail!(
-            crate::error::codes::LOAD_RESERVED_COLUMN,
-            "export `{}`: the source has a column named `{}`, which is a name rivet OWNS in \
-             a `{}` load's changelog and base tables. Its values would not survive the merge \
-             (and `__is_deleted` would switch on soft-delete semantics for rows the source \
-             controls). Rename or exclude the column in the export's query, or load this \
-             table with `mode: full`, where rivet builds no such columns.",
-            plan.export_name,
-            s.column_name,
-            plan.mode.ledger_str(),
-        );
-    }
     let has = |c: &str| plan.specs.iter().any(|s| s.column_name == c);
     if let Some(m) = plan.pk.iter().find(|c| !has(c)) {
         crate::rivet_bail!(
@@ -808,7 +804,12 @@ fn build_plans_keyed(
             specs,
             gcs_prefix,
             destination: export.destination.clone(),
-            layout: cdc_layout(export, mode, eff_load.layout, eff_load.target.compacts()),
+            layout: cdc_layout(
+                export,
+                mode,
+                eff_load.layout,
+                eff_load.target.base_support(),
+            ),
             // A CDC stream can express a delete, a query cannot — so the flag is a
             // column a batch base does not pay for unless its operator asks.
             deleted_flag: eff_load
@@ -1746,9 +1747,6 @@ load:
             .unwrap();
         check_spec_fit(&fitted).expect("nothing owed");
 
-        // A SOURCE column in rivet's reserved `__` vocabulary is refused on a delta
-        // mode — see `a_source_column_in_rivets_reserved_namespace_is_refused` for why
-        // silence here is destructive. Reuses this plan rather than rebuilding one.
         for name in ["__op", "__pos", "__seq", "__is_deleted"] {
             let mut clashing = fitted.clone();
             clashing.mode = LoadMode::Cdc;
@@ -1756,28 +1754,25 @@ load:
                 crate::load::cdc::Warehouse::BigQuery,
             ));
             clashing.specs.last_mut().unwrap().column_name = name.to_string();
-            let err = check_spec_fit(&clashing).unwrap_err().to_string();
+            let err = clashing.refused().unwrap_err().to_string();
             assert!(
                 err.contains(name) && err.contains("rivet OWNS"),
                 "`{name}` must be refused by name: {err}"
             );
-            // `full` builds none of that vocabulary, so it must stay loadable.
             clashing.mode = LoadMode::Full;
-            check_spec_fit(&clashing).unwrap_or_else(|e| {
+            clashing.refused().unwrap_or_else(|e| {
                 panic!("a full load overwrites with source columns only — `{name}` is just a column there: {e}")
             });
         }
 
-        // NON-VACUITY: rivet's OWN enrich columns live in the `_rivet_` namespace, not
-        // `__`, and must never trip this. Without this arm the guard could refuse every
-        // delta plan rivet itself builds and the loop above would still pass.
         let mut enriched = fitted.clone();
         enriched.mode = LoadMode::Cdc;
         enriched.specs.push(crate::load::cdc::flag_spec(
             crate::load::cdc::Warehouse::BigQuery,
         ));
         enriched.specs.last_mut().unwrap().column_name = crate::enrich::COL_ROW_HASH.to_string();
-        check_spec_fit(&enriched)
+        enriched
+            .refused()
             .expect("`_rivet_row_hash` is rivet's own enrich column, a different namespace");
     }
 
@@ -1813,6 +1808,88 @@ load:
                 "{theirs} belongs to the source (or to the `_rivet_` enrich namespace) \
                  and must stay loadable"
             );
+        }
+    }
+
+    /// A plan rebuilt from the spec of the run it consumes refuses a reserved source column on a delta mode; `full` and ordinary names stay loadable.
+    #[test]
+    fn a_plan_pinned_to_its_run_refuses_a_reserved_source_column() {
+        use crate::state::{LoadSpec, LoadSpecColumn};
+        use crate::types::{RivetType, TypeFidelity};
+        let yaml = |mode: &str| {
+            let cursor = if mode == "incremental" {
+                "cursor_column: id,"
+            } else {
+                ""
+            };
+            format!(
+                r#"
+source: {{ type: postgres, url: "postgresql://localhost/test" }}
+exports:
+  - {{ name: orders, table: orders, mode: {mode}, {cursor} format: parquet, destination: {{ type: gcs, bucket: b, prefix: o/ }} }}
+load: {{ target: bigquery, project: p, dataset: d, pk: [id], cluster_by: none }}
+"#
+            )
+        };
+        let column = |name: &str| LoadSpecColumn {
+            name: name.into(),
+            source_type: "int8".into(),
+            rivet_type: RivetType::Int64,
+            fidelity: TypeFidelity::Exact,
+            nullable: true,
+            warnings: Vec::new(),
+        };
+        let target = crate::types::target::ExportTarget::parse("bigquery").unwrap();
+        let pinned = |mode: &str, names: &[&str]| {
+            let cfg = crate::config::Config::from_yaml(&yaml(mode)).unwrap();
+            let load = cfg.load.clone().unwrap();
+            let by_name = build_plans_keyed(
+                &cfg,
+                &load,
+                vec![report("orders", vec![col("id", TargetStatus::Ok)])],
+                &RecordedKeys::new(),
+                SpecFit::Deferred,
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+            let spec = LoadSpec {
+                export_name: "orders".into(),
+                unit: None,
+                columns: names.iter().map(|n| column(n)).collect(),
+                primary_key: Some(vec!["id".into()]),
+                run_id: Some("orders_run_1".into()),
+                origin: "run".into(),
+                captured_at: "2026-10-29T00:00:00Z".into(),
+            };
+            retype_plan(&cfg, &by_name, &spec, target).unwrap()
+        };
+        for mode in ["incremental", "cdc"] {
+            for name in ["__op", "__pos", "__seq", "__is_deleted"] {
+                let plan = pinned(mode, &["id", name]);
+                let err = plan.refused().unwrap_err();
+                assert_eq!(
+                    crate::error::error_code(&err),
+                    Some("RIVET_LOAD_RESERVED_COLUMN"),
+                    "{mode} `{name}`: {err:#}"
+                );
+                let said = format!("{err:#}");
+                assert!(
+                    said.contains(&format!("`{name}`")) && said.contains("rivet OWNS"),
+                    "{mode} `{name}`: {said}"
+                );
+            }
+            pinned(
+                mode,
+                &["id", "is_deleted", "op", "__opx", "_rivet_row_hash"],
+            )
+            .refused()
+            .unwrap_or_else(|e| panic!("{mode}: ordinary names stay loadable: {e:#}"));
+        }
+        for name in ["__op", "__is_deleted"] {
+            pinned("full", &["id", name])
+                .refused()
+                .unwrap_or_else(|e| panic!("full: `{name}` is a plain column there: {e:#}"));
         }
     }
 
@@ -3620,11 +3697,21 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none, pk: [id] }
             Some("RIVET_LOAD_LOOKALIKE_COLUMN")
         );
         let mut reserved = plans[0].clone();
+        reserved.refusal = None;
         reserved.specs.push(spec_named("__op"));
         assert_eq!(
-            code_of(check_spec_fit(&reserved)),
+            code_of(reserved.refused()),
             Some("RIVET_LOAD_RESERVED_COLUMN")
         );
+        for op in ["load", "compact"] {
+            assert_eq!(
+                code_of(crate::load::pin::pin_plan_to_its_run(
+                    &reserved, None, &cfg, op
+                )),
+                Some("RIVET_LOAD_RESERVED_COLUMN"),
+                "{op} refuses before any pin"
+            );
+        }
 
         let s3 = crate::config::Config::from_yaml(
             r#"

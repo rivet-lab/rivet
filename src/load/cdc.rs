@@ -141,12 +141,18 @@ impl CompactOrder {
     /// The complete `ORDER BY` clause of the winner-picking `ROW_NUMBER`.
     pub(crate) fn order_by(&self, warehouse: Warehouse) -> String {
         match self {
-            CompactOrder::Cdc(engine) => engine
-                .order_exprs(warehouse)
-                .into_iter()
-                .map(|e| format!("{e} DESC"))
-                .collect::<Vec<_>>()
-                .join(", "),
+            CompactOrder::Cdc(engine) => {
+                // Snowflake sorts NULL first in DESC, so a baseline row (NULL `__pos`)
+                // would outrank every change: rank it last, as the view does.
+                let baseline_last =
+                    (warehouse == Warehouse::Snowflake).then(|| "__pos IS NOT NULL".to_string());
+                baseline_last
+                    .into_iter()
+                    .chain(engine.order_exprs(warehouse))
+                    .map(|e| format!("{e} DESC"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
             CompactOrder::Cursor(column) => cursor_order_by(warehouse, column),
         }
     }
@@ -254,7 +260,7 @@ pub use crate::enrich::DELETE_FLAG_COLUMN;
 /// because `merge_inputs` infers the tombstone arm from that name being PRESENT
 /// and so turns soft-delete semantics on for a column the source owns.
 ///
-/// One predicate owns the whole vocabulary now, and `check_spec_fit` asks it.
+/// One predicate owns the whole vocabulary now, and `LoadPlan::refused` asks it.
 pub(crate) fn is_reserved_column(name: &str) -> bool {
     is_meta_column(name) || name == DELETE_FLAG_COLUMN
 }
@@ -303,38 +309,50 @@ pub struct RangeBound {
 
 /// `__rivet_t.k = __rivet_s.k AND …` over the key columns.
 fn key_join(pk: &[&str]) -> String {
+    key_equality(Warehouse::BigQuery, "__rivet_t", "__rivet_s", pk)
+}
+
+/// `left.k = right.k AND …` over the key columns, quoted for `warehouse`; plain `=`, so a
+/// NULL key matches nothing.
+fn key_equality(warehouse: Warehouse, left: &str, right: &str, pk: &[&str]) -> String {
     pk.iter()
-        .map(|k| format!("__rivet_t.`{k}` = __rivet_s.`{k}`"))
+        .map(|k| {
+            let k = warehouse.quote_ident(k);
+            format!("{left}.{k} = {right}.{k}")
+        })
         .collect::<Vec<_>>()
         .join(" AND ")
 }
 
-/// The tombstones a re-baseline buffers (BigQuery): every live base row whose key the
-/// buffer holds no row for, with the base's last values and `__op = 'delete'`. `rivet
-/// compact` then flags each one `__is_deleted` in the base.
+/// The tombstones a re-baseline buffers: every live base row whose key the buffer holds
+/// no row for, with the base's last values and `__op = 'delete'`. `rivet compact` then
+/// flags each one `__is_deleted` in the base.
 pub fn absent_as_deleted_sql(
+    warehouse: Warehouse,
     base_fqtn: &str,
     changes_fqtn: &str,
     columns: &[&str],
     pk: &[&str],
 ) -> String {
-    let cols = columns
-        .iter()
-        .map(|c| format!("`{c}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let q = |c: &str| warehouse.quote_ident(c);
+    let cols = columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
     let picked = columns
         .iter()
-        .map(|c| format!("__rivet_t.`{c}`"))
+        .map(|c| format!("__rivet_t.{}", q(c)))
         .collect::<Vec<_>>()
         .join(", ");
+    let (op, flag) = (q("__op"), q(DELETE_FLAG_COLUMN));
+    let (base, changes) = (
+        warehouse.quote_fqtn(base_fqtn),
+        warehouse.quote_fqtn(changes_fqtn),
+    );
     format!(
-        "INSERT INTO `{changes_fqtn}` ({cols}, `__op`)\n\
+        "INSERT INTO {changes} ({cols}, {op})\n\
          SELECT {picked}, 'delete'\n\
-         FROM `{base_fqtn}` AS __rivet_t\n\
-         WHERE NOT IFNULL(__rivet_t.`{DELETE_FLAG_COLUMN}`, FALSE)\n\
-         \x20 AND NOT EXISTS (SELECT 1 FROM `{changes_fqtn}` AS __rivet_s WHERE {join})",
-        join = key_join(pk)
+         FROM {base} AS __rivet_t\n\
+         WHERE NOT IFNULL(__rivet_t.{flag}, FALSE)\n\
+         \x20 AND NOT EXISTS (SELECT 1 FROM {changes} AS __rivet_s WHERE {join})",
+        join = key_equality(warehouse, "__rivet_t", "__rivet_s", pk)
     )
 }
 
@@ -675,6 +693,86 @@ impl MergeFilter {
     }
 }
 
+/// The latest row per key of `changes_fqtn` under `order`, with the ranking column dropped
+/// and `filter` (a leading ` AND …` or empty) on the winners. Ranked over the WHOLE buffer
+/// and only then filtered, so a key changed on both sides of a filter has one winner.
+fn winners_sql(
+    warehouse: Warehouse,
+    changes_fqtn: &str,
+    pk: &[&str],
+    order: &CompactOrder,
+    filter: &str,
+) -> String {
+    let partition = quote_partition(warehouse, pk);
+    let order = order.order_by(warehouse);
+    let except = warehouse.except_keyword();
+    let changes = warehouse.quote_fqtn(changes_fqtn);
+    format!(
+        "SELECT * {except} (__rn) FROM (\n\
+         \x20   SELECT *, ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {order}) AS __rn\n\
+         \x20   FROM {changes}\n\
+         \x20 ) WHERE __rn = 1{filter}"
+    )
+}
+
+/// The one transaction that folds a spent buffer into its base on a warehouse that
+/// replaces rows instead of merging them (Snowflake): the buffer's winners delete the base
+/// rows they replace and are inserted whole, a tombstone flags its base row when the base
+/// carries `__is_deleted` and deletes nothing it did not find. Replaying the same winners
+/// leaves the same base, which is what makes a leftover buffer safe to merge again.
+/// Semantics are those of [`compact_merge_filtered_sql`]'s MERGE, statement for statement.
+pub(crate) fn replace_compact_sql(
+    warehouse: Warehouse,
+    base_fqtn: &str,
+    changes_fqtn: &str,
+    columns: &[&str],
+    pk: &[&str],
+    order: &CompactOrder,
+    deleted_flag: bool,
+) -> String {
+    let winners = winners_sql(warehouse, changes_fqtn, pk, order, "");
+    let base = warehouse.quote_fqtn(base_fqtn);
+    let target = base_fqtn.rsplit('.').next().unwrap_or(base_fqtn);
+    let on = key_equality(warehouse, target, "__rivet_s", pk);
+    let q = |c: &str| warehouse.quote_ident(c);
+    let flag = |rendered: String| deleted_flag.then_some(rendered);
+    let insert_cols = columns
+        .iter()
+        .map(|c| q(c))
+        .chain(flag(q(DELETE_FLAG_COLUMN)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert_vals = columns
+        .iter()
+        .map(|c| format!("__rivet_s.{}", q(c)))
+        .chain(flag("FALSE".to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let upsert = "COALESCE(__rivet_s.__op, '') <> 'delete'";
+    // Without the flag column a delete deletes; with it the base row stays, flagged.
+    let replaced = if deleted_flag {
+        format!("{on} AND {upsert}")
+    } else {
+        on.clone()
+    };
+    let tombstone = if deleted_flag {
+        format!(
+            "UPDATE {base} SET {flag_col} = TRUE FROM (\n  {winners}\n) AS __rivet_s \
+             WHERE {on} AND __rivet_s.__op = 'delete';\n",
+            flag_col = q(DELETE_FLAG_COLUMN)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "BEGIN;\n\
+         DELETE FROM {base} USING (\n  {winners}\n) AS __rivet_s WHERE {replaced};\n\
+         INSERT INTO {base} ({insert_cols})\n\
+         SELECT {insert_vals} FROM (\n  {winners}\n) AS __rivet_s WHERE {upsert};\n\
+         {tombstone}COMMIT;\n"
+    )
+}
+
 /// [`compact_merge_sql`] over a [`MergeFilter`]: the filter is applied to the
 /// buffer's winners AND, for a partition filter, to the base in `ON`.
 pub fn compact_merge_filtered_sql(
@@ -687,9 +785,7 @@ pub fn compact_merge_filtered_sql(
     deleted_flag: bool,
 ) -> String {
     let wh = Warehouse::BigQuery;
-    let partition = quote_partition(wh, pk);
-    let order = order.order_by(wh);
-    let source_filter = filter.predicate("");
+    let winners = winners_sql(wh, changes_fqtn, pk, order, &filter.predicate(""));
     let on_keys = key_join(pk);
     // NULL-keyed winners match the base by key alone: their partition is unknown.
     let on_bound = match filter {
@@ -729,10 +825,7 @@ pub fn compact_merge_filtered_sql(
     format!(
         "MERGE `{base_fqtn}` AS __rivet_t\n\
          USING (\n\
-         \x20 SELECT * EXCEPT (__rn) FROM (\n\
-         \x20   SELECT *, ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {order}) AS __rn\n\
-         \x20   FROM `{changes_fqtn}`\n\
-         \x20 ) WHERE __rn = 1{source_filter}\n\
+         \x20 {winners}\n\
          ) AS __rivet_s\n\
          ON {on_keys}{on_bound}\n\
          {tombstone}WHEN MATCHED THEN UPDATE SET {set}\n\
@@ -921,7 +1014,13 @@ mod tests {
     /// The re-baseline's tombstones: each live base row with no buffer row for its key, under its last values.
     #[test]
     fn the_rebaseline_tombstones_are_the_live_base_rows_the_buffer_does_not_hold() {
-        let sql = super::absent_as_deleted_sql("p.d.t", "p.d.t__changes", &["id", "v"], &["id"]);
+        let sql = super::absent_as_deleted_sql(
+            Warehouse::BigQuery,
+            "p.d.t",
+            "p.d.t__changes",
+            &["id", "v"],
+            &["id"],
+        );
         assert_eq!(
             sql,
             "INSERT INTO `p.d.t__changes` (`id`, `v`, `__op`)\n\
@@ -1281,7 +1380,7 @@ pub struct CompactProbe {
 /// the delete flag excluded), the key columns, and whether the base carries the
 /// delete flag at all — the one fact that turns the tombstone arm on. One derivation
 /// for both builders, so the filter and the flag cannot drift between them.
-fn merge_inputs<'a>(
+pub(crate) fn merge_inputs<'a>(
     specs: &'a [TargetColumnSpec],
     pk: &'a [String],
 ) -> (Vec<&'a str>, Vec<&'a str>, bool) {
@@ -2637,6 +2736,104 @@ mod compact_flag_tests {
                 "WHEN MATCHED THEN UPDATE SET `id` = __rivet_s.`id`, `v` = __rivet_s.`v`\n"
             ) && without.contains("INSERT (`id`, `v`) VALUES (__rivet_s.`id`, __rivet_s.`v`)"),
             "the data columns still upsert: {without}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod replace_compact_tests {
+    use super::*;
+
+    fn script(deleted_flag: bool) -> String {
+        replace_compact_sql(
+            Warehouse::Snowflake,
+            "DB.SC.orders",
+            "DB.SC.orders__changes__merging",
+            &["id", "v"],
+            &["id"],
+            &CompactOrder::Cdc(SourceEngine::MySql),
+            deleted_flag,
+        )
+    }
+
+    fn at(sql: &str, needle: &str) -> usize {
+        sql.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` missing from:\n{sql}"))
+    }
+
+    /// The replacement is ONE transaction, in the order delete, insert, tombstone, commit.
+    #[test]
+    fn the_replacement_is_one_transaction_in_a_fixed_order() {
+        let s = script(true);
+        let order = [
+            at(&s, "BEGIN;"),
+            at(&s, "DELETE FROM DB.SC.orders USING"),
+            at(&s, "INSERT INTO DB.SC.orders"),
+            at(&s, "UPDATE DB.SC.orders SET __is_deleted = TRUE"),
+            at(&s, "COMMIT;"),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{s}");
+        assert_eq!(s.matches("BEGIN;").count(), 1, "{s}");
+        assert!(
+            !s.contains("MERGE"),
+            "Snowflake replaces, it does not merge: {s}"
+        );
+    }
+
+    /// With the flag a tombstone flags its base row and neither deletes nor inserts it.
+    #[test]
+    fn with_the_flag_a_tombstone_flags_its_row_and_is_never_inserted() {
+        let s = script(true);
+        assert!(
+            s.contains(
+                "WHERE orders.id = __rivet_s.id AND COALESCE(__rivet_s.__op, '') <> 'delete';"
+            ),
+            "only non-delete winners replace a base row: {s}"
+        );
+        assert!(
+            s.contains("FALSE) FROM") || s.contains(", FALSE FROM"),
+            "an inserted row is live: {s}"
+        );
+        assert!(
+            s.contains("WHERE orders.id = __rivet_s.id AND __rivet_s.__op = 'delete';"),
+            "the tombstone flags the row it finds and inserts nothing: {s}"
+        );
+        assert!(
+            s.contains("INSERT INTO DB.SC.orders (id, v, __is_deleted)"),
+            "{s}"
+        );
+    }
+
+    /// Without the flag a delete winner deletes its base row, and no tombstone statement exists.
+    #[test]
+    fn without_the_flag_a_delete_deletes_and_names_no_flag_column() {
+        let s = script(false);
+        assert!(!s.contains("__is_deleted"), "{s}");
+        assert!(!s.contains("UPDATE"), "{s}");
+        assert!(
+            s.contains("AS __rivet_s WHERE orders.id = __rivet_s.id;"),
+            "every winner, deletes included, removes its base row: {s}"
+        );
+        assert!(
+            s.contains("INSERT INTO DB.SC.orders (id, v)")
+                && s.contains("WHERE COALESCE(__rivet_s.__op, '') <> 'delete';"),
+            "a delete winner is not inserted: {s}"
+        );
+    }
+
+    /// The winner of a key is the latest by log position; Snowflake sorts NULLs first on DESC.
+    #[test]
+    fn the_winner_ranks_a_missing_position_last_on_snowflake_only() {
+        let s = script(true);
+        assert!(
+            s.contains("ROW_NUMBER() OVER (PARTITION BY id ORDER BY __pos IS NOT NULL DESC"),
+            "{s}"
+        );
+        assert!(!s.contains("QUALIFY"), "{s}");
+        let bq = CompactOrder::Cdc(SourceEngine::MySql).order_by(Warehouse::BigQuery);
+        assert!(
+            !bq.contains("IS NOT NULL"),
+            "BigQuery's order is unchanged: {bq}"
         );
     }
 }

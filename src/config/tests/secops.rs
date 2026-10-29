@@ -10,16 +10,19 @@ fn src_with_password(password: Option<&str>, url: Option<&str>) -> SourceConfig 
         url: url.map(String::from),
         url_env: None,
         url_file: None,
+        url_secret: None,
         host: Some("db.example.com".into()),
         port: Some(5432),
         user: Some("rivet".into()),
         password: password.map(String::from),
         password_env: Some("DB_PASSWORD".into()),
+        password_secret: None,
         database: Some("prod".into()),
         environment: None,
         tuning: None,
         tls: None,
         mongo: None,
+        columns_from: None,
     }
 }
 
@@ -79,22 +82,33 @@ fn redact_env_references_are_preserved() {
         url: None,
         url_env: Some("DATABASE_URL".into()),
         url_file: Some("/etc/secrets/db".into()),
+        url_secret: Some("projects/p/secrets/db_url".into()),
         host: None,
         port: None,
         user: None,
         password: None,
         password_env: Some("DB_PWD".into()),
+        password_secret: Some("projects/p/secrets/db_pwd".into()),
         database: None,
         environment: None,
         tuning: None,
         tls: None,
         mongo: None,
+        columns_from: None,
     };
     let (safe, redacted) = src.redact_for_artifact();
     assert!(!redacted, "env-only config has nothing to redact");
     assert_eq!(safe.url_env.as_deref(), Some("DATABASE_URL"));
     assert_eq!(safe.url_file.as_deref(), Some("/etc/secrets/db"));
     assert_eq!(safe.password_env.as_deref(), Some("DB_PWD"));
+    assert_eq!(
+        safe.url_secret.as_deref(),
+        Some("projects/p/secrets/db_url")
+    );
+    assert_eq!(
+        safe.password_secret.as_deref(),
+        Some("projects/p/secrets/db_pwd")
+    );
 }
 
 #[test]

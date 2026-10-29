@@ -87,6 +87,14 @@ scenarios:
     mongo:    { na: "schemaless — a new field rides the verbatim document blob; no fixed per-collection schema to drift" }
     oracle:   { test: oracle_cdc_picks_up_a_column_added_between_runs }
 
+  - id: cdc_stop_after_column_roll
+    what: "a run stopped right after the roll a column added while it is open forces resumes at the commit before the change that caused it: that change is delivered, not acknowledged unwritten"
+    postgres: { test: pg_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it }
+    mysql:    { test: mysql_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it }
+    mssql:    { na: "a capture instance never carries a column added after it was created, so a run open over one stops by code instead of rolling (mssql_cdc_a_column_added_while_a_run_is_open_stops_by_code)" }
+    mongo:    { na: "schemaless — a field added while the run is open is a value in the document column; the run's schema never lacks a name, so no roll for a column occurs" }
+    oracle:   { na: "a run drains only to the SCN current at open and resolves its schema after it, so it never reads a change written after its schema; an ADD COLUMN inside the window is refused before any write (oracle_cdc_a_change_older_than_an_alter_is_refused_by_code)" }
+
   - id: cdc_whole_db_multiplex
     what: "one stream over many tables/collections, one anchor, resumes"
     postgres: { test: pg_cdc_multi_table_stream_uses_one_slot_and_resumes }

@@ -107,9 +107,11 @@ struct RawLoadSection {
     #[serde(default)]
     pk: KeyColumns,
     /// `log_view` or `base_buffer` — where the current state lives. Absent derives
-    /// it from the mode: a CDC stream with a `backfill:` is base+buffer, the rest
-    /// changelog+view. `base_buffer` needs `target: bigquery` — `rivet compact` is
-    /// what merges the buffer into the base, and it is BigQuery-only.
+    /// it from the target: on Snowflake an incremental or CDC export is base+buffer
+    /// (`log_view` keeps the changelog and its view); on BigQuery a CDC stream with a
+    /// `backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs
+    /// `target: bigquery` or `snowflake` — `rivet compact` merges the buffer into the
+    /// base, and ClickHouse has none.
     #[serde(default)]
     layout: Option<LayoutChoice>,
     /// Whether the base carries a `__is_deleted` column. Absent derives it from the
@@ -277,6 +279,24 @@ impl TryFrom<RawLoadSection> for LoadSection {
 }
 
 impl LoadSection {
+    /// One export's effective settings: this section, the export's own `load:` block layered over it, then, for a captured `table` of a multiplex stream, that table's `load.tables.<name>` block over both.
+    pub(crate) fn overlay(
+        &self,
+        export: &crate::config::ExportConfig,
+        table: Option<&str>,
+    ) -> LoadSection {
+        let mut eff = match &export.load {
+            Some(o) => self.with_override(o),
+            None => self.clone(),
+        };
+        if let (Some(o), Some(t)) = (&export.load, table)
+            && let Some(per_table) = o.tables.get(t)
+        {
+            eff = eff.with_override(per_table);
+        }
+        eff
+    }
+
     /// This section with one export's [`LoadOverride`] applied: each `Some` replaces,
     /// each `None` inherits. The target is never overridden.
     pub fn with_override(&self, o: &LoadOverride) -> LoadSection {
@@ -336,6 +356,17 @@ pub enum LoadTarget {
     },
 }
 
+/// How far a warehouse takes the base-and-buffer layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaseSupport {
+    /// No compaction: the changelog and its view are the only layout.
+    Never,
+    /// A base for every incremental and CDC export unless `load.layout: log_view` is written; a stream's `backfill:` is not what makes it.
+    Default,
+    /// A written `base_buffer`, or a stream's `backfill:`, makes the base.
+    Derived,
+}
+
 impl LoadTarget {
     /// The target name the type resolver is keyed on (`ExportTarget::parse`).
     pub fn name(&self) -> &'static str {
@@ -346,9 +377,18 @@ impl LoadTarget {
         }
     }
 
+    /// How far this warehouse takes a base and a buffer.
+    pub(crate) fn base_support(&self) -> BaseSupport {
+        match self {
+            LoadTarget::Bigquery { .. } => BaseSupport::Derived,
+            LoadTarget::Snowflake { .. } => BaseSupport::Default,
+            LoadTarget::Clickhouse { .. } => BaseSupport::Never,
+        }
+    }
+
     /// Whether `rivet compact` can merge a buffer into a base on this warehouse.
     pub(crate) fn compacts(&self) -> bool {
-        matches!(self, LoadTarget::Bigquery { .. })
+        self.base_support() != BaseSupport::Never
     }
 
     /// Whether this warehouse names each job or statement rivet runs (a BigQuery job id, a
@@ -1154,7 +1194,7 @@ mod partition_form_tests {
         };
         assert_eq!(
             [bq.compacts(), sf.compacts(), ch.compacts()],
-            [true, false, false]
+            [true, true, false]
         );
         assert_eq!(
             [bq.names_jobs(), sf.names_jobs(), ch.names_jobs()],

@@ -23,16 +23,19 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `url` | `string` |  |  |
 | `url_env` | `string` |  |  |
 | `url_file` | `string` |  |  |
+| `url_secret` | `string` |  | Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`. |
 | `host` | `string` |  |  |
 | `port` | `integer` |  |  |
 | `user` | `string` |  |  |
 | `password` | `string` |  |  |
 | `password_env` | `string` |  |  |
+| `password_secret` | `string` |  | Google Secret Manager secret holding the password: `projects/<p>/secrets/<s>[/versions/<n>]`. |
 | `database` | `string` |  |  |
 | `environment` | `local` \| `replica` \| `production` |  | Operational profile of the source database.  Selects the **default** tuning profile when none is explicitly set in `source.tuning.profile` or `export.tuning.profile`:  | `environment`           | default profile | |-------------------------|------------------| | `production` (default)  | `balanced` (50 ms throttle, 10 k batch, retries) | | `replica`               | `balanced` | | `local`                 | `fast` (no throttle, 50 k batch — saves ~30% wall on localhost) |  Explicit `tuning.profile:` always wins over this hint. |
 | `tuning` | [TuningConfig](#tuningconfig) |  |  |
 | `tls` | [TlsConfig](#tlsconfig) |  | Transport security settings (ADR: SecOps). When absent, Rivet connects without TLS — a warning is emitted so operators are aware. See [`TlsConfig`]. |
 | `mongo` | [MongoConfig](#mongoconfig) |  | MongoDB-specific read options (`source.mongo:`). Honoured only when `type: mongo`; ignored by the SQL engines. See [`MongoConfig`]. |
+| `columns_from` | `grants` |  | `grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only). |
 
 ### `source.mongo` (MongoDB read options)
 
@@ -201,7 +204,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `ca_file` | `string` |  | ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed by a private CA, beside the built-in public roots. |
 | `cleanup_source` | `boolean` |  | After a successful load, delete the staged Parquet under the export prefix. |
 | `pk` | `auto` \| `none` |  | Dedup key of the incremental/CDC current-state view: `auto` (the source primary key `rivet run` recorded), `none`, or explicit columns; ignored for `full`. |
-| `layout` | `log_view` \| `base_buffer` |  | `log_view` or `base_buffer` — where the current state lives. Absent derives it from the mode: a CDC stream with a `backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs `target: bigquery` — `rivet compact` is what merges the buffer into the base, and it is BigQuery-only. |
+| `layout` | `log_view` \| `base_buffer` |  | `log_view` or `base_buffer` — where the current state lives. Absent derives it from the target: on Snowflake an incremental or CDC export is base+buffer (`log_view` keeps the changelog and its view); on BigQuery a CDC stream with a `backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs `target: bigquery` or `snowflake` — `rivet compact` merges the buffer into the base, and ClickHouse has none. |
 | `deleted_flag` | `boolean` |  | Whether the base carries a `__is_deleted` column. Absent derives it from the mode: a CDC stream expresses deletes and gets the flag, a query-based export cannot express one and does not — an extra column per row otherwise. |
 | `allow_source_drift` | `boolean` |  | Load even when a run manifest's source count disagrees with what it extracted (source→file drift): warn instead of blocking. |
 | `gc_orphans` | `boolean` |  | After a successful load, delete staged Parquet under the export prefix that no `Success` manifest references — crash leftovers. Only when no extract writes the prefix concurrently. |

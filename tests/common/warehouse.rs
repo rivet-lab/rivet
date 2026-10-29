@@ -97,6 +97,20 @@ impl Warehouse {
 
     /// `rig` landing in this warehouse: its destination and its `load:` line keyed on `pk`.
     pub fn shape(&self, rig: Rig, pk: &str) -> Rig {
+        self.shape_layout(rig, pk, ", layout: log_view")
+    }
+
+    /// `shape` with `layout: base_buffer` (a base table and a buffer); not for ClickHouse.
+    pub fn shape_base_buffer(&self, rig: Rig, pk: &str) -> Rig {
+        assert_ne!(
+            self.kind,
+            WarehouseKind::ClickHouse,
+            "ClickHouse has no compact"
+        );
+        self.shape_layout(rig, pk, ", layout: base_buffer")
+    }
+
+    fn shape_layout(&self, rig: Rig, pk: &str, layout: &str) -> Rig {
         match self.kind {
             WarehouseKind::DuckDb => rig,
             WarehouseKind::ClickHouse => rig
@@ -108,13 +122,18 @@ impl Warehouse {
                 )),
             WarehouseKind::BigQuery => {
                 let bq = self.bq.as_ref().expect("a BigQuery dataset");
+                let layout = if layout.contains("base_buffer") {
+                    layout
+                } else {
+                    ""
+                };
                 rig.dest_gcs_live(&bq.bucket, &bq.prefix)
-                    .top_line(&bq.load_line(&format!(", pk: [{pk}]")))
+                    .top_line(&bq.load_line(&format!(", pk: [{pk}]{layout}")))
             }
             WarehouseKind::Snowflake => {
                 let sf = self.sf.as_ref().expect("a Snowflake schema");
                 rig.dest_gcs_live(&sf.bucket, &sf.prefix)
-                    .top_line(&sf.load_line(&format!(", pk: [{pk}]")))
+                    .top_line(&sf.load_line(&format!(", pk: [{pk}]{layout}")))
             }
         }
     }
@@ -139,16 +158,20 @@ impl Warehouse {
         }
     }
 
+    /// The environment `rivet load` needs for this warehouse's `load:` line.
+    pub fn load_envs(&self) -> &'static [(&'static str, &'static str)] {
+        match self.kind {
+            WarehouseKind::ClickHouse => &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)],
+            _ => &[],
+        }
+    }
+
     /// `rivet load` through `rig`, which must succeed; everything it said.
     pub fn load(&self, rig: &Rig) -> String {
         if !self.loads() {
             return String::new();
         }
-        let envs: &[(&str, &str)] = match self.kind {
-            WarehouseKind::ClickHouse => &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)],
-            _ => &[],
-        };
-        let out = rig.load_args_env(&[], envs);
+        let out = rig.load_args_env(&[], self.load_envs());
         let said = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),

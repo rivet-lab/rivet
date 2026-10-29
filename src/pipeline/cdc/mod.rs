@@ -64,6 +64,13 @@ pub(crate) struct CdcCapture<'a> {
     pub policy: crate::types::policy::TypePolicy,
 }
 
+/// A table's probe query, its `columns:` overrides and its `columns_from: grants` readable set.
+type Probe = (
+    String,
+    std::collections::HashMap<String, crate::types::RivetType>,
+    Option<crate::source::cdc::ReadableColumns>,
+);
+
 /// Open the change stream (with the engine's permission/TLS gate), resolve each
 /// table's typed schema, and drive the commit-seam file sink — the single place
 /// the typed CDC capture is assembled. Returns one `RunManifest` per output, in
@@ -93,13 +100,7 @@ pub(crate) fn run_capture(
     let cap_tables: Vec<String> = cap.outputs.iter().map(|o| o.table.clone()).collect();
     let mut outputs = Vec::with_capacity(cap.outputs.len());
     // What each table is probed by and which overrides it carries, for a mid-run re-resolve.
-    let mut probes: std::collections::HashMap<
-        String,
-        (
-            String,
-            std::collections::HashMap<String, crate::types::RivetType>,
-        ),
-    > = std::collections::HashMap::new();
+    let mut probes: std::collections::HashMap<String, Probe> = std::collections::HashMap::new();
     // ONE resolver session serves every table (was: 2 fresh connections per
     // table per run — the multi-table per-cycle cost the roast flagged).
     crate::test_hook::maybe_panic_at("cdc_before_resolve");
@@ -140,9 +141,13 @@ pub(crate) fn run_capture(
             None => o.table.clone(),
         };
         let subject = format!("export '{}' table '{}'", cap.export_name, o.table);
-        probes.insert(o.table.clone(), (probe.clone(), o.overrides.clone()));
+        let readable = stream.readable_columns(&o.table);
+        probes.insert(
+            o.table.clone(),
+            (probe.clone(), o.overrides.clone(), readable.clone()),
+        );
         let columns = match resolver
-            .resolve(&probe, &o.overrides)
+            .resolve(&probe, &o.overrides, readable.as_ref())
             .and_then(|c| crate::types::plan_columns(c, &cap.policy, &subject))
         {
             Ok(c) => c,
@@ -197,7 +202,7 @@ pub(crate) fn run_capture(
     let (policy, schema_gate, export_name) =
         (&cap.policy, cap.schema_gate, cap.export_name.clone());
     let reschema: sink::Reschema<'_> = Box::new(move |table: &str| {
-        let (probe, overrides) = probes.get(table).ok_or_else(|| {
+        let (probe, overrides, readable) = probes.get(table).ok_or_else(|| {
             crate::error::coded(
                 crate::error::codes::INTERNAL_SOURCE_INVARIANT,
                 format!("cdc: no probe recorded for table `{table}`"),
@@ -205,7 +210,7 @@ pub(crate) fn run_capture(
         })?;
         let subject = format!("export '{export_name}' table '{table}'");
         let columns = resolver
-            .resolve(probe, overrides)
+            .resolve(probe, overrides, readable.as_ref())
             .and_then(|c| crate::types::plan_columns(c, policy, &subject))?;
         if let Some(gate) = schema_gate {
             gate(table, &columns)?;

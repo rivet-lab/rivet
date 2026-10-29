@@ -73,7 +73,7 @@
 //!
 //! Transport is BigQuery's REST API, in process (`bq_rest`) — `jobs.insert`
 //! plus a poll, on the blocking `reqwest` client. Auth comes from the SAME ADC
-//! seam the GCS destination signs with (`destination::gcs_auth`), so a laptop
+//! seam the GCS destination signs with (`gcp_auth`), so a laptop
 //! with `gcloud auth application-default login`, a container with a
 //! service-account key file in `GOOGLE_APPLICATION_CREDENTIALS`, and a CI box
 //! with a token all work without the Google Cloud SDK on PATH — and all three
@@ -618,6 +618,7 @@ impl TargetLoader for BigQueryLoader {
             .collect();
         let keys: Vec<&str> = pk.iter().map(String::as_str).collect();
         let sql = crate::load::cdc::absent_as_deleted_sql(
+            crate::load::cdc::Warehouse::BigQuery,
             &self.fqtn(table),
             &self.fqtn(&changes),
             &columns,

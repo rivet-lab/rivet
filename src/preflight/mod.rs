@@ -186,7 +186,9 @@ pub(crate) fn get_export_diagnostic(
     crate::source::warn_if_tls_disabled(&config.source);
     match config.source.source_type {
         SourceType::Postgres => postgres::diagnose_export_pg(&url, tls, export),
-        SourceType::Mysql => mysql::diagnose_export_mysql(&url, tls, export),
+        SourceType::Mysql => {
+            mysql::diagnose_export_mysql(&url, tls, export, config.source.columns_from_grants())
+        }
         SourceType::Mssql => mssql::diagnose_export_mssql(&url, tls, export),
         #[cfg(feature = "oracle")]
         SourceType::Oracle => oracle::diagnose_export_oracle(&url, tls, export),
@@ -436,7 +438,9 @@ pub fn check(
     let described: Vec<&ExportConfig> = planned.iter().collect();
     let diagnostics: Vec<ExportDiagnostic> = match config.source.source_type {
         SourceType::Postgres => postgres::check_postgres(&url, tls, &described)?,
-        SourceType::Mysql => mysql::check_mysql(&url, tls, &described)?,
+        SourceType::Mysql => {
+            mysql::check_mysql(&url, tls, &described, config.source.columns_from_grants())?
+        }
         SourceType::Mssql => mssql::check_mssql(&url, tls, &described)?,
         #[cfg(feature = "oracle")]
         SourceType::Oracle => oracle::check_oracle(&url, tls, &described)?,
@@ -464,6 +468,9 @@ pub fn check(
     if !json_output {
         for diag in &diagnostics {
             print_diagnostic(diag);
+        }
+        if config.source.columns_from_grants() {
+            println!("\n{}", crate::source::mysql::column_grants::BOUNDARY);
         }
     } else if !show_type_report {
         // `--json` WITHOUT a type report (the CLI forces `show_type_report` on

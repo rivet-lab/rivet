@@ -32,8 +32,9 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CONFIG_COLUMN_OVERRIDE_CASE` | usage | 1 | spell the `columns:` key exactly as the result set names the column |
 | `RIVET_CONFIG_FILE_UNREADABLE` | environment | 2 if transient, else 1 | check the config path and its read permission, or run `rivet init` to generate one |
 | `RIVET_CONFIG_YAML_INVALID` | usage | 1 | fix the YAML syntax or the key the message names, moving it to where the message shows |
-| `RIVET_CONFIG_SOURCE_CONNECTION_INVALID` | usage | 1 | give `source:` exactly one connection method (`url_env`, `url`, `url_file` or complete host/user/database fields) and one password setting |
+| `RIVET_CONFIG_SOURCE_CONNECTION_INVALID` | usage | 1 | give `source:` exactly one connection method (`url_env`, `url`, `url_file`, `url_secret` or complete host/user/database fields) and one password setting |
 | `RIVET_CONFIG_SECRET_UNSET` | environment | 2 if transient, else 1 | export the environment variable (or pass the `--param`) the message names, or make the named file readable |
+| `RIVET_CONFIG_GCP_SECRET_UNREADABLE` | environment | 2 if transient, else 1 | grant the credential rivet runs as `roles/secretmanager.secretAccessor` on the secret the message names, and check its project, name and version |
 | `RIVET_CONFIG_EXPORT_SOURCE_INVALID` | usage | 1 | give the export exactly one of `query`, `query_file` (a relative path inside the config directory), `table` (`<name>` or `<schema>.<name>`) or `tables` |
 | `RIVET_CONFIG_MODE_SETTING_INVALID` | usage | 1 | add the setting the export's mode requires, or remove the setting the mode does not take, as the message names |
 | `RIVET_CONFIG_DESTINATION_AUTH_INVALID` | usage | 1 | configure one complete auth mode for the destination (keys, a credentials file, or `allow_anonymous`) and drop the others |
@@ -183,6 +184,8 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CONFIG_SOURCE_FEATURE_MISSING` | usage | 1 | run a rivet built with the feature the message names (the release binaries include it) |
 | `RIVET_SOURCE_CDC_TABLE_UNRESOLVED` | usage | 1 | set `table:` to the one base table the capture follows, qualified `schema.table` as the catalog spells it, as the message explains |
 | `RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | usage | 1 | export the table in batch (`mode: full`), or capture a table the message's supported list covers |
+| `RIVET_SOURCE_COLUMNS_UNREADABLE` | usage | 1 | grant the account `SELECT` on the columns the message names (at least the key), or drop the table from the export |
+| `RIVET_SOURCE_CDC_GRANTS_CHANGED` | transient | 2 | re-run: the next run reads the new grants and resumes from the checkpoint, so nothing is lost |
 | `RIVET_SOURCE_CDC_TRANSACTION_TOO_LARGE` | usage | 1 | split the source transaction, or raise RIVET_CDC_MAX_TX_ROWS / RIVET_CDC_MAX_TX_BYTES when a transaction this large is expected |
 | `RIVET_SOURCE_QUERY_COLUMN_UNREFERENCEABLE` | usage | 1 | give the column an alias in the export's `query:` (e.g. `... AS row_id`) |
 | `RIVET_SOURCE_RUNTIME_UNAVAILABLE` | environment | 2 if transient, else 1 | the process could not start the async runtime its driver needs (out of file descriptors or threads): raise the open-files limit (`ulimit -n`) or lower parallelism, then rerun |

@@ -75,6 +75,8 @@ mod live_cdc;
 mod live_cdc_backfill;
 #[path = "live/live_cdc_cli_surface.rs"]
 mod live_cdc_cli_surface;
+#[path = "live/live_cdc_column_grants.rs"]
+mod live_cdc_column_grants;
 #[path = "live/live_cdc_compact.rs"]
 mod live_cdc_compact;
 #[path = "live/live_cdc_full_cycle.rs"]
@@ -243,6 +245,8 @@ mod live_pooled_reads;
 mod live_quality_gate;
 #[path = "live/live_reconcile_repair.rs"]
 mod live_reconcile_repair;
+#[path = "live/live_reserved_column.rs"]
+mod live_reserved_column;
 #[path = "live/live_resume.rs"]
 mod live_resume;
 #[path = "live/live_retry_and_faults.rs"]
@@ -261,6 +265,8 @@ mod live_shape_drift;
 mod live_shared_state_same_name;
 #[path = "live/live_skip_empty.rs"]
 mod live_skip_empty;
+#[path = "live/live_snowflake_compact.rs"]
+mod live_snowflake_compact;
 #[path = "live/live_snowflake_load.rs"]
 mod live_snowflake_load;
 #[path = "live/live_source_conformance.rs"]

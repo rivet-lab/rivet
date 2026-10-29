@@ -3,6 +3,7 @@ pub mod cursor;
 pub(crate) mod destination;
 mod export;
 mod format;
+mod gcp_secret;
 mod lints;
 pub mod load;
 mod notifications;
@@ -524,6 +525,7 @@ impl Config {
     fn validate(&self) -> crate::error::Result<()> {
         self.validate_exports_list()?;
         self.validate_source_connection()?;
+        self.validate_columns_from()?;
         self.validate_non_sql_source_modes()?;
         for export in &self.exports {
             self.validate_export(export)?;
@@ -532,6 +534,7 @@ impl Config {
         self.validate_csv_exports_are_not_loaded()?;
         self.validate_load_overrides()?;
         self.validate_layout_has_a_compacting_warehouse()?;
+        self.validate_a_default_base_has_a_baseline()?;
         self.validate_cdc_has_a_loadable_target()?;
         Ok(())
     }
@@ -556,8 +559,8 @@ impl Config {
         Ok(())
     }
 
-    /// `layout: base_buffer` promises a `rivet compact`, which is BigQuery-only: on
-    /// another warehouse the base would freeze at the backfill while the buffer grew.
+    /// `layout: base_buffer` promises a `rivet compact`, which ClickHouse has none of: there
+    /// the base would freeze at the backfill while the buffer grew.
     fn validate_layout_has_a_compacting_warehouse(&self) -> crate::error::Result<()> {
         use crate::config::load::LayoutChoice;
         let Some(load) = &self.load else {
@@ -584,10 +587,51 @@ impl Config {
         if let Some(site) = written {
             crate::config_bail!(
                 crate::error::codes::CONFIG_LOAD_BLOCK_INVALID,
-                "{site}: `base_buffer` needs `target: bigquery` — `rivet compact` is \
-                 BigQuery-only in this release, so the base would never take its buffer. \
-                 Drop the key to keep the changelog and its dedup view"
+                "{site}: `base_buffer` needs `target: bigquery` or `target: snowflake` — \
+                 `rivet compact` does not run on ClickHouse, so the base would never take its \
+                 buffer. Drop the key to keep the changelog and its dedup view"
             );
+        }
+        Ok(())
+    }
+
+    /// Where a base is the default layout, a `mode: cdc` export needs a baseline to build it from: without `cdc.backfill:` or `cdc.initial: snapshot` the base would start empty and miss every row the stream never touched.
+    fn validate_a_default_base_has_a_baseline(&self) -> crate::error::Result<()> {
+        use crate::config::load::{BaseSupport, LayoutChoice};
+        let Some(load) = &self.load else {
+            return Ok(());
+        };
+        if load.target.base_support() != BaseSupport::Default {
+            return Ok(());
+        }
+        for e in self.exports.iter().filter(|e| e.mode == ExportMode::Cdc) {
+            if e.cdc.as_ref().is_some_and(|c| c.has_baseline()) {
+                continue;
+            }
+            let units: Vec<Option<&str>> = match e.multiplex_tables() {
+                Some(tables) => tables.iter().map(|t| Some(t.as_str())).collect(),
+                None => vec![None],
+            };
+            for unit in units {
+                if load.overlay(e, unit).layout == Some(LayoutChoice::LogView) {
+                    continue;
+                }
+                let site = match unit {
+                    Some(t) => format!("export '{}' (table '{t}')", e.name),
+                    None => format!("export '{}'", e.name),
+                };
+                crate::config_bail!(
+                    crate::error::codes::CONFIG_LOAD_BLOCK_INVALID,
+                    "{site}: on `target: {}` a `mode: cdc` export keeps a base table and a buffer, \
+                     and this stream names nothing to build the base from — neither \
+                     `cdc.backfill:` nor `cdc.initial: snapshot` — so the base would start empty \
+                     and miss every row the stream never changes. Either add `cdc.backfill:` (or \
+                     `cdc.initial: snapshot`) to build the base from a snapshot of the table, or \
+                     write `load.layout: log_view` to keep the change log and its current-state \
+                     view",
+                    load.target.name()
+                );
+            }
         }
         Ok(())
     }
@@ -642,6 +686,14 @@ impl Config {
                  `partition`, `cleanup_source`, `gc_orphans` and `allow_source_drift`",
                 e.name
             );
+        }
+        Ok(())
+    }
+
+    /// `columns_from: grants` on an engine that does not enforce it is refused for every mode, SQL or not.
+    fn validate_columns_from(&self) -> crate::error::Result<()> {
+        if let Some(why) = source::columns_from_refusal(&self.source) {
+            crate::config_bail!(crate::error::codes::CONFIG_SOURCE_MODE_UNSUPPORTED, "{why}");
         }
         Ok(())
     }
@@ -793,7 +845,7 @@ impl Config {
             // for them.
             crate::config_bail!(
                 crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-                "source: no connection method configured. Add one of:\n  url_env: DATABASE_URL                          (URL from env var — recommended)\n  url: 'postgresql://user:pass@host:5432/db'      (inline — not recommended for committed configs)\n  url_file: /etc/rivet/source.url                 (URL from file — rotation-friendly)\n  host/user/database/...                          (structured fields under `source:`)"
+                "source: no connection method configured. Add one of:\n  url_env: DATABASE_URL                          (URL from env var — recommended)\n  url: 'postgresql://user:pass@host:5432/db'      (inline — not recommended for committed configs)\n  url_file: /etc/rivet/source.url                 (URL from file — rotation-friendly)\n  url_secret: projects/<p>/secrets/<s>            (URL from Google Secret Manager)\n  host/user/database/...                          (structured fields under `source:`)"
             );
         }
 
@@ -802,6 +854,7 @@ impl Config {
                 &self.source.url,
                 &self.source.url_env,
                 &self.source.url_file,
+                &self.source.url_secret,
             ]
             .iter()
             .filter(|u| u.is_some())
@@ -809,7 +862,7 @@ impl Config {
             if url_count > 1 {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-                    "source: specify exactly one of 'url', 'url_env', or 'url_file' (got {} set).\n  Hint: pick one — `url_env` is recommended so credentials never enter the YAML.",
+                    "source: specify exactly one of 'url', 'url_env', 'url_file' or 'url_secret' (got {} set).\n  Hint: pick one — `url_env` is recommended so credentials never enter the YAML.",
                     url_count
                 );
             }
@@ -829,10 +882,15 @@ impl Config {
                     return Err(source::structured_field_missing(field));
                 }
             }
-            if self.source.password.is_some() && self.source.password_env.is_some() {
+            let passwords = [
+                self.source.password.is_some(),
+                self.source.password_env.is_some(),
+                self.source.password_secret.is_some(),
+            ];
+            if passwords.iter().filter(|set| **set).count() > 1 {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
-                    "source: specify 'password' OR 'password_env', not both.\n  Hint: prefer `password_env: DB_PASSWORD` so credentials never enter the YAML."
+                    "source: specify one of 'password', 'password_env' or 'password_secret', not both.\n  Hint: prefer `password_env: DB_PASSWORD` so credentials never enter the YAML."
                 );
             }
         }

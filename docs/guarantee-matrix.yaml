@@ -756,6 +756,7 @@ guarantees:
         sentence: "`rivet compact` merges them in with one `MERGE` per table and drops the buffer"
     held_by:
       bigquery: { test: base_and_buffer_cycle_run_load_compact_keeps_deletes_as_flags, asserts: "the buffer is dropped after the merge" }
+      snowflake: { test: snowflake_compact_cycle_mysql, asserts: "the buffer is dropped" }
 
   # ── Types (docs/type-mapping.md, docs/semantics.md) ──────────────────────────────────────
   - id: decimals_never_become_floats

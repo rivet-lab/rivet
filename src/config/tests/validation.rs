@@ -1691,10 +1691,11 @@ exports:
     assert!(err.contains("allow_source_drfit"), "{err}");
 }
 
-/// `layout: base_buffer` promises `rivet compact`, which is BigQuery-only: on Snowflake
-/// the base would freeze at the backfill while the buffer grew, and every load would
-/// prescribe a command that can only fail. Refused where the key is written, at every
-/// layer; BigQuery takes it, and Snowflake without the key makes no promise.
+/// `layout: base_buffer` promises `rivet compact`, which BigQuery and Snowflake run: on
+/// ClickHouse the base would freeze at the backfill while the buffer grew, and every load
+/// would prescribe a command that can only fail. Refused where the key is written, at
+/// every layer; BigQuery and Snowflake take it, and ClickHouse without the key makes no
+/// promise.
 #[test]
 fn a_base_and_buffer_layout_needs_a_compacting_warehouse() {
     let cfg = |target: &str, export_load: &str| {
@@ -1707,24 +1708,137 @@ fn a_base_and_buffer_layout_needs_a_compacting_warehouse() {
     let snowflake = "  target: snowflake\n  account: a\n  user: u\n  private_key_path: /k.p8\n  warehouse: w\n  database: d\n  \
                      schema: s\n  storage_integration: i\n";
     let bigquery = "  target: bigquery\n  project: p\n  dataset: d\n";
+    let clickhouse = "  target: clickhouse\n  url: \"http://localhost:8123\"\n  database: d\n  \
+                      user: u\n  password_env: CH_PW\n";
 
     let err = format!(
         "{:#}",
-        Config::from_yaml(&cfg(&format!("{snowflake}  layout: base_buffer\n"), "")).unwrap_err()
+        Config::from_yaml(&cfg(&format!("{clickhouse}  layout: base_buffer\n"), "")).unwrap_err()
     );
     assert!(
-        err.contains("`load.layout`") && err.contains("BigQuery-only"),
+        err.contains("`load.layout`")
+            && err.contains("`base_buffer` needs `target: bigquery` or `target: snowflake`")
+            && err.contains("does not run on ClickHouse"),
         "{err}"
     );
     let err = format!(
         "{:#}",
-        Config::from_yaml(&cfg(snowflake, "    load: { layout: base_buffer }\n")).unwrap_err()
+        Config::from_yaml(&cfg(clickhouse, "    load: { layout: base_buffer }\n")).unwrap_err()
     );
     assert!(err.contains("export 't': `load.layout`"), "{err}");
 
     Config::from_yaml(&cfg(&format!("{bigquery}  layout: base_buffer\n"), ""))
         .expect("BigQuery compacts, so it may promise a base and a buffer");
-    Config::from_yaml(&cfg(snowflake, "")).expect("no key written, no promise made");
+    Config::from_yaml(&cfg(&format!("{snowflake}  layout: base_buffer\n"), ""))
+        .expect("Snowflake compacts, so it may promise a base and a buffer");
+    Config::from_yaml(&cfg(snowflake, "    load: { layout: base_buffer }\n"))
+        .expect("an export's own key is taken on Snowflake too");
+    Config::from_yaml(&cfg(clickhouse, "")).expect("no key written, no promise made");
+}
+
+/// On Snowflake `base_buffer` is the default, so a CDC stream that names nothing to build the
+/// base from would start it empty: refused at config load with its two remedies. Every
+/// neighbour that has a baseline, writes `log_view`, is not CDC or loads into another warehouse
+/// loads as before.
+#[test]
+fn a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load() {
+    let snowflake = "  target: snowflake\n  account: a\n  user: u\n  private_key_path: /k.p8\n  warehouse: w\n  database: d\n  \
+                     schema: s\n  storage_integration: i\n";
+    let bigquery = "  target: bigquery\n  project: p\n  dataset: d\n";
+    let clickhouse = "  target: clickhouse\n  url: \"http://localhost:8123\"\n  database: d\n  \
+                      user: u\n  password_env: CH_PW\n";
+    let cfg = |load: &str, stream: &str, extra: &str| {
+        format!(
+            "source:\n  type: postgres\n  url: \"postgresql://localhost/app\"\nexports:\n\
+             \x20 - name: a_base\n    table: a\n    mode: full\n    format: parquet\n    \
+             destination: {{ type: gcs, bucket: b, prefix: a/ }}\n\
+             \x20 - name: b_base\n    table: b\n    mode: full\n    format: parquet\n    \
+             destination: {{ type: gcs, bucket: b, prefix: b/ }}\n\
+             \x20 - name: stream\n    tables: [a, b]\n    mode: cdc\n    format: parquet\n{stream}    \
+             destination: {{ type: gcs, bucket: b, prefix: cdc/ }}\nload:\n{load}{extra}"
+        )
+    };
+    let refused = |yaml: String| {
+        let e = Config::from_yaml(&yaml).expect_err("a base with nothing to start from is refused");
+        (
+            format!("{e:#}"),
+            crate::error::error_code(&e),
+            crate::error::classify_exit(&e),
+        )
+    };
+    let none = "    cdc: { slot: s }\n";
+    let snapshot = "    cdc: { slot: s, initial: snapshot }\n";
+    let backfill = "    cdc: { slot: s, backfill: auto }\n";
+
+    let (said, code, exit) = refused(cfg(snowflake, none, ""));
+    assert_eq!(code, Some("RIVET_CONFIG_LOAD_BLOCK_INVALID"), "{said}");
+    assert_eq!(exit, 1, "a config usage stop exits 1: {said}");
+    for want in [
+        "export 'stream' (table 'a')",
+        "on `target: snowflake` a `mode: cdc` export keeps a base table and a buffer",
+        "neither `cdc.backfill:` nor `cdc.initial: snapshot`",
+        "add `cdc.backfill:` (or `cdc.initial: snapshot`) to build the base from a snapshot of the table",
+        "or write `load.layout: log_view` to keep the change log and its current-state view",
+    ] {
+        assert!(said.contains(want), "missing `{want}` in: {said}");
+    }
+    let (said, _, _) = refused(cfg(snowflake, none, "  layout: base_buffer\n"));
+    assert!(
+        said.contains("export 'stream'"),
+        "a written base_buffer is no baseline: {said}"
+    );
+
+    for (what, yaml) in [
+        ("initial: snapshot", cfg(snowflake, snapshot, "")),
+        ("backfill: auto", cfg(snowflake, backfill, "")),
+        (
+            "layout: log_view written",
+            cfg(snowflake, none, "  layout: log_view\n"),
+        ),
+        (
+            "export load override",
+            cfg(
+                snowflake,
+                &format!("{none}    load: {{ layout: log_view }}\n"),
+                "",
+            ),
+        ),
+        (
+            "every table overridden",
+            cfg(
+                snowflake,
+                &format!(
+                    "{none}    load: {{ tables: {{ a: {{ layout: log_view }}, b: {{ layout: log_view }} }} }}\n"
+                ),
+                "",
+            ),
+        ),
+        ("BigQuery, no baseline", cfg(bigquery, none, "")),
+        (
+            "BigQuery, written base_buffer",
+            cfg(bigquery, none, "  layout: base_buffer\n"),
+        ),
+        ("ClickHouse, no baseline", cfg(clickhouse, none, "")),
+    ] {
+        Config::from_yaml(&yaml)
+            .unwrap_or_else(|e| panic!("{what}: loads as before: {e:#}\n{yaml}"));
+    }
+
+    let (said, _, _) = refused(cfg(
+        snowflake,
+        &format!("{none}    load: {{ tables: {{ a: {{ layout: log_view }} }} }}\n"),
+        "",
+    ));
+    assert!(
+        said.contains("(table 'b')") && !said.contains("(table 'a')"),
+        "only the table left without a baseline or a log_view is named: {said}"
+    );
+
+    let incremental = "source:\n  type: mysql\n  url: \"mysql://localhost/test\"\nexports:\n  - name: t\n    \
+                       table: t\n    mode: incremental\n    cursor_column: updated_at\n    format: parquet\n    \
+                       destination: { type: gcs, bucket: b, prefix: t/ }\nload:\n";
+    Config::from_yaml(&format!("{incremental}{snowflake}"))
+        .expect("an incremental export builds its base from its first pass");
 }
 
 /// A ClickHouse `load:` carries `url`, `database`, `user` and `password_env`; a
@@ -1773,5 +1887,5 @@ fn a_clickhouse_load_names_its_own_fields_and_refuses_foreign_ones() {
         load::LoadTarget::Clickhouse { ca_file: Some(ref f), .. } if f == "/etc/rivet/ca.pem"
     ));
     let layout = err(&format!("{own}  layout: base_buffer\n"));
-    assert!(layout.contains("BigQuery-only"), "{layout}");
+    assert!(layout.contains("does not run on ClickHouse"), "{layout}");
 }

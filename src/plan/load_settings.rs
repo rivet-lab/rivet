@@ -1,6 +1,6 @@
 //! One export's effective load settings from the config alone: mode, layout, partition, delete flag.
 
-use crate::config::load::{LoadSection, PartitionSpec};
+use crate::config::load::{BaseSupport, LoadSection, PartitionSpec};
 
 /// Source primary keys `rivet run` recorded, by `(export, unit)`.
 pub type RecordedKeys = std::collections::HashMap<(String, Option<String>), Vec<String>>;
@@ -20,10 +20,11 @@ pub enum LoadMode {
 }
 
 /// How a CDC export's tables are laid out in the warehouse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CdcLayout {
     /// Baseline and changes in one `<table>__changes` log; `<table>` is the dedup
     /// view over it (`initial: snapshot`, and every stream without a baseline).
+    #[default]
     LogAndView,
     /// `<table>` is a physical base (source schema + `__is_deleted`) the baseline
     /// legs overwrite; `<table>__changes` is a per-cycle buffer `rivet compact`
@@ -86,28 +87,13 @@ pub fn load_mode_of(
     }
 }
 
-/// One export's effective load settings: the shared section, the export's own `load:`
-/// block layered over it, then — for a captured table of a multiplex stream — that
-/// table's `load.tables.<name>` block over both.
-///
-/// THE overlay. It was written out four times (three `resolved_*` readers and the plan
-/// builder), and only the builder's copy applied the third layer, so the load honoured a
-/// per-table override the extract never saw.
+/// One export's effective load settings (see [`LoadSection::overlay`]): the shared section, the export's own `load:` block, then a captured table's block.
 pub(crate) fn overlay(
     section: &LoadSection,
     export: &crate::config::ExportConfig,
     table: Option<&str>,
 ) -> LoadSection {
-    let mut eff = match &export.load {
-        Some(o) => section.with_override(o),
-        None => section.clone(),
-    };
-    if let (Some(o), Some(t)) = (&export.load, table)
-        && let Some(per_table) = o.tables.get(t)
-    {
-        eff = eff.with_override(per_table);
-    }
-    eff
+    section.overlay(export, table)
 }
 
 /// [`overlay`] against the config's shared `load:` block; `None` when there is none.
@@ -156,15 +142,17 @@ pub fn resolved_layout(
 ) -> CdcLayout {
     let eff = effective_load(config, export, table);
     let choice = eff.as_ref().and_then(|eff| eff.layout);
-    let compacts = eff.as_ref().is_some_and(|l| l.target.compacts());
-    cdc_layout(export, load_mode_of(config, export), choice, compacts)
+    let support = eff
+        .as_ref()
+        .map_or(BaseSupport::Never, |l| l.target.base_support());
+    cdc_layout(export, load_mode_of(config, export), choice, support)
 }
 
 pub(crate) fn cdc_layout(
     export: &crate::config::ExportConfig,
     mode: LoadMode,
     choice: Option<crate::config::load::LayoutChoice>,
-    warehouse_compacts: bool,
+    support: BaseSupport,
 ) -> CdcLayout {
     use crate::config::load::LayoutChoice;
     match (mode, choice) {
@@ -172,10 +160,14 @@ pub(crate) fn cdc_layout(
         // accumulated current state to lay out, so the key means nothing here.
         (LoadMode::Full, _) => CdcLayout::LogAndView,
         // A base without a compaction is a snapshot frozen at the backfill and a buffer
-        // that grows for ever (measured on Snowflake): only a compacting warehouse gets
-        // one — written, or derived from a stream's `backfill:`.
-        (_, Some(LayoutChoice::BaseBuffer)) if warehouse_compacts => CdcLayout::BaseAndBuffer,
-        (LoadMode::Cdc, None) if warehouse_compacts => {
+        // that grows for ever: only a compacting warehouse gets one — written, on Snowflake
+        // the default of every incremental and CDC export, on BigQuery derived from a
+        // stream's `backfill:`.
+        (_, Some(LayoutChoice::BaseBuffer)) if support != BaseSupport::Never => {
+            CdcLayout::BaseAndBuffer
+        }
+        (_, None) if support == BaseSupport::Default => CdcLayout::BaseAndBuffer,
+        (LoadMode::Cdc, None) if support == BaseSupport::Derived => {
             match export.cdc.as_ref().and_then(|c| c.backfill.as_ref()) {
                 Some(_) => CdcLayout::BaseAndBuffer,
                 None => CdcLayout::LogAndView,
@@ -250,7 +242,7 @@ mod tests {
         );
     }
 
-    /// A stream with a `backfill:` on a warehouse without `rivet compact` (Snowflake)
+    /// A stream with a `backfill:` on a warehouse without `rivet compact` (ClickHouse)
     /// keeps the changelog and its view: a base there would freeze at the backfill
     /// while its buffer grew for ever, with every load prescribing a command that can
     /// only fail. RED against deriving the layout from the export alone.
@@ -261,8 +253,8 @@ mod tests {
              \x20 - name: t\n    table: t\n    mode: cdc\n    format: parquet\n\
              \x20   cdc: { backfill: auto, checkpoint: ./t.ckpt }\n\
              \x20   destination: { type: gcs, bucket: b, prefix: t/ }\n\
-             load:\n  target: snowflake\n  account: a\n  user: u\n  private_key_path: /k.p8\n  warehouse: w\n  database: d\n\
-             \x20 schema: s\n  storage_integration: i\n",
+             load:\n  target: clickhouse\n  url: \"http://localhost:8123\"\n  database: d\n  user: u\n\
+             \x20 password_env: CH_PW\n",
         )
         .expect("a config");
         assert_eq!(
@@ -420,6 +412,47 @@ load:
         );
     }
 
+    /// On Snowflake every incremental and CDC export is base+buffer unless `log_view` is written;
+    /// a full load keeps its overwrite. RED against the changelog+view default.
+    #[test]
+    fn snowflake_takes_a_base_unless_log_view_is_written() {
+        use crate::config::load::LayoutChoice;
+        let plain = serde_yaml_ng::from_str::<crate::config::ExportConfig>(
+            "name: t\ntable: t\nmode: cdc\nformat: parquet\n\
+             cdc: { checkpoint: ./t.ckpt }\n\
+             destination: { type: local, path: /tmp/t }\n",
+        )
+        .expect("an export");
+        let layout = |mode, choice| cdc_layout(&plain, mode, choice, BaseSupport::Default);
+        assert_eq!(
+            layout(LoadMode::Cdc, None),
+            CdcLayout::BaseAndBuffer,
+            "an unwritten layout is the base and its buffer, with or without a backfill"
+        );
+        assert_eq!(
+            layout(LoadMode::Incremental, None),
+            CdcLayout::BaseAndBuffer
+        );
+        assert_eq!(
+            layout(LoadMode::Cdc, Some(LayoutChoice::BaseBuffer)),
+            CdcLayout::BaseAndBuffer
+        );
+        assert_eq!(
+            layout(LoadMode::Cdc, Some(LayoutChoice::LogView)),
+            CdcLayout::LogAndView,
+            "a written log_view keeps the changelog and its view"
+        );
+        assert_eq!(
+            layout(LoadMode::Incremental, Some(LayoutChoice::LogView)),
+            CdcLayout::LogAndView
+        );
+        assert_eq!(
+            layout(LoadMode::Full, None),
+            CdcLayout::LogAndView,
+            "a full load overwrites its table; there is no base"
+        );
+    }
+
     /// Only a CDC load of a stream WITH `backfill:` takes the base-and-buffer
     /// layout; the same stream without a baseline, and any batch load, keep the
     /// changelog + view.
@@ -438,15 +471,15 @@ load:
              destination: { type: local, path: /tmp/t }\n",
         );
         assert_eq!(
-            cdc_layout(&with, LoadMode::Cdc, None, true),
+            cdc_layout(&with, LoadMode::Cdc, None, BaseSupport::Derived),
             CdcLayout::BaseAndBuffer
         );
         assert_eq!(
-            cdc_layout(&without, LoadMode::Cdc, None, true),
+            cdc_layout(&without, LoadMode::Cdc, None, BaseSupport::Derived),
             CdcLayout::LogAndView
         );
         assert_eq!(
-            cdc_layout(&with, LoadMode::Full, None, true),
+            cdc_layout(&with, LoadMode::Full, None, BaseSupport::Derived),
             CdcLayout::LogAndView,
             "a batch load of the same export is no CDC layout"
         );
@@ -454,7 +487,7 @@ load:
         // the base would freeze at the backfill and the buffer grow for ever, with no
         // view either. RED against deriving the layout from the export alone.
         assert_eq!(
-            cdc_layout(&with, LoadMode::Cdc, None, false),
+            cdc_layout(&with, LoadMode::Cdc, None, BaseSupport::Never),
             CdcLayout::LogAndView,
             "no compaction, no base: the changelog and its view"
         );
@@ -466,23 +499,33 @@ load:
                 &without,
                 LoadMode::Incremental,
                 Some(LayoutChoice::BaseBuffer),
-                true
+                BaseSupport::Derived
             ),
             CdcLayout::BaseAndBuffer,
             "an incremental export asks for a base by name"
         );
         assert_eq!(
-            cdc_layout(&with, LoadMode::Cdc, Some(LayoutChoice::LogView), true),
+            cdc_layout(
+                &with,
+                LoadMode::Cdc,
+                Some(LayoutChoice::LogView),
+                BaseSupport::Derived
+            ),
             CdcLayout::LogAndView,
             "written wins over the backfill-derived default"
         );
         assert_eq!(
-            cdc_layout(&with, LoadMode::Full, Some(LayoutChoice::BaseBuffer), true),
+            cdc_layout(
+                &with,
+                LoadMode::Full,
+                Some(LayoutChoice::BaseBuffer),
+                BaseSupport::Derived
+            ),
             CdcLayout::LogAndView,
             "a full load overwrites the whole table; the key means nothing there"
         );
         assert_eq!(
-            cdc_layout(&without, LoadMode::Incremental, None, true),
+            cdc_layout(&without, LoadMode::Incremental, None, BaseSupport::Derived),
             CdcLayout::LogAndView,
             "unwritten keeps what shipped"
         );
@@ -545,7 +588,12 @@ load:
         .expect("an export");
         for mode in [LoadMode::Incremental, LoadMode::Cdc] {
             assert_eq!(
-                cdc_layout(&export, mode, Some(LayoutChoice::BaseBuffer), false),
+                cdc_layout(
+                    &export,
+                    mode,
+                    Some(LayoutChoice::BaseBuffer),
+                    BaseSupport::Never
+                ),
                 CdcLayout::LogAndView,
                 "{mode:?}: a base nothing merges into would freeze at its first pass"
             );

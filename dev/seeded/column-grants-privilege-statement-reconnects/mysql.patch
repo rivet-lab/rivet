@@ -1,0 +1,15 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 0ff53467..7dba7720 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -1602,8 +1602,8 @@ impl MysqlChangeStream {
+             Some(EventData::QueryEvent(qe))
+                 if is_privilege_statement(&qe.query(), event_mode(&qe)) =>
+             {
+-                self.grants_pending
+-                    .get_or_insert_with(|| (self.file.clone(), log_pos));
++                self.grants_pending = Some((self.file.clone(), log_pos));
++                self.refuse_changed_grants()?;
+             }
+             Some(EventData::QueryEvent(qe)) if is_commit_statement(&qe.query()) => {
+                 if !self.close_transaction_at(log_pos) {

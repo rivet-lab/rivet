@@ -699,12 +699,17 @@ pub mod codes {
     /// The `source:` block names no connection method, more than one, or an incomplete one.
     pub const CONFIG_SOURCE_CONNECTION_INVALID: Code = usage(
         "RIVET_CONFIG_SOURCE_CONNECTION_INVALID",
-        "give `source:` exactly one connection method (`url_env`, `url`, `url_file` or complete host/user/database fields) and one password setting",
+        "give `source:` exactly one connection method (`url_env`, `url`, `url_file`, `url_secret` or complete host/user/database fields) and one password setting",
     );
     /// An environment variable, `--param` or file a config key points at is not there.
     pub const CONFIG_SECRET_UNSET: Code = environment(
         "RIVET_CONFIG_SECRET_UNSET",
         "export the environment variable (or pass the `--param`) the message names, or make the named file readable",
+    );
+    /// A Secret Manager secret a source setting names could not be read.
+    pub const CONFIG_GCP_SECRET_UNREADABLE: Code = environment(
+        "RIVET_CONFIG_GCP_SECRET_UNREADABLE",
+        "grant the credential rivet runs as `roles/secretmanager.secretAccessor` on the secret the message names, and check its project, name and version",
     );
     /// An export does not name exactly one well-formed `query` / `query_file` / `table` / `tables`.
     pub const CONFIG_EXPORT_SOURCE_INVALID: Code = usage(
@@ -1476,6 +1481,16 @@ pub mod codes {
         "RIVET_SOURCE_CDC_TABLE_UNSUPPORTED",
         "export the table in batch (`mode: full`), or capture a table the message's supported list covers",
     );
+    /// A `columns_from: grants` table whose account may read no column, or not its key.
+    pub const SOURCE_COLUMNS_UNREADABLE: Code = usage(
+        "RIVET_SOURCE_COLUMNS_UNREADABLE",
+        "grant the account `SELECT` on the columns the message names (at least the key), or drop the table from the export",
+    );
+    /// A `columns_from: grants` stream met a grant change that alters what it may deliver.
+    pub const SOURCE_CDC_GRANTS_CHANGED: Code = transient(
+        "RIVET_SOURCE_CDC_GRANTS_CHANGED",
+        "re-run: the next run reads the new grants and resumes from the checkpoint, so nothing is lost",
+    );
     /// One source transaction larger than the in-memory buffer cap.
     pub const SOURCE_CDC_TRANSACTION_TOO_LARGE: Code = usage(
         "RIVET_SOURCE_CDC_TRANSACTION_TOO_LARGE",
@@ -1709,6 +1724,7 @@ pub mod codes {
         CONFIG_YAML_INVALID,
         CONFIG_SOURCE_CONNECTION_INVALID,
         CONFIG_SECRET_UNSET,
+        CONFIG_GCP_SECRET_UNREADABLE,
         CONFIG_EXPORT_SOURCE_INVALID,
         CONFIG_MODE_SETTING_INVALID,
         CONFIG_DESTINATION_AUTH_INVALID,
@@ -1858,6 +1874,8 @@ pub mod codes {
         CONFIG_SOURCE_FEATURE_MISSING,
         SOURCE_CDC_TABLE_UNRESOLVED,
         SOURCE_CDC_TABLE_UNSUPPORTED,
+        SOURCE_COLUMNS_UNREADABLE,
+        SOURCE_CDC_GRANTS_CHANGED,
         SOURCE_CDC_TRANSACTION_TOO_LARGE,
         SOURCE_QUERY_COLUMN_UNREFERENCEABLE,
         SOURCE_RUNTIME_UNAVAILABLE,

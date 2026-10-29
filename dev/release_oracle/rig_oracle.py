@@ -403,6 +403,21 @@ def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()
     return numeric
 
 
+def _mysql_selectable(ora, db: str, leaf: str, cols: list[str]) -> set[str]:
+    """The columns of `db.leaf` the oracle's account may SELECT: information_schema lists a column on ANY privilege, an UPDATE-only one included."""
+    def reads(names: list[str]) -> bool:
+        sql = f"SELECT {', '.join(f'`{c}`' for c in names)} FROM `{db}`.`{leaf}` LIMIT 0"
+        try:
+            ora.rows("SELECT * FROM mysql_query('my', " + _lit(sql) + ")")
+        except Exception as e:  # noqa: BLE001
+            if "denied" not in str(e):
+                raise
+            return False
+        return True
+
+    return set(cols) if not cols or reads(cols) else {c for c in cols if reads([c])}
+
+
 def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     """(source relation, primary key columns, declared type per column in the ledger's spelling) for the spec's engine."""
     from .value_diff import oracle_rows
@@ -472,11 +487,20 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         native = {c: "BOOLEAN" if norm_native(t) == "TINYINT(1)" else norm_native(t) for c, t in ora.rows(
             "SELECT * FROM mysql_query('my', " + _lit(
                 f"SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {_lit(schema or db)} "
-                f"AND TABLE_NAME = {_lit(leaf)}"
+                f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA NOT LIKE '%INVISIBLE%'"
             ) + ")"
         )}
+        selectable = _mysql_selectable(ora, schema or db, leaf, list(native))
+        partial = len(selectable) < len(native)
+        native = {c: n for c, n in native.items() if c in selectable}
         wide = [c for c, n in native.items() if (d := re.match(r"DECIMAL\((\d+)", n)) and int(d.group(1)) > 38]
-        if not wide:
+        invisible = ora.rows(
+            "SELECT * FROM mysql_query('my', " + _lit(
+                f"SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {_lit(schema or db)} "
+                f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA LIKE '%INVISIBLE%'"
+            ) + ")"
+        )
+        if not wide and not invisible and not partial:
             return f"my.{schema or db}.{leaf}", key, native
         # The scanner reads a DECIMAL wider than DuckDB's 38 digits as DOUBLE; MySQL's own text keeps every digit.
         cols = ", ".join(f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide else f"`{c}`" for c in native)
@@ -1526,7 +1550,7 @@ def grade_load(spec: dict) -> dict:
         elif target == "snowflake":
             sf_db, sf_schema = fq.split(".")[:2]
             sql = (f"SELECT table_name, table_type FROM {sf_db}.INFORMATION_SCHEMA.TABLES "
-                   f"WHERE table_schema = {_lit(sf_schema.upper())} AND table_name IN ({_lit(leaf.upper())}, {_lit(leaf.upper() + '__CHANGES')})")
+                   f"WHERE table_schema = {_lit(sf_schema.upper())} AND table_name IN ({_lit(leaf.upper())}, {_lit(leaf.upper() + '__CHANGES')}, {_lit(leaf.upper() + '__CHANGES__MERGING')})")
             kinds = dict(ora.rows(f"SELECT * FROM {ora.snowflake(sql)}"))
             if leaf.upper() not in kinds:
                 if not ora.scalar(f"SELECT count(*) FROM {_state_table(ora, spec, 'load_run')} "
@@ -1535,11 +1559,24 @@ def grade_load(spec: dict) -> dict:
                 return {"failures": [f"WAREHOUSE: `{fq}` does not exist in Snowflake ({sorted(kinds)} do)"], "notes": notes}
             # Snowflake folds an unquoted name to upper case; each column is read under the source's own spelling.
             spelled = {c.upper(): c for c, _ in _columns(ora, "source_rows")}
-            cols = [r[0] for r in ora.rows(f"SELECT * FROM {ora.snowflake(f'SELECT column_name FROM {sf_db}.INFORMATION_SCHEMA.COLUMNS WHERE table_schema = {_lit(sf_schema.upper())} AND table_name = {_lit(leaf.upper())} ORDER BY ordinal_position')}")]
-            named = ", ".join(f"{_qi(c)} AS {_qi(spelled.get(c, c.lower()))}" for c in cols)
-            rel = f"(SELECT {named} FROM {ora.snowflake(f'SELECT * FROM {fq}')})"
+
+            def sf_relation(name: str) -> str:
+                """The Snowflake table `name` of this schema, every column renamed to the source's spelling."""
+                catalog = (f"SELECT column_name FROM {sf_db}.INFORMATION_SCHEMA.COLUMNS WHERE table_schema = "
+                           f"{_lit(sf_schema.upper())} AND table_name = {_lit(name.upper())} ORDER BY ordinal_position")
+                cols = [r[0] for r in ora.rows(f"SELECT * FROM {ora.snowflake(catalog)}")]
+                named = ", ".join(f"{_qi(c)} AS {_qi(spelled.get(c, c.lower()))}" for c in cols)
+                return f"(SELECT {named} FROM {ora.snowflake(f'SELECT * FROM {sf_db}.{sf_schema}.{name}')})"
+
+            rel = sf_relation(leaf)
             wh_types = {}
-            buffered = 0
+            # `<table>__changes` beside a VIEW is the changelog+view layout; beside a base TABLE it is base_buffer's uncompacted buffer.
+            buffered = leaf.upper() + "__CHANGES" in kinds and kinds[leaf.upper()] != "VIEW"
+            base = True
+            if buffered:
+                buffer_rel = sf_relation(f"{leaf}__changes")
+            if spec.get("verb") == "compact" and leaf.upper() + "__CHANGES__MERGING" in kinds:
+                return {"failures": [f"WAREHOUSE snowflake `{fq}`: `rivet compact` exited 0 and left `{leaf}__changes__merging` behind"], "notes": notes}
         else:
             ds = str(load.get("dataset"))
             # One catalog listing (seconds); a BigQuery query job costs ~10 s, a storage read ~2 s and reads tables only.
@@ -1553,6 +1590,7 @@ def grade_load(spec: dict) -> dict:
             rel = f"bq.{ds}.{leaf}" if leaf in tables else f"bigquery_query('bq', {_lit(f'SELECT * FROM `{fq}`')})"
             wh_types = {}
             buffered = f"{leaf}__changes" in tables
+            buffer_rel = f"bq.{ds}.{leaf}__changes"
             if buffered:
                 # `<table>__changes` beside a VIEW is the changelog+view layout (the view is the current state);
                 # beside a base TABLE (or no base yet) it is base_buffer's uncompacted buffer.
@@ -1568,13 +1606,13 @@ def grade_load(spec: dict) -> dict:
         if not wh_types and target == "clickhouse":
             return {"failures": [f"WAREHOUSE: `{fq}` does not exist in ClickHouse database `{db}`"], "notes": notes}
         if buffered and spec.get("verb") == "compact":
-            return {"failures": [f"WAREHOUSE bigquery `{fq}`: `rivet compact` exited 0 and left `{leaf}__changes` behind"], "notes": notes}
+            return {"failures": [f"WAREHOUSE {target} `{fq}`: `rivet compact` exited 0 and left `{leaf}__changes` behind"], "notes": notes}
         if buffered and not key:
             return {"skip": f"`{fq}__changes` holds an uncompacted buffer and the relation names no key to fold it into the base by"}
         try:
             if buffered:
                 # base ∪ buffer, folded per key below the way `rivet compact` merges them: a buffer row beats the base.
-                legs = ([f"(SELECT *, 0 AS _rivet_src FROM {rel})"] if base else []) + [f"(SELECT *, 1 AS _rivet_src FROM bq.{ds}.{leaf}__changes)"]
+                legs = ([f"(SELECT *, 0 AS _rivet_src FROM {rel})"] if base else []) + [f"(SELECT *, 1 AS _rivet_src FROM {buffer_rel})"]
                 ora.db.sql(f"CREATE OR REPLACE TEMP TABLE wh_all AS {' UNION ALL BY NAME '.join(legs)}")
                 partial.append("base_buffer before `rivet compact`: graded base ∪ buffer folded per key, not the merge compact performs")
             else:

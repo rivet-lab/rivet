@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/column_grants.rs b/src/source/mysql/column_grants.rs
+--- a/src/source/mysql/column_grants.rs
++++ b/src/source/mysql/column_grants.rs
+@@ -152,7 +152,7 @@
+             .filter(|k| !shown.iter().any(|c| c.eq_ignore_ascii_case(k)))
+         {
+             let sql = projection_sql(Some(&db), &table, std::slice::from_ref(k));
+-            match conn.prep(&sql) {
++            match Err::<mysql::Statement, mysql::Error>(mysql::Error::MySqlError(mysql::MySqlError { state: "42000".into(), message: "x".into(), code: 1143 })) {
+                 Ok(stmt) => conn.close(stmt)?,
+                 Err(mysql::Error::MySqlError(e)) if DENIED.contains(&e.code) => {
+                     crate::rivet_bail!(

@@ -439,3 +439,27 @@ scenarios:
     mssql:    { test: a_keyless_table_is_refused_whatever_the_row_estimate_mssql }
     mongo:    { na: "a Mongo export has no `mode: chunked`" }
     oracle:   { test: a_keyless_table_is_refused_whatever_the_row_estimate_oracle }
+
+  - id: reserved_source_column_clickhouse
+    what: "2026-10-29 finding: `rivet load` of a delta export whose source column is named like one rivet owns (`__op`, `__pos`, `__seq`, `__is_deleted`) into ClickHouse is refused by RIVET_LOAD_RESERVED_COLUMN on every attempt, after a run that pinned the plan to its spec and before any warehouse statement; the named remedy `mode: full` then delivers the rows"
+    postgres: { test: reserved_column_is_refused_into_clickhouse_postgres }
+    mysql:    { test: reserved_column_is_refused_into_clickhouse_mysql }
+    mssql:    { test: reserved_column_is_refused_into_clickhouse_mssql }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only and a `cdc` stream is refused at run time for these names (src/source/cdc/mod.rs); the plan-level refusal is engine-independent and unit-tested (a_plan_pinned_to_its_run_refuses_a_reserved_source_column)" }
+    oracle:   { na: "an unquoted Oracle identifier cannot start with an underscore, so the fixture helper cannot create the column; the plan-level refusal reads only the recorded column names, which the other engines' cells and the unit test exercise" }
+
+  - id: reserved_source_column_bigquery
+    what: "2026-10-29 finding: `rivet load` of a delta export whose source column is named like one rivet owns (`__op`, `__pos`, `__seq`, `__is_deleted`) into BigQuery is refused by RIVET_LOAD_RESERVED_COLUMN on every attempt, after a run that pinned the plan to its spec and before any warehouse statement; the named remedy `mode: full` then delivers the rows"
+    postgres: { test: reserved_column_is_refused_into_bigquery_postgres }
+    mysql:    { test: reserved_column_is_refused_into_bigquery_mysql }
+    mssql:    { test: reserved_column_is_refused_into_bigquery_mssql }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only and a `cdc` stream is refused at run time for these names (src/source/cdc/mod.rs); the plan-level refusal is engine-independent and unit-tested (a_plan_pinned_to_its_run_refuses_a_reserved_source_column)" }
+    oracle:   { na: "an unquoted Oracle identifier cannot start with an underscore, so the fixture helper cannot create the column; the plan-level refusal reads only the recorded column names, which the other engines' cells and the unit test exercise" }
+
+  - id: reserved_source_column_snowflake
+    what: "2026-10-29 finding: `rivet load` of a delta export whose source column is named like one rivet owns (`__op`, `__pos`, `__seq`, `__is_deleted`) into Snowflake is refused by RIVET_LOAD_RESERVED_COLUMN on every attempt, after a run that pinned the plan to its spec and before any warehouse statement; the named remedy `mode: full` then delivers the rows"
+    postgres: { test: reserved_column_is_refused_into_snowflake_postgres }
+    mysql:    { test: reserved_column_is_refused_into_snowflake_mysql }
+    mssql:    { test: reserved_column_is_refused_into_snowflake_mssql }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only and a `cdc` stream is refused at run time for these names (src/source/cdc/mod.rs); the plan-level refusal is engine-independent and unit-tested (a_plan_pinned_to_its_run_refuses_a_reserved_source_column)" }
+    oracle:   { na: "an unquoted Oracle identifier cannot start with an underscore, so the fixture helper cannot create the column; the plan-level refusal reads only the recorded column names, which the other engines' cells and the unit test exercise" }

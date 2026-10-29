@@ -385,6 +385,62 @@ Notes:
   The filenames are the tell: `mysql-bin-changelog.NNNNNN` is RDS's naming, so an
   `ERROR 1236` naming one of those is this, not `PURGE BINARY LOGS`.
 
+#### MySQL — column grants (`source.columns_from: grants`)
+
+The binlog carries every column of a row. Under `source.columns_from: grants` rivet
+reads and delivers only the columns the account may `SELECT`, in every mode. Batch reads
+are enforced by the server (the `SELECT` names only readable columns). The change stream is a
+client-side projection: the binlog carries every column of a changed row to rivet, which drops
+the unreadable ones before anything is written. That is data minimisation, not access control.
+`rivet check` prints this boundary and a change-stream run logs it at start.
+
+```sql
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'rivet_cdc'@'%';
+GRANT SELECT (id, name, email) ON `app`.`users` TO 'rivet_cdc'@'%';  -- not `pass`
+```
+
+```yaml
+source:
+  type: mysql
+  url_env: DATABASE_URL
+  columns_from: grants
+```
+
+| Mode | What is read |
+|---|---|
+| Batch `table:` (full, chunked, incremental, time_window, partition, split) | `SELECT <readable columns>` |
+| Batch `query:` | The query as written; a hidden column is refused by MySQL (`1142`) |
+| `cdc` + `initial: snapshot` | `SELECT <readable columns>`, then the stream projected to them |
+| `cdc` + `backfill: auto` | Each recipe export reads `SELECT <readable columns>` |
+| `cdc` + `until_current: false` | The stream projected; a grant change in the binlog stops the run (below) |
+
+| What | Behaviour |
+|---|---|
+| Readable set | Each column is judged by the server: a `PREPARE SELECT <col>` per column, read at run start |
+| Hidden column | Never in a Parquet part, a schema, the spill, the state DB, `check --target` or the load plan |
+| Column added later | Not delivered (fail-closed) until a grant covers it and a new run starts |
+| One value per run | The readable set is read once before the anchor and shared by the snapshot legs, the stream open and the mid-run re-reads. A grant change between that read and the stream open is refused with `RIVET_SOURCE_CDC_GRANTS_CHANGED` (exit 2), never delivered as a mix of two column sets. A snapshot leg whose `SELECT` is denied because a column was revoked after that read is the same refusal (exit 2, re-run), not a stale-plan failure |
+| Grant change between runs | Takes effect on the next run |
+| Policy switched on or off over existing state | Takes effect on the next run, as a grant change does: the schema-drift check reports the columns that disappeared (or appeared) per `on_schema_drift`. Values already delivered stay where they are (switching on does not remove a hidden column from earlier parts or from the warehouse), and switching off does not backfill the earlier changes. Re-baseline the stream to start clean |
+| Grant change during a run | `GRANT`/`REVOKE`/user/role statement in the binlog → grants re-read on a fresh login (so database-level and global privileges and login-time roles are seen as they are now, not as the session cached them); changed → `RIVET_SOURCE_CDC_GRANTS_CHANGED`, nothing past it delivered; re-run resumes under the new grants. Consecutive privilege statements share one re-read, taken at the next event that is not one or at the end of the stream, so a backlog of them costs one login, not one per statement |
+| Grant or rename statement behind a comment | The binlog keeps a statement as the client wrote it, so rivet reads it the way the server lexes it, once, for the grant re-read and for the rename refusal alike: a `/*! … */` body is SQL whatever its version (`/*!80000 REVOKE … */`), a plain `/* … */` inside it or outside it is a space, and so are a `-- ` line (the dashes followed by a space, tab or line end) and a `#` line; quoted text is kept as written, so a `--`, `#` or `/*` inside a string or a name is text |
+| Partial row image | A change written with `binlog_row_image` = `MINIMAL` or `NOBLOB` (a session override counts) is refused with `RIVET_SOURCE_CDC_PREREQUISITE` before it is projected: its values cannot be placed under the table's column names. Setting `binlog_row_image = FULL` fixes only the changes written after it: the refused change stays in the binlog and a re-run is refused again. Set FULL for every writer, then re-baseline the stream (the refusal prints the steps; the same ones as for a lost log position) |
+| Update of hidden columns only | Not delivered; the checkpoint advances over it exactly as it does without the policy (so does an update of a table the export does not capture) |
+| A column of a captured table is renamed (`RENAME COLUMN`, `CHANGE`) while the stream has a backlog | MySQL does not move column privileges with a rename, so the old name's changes cannot be placed under the new name. Refused with `RIVET_SOURCE_CDC_UNDECODABLE` (exit 5), naming the table and the statement; the checkpoint stays before it and the remedy is the re-baseline the message ends with. Any column of the table counts, a hidden one too: the backlog is read against the grants as they are after the rename, which cannot tell a hidden column from a delivered one. A rename written behind a comment (`ALTER TABLE t -- note` then `RENAME COLUMN a TO b` on the next line, a `#` line, `/*!80000 ALTER TABLE t /* note */ RENAME COLUMN a TO b */`) or with double-quoted names (`ALTER TABLE "db"."t" RENAME COLUMN "a" TO "b"`, `CHANGE "a" "b" INT`; the QUERY event carries the `sql_mode` it was logged under and rivet lexes by it: under `ANSI_QUOTES` a double-quoted name is an identifier, and under `NO_BACKSLASH_ESCAPES` a backslash escapes nothing, so `'x\'` is a whole literal) is read as the statement the server runs and refused the same way; an event with no `sql_mode` is read in the default mode. Without the policy a rename is delivered as before |
+| A captured table is renamed (`RENAME TABLE t TO t_old, t_new TO t`, `ALTER TABLE t RENAME [TO] t2`) while the stream has a backlog | MySQL does not move privileges with a rename: they stay with the name, so the table now under a name is not the one its readable columns were granted on. Refused with `RIVET_SOURCE_CDC_UNDECODABLE` (exit 5) when either the old or the new name is a captured table, naming the table; the checkpoint stays before the statement, and the remedy is the re-baseline the message ends with, after a `GRANT SELECT` on the columns of the table that holds the name now. A rename between tables the run does not capture is read as before. Without the policy a rename is delivered as before |
+| Key column not readable | The key the export uses (`load.pk` if declared, else the primary key) is judged by the server once, before the anchor: a key the account may `SELECT` is accepted even when the listing hides it (a generated invisible primary key). Otherwise refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` before anything is read or written |
+| `cursor_column`, `chunk_column`, `chunk_by_key`, `time_column` or `partition_by` naming a hidden column | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE`, naming the column and the setting, before the read |
+| Sealed plan applied after a `REVOKE` | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` naming the column; run `rivet plan` again |
+| Schema change under a table-level grant (`ADD COLUMN`) | Reported as the schema change it is, naming the column that appeared; not as a grant change |
+| No readable column | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` |
+| Without `columns_from` | A column-grant account is refused by MySQL (`1142`) at the `SELECT *` of `rivet run` (a fresh run). `rivet cdc` (the CLI, which reads no config and so never applies the policy) resumed from a checkpoint prints every column the binlog carries |
+
+Limits:
+
+- MySQL only. On PostgreSQL, SQL Server, Oracle and MongoDB every command that loads the config (`run`, `check`, `plan`, `doctor`, `validate`, `load`, `state`) and `apply` of a plan that carries it refuses it with `RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED` (exit 1, nothing connected or written), because those sources would read and deliver every column (see #711). Remove `columns_from:` from `source:` or point `source:` at a MySQL server.
+- The binlog still leaves the server in full: the filter is in rivet, not in MySQL.
+- A grant change not written to the binlog (`sql_log_bin = 0`, a direct `mysql.*` edit without `FLUSH PRIVILEGES`) takes effect on the next run only.
+
 ### PostgreSQL — the logical slot
 
 Rivet's PostgreSQL reader consumes a logical slot through the **normal SQL

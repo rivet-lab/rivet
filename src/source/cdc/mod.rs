@@ -51,6 +51,29 @@ pub(crate) fn tx_cap_from_env(raw: Option<&str>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// The refusal for a PARTIAL change image: `names` columns but `n` values.
+pub(crate) fn partial_image_refusal(
+    schema: &str,
+    table: &str,
+    n: usize,
+    names: usize,
+) -> anyhow::Error {
+    crate::error::coded(
+        crate::error::codes::SOURCE_CDC_PREREQUISITE,
+        format!(
+            "cdc: {schema}.{table}: a row image carries {n} value(s) under {names} column \
+             name(s) — a PARTIAL image, which rivet cannot map without \
+             fabricating the missing cells as NULL. On MySQL this is \
+             `binlog_row_image` set to something other than FULL when the \
+             change was WRITTEN (a session override counts, and the open-time \
+             probe reads only the global). Setting `binlog_row_image = FULL` fixes only the \
+             changes written after it: this one stays in the binlog, and every run that \
+             resumes before it meets it again. Set FULL for every writer, then re-baseline: {}",
+            checkpoint_identity::RECOVER
+        ),
+    )
+}
+
 /// Default row cap — 5M rows, far above any real OLTP transaction.
 pub(crate) const DEFAULT_MAX_TX_ROWS: usize = 5_000_000;
 /// Default byte cap — 2 GiB, likewise.
@@ -533,6 +556,11 @@ pub(crate) trait ChangeStream {
         None
     }
 
+    /// `columns_from: grants`: the columns of `configured` this run may deliver; `None` = all.
+    fn readable_columns(&self, _configured: &str) -> Option<ReadableColumns> {
+        None
+    }
+
     /// After a clean drain, a position past everything read that nothing captured can precede.
     fn drained_frontier(&self) -> Option<Position> {
         None
@@ -716,6 +744,15 @@ fn emit_ndjson(
     Ok(())
 }
 
+/// The columns a `columns_from: grants` run delivers for one table, and the `SELECT` that reads them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadableColumns {
+    /// The readable columns, in table order.
+    pub columns: Vec<String>,
+    /// A `SELECT` of exactly those columns, every identifier quoted.
+    pub select: String,
+}
+
 /// The per-engine CDC knobs — each variant carries ONLY the parameters its
 /// engine reads, so the live set is obvious at a glance (a MySQL run has no
 /// `slot`, a Mongo run has no `server_id`) and a new engine adds a self-contained
@@ -734,6 +771,8 @@ pub(crate) enum CdcEngineOpts {
         /// it is allowed to fail the run — otherwise one PARTIAL_JSON table is a
         /// server-wide outage for exports that never read it.
         configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor; the stream delivers only those columns and refuses when it opens under others.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     /// PostgreSQL logical slot name.
     Postgres {
@@ -1061,11 +1100,15 @@ impl CdcEngine {
         tls: Option<&crate::config::TlsConfig>,
         tables: &[String],
         drain: DrainMode,
+        columns_from_grants: bool,
     ) -> Result<()> {
         match self {
             Self::Mysql => {
                 crate::source::mysql::cdc::MysqlChangeStream::refuse_unmet_prerequisites(
-                    url, tls, tables,
+                    url,
+                    tls,
+                    tables,
+                    columns_from_grants,
                 )
             }
             Self::Postgres => {
@@ -1379,6 +1422,7 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Mysql {
             server_id,
             configured_tables,
+            resolved_grants,
         } => {
             // Validate the checkpoint BEFORE open_or_resume so a corrupt/truncated
             // checkpoint (or a directory path) surfaces cleanly, not blanketed by
@@ -1404,6 +1448,7 @@ pub(crate) fn create_change_stream(
                     cfg.drain,
                     tls,
                     configured_tables.clone(),
+                    resolved_grants.clone(),
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir),
                 )
                 .map_err(|e| with_setup_hint(e, MYSQL_CDC_HINT))?,
@@ -1608,11 +1653,15 @@ impl<'s> CdcSchemaResolver<'s> {
         &mut self,
         table: &str,
         overrides: &crate::types::ColumnOverrides,
+        readable: Option<&ReadableColumns>,
     ) -> Result<Vec<crate::types::TypeMapping>> {
         validate_table_ident(table)?;
-        let mut mappings = self
-            .source()
-            .type_mappings(&format!("SELECT * FROM {table}"), overrides)?;
+        let select =
+            readable.map_or_else(|| format!("SELECT * FROM {table}"), |r| r.select.clone());
+        let mut mappings = match self.source().type_mappings(&select, overrides) {
+            Ok(m) => m,
+            Err(e) => return Err(schema_read_error(readable.is_some(), table, e)),
+        };
         // A source column in the CDC meta namespace collides with the columns the
         // sink prepends, and the collision is silent in the direction that matters.
         // The sink puts `__op`/`__pos`/`__seq` at batch indices 0-2, and
@@ -1715,7 +1764,7 @@ pub(crate) fn resolve_cdc_columns(
 ) -> Result<Vec<crate::types::TypeMapping>> {
     // Validate BEFORE connecting, so a hostile table name needs no database.
     validate_table_ident(table)?;
-    CdcSchemaResolver::connect(url, tls)?.resolve(table, overrides)
+    CdcSchemaResolver::connect(url, tls)?.resolve(table, overrides, None)
 }
 
 /// The table name is interpolated into `SELECT * FROM {table}` for the schema
@@ -1739,6 +1788,26 @@ pub(crate) fn validate_table_ident(table: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The error of a schema read: a column refused while the run projects is a grant change, any other stays as it came.
+fn schema_read_error(projecting: bool, table: &str, err: anyhow::Error) -> anyhow::Error {
+    if !grants_moved_mid_resolve(projecting, &err) {
+        return err;
+    }
+    crate::error::coded(
+        crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+        format!(
+            "mysql cdc: the account lost SELECT on a column of `{table}` between the stream's \
+             read of the readable columns and its read of the schema; nothing past it was \
+             delivered. Re-run: the run then reads the columns as they are now"
+        ),
+    )
+}
+
+/// A schema read refused by the server's privilege check while the run projects: the grants moved since the readable set was read.
+fn grants_moved_mid_resolve(projecting: bool, err: &anyhow::Error) -> bool {
+    projecting && crate::source::mysql::column_grants::denied_by_server(err).is_some()
 }
 
 /// The CDC probe could not read a captured table for a reason the server named; nothing was read or written.
@@ -1928,6 +1997,36 @@ mod mod_decisions {
              `bigint` here, which is a type for a column that does not exist"
         );
         assert_eq!(native_type_for(&[], "id"), None);
+    }
+
+    #[test]
+    fn only_a_projecting_run_reads_a_denied_schema_read_as_moved_grants() {
+        let denied = || {
+            anyhow::Error::from(mysql::Error::MySqlError(mysql::MySqlError {
+                state: "42000".into(),
+                message: "SELECT command denied".into(),
+                code: 1143,
+            }))
+        };
+        assert!(super::grants_moved_mid_resolve(true, &denied()));
+        assert!(!super::grants_moved_mid_resolve(false, &denied()));
+        assert!(!super::grants_moved_mid_resolve(
+            true,
+            &anyhow::anyhow!("other")
+        ));
+
+        let moved = super::schema_read_error(true, "d.t", denied());
+        assert_eq!(
+            crate::error::code_of(&moved),
+            Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED)
+        );
+        assert!(format!("{moved:#}").contains("lost SELECT on a column of `d.t`"));
+        for (projecting, err) in [(false, denied()), (true, anyhow::anyhow!("other"))] {
+            let said = format!("{err:#}");
+            let kept = super::schema_read_error(projecting, "d.t", err);
+            assert_eq!(crate::error::code_of(&kept), None);
+            assert_eq!(format!("{kept:#}"), said);
+        }
     }
 
     /// A checkpoint that cannot be READ is not a checkpoint that is ABSENT.
@@ -2429,6 +2528,7 @@ mod setup_hint {
             None,
             vec![],
             None,
+            None,
         );
         assert_names_refused_port(open.map(drop), super::MYSQL_CDC_HINT);
     }
@@ -2468,6 +2568,7 @@ mod engine_identity {
                 CdcEngineOpts::Mysql {
                     server_id: 1,
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Mysql,
                 "mysql://h/d",
@@ -2714,6 +2815,7 @@ mod tests {
             engine: CdcEngineOpts::Mysql {
                 server_id: 4321,
                 configured_tables: Vec::new(),
+                resolved_grants: None,
             },
         };
         let err = match create_change_stream(&cfg, PeekBound::Unbounded) {
@@ -2746,6 +2848,7 @@ mod tests {
                 engine: CdcEngineOpts::Mysql {
                     server_id: 4321,
                     configured_tables: Vec::new(),
+                    resolved_grants: None,
                 },
             };
             let Err(err) = create_change_stream(&cfg, PeekBound::Unbounded) else {

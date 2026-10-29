@@ -1,0 +1,34 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 53638066..df934d64 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -104,6 +104,7 @@ pub(crate) struct MysqlChangeStream {
+     grants_source: Option<(String, Option<TlsConfig>)>,
+     /// `(file, position)` of the first privilege statement not yet answered by a re-read: consecutive statements share one.
+     grants_pending: Option<(String, u64)>,
++    grants_conn: Option<mysql::Conn>,
+ }
+ 
+ impl MysqlChangeStream {
+@@ -742,8 +743,12 @@ impl MysqlChangeStream {
+         let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
+             return Ok(());
+         };
+-        let mut conn = connect_conn(url, tls.as_ref())?;
++        let mut conn = match self.grants_conn.take() {
++            Some(c) => c,
++            None => connect_conn(url, tls.as_ref())?,
++        };
+         let read = Self::readable_on(&mut conn, &self.configured_tables, true)?;
++        self.grants_conn = Some(conn);
+         let now = read.unwrap_or_default();
+         let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
+             r.get(t).map(|c| c.columns.clone())
+@@ -894,6 +899,7 @@ impl MysqlChangeStream {
+             readable: None,
+             grants_source: None,
+             grants_pending: None,
++            grants_conn: None,
+         })
+     }
+ 

@@ -31,7 +31,10 @@ use std::path::{Path, PathBuf};
 // Raised 23 -> 24 (2026-10-08): the MongoDB oplog-gone cells run on a replica set container they start themselves, which the reader inside rivet-duckdb cannot reach.
 // 24 -> 21 (2026-10-15): the oracle reads a mixed-type MongoDB `_id` (pymongo, canonical extended JSON), so the three heterogeneous-`_id` full scans are graded.
 // 21 -> 22 (2026-10-21, #675): a bare MySQL CDC name only another database holds; the oracle reads the bare name in the connection database, so the cell reads the parts itself.
-const NO_ORACLE_CEILING: usize = 22; // ratchet-pin: no-oracle-opt-outs
+// 22 -> 26 (2026-10-29, #719): column-grants cells the oracle cannot grade (a bare name another database holds, the generated invisible key, a DDL in the backlog, the grant changed between two reads); closes when the oracle reads the account's columns.
+// 26 -> 27 (2026-10-29): the reserved-source-column cells load a `mode: full` remedy whose table holds a source column called `__is_deleted`; the warehouse oracle filters on that name, so the cell reads the rows through the second client.
+// 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
+const NO_ORACLE_CEILING: usize = 28; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave: `.a_failed_run_may_leave(` and a raw run's `FAILED_RUN_LEAVES_ENV`.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
@@ -48,7 +51,9 @@ const NO_ORACLE_CEILING: usize = 22; // ratchet-pin: no-oracle-opt-outs
 // 45 -> 46 (2026-10-16): a Snowflake full load whose COPY fails on a corrupted part (snowflake_full_load_that_fails_keeps_the_last_table_*): the load reached the warehouse write (the staging table), so its load_run row is `failed`, which the ledger counts as ownership by design.
 // 2026-10-21: +1 - the SQL Server hot ADD COLUMN stop (#644) comes at the end of a drain whose parts were
 // committed before the column was added; they and the checkpoint stay, as on every mid-drain CDC stop.
-const FAILED_RUN_LEFTOVER_CEILING: usize = 47; // ratchet-pin: failed-run-leftover-declarations
+// 47 -> 51 (2026-10-29, #719): four column-grants cells whose failed run leaves its parts, rows and checkpoint for the re-run by design.
+// 51 -> 52 (2026-10-29, #719 follow-up): the same helper; a refused run leaves its parts, rows and checkpoint for the re-run by design.
+const FAILED_RUN_LEFTOVER_CEILING: usize = 52; // ratchet-pin: failed-run-leftover-declarations
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs): product defects every failed run may show.
 // 2 -> 1 (2026-10-08): a run that fails before its first write leaves the prefix alone, so a failed manifest before a write is a failure, no longer an excuse.

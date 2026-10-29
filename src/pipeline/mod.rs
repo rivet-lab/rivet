@@ -96,6 +96,7 @@ pub(crate) use job::run_export_job_with_chunk_source;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use retry::is_transient;
+pub(crate) use single::attach_connect_hint;
 
 // ── Test-only surface ──────────────────────────────────────────────────────
 //
@@ -365,16 +366,19 @@ mod tests {
                 url: Some("postgresql://localhost/test".into()),
                 url_env: None,
                 url_file: None,
+                url_secret: None,
                 host: None,
                 port: None,
                 user: None,
                 password: None,
                 password_env: None,
+                password_secret: None,
                 database: None,
                 environment: None,
                 tuning: None,
                 tls: None,
                 mongo: None,
+                columns_from: None,
             },
             column_overrides: Default::default(),
             verify: crate::config::VerifyMode::Size,
