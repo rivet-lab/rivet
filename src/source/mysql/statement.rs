@@ -194,7 +194,9 @@ pub(crate) fn tokens(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
             executable += 1;
             out.push(Tok::Blank(" "));
             let digits = version_digits(&b[i + 3..]);
-            i = sql.len() - rest.get(3 + digits..).map_or(0, str::len);
+            i = sql
+                .len()
+                .saturating_sub(rest.get(3 + digits..).map_or(0, str::len));
         } else if let Some(body) = rest.strip_prefix("/*") {
             out.push(Tok::Blank(" "));
             i = body.find("*/").map_or(sql.len(), |n| i + n + 4);
