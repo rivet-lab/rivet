@@ -259,6 +259,14 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
         rs,
         rt,
     ) {
+        if rt.contains('.') {
+            return RoutingVerdict::Never(format!(
+                "pg cdc: `{cfg}` resolves to the relation `{rs}.{rt}`, whose NAME holds a dot. \
+                 Routing reads a dotted `table:` as `schema.table`, so no spelling of `table:` \
+                 can route it, and its changes would be dropped while the slot advanced past \
+                 them. Rename the relation to a name without a dot, or drop it from the config."
+            ));
+        }
         return RoutingVerdict::Never(format!(
             "pg cdc: `{cfg}` resolves to the relation `{rs}.{rt}`, but routing compares the              config string BYTE-EXACT against the name test_decoding emits — and those two              disagree here. The schema probe would read `{rs}.{rt}`'s columns while events              carrying a different spelling route nowhere, so the run would either capture              NOTHING or write rows under the wrong table's schema, silently, past an              advancing slot. Set `table:` to `{rs}.{rt}` exactly as the catalog spells it."
         ));
@@ -397,9 +405,9 @@ impl PgChangeStream {
             // returns every relation the configured string could mean under EITHER
             // rule that is live today: what PostgreSQL itself would pick
             // (`to_regclass`, which FOLDS case and accepts `db.schema.table`), and
-            // what the byte-exact router would capture (`sink::table_matches`: the
-            // whole string as a relname — a quoted name may contain dots — or a
-            // `schema.table` split on the FIRST dot). The union goes through
+            // what the byte-exact router would capture (`sink::table_matches`: a bare
+            // name as the relname, a dotted string as `schema.table` split on the
+            // FIRST dot). The union goes through
             // `identity::resolve_captured_table`, whose ambiguity arm subsumes the
             // bare-name block that used to sit here AND the folded-twin case that
             // `classify_routing`'s first arm catches after the fact: with both
@@ -422,14 +430,25 @@ impl PgChangeStream {
                        AND n.nspname NOT LIKE 'pg_temp%' \
                        AND n.nspname NOT LIKE 'pg_toast%' \
                        AND (c.oid = to_regclass($1) \
-                            OR c.relname = $1 \
-                            OR n.nspname || '.' || c.relname = $1 \
+                            OR (position('.' in $1) = 0 AND c.relname = $1) \
                             OR (position('.' in $1) > 0 \
                                 AND n.nspname = split_part($1, '.', 1) \
                                 AND c.relname = substr($1, position('.' in $1) + 1)))",
                     &[&cfg.as_str()],
                 )
-                .with_context(|| format!("pg cdc: listing catalog matches for `{cfg}`"))?
+                .map_err(|e| {
+                    if e.code() == Some(&postgres::error::SqlState::FEATURE_NOT_SUPPORTED) {
+                        crate::error::coded(
+                            crate::error::codes::SOURCE_CDC_TABLE_UNRESOLVED,
+                            format!(
+                                "pg cdc: `{cfg}` names a relation in another database, or a relation whose name holds a dot ({e}). `table:` takes `table` or `schema.table` of the connected database, and a dotted `table:` is always read as `schema.table`; a relation whose name holds a dot cannot be captured by name: rename it."
+                            ),
+                        )
+                    } else {
+                        anyhow::Error::new(e)
+                            .context(format!("pg cdc: listing catalog matches for `{cfg}`"))
+                    }
+                })?
                 .iter()
                 .map(|r| crate::source::cdc::identity::CatalogMatch {
                     schema: r.get(0),

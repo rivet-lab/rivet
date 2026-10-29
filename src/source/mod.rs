@@ -446,21 +446,32 @@ pub(crate) fn code_a_missing_relation(
     ))
 }
 
-/// `err` of an export run under `columns_from: grants`, as `RIVET_SOURCE_COLUMNS_UNREADABLE` when the server refused a column the run reads: the grants moved after the plan (or the export's settings) named it. Any other error, or one already coded, as it came.
+/// `err` of an export run under `columns_from: grants`, coded when the server refused a column the run reads: the grants moved after the columns were named. A batch export names them in its plan, so it is `RIVET_SOURCE_COLUMNS_UNREADABLE` (run `rivet plan` again); the snapshot leg of a change stream (`cdc_leg`) takes them from the grants the stream resolved once, so it is `RIVET_SOURCE_CDC_GRANTS_CHANGED` (re-run). Any other error, or one already coded, as it came.
 pub(crate) fn code_a_revoked_column(
     err: anyhow::Error,
     export: &str,
     grants_on: bool,
+    cdc_leg: bool,
 ) -> anyhow::Error {
-    let code = crate::error::codes::SOURCE_COLUMNS_UNREADABLE;
     if !grants_on || crate::error::code_of(&err).is_some() {
         return err;
     }
     let Some(said) = mysql::column_grants::denied_by_server(&err) else {
         return err;
     };
+    if cdc_leg {
+        return crate::error::coded(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            format!(
+                "export '{export}': the account may no longer SELECT a column this snapshot reads \
+                 under `columns_from: grants` (the server said: {said}). The grants changed after \
+                 this run read them; the snapshot of this table was not completed and no change \
+                 stream was opened. Re-run: the run then reads the columns as they are now"
+            ),
+        );
+    }
     crate::error::coded(
-        code,
+        crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
         format!(
             "export '{export}': the account may no longer SELECT a column this run reads under \
              `columns_from: grants` (the server said: {said}). The grants changed after the plan \

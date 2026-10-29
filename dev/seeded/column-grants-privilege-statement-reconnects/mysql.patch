@@ -1,12 +1,14 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -754,7 +754,7 @@
+@@ -1580,8 +1580,8 @@
              }
-             Err(e) => return Err(e),
-         };
--        self.grants_conn = Some(conn);
-+        self.grants_conn = None;
-         let now = read.unwrap_or_default();
-         let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
-             r.get(t).map(|c| c.columns.clone())
+             // `columns_from: grants`: a grant change is re-read where the binlog records it.
+             Some(EventData::QueryEvent(qe)) if is_privilege_statement(&qe.query()) => {
+-                self.grants_pending
+-                    .get_or_insert_with(|| (self.file.clone(), log_pos));
++                self.grants_pending = Some((self.file.clone(), log_pos));
++                self.refuse_changed_grants()?;
+             }
+             Some(EventData::QueryEvent(qe)) if is_commit_statement(&qe.query()) => {
+                 if !self.close_transaction_at(log_pos) {

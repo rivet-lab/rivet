@@ -1247,6 +1247,8 @@ struct TailPolicy<'a> {
     strict: bool,
     /// The run path's `--force`: a `--resume` with no chunk run to continue runs as a plain run. Apply's `--force` is another gate.
     force: bool,
+    /// The run is the snapshot leg of a change-stream export: its `SELECT` was fixed by the grants the stream resolved once, so a denial of a column in it is a grant change, not a stale plan.
+    cdc_leg: bool,
 }
 
 /// Does this run's reconcile leg run? Pure, because the three-input condition
@@ -1527,6 +1529,7 @@ fn execute_resolved_plan(
                 e,
                 &plan.export_name,
                 plan.source.columns_from_grants(),
+                tail.cdc_leg,
             );
             Err(crate::source::code_a_missing_relation(
                 e,
@@ -2051,6 +2054,7 @@ fn run_export_job_inner(
             plan_warnings,
             strict: opts.strict,
             force: opts.force,
+            cdc_leg: export.snapshot_parent.is_some(),
         },
         meta,
     )
@@ -2134,6 +2138,7 @@ pub(crate) fn run_export_job_with_chunk_source(
             plan_warnings: Vec::new(),
             strict: false,
             force: false,
+            cdc_leg: false,
         },
         MetaConn::open(&plan.source),
     )
@@ -2203,6 +2208,7 @@ mod snapshot_leg_tests {
                     plan_warnings: Vec::new(),
                     strict: false,
                     force: false,
+                    cdc_leg: false,
                 },
                 MetaConn::open(&plan.source),
             );
@@ -2248,6 +2254,7 @@ mod snapshot_leg_tests {
                 plan_warnings: Vec::new(),
                 strict: false,
                 force: false,
+                cdc_leg: false,
             },
             MetaConn::open(&plan.source),
         );

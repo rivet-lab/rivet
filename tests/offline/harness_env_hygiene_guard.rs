@@ -247,8 +247,6 @@ const PRODUCT_ENV_SURFACE: &[&str] = &[
     "src/pipeline/cdc/sink.rs maybe_panic_at \"cdc_after_flush_before_ack\"",
     "src/pipeline/cdc/sink.rs maybe_pause_at \"cdc_after_parts_before_ack\"",
     "src/pipeline/cdc/sink.rs maybe_panic_at \"cdc_before_manifest\"",
-    "src/pipeline/cdc_job.rs maybe_pause_at \"cdc_before_anchor\"",
-    "src/pipeline/cdc_job.rs maybe_pause_at \"cdc_before_stream_open\"",
     "src/pipeline/chunked/exec.rs maybe_error_at_index \"chunk_export\"",
     "src/pipeline/chunked/exec.rs maybe_transient_once \"chunk_write\"",
     "src/pipeline/chunked/parallel_checkpoint.rs maybe_error_at_index \"chunk_export\"",

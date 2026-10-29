@@ -322,9 +322,25 @@ mod tests {
     }
 
     #[test]
+    fn a_denied_read_of_a_snapshot_leg_is_a_grant_change_with_the_rerun_remedy() {
+        let code = crate::error::codes::SOURCE_CDC_GRANTS_CHANGED;
+        let coded = crate::source::code_a_revoked_column(server_said(1143), "orders", true, true);
+        assert_eq!(crate::error::code_of(&coded), Some(code));
+        let text = format!("{coded:#}");
+        assert!(
+            text.contains("orders") && text.contains("Re-run") && !text.contains("rivet plan"),
+            "{text}"
+        );
+        let other = crate::source::code_a_revoked_column(server_said(1054), "orders", true, true);
+        assert!(crate::error::code_of(&other).is_none());
+        let off = crate::source::code_a_revoked_column(server_said(1143), "orders", false, true);
+        assert!(crate::error::code_of(&off).is_none());
+    }
+
+    #[test]
     fn a_denied_read_under_the_policy_is_coded_with_the_replan_remedy_and_nothing_else_is() {
         let code = crate::error::codes::SOURCE_COLUMNS_UNREADABLE;
-        let coded = crate::source::code_a_revoked_column(server_said(1143), "orders", true);
+        let coded = crate::source::code_a_revoked_column(server_said(1143), "orders", true, false);
         assert_eq!(crate::error::code_of(&coded), Some(code));
         let text = format!("{coded:#}");
         assert!(
@@ -335,15 +351,15 @@ mod tests {
             !text.contains("1143"),
             "the raw driver error does not stay in the chain: {text}"
         );
-        let off = crate::source::code_a_revoked_column(server_said(1143), "orders", false);
+        let off = crate::source::code_a_revoked_column(server_said(1143), "orders", false, false);
         assert!(
             crate::error::code_of(&off).is_none(),
             "no policy, no recoding"
         );
-        let other = crate::source::code_a_revoked_column(server_said(1054), "orders", true);
+        let other = crate::source::code_a_revoked_column(server_said(1054), "orders", true, false);
         assert!(crate::error::code_of(&other).is_none());
         let already = crate::error::coded(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED, "moved");
-        let kept = crate::source::code_a_revoked_column(already, "orders", true);
+        let kept = crate::source::code_a_revoked_column(already, "orders", true, false);
         assert_eq!(
             crate::error::code_of(&kept),
             Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED),

@@ -16,8 +16,8 @@ fn root() -> mysql::Conn {
     mysql::Conn::new(mysql::Opts::from_url(&root_url()).unwrap()).expect("connect as root")
 }
 
-/// A replication account that may SELECT only `columns` of `table`.
-struct GrantUser(String);
+/// A replication account that may SELECT only `columns` of `table`; the role it holds, if any, is dropped with it.
+struct GrantUser(String, Option<String>);
 
 impl GrantUser {
     fn new(table: &str, columns: &str) -> Self {
@@ -43,7 +43,7 @@ impl GrantUser {
             "GRANT SELECT ({columns}) ON rivet.{table} TO '{user}'@'%'"
         ))
         .unwrap();
-        Self(user)
+        Self(user, None)
     }
 
     /// An account that may SELECT the whole of `table` (every column, by table privilege), plus replication.
@@ -58,7 +58,39 @@ impl GrantUser {
             "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '{user}'@'%'"
         ))
         .unwrap();
-        Self(user)
+        Self(user, None)
+    }
+
+    /// An account that may SELECT every column of `table` by a database-level grant, plus replication.
+    fn database_level(table: &str) -> Self {
+        let user = Self::select_only(table, "id");
+        let mut c = root();
+        c.query_drop(format!(
+            "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '{}'@'%'",
+            user.0
+        ))
+        .unwrap();
+        c.query_drop(format!("GRANT SELECT ON rivet.* TO '{}'@'%'", user.0))
+            .unwrap();
+        user
+    }
+
+    /// An account that may SELECT `id, name` of `table` itself and `pass` only through a role that is its default role, plus replication.
+    fn with_default_role(table: &str) -> Self {
+        let mut user = Self::new(table, "id, name");
+        let role = unique_name("cg_r");
+        let mut c = root();
+        c.query_drop(format!("CREATE ROLE '{role}'")).unwrap();
+        c.query_drop(format!(
+            "GRANT SELECT (id, name, pass) ON rivet.{table} TO '{role}'"
+        ))
+        .unwrap();
+        c.query_drop(format!("GRANT '{role}' TO '{}'@'%'", user.0))
+            .unwrap();
+        c.query_drop(format!("SET DEFAULT ROLE '{role}' TO '{}'@'%'", user.0))
+            .unwrap();
+        user.1 = Some(role);
+        user
     }
 
     fn url(&self) -> String {
@@ -69,6 +101,9 @@ impl GrantUser {
 impl Drop for GrantUser {
     fn drop(&mut self) {
         let _ = root().query_drop(format!("DROP USER IF EXISTS '{}'@'%'", self.0));
+        if let Some(role) = &self.1 {
+            let _ = root().query_drop(format!("DROP ROLE IF EXISTS '{role}'"));
+        }
     }
 }
 
@@ -207,24 +242,28 @@ fn a_column_grant_account_is_refused_without_the_policy_or_without_the_key_mysql
         .unwrap();
 
     let readable = GrantUser::new(&table, "id, name");
-    let said = Rig::mysql_cdc(&table)
+    let out = Rig::mysql_cdc(&table)
         .source_url(&readable.url())
         .cdc("initial: snapshot")
-        .run_expect_fail();
+        .run();
+    assert_refused(&out, Refused::by_code("RIVET_SOURCE_QUERY_FAILED", 1));
     assert!(
-        said.contains("1142"),
-        "without `columns_from: grants` the account's `SELECT *` is refused by the server:\n{said}"
+        said_by(&out).contains("1142"),
+        "without `columns_from: grants` the account's `SELECT *` is refused by the server:\n{}",
+        said_by(&out)
     );
 
     let keyless = GrantUser::new(&table, "name");
-    let said = Rig::mysql_cdc(&table)
+    let out = Rig::mysql_cdc(&table)
         .source_url(&keyless.url())
         .cdc("initial: snapshot")
         .source_line("columns_from: grants")
-        .run_expect_fail();
+        .run();
+    assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
     assert!(
-        said.contains("RIVET_SOURCE_COLUMNS_UNREADABLE") && said.contains("`id`"),
-        "an unreadable key is refused by code and named:\n{said}"
+        said_by(&out).contains("`id`"),
+        "an unreadable key is named:\n{}",
+        said_by(&out)
     );
 }
 
@@ -349,6 +388,16 @@ impl OpenRun {
 
 /// Park `rig`'s next run at `point` for `ms`, call `during` once the run is parked, and reap the run.
 fn run_parked_at(rig: &Rig, point: &str, ms: u64, during: impl FnOnce()) -> std::process::Output {
+    run_parked_through(rig, point, ms, vec![Box::new(during)])
+}
+
+/// As [`run_parked_at`] for a run that parks at `point` once per closure: each runs while the run sits at the point, and the marker is cleared so the next park is told from this one.
+fn run_parked_through<'a>(
+    rig: &Rig,
+    point: &str,
+    ms: u64,
+    during: Vec<Box<dyn FnOnce() + 'a>>,
+) -> std::process::Output {
     let marker = rig.out_dir().join("..").join(format!("{point}.paused"));
     let marker_env = marker.display().to_string();
     let at = format!("{point}:{ms}");
@@ -359,28 +408,31 @@ fn run_parked_at(rig: &Rig, point: &str, ms: u64, during: impl FnOnce()) -> std:
             ("RIVET_TEST_PAUSE_MARKER", &marker_env),
         ],
     );
-    let opened = std::time::Instant::now();
-    while !marker.is_file() {
-        if let Ok(Some(_)) = child.try_wait() {
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "the run exited before it parked at {point}:\n{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
+    for act in during {
+        let opened = std::time::Instant::now();
+        while !marker.is_file() {
+            if let Ok(Some(_)) = child.try_wait() {
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "the run exited before it parked at {point}:\n{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            if opened.elapsed() > std::time::Duration::from_secs(60) {
+                let _ = child.kill();
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "the run never parked at {point}:\n{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        if opened.elapsed() > std::time::Duration::from_secs(60) {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "the run never parked at {point}:\n{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::remove_file(&marker).expect("clear the park marker");
+        act();
     }
-    during();
     child.wait_with_output().expect("reap the parked run")
 }
 
@@ -391,18 +443,38 @@ fn an_open_run_with(label: &str, max_events: u32, act: impl FnOnce(&str, &GrantU
 }
 
 /// As [`an_open_run_with`]; `whole_table` makes the account hold SELECT on the whole table.
-fn an_open_run_as(
+fn an_open_run_as<'a>(
     label: &str,
     max_events: u32,
     whole_table: bool,
-    act: impl FnOnce(&str, &GrantUser),
+    act: impl FnOnce(&str, &GrantUser) + 'a,
+) -> OpenRun {
+    an_open_run_through(
+        label,
+        max_events,
+        |table| {
+            if whole_table {
+                GrantUser::whole_table(table)
+            } else {
+                GrantUser::new(table, "id, name, pass")
+            }
+        },
+        vec![Box::new(act)],
+    )
+}
+
+/// What the source does while an open run is parked: called with the table and the account.
+type Act<'a> = Box<dyn FnOnce(&str, &GrantUser) + 'a>;
+
+/// An open continuous run of the account `account(table)`: the run parks after each durable part, and `acts[i]` writes to the source during its i-th park; the run ends at `max_events`.
+fn an_open_run_through<'a>(
+    label: &str,
+    max_events: u32,
+    account: impl FnOnce(&str) -> GrantUser,
+    acts: Vec<Act<'a>>,
 ) -> OpenRun {
     let (table, _table) = seeded(label);
-    let user = if whole_table {
-        GrantUser::whole_table(&table)
-    } else {
-        GrantUser::new(&table, "id, name, pass")
-    };
+    let user = account(&table);
     let mut rig = Rig::mysql_cdc(&table)
         .source_url(&user.url())
         .source_line("columns_from: grants")
@@ -425,9 +497,14 @@ fn an_open_run_as(
         ))
         .unwrap();
     rig.replace_cdc_line("until_current", "until_current: false");
-    let out = run_parked_at(&rig, "cdc_after_parts_before_ack", 20000, || {
-        act(&table, &user)
-    });
+    let during: Vec<Box<dyn FnOnce() + '_>> = acts
+        .into_iter()
+        .map(|act| {
+            let (table, user) = (&table, &user);
+            Box::new(move || act(table, user)) as Box<dyn FnOnce() + '_>
+        })
+        .collect();
+    let out = run_parked_through(&rig, "cdc_after_parts_before_ack", 8000, during);
     OpenRun {
         user,
         rig,
@@ -436,25 +513,8 @@ fn an_open_run_as(
     }
 }
 
-/// An open continuous run, a grant change written as `revoke(table, user)`, a row after it.
-fn a_revoke_stops_an_open_run_before_the_column_leaves(
-    label: &str,
-    revoke: impl Fn(&str, &str) -> String,
-) {
-    let mut run = an_open_run_with(label, 4, |table, user| {
-        let mut c = root();
-        c.query_drop(revoke(table, &user.0)).unwrap();
-        c.query_drop(format!(
-            "INSERT INTO rivet.{table} VALUES (7, 'eve', 'REVOKED-7')"
-        ))
-        .unwrap();
-    });
-    let said = run.said();
-    assert!(
-        run.out.status.code() == Some(2) && said.contains("RIVET_SOURCE_CDC_GRANTS_CHANGED"),
-        "a revoke inside the open run stops it by code, exit 2:\n{said}"
-    );
-
+/// The run ended at a grant change; the rest of the backlog, read on its own, holds no value written after the change.
+fn nothing_written_after_the_change_leaves(run: &mut OpenRun) {
     run.rig
         .replace_cdc_line("until_current", "until_current: true");
     run.rig.run_ok();
@@ -470,6 +530,89 @@ fn a_revoke_stops_an_open_run_before_the_column_leaves(
     assert!(
         cells.iter().any(|v| v == "eve") && cells.iter().any(|v| v == "dan"),
         "the rows on both sides of the revoke are delivered: {cells:?}"
+    );
+}
+
+/// An open continuous run, a grant change written as `revoke(table, user)`, a row after it.
+fn a_revoke_stops_an_open_run_before_the_column_leaves(
+    label: &str,
+    revoke: impl Fn(&str, &str) -> String,
+) {
+    let mut run = an_open_run_with(label, 4, |table, user| {
+        let mut c = root();
+        c.query_drop(revoke(table, &user.0)).unwrap();
+        c.query_drop(format!(
+            "INSERT INTO rivet.{table} VALUES (7, 'eve', 'REVOKED-7')"
+        ))
+        .unwrap();
+    });
+    assert_refused(
+        &run.out,
+        Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2),
+    );
+    nothing_written_after_the_change_leaves(&mut run);
+}
+
+/// An open run that has already re-read the grants once (an unrelated `FLUSH PRIVILEGES`, then three rows), then `change` the account's grants and one row the changed grants hide.
+fn a_login_time_grant_change_after_an_earlier_re_read_stops_an_open_run(
+    label: &str,
+    account: impl FnOnce(&str) -> GrantUser,
+    change: fn(&str, &str) -> Vec<String>,
+) {
+    let mut run = an_open_run_through(
+        label,
+        7,
+        account,
+        vec![
+            Box::new(|table, _| {
+                let mut c = root();
+                c.query_drop("FLUSH PRIVILEGES").unwrap();
+                c.query_drop(format!(
+                    "INSERT INTO rivet.{table} VALUES (7, 'gus', 'open'), (8, 'hal', 'open'), (9, 'ivy', 'open')"
+                ))
+                .unwrap();
+            }),
+            Box::new(move |table, user| {
+                let mut c = root();
+                for q in change(table, &user.0) {
+                    c.query_drop(q).unwrap();
+                }
+                c.query_drop(format!(
+                    "INSERT INTO rivet.{table} VALUES (10, 'eve', 'REVOKED-10')"
+                ))
+                .unwrap();
+            }),
+        ],
+    );
+    assert_refused(
+        &run.out,
+        Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2),
+    );
+    nothing_written_after_the_change_leaves(&mut run);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql() {
+    a_login_time_grant_change_after_an_earlier_re_read_stops_an_open_run(
+        "cg_dbl",
+        GrantUser::database_level,
+        |table, user| {
+            vec![
+                format!("GRANT SELECT (id, name) ON rivet.{table} TO '{user}'@'%'"),
+                format!("REVOKE SELECT ON rivet.* FROM '{user}'@'%'"),
+            ]
+        },
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql() {
+    a_login_time_grant_change_after_an_earlier_re_read_stops_an_open_run(
+        "cg_drl",
+        GrantUser::with_default_role,
+        |_, user| vec![format!("SET DEFAULT ROLE NONE TO '{user}'@'%'")],
     );
 }
 
@@ -654,8 +797,11 @@ fn a_partial_row_image_is_refused_before_it_is_projected_mysql() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(
-            said.contains("a PARTIAL image") && said.contains("binlog_row_image = FULL"),
-            "{image} {what}: the refusal names the cause and the remedy:\n{said}"
+            said.contains("a PARTIAL image")
+                && said.contains("binlog_row_image = FULL")
+                && said.contains(REBASELINE_REMEDY)
+                && !said.contains("a delay rather than a loss"),
+            "{image} {what}: the refusal names the cause and the re-baseline that gets past it, not a re-run that meets the same image again:\n{said}"
         );
         let parts: Vec<_> = parquet_dirs(&rig.out_dir())
             .iter()
@@ -666,6 +812,28 @@ fn a_partial_row_image_is_refused_before_it_is_projected_mysql() {
             changes(&parts),
             vec![],
             "{image} {what}: a refused image delivers no change, and never overwrites a key"
+        );
+        writer
+            .query_drop("SET SESSION binlog_row_image = 'FULL'")
+            .unwrap();
+        let mut rig = rig;
+        follow_rebaseline_remedy(&mut rig, true);
+        let (names, mut cells) = delivered(&rig);
+        let mut expected: Vec<String> = root()
+            .query::<(i64, Option<String>), _>(format!("SELECT id, name FROM rivet.{table}"))
+            .unwrap()
+            .into_iter()
+            .flat_map(|(id, name)| [id.to_string(), name.unwrap_or_default()])
+            .collect();
+        cells.sort();
+        expected.sort();
+        assert_eq!(
+            cells, expected,
+            "{image} {what}: the remedy the refusal names re-baselines the stream onto the source as it is now"
+        );
+        assert!(
+            names.iter().all(|n| n == "id" || n == "name"),
+            "{image} {what}: only the readable columns after the re-baseline: {names:?}"
         );
     }
 }
@@ -885,8 +1053,19 @@ fn checkpoint_at(rig: &Rig) -> (String, u64) {
     )
 }
 
+/// True (and a skip is recorded) unless the stand is ours alone: the checkpoint cells compare the checkpoint with the exact end of the log.
+fn the_stand_is_shared() -> bool {
+    let shared = std::env::var("RIVET_TEST_EXCLUSIVE").is_err();
+    if shared {
+        skip_live(
+            "any commit of another writer moves the end of the log the checkpoint is compared with — run with RIVET_TEST_EXCLUSIVE=1 and --test-threads=1",
+        );
+    }
+    shared
+}
+
 /// A run under the policy anchored and baselined, then `writes` committed one by one: the
-/// checkpoint of the next run must reach the end of the last commit that wrote `watch`.
+/// checkpoint of the next run is exactly the end of the last commit (the one that wrote `watch`).
 fn the_checkpoint_follows_commits_of(
     what: &str,
     watch: impl Fn(&str, &str) -> String,
@@ -905,12 +1084,17 @@ fn the_checkpoint_follows_commits_of(
     for sql in writes(&table, &other) {
         c.query_drop(sql).unwrap();
     }
+    let end = binlog_now();
     let want = commit_end_after(&start, &watch(&table, &other));
+    assert_eq!(
+        want, end,
+        "{what}: a commit of another writer followed the cell's last one; the cell needs the stand to itself"
+    );
     rig.run_ok();
-    let got = checkpoint_at(&rig);
-    assert!(
-        got >= want,
-        "{what}: the checkpoint {got:?} stopped before the end of the last commit {want:?}"
+    assert_eq!(
+        checkpoint_at(&rig),
+        want,
+        "{what}: the checkpoint is not exactly the end of the last commit"
     );
     let parts: Vec<_> = parquet_dirs(&rig.out_dir())
         .iter()
@@ -921,8 +1105,11 @@ fn the_checkpoint_follows_commits_of(
 }
 
 #[test]
-#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+#[ignore = "live+exclusive: the checkpoint is compared with the exact end of the log — set RIVET_TEST_EXCLUSIVE=1"]
 fn an_update_of_hidden_columns_only_advances_the_checkpoint_mysql() {
+    if the_stand_is_shared() {
+        return;
+    }
     let delivered = the_checkpoint_follows_commits_of(
         "hidden-only update",
         |t, _| t.to_string(),
@@ -940,8 +1127,11 @@ fn an_update_of_hidden_columns_only_advances_the_checkpoint_mysql() {
 }
 
 #[test]
-#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+#[ignore = "live+exclusive: the checkpoint is compared with the exact end of the log — set RIVET_TEST_EXCLUSIVE=1"]
 fn an_update_of_an_uncaptured_table_advances_the_checkpoint_under_the_policy_mysql() {
+    if the_stand_is_shared() {
+        return;
+    }
     let delivered = the_checkpoint_follows_commits_of(
         "uncaptured update",
         |_, o| o.to_string(),
@@ -959,8 +1149,11 @@ fn an_update_of_an_uncaptured_table_advances_the_checkpoint_under_the_policy_mys
 }
 
 #[test]
-#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+#[ignore = "live+exclusive: the checkpoint is compared with the exact end of the log — set RIVET_TEST_EXCLUSIVE=1"]
 fn a_visible_update_and_a_mixed_transaction_advance_the_checkpoint_as_before_mysql() {
+    if the_stand_is_shared() {
+        return;
+    }
     let delivered = the_checkpoint_follows_commits_of(
         "visible update",
         |t, _| t.to_string(),
@@ -996,10 +1189,12 @@ fn anchored_under_the_policy(label: &str) -> (String, MysqlCdcTable, GrantUser, 
     (table, guard, user, rig)
 }
 
-#[test]
-#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql() {
-    let (table, _guard, user, rig) = anchored_under_the_policy("cg_ren");
+/// A column renamed in the backlog by `rename(table)`: the run is refused by code and the re-baseline delivers the column under its new name.
+fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped(
+    label: &str,
+    rename: fn(&str) -> String,
+) {
+    let (table, _guard, user, rig) = anchored_under_the_policy(label);
     let mut rig = rig.a_failed_run_may_leave(
         &[Leftover::ResumePoint],
         "the run observes the readable columns at its start, and a rename leaves the old column ungranted: that observed schema is stored before the refusal at the statement (known: src/state/schema.rs stores the baseline of a failed run)",
@@ -1007,7 +1202,7 @@ fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql() {
     let mut c = root();
     for sql in [
         format!("UPDATE rivet.{table} SET name = 'ann-before' WHERE id = 1"),
-        format!("ALTER TABLE rivet.{table} RENAME COLUMN name TO nm"),
+        rename(&table),
         format!("UPDATE rivet.{table} SET nm = 'ann-after' WHERE id = 1"),
     ] {
         c.query_drop(sql).unwrap();
@@ -1051,6 +1246,22 @@ fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql() {
         "the re-baselined stream delivers the column under its new name: {names:?} {cells:?}"
     );
     assert_no_hidden(&parts, "after the re-baseline");
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql() {
+    a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_ren", |t| {
+        format!("ALTER TABLE rivet.{t} RENAME COLUMN name TO nm")
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_in_an_executable_comment_is_refused_not_silently_dropped_mysql() {
+    a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_renx", |t| {
+        format!("/*!80000 ALTER TABLE rivet.{t} RENAME COLUMN name TO nm */")
+    });
 }
 
 /// What a run delivered, as `(column names, sorted cells)` of every column that is not rivet's own.
@@ -1356,41 +1567,107 @@ fn a_time_window_and_a_partitioned_export_under_the_policy_read_the_readable_col
     assert!(partitions >= 2, "one directory per day: {partitions}");
 }
 
-/// A run over `seeded(label)` (account granted `granted`) parked just before the stream opens,
-/// with the snapshot leg already read; `act` changes the grants and writes a row meanwhile.
-/// The policy is one value per run: the run is refused by code (exit 2), no part carries
-/// columns another part lacks, and a revoked value is never delivered.
+/// A table of `rows` rows `(id, name, pass)`, every `pass` a `SECRET-` value, dropped on Drop.
+fn big_table(label: &str, rows: u32) -> (String, MysqlCdcTable) {
+    let table = unique_name(label);
+    let guard = MysqlCdcTable(table.clone());
+    let mut c = root();
+    c.query_drop(format!(
+        "CREATE TABLE rivet.{table} (id INT PRIMARY KEY, name VARCHAR(20), pass VARCHAR(20))"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO rivet.{table} \
+         WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < {rows}) \
+         SELECT n, CONCAT('n', n), CONCAT('{SECRET}', n) FROM s"
+    ))
+    .unwrap();
+    (table, guard)
+}
+
+/// A first run over a throttled snapshot of a big table (then, if `two_tables`, of `seeded(label)`), the account granted `granted` on each. `act(last, user)` runs once the first table's snapshot is being read, with `last` the table read last. The policy is one value per run: the run is refused by code (exit 2), no table's parts carry two column sets, and a revoked value is never delivered.
 fn the_policy_is_one_value_per_run(
     label: &str,
     granted: &str,
-    point: &str,
+    two_tables: bool,
     act: impl FnOnce(&str, &GrantUser),
 ) {
-    let (table, _table) = seeded(label);
-    let user = GrantUser::new(&table, granted);
-    let rig = Rig::mysql_cdc(&table)
+    let (first, _first) = big_table(label, 60);
+    let (second, _second) = seeded(&format!("{label}_b"));
+    let user = GrantUser::new(&first, granted);
+    root()
+        .query_drop(format!(
+            "GRANT SELECT ({granted}) ON rivet.{second} TO '{}'@'%'",
+            user.0
+        ))
+        .unwrap();
+    let tables: Vec<&str> = if two_tables {
+        vec![&first, &second]
+    } else {
+        vec![&first]
+    };
+    let rig = Rig::mysql_cdc(&first)
+        .tables(&tables)
         .source_url(&user.url())
         .source_line("columns_from: grants")
+        .source_line("tuning:")
+        .source_line("  batch_size: 10")
+        .source_line("  throttle_ms: 1500")
         .cdc("initial: snapshot")
         .no_oracle(
-            "the stop comes at the grant change after the snapshot leg finished: the leg is a complete delivery under its own prefix, with its marker, manifest and journal rows, which a failed run may not leave by the oracle's contract; the cell reads the parts itself",
+            "the stop comes at the grant change after a snapshot leg finished: the leg is a complete delivery under its own prefix, with its marker, manifest and journal rows, which a failed run may not leave by the oracle's contract; the cell reads the parts itself",
         );
-    let out = run_parked_at(&rig, point, 4000, || act(&table, &user));
-    let said = said_by(&out);
-    assert!(
-        out.status.code() == Some(2) && said.contains("RIVET_SOURCE_CDC_GRANTS_CHANGED"),
-        "a grant change between the two reads of one run is refused by code, exit 2:\n{said}"
-    );
-    let sets = delivered_columns(&rig);
-    assert!(
-        sets.windows(2).all(|w| {
-            let (mut a, mut b) = (w[0].clone(), w[1].clone());
-            a.sort();
-            b.sort();
-            a == b
-        }),
-        "the snapshot leg and the stream carry different columns in one run: {sets:?}\n{said}"
-    );
+    let mut child = rig.spawn_args_env(&[], &[]);
+    let opened = std::time::Instant::now();
+    // A login of the account that has sat for a second is a throttled snapshot page loop: the grants were read before it began and the stream is not open yet.
+    let mut c = root();
+    while c
+        .exec_first::<u64, _, _>(
+            "SELECT COUNT(*) FROM performance_schema.processlist WHERE USER = ? AND TIME >= 1",
+            (user.0.as_str(),),
+        )
+        .unwrap()
+        .unwrap_or(0)
+        == 0
+    {
+        if let Ok(Some(_)) = child.try_wait() {
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "the run ended before it read the first table:\n{}",
+                said_by(&out)
+            );
+        }
+        assert!(
+            opened.elapsed() < std::time::Duration::from_secs(60),
+            "the run never sat in a snapshot read"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    act(if two_tables { &second } else { &first }, &user);
+    let out = child.wait_with_output().expect("reap the run");
+    assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2));
+    for dir in parquet_dirs(&rig.out_dir()) {
+        let sets: Vec<Vec<String>> = read_all_parts(&dir)
+            .iter()
+            .map(|b| {
+                let mut names: Vec<String> = b
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .filter(|n| !n.starts_with("__"))
+                    .collect();
+                names.sort();
+                names
+            })
+            .collect();
+        assert!(
+            sets.windows(2).all(|w| w[0] == w[1]),
+            "{}: one table's parts carry different columns in one run: {sets:?}\n{}",
+            dir.display(),
+            said_by(&out)
+        );
+    }
     let (_, cells) = delivered(&rig);
     assert!(
         !cells.iter().any(|v| v.contains("REVOKED-")),
@@ -1400,68 +1677,49 @@ fn the_policy_is_one_value_per_run(
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_grant_between_the_snapshot_and_the_stream_open_never_mixes_columns_in_one_run_mysql() {
-    the_policy_is_one_value_per_run(
-        "cg_once_a",
-        "id, name",
-        "cdc_before_stream_open",
-        |table, user| {
-            let mut c = root();
-            c.query_drop(format!(
-                "GRANT SELECT (pass) ON rivet.{table} TO '{}'@'%'",
-                user.0
-            ))
-            .unwrap();
-            c.query_drop(format!(
-                "UPDATE rivet.{table} SET name = 'ann2', pass = 'GRANTED-1' WHERE id = 1"
-            ))
-            .unwrap();
-        },
-    );
+fn a_grant_while_the_snapshot_is_read_never_mixes_columns_in_one_run_mysql() {
+    the_policy_is_one_value_per_run("cg_once_a", "id, name", true, |last, user| {
+        let mut c = root();
+        c.query_drop(format!(
+            "GRANT SELECT (pass) ON rivet.{last} TO '{}'@'%'",
+            user.0
+        ))
+        .unwrap();
+        c.query_drop(format!(
+            "UPDATE rivet.{last} SET name = 'ann2', pass = 'GRANTED-1' WHERE id = 1"
+        ))
+        .unwrap();
+    });
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_revoke_between_the_snapshot_and_the_stream_open_never_mixes_columns_in_one_run_mysql() {
-    the_policy_is_one_value_per_run(
-        "cg_once_b",
-        "id, name, pass",
-        "cdc_before_stream_open",
-        |table, user| {
-            let mut c = root();
-            c.query_drop(format!(
-                "REVOKE SELECT (pass) ON rivet.{table} FROM '{}'@'%'",
-                user.0
-            ))
-            .unwrap();
-            c.query_drop(format!(
-                "UPDATE rivet.{table} SET name = 'ann2', pass = 'REVOKED-1' WHERE id = 1"
-            ))
-            .unwrap();
-        },
-    );
+fn a_revoke_while_the_last_snapshot_is_read_never_mixes_columns_in_one_run_mysql() {
+    the_policy_is_one_value_per_run("cg_once_b", "id, name, pass", false, |last, user| {
+        let mut c = root();
+        c.query_drop(format!(
+            "REVOKE SELECT (pass) ON rivet.{last} FROM '{}'@'%'",
+            user.0
+        ))
+        .unwrap();
+        c.query_drop(format!(
+            "UPDATE rivet.{last} SET name = 'ann2', pass = 'REVOKED-1' WHERE id = 1"
+        ))
+        .unwrap();
+    });
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_grant_between_the_snapshot_read_and_the_anchor_never_mixes_columns_in_one_run_mysql() {
-    the_policy_is_one_value_per_run(
-        "cg_once_c",
-        "id, name",
-        "cdc_before_anchor",
-        |table, user| {
-            let mut c = root();
-            c.query_drop(format!(
-                "GRANT SELECT (pass) ON rivet.{table} TO '{}'@'%'",
-                user.0
-            ))
-            .unwrap();
-            c.query_drop(format!(
-                "UPDATE rivet.{table} SET name = 'ann2', pass = 'GRANTED-1' WHERE id = 1"
-            ))
-            .unwrap();
-        },
-    );
+fn a_revoke_before_a_later_snapshot_is_read_is_a_grant_change_not_a_stale_plan_mysql() {
+    the_policy_is_one_value_per_run("cg_once_c", "id, name, pass", true, |last, user| {
+        let mut c = root();
+        c.query_drop(format!(
+            "REVOKE SELECT (pass) ON rivet.{last} FROM '{}'@'%'",
+            user.0
+        ))
+        .unwrap();
+    });
 }
 
 /// `table` `(id PK, code UNIQUE, name, pass)` holding two rows, dropped on Drop.
@@ -1492,6 +1750,7 @@ fn a_declared_key_the_account_reads_is_accepted_while_the_primary_key_is_hidden_
         .source_url(&user.url())
         .source_line("columns_from: grants")
         .top_line(DECLARED_CODE_KEY)
+        .census_key("code")
         .cdc("initial: snapshot");
     rig.run_ok();
     root()
@@ -1567,15 +1826,10 @@ fn a_column_the_account_may_update_but_not_select_is_not_delivered_mysql() {
             user.0
         ))
         .unwrap();
-    let ungraded = |r: Rig| {
-        r.no_oracle("the oracle lists the source's columns as the account and is refused on the UPDATE-only `pass`, the column this cell proves is never read")
-    };
-    let batch = ungraded(
-        Rig::mysql_cdc(&table)
-            .source_url(&user.url())
-            .source_line("columns_from: grants")
-            .into_full_batch(),
-    );
+    let batch = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .source_line("columns_from: grants")
+        .into_full_batch();
     batch.run_ok();
     let (names, cells) = delivered(&batch);
     assert_eq!(names, vec!["id".to_string(), "name".to_string()], "batch");
@@ -1584,12 +1838,10 @@ fn a_column_the_account_may_update_but_not_select_is_not_delivered_mysql() {
         "batch: {cells:?}"
     );
 
-    let rig = ungraded(
-        Rig::mysql_cdc(&table)
-            .source_url(&user.url())
-            .source_line("columns_from: grants")
-            .cdc("initial: snapshot"),
-    );
+    let rig = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .source_line("columns_from: grants")
+        .cdc("initial: snapshot");
     rig.run_ok();
     root()
         .query_drop(format!(
@@ -1639,7 +1891,7 @@ fn a_revoke_between_the_stream_open_and_the_schema_read_is_refused_by_code_mysql
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_schema_change_under_a_table_grant_is_refused_naming_the_column_that_appeared_mysql() {
-    let run = an_open_run_as("cg_msg", 4, true, |table, _user| {
+    let run = an_open_run_as("cg_msg", 5, true, |table, _user| {
         let mut c = root();
         c.query_drop(format!(
             "ALTER TABLE rivet.{table} ADD COLUMN extra VARCHAR(20) DEFAULT 'x'"
@@ -1660,9 +1912,9 @@ fn a_schema_change_under_a_table_grant_is_refused_naming_the_column_that_appeare
         .query_drop("DROP USER IF EXISTS 'cg_unrelated'@'%'")
         .unwrap();
     let said = run.said();
-    assert!(
-        run.out.status.code() == Some(2) && said.contains("RIVET_SOURCE_CDC_GRANTS_CHANGED"),
-        "refused by code, exit 2:\n{said}"
+    assert_refused(
+        &run.out,
+        Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2),
     );
     assert!(
         said.contains("gained `extra`")
@@ -1748,11 +2000,10 @@ fn a_bare_table_name_is_read_from_the_same_relation_with_and_without_the_policy_
         !policy_said.contains("FOREIGN") && !plain_said.contains("FOREIGN"),
         "the policy read a relation the plain run cannot:\nwithout:\n{plain_said}\nwith:\n{policy_said}"
     );
+    let (names, cells) = delivered(&policy);
     assert!(
-        !files_under(&policy.out_dir())
-            .iter()
-            .any(|f| std::fs::read_to_string(f).is_ok_and(|t| t.contains("FOREIGN"))),
-        "the policy delivered the other database's rows"
+        names.is_empty() && cells.is_empty(),
+        "the policy delivered the other database's rows: {names:?} {cells:?}"
     );
 }
 

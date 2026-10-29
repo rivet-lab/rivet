@@ -3794,7 +3794,7 @@ seeds:
 
   - name: update-delivering-nothing-leaves-the-checkpoint-behind
     class: "under `columns_from: grants` an UPDATE that changes only hidden columns delivers no row and does not move the checkpoint past its transaction: a later run reads the same commit again, and an idle log never advances"
-    history: "PR #719 review B2 (2026-10-29); RED from this patch: the checkpoint stopped before the end of the last commit. Run this cell alone: in a parallel run another test's commit moves the log end and the check is vacuous"
+    history: "PR #719 review B2 (2026-10-29); RED from this patch: the checkpoint is not exactly the end of the last commit (the cells are live+exclusive: with another writer on the stand the log end moves and the comparison would be vacuous)"
     scope: source
     engines:
       mysql:
@@ -3895,13 +3895,64 @@ seeds:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
   - name: column-grants-privilege-statement-reconnects
-    class: "every privilege statement in the binlog backlog opens a new connection as the run's account to re-read the grants: a backlog of GRANT/REVOKE statements opens a connection each"
+    class: "every privilege statement in the binlog backlog opens a new connection as the run's account to re-read the grants: a backlog of consecutive GRANT/REVOKE statements opens a connection each, where one re-read answers them all"
     history: "PR #719 review B9 (2026-10-29); RED from this patch: 40 privilege statements opened 67 connections as the run's account"
     scope: source
     engines:
       mysql:
         patch: column-grants-privilege-statement-reconnects/mysql.patch
         cells: [privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: column-grants-reread-on-a-cached-session
+    class: "the re-read of the grants at a privilege statement runs on a connection kept from an earlier re-read: the session keeps its database-level privilege and its login-time global privileges and default roles, so a REVOKE at database level or a SET DEFAULT ROLE NONE in an open run is not seen and the run keeps delivering the hidden column"
+    history: "PR #719 review round 2 (2026-10-29); RED from this patch: the open run ends without RIVET_SOURCE_CDC_GRANTS_CHANGED and delivers the hidden value"
+    scope: source
+    engines:
+      mysql:
+        patch: column-grants-reread-on-a-cached-session/mysql.patch
+        cells: [a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql, a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: column-rename-in-an-executable-comment-missed
+    class: "a column rename written as an executable comment (`/*!80000 ALTER TABLE t RENAME COLUMN a TO b */`) is read as a comment by the rename refusal, so the run exits 0 and the rows around the rename are dropped or nulled"
+    history: "PR #719 review round 2 (2026-10-29); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
+    scope: source
+    engines:
+      mysql:
+        patch: column-rename-in-an-executable-comment-missed/mysql.patch
+        cells: [a_column_renamed_in_an_executable_comment_is_refused_not_silently_dropped_mysql, "lib:every_scan_of_a_statement_reads_an_executable_comment_as_the_server_runs_it"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: column-grants-snapshot-leg-denial-read-as-a-stale-plan
+    class: "a snapshot leg of a CDC run whose SELECT is denied because the grants changed after the run read them is refused as RIVET_SOURCE_COLUMNS_UNREADABLE (exit 1, run `rivet plan` again) instead of RIVET_SOURCE_CDC_GRANTS_CHANGED (exit 2, re-run)"
+    history: "PR #719 review round 2 (2026-10-29); RED from this patch: the invocation ended with [RIVET_SOURCE_COLUMNS_UNREADABLE] (exit 1), expected [RIVET_SOURCE_CDC_GRANTS_CHANGED] (exit 2)"
+    scope: source
+    engines:
+      mysql:
+        patch: column-grants-snapshot-leg-denial-read-as-a-stale-plan/mysql.patch
+        cells: [a_revoke_before_a_later_snapshot_is_read_is_a_grant_change_not_a_stale_plan_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
@@ -3935,7 +3986,7 @@ seeds:
     engines:
       mysql:
         patch: column-grants-moved-between-reads-mixed-in-one-run/mysql.patch
-        cells: [a_grant_between_the_snapshot_read_and_the_anchor_never_mixes_columns_in_one_run_mysql, a_grant_between_the_snapshot_and_the_stream_open_never_mixes_columns_in_one_run_mysql, a_revoke_between_the_snapshot_and_the_stream_open_never_mixes_columns_in_one_run_mysql]
+        cells: [a_grant_while_the_snapshot_is_read_never_mixes_columns_in_one_run_mysql, a_revoke_while_the_last_snapshot_is_read_never_mixes_columns_in_one_run_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:

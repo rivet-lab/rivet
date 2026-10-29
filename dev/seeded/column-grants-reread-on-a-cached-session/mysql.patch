@@ -1,0 +1,39 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -104,6 +104,7 @@
+     grants_source: Option<(String, Option<TlsConfig>)>,
+     /// `(file, position)` of the first privilege statement not yet answered by a re-read: consecutive statements share one.
+     grants_pending: Option<(String, u64)>,
++    grants_conn: Option<mysql::Conn>,
+ }
+ 
+ impl MysqlChangeStream {
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -896,6 +896,7 @@
+             readable: None,
+             grants_source: None,
+             grants_pending: None,
++            grants_conn: None,
+         })
+     }
+ 
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -744,8 +744,12 @@
+             return Ok(());
+         };
+         // A fresh login: global privileges and default roles are read only at login.
+-        let mut conn = connect_conn(url, tls.as_ref())?;
++        let mut conn = match self.grants_conn.take() {
++            Some(c) => c,
++            None => connect_conn(url, tls.as_ref())?,
++        };
+         let read = Self::readable_on(&mut conn, &self.configured_tables, true)?;
++        self.grants_conn = Some(conn);
+         let now = read.unwrap_or_default();
+         let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
+             r.get(t).map(|c| c.columns.clone())

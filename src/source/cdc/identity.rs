@@ -8,7 +8,7 @@
 //!
 //! | site | rule |
 //! |---|---|
-//! | `sink::table_matches` — the routing AUTHORITY | full string, else `split_once('.')`, byte-exact |
+//! | `sink::table_matches` — the routing AUTHORITY | a bare name is the table, a dotted string is `schema.table` split at the first dot (a Mongo name is whole), byte-exact |
 //! | pg `check_configured_tables_are_routable` | `to_regclass` — PostgreSQL's parser, FOLDS case |
 //! | `CdcSchemaResolver::resolve` | `SELECT * FROM {table}` — FOLDS |
 //! | pg `row_image` | `rsplit('.')` then match the bare name in ANY schema |
