@@ -133,6 +133,7 @@ pub(super) fn run_cdc_export(
     export: &ExportConfig,
     state: &StateStore,
     strict: bool,
+    grants: Option<RunGrants>,
 ) -> (Result<()>, RunSummary) {
     // No-silent-config-drop: warn (don't hard-fail — a shared default may set
     // meta_columns for a mixed batch+CDC config) that the request has no effect.
@@ -235,6 +236,7 @@ pub(super) fn run_cdc_export(
         config_dir,
         meta.as_deref_mut(),
         strict,
+        grants,
     );
     let duration_ms = started.elapsed().as_millis() as i64;
     let peak_rss_mb = rss_sampler
@@ -366,11 +368,44 @@ pub(super) fn claim_checkpoint(config_path: &str, export: &ExportConfig) -> Resu
     crate::source::cdc::checkpoint_identity::claim_checkpoint(&ckpt, config, &export.name)
 }
 
+/// The grants every part of a `columns_from: grants` run takes, read once before the anchor.
+pub(super) type RunGrants =
+    std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
+
+/// Read the account's grants once for a `columns_from: grants` MySQL CDC run; `None` without the policy.
+pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
+    if !config.source.columns_from_grants() {
+        return Ok(None);
+    }
+    let tables = match (&export.tables, &export.table) {
+        (Some(ts), _) => ts.clone(),
+        (None, Some(t)) => vec![t.clone()],
+        (None, None) => return Ok(None),
+    };
+    log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+    let declared = tables
+        .iter()
+        .filter_map(|t| {
+            crate::load::plan::effective_load(config, export, Some(t))
+                .and_then(|l| l.pk.declared())
+                .map(|k| (t.clone(), k))
+        })
+        .collect();
+    crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
+        &config.source.resolve_url()?,
+        config.source.tls.as_ref(),
+        &tables,
+        &declared,
+    )
+    .map(Some)
+}
+
 pub(super) fn initial_snapshot_pending(
     config: &Config,
     export: &ExportConfig,
     state: &StateStore,
     config_dir: &std::path::Path,
+    grants: Option<&RunGrants>,
 ) -> Result<Vec<ExportConfig>> {
     let cdc = export.cdc.clone().unwrap_or_default();
     // Two ways to ask for a baseline, one step: `initial: snapshot` synthesizes the
@@ -539,6 +574,7 @@ pub(super) fn initial_snapshot_pending(
             tls,
             &tables,
             DrainMode::from_until_current(cdc.until_current),
+            config.source.columns_from_grants(),
         )?;
     }
 
@@ -581,6 +617,7 @@ pub(super) fn initial_snapshot_pending(
     for idx in pending_idx {
         let (label, read, snap_dcfg) = &table_dests[idx];
         let mut synth = synth_snapshot_export(export, label, read, snap_dcfg);
+        synth.table_select = grants.and_then(|g| g.get(label)).map(|r| r.select.clone());
         if let Some(recipe) = crate::config::backfill_recipe_for(&recipes, label) {
             apply_backfill_recipe(&mut synth, recipe, export, label)?;
         }
@@ -797,6 +834,7 @@ fn run_cdc_inner(
     config_dir: &std::path::Path,
     meta: Option<&mut (dyn crate::source::Source + 'static)>,
     strict: bool,
+    grants: Option<RunGrants>,
 ) -> (Vec<crate::manifest::RunManifest>, Result<()>) {
     let url = match config.source.resolve_url() {
         Ok(u) => u,
@@ -939,6 +977,7 @@ fn run_cdc_inner(
                             .unwrap_or(crate::config::DEFAULT_MYSQL_SERVER_ID),
                         // The same strings the sink will route by — see the field's doc.
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        resolved_grants: grants,
                     },
                     crate::config::SourceType::Postgres => CdcEngineOpts::Postgres {
                         slot: cdc

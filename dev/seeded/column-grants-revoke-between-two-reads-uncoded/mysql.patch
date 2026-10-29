@@ -1,0 +1,12 @@
+diff --git a/src/source/cdc/mod.rs b/src/source/cdc/mod.rs
+--- a/src/source/cdc/mod.rs
++++ b/src/source/cdc/mod.rs
+@@ -1800,7 +1800,7 @@
+ 
+ /// A schema read refused by the server's privilege check while the run projects: the grants moved since the readable set was read.
+ fn grants_moved_mid_resolve(projecting: bool, err: &anyhow::Error) -> bool {
+-    projecting && crate::source::mysql::column_grants::denied_by_server(err).is_some()
++    false && projecting && crate::source::mysql::column_grants::denied_by_server(err).is_some()
+ }
+ 
+ /// The CDC probe could not read a captured table for a reason the server named; nothing was read or written.

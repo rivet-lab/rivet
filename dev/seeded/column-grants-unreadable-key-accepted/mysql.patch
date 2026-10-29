@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/column_grants.rs b/src/source/mysql/column_grants.rs
+--- a/src/source/mysql/column_grants.rs
++++ b/src/source/mysql/column_grants.rs
+@@ -154,7 +154,7 @@
+             let sql = projection_sql(Some(&db), &table, std::slice::from_ref(k));
+             match conn.prep(&sql) {
+                 Ok(stmt) => conn.close(stmt)?,
+-                Err(mysql::Error::MySqlError(e)) if DENIED.contains(&e.code) => {
++                Err(mysql::Error::MySqlError(e)) if false && DENIED.contains(&e.code) => {
+                     crate::rivet_bail!(
+                         crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+                         "mysql: `{db}.{table}`: key column `{k}` ({from}) is not readable under \

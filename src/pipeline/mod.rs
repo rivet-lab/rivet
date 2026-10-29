@@ -96,6 +96,7 @@ pub(crate) use job::run_export_job_with_chunk_source;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use retry::is_transient;
+pub(crate) use single::attach_connect_hint;
 
 // ── Test-only surface ──────────────────────────────────────────────────────
 //
@@ -377,6 +378,7 @@ mod tests {
                 tuning: None,
                 tls: None,
                 mongo: None,
+                columns_from: None,
             },
             column_overrides: Default::default(),
             verify: crate::config::VerifyMode::Size,

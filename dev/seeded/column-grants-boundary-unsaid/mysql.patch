@@ -1,0 +1,22 @@
+diff --git a/src/pipeline/cdc_job.rs b/src/pipeline/cdc_job.rs
+--- a/src/pipeline/cdc_job.rs
++++ b/src/pipeline/cdc_job.rs
+@@ -382,7 +382,6 @@
+         (None, Some(t)) => vec![t.clone()],
+         (None, None) => return Ok(None),
+     };
+-    log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+     let declared = tables
+         .iter()
+         .filter_map(|t| {
+diff --git a/src/preflight/mod.rs b/src/preflight/mod.rs
+--- a/src/preflight/mod.rs
++++ b/src/preflight/mod.rs
+@@ -470,7 +470,6 @@
+             print_diagnostic(diag);
+         }
+         if config.source.columns_from_grants() {
+-            println!("\n{}", crate::source::mysql::column_grants::BOUNDARY);
+         }
+     } else if !show_type_report {
+         // `--json` WITHOUT a type report (the CLI forces `show_type_report` on

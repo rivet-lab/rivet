@@ -1,0 +1,25 @@
+diff --git a/src/source/postgres/cdc.rs b/src/source/postgres/cdc.rs
+index 32abf126..4cb3cbc0 100644
+--- a/src/source/postgres/cdc.rs
++++ b/src/source/postgres/cdc.rs
+@@ -436,19 +436,7 @@ impl PgChangeStream {
+                                 AND c.relname = substr($1, position('.' in $1) + 1)))",
+                     &[&cfg.as_str()],
+                 )
+-                .map_err(|e| {
+-                    if e.code() == Some(&postgres::error::SqlState::FEATURE_NOT_SUPPORTED) {
+-                        crate::error::coded(
+-                            crate::error::codes::SOURCE_CDC_TABLE_UNRESOLVED,
+-                            format!(
+-                                "pg cdc: `{cfg}` names a relation in another database, or a relation whose name holds a dot ({e}). `table:` takes `table` or `schema.table` of the connected database, and a dotted `table:` is always read as `schema.table`; a relation whose name holds a dot cannot be captured by name: rename it."
+-                            ),
+-                        )
+-                    } else {
+-                        anyhow::Error::new(e)
+-                            .context(format!("pg cdc: listing catalog matches for `{cfg}`"))
+-                    }
+-                })?
++                .with_context(|| format!("pg cdc: listing catalog matches for `{cfg}`"))?
+                 .iter()
+                 .map(|r| crate::source::cdc::identity::CatalogMatch {
+                     schema: r.get(0),

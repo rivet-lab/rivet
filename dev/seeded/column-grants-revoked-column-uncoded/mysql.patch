@@ -1,0 +1,13 @@
+diff --git a/src/source/mod.rs b/src/source/mod.rs
+index f7020418..6452b656 100644
+--- a/src/source/mod.rs
++++ b/src/source/mod.rs
+@@ -452,7 +452,7 @@ pub(crate) fn code_a_revoked_column(
+     grants_on: bool,
+     cdc_leg: bool,
+ ) -> anyhow::Error {
+-    if !grants_on || crate::error::code_of(&err).is_some() {
++    if true || !grants_on || crate::error::code_of(&err).is_some() {
+         return err;
+     }
+     let Some(said) = mysql::column_grants::denied_by_server(&err) else {

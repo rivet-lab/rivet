@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index d8888d2e..82126ba5 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -1564,7 +1564,7 @@ impl MysqlChangeStream {
+                     statement_dml_refusal_message(target.as_ref()),
+                 ));
+             }
+-            Some(EventData::QueryEvent(qe)) if is_privilege_statement(&qe.query()) => {
++            Some(EventData::QueryEvent(qe)) if is_privilege_statement(&qe.query()) || true => {
+                 self.grants_pending
+                     .get_or_insert_with(|| (self.file.clone(), log_pos));
+             }

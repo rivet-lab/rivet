@@ -1,0 +1,18 @@
+diff --git a/src/source/cdc/identity.rs b/src/source/cdc/identity.rs
+index eb4a6278..b3a5ed71 100644
+--- a/src/source/cdc/identity.rs
++++ b/src/source/cdc/identity.rs
+@@ -243,9 +243,12 @@ pub(crate) fn table_matches(
+     if engine == super::CdcEngine::Mongo {
+         return cfg == table;
+     }
++    if cfg == table {
++        return true;
++    }
+     match cfg.split_once('.') {
+         Some((cs, ct)) => cs == schema && ct == table,
+-        None => cfg == table,
++        None => false,
+     }
+ }
+ 

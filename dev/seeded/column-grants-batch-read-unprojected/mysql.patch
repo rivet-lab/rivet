@@ -1,0 +1,12 @@
+diff --git a/src/plan/build.rs b/src/plan/build.rs
+--- a/src/plan/build.rs
++++ b/src/plan/build.rs
+@@ -89,7 +89,7 @@
+     let Some(table) = export
+         .table
+         .as_ref()
+-        .filter(|_| source.columns_from_grants() && export.table_select.is_none())
++        .filter(|_| false && export.table_select.is_none())
+     else {
+         return Ok(None);
+     };

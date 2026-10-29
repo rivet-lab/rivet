@@ -74,7 +74,7 @@ ignore = [
     "RUSTSEC-2026-0194", # quick-xml: quadratic duplicate-attribute check
     "RUSTSEC-2026-0195", # quick-xml: unbounded namespace-declaration allocation
 
-    # ─── zstd 0.13 via mysql_common binlog (RUSTSEC-2026-0391, -0398, -0403) ──
+    # ─── zstd-safe 7.3.0 via mysql_common binlog (RUSTSEC-2026-0391, -0395..0406, -0398, -0403) ──
     # Path: mysql 28.0.4 -> mysql_common 0.37.3 (binlog feature) -> zstd 0.13.3, zstd-safe 7.3.0.
     # Status: the fixes need zstd >= 0.14.3 / zstd-safe >= 8.2.0. mysql_common 0.37.3 and
     #       0.38.2 (latest) both require zstd "0.13", so no upstream path. zstd 0.14 (parquet)
@@ -84,8 +84,27 @@ ignore = [
     #       streams). 0398 needs the `seekable` feature, which is not compiled (cargo tree -e
     #       features). 0403 is hit only by a failed legacy-frame decode of a payload from the
     #       configured MySQL server.
-    # Action: drop all three when mysql_common requires zstd >= 0.14.
+    # 2026-10-29 (#724): the 0395..0406 set is fixed only in zstd-safe 8.2.0 as well. Encoder, try_clone,
+    #       dictionary, seekable and around_pos APIs are not reached; the decoder is zstd::Decoder and
+    #       copy_decode only.
+    # Action: drop all entries when mysql_common requires zstd >= 0.14 (tracked in #724).
     "RUSTSEC-2026-0391", # zstd: stream context reuse leak (mysql_common binlog)
     "RUSTSEC-2026-0398", # zstd-safe: Seekable::decompress (seekable feature off)
     "RUSTSEC-2026-0403", # zstd-safe: uninit memory on failed legacy-frame decode
+    "RUSTSEC-2026-0395", # zstd-safe: StableInBuffer on CCtx (encoder only)
+    "RUSTSEC-2026-0396", # zstd-safe: Seekable reads (seekable feature off)
+    "RUSTSEC-2026-0397", # zstd-safe: OutBuffer::around_pos (decoder uses OutBuffer::around)
+    "RUSTSEC-2026-0399", # zstd-safe: init_using_cdict/ddict (no dictionaries)
+    "RUSTSEC-2026-0400", # zstd-safe: dictionary after one-shot call (no dictionaries)
+    "RUSTSEC-2026-0401", # zstd-safe: train_from_buffer (zdict training not called)
+    "RUSTSEC-2026-0402", # zstd-safe: CCtx::try_clone (encoder only)
+    "RUSTSEC-2026-0404", # zstd-safe: DCtx::try_clone (not called)
+    "RUSTSEC-2026-0405", # zstd-safe: InBuffer::pos set out of range (decoder uses InBuffer::around)
+    "RUSTSEC-2026-0406", # zstd-safe: multithreaded CCtx with unfinished frame (encoder only)
+
+    # ─── unsafe-libyaml unmaintained (RUSTSEC-2024-0449), 2026-10-29 ──
+    # Path: serde_yaml_ng 0.10.0 -> unsafe-libyaml 0.2.11. Warning, not a CVE; the crate has no
+    #       patched release. Parses only operator-written YAML config. Replacement (serde_norway,
+    #       unsafe-libyaml-norway) is a parser swap, tracked in #724.
+    "RUSTSEC-2024-0449",
 ]

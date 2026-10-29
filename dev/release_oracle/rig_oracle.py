@@ -403,6 +403,21 @@ def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()
     return numeric
 
 
+def _mysql_selectable(ora, db: str, leaf: str, cols: list[str]) -> set[str]:
+    """The columns of `db.leaf` the oracle's account may SELECT: information_schema lists a column on ANY privilege, an UPDATE-only one included."""
+    def reads(names: list[str]) -> bool:
+        sql = f"SELECT {', '.join(f'`{c}`' for c in names)} FROM `{db}`.`{leaf}` LIMIT 0"
+        try:
+            ora.rows("SELECT * FROM mysql_query('my', " + _lit(sql) + ")")
+        except Exception as e:  # noqa: BLE001
+            if "denied" not in str(e):
+                raise
+            return False
+        return True
+
+    return set(cols) if not cols or reads(cols) else {c for c in cols if reads([c])}
+
+
 def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     """(source relation, primary key columns, declared type per column in the ledger's spelling) for the spec's engine."""
     from .value_diff import oracle_rows
@@ -472,11 +487,20 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         native = {c: "BOOLEAN" if norm_native(t) == "TINYINT(1)" else norm_native(t) for c, t in ora.rows(
             "SELECT * FROM mysql_query('my', " + _lit(
                 f"SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {_lit(schema or db)} "
-                f"AND TABLE_NAME = {_lit(leaf)}"
+                f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA NOT LIKE '%INVISIBLE%'"
             ) + ")"
         )}
+        selectable = _mysql_selectable(ora, schema or db, leaf, list(native))
+        partial = len(selectable) < len(native)
+        native = {c: n for c, n in native.items() if c in selectable}
         wide = [c for c, n in native.items() if (d := re.match(r"DECIMAL\((\d+)", n)) and int(d.group(1)) > 38]
-        if not wide:
+        invisible = ora.rows(
+            "SELECT * FROM mysql_query('my', " + _lit(
+                f"SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {_lit(schema or db)} "
+                f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA LIKE '%INVISIBLE%'"
+            ) + ")"
+        )
+        if not wide and not invisible and not partial:
             return f"my.{schema or db}.{leaf}", key, native
         # The scanner reads a DECIMAL wider than DuckDB's 38 digits as DOUBLE; MySQL's own text keeps every digit.
         cols = ", ".join(f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide else f"`{c}`" for c in native)
