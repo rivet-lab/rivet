@@ -4131,3 +4131,37 @@ seeds:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-table-rename-not-refused
+    class: "a RENAME TABLE swap, or an ALTER TABLE ... RENAME, that touches a captured table under `columns_from: grants` is met as any other statement: privileges stay with the name, so the rows after the swap are read through another table's columns and delivered as the captured table's, exit 0"
+    history: "PR #719 follow-up (2026-10-29); RED on main 2026-10-29 (the rig oracle: the swapped-in table's rows are delivered as the captured table's, exit 0)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-table-rename-not-refused/mysql.patch
+        cells: [a_table_swap_of_a_captured_table_is_refused_under_the_policy_mysql, a_rename_of_a_captured_table_is_refused_in_every_form_under_the_policy_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-sql-mode-not-read
+    class: "the statement reader lexes a binlog statement in the default sql_mode whatever the QUERY event was logged under: under NO_BACKSLASH_ESCAPES a literal ending in a backslash, and under ANSI_QUOTES a double-quoted name ending in one, hide a following RENAME COLUMN or a name, so the rename is delivered with exit 0 and the column's later changes are lost"
+    history: "PR #719 follow-up (2026-10-29); RED on main 2026-10-29 (the rig oracle: the renamed column's later values are absent from the destination, exit 0)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-sql-mode-not-read/mysql.patch
+        cells: [a_column_renamed_after_a_backslash_literal_under_no_backslash_escapes_is_refused_mysql, a_column_renamed_after_a_backslash_name_under_ansi_quotes_is_refused_mysql, a_truncate_drop_or_statement_write_with_double_quoted_names_is_refused_under_ansi_quotes_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
