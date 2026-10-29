@@ -3962,6 +3962,57 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: partial-image-refusal-names-a-remedy-that-loops
+    class: "the refusal of a PARTIAL row image tells the operator to set `binlog_row_image = FULL` and re-run, but the image is already in the binlog under the checkpoint: every run meets it again and exits 1 for ever, where the remedy that works is the re-baseline"
+    history: "PR #719 review round 2 (2026-10-29); RED from this patch: the refusal does not carry the re-baseline remedy"
+    scope: source
+    engines:
+      mysql:
+        patch: partial-image-refusal-names-a-remedy-that-loops/mysql.patch
+        cells: [a_partial_row_image_is_refused_before_it_is_projected_mysql]
+      postgres:
+        na: "a binlog row image is MySQL's: `columns_from: grants` is refused on this engine at config load, so the partial-image refusal is never reached (columns_from_grants_is_refused_by_every_command_<engine>)"
+      mssql:
+        na: "a binlog row image is MySQL's: `columns_from: grants` is refused on this engine at config load, so the partial-image refusal is never reached (columns_from_grants_is_refused_by_every_command_<engine>)"
+      oracle:
+        na: "a binlog row image is MySQL's: `columns_from: grants` is refused on this engine at config load, so the partial-image refusal is never reached (columns_from_grants_is_refused_by_every_command_<engine>)"
+      mongo:
+        na: "a binlog row image is MySQL's: `columns_from: grants` is refused on this engine at config load, so the partial-image refusal is never reached (columns_from_grants_is_refused_by_every_command_<engine>)"
+
+  - name: pg-dotted-relname-routing-refusal-names-a-spelling-that-cannot-match
+    class: "PostgreSQL: a relation whose NAME holds a dot is refused by the routing guard with the remedy `set table: to the relation exactly as the catalog spells it`, a spelling the matcher reads as schema.table and routes nowhere, so following the remedy ends in the same or a worse refusal"
+    history: "PR #719 review round 2 (2026-10-29); RED from this patch: the refusal says nothing of renaming the relation"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-dotted-relname-routing-refusal-names-a-spelling-that-cannot-match/postgres.patch
+        cells: [pg_cdc_a_relation_named_with_a_dot_is_refused_by_a_remedy_that_can_be_followed]
+      mysql:
+        na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
+      mssql:
+        na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
+      oracle:
+        na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
+      mongo:
+        na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
+
+  - name: pg-dotted-relname-catalog-error-uncoded
+    class: "PostgreSQL: a `table:` spelled `public.d.a` makes the catalog probe fail in the server (cross-database reference) and the run ends in the server's raw error, uncoded and without a remedy"
+    history: "PR #719 review round 2 (2026-10-29); RED from this patch: the refusal is not RIVET_SOURCE_CDC_TABLE_UNRESOLVED"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-dotted-relname-catalog-error-uncoded/postgres.patch
+        cells: [pg_cdc_a_relation_named_with_a_dot_is_refused_by_a_remedy_that_can_be_followed]
+      mysql:
+        na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
+      mssql:
+        na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
+      oracle:
+        na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
+      mongo:
+        na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
+
   - name: column-grants-batch-bare-name-read-by-the-stream-rule
     class: "a batch `table:` read under `columns_from: grants` resolves a bare table name by the stream's rule (another database holding the only such table), not the relation the export's own SELECT reads: the wrong relation's columns are projected"
     history: "PR #719 review B11 (2026-10-29); RED from this patch: the policy run is refused or delivers the other database's row"

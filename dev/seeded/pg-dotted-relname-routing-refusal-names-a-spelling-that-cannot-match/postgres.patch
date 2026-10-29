@@ -1,0 +1,19 @@
+diff --git a/src/source/postgres/cdc.rs b/src/source/postgres/cdc.rs
+index 32abf126..b4d07567 100644
+--- a/src/source/postgres/cdc.rs
++++ b/src/source/postgres/cdc.rs
+@@ -259,14 +259,6 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
+         rs,
+         rt,
+     ) {
+-        if rt.contains('.') {
+-            return RoutingVerdict::Never(format!(
+-                "pg cdc: `{cfg}` resolves to the relation `{rs}.{rt}`, whose NAME holds a dot. \
+-                 Routing reads a dotted `table:` as `schema.table`, so no spelling of `table:` \
+-                 can route it, and its changes would be dropped while the slot advanced past \
+-                 them. Rename the relation to a name without a dot, or drop it from the config."
+-            ));
+-        }
+         return RoutingVerdict::Never(format!(
+             "pg cdc: `{cfg}` resolves to the relation `{rs}.{rt}`, but routing compares the              config string BYTE-EXACT against the name test_decoding emits — and those two              disagree here. The schema probe would read `{rs}.{rt}`'s columns while events              carrying a different spelling route nowhere, so the run would either capture              NOTHING or write rows under the wrong table's schema, silently, past an              advancing slot. Set `table:` to `{rs}.{rt}` exactly as the catalog spells it."
+         ));
