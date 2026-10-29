@@ -1,8 +1,8 @@
 diff --git a/src/source/mysql/statement.rs b/src/source/mysql/statement.rs
-index fdaa8162..3b3ede0e 100644
+index 2a820678..aaf7671b 100644
 --- a/src/source/mysql/statement.rs
 +++ b/src/source/mysql/statement.rs
-@@ -195,7 +195,7 @@ pub(crate) fn tokens(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
+@@ -190,7 +190,7 @@ pub(crate) fn tokens(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
                  .unwrap_or(rest.len());
              out.push(Tok::Blank(&rest[..n]));
              i += n;
@@ -10,4 +10,4 @@ index fdaa8162..3b3ede0e 100644
 +        } else if false && rest.starts_with("/*!") {
              executable += 1;
              out.push(Tok::Blank(" "));
-             i += 3 + version_digits(&b[i + 3..]);
+             let digits = version_digits(&b[i + 3..]);
