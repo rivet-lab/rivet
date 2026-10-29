@@ -1443,9 +1443,6 @@ impl Verification {
                     self.fixture.table
                 ))?,
             )),
-            // Per-column NULL count in the warehouse == source. A single column
-            // silently degraded to 100% NULL is invisible to row-count/sum checks
-            // (the FixedSizeBinary-nulls class) — this is the check that catches it.
             WarehouseOracle::NullProfile => {
                 let cols = self.source_columns()?;
                 if cols.is_empty() {
@@ -1453,23 +1450,12 @@ impl Verification {
                         why: "source has no columns".into(),
                     });
                 }
-                for c in &cols {
-                    let wc = self.wh_col(c);
-                    let dest =
-                        self.wh_scalar(&format!("SELECT COUNT(*) - COUNT({wc}) FROM {t}"))?;
-                    let src = self.source_scalar(&format!(
-                        "SELECT COUNT(*) - COUNT({c}) FROM {}",
-                        self.fixture.table
-                    ))?;
-                    if dest != src {
-                        return Ok(OracleOutcome::Fail {
-                            detail: format!(
-                                "null-profile[{c}]: warehouse {dest} nulls != source {src}"
-                            ),
-                        });
-                    }
-                }
-                Ok(OracleOutcome::Pass)
+                let dest =
+                    null_counts(&cols, |c| self.wh_col(c), &t, |sql, n| self.wh_ints(sql, n))?;
+                let src = null_counts(&cols, str::to_string, &self.fixture.table, |sql, n| {
+                    self.source_ints(sql, n)
+                })?;
+                Ok(null_profile_verdict(&cols, &dest, &src))
             }
             // Warehouse column type FAMILY == the source's semantic type family.
             // This is the loaders' headline: it catches jsonb→STRING, timestamptz→
@@ -1584,12 +1570,15 @@ impl Verification {
         capture(&mut cmd, "source query")
     }
 
+    /// The one row of a SOURCE query as `n` integers, split on the lane's column separator.
+    fn source_ints(&self, sql: &str, n: usize) -> Result<Vec<i64>> {
+        let out = self.source_raw(sql)?;
+        parse_int_row("source", &single_line(&out, "source")?, self.lane().sep, n)
+    }
+
     /// A single scalar from the SOURCE.
     fn source_scalar(&self, sql: &str) -> Result<i64> {
-        self.source_raw(sql)?
-            .trim()
-            .parse::<i64>()
-            .context("parse source scalar")
+        Ok(self.source_ints(sql, 1)?[0])
     }
 
     /// The fixture table's columns, in ordinal order (drives NullProfile).
@@ -1686,12 +1675,17 @@ impl Verification {
         }
     }
 
+    /// The one row of a warehouse query as `n` integers.
+    fn wh_ints(&self, sql: &str, n: usize) -> Result<Vec<i64>> {
+        match self.warehouse {
+            Warehouse::BigQuery => bq_ints(sql, n),
+            Warehouse::Snowflake => sf_ints(&self.sf_conn()?, sql, n),
+        }
+    }
+
     /// A single scalar re-read from the cell's warehouse.
     fn wh_scalar(&self, sql: &str) -> Result<i64> {
-        match self.warehouse {
-            Warehouse::BigQuery => bq_scalar(sql),
-            Warehouse::Snowflake => sf_scalar(&self.sf_conn()?, sql),
-        }
+        Ok(self.wh_ints(sql, 1)?[0])
     }
 
     /// The `snow` connection name for a Snowflake cell.
@@ -1825,6 +1819,88 @@ fn capture(cmd: &mut Command, what: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Columns per null-count query: keeps a wide table's statement far under every engine's length limit.
+const NULL_PROFILE_COLUMNS_PER_QUERY: usize = 100;
+
+/// The only non-empty line of `text`; anything else is an error.
+fn single_line(text: &str, what: &str) -> Result<String> {
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let line = lines
+        .next()
+        .with_context(|| format!("{what}: no data row"))?;
+    anyhow::ensure!(lines.next().is_none(), "{what}: more than one data row");
+    Ok(line.to_string())
+}
+
+/// `line` split on `sep` as exactly `n` integers.
+fn parse_int_row(what: &str, line: &str, sep: char, n: usize) -> Result<Vec<i64>> {
+    let vals = line
+        .split(sep)
+        .map(|x| x.trim().parse::<i64>())
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("parse {what} integers from `{line}`"))?;
+    anyhow::ensure!(
+        vals.len() == n,
+        "{what}: {} values, expected {n}",
+        vals.len()
+    );
+    Ok(vals)
+}
+
+/// `SELECT COUNT(*) - COUNT(c), ... FROM table` for `cols`, each referenced through `col`.
+fn null_count_select(cols: &[String], col: &impl Fn(&str) -> String, table: &str) -> String {
+    let items: Vec<String> = cols
+        .iter()
+        .map(|c| format!("COUNT(*) - COUNT({})", col(c)))
+        .collect();
+    format!("SELECT {} FROM {table}", items.join(", "))
+}
+
+/// Per-column NULL counts of `table`, one query per [`NULL_PROFILE_COLUMNS_PER_QUERY`] columns run by `run`.
+fn null_counts(
+    cols: &[String],
+    col: impl Fn(&str) -> String,
+    table: &str,
+    mut run: impl FnMut(&str, usize) -> Result<Vec<i64>>,
+) -> Result<Vec<i64>> {
+    let mut out = Vec::with_capacity(cols.len());
+    for chunk in cols.chunks(NULL_PROFILE_COLUMNS_PER_QUERY) {
+        let got = run(&null_count_select(chunk, &col, table), chunk.len())?;
+        anyhow::ensure!(
+            got.len() == chunk.len(),
+            "null-profile: {} counts for {} columns",
+            got.len(),
+            chunk.len()
+        );
+        out.extend(got);
+    }
+    Ok(out)
+}
+
+/// Pass iff every column's warehouse NULL count equals the source's; a failure names the first column that differs.
+fn null_profile_verdict(cols: &[String], dest: &[i64], src: &[i64]) -> OracleOutcome {
+    if dest.len() != cols.len() || src.len() != cols.len() {
+        return OracleOutcome::Fail {
+            detail: format!(
+                "null-profile: {} columns, warehouse {} counts, source {} counts",
+                cols.len(),
+                dest.len(),
+                src.len()
+            ),
+        };
+    }
+    match cols
+        .iter()
+        .zip(dest.iter().zip(src))
+        .find(|(_, (d, s))| d != s)
+    {
+        Some((c, (d, s))) => OracleOutcome::Fail {
+            detail: format!("null-profile[{c}]: warehouse {d} nulls != source {s}"),
+        },
+        None => OracleOutcome::Pass,
+    }
+}
+
 /// Pass iff the warehouse re-read equals the source; the oracle's verdict.
 fn compare(what: &str, dest: i64, src: i64) -> OracleOutcome {
     if dest == src {
@@ -1836,16 +1912,14 @@ fn compare(what: &str, dest: i64, src: i64) -> OracleOutcome {
     }
 }
 
-/// `bq query` returning a single scalar (CSV, header-stripped).
-fn bq_scalar(sql: &str) -> Result<i64> {
+/// `bq query` returning one row of `n` integers (CSV, header-stripped).
+fn bq_ints(sql: &str, n: usize) -> Result<Vec<i64>> {
     let out = capture(
         Command::new("bq").args(["query", "--nouse_legacy_sql", "--format=csv", sql]),
         "bq query",
     )?;
-    out.lines()
-        .nth(1) // line 0 is the header
-        .and_then(|l| l.trim().parse::<i64>().ok())
-        .context("parse bq scalar")
+    let body = out.split_once('\n').map_or("", |(_, rest)| rest);
+    parse_int_row("bq", &single_line(body, "bq")?, ',', n)
 }
 
 /// `bq query` returning `(col0, col1)` rows (CSV, header-stripped).
@@ -1950,18 +2024,24 @@ fn sf_read(conn: &str, sql: &str) -> Result<Vec<Vec<serde_json::Value>>> {
     .map_err(anyhow::Error::msg)
 }
 
-/// The first column of the first row, as an integer.
-fn sf_scalar(conn: &str, sql: &str) -> Result<i64> {
+/// The one row of `sql` as `n` integers.
+fn sf_ints(conn: &str, sql: &str, n: usize) -> Result<Vec<i64>> {
     let rows = sf_read(conn, sql)?;
-    let val = rows
-        .first()
-        .and_then(|r| r.first())
-        .context("snowflake: empty result")?;
-    match val {
-        serde_json::Value::Number(n) => n.as_i64().context("snowflake: scalar not an i64"),
-        serde_json::Value::String(s) => s.trim().parse().context("snowflake: parse scalar string"),
-        other => bail!("snowflake: unexpected scalar {other}"),
-    }
+    let [row] = rows.as_slice() else {
+        bail!("snowflake: {} rows, expected 1", rows.len());
+    };
+    anyhow::ensure!(
+        row.len() == n,
+        "snowflake: {} values, expected {n}",
+        row.len()
+    );
+    row.iter()
+        .map(|val| match val {
+            serde_json::Value::Number(x) => x.as_i64().context("snowflake: value not an i64"),
+            serde_json::Value::String(x) => x.trim().parse().context("snowflake: parse string"),
+            other => bail!("snowflake: unexpected value {other}"),
+        })
+        .collect()
 }
 
 /// `(col0, col1)` of every row, in SELECT order.
@@ -2084,5 +2164,102 @@ mod generated_configs {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod null_profile {
+    use super::*;
+
+    fn names(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("c{i}")).collect()
+    }
+
+    #[test]
+    fn the_select_counts_every_column_through_the_warehouse_quoting() {
+        let cols = vec!["Order".to_string(), "id".to_string()];
+        let sql = null_count_select(&cols, &|c| format!("`{c}`"), "`p.d.t`");
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) - COUNT(`Order`), COUNT(*) - COUNT(`id`) FROM `p.d.t`"
+        );
+    }
+
+    #[test]
+    fn a_wide_table_is_read_in_chunks_and_keeps_column_order() {
+        let cols = names(2 * NULL_PROFILE_COLUMNS_PER_QUERY + 50);
+        let mut sizes = Vec::new();
+        let got = null_counts(&cols, str::to_string, "t", |sql, n| {
+            sizes.push(n);
+            assert_eq!(sql.matches("COUNT(*) - COUNT(").count(), n);
+            let first: i64 = sql["SELECT COUNT(*) - COUNT(c".len()..]
+                .split(')')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            Ok((first..first + n as i64).collect())
+        })
+        .unwrap();
+        let want = [
+            NULL_PROFILE_COLUMNS_PER_QUERY,
+            NULL_PROFILE_COLUMNS_PER_QUERY,
+            50,
+        ];
+        assert_eq!(sizes, want);
+        assert_eq!(got, (0..cols.len() as i64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_reader_that_returns_the_wrong_number_of_counts_is_an_error() {
+        let err = null_counts(&names(3), str::to_string, "t", |_, _| Ok(vec![0, 0])).unwrap_err();
+        assert!(err.to_string().contains("2 counts for 3 columns"), "{err}");
+    }
+
+    #[test]
+    fn one_wrong_column_count_fails_naming_that_column() {
+        let cols = names(20);
+        let src = vec![0i64; 20];
+        for i in 0..cols.len() {
+            let mut dest = src.clone();
+            dest[i] = 7;
+            match null_profile_verdict(&cols, &dest, &src) {
+                OracleOutcome::Fail { detail } => {
+                    assert_eq!(
+                        detail,
+                        format!("null-profile[c{i}]: warehouse 7 nulls != source 0")
+                    );
+                }
+                other => panic!("expected a Fail naming c{i}, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            null_profile_verdict(&cols, &src, &src),
+            OracleOutcome::Pass
+        ));
+    }
+
+    #[test]
+    fn a_count_vector_of_the_wrong_length_never_passes() {
+        let cols = names(3);
+        assert!(matches!(
+            null_profile_verdict(&cols, &[0, 0], &[0, 0, 0]),
+            OracleOutcome::Fail { .. }
+        ));
+        assert!(matches!(
+            null_profile_verdict(&cols, &[0, 0, 0], &[0, 0, 0, 0]),
+            OracleOutcome::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn a_row_reader_refuses_a_shape_it_does_not_understand() {
+        assert_eq!(parse_int_row("t", "1|2|3", '|', 3).unwrap(), vec![1, 2, 3]);
+        assert!(parse_int_row("t", "1|2", '|', 3).is_err());
+        assert!(parse_int_row("t", "1|x|3", '|', 3).is_err());
+        assert!(parse_int_row("t", "1|2|3|4", '|', 3).is_err());
+        assert!(single_line("", "t").is_err());
+        assert!(single_line("1\n2\n", "t").is_err());
+        assert_eq!(single_line("\n 4 \n", "t").unwrap(), "4");
     }
 }
