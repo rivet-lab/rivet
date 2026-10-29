@@ -3901,6 +3901,7 @@ dependencies = [
  "console",
  "criterion",
  "csv",
+ "encoding_rs",
  "env_logger",
  "futures-util",
  "indicatif",

@@ -58,6 +58,7 @@ clap = { version = "4", features = ["derive", "env"] }
 clap-markdown = "0.1"
 csv = "1"
 env_logger = "0.11"
+encoding_rs = "0.8"
 libc = "0.2"
 log = "0.4"
 # Percent-encode the user/password when building a connection URL from structured

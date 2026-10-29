@@ -69,7 +69,17 @@ impl SqlMode {
     }
 }
 
-const VERSION_DIGITS: usize = 5;
+/// How many version digits a `/*!` marker consumes: none under five digits, six when the sixth digit is followed by whitespace, else five.
+fn version_digits(after_bang: &[u8]) -> usize {
+    if !after_bang.iter().take(5).all(u8::is_ascii_digit) || after_bang.len() < 5 {
+        return 0;
+    }
+    let six = after_bang.get(5).is_some_and(u8::is_ascii_digit)
+        && after_bang
+            .get(6)
+            .is_some_and(|c| matches!(c, b' ' | 9..=13));
+    if six { 6 } else { 5 }
+}
 
 fn word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii() && !c.is_whitespace()
@@ -105,6 +115,73 @@ fn line_comment_starts(rest: &str) -> bool {
         })
 }
 
+/// A client character set whose multibyte characters can end in a backslash or a backtick byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    Big5,
+    Gbk,
+    Sjis,
+    Gb18030,
+}
+
+impl Layout {
+    /// The layout of the character set a QUERY event's client used (its collation id), if it is one of these.
+    fn of_charset(id: u16) -> Option<Self> {
+        match id {
+            1 | 84 => Some(Self::Big5),
+            28 | 87 => Some(Self::Gbk),
+            13 | 88 | 95 | 96 => Some(Self::Sjis),
+            248..=250 => Some(Self::Gb18030),
+            _ => None,
+        }
+    }
+
+    fn encoding(self) -> &'static encoding_rs::Encoding {
+        match self {
+            Self::Big5 => encoding_rs::BIG5,
+            Self::Gbk => encoding_rs::GBK,
+            Self::Sjis => encoding_rs::SHIFT_JIS,
+            Self::Gb18030 => encoding_rs::GB18030,
+        }
+    }
+
+    /// The byte length of the character at the start of `b`, as the server's `my_ismbchar` counts it.
+    fn char_len(self, b: &[u8]) -> usize {
+        let wide_trail = |t: u8| matches!(t, 0x40..=0x7E | 0x80..=0xFE);
+        match (self, b) {
+            (Self::Big5, [0xA1..=0xF9, 0x40..=0x7E | 0xA1..=0xFE, ..]) => 2,
+            (Self::Gbk, [0x81..=0xFE, t, ..]) if wide_trail(*t) => 2,
+            (Self::Sjis, [0x81..=0x9F | 0xE0..=0xFC, 0x40..=0x7E | 0x80..=0xFC, ..]) => 2,
+            (Self::Gb18030, [0x81..=0xFE, 0x30..=0x39, 0x81..=0xFE, 0x30..=0x39, ..]) => 4,
+            (Self::Gb18030, [0x81..=0xFE, t, ..]) if wide_trail(*t) => 2,
+            _ => 1,
+        }
+    }
+}
+
+/// A statement's bytes as text: read as the client sent them when its character set has multibyte characters ending in a backslash or a backtick, else as UTF-8.
+pub(crate) fn client_text(raw: &[u8], charset: Option<u16>) -> std::borrow::Cow<'_, str> {
+    let Some(layout) = charset.and_then(Layout::of_charset) else {
+        return String::from_utf8_lossy(raw);
+    };
+    let (mut out, mut i) = (String::with_capacity(raw.len()), 0usize);
+    while i < raw.len() {
+        let n = layout.char_len(&raw[i..]);
+        if n == 1 && raw[i].is_ascii() {
+            out.push(char::from(raw[i]));
+        } else {
+            out.push_str(
+                &layout
+                    .encoding()
+                    .decode_without_bom_handling(&raw[i..i + n])
+                    .0,
+            );
+        }
+        i += n;
+    }
+    out.into()
+}
+
 /// The statement cut into pieces the way the server lexes it: `/*! */` bodies are SQL (nested ones too), other comments, `#` and `-- ` lines become a blank, quoted text is one piece.
 pub(crate) fn tokens(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
     let b = sql.as_bytes();
@@ -120,13 +197,8 @@ pub(crate) fn tokens(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
             i += n;
         } else if rest.starts_with("/*!") {
             executable += 1;
-            let digits = b[i + 3..]
-                .iter()
-                .take(VERSION_DIGITS)
-                .take_while(|d| d.is_ascii_digit())
-                .count();
             out.push(Tok::Blank(" "));
-            i += 3 + if digits == VERSION_DIGITS { digits } else { 0 };
+            i += 3 + version_digits(&b[i + 3..]);
         } else if let Some(body) = rest.strip_prefix("/*") {
             out.push(Tok::Blank(" "));
             i = body.find("*/").map_or(sql.len(), |n| i + n + 4);
@@ -313,11 +385,18 @@ mod tests {
     }
 
     #[test]
-    fn a_version_comment_takes_exactly_five_digits_after_the_bang() {
+    fn a_version_comment_takes_five_digits_or_six_when_whitespace_follows_the_sixth() {
         for (sql, want) in [
             ("/*!80000 REVOKE */", "REVOKE"),
-            ("/*!800001 x */", "1 x"),
+            ("/*!080400 REVOKE */", "REVOKE"),
+            ("/*!080400\tREVOKE */", "REVOKE"),
+            ("/*!080400\nREVOKE */", "REVOKE"),
+            ("/*!080400REVOKE */", "0REVOKE"),
+            ("/*!080400", "0"),
+            ("/*!0804000 x */", "00 x"),
+            ("/*!800001 x */", "x"),
             ("/*!8000012345 x */", "12345 x"),
+            ("/*!80000123 x */", "123 x"),
             ("/*!8000 x */", "8000 x"),
             ("/*!x */", "x"),
             ("/*! x */", "x"),
@@ -326,5 +405,106 @@ mod tests {
         ] {
             assert_eq!(read(sql), want, "{sql:?}");
         }
+    }
+
+    fn first_quote_is_closed(raw: &[u8], charset: u16) -> Option<bool> {
+        let sql = client_text(raw, Some(charset));
+        tokens(&sql, SqlMode::default())
+            .iter()
+            .find_map(|t| match t {
+                Tok::Quoted { closed, .. } => Some(*closed),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn a_multibyte_character_ending_in_a_backslash_does_not_escape_the_quote_after_it() {
+        for (raw, charset) in [
+            (&b"'\xE4\xB8\xAD\\'"[..], 28),
+            (&b"'\xE4\xB8\xAD\\'"[..], 87),
+            (&b"'\xC3\x81\\'"[..], 13),
+            (&b"'\xC3\x81\\'"[..], 88),
+            (&b"'\xC3\x81\\'"[..], 95),
+            (&b"'\xC3\x81\\'"[..], 96),
+            (&b"'\xA4\\'"[..], 1),
+            (&b"'\xA4\\'"[..], 84),
+            (&b"'\x81\x30\x81\x30\xAD\\'"[..], 248),
+            (&b"'\x81\\'"[..], 249),
+            (&b"'\x81\\'"[..], 250),
+        ] {
+            assert_eq!(
+                first_quote_is_closed(raw, charset),
+                Some(true),
+                "{raw:?} {charset}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_bytes_in_a_character_set_without_such_characters_keep_the_backslash_an_escape() {
+        for (raw, charset) in [
+            (&b"'\xE4\xB8\xAD\\'"[..], 45),
+            (&b"'\xE4\xB8\xAD\\'"[..], 255),
+            (&b"'\xC3\x81\\'"[..], 8),
+            (&b"'\xC3\x81\\'"[..], 63),
+            (&b"'\xA4\\'"[..], 12),
+            (&b"'\xA4\\'"[..], 19),
+            (&b"'x\\'"[..], 28),
+            (&b"'x\\'"[..], 13),
+            (&b"'x\\'"[..], 1),
+            (&b"'x\\'"[..], 248),
+        ] {
+            assert_eq!(
+                first_quote_is_closed(raw, charset),
+                Some(false),
+                "{raw:?} {charset}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_four_byte_gb18030_character_and_a_lead_without_a_trail_are_read_as_the_server_counts_them()
+    {
+        assert_eq!(client_text(b"\x81\x30\x81\x30", Some(248)), "\u{80}");
+        assert_eq!(
+            first_quote_is_closed(b"'\x81\x30\x81\x30\\'", 248),
+            Some(false)
+        );
+        assert_eq!(first_quote_is_closed(b"'\x81\x30\x81\\'", 248), Some(true));
+        assert_eq!(client_text(b"A\x81", Some(28)), "A\u{FFFD}");
+        assert_eq!(client_text(b"A\x81 B", Some(28)), "A\u{FFFD} B");
+        assert_eq!(client_text(b"A\x81\x7F", Some(28)), "A\u{FFFD}\x7F");
+        assert_eq!(client_text(b"A\xA4\x20", Some(1)), "A\u{FFFD} ");
+        assert_eq!(client_text(b"A\xA0\x5C", Some(1)), "A\u{FFFD}\\");
+    }
+
+    #[test]
+    fn a_multibyte_trail_that_is_a_backtick_does_not_close_the_identifier() {
+        let open = |raw: &[u8], charset: u16| {
+            let sql = client_text(raw, Some(charset));
+            tokens(&sql, SqlMode::default())
+                .iter()
+                .find_map(|t| match t {
+                    Tok::Quoted {
+                        quote: '`', closed, ..
+                    } => Some(*closed),
+                    _ => None,
+                })
+        };
+        assert_eq!(open(b"`a\x81`", 28), Some(false));
+        assert_eq!(open(b"`a\x81`", 45), Some(true));
+    }
+
+    #[test]
+    fn a_name_in_a_multibyte_character_set_is_decoded_to_the_text_the_server_stores() {
+        assert_eq!(client_text(b"\xB1\xED", Some(28)), "\u{8868}");
+        assert_eq!(client_text(b"\x95\x5C", Some(13)), "\u{8868}");
+        assert_eq!(client_text(b"\x95\x5C", Some(95)), "\u{8868}");
+        assert_eq!(
+            client_text("t\u{8868}".as_bytes(), Some(255)),
+            "t\u{8868}",
+            "a UTF-8 client is read as before"
+        );
+        assert_eq!(client_text(b"select 1", None), "select 1");
     }
 }
