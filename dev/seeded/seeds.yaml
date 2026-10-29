@@ -34,6 +34,23 @@ seeds:
       oracle:
         na: "Oracle CDC only drains to the SCN current at open (`until_current: false` is refused) and resolves its schema after it, so a run never reads a change written after its schema; an ADD COLUMN inside the window is refused before any write as RIVET_SOURCE_CDC_UNDECODABLE (oracle_cdc_a_change_older_than_an_alter_is_refused_by_code), and one between runs is delivered with its values (oracle_cdc_picks_up_a_column_added_between_runs)"
 
+  - name: cdc-roll-checkpoints-its-trigger
+    class: "the roll a column added while a CDC run is open forces checkpoints and acknowledges the position of the change that carried the column before that change is written: a stop right after the roll resumes past it and the row is never delivered, exit 0 (PostgreSQL also advances the slot past it)"
+    history: "found 2026-10-29 by a rivet-verifier probe (a MySQL continuous run, INSERT 3, ALTER TABLE ADD COLUMN, INSERT 4, run stopped after the roll: ck.json at the position of row 4, row 4 in no declared part); RED on main 2026-10-29 (the rig oracle: source row 4 not delivered, PostgreSQL and MySQL)"
+    scope: source
+    patch: cdc-roll-checkpoints-its-trigger/shared.patch
+    engines:
+      postgres:
+        cells: [pg_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it, "lib:a_roll_for_an_added_column_never_checkpoints_the_event_that_caused_it"]
+      mysql:
+        cells: [mysql_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it, "lib:a_roll_for_an_added_column_never_checkpoints_the_event_that_caused_it"]
+      mssql:
+        na: "a capture instance never carries a column added after it was created, so a run open over one stops by code and never rolls for a column (mssql_cdc_a_column_added_while_a_run_is_open_stops_by_code)"
+      mongo:
+        na: "a MongoDB change lands the whole document in its one `document` column, so the run's schema never lacks a name and no roll for a column occurs (mongo_cdc_a_field_added_while_a_run_is_open_is_in_the_document)"
+      oracle:
+        na: "Oracle CDC only drains to the SCN current at open and resolves its schema after it, so a run never reads a change written after its schema and never rolls for a column (oracle_cdc_a_change_older_than_an_alter_is_refused_by_code)"
+
   - name: incremental-plan-replay-answered
     class: "`rivet apply` treats an incremental plan (`mode: incremental`, `keyset_incremental`) as a point-in-time snapshot: a replay after its first exit-0 apply answers \"already applied\", so every row that arrived since is never delivered with exit 0, and the plan is refused past 24 h"
     history: "found 2026-10-16 on PR #616 CI (run 38911927276): the first F3 replay answer keyed on plan_id alone; `incremental_keyset_apply_rotates_run_id_across_repeated_applies` read COUNT(*) source 150, delivered 100; owner decision (PR #616 comment 6219074059): an incremental plan is a reusable description"

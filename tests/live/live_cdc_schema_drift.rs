@@ -430,14 +430,9 @@ fn pg_cdc_upgrade_baseline_takes_server_text_silently_and_still_refuses_a_new_co
 /// How long the open run parks after each part, so the test changes the table while it is open.
 const HOT_PAUSE: &str = "cdc_after_parts_before_ack:20000";
 
-/// Pin and baseline rows 1-2, then a CONTINUOUS run reads row 3 under the old schema and parks
-/// after its part; meanwhile the table gains `c` and rows 4-5 carry values in it. Returns what the
-/// open run said and its exit.
-pub(crate) fn run_while_a_column_is_added(
-    scn: &mut CdcScenario,
-    exec: &dyn Fn(&str),
-    add_column: &str,
-) -> (std::process::Output, String) {
+/// Pin and baseline rows 1-2, then start a CONTINUOUS run that reads row 3 under the old schema
+/// and parks after its part. Returns the open run and the file it touches each time it parks.
+fn park_an_open_run(scn: &mut CdcScenario) -> (Spawned<'_>, std::path::PathBuf) {
     let t = scn.table.clone();
     scn.sql(&format!("INSERT INTO {t} (id, v) VALUES (1, 10)"));
     scn.sql(&format!("INSERT INTO {t} (id, v) VALUES (2, 20)"));
@@ -457,14 +452,31 @@ pub(crate) fn run_while_a_column_is_added(
             ("RIVET_TEST_PAUSE_MARKER", &marker_env),
         ],
     );
+    wait_for_file(&marker, "the open run never parked after its first part");
+    (child, marker)
+}
+
+fn wait_for_file(marker: &std::path::Path, what: &str) {
     let opened = std::time::Instant::now();
     while !marker.is_file() {
         assert!(
             opened.elapsed() < std::time::Duration::from_secs(120),
-            "the open run never parked after its first part"
+            "{what}"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+}
+
+/// Pin and baseline rows 1-2, then a CONTINUOUS run reads row 3 under the old schema and parks
+/// after its part; meanwhile the table gains `c` and rows 4-5 carry values in it. Returns what the
+/// open run said and its exit.
+pub(crate) fn run_while_a_column_is_added(
+    scn: &mut CdcScenario,
+    exec: &dyn Fn(&str),
+    add_column: &str,
+) -> (std::process::Output, String) {
+    let t = scn.table.clone();
+    let (child, _) = park_an_open_run(scn);
     exec(add_column);
     exec(&format!(
         "INSERT INTO {t} (id, v, c) VALUES (4, 40, 'four')"
@@ -479,6 +491,32 @@ pub(crate) fn run_while_a_column_is_added(
         String::from_utf8_lossy(&out.stderr)
     );
     (out, said)
+}
+
+/// The open run is stopped (SIGKILL) at its next park after the roll a new column forces: row 4 has
+/// a part by then, but the run died before its manifest and ack. The run that follows, from the
+/// stored checkpoint, must deliver row 4: the roll may not have moved the checkpoint past it. The
+/// rig oracle grades that run against the source (a row the source holds and no declared part does).
+fn a_stop_after_the_column_roll_resumes_at_the_row_that_carried_it(
+    mut scn: CdcScenario,
+    exec: &dyn Fn(&str),
+) {
+    let t = scn.table.clone();
+    let (mut child, marker) = park_an_open_run(&mut scn);
+    std::fs::remove_file(&marker).expect("clear the first park");
+    exec(&format!("ALTER TABLE {t} ADD COLUMN c VARCHAR(16)"));
+    exec(&format!(
+        "INSERT INTO {t} (id, v, c) VALUES (4, 40, 'four')"
+    ));
+    wait_for_file(&marker, "the open run never parked after the column roll");
+    child.kill().expect("stop the open run");
+    child.wait().expect("reap the open run");
+    drop(child);
+    scn.rig
+        .replace_cdc_line("until_current", "until_current: true");
+    scn.rig
+        .replace_cdc_line("max_events", "max_events: 1000000");
+    scn.rig.run_ok();
 }
 
 /// Every value of the added column reaches the warehouse: the open run, then load and compact,
@@ -722,6 +760,37 @@ fn pg_cdc_a_drop_and_add_at_one_arity_while_a_run_is_open_lands_under_the_new_na
             .expect(q)
     };
     equal_arity_drop_and_add(scn, &exec);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql-cdc (binlog_row_metadata=FULL)"]
+fn mysql_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it() {
+    let scn = CdcScenario::mysql_with("hot_stop_my", "id BIGINT PRIMARY KEY, v INT", |r, _| {
+        equal_arity_shape(r)
+    });
+    let exec = |q: &str| {
+        mysql::Pool::new(MYSQL_CDC_URL)
+            .and_then(|p| p.get_conn())
+            .expect("connect mysql-cdc")
+            .query_drop(q)
+            .expect(q)
+    };
+    a_stop_after_the_column_roll_resumes_at_the_row_that_carried_it(scn, &exec);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres-cdc (wal_level=logical)"]
+fn pg_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it() {
+    let scn = CdcScenario::pg_with("hot_stop_pg", "id BIGINT PRIMARY KEY, v INT", |r, _| {
+        equal_arity_shape(r)
+    });
+    let exec = |q: &str| {
+        postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls)
+            .expect("connect postgres-cdc")
+            .batch_execute(q)
+            .expect(q)
+    };
+    a_stop_after_the_column_roll_resumes_at_the_row_that_carried_it(scn, &exec);
 }
 
 /// MongoDB's form of a hot ADD COLUMN: documents written while the run is open carry a field

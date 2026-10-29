@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **A CDC run that meets a column added to a captured table while it is open no longer checkpoints and
+  acknowledges the change that carried the column before writing it** (PostgreSQL and MySQL; SQL Server
+  stops by code, MongoDB and Oracle never roll for a column). The roll that closes the part under the old
+  schema persisted the position of the very change that triggered it (an autocommit `INSERT` after the
+  `ALTER TABLE`) and, on PostgreSQL, advanced the slot past it; a stop or crash between that roll and the
+  part holding the change lost the row on the next run, with exit 0. The commit position is now recorded
+  after the change is buffered, so the roll stops at the commit before it and a resume re-reads the change.
+  Nothing in state or in written tables changes shape, so the upgrade needs no step. A row already lost
+  this way before the upgrade is not brought back by it: if a run was killed while a column was being added
+  to a captured table, re-baseline that table (`cdc.backfill:` or a fresh `initial: snapshot`) to recover it.
+
 - **Behaviour change: Snowflake keeps a base table and a buffer by default, and `rivet compact` merges
   them.** On `target: snowflake`, an incremental or CDC export now lands `<table>` as a physical base
   and later deltas in a buffer `<table>__changes`, with no view and no MERGE: `rivet compact` renames the
