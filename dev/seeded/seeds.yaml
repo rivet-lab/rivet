@@ -2158,6 +2158,25 @@ seeds:
       lib:
         cells: ["lib:snowflake_takes_a_base_unless_log_view_is_written"]
 
+  - name: snowflake-baseline-flag-left-null
+    class: "a baseline Parquet staged without the delete flag is loaded into a Snowflake base as it is: the COPY transform reads the absent column as NULL, and every row falls out of `WHERE NOT __is_deleted`"
+    history: "2026-10-28 - the warehouse cell that loads one extract into BigQuery and Snowflake read 0 live rows of 2000 on the Snowflake base; the baseline had been staged under the log+view layout"
+    scope: source
+    patch: snowflake-baseline-flag-left-null/shared.patch
+    engines:
+      postgres:
+        cells: [snowflake_baseline_without_the_flag_lands_live_postgres, "lib:the_delete_flag_is_false_for_a_row_the_file_does_not_flag"]
+      mysql:
+        cells: [snowflake_baseline_without_the_flag_lands_live_mysql, "lib:the_delete_flag_is_false_for_a_row_the_file_does_not_flag"]
+      mssql:
+        cells: [snowflake_baseline_without_the_flag_lands_live_mssql, "lib:the_delete_flag_is_false_for_a_row_the_file_does_not_flag"]
+      mongo:
+        cells: [snowflake_baseline_without_the_flag_lands_live_mongo, "lib:the_delete_flag_is_false_for_a_row_the_file_does_not_flag"]
+      oracle:
+        na: "an Oracle cdc export into a warehouse is refused at config load, and the COPY select the lib cell grades is engine-independent"
+      lib:
+        cells: ["lib:the_delete_flag_is_false_for_a_row_the_file_does_not_flag"]
+
   - name: load-view-as-base-guard-removed
     class: "a base-and-buffer load meets a VIEW under the base name and goes on, appending to the buffer or failing in the warehouse instead of stopping with the coded conflict"
     history: "2026-10-28 - with base-and-buffer the default on Snowflake, a table left as a log+view view must stop every load leg and compact; BigQuery shared the silent append"

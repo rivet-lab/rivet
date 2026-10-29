@@ -41,6 +41,10 @@
   - `rivet compact` on a Snowflake table that writes `load.layout: log_view` says "a changelog + view
     table (`load.layout: log_view` is written); nothing to merge" where it said it "never compacts"; scripts
     that match the old words should match `nothing to merge`;
+  - a Snowflake base loaded from a baseline file that carries no `__is_deleted` (a baseline staged under
+    `load.layout: log_view`, then loaded under the default) now lands the flag FALSE on every row; read as
+    NULL it hid every row from `WHERE NOT __is_deleted`. Nothing to migrate: no Snowflake base existed
+    before this release;
   - `rivet init` for Snowflake no longer writes a `layout:` line (the default is the base and buffer); for
     a CDC stream with no baseline it writes `layout: log_view`;
   - the ClickHouse refusal of `load.layout: base_buffer` now reads "`base_buffer` needs `target: bigquery`

@@ -487,6 +487,12 @@ impl Verification {
                 rivet().args(["load", "-c"]).arg(&cfg),
                 &format!("{what} into {}", w.target()),
             )?;
+            if cell.keeps_snowflake_base() {
+                run(
+                    rivet().args(["compact", "-c"]).arg(&cfg),
+                    &format!("rivet compact (cdc) into {}", w.target()),
+                )?;
+            }
             for (name, outcome) in grade(&cell, last)? {
                 let name = if self.targets.len() > 1 {
                     format!("{}:{name}", w.target())
@@ -497,6 +503,16 @@ impl Verification {
             }
         }
         Ok(out)
+    }
+
+    /// A Snowflake CDC stream with no baseline grades the change log and its view.
+    fn keeps_log_view(&self) -> bool {
+        self.warehouse == Warehouse::Snowflake && self.mode == Mode::Cdc && !self.initial_snapshot
+    }
+
+    /// A Snowflake CDC stream with a baseline keeps a base that waits for `rivet compact`.
+    fn keeps_snowflake_base(&self) -> bool {
+        self.warehouse == Warehouse::Snowflake && self.mode == Mode::Cdc && self.initial_snapshot
     }
 
     /// Turn on `cdc.initial: snapshot` — the first CDC run anchors, backfills
@@ -1722,7 +1738,14 @@ impl Verification {
                 Engine::Mongo => "_id",
                 _ => "id",
             };
-            format!("{load_block}  pk: [{pk}]\n")
+            // A Snowflake stream names a baseline (`initial: snapshot`) to keep a base; one without
+            // grades the change log and its current-state view.
+            let layout = if self.keeps_log_view() {
+                "  layout: log_view\n"
+            } else {
+                ""
+            };
+            format!("{load_block}  pk: [{pk}]\n{layout}")
         } else {
             load_block
         };
@@ -2010,5 +2033,56 @@ impl TempWork {
 impl Drop for TempWork {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(test)]
+mod generated_configs {
+    use super::*;
+
+    fn offline_env() -> HarnessEnv {
+        HarnessEnv {
+            oss_dir: PathBuf::from("."),
+            gcs_bucket: "bucket".into(),
+            bq_project: Some("project".into()),
+            sf: Some(SfEnv {
+                connection: "conn".into(),
+                account: "org-acct".into(),
+                user: "USR".into(),
+                private_key_path: "/key.p8".into(),
+                role: None,
+                warehouse: "WH".into(),
+                database: "DB".into(),
+                schema: "SC".into(),
+                storage_integration: "INT".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn every_config_a_cell_generates_loads_without_a_refusal() {
+        let env = offline_env();
+        for engine in [
+            Engine::Postgres,
+            Engine::Mysql,
+            Engine::Mssql,
+            Engine::Mongo,
+        ] {
+            for (mode, snapshot) in [(Mode::Batch, false), (Mode::Cdc, false), (Mode::Cdc, true)] {
+                for warehouse in [Warehouse::BigQuery, Warehouse::Snowflake] {
+                    let mut cell =
+                        Verification::new(engine, mode, Fixture::smoke("t")).warehouse(warehouse);
+                    if snapshot {
+                        cell = cell.initial_snapshot();
+                    }
+                    let yaml = cell.extraction_yaml(&env, "p/", true).expect("a config");
+                    if let Err(e) = rivet::config::Config::from_yaml(&yaml) {
+                        panic!(
+                            "{engine:?} {mode:?} snapshot={snapshot} {warehouse:?}: {e}\n{yaml}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
