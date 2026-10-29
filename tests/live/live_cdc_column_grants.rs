@@ -2387,6 +2387,7 @@ fn statements_in_the_backlog(label: &str, policy: bool, steps: &[&str]) -> Backl
     let _aside = (
         MysqlCdcTable(format!("{table}_old")),
         MysqlCdcTable(format!("{table}_new")),
+        MysqlCdcTable(table.to_uppercase()),
     );
     let user = GrantUser::new(&table, "id, name");
     let mut rig = Rig::mysql_cdc(&table)
@@ -2405,7 +2406,11 @@ fn statements_in_the_backlog(label: &str, policy: bool, steps: &[&str]) -> Backl
     let before = checkpoint_at(&rig);
     let mut c = root();
     for sql in steps {
-        c.query_drop(sql.replace("{t}", &table)).unwrap();
+        c.query_drop(
+            sql.replace("{t}", &table)
+                .replace("{T}", &table.to_uppercase()),
+        )
+        .unwrap();
     }
     let out = rig.run();
     let parts: Vec<_> = parquet_dirs(&rig.out_dir())
@@ -2731,6 +2736,405 @@ fn a_truncate_drop_or_statement_write_is_met_as_before_without_double_quoted_nam
                     ansi,
                     "TRUNCATE \"rivet\".\"{t}_old\"",
                     "DROP TABLE \"rivet\".\"{t}_old\"",
+                    UPDATED_AFTER,
+                ],
+                BOTH_DELIVERED,
+            ),
+        ],
+    );
+}
+
+fn the_server_reads_six_digit_version_comments() -> bool {
+    match root().query_drop("/*!080400 SELECT 1 */") {
+        Ok(()) => true,
+        Err(mysql::Error::MySqlError(e)) if e.code == 1064 => false,
+        Err(e) => panic!("probing the version comment: {e}"),
+    }
+}
+
+fn the_server_folds_names() -> bool {
+    let value: Option<(String, String)> = root()
+        .query_first("SHOW GLOBAL VARIABLES WHERE Variable_name = 'lower_case_table_names'")
+        .unwrap();
+    value.is_some_and(|(_, v)| v != "0")
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_rename_in_a_six_digit_version_comment_is_refused_under_the_policy_on_this_server_mysql() {
+    if !the_server_reads_six_digit_version_comments() {
+        return;
+    }
+    backlogs_end_as(
+        "cg_v6",
+        &[
+            (
+                true,
+                &[
+                    UPDATED_BEFORE,
+                    "/*!080400 ALTER TABLE rivet.{t} RENAME COLUMN name TO nm */",
+                    UPDATED_AFTER_AS_NM,
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                true,
+                &[
+                    UPDATED_BEFORE,
+                    GHOST_WITH_NM,
+                    GHOST_COPY,
+                    "/*!080400 RENAME TABLE rivet.{t} TO rivet.{t}_old, rivet.{t}_new TO rivet.{t} */",
+                    UPDATED_AFTER_AS_NM,
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                true,
+                &[
+                    UPDATED_BEFORE,
+                    "/*!080400\nALTER TABLE rivet.{t} RENAME TO rivet.{t}_old */",
+                    RECREATED,
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                false,
+                &[
+                    UPDATED_BEFORE,
+                    GHOST_WITH_NM,
+                    GHOST_COPY,
+                    "/*!080400 RENAME TABLE rivet.{t} TO rivet.{t}_old, rivet.{t}_new TO rivet.{t} */",
+                    UPDATED_AFTER_AS_NM,
+                ],
+                BOTH_DELIVERED,
+            ),
+            (
+                true,
+                &[
+                    UPDATED_BEFORE,
+                    "/*!080400 ALTER TABLE rivet.{t} ADD COLUMN extra INT */",
+                    UPDATED_AFTER,
+                ],
+                BOTH_DELIVERED,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_revoke_in_a_six_digit_version_comment_stops_an_open_run_on_this_server_mysql() {
+    if !the_server_reads_six_digit_version_comments() {
+        return;
+    }
+    a_revoke_stops_an_open_run_before_the_column_leaves("cg_rev6", |table, user| {
+        format!("/*!080400 REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_six_digit_version_comment_is_a_syntax_error_on_a_server_that_reads_five_on_this_server_mysql()
+{
+    let reads = the_server_reads_six_digit_version_comments();
+    let version: String = root().query_first("SELECT VERSION()").unwrap().unwrap();
+    assert_eq!(
+        reads,
+        !version.starts_with("8.0.") && !version.starts_with("5."),
+        "{version}"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_table_renamed_with_tables_or_by_equals_is_refused_under_the_policy_mysql() {
+    let forms: [&[&str]; 4] = [
+        &["RENAME TABLES rivet.{t} TO rivet.{t}_old", RECREATED],
+        &["ALTER TABLE rivet.{t} RENAME = rivet.{t}_old", RECREATED],
+        &[
+            GHOST_WITH_NM,
+            "RENAME TABLES rivet.{t} TO rivet.{t}_old, rivet.{t}_new TO rivet.{t}",
+        ],
+        &[
+            "/*!80000 RENAME tables rivet.{t} TO rivet.{t}_old */",
+            RECREATED,
+        ],
+    ];
+    let cases: Vec<_> = forms
+        .iter()
+        .map(|f| (true, *f, REFUSED_UNDECODABLE))
+        .collect();
+    backlogs_end_as("cg_rnt", &cases);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_drop_with_tables_is_refused_for_a_captured_table_and_met_as_before_for_another_mysql() {
+    backlogs_end_as(
+        "cg_dpt",
+        &[
+            (
+                false,
+                &["DROP TABLES IF EXISTS rivet.{t}", RECREATED_PLAIN],
+                REFUSED_TRUNCATED,
+            ),
+            (
+                false,
+                &[
+                    UPDATED_BEFORE,
+                    "CREATE TABLE rivet.{t}_old (id INT PRIMARY KEY)",
+                    "DROP TABLES rivet.{t}_old",
+                    UPDATED_AFTER,
+                ],
+                BOTH_DELIVERED,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn alters_and_renames_that_move_no_captured_table_are_met_as_before_under_the_policy_mysql() {
+    backlogs_end_as(
+        "cg_rnn",
+        &[(
+            true,
+            &[
+                UPDATED_BEFORE,
+                "ALTER TABLE rivet.{t} ADD INDEX ix_name (name)",
+                "ALTER TABLE rivet.{t} RENAME KEY ix_name TO ix_other",
+                "ALTER TABLE rivet.{t} COMMENT = 'x', RENAME INDEX ix_other TO ix_third",
+                "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY)",
+                "RENAME TABLES rivet.{t}_new TO rivet.{t}_old",
+                UPDATED_AFTER,
+            ],
+            BOTH_DELIVERED,
+        )],
+    );
+}
+
+const DISTINCT_UPPER: &str =
+    "CREATE TABLE rivet.{T} (id INT PRIMARY KEY, name VARCHAR(20), pass VARCHAR(20))";
+
+type FoldCase = (
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+);
+
+fn another_case_ends_as(label: &str, folded_verdict: &'static str, cases: &[FoldCase]) {
+    let folded = the_server_folds_names();
+    let owned: Vec<(bool, Vec<&str>, &str)> = cases
+        .iter()
+        .map(|(mid, tail_folded, tail_distinct)| {
+            let mut steps = vec![UPDATED_BEFORE];
+            if !folded {
+                steps.push(DISTINCT_UPPER);
+            }
+            steps.push(mid);
+            steps.extend_from_slice(if folded { tail_folded } else { tail_distinct });
+            let want = if folded {
+                folded_verdict
+            } else {
+                BOTH_DELIVERED
+            };
+            (true, steps, want)
+        })
+        .collect();
+    let borrowed: Vec<(bool, &[&str], &str)> = owned
+        .iter()
+        .map(|(p, steps, want)| (*p, steps.as_slice(), *want))
+        .collect();
+    backlogs_end_as(label, &borrowed);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_table_renamed_in_another_case_is_refused_exactly_when_the_server_folds_names_on_this_server_mysql()
+ {
+    another_case_ends_as(
+        "cg_foldr",
+        REFUSED_UNDECODABLE,
+        &[
+            (
+                "RENAME TABLE rivet.{T} TO rivet.{t}_old",
+                &[RECREATED, UPDATED_AFTER],
+                &[UPDATED_AFTER],
+            ),
+            (
+                "ALTER TABLE rivet.{T} ADD COLUMN extra INT, RENAME TO rivet.{t}_old",
+                &[RECREATED, UPDATED_AFTER],
+                &[UPDATED_AFTER],
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_in_another_case_is_refused_exactly_when_the_server_folds_names_on_this_server_mysql()
+ {
+    another_case_ends_as(
+        "cg_foldc",
+        REFUSED_UNDECODABLE,
+        &[(
+            "ALTER TABLE rivet.{T} RENAME COLUMN name TO nm",
+            &[UPDATED_AFTER_AS_NM],
+            &[UPDATED_AFTER],
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_truncate_or_drop_in_another_case_is_refused_exactly_when_the_server_folds_names_on_this_server_mysql()
+ {
+    another_case_ends_as(
+        "cg_foldt",
+        REFUSED_TRUNCATED,
+        &[
+            ("TRUNCATE rivet.{T}", &[UPDATED_AFTER], &[UPDATED_AFTER]),
+            (
+                "DROP TABLE rivet.{T}",
+                &[RECREATED_PLAIN, UPDATED_AFTER],
+                &[UPDATED_AFTER],
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_statement_write_in_another_case_is_refused_exactly_when_the_server_folds_names_on_this_server_mysql()
+ {
+    another_case_ends_as(
+        "cg_folds",
+        REFUSED_UNDECODABLE,
+        &[(
+            "SET SESSION binlog_format = 'STATEMENT'",
+            &[
+                "UPDATE rivet.{T} SET name = 'stmt' WHERE id = 2",
+                "SET SESSION binlog_format = 'ROW'",
+                UPDATED_AFTER,
+            ],
+            &[
+                "UPDATE rivet.{T} SET name = 'stmt' WHERE id = 2",
+                "SET SESSION binlog_format = 'ROW'",
+                UPDATED_AFTER,
+            ],
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_schema_spelled_in_another_case_is_refused_when_the_server_folds_names_on_this_server_mysql() {
+    if !the_server_folds_names() {
+        return;
+    }
+    backlogs_end_as(
+        "cg_foldsc",
+        &[(
+            true,
+            &[
+                UPDATED_BEFORE,
+                "RENAME TABLE RIVET.{t} TO RIVET.{t}_old",
+                RECREATED,
+                UPDATED_AFTER,
+            ],
+            REFUSED_UNDECODABLE,
+        )],
+    );
+}
+
+const HIDDEN_BACKSLASH: &str =
+    "ALTER TABLE rivet.{t} COMMENT = '\u{801}\\', RENAME COLUMN name TO nm";
+const HIDDEN_BACKSLASH_BIG5: &str =
+    "ALTER TABLE rivet.{t} COMMENT = '\u{861}\\', RENAME COLUMN name TO nm";
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_after_a_multibyte_character_ending_in_a_backslash_is_refused_mysql() {
+    let cases: Vec<(String, &str)> = ["gbk", "gb18030", "sjis", "cp932"]
+        .iter()
+        .map(|cs| (format!("SET NAMES {cs}"), HIDDEN_BACKSLASH))
+        .chain([("SET NAMES big5".to_string(), HIDDEN_BACKSLASH_BIG5)])
+        .collect();
+    let steps: Vec<[&str; 4]> = cases
+        .iter()
+        .map(|(set, alter)| [set.as_str(), UPDATED_BEFORE, *alter, UPDATED_AFTER_AS_NM])
+        .collect();
+    let borrowed: Vec<(bool, &[&str], &str)> = steps
+        .iter()
+        .map(|s| (true, &s[..], REFUSED_UNDECODABLE))
+        .collect();
+    backlogs_end_as("cg_mb", &borrowed);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_quote_closed_after_a_multibyte_character_ending_in_a_backslash_is_not_refused_mysql() {
+    let cases: Vec<(String, &str)> = [
+        ("sjis", "\u{801}"),
+        ("cp932", "\u{801}"),
+        ("gb18030", "\u{801}"),
+        ("big5", "\u{861}"),
+    ]
+    .iter()
+    .map(|(cs, ch)| {
+        (
+            format!("SET NAMES {cs}"),
+            if *ch == "\u{861}" {
+                "ALTER TABLE rivet.{t} COMMENT = '\u{861}\\', ADD COLUMN extra INT"
+            } else {
+                "ALTER TABLE rivet.{t} COMMENT = '\u{801}\\', ADD COLUMN extra INT"
+            },
+        )
+    })
+    .collect();
+    let steps: Vec<[&str; 4]> = cases
+        .iter()
+        .map(|(set, alter)| [set.as_str(), UPDATED_BEFORE, *alter, UPDATED_AFTER])
+        .collect();
+    let borrowed: Vec<(bool, &[&str], &str)> = steps
+        .iter()
+        .map(|s| (true, &s[..], BOTH_DELIVERED))
+        .collect();
+    backlogs_end_as("cg_mbc", &borrowed);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn statements_in_a_multibyte_client_character_set_are_met_as_before_under_the_policy_mysql() {
+    backlogs_end_as(
+        "cg_mbn",
+        &[
+            (
+                true,
+                &[
+                    "SET NAMES gbk",
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.{t} COMMENT = '\u{801}\\', ADD COLUMN extra INT",
+                    UPDATED_AFTER,
+                ],
+                BOTH_DELIVERED,
+            ),
+            (
+                true,
+                &[
+                    "SET NAMES gbk",
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.{t} RENAME COLUMN name TO nm",
+                    UPDATED_AFTER_AS_NM,
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                true,
+                &[
+                    "SET NAMES utf8mb4",
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.{t} COMMENT = '\u{801}', ADD COLUMN extra INT",
                     UPDATED_AFTER,
                 ],
                 BOTH_DELIVERED,

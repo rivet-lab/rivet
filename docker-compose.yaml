@@ -285,8 +285,7 @@ services:
       retries: 30
 
   mysql-cdc:
-    # Version-matrix knob (staff class #3): nightly runs the CDC
-    # conformance lane against other tags via MYSQL_CDC_TAG.
+    # Version-matrix knobs: MYSQL_CDC_TAG (server tag) and MYSQL_CDC_LCTN (lower_case_table_names).
     image: mysql:${MYSQL_CDC_TAG:-8.0}
     profiles: ["cdc"]
     # binlog is ON by default in MySQL 8 (ROW format); set a server id and grant
@@ -300,6 +299,7 @@ services:
       # writer pools + gremlins + grant tests) — same environment-ceiling
       # class as PG max_replication_slots.
       - "--max-connections=400"
+      - "--lower-case-table-names=${MYSQL_CDC_LCTN:-0}"
       # FULL puts column NAMES into TABLE_MAP optional metadata (8.0.1+); rivet
       # refuses MINIMAL (MySQL's own default), which maps values by position.
       - "--loose-binlog-row-metadata=FULL" # loose: 5.7 (the scout lane) has no such variable
