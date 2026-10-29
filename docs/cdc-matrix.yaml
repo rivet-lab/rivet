@@ -231,6 +231,14 @@ scenarios:
     mongo:    { test: mongo_cdc_collection_switched_to_another_over_its_baseline_is_refused_and_switched_back_continues }
     oracle:   { test: oracle_cdc_table_switched_to_another_over_its_baseline_is_refused_and_switched_back_continues }
 
+  - id: cdc_mysql_statement_read_as_the_server_reads_it
+    what: "under `source.columns_from: grants` a MySQL binlog statement is decided on the text the server read: 5 or 6 digit version comments, `RENAME TABLES`, `ALTER ... RENAME = t2`, `DROP TABLES`, names compared case-insensitively when the server folds them (lower_case_table_names 1 or 2), and a multibyte client character set whose trail byte is a backslash; `RENAME INDEX/KEY/COLUMN` are not table renames"
+    postgres: { na: "no statement text in the logical stream: DDL is not decoded from WAL, so there is no statement for rivet to read" }
+    mysql:    { test: a_table_renamed_with_tables_or_by_equals_is_refused_under_the_policy_mysql }
+    mssql:    { na: "no statement text in the capture: the change tables carry rows, not the DDL that shaped them" }
+    mongo:    { na: "no statement text in the change stream: a rename arrives as a `rename` event, not as SQL" }
+    oracle:   { na: "`columns_from: grants` is enforced on MySQL sources only and refused at config load on every other engine (rivet-lab/rivet#711), so no grants policy reads an Oracle statement" }
+
   # ── Harm / operational-cost contracts (the price CDC charges the source) ──────
   - id: cdc_drain_releases_pinned_wal
     what: "the disk-fill harm: an un-consumed logical slot pins WAL (and holds catalog_xmin, blocking vacuum); a bounded drain must advance confirmed_flush past the drained span so pg_wal_lsn_diff(current, confirmed_flush_lsn) collapses (restart_lsn / catalog_xmin follow at the next checkpoint). Oracle: the server's pg_replication_slots, not rivet's counters"
