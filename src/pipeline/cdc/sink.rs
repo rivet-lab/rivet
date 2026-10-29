@@ -563,16 +563,15 @@ pub(crate) fn run_to_files(
                 yielded_this_pass += 1;
                 txn_seq.stamp(&mut ev);
                 // The commit boundary is a property of the STREAM, not of any routed
-                // table — record it BEFORE the routing filter. MySQL marks only the
+                // table — record it for every event, whatever the routing filter does with
+                // it, and after the event is buffered. MySQL marks only the
                 // LAST event of a transaction committed; if that event lands on an
                 // uncaptured table (audit-log-written-last is a common ORM shape),
                 // filtering first would drop the boundary, stall the checkpoint
                 // forever, and duplicate the captured rows on every scheduler cycle.
                 let committed = ev.committed;
-                if committed {
-                    last_commit = Some(ev.position.clone());
-                    unacked_commit = true;
-                }
+                let commit_at = committed.then(|| ev.position.clone());
+                let mut buffered = false;
                 // Routing is a BLOCK, not a `continue`: the soft cap below must run
                 // for every event, because a commit boundary is a STREAM property
                 // that can land on an UNCAPTURED table (the `commit_boundary_on_an_
@@ -668,11 +667,18 @@ pub(crate) fn run_to_files(
                         total_rows += 1;
                         emitted += 1;
                     }
-                    if policy.should_roll(total_rows, total_bytes.bytes(), committed) {
-                        roll_all(&mut sinks, stream, &run, &last_commit, &mut unacked_commit)?;
-                        total_rows = 0;
-                        total_bytes.reset();
-                    }
+                    buffered = true;
+                }
+                // Recorded AFTER the event is buffered: a roll between the record and the push
+                // (the column-added roll above) would checkpoint and ack past an unwritten row.
+                if let Some(at) = commit_at {
+                    last_commit = Some(at);
+                    unacked_commit = true;
+                }
+                if buffered && policy.should_roll(total_rows, total_bytes.bytes(), committed) {
+                    roll_all(&mut sinks, stream, &run, &last_commit, &mut unacked_commit)?;
+                    total_rows = 0;
+                    total_bytes.reset();
                 }
                 // SOFT cap, judged at the COMMIT BOUNDARY — the same treatment
                 // `should_roll` gives every other budget. Judged per event, the cap
@@ -4295,6 +4301,142 @@ mod tests {
             (0, 0),
             "nothing is acknowledged past the change the run could not place"
         );
+    }
+
+    /// A stream that fails once its events are spent: the run stopped right after what it read.
+    struct StopStream(FakeStream);
+    impl ChangeStream for StopStream {
+        fn engine(&self) -> CdcEngine {
+            CdcEngine::Postgres
+        }
+        fn next_change(&mut self) -> Option<Result<ChangeEvent>> {
+            self.0
+                .next_change()
+                .or_else(|| Some(Err(anyhow::anyhow!("stopped"))))
+        }
+        fn ack(&mut self, position: &Position) -> Result<()> {
+            self.0.ack(position)
+        }
+    }
+
+    /// An insert of `id` carrying the column `c`, which the run's schema lacks.
+    fn insert_with_c(id: i64, committed: bool) -> ChangeEvent {
+        let mut e = insert(id);
+        e.committed = committed;
+        e.after = Some(vec![RivetValue::Int(id), RivetValue::Bytes(b"x".to_vec())]);
+        e.image_names = Some(std::sync::Arc::from(vec!["v".to_string(), "c".to_string()]));
+        e
+    }
+
+    fn grown_columns() -> Vec<TypeMapping> {
+        let mut grown = int_col();
+        grown.push(TypeMapping {
+            column_name: "c".into(),
+            source_native_type: "varchar".into(),
+            rivet_type: crate::types::RivetType::String,
+            arrow_type: Some(DataType::Utf8),
+            ..int_col().remove(0)
+        });
+        grown
+    }
+
+    /// One run over `events` that re-reads the catalog when `c` appears, then ends by `stop`
+    /// (`Err` after the last event) or cleanly. Returns the source ids, the ids in parts, the
+    /// checkpoint's lsn and the positions acked.
+    fn reschema_run(
+        events: Vec<ChangeEvent>,
+        rollover: usize,
+        stop: bool,
+    ) -> (Vec<i64>, Vec<i64>, Option<String>, Vec<String>) {
+        let (dir, ck_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (dest, cols, ck) = (local_dest(&dir), int_col(), ck_dir.path().join("ck.json"));
+        let source: Vec<i64> = events
+            .iter()
+            .map(|e| match &e.after.as_ref().unwrap()[0] {
+                RivetValue::Int(i) => *i,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let mut config = cfg(dest.as_ref(), &cols, FormatType::Parquet, rollover);
+        config.checkpoint = Some(ck.clone());
+        let grown = grown_columns();
+        config.reschema = Some(Box::new(move |_: &str| Ok(grown.clone())));
+        let fake = FakeStream {
+            events: events.into(),
+            acked: Vec::new(),
+        };
+        let (acked, result) = if stop {
+            let mut s = StopStream(fake);
+            let (_, r) = run_to_files(&mut s, config);
+            (s.0.acked, r)
+        } else {
+            let mut s = fake;
+            let (_, r) = run_to_files(&mut s, config);
+            (s.acked, r)
+        };
+        assert_eq!(result.is_err(), stop, "{result:?}");
+        let lsn = |p: &Position| p.0.get("lsn").and_then(|v| v.as_str()).unwrap().to_string();
+        let mut delivered: Vec<i64> = part_rows(dir.path()).into_iter().map(|r| r.1).collect();
+        delivered.sort();
+        (
+            source,
+            delivered,
+            Position::load(&ck).unwrap().map(|p| lsn(&p)),
+            acked.iter().map(lsn).collect(),
+        )
+    }
+
+    /// The roll a new column forces closes what is buffered; it may never checkpoint or ack the
+    /// event that caused it, which is not yet written. A stop right after it must lose nothing.
+    #[test]
+    fn a_roll_for_an_added_column_never_checkpoints_the_event_that_caused_it() {
+        let shapes: Vec<(&str, Vec<ChangeEvent>)> = vec![
+            (
+                "trigger after a buffered commit",
+                vec![insert(1), insert_with_c(2, true)],
+            ),
+            ("trigger is the first event", vec![insert_with_c(1, true)]),
+            (
+                "trigger after two commits",
+                vec![insert(1), insert(2), insert_with_c(3, true)],
+            ),
+        ];
+        for (shape, events) in shapes {
+            for rollover in [100, 1] {
+                let (source, delivered, ck, acked) = reschema_run(events.clone(), rollover, true);
+                for id in source.iter().filter(|id| !delivered.contains(id)) {
+                    let at = format!("{id:08X}");
+                    assert!(
+                        ck.as_ref().is_none_or(|c| *c < at) && acked.iter().all(|a| *a < at),
+                        "{shape} (rollover {rollover}): row {id} is in no part but the checkpoint \
+                         {ck:?} / acks {acked:?} are at or past it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// What the column-added roll did right before stays: a trigger inside a transaction, and a
+    /// run that ends clean, end on the same checkpoint with every row in a part.
+    #[test]
+    fn a_roll_for_an_added_column_leaves_a_clean_run_and_a_mid_transaction_trigger_as_they_were() {
+        let (source, delivered, ck, acked) = reschema_run(
+            vec![insert(1), insert_with_c(2, false), insert_with_c(3, true)],
+            100,
+            false,
+        );
+        assert_eq!((source, delivered), (vec![1, 2, 3], vec![1, 2, 3]));
+        assert_eq!(ck.as_deref(), Some("00000003"));
+        assert_eq!(acked, vec!["00000001", "00000003"]);
+
+        let (_, delivered, ck, acked) = reschema_run(
+            vec![insert(1), insert_with_c(2, true), insert_with_c(3, true)],
+            100,
+            false,
+        );
+        assert_eq!(delivered, vec![1, 2, 3]);
+        assert_eq!(ck.as_deref(), Some("00000003"));
+        assert_eq!(acked.last().map(String::as_str), Some("00000003"));
     }
 
     #[test]
