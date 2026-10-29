@@ -3707,6 +3707,26 @@ seeds:
       lib:
         cells: ["lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
 
+  - name: reserved-column-checked-on-the-unpinned-plan-only
+    class: the refusal of a source column named like one rivet owns in a delta load's tables is raised only on the path that has no recorded run to type the plan from, so the normal load after a run loads the colliding column
+    history: "2026-10-29 Snowflake bughunt F1 - `__op` and `__is_deleted` source columns passed a pinned load on Snowflake and BigQuery, exit 0, and a compact deleted live rows"
+    scope: source
+    patch: reserved-column-checked-on-the-unpinned-plan-only/shared.patch
+    engines:
+      postgres:
+        cells: [reserved_column_is_refused_into_clickhouse_postgres]
+      mysql:
+        cells: [reserved_column_is_refused_into_clickhouse_mysql]
+      mssql:
+        cells: [reserved_column_is_refused_into_clickhouse_mssql]
+      mongo:
+        na: "the load driver never reads the source engine: one code path, graded by the lib cell and the postgres/mysql cells"
+      oracle:
+        na: "the load driver never reads the source engine: one code path, graded by the lib cell and the postgres/mysql cells"
+      lib:
+        cells:
+          - "lib:a_plan_pinned_to_its_run_refuses_a_reserved_source_column"
+
   - name: columns-from-grants-accepted-off-mysql
     class: "`source.columns_from: grants` is accepted on a PostgreSQL, SQL Server, Oracle or MongoDB source, which then reads and delivers every column of a row: the operator who wrote the key believes hidden columns are not delivered"
     history: "found reviewing PR #719 (2026-10-28): the refusal was only reached for MongoDB-shaped validation and never on PostgreSQL, SQL Server or Oracle; RED from this patch: `rivet run` exits 0 on a PostgreSQL config with `columns_from: grants`"
