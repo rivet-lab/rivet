@@ -91,13 +91,16 @@ impl SnowflakeLoader {
     /// The `COPY` transform projection: a `VARIANT` column is parsed with
     /// `PARSE_JSON` (a plain `COPY` would leave it a string), everything else is
     /// passed through `$1:col` (the path key preserves the Parquet field case)
-    /// and coerced by the target column's type.
+    /// and coerced by the target column's type. The delete flag is `FALSE` for a row the
+    /// file does not flag: a baseline staged without the column must not land NULL.
     fn build_copy_select(specs: &[TargetColumnSpec]) -> String {
         specs
             .iter()
             .map(|s| {
                 let path = format!("$1:{}", s.column_name);
-                if needs_parse_json(s) {
+                if s.column_name == crate::load::cdc::DELETE_FLAG_COLUMN {
+                    format!("COALESCE({path}::BOOLEAN, FALSE)")
+                } else if needs_parse_json(s) {
                     format!("PARSE_JSON({path})")
                 } else if s.target_type == TargetType::Snowflake(SfType::Binary) {
                     format!("{path}::BINARY")
@@ -989,6 +992,18 @@ mod tests {
         ];
         let sel = SnowflakeLoader::build_copy_select(&specs);
         assert_eq!(sel, "$1:id, PARSE_JSON($1:meta), $1:created");
+    }
+
+    #[test]
+    fn the_delete_flag_is_false_for_a_row_the_file_does_not_flag() {
+        let specs = [
+            spec("id", SfType::NumberPs(38, 0)),
+            spec("__is_deleted", SfType::Boolean),
+        ];
+        assert_eq!(
+            SnowflakeLoader::build_copy_select(&specs),
+            "$1:id, COALESCE($1:__is_deleted::BOOLEAN, FALSE)"
+        );
     }
 
     #[test]
