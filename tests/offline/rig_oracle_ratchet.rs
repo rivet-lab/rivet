@@ -32,7 +32,8 @@ use std::path::{Path, PathBuf};
 // 24 -> 21 (2026-10-15): the oracle reads a mixed-type MongoDB `_id` (pymongo, canonical extended JSON), so the three heterogeneous-`_id` full scans are graded.
 // 21 -> 22 (2026-10-21, #675): a bare MySQL CDC name only another database holds; the oracle reads the bare name in the connection database, so the cell reads the parts itself.
 // 22 -> 26 (2026-10-29, #719): column-grants cells the oracle cannot grade (a bare name another database holds, the generated invisible key, a DDL in the backlog, the grant changed between two reads); closes when the oracle reads the account's columns.
-const NO_ORACLE_CEILING: usize = 26; // ratchet-pin: no-oracle-opt-outs
+// 26 -> 27 (2026-10-29): the reserved-source-column cells load a `mode: full` remedy whose table holds a source column called `__is_deleted`; the warehouse oracle filters on that name, so the cell reads the rows through the second client.
+const NO_ORACLE_CEILING: usize = 27; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave: `.a_failed_run_may_leave(` and a raw run's `FAILED_RUN_LEAVES_ENV`.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).

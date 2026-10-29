@@ -245,6 +245,8 @@ mod live_pooled_reads;
 mod live_quality_gate;
 #[path = "live/live_reconcile_repair.rs"]
 mod live_reconcile_repair;
+#[path = "live/live_reserved_column.rs"]
+mod live_reserved_column;
 #[path = "live/live_resume.rs"]
 mod live_resume;
 #[path = "live/live_retry_and_faults.rs"]
