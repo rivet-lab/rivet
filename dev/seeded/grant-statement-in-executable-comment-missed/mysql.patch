@@ -1,13 +1,11 @@
-diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 601cd027..cc0e8a74 100644
---- a/src/source/mysql/cdc.rs
-+++ b/src/source/mysql/cdc.rs
-@@ -2204,7 +2204,7 @@ fn executable_text(sql: &str) -> String {
-         out.push_str(&rest[..start]);
-         out.push(' ');
-         let body = &rest[start + 2..];
--        let executable = body.starts_with('!');
-+        let executable = false && body.starts_with('!');
-         let (text, after) = match body.find("*/") {
-             Some(end) => (&body[..end], &body[end + 2..]),
-             None => (body, ""),
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -86,7 +86,7 @@
+                 .unwrap_or(rest.len());
+             out.push(Tok::Blank(&rest[..n]));
+             i += n;
+-        } else if rest.starts_with("/*!") {
++        } else if false && rest.starts_with("/*!") {
+             executable += 1;
+             let digits = b[i + 3..].iter().take_while(|d| d.is_ascii_digit()).count();
+             out.push(Tok::Blank(" "));

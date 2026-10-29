@@ -3750,7 +3750,7 @@ seeds:
         na: "the grant-change detector of a binlog stream exists on MySQL only: `columns_from: grants` is refused on PostgreSQL at config load (columns_from_grants_is_refused_by_every_command_postgres)"
       mysql:
         patch: grant-statement-in-executable-comment-missed/mysql.patch
-        cells: [a_revoke_written_as_an_executable_comment_stops_an_open_run_too_mysql, "lib:privilege_statements_are_told_from_every_other_statement"]
+        cells: [a_revoke_written_as_an_executable_comment_stops_an_open_run_too_mysql, a_revoke_behind_a_line_comment_in_an_executable_comment_stops_an_open_run_mysql, "lib:privilege_statements_are_told_from_every_other_statement"]
       mssql:
         na: "the grant-change detector of a binlog stream exists on MySQL only: `columns_from: grants` is refused on SQL Server at config load (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
@@ -3945,6 +3945,40 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: statement-line-comment-read-as-text
+    class: "a `-- ` or `#` line comment in a binlog statement is read as statement text, so a column rename or a privilege statement written behind one is missed: the run exits 0 with the renamed column's later changes lost, or keeps delivering a revoked column"
+    history: "PR #719 final verification (2026-10-29); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
+    scope: source
+    engines:
+      mysql:
+        patch: statement-line-comment-read-as-text/mysql.patch
+        cells: [a_column_renamed_after_a_dash_comment_is_refused_not_silently_dropped_mysql, a_column_renamed_after_a_hash_comment_is_refused_not_silently_dropped_mysql, a_revoke_behind_a_line_comment_in_an_executable_comment_stops_an_open_run_mysql, "lib:every_comment_kind_is_a_blank_and_quoted_text_is_kept_as_written"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: statement-ansi-quoted-name-read-as-text
+    class: "a double-quoted name in a binlog statement (an identifier under `ANSI_QUOTES`) is read as a string, so a column rename written with double-quoted names is missed: the run exits 0 with the renamed column's later changes lost"
+    history: "PR #719 final verification (2026-10-29); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
+    scope: source
+    engines:
+      mysql:
+        patch: statement-ansi-quoted-name-read-as-text/mysql.patch
+        cells: [a_column_renamed_with_ansi_quoted_names_is_refused_mysql, a_column_changed_with_ansi_quoted_names_is_refused_mysql, "lib:a_quoted_name_is_an_identifier_only_when_closed_and_has_its_doubled_quotes_undone"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
   - name: column-rename-in-an-executable-comment-missed
     class: "a column rename written as an executable comment (`/*!80000 ALTER TABLE t RENAME COLUMN a TO b */`) is read as a comment by the rename refusal, so the run exits 0 and the rows around the rename are dropped or nulled"
     history: "PR #719 review round 2 (2026-10-29); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
@@ -3952,7 +3986,7 @@ seeds:
     engines:
       mysql:
         patch: column-rename-in-an-executable-comment-missed/mysql.patch
-        cells: [a_column_renamed_in_an_executable_comment_is_refused_not_silently_dropped_mysql, "lib:every_scan_of_a_statement_reads_an_executable_comment_as_the_server_runs_it"]
+        cells: [a_column_renamed_in_an_executable_comment_is_refused_not_silently_dropped_mysql, a_column_renamed_beside_a_comment_in_an_executable_comment_is_refused_mysql, "lib:every_scan_of_a_statement_reads_an_executable_comment_as_the_server_runs_it"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:

@@ -624,6 +624,14 @@ fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_revoke_behind_a_line_comment_in_an_executable_comment_stops_an_open_run_mysql() {
+    a_revoke_stops_an_open_run_before_the_column_leaves("cg_revl", |table, user| {
+        format!("/*!80000 -- note\nREVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_revoke_written_as_an_executable_comment_stops_an_open_run_too_mysql() {
     a_revoke_stops_an_open_run_before_the_column_leaves("cg_revx", |table, user| {
         format!("/*!80000 REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
@@ -1187,7 +1195,7 @@ fn anchored_under_the_policy(label: &str) -> (String, MysqlCdcTable, GrantUser, 
 /// A column renamed in the backlog by `rename(table)`: the run is refused by code and the re-baseline delivers the column under its new name.
 fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped(
     label: &str,
-    rename: fn(&str) -> String,
+    rename: fn(&str) -> Vec<String>,
 ) {
     let (table, _guard, user, rig) = anchored_under_the_policy(label);
     let mut rig = rig.a_failed_run_may_leave(
@@ -1195,11 +1203,14 @@ fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped(
         "the run observes the readable columns at its start, and a rename leaves the old column ungranted: that observed schema is stored before the refusal at the statement (known: src/state/schema.rs stores the baseline of a failed run)",
     );
     let mut c = root();
-    for sql in [
-        format!("UPDATE rivet.{table} SET name = 'ann-before' WHERE id = 1"),
-        rename(&table),
-        format!("UPDATE rivet.{table} SET nm = 'ann-after' WHERE id = 1"),
-    ] {
+    let steps = std::iter::once(format!(
+        "UPDATE rivet.{table} SET name = 'ann-before' WHERE id = 1"
+    ))
+    .chain(rename(&table))
+    .chain([format!(
+        "UPDATE rivet.{table} SET nm = 'ann-after' WHERE id = 1"
+    )]);
+    for sql in steps {
         c.query_drop(sql).unwrap();
     }
     let before = checkpoint_at(&rig);
@@ -1247,7 +1258,7 @@ fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped(
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql() {
     a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_ren", |t| {
-        format!("ALTER TABLE rivet.{t} RENAME COLUMN name TO nm")
+        vec![format!("ALTER TABLE rivet.{t} RENAME COLUMN name TO nm")]
     });
 }
 
@@ -1255,7 +1266,61 @@ fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql() {
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_column_renamed_in_an_executable_comment_is_refused_not_silently_dropped_mysql() {
     a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_renx", |t| {
-        format!("/*!80000 ALTER TABLE rivet.{t} RENAME COLUMN name TO nm */")
+        vec![format!(
+            "/*!80000 ALTER TABLE rivet.{t} RENAME COLUMN name TO nm */"
+        )]
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_after_a_dash_comment_is_refused_not_silently_dropped_mysql() {
+    a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_rend", |t| {
+        vec![format!(
+            "ALTER TABLE rivet.{t} -- c\nRENAME COLUMN name TO nm"
+        )]
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_after_a_hash_comment_is_refused_not_silently_dropped_mysql() {
+    a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_renh", |t| {
+        vec![format!(
+            "ALTER TABLE rivet.{t} # c\nRENAME COLUMN name TO nm"
+        )]
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_beside_a_comment_in_an_executable_comment_is_refused_mysql() {
+    a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_renn", |t| {
+        vec![format!(
+            "/*!80000 ALTER TABLE rivet.{t} /* c */ RENAME COLUMN name TO nm */"
+        )]
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_with_ansi_quoted_names_is_refused_mysql() {
+    a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_rena", |t| {
+        vec![
+            "SET SESSION sql_mode = 'ANSI_QUOTES'".to_string(),
+            format!("ALTER TABLE \"rivet\".\"{t}\" RENAME COLUMN \"name\" TO \"nm\""),
+        ]
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_changed_with_ansi_quoted_names_is_refused_mysql() {
+    a_column_renamed_in_the_backlog_is_refused_not_silently_dropped("cg_renc", |t| {
+        vec![
+            "SET SESSION sql_mode = 'ANSI_QUOTES'".to_string(),
+            format!("ALTER TABLE rivet.{t} CHANGE \"name\" \"nm\" VARCHAR(20)"),
+        ]
     });
 }
 

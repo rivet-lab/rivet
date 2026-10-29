@@ -1,0 +1,12 @@
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -64,6 +64,9 @@
+ 
+ /// Whether `rest` opens a line comment: `#`, or `--` followed by whitespace, a control character or the end.
+ fn line_comment_starts(rest: &str) -> bool {
++    if rest.len() > 0 {
++        return false;
++    }
+     rest.starts_with('#')
+         || rest.strip_prefix("--").is_some_and(|after| {
+             after

@@ -29,6 +29,7 @@ use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
+use crate::source::mysql::statement::{Tok, executable_text, tokens};
 
 /// A blocking iterator of canonical [`ChangeEvent`]s over a MySQL binlog stream.
 ///
@@ -2066,55 +2067,19 @@ enum AlterToken {
     Punct(char),
 }
 
-/// `sql` cut into [`AlterToken`]s; `None` for an unterminated backtick or string.
+/// `sql` cut into [`AlterToken`]s; `None` for an unterminated quote.
 fn alter_tokens(sql: &str) -> Option<Vec<AlterToken>> {
     let mut out = Vec::new();
-    let mut chars = sql.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            c if c.is_whitespace() => {}
-            '`' => {
-                let mut name = String::new();
-                loop {
-                    match chars.next()? {
-                        '`' if chars.peek() == Some(&'`') => {
-                            chars.next();
-                            name.push('`');
-                        }
-                        '`' => break,
-                        ch => name.push(ch),
-                    }
-                }
-                out.push(AlterToken::Word(name, true));
-            }
-            '\'' | '"' => {
-                loop {
-                    match chars.next()? {
-                        '\\' => {
-                            chars.next()?;
-                        }
-                        ch if ch == c && chars.peek() == Some(&c) => {
-                            chars.next();
-                        }
-                        ch if ch == c => break,
-                        _ => {}
-                    }
-                }
-                out.push(AlterToken::Text);
-            }
-            c if c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii() => {
-                let mut word = String::from(c);
-                while let Some(&n) = chars.peek() {
-                    if n.is_alphanumeric() || n == '_' || n == '$' || !n.is_ascii() {
-                        word.push(n);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                out.push(AlterToken::Word(word, false));
-            }
-            c => out.push(AlterToken::Punct(c)),
+    for tok in tokens(sql) {
+        match tok {
+            Tok::Blank(_) => {}
+            Tok::Word(w) => out.push(AlterToken::Word(w.to_string(), false)),
+            Tok::Punct(c) => out.push(AlterToken::Punct(c)),
+            Tok::Quoted { closed: false, .. } => return None,
+            quoted => out.push(match quoted.identifier() {
+                Some(name) => AlterToken::Word(name, true),
+                None => AlterToken::Text,
+            }),
         }
     }
     Some(out)
@@ -2122,7 +2087,7 @@ fn alter_tokens(sql: &str) -> Option<Vec<AlterToken>> {
 
 /// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name; `None` for any other statement.
 pub(crate) fn column_rename_target(sql: &str, event_db: &str) -> Option<(String, String)> {
-    let tokens = alter_tokens(&executable_text(sql))?;
+    let tokens = alter_tokens(sql)?;
     let word = |i: usize, w: &str| matches!(tokens.get(i), Some(AlterToken::Word(t, false)) if t.eq_ignore_ascii_case(w));
     let mut at = 0;
     if !word(at, "alter") {
@@ -2444,30 +2409,6 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
     )
 }
 
-/// A statement text as the server executes it: `/*! */` bodies are SQL, other comments become a space.
-fn executable_text(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut rest = sql;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        out.push(' ');
-        let body = &rest[start + 2..];
-        let executable = body.starts_with('!');
-        let (text, after) = match body.find("*/") {
-            Some(end) => (&body[..end], &body[end + 2..]),
-            None => (body, ""),
-        };
-        if executable {
-            let digits = text[1..].bytes().take_while(u8::is_ascii_digit).count();
-            out.push_str(&text[1 + digits..]);
-            out.push(' ');
-        }
-        rest = after;
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Whether a pending grants re-read may wait past this event.
 fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     match data {
@@ -2487,19 +2428,23 @@ fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
 
 /// A statement that can change what an account may read.
 fn is_privilege_statement(sql: &str) -> bool {
-    let text = executable_text(sql);
-    let mut w = text.split_whitespace().map(str::to_ascii_uppercase);
-    match (
-        w.next().as_deref(),
-        w.next().as_deref(),
-        w.next().as_deref(),
-    ) {
-        (Some("GRANT" | "REVOKE"), ..) => true,
-        (Some("CREATE" | "DROP" | "ALTER" | "RENAME"), Some("USER" | "ROLE"), _) => true,
-        (Some("SET"), Some("DEFAULT"), Some("ROLE")) => true,
-        (Some("FLUSH"), Some(p), _) => p.trim_end_matches(';') == "PRIVILEGES",
-        _ => false,
-    }
+    let mut w = tokens(sql).into_iter().filter_map(|t| match t {
+        Tok::Blank(_) => None,
+        Tok::Word(w) => Some(Some(w.to_ascii_uppercase())),
+        _ => Some(None),
+    });
+    let mut next = || w.next().flatten();
+    matches!(
+        (next().as_deref(), next().as_deref(), next().as_deref()),
+        (Some("GRANT" | "REVOKE"), ..)
+            | (
+                Some("CREATE" | "DROP" | "ALTER" | "RENAME"),
+                Some("USER" | "ROLE"),
+                _
+            )
+            | (Some("SET"), Some("DEFAULT"), Some("ROLE"))
+            | (Some("FLUSH"), Some("PRIVILEGES"), _)
+    )
 }
 
 /// Does this QUERY event close a transaction?
@@ -2748,6 +2693,12 @@ mod tests {
             "/* xid=1 */ /* note */ GRANT r TO u",
             "/*!80000 REVOKE SELECT (pass) ON rivet.t FROM u */",
             "/*!REVOKE SELECT (pass) ON rivet.t FROM u */",
+            "/*!80000 -- note\nREVOKE SELECT (pass) ON rivet.t FROM u */",
+            "/*!80000 # note\nREVOKE SELECT (pass) ON rivet.t FROM u */",
+            "/*!80000 /* note */ REVOKE SELECT (pass) ON rivet.t FROM u */",
+            "-- note\nGRANT r TO u",
+            "# note\nGRANT r TO u",
+            "--\tnote\nGRANT r TO u",
             "/*!80000 GRANT SELECT (id) ON rivet.t TO u */",
             "/* xid=1 */ /*!50000 CREATE USER u */",
             "/*!80000 FLUSH */ PRIVILEGES",
@@ -2773,6 +2724,12 @@ mod tests {
             "/* GRANT */ UPDATE t SET a = 1",
             "/*+ SET_VAR(x=1) */ UPDATE t SET a = 1",
             "/*!80000 UPDATE t SET revoke_at = 1 */",
+            "-- GRANT r TO u\nUPDATE t SET a = 1",
+            "# GRANT r TO u\nUPDATE t SET a = 1",
+            "/*!80000 -- GRANT r TO u\nUPDATE t SET a = 1 */",
+            "'GRANT' r TO u",
+            "\"REVOKE\" x FROM u",
+            "`GRANT` r TO u",
             "/*! unterminated",
             "ГРАНТ", // allow-cyrillic
         ] {
@@ -3110,7 +3067,9 @@ mod tests {
         assert_eq!(cut("`a``"), None, "a doubled tick opens nothing new");
         assert_eq!(cut("`ab"), None);
         assert_eq!(cut("'a''b' x"), Some(vec![Text, bare("x")]));
-        assert_eq!(cut("\"a'b\" x"), Some(vec![Text, bare("x")]));
+        assert_eq!(cut("\"a'b\" x"), Some(vec![ticked("a'b"), bare("x")]));
+        assert_eq!(cut("\"a\"\"b\" x"), Some(vec![ticked("a\"b"), bare("x")]));
+        assert_eq!(cut("\"ab"), None);
         assert_eq!(cut("'a\\'b' x"), Some(vec![Text, bare("x")]));
         assert_eq!(cut("'a,b' , c"), Some(vec![Text, Punct(','), bare("c")]));
         assert_eq!(cut("'' x"), Some(vec![Text, bare("x")]));
@@ -3174,6 +3133,58 @@ mod tests {
                 "/* app */ ALTER /* x */ TABLE t /* y */ RENAME COLUMN a TO b",
                 at("shop", "t"),
             ),
+            (
+                "ALTER TABLE db.t -- c\nRENAME COLUMN name TO nm",
+                at("db", "t"),
+            ),
+            (
+                "ALTER TABLE db.t # c\nRENAME COLUMN name TO nm",
+                at("db", "t"),
+            ),
+            (
+                "ALTER TABLE db.t --\tc\nRENAME COLUMN a TO b",
+                at("db", "t"),
+            ),
+            (
+                "/*!80000 ALTER TABLE db.t /* c */ RENAME COLUMN name TO nm */",
+                at("db", "t"),
+            ),
+            (
+                "/*!80000 ALTER TABLE t -- c\nRENAME COLUMN a TO b */",
+                at("shop", "t"),
+            ),
+            (
+                "ALTER TABLE \"db\".\"t\" RENAME COLUMN name TO nm",
+                at("db", "t"),
+            ),
+            (
+                "ALTER TABLE t CHANGE \"name\" \"nm\" VARCHAR(20)",
+                at("shop", "t"),
+            ),
+            (
+                "ALTER TABLE \"o\"\"rd\" RENAME COLUMN \"a\" TO \"b\"",
+                at("shop", "o\"rd"),
+            ),
+            (
+                "ALTER TABLE \"\u{8868}\" CHANGE \"\u{540d}\" \"\u{540d}\u{524d}\" INT",
+                at("shop", "\u{8868}"),
+            ),
+            (
+                "ALTER TABLE t ADD x INT COMMENT 'a -- b', CHANGE a b INT",
+                at("shop", "t"),
+            ),
+            (
+                "ALTER TABLE t ADD x INT COMMENT '#', RENAME COLUMN a TO b",
+                at("shop", "t"),
+            ),
+            (
+                "ALTER TABLE t ADD x INT COMMENT '/*', RENAME COLUMN a TO b",
+                at("shop", "t"),
+            ),
+            (
+                "ALTER TABLE t ADD x INT COMMENT \"it's\", RENAME COLUMN a TO b",
+                at("shop", "t"),
+            ),
         ] {
             assert_eq!(column_rename_target(sql, "shop"), want, "{sql}");
         }
@@ -3188,6 +3199,12 @@ mod tests {
             "ALTER TABLE t ADD INDEX i (a, change b c)",
             "ALTER TABLE t ADD c VARCHAR(5) COMMENT 'rename column a to b'",
             "ALTER TABLE t ADD x INT /* RENAME COLUMN a TO b */",
+            "ALTER TABLE t ADD x INT -- RENAME COLUMN a TO b",
+            "ALTER TABLE t ADD x INT # RENAME COLUMN a TO b",
+            "ALTER TABLE t ADD x INT /*! -- RENAME COLUMN a TO b\n*/",
+            "ALTER TABLE t \"rename\" \"column\" a to b",
+            "ALTER TABLE t CHANGE \"a\" \"a\" INT",
+            "ALTER TABLE t ADD \"x",
             "ALTER TABLE t `rename` `column` a to b",
             "ALTER TABLE t ADD `x",
             "ALTER TABLE",
@@ -3264,7 +3281,7 @@ mod tests {
             ("/*!50000*/", "  "),
             ("/*a*//*!b*/", "  b "),
             ("/* a /* b */ c */", "  c */"),
-            ("x /*!80000 DROP", "x   DROP "),
+            ("x /*!80000 DROP", "x   DROP"),
             ("x /* y", "x  "),
             ("\u{e9}/*\u{fc}*/\u{f6}", "\u{e9} \u{f6}"),
             ("/*!80000 \u{540d} */", "  \u{540d}  "),

@@ -1,0 +1,11 @@
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -27,7 +27,7 @@
+     pub(crate) fn identifier(&self) -> Option<String> {
+         match self {
+             Tok::Quoted {
+-                quote: quote @ ('`' | '"'),
++                quote: quote @ '`',
+                 raw,
+                 closed: true,
+             } => {
