@@ -1,9 +1,9 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 53638066..8f37f86d 100644
+index d8888d2e..61b50a2d 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -1048,8 +1048,6 @@ impl MysqlChangeStream {
-         };
+@@ -1049,8 +1049,6 @@ impl MysqlChangeStream {
+         // `/`, where that is an EACCES at the exact moment the cap is crossed.
          // ONE connection for every question asked before the dump; it then dumps.
          let mut conn = connect_conn(url, tls)?;
 -        // Before the anchor is written: a refused first run leaves no checkpoint.
@@ -11,22 +11,22 @@ index 53638066..8f37f86d 100644
          let readable = Self::readable_on(&mut conn, &configured_tables, resolved_grants.is_some())?;
          if let (Some(read), Some(resolved)) = (&readable, &resolved_grants) {
              Self::refuse_grants_moved_since_resolved(&configured_tables, resolved, read)?;
-@@ -1098,9 +1096,6 @@ impl MysqlChangeStream {
+@@ -1102,9 +1100,6 @@ impl MysqlChangeStream {
          // at a part commit — so an idle bounded run (zero changes drained) would
          // otherwise leave no checkpoint, the next run would re-anchor to a newer
          // "current" position, and every change in between would be silently skipped.
--        if readable.is_none() {
+-        if !projecting {
 -            Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
 -        }
          let (file, pos) = Self::current_coordinates(&mut conn)?;
          let identity = Self::server_identity(&mut conn);
          if let Some(path) = ckpt {
-@@ -1129,6 +1124,10 @@ impl MysqlChangeStream {
+@@ -1133,6 +1128,10 @@ impl MysqlChangeStream {
              );
              Self::write_anchor(path, &file, pos, &identity)?;
          }
 +        Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
-+        if readable.is_none() {
++        if !projecting {
 +            Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
 +        }
          Self::open_on(
