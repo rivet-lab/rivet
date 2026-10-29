@@ -1,9 +1,10 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 53638066..5e2bb385 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2139,7 +2139,7 @@
+@@ -2128,7 +2128,7 @@ fn alter_tokens(sql: &str) -> Option<Vec<AlterToken>> {
  
- /// The table an `ALTER TABLE` QUERY event gives a column a new name (`RENAME COLUMN a TO b`, `CHANGE [COLUMN] a b ...`), as `(schema, table)`; `None` for any other statement.
+ /// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name; `None` for any other statement.
  pub(crate) fn column_rename_target(sql: &str, event_db: &str) -> Option<(String, String)> {
 -    let tokens = alter_tokens(&executable_text(sql))?;
 +    let tokens = alter_tokens(sql.split("/*").next().unwrap_or(""))?;

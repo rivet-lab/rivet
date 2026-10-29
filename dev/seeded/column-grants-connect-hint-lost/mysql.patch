@@ -1,10 +1,11 @@
 diff --git a/src/pipeline/job.rs b/src/pipeline/job.rs
+index c466cbba..26fd4628 100644
 --- a/src/pipeline/job.rs
 +++ b/src/pipeline/job.rs
-@@ -1931,7 +1931,7 @@
+@@ -1951,7 +1951,7 @@ fn run_export_job_inner(
+         export
      };
      let mut meta = MetaConn::open(&config.source);
-     // `columns_from: grants` plans on a connection, so a failed connect fails here, with its hint.
 -    let probe = if config.source.columns_from_grants() {
 +    let probe = if false && config.source.columns_from_grants() {
          match meta.require() {

@@ -1,10 +1,11 @@
 diff --git a/src/source/mod.rs b/src/source/mod.rs
+index f7020418..6452b656 100644
 --- a/src/source/mod.rs
 +++ b/src/source/mod.rs
-@@ -453,7 +453,7 @@
+@@ -452,7 +452,7 @@ pub(crate) fn code_a_revoked_column(
      grants_on: bool,
+     cdc_leg: bool,
  ) -> anyhow::Error {
-     let code = crate::error::codes::SOURCE_COLUMNS_UNREADABLE;
 -    if !grants_on || crate::error::code_of(&err).is_some() {
 +    if true || !grants_on || crate::error::code_of(&err).is_some() {
          return err;

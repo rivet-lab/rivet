@@ -1,11 +1,11 @@
 diff --git a/src/source/cdc/identity.rs b/src/source/cdc/identity.rs
-index eeab7c92..f0baf4be 100644
+index eb4a6278..b3a5ed71 100644
 --- a/src/source/cdc/identity.rs
 +++ b/src/source/cdc/identity.rs
-@@ -248,9 +248,12 @@ pub(crate) fn table_matches(
-     // A SQL store reads a dotted string as `schema.table` ONLY. Matching the whole string
-     // against the table first let `db.t` capture a table literally named `db.t` in another
-     // database, delivering rows of a relation the config never named.
+@@ -243,9 +243,12 @@ pub(crate) fn table_matches(
+     if engine == super::CdcEngine::Mongo {
+         return cfg == table;
+     }
 +    if cfg == table {
 +        return true;
 +    }

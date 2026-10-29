@@ -1,9 +1,10 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 53638066..6bae1306 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -1580,8 +1580,8 @@
+@@ -1569,8 +1569,8 @@ impl MysqlChangeStream {
+                 ));
              }
-             // `columns_from: grants`: a grant change is re-read where the binlog records it.
              Some(EventData::QueryEvent(qe)) if is_privilege_statement(&qe.query()) => {
 -                self.grants_pending
 -                    .get_or_insert_with(|| (self.file.clone(), log_pos));

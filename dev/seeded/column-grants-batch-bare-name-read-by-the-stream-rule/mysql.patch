@@ -1,7 +1,8 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 53638066..27c3de2e 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -712,7 +712,8 @@
+@@ -711,7 +711,8 @@ impl MysqlChangeStream {
          configured: &[String],
      ) -> Result<HashMap<String, crate::source::cdc::ReadableColumns>> {
          let own_db = Self::own_db_on(conn);
@@ -10,4 +11,4 @@ diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
 +        super::column_grants::readable_columns_of(conn, configured, &own_db, &bare)
      }
  
-     /// The grants of a `columns_from: grants` run, read ONCE on one connection before the anchor: the readable columns of each configured table, and its key (the `declared` one, else the primary key) judged readable. The snapshot legs, the stream open and the mid-run re-reads all take this value or refuse.
+     /// The grants of a `columns_from: grants` run, read once on one connection before the anchor.
