@@ -469,6 +469,9 @@ pub fn check(
         for diag in &diagnostics {
             print_diagnostic(diag);
         }
+        if config.source.columns_from_grants() {
+            println!("\n{}", crate::source::mysql::column_grants::BOUNDARY);
+        }
     } else if !show_type_report {
         // `--json` WITHOUT a type report (the CLI forces `show_type_report` on
         // under `--json`, so this only fires if `check` is called directly with

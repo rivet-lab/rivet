@@ -133,6 +133,7 @@ pub(super) fn run_cdc_export(
     export: &ExportConfig,
     state: &StateStore,
     strict: bool,
+    grants: Option<RunGrants>,
 ) -> (Result<()>, RunSummary) {
     // No-silent-config-drop: warn (don't hard-fail — a shared default may set
     // meta_columns for a mixed batch+CDC config) that the request has no effect.
@@ -235,6 +236,7 @@ pub(super) fn run_cdc_export(
         config_dir,
         meta.as_deref_mut(),
         strict,
+        grants,
     );
     let duration_ms = started.elapsed().as_millis() as i64;
     let peak_rss_mb = rss_sampler
@@ -366,9 +368,36 @@ pub(super) fn claim_checkpoint(config_path: &str, export: &ExportConfig) -> Resu
     crate::source::cdc::checkpoint_identity::claim_checkpoint(&ckpt, config, &export.name)
 }
 
-/// The snapshot legs read grants only under `columns_from: grants` and only when a leg is pending.
-fn legs_read_grants(columns_from_grants: bool, pending_legs: usize) -> bool {
-    columns_from_grants && pending_legs > 0
+/// The grants every part of a `columns_from: grants` run takes, read once before the anchor.
+pub(super) type RunGrants =
+    std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
+
+/// Read the account's grants ONCE for a `columns_from: grants` MySQL CDC run: the snapshot legs, the stream open and its re-reads all take this value or refuse. `None` without the policy. A key the account cannot read is refused here, before the anchor or any part is written.
+pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
+    if !config.source.columns_from_grants() {
+        return Ok(None);
+    }
+    let tables = match (&export.tables, &export.table) {
+        (Some(ts), _) => ts.clone(),
+        (None, Some(t)) => vec![t.clone()],
+        (None, None) => return Ok(None),
+    };
+    log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+    let declared = tables
+        .iter()
+        .filter_map(|t| {
+            crate::load::plan::effective_load(config, export, Some(t))
+                .and_then(|l| l.pk.declared())
+                .map(|k| (t.clone(), k))
+        })
+        .collect();
+    crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
+        &config.source.resolve_url()?,
+        config.source.tls.as_ref(),
+        &tables,
+        &declared,
+    )
+    .map(Some)
 }
 
 pub(super) fn initial_snapshot_pending(
@@ -376,6 +405,7 @@ pub(super) fn initial_snapshot_pending(
     export: &ExportConfig,
     state: &StateStore,
     config_dir: &std::path::Path,
+    grants: Option<&RunGrants>,
 ) -> Result<Vec<ExportConfig>> {
     let cdc = export.cdc.clone().unwrap_or_default();
     // Two ways to ask for a baseline, one step: `initial: snapshot` synthesizes the
@@ -548,17 +578,6 @@ pub(super) fn initial_snapshot_pending(
         )?;
     }
 
-    // `columns_from: grants`: each leg reads only its readable columns, refused before the anchor.
-    let readable = if legs_read_grants(config.source.columns_from_grants(), pending_idx.len()) {
-        let reads: Vec<String> = pending_idx
-            .iter()
-            .map(|&i| table_dests[i].1.clone())
-            .collect();
-        crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(&url, tls, &reads)?
-    } else {
-        std::collections::HashMap::new()
-    };
-
     // The pairing, resolved by the same function config load already admitted — so
     // a reference the run would reject cannot have reached this point, and the
     // recipe-vs-stream type conflict was refused there too (`Config::validate`).
@@ -599,7 +618,7 @@ pub(super) fn initial_snapshot_pending(
     for idx in pending_idx {
         let (label, read, snap_dcfg) = &table_dests[idx];
         let mut synth = synth_snapshot_export(export, label, read, snap_dcfg);
-        synth.table_select = readable.get(read).map(|r| r.select.clone());
+        synth.table_select = grants.and_then(|g| g.get(label)).map(|r| r.select.clone());
         if let Some(recipe) = crate::config::backfill_recipe_for(&recipes, label) {
             apply_backfill_recipe(&mut synth, recipe, export, label)?;
         }
@@ -816,6 +835,7 @@ fn run_cdc_inner(
     config_dir: &std::path::Path,
     meta: Option<&mut (dyn crate::source::Source + 'static)>,
     strict: bool,
+    grants: Option<RunGrants>,
 ) -> (Vec<crate::manifest::RunManifest>, Result<()>) {
     let url = match config.source.resolve_url() {
         Ok(u) => u,
@@ -959,7 +979,7 @@ fn run_cdc_inner(
                             .unwrap_or(crate::config::DEFAULT_MYSQL_SERVER_ID),
                         // The same strings the sink will route by — see the field's doc.
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        columns_from_grants: config.source.columns_from_grants(),
+                        resolved_grants: grants,
                     },
                     crate::config::SourceType::Postgres => CdcEngineOpts::Postgres {
                         slot: cdc
@@ -1110,13 +1130,6 @@ fn record_metric(state: &StateStore, config: &Config, export: &ExportConfig, sum
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn snapshot_legs_read_grants_only_under_the_policy_with_a_leg_pending() {
-        assert!(super::legs_read_grants(true, 1));
-        assert!(!super::legs_read_grants(true, 0));
-        assert!(!super::legs_read_grants(false, 1));
-    }
 
     /// `resolve_checkpoint`'s three cases, each named by a mutant that survived.
     ///

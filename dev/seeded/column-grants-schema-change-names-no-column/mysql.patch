@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -1635,7 +1635,7 @@
+             .map(|c| format!("`{c}`"))
+             .collect()
+     };
+-    let (gained, lost) = (missing(now, before), missing(before, now));
++    let (gained, lost) = (missing(now, before).into_iter().take(0).collect::<Vec<_>>(), missing(before, now).into_iter().take(0).collect::<Vec<_>>());
+     let mut changes = Vec::new();
+     if !gained.is_empty() {
+         changes.push(format!("gained {}", gained.join(", ")));

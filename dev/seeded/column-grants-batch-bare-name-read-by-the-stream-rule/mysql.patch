@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -712,7 +712,8 @@
+         configured: &[String],
+     ) -> Result<HashMap<String, crate::source::cdc::ReadableColumns>> {
+         let own_db = Self::own_db_on(conn);
+-        super::column_grants::readable_columns_of(conn, configured, &own_db, &HashMap::new())
++        let bare = Self::bare_name_databases(conn, &own_db, configured);
++        super::column_grants::readable_columns_of(conn, configured, &own_db, &bare)
+     }
+ 
+     /// The grants of a `columns_from: grants` run, read ONCE on one connection before the anchor: the readable columns of each configured table, and its key (the `declared` one, else the primary key) judged readable. The snapshot legs, the stream open and the mid-run re-reads all take this value or refuse.

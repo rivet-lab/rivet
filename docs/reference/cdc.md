@@ -388,7 +388,11 @@ Notes:
 #### MySQL — column grants (`source.columns_from: grants`)
 
 The binlog carries every column of a row. Under `source.columns_from: grants` rivet
-reads and delivers only the columns the account may `SELECT`, in every mode.
+reads and delivers only the columns the account may `SELECT`, in every mode. Batch reads
+are enforced by the server (the `SELECT` names only readable columns). The change stream is a
+client-side projection: the binlog carries every column of a changed row to rivet, which drops
+the unreadable ones before anything is written. That is data minimisation, not access control.
+`rivet check` prints this boundary and a change-stream run logs it at start.
 
 ```sql
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'rivet_cdc'@'%';
@@ -415,14 +419,20 @@ source:
 | Readable set | Each column is judged by the server: a `PREPARE SELECT <col>` per column, read at run start |
 | Hidden column | Never in a Parquet part, a schema, the spill, the state DB, `check --target` or the load plan |
 | Column added later | Not delivered (fail-closed) until a grant covers it and a new run starts |
+| One value per run | The readable set is read once before the anchor and shared by the snapshot legs, the stream open and the mid-run re-reads. A grant change between that read and the stream open is refused with `RIVET_SOURCE_CDC_GRANTS_CHANGED` (exit 2), never delivered as a mix of two column sets |
 | Grant change between runs | Takes effect on the next run |
+| Policy switched on or off over existing state | Takes effect on the next run, as a grant change does: the schema-drift check reports the columns that disappeared (or appeared) per `on_schema_drift`. Values already delivered stay where they are (switching on does not remove a hidden column from earlier parts or from the warehouse), and switching off does not backfill the earlier changes. Re-baseline the stream to start clean |
 | Grant change during a run | `GRANT`/`REVOKE`/user/role statement in the binlog → grants re-read; changed → `RIVET_SOURCE_CDC_GRANTS_CHANGED`, nothing past it delivered; re-run resumes under the new grants |
 | Grant statement in an executable comment | `/*!80000 REVOKE … */` is read as the statement it is (a `/*! … */` body is SQL whatever its version); a plain `/* … */` is a comment |
 | Partial row image | A change written with `binlog_row_image` = `MINIMAL` or `NOBLOB` (a session override counts) is refused with `RIVET_SOURCE_CDC_PREREQUISITE` before it is projected: its values cannot be placed under the table's column names. Set `binlog_row_image = FULL` and re-run; the change is still in the binlog |
-| Update of hidden columns only | Not delivered; its position still advances |
-| Key column not readable | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` before anything is read |
+| Update of hidden columns only | Not delivered; the checkpoint advances over it exactly as it does without the policy (so does an update of a table the export does not capture) |
+| A column of a captured table is renamed (`RENAME COLUMN`, `CHANGE`) while the stream has a backlog | MySQL does not move column privileges with a rename, so the old name's changes cannot be placed under the new name. Refused with `RIVET_SOURCE_CDC_UNDECODABLE` (exit 5), naming the table and the statement; the checkpoint stays before it and the remedy is the re-baseline the message ends with. Any column of the table counts, a hidden one too: the backlog is read against the grants as they are after the rename, which cannot tell a hidden column from a delivered one. Without the policy a rename is delivered as before |
+| Key column not readable | The key the export uses (`load.pk` if declared, else the primary key) is judged by the server once, before the anchor: a key the account may `SELECT` is accepted even when the listing hides it (a generated invisible primary key). Otherwise refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` before anything is read or written |
+| `cursor_column`, `chunk_column`, `chunk_by_key`, `time_column` or `partition_by` naming a hidden column | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE`, naming the column and the setting, before the read |
+| Sealed plan applied after a `REVOKE` | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` naming the column; run `rivet plan` again |
+| Schema change under a table-level grant (`ADD COLUMN`) | Reported as the schema change it is, naming the column that appeared; not as a grant change |
 | No readable column | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` |
-| Without `columns_from` | A column-grant account is refused by MySQL (`1142`) at the `SELECT *` |
+| Without `columns_from` | A column-grant account is refused by MySQL (`1142`) at the `SELECT *` of `rivet run` (a fresh run). `rivet cdc` (the CLI, which reads no config and so never applies the policy) resumed from a checkpoint prints every column the binlog carries |
 
 Limits:
 

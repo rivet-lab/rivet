@@ -7,8 +7,25 @@ use mysql::prelude::Queryable as _;
 use crate::error::Result;
 use crate::source::cdc::ReadableColumns;
 
+/// What `columns_from: grants` guarantees, said once to the operator at `rivet check` and at the start of a change-stream run.
+pub(crate) const BOUNDARY: &str = "columns_from: grants - batch reads are enforced by the server (a column the \
+account may not SELECT is never selected). The MySQL change stream is a client-side projection: the binlog \
+carries every column of a changed row to this process, which drops the unreadable ones before anything is \
+written. That is data minimisation, not access control: restrict the replication account itself if the values \
+must not reach this host.";
+
 /// ER_TABLEACCESS_DENIED_ERROR, ER_COLUMNACCESS_DENIED_ERROR: the server's "not yours to read".
 const DENIED: [u16; 2] = [1142, 1143];
+
+/// The server's text when `err` is its typed "not yours to read" verdict (1142, 1143).
+pub(crate) fn denied_by_server(err: &anyhow::Error) -> Option<String> {
+    err.chain()
+        .find_map(|e| e.downcast_ref::<mysql::Error>())
+        .and_then(|e| match e {
+            mysql::Error::MySqlError(me) if DENIED.contains(&me.code) => Some(me.message.clone()),
+            _ => None,
+        })
+}
 
 /// `name` as a MySQL identifier, safe for any text.
 pub(crate) fn quote_ident(name: &str) -> String {
@@ -61,20 +78,26 @@ pub(crate) fn readable_columns(
              read or written"
         );
     }
-    let key: Vec<String> = conn.exec(
-        "SELECT COLUMN_NAME FROM information_schema.STATISTICS \
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX",
-        (db, table),
-    )?;
-    if let Some(missing) = crate::source::cdc::unreadable(&key, &readable) {
-        crate::rivet_bail!(
-            crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
-            "mysql: `{db}.{table}`: key column `{missing}` is not readable under \
-             `columns_from: grants`, so changes to a row could not be told apart; nothing was \
-             read or written"
-        );
-    }
     Ok(readable)
+}
+
+/// The database and table a configured name means: a bare name is read in `bare_db`'s database for it, else in `own_db`.
+fn relation_of(
+    cfg: &str,
+    own_db: &str,
+    bare_db: &HashMap<String, String>,
+) -> Result<(String, String)> {
+    Ok(match cfg.split_once('.') {
+        Some((db, t)) => (db.to_string(), t.to_string()),
+        None => match bare_db.get(cfg).map(String::as_str).unwrap_or(own_db) {
+            "" => crate::rivet_bail!(
+                crate::error::codes::SOURCE_CDC_TABLE_UNRESOLVED,
+                "mysql: `{cfg}` is a bare name and the source URL names no database, so \
+                 `columns_from: grants` cannot tell whose grants to read: write `db.{cfg}`"
+            ),
+            db => (db.to_string(), cfg.to_string()),
+        },
+    })
 }
 
 /// The readable columns of every configured table, keyed by its configured name.
@@ -88,22 +111,65 @@ pub(crate) fn readable_columns_of(
 ) -> Result<HashMap<String, ReadableColumns>> {
     let mut out = HashMap::with_capacity(configured.len());
     for cfg in configured {
-        let (db, table) = match cfg.split_once('.') {
-            Some((db, t)) => (db.to_string(), t.to_string()),
-            None => match bare_db.get(cfg).map(String::as_str).unwrap_or(own_db) {
-                "" => crate::rivet_bail!(
-                    crate::error::codes::SOURCE_CDC_TABLE_UNRESOLVED,
-                    "mysql: `{cfg}` is a bare name and the source URL names no database, so \
-                     `columns_from: grants` cannot tell whose grants to read: write `db.{cfg}`"
-                ),
-                db => (db.to_string(), cfg.clone()),
-            },
-        };
+        let (db, table) = relation_of(cfg, own_db, bare_db)?;
         let columns = readable_columns(conn, &db, &table)?;
         let select = projection_sql(Some(&db), &table, &columns);
         out.insert(cfg.clone(), ReadableColumns { columns, select });
     }
     Ok(out)
+}
+
+/// The primary key of `db.table`, in key order; empty for a table without one.
+fn primary_key_of(conn: &mut mysql::Conn, db: &str, table: &str) -> Result<Vec<String>> {
+    Ok(conn.exec(
+        "SELECT COLUMN_NAME FROM information_schema.STATISTICS \
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX",
+        (db, table),
+    )?)
+}
+
+/// [`readable_columns_of`], and the key each table is told apart by must be readable: the `declared` key of a table (its `load.pk`), else its primary key.
+///
+/// A key column the listing does not show is judged by the server like any other column: an
+/// `INVISIBLE` one (a generated invisible primary key) is selectable though `SELECT *` omits it.
+pub(crate) fn resolve_grants(
+    conn: &mut mysql::Conn,
+    configured: &[String],
+    own_db: &str,
+    bare_db: &HashMap<String, String>,
+    declared: &HashMap<String, Vec<String>>,
+) -> Result<HashMap<String, ReadableColumns>> {
+    let readable = readable_columns_of(conn, configured, own_db, bare_db)?;
+    for cfg in configured {
+        let (db, table) = relation_of(cfg, own_db, bare_db)?;
+        let (key, from) = match declared.get(cfg) {
+            Some(k) => (k.clone(), "the `load.pk` of this export"),
+            None => (primary_key_of(conn, &db, &table)?, "the primary key"),
+        };
+        let shown = &readable[cfg].columns;
+        for k in key
+            .iter()
+            .filter(|k| !shown.iter().any(|c| c.eq_ignore_ascii_case(k)))
+        {
+            let sql = projection_sql(Some(&db), &table, std::slice::from_ref(k));
+            match conn.prep(&sql) {
+                Ok(stmt) => conn.close(stmt)?,
+                Err(mysql::Error::MySqlError(e)) if DENIED.contains(&e.code) => {
+                    crate::rivet_bail!(
+                        crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+                        "mysql: `{db}.{table}`: key column `{k}` ({from}) is not readable under \
+                         `columns_from: grants`, so changes to a row could not be told apart; \
+                         nothing was read or written. GRANT SELECT on it, or name a readable \
+                         unique key in `load.pk`"
+                    );
+                }
+                // A column the table does not have is the key check's own refusal, later.
+                Err(mysql::Error::MySqlError(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(readable)
 }
 
 /// The positions in `names` of the columns in `readable` (MySQL column names fold case).
@@ -229,6 +295,59 @@ mod tests {
         assert!(
             is_partial(3, Some(&(vec![1, 2, 3, 4], vec![]))),
             "more values than names is not whole either"
+        );
+    }
+    fn server_said(code: u16) -> anyhow::Error {
+        mysql::Error::MySqlError(mysql::MySqlError {
+            state: "42000".into(),
+            message: "SELECT command denied to user 'u'@'h' for column 'pass' in table 't'".into(),
+            code,
+        })
+        .into()
+    }
+
+    #[test]
+    fn only_the_servers_typed_denial_is_a_denial() {
+        for code in [1142, 1143] {
+            let said = denied_by_server(&server_said(code)).expect("a denial");
+            assert!(said.contains("denied"), "{said}");
+        }
+        assert!(
+            denied_by_server(&server_said(1054)).is_none(),
+            "an unknown column is not a denial"
+        );
+        let wrapped = server_said(1143).context("while reading the page");
+        assert!(denied_by_server(&wrapped).is_some(), "found down the chain");
+        assert!(denied_by_server(&anyhow::anyhow!("ERROR 1143 in the text")).is_none());
+    }
+
+    #[test]
+    fn a_denied_read_under_the_policy_is_coded_with_the_replan_remedy_and_nothing_else_is() {
+        let code = crate::error::codes::SOURCE_COLUMNS_UNREADABLE;
+        let coded = crate::source::code_a_revoked_column(server_said(1143), "orders", true);
+        assert_eq!(crate::error::code_of(&coded), Some(code));
+        let text = format!("{coded:#}");
+        assert!(
+            text.contains("orders") && text.contains("rivet plan") && text.contains("GRANT SELECT"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("1143"),
+            "the raw driver error does not stay in the chain: {text}"
+        );
+        let off = crate::source::code_a_revoked_column(server_said(1143), "orders", false);
+        assert!(
+            crate::error::code_of(&off).is_none(),
+            "no policy, no recoding"
+        );
+        let other = crate::source::code_a_revoked_column(server_said(1054), "orders", true);
+        assert!(crate::error::code_of(&other).is_none());
+        let already = crate::error::coded(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED, "moved");
+        let kept = crate::source::code_a_revoked_column(already, "orders", true);
+        assert_eq!(
+            crate::error::code_of(&kept),
+            Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED),
+            "a coded error keeps its code"
         );
     }
 }

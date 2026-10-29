@@ -1,0 +1,12 @@
+diff --git a/src/source/mod.rs b/src/source/mod.rs
+--- a/src/source/mod.rs
++++ b/src/source/mod.rs
+@@ -453,7 +453,7 @@
+     grants_on: bool,
+ ) -> anyhow::Error {
+     let code = crate::error::codes::SOURCE_COLUMNS_UNREADABLE;
+-    if !grants_on || crate::error::code_of(&err).is_some() {
++    if true || !grants_on || crate::error::code_of(&err).is_some() {
+         return err;
+     }
+     let Some(said) = mysql::column_grants::denied_by_server(&err) else {

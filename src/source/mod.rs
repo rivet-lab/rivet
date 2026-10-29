@@ -292,9 +292,9 @@ pub trait Source: Send {
         )
     }
 
-    /// The `SELECT` of `table` naming only the columns this account may read (`columns_from:
-    /// grants`); `None` on an engine without column grants.
-    fn readable_select(&mut self, _table: &str) -> Result<Option<String>> {
+    /// The columns of `table` this account may read and the `SELECT` naming only them
+    /// (`columns_from: grants`); `None` on an engine without column grants.
+    fn readable_columns(&mut self, _table: &str) -> Result<Option<cdc::ReadableColumns>> {
         Ok(None)
     }
 
@@ -444,6 +444,30 @@ pub(crate) fn code_a_missing_relation(
              on purpose"
         ),
     ))
+}
+
+/// `err` of an export run under `columns_from: grants`, as `RIVET_SOURCE_COLUMNS_UNREADABLE` when the server refused a column the run reads: the grants moved after the plan (or the export's settings) named it. Any other error, or one already coded, as it came.
+pub(crate) fn code_a_revoked_column(
+    err: anyhow::Error,
+    export: &str,
+    grants_on: bool,
+) -> anyhow::Error {
+    let code = crate::error::codes::SOURCE_COLUMNS_UNREADABLE;
+    if !grants_on || crate::error::code_of(&err).is_some() {
+        return err;
+    }
+    let Some(said) = mysql::column_grants::denied_by_server(&err) else {
+        return err;
+    };
+    crate::error::coded(
+        code,
+        format!(
+            "export '{export}': the account may no longer SELECT a column this run reads under \
+             `columns_from: grants` (the server said: {said}). The grants changed after the plan \
+             or the settings named that column; nothing of this run was delivered. Run `rivet plan` \
+             again so the plan reads the columns the account may SELECT now, or GRANT SELECT on it"
+        ),
+    )
 }
 
 pub(crate) use crate::connect::driver_runtime;

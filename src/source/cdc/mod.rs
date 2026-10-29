@@ -746,25 +746,11 @@ fn emit_ndjson(
 
 /// The columns a `columns_from: grants` run delivers for one table, and the `SELECT` that reads them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReadableColumns {
+pub struct ReadableColumns {
     /// The readable columns, in table order.
     pub columns: Vec<String>,
     /// A `SELECT` of exactly those columns, every identifier quoted.
     pub select: String,
-}
-
-impl ReadableColumns {
-    /// The first of `key` the run may not read (names fold case, as MySQL's do).
-    pub(crate) fn unreadable_key<'a>(&self, key: &'a [String]) -> Option<&'a str> {
-        unreadable(key, &self.columns)
-    }
-}
-
-/// The first of `key` missing from `readable` (names fold case, as MySQL's do).
-pub(crate) fn unreadable<'a>(key: &'a [String], readable: &[String]) -> Option<&'a str> {
-    key.iter()
-        .find(|k| !readable.iter().any(|c| c.eq_ignore_ascii_case(k)))
-        .map(String::as_str)
 }
 
 /// The per-engine CDC knobs — each variant carries ONLY the parameters its
@@ -785,8 +771,8 @@ pub(crate) enum CdcEngineOpts {
         /// it is allowed to fail the run — otherwise one PARTIAL_JSON table is a
         /// server-wide outage for exports that never read it.
         configured_tables: Vec<String>,
-        /// `cdc.columns_from: grants`: deliver only the columns the account may `SELECT`.
-        columns_from_grants: bool,
+        /// `source.columns_from: grants`: the grants the run resolved before its anchor; the stream delivers only the columns the account may `SELECT` and refuses when they are not the ones it opens under.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     /// PostgreSQL logical slot name.
     Postgres {
@@ -1436,7 +1422,7 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Mysql {
             server_id,
             configured_tables,
-            columns_from_grants,
+            resolved_grants,
         } => {
             // Validate the checkpoint BEFORE open_or_resume so a corrupt/truncated
             // checkpoint (or a directory path) surfaces cleanly, not blanketed by
@@ -1462,7 +1448,7 @@ pub(crate) fn create_change_stream(
                     cfg.drain,
                     tls,
                     configured_tables.clone(),
-                    *columns_from_grants,
+                    resolved_grants.clone(),
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir),
                 )
                 .map_err(|e| with_setup_hint(e, MYSQL_CDC_HINT))?,
@@ -1672,7 +1658,18 @@ impl<'s> CdcSchemaResolver<'s> {
         validate_table_ident(table)?;
         let select =
             readable.map_or_else(|| format!("SELECT * FROM {table}"), |r| r.select.clone());
-        let mut mappings = self.source().type_mappings(&select, overrides)?;
+        let mut mappings = match self.source().type_mappings(&select, overrides) {
+            Ok(m) => m,
+            Err(e) if grants_moved_mid_resolve(readable.is_some(), &e) => {
+                crate::rivet_bail!(
+                    crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+                    "mysql cdc: the account lost SELECT on a column of `{table}` between the stream's \
+                     read of the readable columns and its read of the schema; nothing past it was \
+                     delivered. Re-run: the run then reads the columns as they are now"
+                );
+            }
+            Err(e) => return Err(e),
+        };
         // A source column in the CDC meta namespace collides with the columns the
         // sink prepends, and the collision is silent in the direction that matters.
         // The sink puts `__op`/`__pos`/`__seq` at batch indices 0-2, and
@@ -1799,6 +1796,11 @@ pub(crate) fn validate_table_ident(table: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A schema read refused by the server's privilege check while the run projects: the grants moved since the readable set was read.
+fn grants_moved_mid_resolve(projecting: bool, err: &anyhow::Error) -> bool {
+    projecting && crate::source::mysql::column_grants::denied_by_server(err).is_some()
 }
 
 /// The CDC probe could not read a captured table for a reason the server named; nothing was read or written.
@@ -2001,6 +2003,21 @@ mod mod_decisions {
     ///
     /// This is the same class the corrupt-JSON arm above it already refuses in
     /// prose, one line apart — it just had no test on the io side.
+    #[test]
+    fn only_a_projecting_run_reads_a_denied_schema_read_as_moved_grants() {
+        let denied = anyhow::Error::from(mysql::Error::MySqlError(mysql::MySqlError {
+            state: "42000".into(),
+            message: "SELECT command denied".into(),
+            code: 1143,
+        }));
+        assert!(super::grants_moved_mid_resolve(true, &denied));
+        assert!(!super::grants_moved_mid_resolve(false, &denied));
+        assert!(!super::grants_moved_mid_resolve(
+            true,
+            &anyhow::anyhow!("other")
+        ));
+    }
+
     #[test]
     fn an_unreadable_checkpoint_is_an_error_not_an_absent_one() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -2488,7 +2505,7 @@ mod setup_hint {
             super::DrainMode::Continuous,
             None,
             vec![],
-            false,
+            None,
             None,
         );
         assert_names_refused_port(open.map(drop), super::MYSQL_CDC_HINT);
@@ -2529,7 +2546,7 @@ mod engine_identity {
                 CdcEngineOpts::Mysql {
                     server_id: 1,
                     configured_tables: t(&["a"]),
-                    columns_from_grants: false,
+                    resolved_grants: None,
                 },
                 SourceType::Mysql,
                 "mysql://h/d",
@@ -2776,7 +2793,7 @@ mod tests {
             engine: CdcEngineOpts::Mysql {
                 server_id: 4321,
                 configured_tables: Vec::new(),
-                columns_from_grants: false,
+                resolved_grants: None,
             },
         };
         let err = match create_change_stream(&cfg, PeekBound::Unbounded) {
@@ -2809,7 +2826,7 @@ mod tests {
                 engine: CdcEngineOpts::Mysql {
                     server_id: 4321,
                     configured_tables: Vec::new(),
-                    columns_from_grants: false,
+                    resolved_grants: None,
                 },
             };
             let Err(err) = create_change_stream(&cfg, PeekBound::Unbounded) else {

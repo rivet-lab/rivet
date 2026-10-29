@@ -930,11 +930,14 @@ impl super::Source for MysqlSource {
         introspect_mysql_on(&mut self.pool.get_conn()?, qualified_table)
     }
 
-    fn readable_select(&mut self, table: &str) -> Result<Option<String>> {
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
         let tables = [table.to_string()];
         let mut conn = self.pool.get_conn()?;
-        let readable = cdc::MysqlChangeStream::readable_on(conn.as_mut(), &tables, true)?;
-        Ok(readable.and_then(|mut r| r.remove(table)).map(|r| r.select))
+        let mut readable = cdc::MysqlChangeStream::readable_for_batch(conn.as_mut(), &tables)?;
+        Ok(readable.remove(table))
     }
 
     fn export(

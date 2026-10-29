@@ -999,7 +999,11 @@ fn anchored_under_the_policy(label: &str) -> (String, MysqlCdcTable, GrantUser, 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql() {
-    let (table, _guard, user, mut rig) = anchored_under_the_policy("cg_ren");
+    let (table, _guard, user, rig) = anchored_under_the_policy("cg_ren");
+    let mut rig = rig.a_failed_run_may_leave(
+        &[Leftover::ResumePoint],
+        "the run observes the readable columns at its start, and a rename leaves the old column ungranted: that observed schema is stored before the refusal at the statement (known: src/state/schema.rs stores the baseline of a failed run)",
+    );
     let mut c = root();
     for sql in [
         format!("UPDATE rivet.{table} SET name = 'ann-before' WHERE id = 1"),
@@ -1106,6 +1110,11 @@ fn a_table_with_a_generated_invisible_key_is_read_as_without_the_policy_mysql() 
             rig = rig.source_line("columns_from: grants");
         }
         rig.run_ok();
+        let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect();
+        assert_no_hidden(&parts, "gipk batch");
         delivered(&rig)
     };
     assert_eq!(
@@ -1118,7 +1127,10 @@ fn a_table_with_a_generated_invisible_key_is_read_as_without_the_policy_mysql() 
         let user = GrantUser::whole_table(&table);
         let mut rig = Rig::mysql_cdc(&table)
             .source_url(&user.url())
-            .cdc("initial: snapshot");
+            .cdc("initial: snapshot")
+            .no_oracle(
+                "the oracle keys a CDC delivery by the table's primary key, which is the invisible `my_row_id` the stream does not carry with or without the policy; the cell compares the two deliveries itself",
+            );
         if policy {
             rig = rig.source_line("columns_from: grants");
         }
@@ -1131,6 +1143,11 @@ fn a_table_with_a_generated_invisible_key_is_read_as_without_the_policy_mysql() 
         ))
         .unwrap();
         rig.run_ok();
+        let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect();
+        assert_no_hidden(&parts, "gipk stream");
         delivered(&rig)
     };
     assert_eq!(
@@ -1157,7 +1174,7 @@ fn a_hidden_cursor_or_chunk_column_is_refused_by_code_before_the_read_mysql() {
     for (what, mode, lines) in [
         ("cursor_column", "incremental", &["cursor_column: pass"][..]),
         (
-            "chunk_column",
+            "chunk_by_key",
             "chunked",
             &["chunk_by_key: pass", "chunk_size: 1"][..],
         ),
@@ -1193,6 +1210,11 @@ fn a_visible_cursor_or_chunk_column_is_read_as_before_mysql() {
             .into_full_batch()
             .restage(mode, lines);
         rig.run_ok();
+        let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect();
+        assert_no_hidden(&parts, "visible cursor or chunk");
         let (names, cells) = delivered(&rig);
         assert_eq!(names, vec!["id".to_string(), "name".to_string()], "{mode}");
         assert!(
@@ -1229,10 +1251,16 @@ fn a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remed
     let said = said_by(&out);
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
     assert!(
-        said.contains("`pass`") && said.contains("rivet plan") && !said.contains("1143"),
+        said.contains("column 'pass'") && said.contains("rivet plan") && !said.contains("1143"),
         "the refusal names the column and the remedy (plan again), not the server's error:\n{said}"
     );
-    assert_refused_before_any_write(&rig.out_dir(), &rig.checkpoint());
+    let written = files_under(&rig.out_dir());
+    assert!(
+        written
+            .iter()
+            .all(|f| f.extension().is_some_and(|e| e == "json")),
+        "a run refused at its read delivers no part and no success marker (a failed manifest is its record): {written:?}"
+    );
 }
 
 #[test]
@@ -1284,6 +1312,11 @@ fn a_time_window_and_a_partitioned_export_under_the_policy_read_the_readable_col
             &["time_column: created_at", "days_window: 1"],
         );
     rig.run_ok();
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    assert_no_hidden(&parts, "time_window");
     let (names, cells) = delivered(&rig);
     assert!(!names.iter().any(|n| n == "pass"), "{names:?}");
     assert!(!cells.iter().any(|v| v.contains(SECRET)), "{cells:?}");
@@ -1339,14 +1372,8 @@ fn the_policy_is_one_value_per_run(
         .source_url(&user.url())
         .source_line("columns_from: grants")
         .cdc("initial: snapshot")
-        .a_failed_run_may_leave(
-            &[
-                Leftover::OrphanPart,
-                Leftover::FileLog,
-                Leftover::CdcFlush,
-                Leftover::CdcCheckpoint,
-            ],
-            "the stop comes at the grant change; what was durable before it stays",
+        .no_oracle(
+            "the stop comes at the grant change after the snapshot leg finished: the leg is a complete delivery under its own prefix, with its marker, manifest and journal rows, which a failed run may not leave by the oracle's contract; the cell reads the parts itself",
         );
     let out = run_parked_at(&rig, point, 4000, || act(&table, &user));
     let said = said_by(&out);
@@ -1473,6 +1500,11 @@ fn a_declared_key_the_account_reads_is_accepted_while_the_primary_key_is_hidden_
         ))
         .unwrap();
     rig.run_ok();
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    assert_no_hidden(&parts, "declared key");
     let (names, cells) = delivered(&rig);
     assert_eq!(names, vec!["code".to_string(), "name".to_string()]);
     assert!(cells.iter().any(|v| v == "ann2"), "{cells:?}");
@@ -1565,6 +1597,11 @@ fn a_column_the_account_may_update_but_not_select_is_not_delivered_mysql() {
         ))
         .unwrap();
     rig.run_ok();
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    assert_no_hidden(&parts, "update-only column cdc");
     let (names, cells) = delivered(&rig);
     assert_eq!(names, vec!["id".to_string(), "name".to_string()], "cdc");
     assert!(cells.iter().any(|v| v == "ann2"), "{cells:?}");
@@ -1638,33 +1675,35 @@ fn a_schema_change_under_a_table_grant_is_refused_naming_the_column_that_appeare
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql() {
-    let statements = 40;
-    let run = an_open_run_with("cg_conn", 4, |table, _user| {
+    let connections = |label: &str, statements: u32| -> u64 {
+        let run = an_open_run_with(label, 4, |table, _user| {
+            let mut c = root();
+            for i in 0..statements {
+                c.query_drop(format!("CREATE USER IF NOT EXISTS '{label}_{i}'@'%'"))
+                    .unwrap();
+            }
+            c.query_drop(format!("INSERT INTO rivet.{table} VALUES (7, 'eve', 'p7')"))
+                .unwrap();
+        });
         let mut c = root();
         for i in 0..statements {
-            c.query_drop(format!("CREATE USER IF NOT EXISTS 'cg_noise_{i}'@'%'"))
+            c.query_drop(format!("DROP USER IF EXISTS '{label}_{i}'@'%'"))
                 .unwrap();
         }
-        c.query_drop(format!("INSERT INTO rivet.{table} VALUES (7, 'eve', 'p7')"))
+        let opened: Option<u64> = c
+            .exec_first(
+                "SELECT CAST(SUM(TOTAL_CONNECTIONS) AS UNSIGNED) FROM performance_schema.accounts \
+                 WHERE USER = ?",
+                (run.user.0.as_str(),),
+            )
             .unwrap();
-    });
-    let mut c = root();
-    for i in 0..statements {
-        c.query_drop(format!("DROP USER IF EXISTS 'cg_noise_{i}'@'%'"))
-            .unwrap();
-    }
-    let opened: Option<u64> = c
-        .exec_first(
-            "SELECT CAST(SUM(TOTAL_CONNECTIONS) AS UNSIGNED) FROM performance_schema.accounts \
-             WHERE USER = ?",
-            (run.user.0.as_str(),),
-        )
-        .unwrap();
-    let opened = opened.unwrap_or(0);
+        opened.unwrap_or(0)
+    };
+    let few = connections("cg_conn_a", 2);
+    let many = connections("cg_conn_b", 40);
     assert!(
-        opened <= 8,
-        "{statements} privilege statements opened {opened} connections as the run's account (said:\n{})",
-        run.said()
+        many <= few + 1,
+        "40 privilege statements opened {many} connections as the run's account, 2 opened {few}: the cost of a statement is a connection"
     );
 }
 
@@ -1714,5 +1753,185 @@ fn a_bare_table_name_is_read_from_the_same_relation_with_and_without_the_policy_
             .iter()
             .any(|f| std::fs::read_to_string(f).is_ok_and(|t| t.contains("FOREIGN"))),
         "the policy delivered the other database's rows"
+    );
+}
+
+const BOUNDARY_TEXT: &str = "columns_from: grants - batch reads are enforced by the server (a column the \
+account may not SELECT is never selected). The MySQL change stream is a client-side projection: the binlog \
+carries every column of a changed row to this process, which drops the unreadable ones before anything is \
+written. That is data minimisation, not access control: restrict the replication account itself if the values \
+must not reach this host.";
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn the_policy_says_what_it_does_not_guarantee_at_check_and_at_the_start_of_a_run_mysql() {
+    let (table, _table) = seeded("cg_say");
+    let user = GrantUser::new(&table, "id, name");
+    let on = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .cdc("initial: snapshot")
+        .source_line("columns_from: grants");
+    let check = on.cli(&["check"]);
+    assert!(check.status.success(), "{}", said_by(&check));
+    assert!(
+        String::from_utf8_lossy(&check.stdout).contains(BOUNDARY_TEXT),
+        "`rivet check` states the boundary of the policy:\n{}",
+        said_by(&check)
+    );
+    let run = on.run_args_env(&["--export", &table], &[("RUST_LOG", "info")]);
+    assert!(run.status.success(), "{}", said_by(&run));
+    assert!(
+        said_by(&run).contains(BOUNDARY_TEXT),
+        "a change-stream run says it at its start:\n{}",
+        said_by(&run)
+    );
+    let off = Rig::mysql_cdc(&table).cdc("initial: snapshot");
+    let check = off.cli(&["check"]);
+    assert!(
+        !said_by(&check).contains("data minimisation"),
+        "a config without the policy says nothing about it:\n{}",
+        said_by(&check)
+    );
+}
+
+/// One DDL met in the backlog: the writes before and after it, then what the run exited with, delivered and checkpointed.
+fn ddl_in_the_backlog(policy: bool, ddl: &str) -> String {
+    let (table, _table) = seeded("cg_ddl");
+    let user = GrantUser::new(&table, "id, name");
+    let mut rig = Rig::mysql_cdc(&table).cdc("initial: snapshot");
+    if ddl.contains("RENAME COLUMN") && !policy {
+        rig = rig.no_oracle(
+            "a rename met in a backlog is delivered as two columns, the old name for the rows before it and the new one after; the oracle reads the one column the source has now",
+        );
+    }
+    if policy {
+        rig = rig
+            .source_url(&user.url())
+            .source_line("columns_from: grants");
+    }
+    if policy && ddl.contains("RENAME COLUMN") {
+        rig = rig.a_failed_run_may_leave(
+            &[Leftover::ResumePoint],
+            "the run observes the readable columns at its start, and a rename leaves the old column ungranted: that observed schema is stored before the refusal at the statement (known: src/state/schema.rs stores the baseline of a failed run)",
+        );
+    }
+    rig.run_ok();
+    let start = binlog_now();
+    let mut c = root();
+    c.query_drop(format!(
+        "UPDATE rivet.{table} SET name = 'ann-before' WHERE id = 1"
+    ))
+    .unwrap();
+    c.query_drop(ddl.replace("{t}", &table)).unwrap();
+    let col = if ddl.contains("RENAME COLUMN name") {
+        "nm"
+    } else {
+        "name"
+    };
+    c.query_drop(format!(
+        "UPDATE rivet.{table} SET {col} = 'ann-after' WHERE id = 1"
+    ))
+    .unwrap();
+    let end = commit_end_after(&start, &table);
+    let out = rig.run();
+    let (names, cells) = delivered(&rig);
+    format!(
+        "exit={} code={} advanced={} names={names:?} cells={cells:?}",
+        out.status.code().unwrap_or(-1),
+        said_by(&out)
+            .split("[RIVET_")
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .unwrap_or("-"),
+        checkpoint_at(&rig) >= end
+    )
+}
+
+/// The string `ddl_in_the_backlog` gives for a delivery of the three updates' rows and the columns `names` (policy off: a root account).
+fn the_ddl_run(exit: i32, code: &str, advanced: bool, names: &str, cells: &str) -> String {
+    format!("exit={exit} code={code} advanced={advanced} names={names} cells={cells}")
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn ddl_in_the_backlog_is_met_as_before_mysql() {
+    // Captured on origin/main a130fd97 (policy off) and on be1a8310 (policy on) before the fix.
+    let id_cells = r#"["1", "1", "1", "2", "3""#;
+    let ann = r#""ann", "ann-after", "ann-before", "bob", "cid"]"#;
+    let off: [(&str, String); 4] = [
+        (
+            "ALTER TABLE rivet.{t} ADD COLUMN nick VARCHAR(10) NULL",
+            the_ddl_run(
+                0,
+                "-",
+                true,
+                r#"["id", "name", "nick", "pass"]"#,
+                &format!(
+                    r#"["", "", "1", "1", "1", "2", "3", "SECRET-1", "SECRET-1", "SECRET-1", "SECRET-2", "SECRET-3", {ann}"#
+                ),
+            ),
+        ),
+        (
+            "ALTER TABLE rivet.{t} DROP COLUMN pass",
+            the_ddl_run(
+                0,
+                "-",
+                true,
+                r#"["id", "name", "pass"]"#,
+                &format!(r#"{id_cells}, "SECRET-1", "SECRET-2", "SECRET-3", {ann}"#),
+            ),
+        ),
+        (
+            "ALTER TABLE rivet.{t} RENAME COLUMN name TO nm",
+            the_ddl_run(
+                0,
+                "-",
+                true,
+                r#"["id", "name", "nm", "pass"]"#,
+                &format!(
+                    r#"{id_cells}, "SECRET-1", "SECRET-1", "SECRET-1", "SECRET-2", "SECRET-3", {ann}"#
+                ),
+            ),
+        ),
+        (
+            "ALTER TABLE rivet.{t} RENAME COLUMN pass TO pw",
+            the_ddl_run(
+                0,
+                "-",
+                true,
+                r#"["id", "name", "pass", "pw"]"#,
+                &format!(
+                    r#"{id_cells}, "SECRET-1", "SECRET-1", "SECRET-1", "SECRET-2", "SECRET-3", {ann}"#
+                ),
+            ),
+        ),
+    ];
+    for (ddl, want) in off {
+        assert_eq!(ddl_in_the_backlog(false, ddl), want, "policy off: {ddl}");
+    }
+    // The policy on: a column added or dropped is met as before the rename refusal.
+    let visible = the_ddl_run(
+        0,
+        "-",
+        true,
+        r#"["id", "name"]"#,
+        &format!(r#"{id_cells}, {ann}"#),
+    );
+    for ddl in [
+        "ALTER TABLE rivet.{t} ADD COLUMN nick VARCHAR(10) NULL",
+        "ALTER TABLE rivet.{t} DROP COLUMN pass",
+    ] {
+        assert_eq!(ddl_in_the_backlog(true, ddl), visible, "policy on: {ddl}");
+    }
+    assert_eq!(
+        ddl_in_the_backlog(true, "ALTER TABLE rivet.{t} RENAME COLUMN pass TO pw"),
+        the_ddl_run(
+            5,
+            "SOURCE_CDC_UNDECODABLE",
+            false,
+            r#"["id", "name"]"#,
+            r#"["1", "2", "3", "ann", "bob", "cid"]"#
+        ),
+        "a hidden column's rename is refused too: the backlog cannot tell it from a delivered one"
     );
 }

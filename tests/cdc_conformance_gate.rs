@@ -936,7 +936,8 @@ const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
 // cells read the warehouse back through `bq` / its HTTP client.
 // 2026-10-29: +2 shared codec - the PR #719 review fixes: the partial-row-image cell and the qualified-table cell read
 // the delivered parts with arrow (`changes` / `read_all_parts`); the rig oracle grades each run against the source.
-const PIN_SHARED_CODEC: usize = 126; // ratchet-pin: cdc-census-shared-codec
+// 2026-10-29: +6 shared codec - the PR #719 review cells: the DDL-in-the-backlog cell and five delivery cells (the generated invisible key, a visible cursor or chunk column, time_window and partition_by, a declared key, an UPDATE-only column) read the delivered parts with arrow (`read_all_parts`) and assert none holds a hidden column; the rig oracle grades the runs that have a source-shaped answer.
+const PIN_SHARED_CODEC: usize = 132; // ratchet-pin: cdc-census-shared-codec
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
@@ -959,7 +960,8 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-10-06: +1 presence - the SQL Server case-only `--table` mismatch refusal, whose oracle is the refusal text and an untouched destination.
 // 2026-10-20: +1 presence - the PostgreSQL slot-advanced-by-another-reader refusal, whose oracle is the coded refusal; the rig oracle grades the runs before it.
 // 89 -> 93 (2026-10-21, #675): four MySQL bare-name cells read every part's ids and compare them with the rows written to each database.
-const PIN_PRESENCE: usize = 95; // ratchet-pin: cdc-census-presence
+// 95 -> 102 (2026-10-29, #719): seven cells of the column-grants review whose oracle is a coded refusal and its exit class, the unmoved checkpoint, or the part set a refused run left (a rename in the backlog, a hidden cursor or chunk column, a revoked column met by a sealed plan or between two reads, an unreadable key, the grant changed between the snapshot and the stream open, the connection count of the privilege statements, the boundary text); the rig oracle grades every run before the refusal.
+const PIN_PRESENCE: usize = 102; // ratchet-pin: cdc-census-presence
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a
 /// COMPLETENESS claim must carry a class-(a) INDEPENDENT oracle — not merely

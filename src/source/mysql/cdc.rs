@@ -102,6 +102,8 @@ pub(crate) struct MysqlChangeStream {
     readable: Option<HashMap<String, crate::source::cdc::ReadableColumns>>,
     /// `columns_from: grants`: the source the readable columns are re-read from at a grant change.
     grants_source: Option<(String, Option<TlsConfig>)>,
+    /// The one connection every grant re-read of this run rides, opened at the first privilege statement.
+    grants_conn: Option<mysql::Conn>,
 }
 
 impl MysqlChangeStream {
@@ -457,9 +459,9 @@ impl MysqlChangeStream {
     ) -> Result<()> {
         let mut conn = connect_conn(url, tls)?;
         Self::refuse_unmet_prerequisites_on(&mut conn, configured_tables)?;
-        // Under grants the readable-column read is the probe: `SELECT *` is refused there.
+        // Under grants the run's one grants read ([`Self::resolve_grants`]) is the probe: `SELECT *` is refused there.
         if columns_from_grants {
-            return Self::readable_on(&mut conn, configured_tables, true).map(drop);
+            return Ok(());
         }
         Self::refuse_absent_tables_on(&mut conn, configured_tables)
     }
@@ -704,12 +706,56 @@ impl MysqlChangeStream {
         super::column_grants::readable_columns_of(conn, configured, &own_db, &bare_db).map(Some)
     }
 
+    /// The readable columns of `configured` as a BATCH read sees them: a bare name is the connection's own database, as the export's own `SELECT` reads it; the stream's rule for a bare name (another database holding the only such table) is not a batch's.
+    pub(crate) fn readable_for_batch(
+        conn: &mut mysql::Conn,
+        configured: &[String],
+    ) -> Result<HashMap<String, crate::source::cdc::ReadableColumns>> {
+        let own_db = Self::own_db_on(conn);
+        super::column_grants::readable_columns_of(conn, configured, &own_db, &HashMap::new())
+    }
+
+    /// The grants of a `columns_from: grants` run, read ONCE on one connection before the anchor: the readable columns of each configured table, and its key (the `declared` one, else the primary key) judged readable. The snapshot legs, the stream open and the mid-run re-reads all take this value or refuse.
+    pub(crate) fn resolve_grants(
+        url: &str,
+        tls: Option<&TlsConfig>,
+        configured: &[String],
+        declared: &HashMap<String, Vec<String>>,
+    ) -> Result<std::sync::Arc<HashMap<String, crate::source::cdc::ReadableColumns>>> {
+        if configured.is_empty() {
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_CDC_TABLE_UNRESOLVED,
+                "mysql cdc: `columns_from: grants` needs the captured tables named"
+            );
+        }
+        let mut conn = connect_conn(url, tls)?;
+        let own_db = Self::own_db_on(&mut conn);
+        let bare_db = Self::bare_name_databases(&mut conn, &own_db, configured);
+        super::column_grants::resolve_grants(&mut conn, configured, &own_db, &bare_db, declared)
+            .map(std::sync::Arc::new)
+    }
+
     /// Refuse at `log_pos` when a configured table's readable columns differ from the ones this run delivers.
-    fn refuse_changed_grants(&self, log_pos: u64) -> Result<()> {
+    fn refuse_changed_grants(&mut self, log_pos: u64) -> Result<()> {
         let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
             return Ok(());
         };
-        let now = Self::readable_columns_at(url, tls.as_ref(), &self.configured_tables)?;
+        // A connection the server closed while the run was idle is replaced once.
+        let reused = self.grants_conn.is_some();
+        let mut conn = match self.grants_conn.take() {
+            Some(c) => c,
+            None => connect_conn(url, tls.as_ref())?,
+        };
+        let read = match Self::readable_on(&mut conn, &self.configured_tables, true) {
+            Ok(r) => r,
+            Err(_) if reused => {
+                conn = connect_conn(url, tls.as_ref())?;
+                Self::readable_on(&mut conn, &self.configured_tables, true)?
+            }
+            Err(e) => return Err(e),
+        };
+        self.grants_conn = Some(conn);
+        let now = read.unwrap_or_default();
         let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
             r.get(t).map(|c| c.columns.clone())
         };
@@ -722,10 +768,43 @@ impl MysqlChangeStream {
         };
         crate::rivet_bail!(
             crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
-            "mysql cdc: the columns this account may SELECT of `{table}` changed at {}:{log_pos} \
-             (a grant change); nothing past it was delivered",
+            "mysql cdc: {} at {}:{log_pos}; nothing past it was delivered. Re-run: the run then \
+             reads the columns as they are now",
+            grants_difference(
+                table,
+                before
+                    .get(table)
+                    .map(|c| c.columns.as_slice())
+                    .unwrap_or(&[]),
+                now.get(table).map(|c| c.columns.as_slice()).unwrap_or(&[]),
+            ),
             self.file
         );
+    }
+
+    /// Refuse when the grants the stream opens under are not the ones this run resolved before its anchor: one policy value per run.
+    fn refuse_grants_moved_since_resolved(
+        configured: &[String],
+        resolved: &HashMap<String, crate::source::cdc::ReadableColumns>,
+        now: &HashMap<String, crate::source::cdc::ReadableColumns>,
+    ) -> Result<()> {
+        for table in configured {
+            let (before, after) = (resolved.get(table), now.get(table));
+            if before.map(|c| &c.columns) == after.map(|c| &c.columns) {
+                continue;
+            }
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+                "mysql cdc: {} between the start of this run and the stream's open; nothing was \
+                 delivered by the stream. Re-run: the run then reads the columns as they are now",
+                grants_difference(
+                    table,
+                    before.map(|c| c.columns.as_slice()).unwrap_or(&[]),
+                    after.map(|c| c.columns.as_slice()).unwrap_or(&[]),
+                )
+            );
+        }
+        Ok(())
     }
 
     /// The readable columns of `tables` on a fresh connection: the snapshot legs' read, asked before the anchor.
@@ -825,6 +904,7 @@ impl MysqlChangeStream {
             row_image,
             readable: None,
             grants_source: None,
+            grants_conn: None,
         })
     }
 
@@ -960,7 +1040,9 @@ impl MysqlChangeStream {
         mode: DrainMode,
         tls: Option<&TlsConfig>,
         configured_tables: Vec<String>,
-        columns_from_grants: bool,
+        resolved_grants: Option<
+            std::sync::Arc<HashMap<String, crate::source::cdc::ReadableColumns>>,
+        >,
         spill_dir: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         // PASSED IN, not derived: resolving the directory needs the CONFIG's dir
@@ -979,7 +1061,10 @@ impl MysqlChangeStream {
         let mut conn = connect_conn(url, tls)?;
         // Before the anchor is written: a refused first run leaves no checkpoint.
         Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
-        let readable = Self::readable_on(&mut conn, &configured_tables, columns_from_grants)?;
+        let readable = Self::readable_on(&mut conn, &configured_tables, resolved_grants.is_some())?;
+        if let (Some(read), Some(resolved)) = (&readable, &resolved_grants) {
+            Self::refuse_grants_moved_since_resolved(&configured_tables, resolved, read)?;
+        }
         let grants_source = readable.is_some().then(|| (url.to_string(), tls.cloned()));
         if let Some(path) = ckpt
             && let Some(pos) = Position::load(path)?
@@ -1283,12 +1368,18 @@ impl MysqlChangeStream {
                     }
                     let before = before.map(project);
                     let after = after.map(project);
-                    // `columns_from: grants`: an update of hidden columns only is not delivered.
+                    // `columns_from: grants`: an update of hidden columns only is not delivered,
+                    // but its row still carries the transaction's commit boundary.
                     if super::column_grants::changes_only_hidden(
-                        keep.is_some(),
+                        captured,
                         before.as_ref(),
                         after.as_ref(),
                     ) {
+                        self.tx.push(
+                            boundary_marker(op, &position),
+                            crate::source::cdc::spill::encode_event,
+                            &format_args!("{}:{log_pos}", self.file),
+                        )?;
                         continue;
                     }
                     // A cell with no faithful representation is a DEFERRED refusal,
@@ -1439,6 +1530,22 @@ impl MysqlChangeStream {
                 self.tx.clear();
             }
             Some(EventData::QueryEvent(qe))
+                if refused_column_rename(
+                    self.readable.is_some(),
+                    &qe.query(),
+                    &qe.schema(),
+                    &self.configured_tables,
+                )
+                .is_some() =>
+            {
+                let (sc, tb) =
+                    refused_column_rename(true, &qe.query(), &qe.schema(), &self.configured_tables)
+                        .expect("just matched");
+                return Err(crate::source::cdc::checkpoint_identity::undecodable(
+                    column_rename_refusal_message(&sc, &tb),
+                ));
+            }
+            Some(EventData::QueryEvent(qe))
                 if drop_table_targets(&qe.query(), &qe.schema()).is_some_and(|ts| {
                     ts.iter().any(|t| {
                         undecodable_event_is_ours(
@@ -1518,6 +1625,48 @@ pub(crate) enum UndecodableRows {
     /// `binlog_row_value_options=PARTIAL_JSON` logs a JSON diff, not a row image.
     PartialJson,
     Other,
+}
+
+/// What differs between the columns of `table` a run delivers and the ones its account may `SELECT` now: the columns gained and lost, and the two ways it happens.
+pub(crate) fn grants_difference(table: &str, before: &[String], now: &[String]) -> String {
+    let missing = |from: &[String], of: &[String]| -> Vec<String> {
+        from.iter()
+            .filter(|c| !of.iter().any(|o| o.eq_ignore_ascii_case(c)))
+            .map(|c| format!("`{c}`"))
+            .collect()
+    };
+    let (gained, lost) = (missing(now, before), missing(before, now));
+    let mut changes = Vec::new();
+    if !gained.is_empty() {
+        changes.push(format!("gained {}", gained.join(", ")));
+    }
+    if !lost.is_empty() {
+        changes.push(format!("lost {}", lost.join(", ")));
+    }
+    format!(
+        "the columns this account may SELECT of `{table}` changed ({}): a grant change, or a \
+         schema change under a table-level grant",
+        changes.join("; ")
+    )
+}
+
+/// An event that routes to no table and carries no row: it holds the commit boundary of a transaction whose rows the policy did not deliver.
+fn boundary_marker(op: ChangeOp, position: &Position) -> ChangeEvent {
+    ChangeEvent {
+        op,
+        schema: String::new(),
+        table: String::new(),
+        before: None,
+        after: None,
+        position: position.clone(),
+        committed: false,
+        image_names: None,
+        seq: 0,
+        poison: None,
+        row_id: None,
+        before_names: None,
+        before_poison: None,
+    }
 }
 
 /// Does an UNDECODABLE rows event belong to a table this run captures?
@@ -1952,6 +2101,153 @@ pub(crate) fn truncate_target(sql: &str, event_db: &str) -> Option<(String, Stri
         Some(at) => Some((unq(&rest[..at]), unq(&rest[at + 1..]))),
         None => Some((event_db.to_string(), unq(rest))),
     }
+}
+
+/// One token of an `ALTER TABLE` statement: a word (`true` when it was backticked), a quoted string, or one punctuation character.
+#[derive(Debug, PartialEq, Eq)]
+enum AlterToken {
+    Word(String, bool),
+    Text,
+    Punct(char),
+}
+
+/// `sql` cut into [`AlterToken`]s; `None` for an unterminated backtick or string.
+fn alter_tokens(sql: &str) -> Option<Vec<AlterToken>> {
+    let mut out = Vec::new();
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {}
+            '`' => {
+                let mut name = String::new();
+                loop {
+                    match chars.next()? {
+                        '`' if chars.peek() == Some(&'`') => {
+                            chars.next();
+                            name.push('`');
+                        }
+                        '`' => break,
+                        ch => name.push(ch),
+                    }
+                }
+                out.push(AlterToken::Word(name, true));
+            }
+            '\'' | '"' => {
+                loop {
+                    match chars.next()? {
+                        '\\' => {
+                            chars.next()?;
+                        }
+                        ch if ch == c && chars.peek() == Some(&c) => {
+                            chars.next();
+                        }
+                        ch if ch == c => break,
+                        _ => {}
+                    }
+                }
+                out.push(AlterToken::Text);
+            }
+            c if c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii() => {
+                let mut word = String::from(c);
+                while let Some(&n) = chars.peek() {
+                    if n.is_alphanumeric() || n == '_' || n == '$' || !n.is_ascii() {
+                        word.push(n);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                out.push(AlterToken::Word(word, false));
+            }
+            c => out.push(AlterToken::Punct(c)),
+        }
+    }
+    Some(out)
+}
+
+/// The table an `ALTER TABLE` QUERY event gives a column a new name (`RENAME COLUMN a TO b`, `CHANGE [COLUMN] a b ...`), as `(schema, table)`; `None` for any other statement.
+pub(crate) fn column_rename_target(sql: &str, event_db: &str) -> Option<(String, String)> {
+    let tokens = alter_tokens(&strip_sql_comments(sql))?;
+    let word = |i: usize, w: &str| matches!(tokens.get(i), Some(AlterToken::Word(t, false)) if t.eq_ignore_ascii_case(w));
+    let mut at = 0;
+    if !word(at, "alter") {
+        return None;
+    }
+    at += 1;
+    if word(at, "ignore") {
+        at += 1;
+    }
+    if !word(at, "table") {
+        return None;
+    }
+    at += 1;
+    let name = |i: usize| match tokens.get(i) {
+        Some(AlterToken::Word(t, _)) => Some(t.clone()),
+        _ => None,
+    };
+    let first = name(at)?;
+    at += 1;
+    let (schema, table) = if tokens.get(at) == Some(&AlterToken::Punct('.')) {
+        let table = name(at + 1)?;
+        at += 2;
+        (first, table)
+    } else {
+        (event_db.to_string(), first)
+    };
+    let (mut depth, mut spec_start) = (0usize, at);
+    for i in at..=tokens.len() {
+        let end = i == tokens.len() || (depth == 0 && tokens[i] == AlterToken::Punct(','));
+        if end {
+            let renames = if word(spec_start, "rename") && word(spec_start + 1, "column") {
+                true
+            } else if word(spec_start, "change") {
+                let from = spec_start + 1 + usize::from(word(spec_start + 1, "column"));
+                match (name(from), name(from + 1)) {
+                    (Some(old), Some(new)) => !old.eq_ignore_ascii_case(&new),
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if renames {
+                return Some((schema, table));
+            }
+            spec_start = i + 1;
+            continue;
+        }
+        match tokens[i] {
+            AlterToken::Punct('(') => depth += 1,
+            AlterToken::Punct(')') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `(schema, table)` of a column rename a run that projects (`columns_from: grants`) refuses: one met on a table the run captures.
+fn refused_column_rename(
+    projecting: bool,
+    sql: &str,
+    event_db: &str,
+    configured: &[String],
+) -> Option<(String, String)> {
+    if !projecting {
+        return None;
+    }
+    column_rename_target(sql, event_db)
+        .filter(|(sc, tb)| undecodable_event_is_ours(Some((sc, tb)), configured))
+}
+
+/// Refuse a column renamed under `columns_from: grants`: column privileges do not follow a rename and the grants read now name the column by its new name, so the rows logged before it would be delivered without the column.
+pub(crate) fn column_rename_refusal_message(schema: &str, table: &str) -> String {
+    format!(
+        "mysql cdc: `{schema}.{table}` had a column renamed (ALTER TABLE ... RENAME COLUMN or \
+         CHANGE) in the log being read, under `columns_from: grants`. MySQL does not carry \
+         column privileges across a rename, so the rows logged before it would have been read \
+         without the column and delivered with it missing, and nothing past the rename was \
+         delivered. GRANT SELECT on the column's new name if it is to be delivered, then: {}",
+        crate::source::cdc::checkpoint_identity::RECOVER
+    )
 }
 
 /// The tables a `DROP TABLE` QUERY event removes (`None` for an unreadable name); `None` when the event is not one.
@@ -2735,6 +3031,64 @@ mod tests {
     }
 
     #[test]
+    fn a_statement_that_gives_a_column_a_new_name_names_its_table() {
+        let t = |sql: &str| column_rename_target(sql, "shop");
+        let orders = Some(("shop".to_string(), "orders".to_string()));
+        for renames in [
+            "ALTER TABLE orders RENAME COLUMN name TO nm",
+            "alter table `orders` rename column `name` to `nm`",
+            "ALTER TABLE shop.orders CHANGE name nm VARCHAR(20)",
+            "ALTER TABLE orders CHANGE COLUMN name nm VARCHAR(20) NOT NULL",
+            "ALTER TABLE orders ADD COLUMN x INT, RENAME COLUMN name TO nm",
+            "ALTER TABLE orders ALGORITHM=INPLACE, CHANGE `name` `Name2` INT",
+            "ALTER IGNORE TABLE orders /* c */ RENAME COLUMN name TO nm;",
+            "ALTER TABLE orders ADD COLUMN c VARCHAR(5) DEFAULT 'a,b', CHANGE name nm INT",
+        ] {
+            assert_eq!(t(renames), orders, "{renames}");
+        }
+        let other = t("ALTER TABLE `odd.name` RENAME COLUMN a TO b");
+        assert_eq!(other, Some(("shop".to_string(), "odd.name".to_string())));
+        assert_eq!(
+            t("ALTER TABLE données RENAME COLUMN a TO b"),
+            Some(("shop".to_string(), "données".to_string()))
+        );
+        for not_a_rename in [
+            "ALTER TABLE orders ADD COLUMN extra INT",
+            "ALTER TABLE orders DROP COLUMN name",
+            "ALTER TABLE orders RENAME TO orders2",
+            "ALTER TABLE orders RENAME INDEX a TO b",
+            "ALTER TABLE orders CHANGE name NAME VARCHAR(30)",
+            "ALTER TABLE orders MODIFY COLUMN name VARCHAR(30)",
+            "ALTER TABLE orders ADD COLUMN c VARCHAR(5) COMMENT 'RENAME COLUMN a TO b'",
+            "ALTER TABLE orders ADD (a INT, change INT)",
+            "ALTER TABLE orders ADD COLUMN `rename` INT, ADD COLUMN `column` INT",
+            "CREATE TABLE t (a INT, `change` INT)",
+            "UPDATE orders SET name = 'RENAME COLUMN a TO b'",
+            "ALTER TABLE orders RENAME COLUMN `unterminated",
+            "",
+        ] {
+            assert_eq!(t(not_a_rename), None, "{not_a_rename}");
+        }
+    }
+
+    #[test]
+    fn a_grant_difference_names_the_columns_gained_and_lost_folding_case() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let said = grants_difference("t", &s(&["id", "Name"]), &s(&["ID", "name", "pass"]));
+        assert!(
+            said.contains("gained `pass`") && !said.contains("lost"),
+            "{said}"
+        );
+        let said = grants_difference("t", &s(&["id", "name"]), &s(&["id"]));
+        assert!(
+            said.contains("lost `name`") && !said.contains("gained"),
+            "{said}"
+        );
+        let said = grants_difference("t", &s(&["id", "a"]), &s(&["id", "b"]));
+        assert!(said.contains("gained `b`; lost `a`"), "{said}");
+    }
+
+    #[test]
     fn a_drop_table_names_every_table_it_removes() {
         let t = |sql: &str| drop_table_targets(sql, "shop");
         let at = |d: &str, n: &str| Some((d.to_string(), n.to_string()));
@@ -3349,7 +3703,7 @@ mod tests {
             DrainMode::BoundedAtOpen,
             None,
             vec!["cdc_idle_first".to_string()], // only its own table: a sibling test's DROP must not reach it
-            false,
+            None,
             None, // no spill dir — these tests never cross the cap
         )
         .unwrap();
@@ -3378,7 +3732,7 @@ mod tests {
             DrainMode::BoundedAtOpen,
             None,
             vec!["cdc_idle_first".to_string()], // only its own table: a sibling test's DROP must not reach it
-            false,
+            None,
             None, // no spill dir — these tests never cross the cap
         )
         .unwrap();
@@ -3438,7 +3792,7 @@ mod tests {
             DrainMode::Continuous,
             None,
             vec!["cdc_resume".to_string()],
-            false,
+            None,
             None, // no spill dir — these tests never cross the cap
         )
         .unwrap();

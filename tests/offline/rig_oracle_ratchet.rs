@@ -32,7 +32,10 @@ use std::path::{Path, PathBuf};
 // 24 -> 21 (2026-10-15): the oracle reads a mixed-type MongoDB `_id` (pymongo, canonical extended JSON), so the three heterogeneous-`_id` full scans are graded.
 // 21 -> 22 (2026-10-21, #675): a bare MySQL CDC name only another database holds; the oracle reads the bare name in the connection database, so the cell reads the parts itself.
 // 22 -> 24 (2026-10-29, #719): the column-grants cells for an UPDATE-only column and for a bare name another database holds; the oracle lists the source's columns as the account (refused on the UPDATE-only one) and reads the bare name in the connection database only.
-const NO_ORACLE_CEILING: usize = 24; // ratchet-pin: no-oracle-opt-outs
+// 24 -> 25 (2026-10-29, #719): the generated-invisible-key stream cell; the oracle keys a CDC delivery by the table's primary key, the invisible `my_row_id`, which the stream does not carry with or without the policy, so the cell compares the two deliveries itself.
+// 25 -> 26 (2026-10-29, #719): the grant-changed-between-two-reads cells (one shared declaration); the snapshot leg is a complete delivery under its own prefix before the stream's refusal, so the failed run leaves its marker, manifest and journal rows, and the cell reads the parts itself.
+// 26 -> 27 (2026-10-29, #719): the neighbour cell for a DDL in the backlog without the policy; a rename met in a backlog is delivered as two columns, the old name for the rows before it and the new one after, which the oracle (one column per source column) cannot grade; the cell pins the delivery as origin/main makes it.
+const NO_ORACLE_CEILING: usize = 27; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave: `.a_failed_run_may_leave(` and a raw run's `FAILED_RUN_LEAVES_ENV`.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
@@ -49,7 +52,8 @@ const NO_ORACLE_CEILING: usize = 24; // ratchet-pin: no-oracle-opt-outs
 // 45 -> 46 (2026-10-16): a Snowflake full load whose COPY fails on a corrupted part (snowflake_full_load_that_fails_keeps_the_last_table_*): the load reached the warehouse write (the staging table), so its load_run row is `failed`, which the ledger counts as ownership by design.
 // 2026-10-21: +1 - the SQL Server hot ADD COLUMN stop (#644) comes at the end of a drain whose parts were
 // committed before the column was added; they and the checkpoint stay, as on every mid-drain CDC stop.
-const FAILED_RUN_LEFTOVER_CEILING: usize = 48; // ratchet-pin: failed-run-leftover-declarations
+// 48 -> 51 (2026-10-29, #719): three cells of the column-grants review: the column rename refused at its statement and the same refusal in the DDL neighbour cell (the run stored the readable columns it observed before it stopped, src/state/schema.rs keeps the baseline of a failed run), and the revoke between the stream open and the schema read (the first run's anchor is written when the stream opens).
+const FAILED_RUN_LEFTOVER_CEILING: usize = 51; // ratchet-pin: failed-run-leftover-declarations
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs): product defects every failed run may show.
 // 2 -> 1 (2026-10-08): a run that fails before its first write leaves the prefix alone, so a failed manifest before a write is a failure, no longer an excuse.

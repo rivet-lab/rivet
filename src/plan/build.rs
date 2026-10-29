@@ -78,6 +78,34 @@ pub fn build_plan(
     )
 }
 
+/// Refuse a setting of `export` that reads a column the account may not `SELECT`: the server would answer it with a raw error, mid-run.
+fn refuse_hidden_read_columns(
+    table: &str,
+    export: &ExportConfig,
+    readable: &[String],
+) -> Result<()> {
+    let named = [
+        ("cursor_column", &export.cursor_column),
+        ("cursor_fallback_column", &export.cursor_fallback_column),
+        ("chunk_column", &export.chunk_column),
+        ("chunk_by_key", &export.chunk_by_key),
+        ("time_column", &export.time_column),
+        ("partition_by", &export.partition_by),
+    ];
+    for (setting, column) in named {
+        let Some(column) = column else { continue };
+        if !readable.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+                "`{table}`: `{setting}: {column}` names a column `{column}` this account may not SELECT \
+                 under `columns_from: grants`, so the read would fail on the server; nothing was read \
+                 or written. GRANT SELECT on `{column}`, or name a readable column in `{setting}`"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `export` reading only the columns the account may `SELECT`: its `table:` read under
 /// `source.columns_from: grants`, asked on `probe` when the caller holds one; `None` when
 /// there is nothing to project.
@@ -93,16 +121,20 @@ pub(crate) fn project_table_read(
     else {
         return Ok(None);
     };
-    let select = match probe {
-        Some(src) => src.readable_select(table)?,
+    let readable = match probe {
+        Some(src) => src.readable_columns(table)?,
         None => crate::source::connect(
             source.source_type,
             &source.resolve_url()?,
             source.tls.as_ref(),
             source.mongo.as_ref(),
         )?
-        .readable_select(table)?,
+        .readable_columns(table)?,
     };
+    if let Some(readable) = &readable {
+        refuse_hidden_read_columns(table, export, &readable.columns)?;
+    }
+    let select = readable.map(|r| r.select);
     let mut out = export.clone();
     out.table_select = select;
     Ok(Some(out))

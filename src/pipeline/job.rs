@@ -1523,6 +1523,11 @@ fn execute_resolved_plan(
         Ok(()) => super::finalize::finalize_export(plan, Some(state), &mut summary),
         Err(e) => {
             super::finalize::finalize_export_records(&mut summary);
+            let e = crate::source::code_a_revoked_column(
+                e,
+                &plan.export_name,
+                plan.source.columns_from_grants(),
+            );
             Err(crate::source::code_a_missing_relation(
                 e,
                 &plan.export_name,
@@ -1863,15 +1868,31 @@ fn run_export_job_inner(
         let cdc_config_dir = std::path::Path::new(config_path)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let pending =
-            match super::cdc_job::initial_snapshot_pending(config, export, state, cdc_config_dir) {
-                Ok(p) => p,
-                Err(e) => {
-                    let summary = synthetic_failed_summary(&export.name, &e);
-                    crate::notify::maybe_send(config.notifications.as_ref(), &summary);
-                    return (Err(e), summary);
-                }
-            };
+        // The account's grants, read once for the whole run: the legs, the stream open and its
+        // re-reads take this value or refuse. A key it cannot read is refused here, before the
+        // anchor.
+        let grants = match super::cdc_job::resolve_grants(config, export) {
+            Ok(g) => g,
+            Err(e) => {
+                let summary = synthetic_failed_summary(&export.name, &e);
+                crate::notify::maybe_send(config.notifications.as_ref(), &summary);
+                return (Err(e), summary);
+            }
+        };
+        let pending = match super::cdc_job::initial_snapshot_pending(
+            config,
+            export,
+            state,
+            cdc_config_dir,
+            grants.as_ref(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                let summary = synthetic_failed_summary(&export.name, &e);
+                crate::notify::maybe_send(config.notifications.as_ref(), &summary);
+                return (Err(e), summary);
+            }
+        };
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
             // The batch pool `--parallel-exports` runs on: every leg runs, each on its
             // own state connection, and a finished snapshot is recorded as it lands.
@@ -1904,7 +1925,7 @@ fn run_export_job_inner(
             done
         };
         let outcome = cdc_outcome_with_legs(&export.name, outcomes, || {
-            super::cdc_job::run_cdc_export(config_path, config, export, state, opts.strict)
+            super::cdc_job::run_cdc_export(config_path, config, export, state, opts.strict, grants)
         });
         // The parent of a child process knows the export's run only by the id reported here.
         outcome.1.emit_finished();

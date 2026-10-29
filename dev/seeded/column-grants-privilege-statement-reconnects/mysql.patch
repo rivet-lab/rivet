@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -754,7 +754,7 @@
+             }
+             Err(e) => return Err(e),
+         };
+-        self.grants_conn = Some(conn);
++        self.grants_conn = None;
+         let now = read.unwrap_or_default();
+         let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
+             r.get(t).map(|c| c.columns.clone())

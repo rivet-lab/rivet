@@ -35,7 +35,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `tuning` | [TuningConfig](#tuningconfig) |  |  |
 | `tls` | [TlsConfig](#tlsconfig) |  | Transport security settings (ADR: SecOps). When absent, Rivet connects without TLS — a warning is emitted so operators are aware. See [`TlsConfig`]. |
 | `mongo` | [MongoConfig](#mongoconfig) |  | MongoDB-specific read options (`source.mongo:`). Honoured only when `type: mongo`; ignored by the SQL engines. See [`MongoConfig`]. |
-| `columns_from` | `grants` |  | `grants`: every export reads and delivers only the columns the source account may `SELECT`, in batch reads, baselines and the change stream (MySQL only). |
+| `columns_from` | `grants` |  | `grants`: every export reads and delivers only the columns the source account may `SELECT`, in batch reads, baselines and the change stream (MySQL only).  Batch reads and baselines are enforced by the server: the `SELECT` names only readable columns. The MySQL change stream is a client-side projection: the binlog carries every column of a changed row to rivet, which drops the unreadable ones before anything is written. That is data minimisation, not access control: restrict the replication account itself if the values must not reach the rivet host. |
 
 ### `source.mongo` (MongoDB read options)
 

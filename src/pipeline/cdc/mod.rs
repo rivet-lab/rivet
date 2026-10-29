@@ -182,20 +182,6 @@ pub(crate) fn run_capture(
                 Err(e) => return (Vec::new(), Err(e)),
             },
         };
-        if let Some(missing) = readable.as_ref().and_then(|r| r.unreadable_key(&key)) {
-            return (
-                Vec::new(),
-                Err(crate::error::coded(
-                    crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
-                    format!(
-                        "export '{}' table '{}': key column `{missing}` is not readable under \
-                         `columns_from: grants`, so changes to a row could not be told apart; \
-                         nothing was read or written",
-                        cap.export_name, o.table
-                    ),
-                )),
-            );
-        }
         if let Some(w) =
             sink::unbudgetable_partition_warning(&o.table, o.partition.as_ref(), &columns)
         {
