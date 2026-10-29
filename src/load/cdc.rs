@@ -260,7 +260,7 @@ pub use crate::enrich::DELETE_FLAG_COLUMN;
 /// because `merge_inputs` infers the tombstone arm from that name being PRESENT
 /// and so turns soft-delete semantics on for a column the source owns.
 ///
-/// One predicate owns the whole vocabulary now, and `check_spec_fit` asks it.
+/// One predicate owns the whole vocabulary now, and `LoadPlan::refused` asks it.
 pub(crate) fn is_reserved_column(name: &str) -> bool {
     is_meta_column(name) || name == DELETE_FLAG_COLUMN
 }

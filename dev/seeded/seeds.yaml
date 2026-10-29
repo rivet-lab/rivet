@@ -3638,3 +3638,23 @@ seeds:
         cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_oracle, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
       lib:
         cells: ["lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
+
+  - name: reserved-column-checked-on-the-unpinned-plan-only
+    class: the refusal of a source column named like one rivet owns in a delta load's tables is raised only on the path that has no recorded run to type the plan from, so the normal load after a run loads the colliding column
+    history: "2026-10-29 Snowflake bughunt F1 - `__op` and `__is_deleted` source columns passed a pinned load on Snowflake and BigQuery, exit 0, and a compact deleted live rows"
+    scope: source
+    patch: reserved-column-checked-on-the-unpinned-plan-only/shared.patch
+    engines:
+      postgres:
+        cells: [reserved_column_is_refused_into_clickhouse_postgres]
+      mysql:
+        cells: [reserved_column_is_refused_into_clickhouse_mysql]
+      mssql:
+        cells: [reserved_column_is_refused_into_clickhouse_mssql]
+      mongo:
+        na: "the load driver never reads the source engine: one code path, graded by the lib cell and the postgres/mysql cells"
+      oracle:
+        na: "the load driver never reads the source engine: one code path, graded by the lib cell and the postgres/mysql cells"
+      lib:
+        cells:
+          - "lib:a_plan_pinned_to_its_run_refuses_a_reserved_source_column"

@@ -139,16 +139,20 @@ impl Warehouse {
         }
     }
 
+    /// The environment `rivet load` needs for this warehouse's `load:` line.
+    pub fn load_envs(&self) -> &'static [(&'static str, &'static str)] {
+        match self.kind {
+            WarehouseKind::ClickHouse => &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)],
+            _ => &[],
+        }
+    }
+
     /// `rivet load` through `rig`, which must succeed; everything it said.
     pub fn load(&self, rig: &Rig) -> String {
         if !self.loads() {
             return String::new();
         }
-        let envs: &[(&str, &str)] = match self.kind {
-            WarehouseKind::ClickHouse => &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)],
-            _ => &[],
-        };
-        let out = rig.load_args_env(&[], envs);
+        let out = rig.load_args_env(&[], self.load_envs());
         let said = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
