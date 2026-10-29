@@ -2324,3 +2324,417 @@ fn ddl_in_the_backlog_is_met_as_before_mysql() {
         "a hidden column's rename is refused too: the backlog cannot tell it from a delivered one"
     );
 }
+
+/// `(op, id, name or nm)` of every change in `parts`, in capture order.
+fn named_changes(parts: &[arrow::record_batch::RecordBatch]) -> Vec<(String, i64, String)> {
+    let mut out = Vec::new();
+    for b in parts.iter().filter(|b| b.column_by_name("__op").is_some()) {
+        let s = |n: &str, i: usize| {
+            arrow::util::display::array_value_to_string(b.column_by_name(n).unwrap(), i).unwrap()
+        };
+        let name = if b.column_by_name("name").is_some() {
+            "name"
+        } else {
+            "nm"
+        };
+        for i in 0..b.num_rows() {
+            let seq: i64 = s("__seq", i).parse().unwrap();
+            out.push((seq, (s("__op", i), s("id", i).parse().unwrap(), s(name, i))));
+        }
+    }
+    out.sort_by_key(|(seq, _)| *seq);
+    out.into_iter().map(|(_, c)| c).collect()
+}
+
+/// What one run met after `steps` were committed in the backlog: how it ended, whether the checkpoint moved, the changes it delivered and what it said.
+struct Backlog {
+    exit: i32,
+    code: String,
+    moved: bool,
+    said: String,
+    changes: Vec<(String, i64, String)>,
+}
+
+impl Backlog {
+    /// The verdict as one line.
+    fn line(&self) -> String {
+        format!(
+            "exit={} code={} moved={} changes={:?}",
+            self.exit, self.code, self.moved, self.changes
+        )
+    }
+}
+
+const REFUSED_UNDECODABLE: &str = "exit=5 code=SOURCE_CDC_UNDECODABLE moved=false changes=[]";
+const REFUSED_TRUNCATED: &str = "exit=5 code=SOURCE_CDC_TRUNCATED moved=false changes=[]";
+const RECREATED: &str = "CREATE TABLE rivet.{t} LIKE rivet.{t}_old";
+const RECREATED_PLAIN: &str =
+    "CREATE TABLE rivet.{t} (id INT PRIMARY KEY, name VARCHAR(20), pass VARCHAR(20))";
+const BOTH_DELIVERED: &str = "exit=0 code=- moved=true changes=[(\"update\", 1, \"ann-before\"), (\"update\", 1, \"ann-after\")]";
+
+const UPDATED_BEFORE: &str = "UPDATE rivet.{t} SET name = 'ann-before' WHERE id = 1";
+const UPDATED_AFTER: &str = "UPDATE rivet.{t} SET name = 'ann-after' WHERE id = 1";
+const UPDATED_AFTER_AS_NM: &str = "UPDATE rivet.{t} SET nm = 'ann-after' WHERE id = 1";
+const GHOST_WITH_NM: &str =
+    "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY, nm VARCHAR(20), pass VARCHAR(20))";
+const GHOST_COPY: &str =
+    "INSERT INTO rivet.{t}_new (id, nm, pass) SELECT id, name, pass FROM rivet.{t}";
+const SWAP: &str = "RENAME TABLE rivet.{t} TO rivet.{t}_old, rivet.{t}_new TO rivet.{t}";
+
+/// The seeded table `{t}` (an anchored run first, with or without `columns_from: grants`), `steps` committed on one root session, then one run; `{t}_old` and `{t}_new` are dropped with it.
+fn statements_in_the_backlog(label: &str, policy: bool, steps: &[&str]) -> Backlog {
+    let (table, _table) = seeded(label);
+    let _aside = (
+        MysqlCdcTable(format!("{table}_old")),
+        MysqlCdcTable(format!("{table}_new")),
+    );
+    let user = GrantUser::new(&table, "id, name");
+    let mut rig = Rig::mysql_cdc(&table)
+        .cdc("initial: snapshot")
+        .a_failed_run_may_leave(
+            &[Leftover::ResumePoint],
+            "the run observes the readable columns at its start: that observed schema is stored before the refusal at the statement (known: src/state/schema.rs stores the baseline of a failed run)",
+        )
+        .no_oracle("the cell grades the changes the run delivered against the statements it committed, not the final table");
+    if policy {
+        rig = rig
+            .source_url(&user.url())
+            .source_line("columns_from: grants");
+    }
+    rig.run_ok();
+    let before = checkpoint_at(&rig);
+    let mut c = root();
+    for sql in steps {
+        c.query_drop(sql.replace("{t}", &table)).unwrap();
+    }
+    let out = rig.run();
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    let said = said_by(&out);
+    Backlog {
+        exit: out.status.code().unwrap_or(-1),
+        code: said
+            .split("[RIVET_")
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .unwrap_or("-")
+            .to_string(),
+        moved: checkpoint_at(&rig) != before,
+        said,
+        changes: named_changes(&parts),
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_table_swap_of_a_captured_table_is_refused_under_the_policy_mysql() {
+    let run = statements_in_the_backlog(
+        "cg_swap",
+        true,
+        &[
+            UPDATED_BEFORE,
+            GHOST_WITH_NM,
+            GHOST_COPY,
+            SWAP,
+            UPDATED_AFTER_AS_NM,
+        ],
+    );
+    assert_eq!(
+        run.line(),
+        "exit=5 code=SOURCE_CDC_UNDECODABLE moved=false changes=[]",
+        "{}",
+        run.said
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_table_swap_without_the_policy_is_met_as_before_mysql() {
+    let run = statements_in_the_backlog(
+        "cg_swap_off",
+        false,
+        &[
+            UPDATED_BEFORE,
+            GHOST_WITH_NM,
+            GHOST_COPY,
+            SWAP,
+            UPDATED_AFTER_AS_NM,
+        ],
+    );
+    assert_eq!(run.line(), BOTH_DELIVERED, "{}", run.said);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_rename_of_a_table_the_run_does_not_capture_is_met_as_before_under_the_policy_mysql() {
+    let run = statements_in_the_backlog(
+        "cg_swap_other",
+        true,
+        &[
+            UPDATED_BEFORE,
+            "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY)",
+            "RENAME TABLE rivet.{t}_new TO rivet.{t}_old",
+            "ALTER TABLE rivet.{t}_old RENAME TO rivet.{t}_new",
+            UPDATED_AFTER,
+        ],
+    );
+    assert_eq!(run.line(), BOTH_DELIVERED, "{}", run.said);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn an_alter_that_renames_no_table_is_met_as_before_under_the_policy_mysql() {
+    let run = statements_in_the_backlog(
+        "cg_swap_idx",
+        true,
+        &[
+            UPDATED_BEFORE,
+            "ALTER TABLE rivet.{t} ADD INDEX ix_name (name), ADD COLUMN `rename` INT",
+            "ALTER TABLE rivet.{t} RENAME INDEX ix_name TO ix_other",
+            "ALTER TABLE rivet.{t} COMMENT = 'rename to somewhere'",
+            UPDATED_AFTER,
+        ],
+    );
+    assert_eq!(run.line(), BOTH_DELIVERED, "{}", run.said);
+}
+
+/// Every case `(policy, steps, verdict line)` run on its own seeded table, the verdicts compared in one assertion.
+fn backlogs_end_as(label: &str, cases: &[(bool, &[&str], &str)]) {
+    let got: Vec<String> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (policy, steps, _))| {
+            let run = statements_in_the_backlog(&format!("{label}{i}"), *policy, steps);
+            format!("{}: {}", steps.join(" ; "), run.line())
+        })
+        .collect();
+    let want: Vec<String> = cases
+        .iter()
+        .map(|(_, steps, want)| format!("{}: {want}", steps.join(" ; ")))
+        .collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_rename_of_a_captured_table_is_refused_in_every_form_under_the_policy_mysql() {
+    let forms: [&[&str]; 10] = [
+        &["ALTER TABLE rivet.{t} RENAME TO rivet.{t}_old", RECREATED],
+        &["ALTER TABLE rivet.{t} RENAME AS rivet.{t}_old", RECREATED],
+        &[
+            "ALTER TABLE rivet.{t} ADD COLUMN k INT, RENAME rivet.{t}_old",
+            RECREATED,
+        ],
+        &["RENAME TABLE rivet.{t} TO rivet.{t}_old", RECREATED],
+        &["RENAME TABLE {t} TO {t}_old", RECREATED],
+        &["RENAME TABLE `rivet`.`{t}` TO `rivet`.`{t}_old`", RECREATED],
+        &[
+            "/*!80000 RENAME TABLE rivet.{t} TO rivet.{t}_old */",
+            RECREATED,
+        ],
+        &["RENAME TABLE rivet.{t} -- c\n TO rivet.{t}_old", RECREATED],
+        &[
+            "SET SESSION sql_mode = 'ANSI_QUOTES'",
+            "RENAME TABLE \"rivet\".\"{t}\" TO \"rivet\".\"{t}_old\"",
+            RECREATED,
+        ],
+        &[
+            "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY)",
+            "RENAME TABLE rivet.{t}_new TO rivet.{t}_old, rivet.{t} TO rivet.{t}_new",
+            "CREATE TABLE rivet.{t} LIKE rivet.{t}_old",
+        ],
+    ];
+    let cases: Vec<_> = forms
+        .iter()
+        .map(|f| (true, *f, REFUSED_UNDECODABLE))
+        .collect();
+    backlogs_end_as("cg_rnf", &cases);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_after_a_backslash_literal_under_no_backslash_escapes_is_refused_mysql() {
+    backlogs_end_as(
+        "cg_nbe",
+        &[(
+            true,
+            &[
+                "SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES'",
+                UPDATED_BEFORE,
+                "ALTER TABLE rivet.{t} COMMENT = 'x\\', RENAME COLUMN name TO nm",
+                UPDATED_AFTER_AS_NM,
+            ],
+            REFUSED_UNDECODABLE,
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_after_a_backslash_name_under_ansi_quotes_is_refused_mysql() {
+    backlogs_end_as(
+        "cg_ans",
+        &[(
+            true,
+            &[
+                "SET SESSION sql_mode = 'ANSI_QUOTES'",
+                UPDATED_BEFORE,
+                "ALTER TABLE rivet.{t} ADD COLUMN \"x\\\" INT, RENAME COLUMN name TO nm",
+                UPDATED_AFTER_AS_NM,
+            ],
+            REFUSED_UNDECODABLE,
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn statements_whose_quotes_do_not_hide_a_rename_are_met_as_before_under_the_policy_mysql() {
+    let no_backslash = "SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES'";
+    let ansi = "SET SESSION sql_mode = 'ANSI_QUOTES'";
+    backlogs_end_as(
+        "cg_qnb",
+        &[
+            (
+                true,
+                &[
+                    no_backslash,
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.{t} COMMENT = 'x\\', ADD COLUMN extra INT",
+                    UPDATED_AFTER,
+                ],
+                BOTH_DELIVERED,
+            ),
+            (
+                true,
+                &[
+                    no_backslash,
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.{t} COMMENT = 'rename column name to nm'",
+                    UPDATED_AFTER,
+                ],
+                BOTH_DELIVERED,
+            ),
+            (
+                true,
+                &[
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.{t} COMMENT = 'it\\'s', RENAME COLUMN name TO nm",
+                    UPDATED_AFTER_AS_NM,
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                true,
+                &[
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.{t} COMMENT = \"a\\\"b\", RENAME COLUMN name TO nm",
+                    UPDATED_AFTER_AS_NM,
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                true,
+                &[
+                    ansi,
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.{t} ADD COLUMN \"x\\\" INT, ADD COLUMN extra INT",
+                    UPDATED_AFTER,
+                ],
+                BOTH_DELIVERED,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_truncate_drop_or_statement_write_with_double_quoted_names_is_refused_under_ansi_quotes_mysql()
+{
+    let ansi = "SET SESSION sql_mode = 'ANSI_QUOTES'";
+    let statement = "SET SESSION binlog_format = 'STATEMENT'";
+    backlogs_end_as(
+        "cg_anq",
+        &[
+            (
+                false,
+                &[ansi, "TRUNCATE \"rivet\".\"{t}\""],
+                REFUSED_TRUNCATED,
+            ),
+            (false, &[ansi, "TRUNCATE TABLE \"{t}\""], REFUSED_TRUNCATED),
+            (
+                false,
+                &[
+                    ansi,
+                    "DROP TABLE IF EXISTS \"rivet\".\"{t}\"",
+                    RECREATED_PLAIN,
+                ],
+                REFUSED_TRUNCATED,
+            ),
+            (
+                false,
+                &[
+                    ansi,
+                    statement,
+                    "UPDATE \"rivet\".\"{t}\" SET name = 'stmt' WHERE id = 2",
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                false,
+                &[
+                    ansi,
+                    statement,
+                    "INSERT INTO \"rivet\".\"{t}\" (id, name, pass) VALUES (9, 'q', 'r')",
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_truncate_drop_or_statement_write_is_met_as_before_without_double_quoted_names_mysql() {
+    let ansi = "SET SESSION sql_mode = 'ANSI_QUOTES'";
+    let statement = "SET SESSION binlog_format = 'STATEMENT'";
+    backlogs_end_as(
+        "cg_anp",
+        &[
+            (false, &["TRUNCATE rivet.{t}"], REFUSED_TRUNCATED),
+            (false, &["TRUNCATE TABLE `rivet`.`{t}`"], REFUSED_TRUNCATED),
+            (
+                false,
+                &["DROP TABLE IF EXISTS `{t}`", RECREATED_PLAIN],
+                REFUSED_TRUNCATED,
+            ),
+            (
+                false,
+                &[statement, "UPDATE rivet.{t} SET name = 'stmt' WHERE id = 2"],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                false,
+                &[
+                    statement,
+                    "INSERT INTO `rivet`.`{t}` (id, name, pass) VALUES (9, 'q', 'r')",
+                ],
+                REFUSED_UNDECODABLE,
+            ),
+            (
+                false,
+                &[
+                    UPDATED_BEFORE,
+                    "CREATE TABLE rivet.{t}_old (id INT PRIMARY KEY)",
+                    ansi,
+                    "TRUNCATE \"rivet\".\"{t}_old\"",
+                    "DROP TABLE \"rivet\".\"{t}_old\"",
+                    UPDATED_AFTER,
+                ],
+                BOTH_DELIVERED,
+            ),
+        ],
+    );
+}
