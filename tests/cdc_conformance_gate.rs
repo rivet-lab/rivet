@@ -934,6 +934,7 @@ const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
 // 2026-10-21: +1 shared codec - the hot ADD COLUMN cells (#644) read the added column's values from their parts
 // with arrow (`read_all_parts`); the rig oracle grades every run against the source, and the BigQuery / ClickHouse
 // cells read the warehouse back through `bq` / its HTTP client.
+// 119 -> 132 (2026-10-29, #719): the column-grants cells read the delivered parts with arrow; the rig oracle grades the runs it can.
 const PIN_SHARED_CODEC: usize = 132; // ratchet-pin: cdc-census-shared-codec
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
@@ -957,6 +958,7 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-10-06: +1 presence - the SQL Server case-only `--table` mismatch refusal, whose oracle is the refusal text and an untouched destination.
 // 2026-10-20: +1 presence - the PostgreSQL slot-advanced-by-another-reader refusal, whose oracle is the coded refusal; the rig oracle grades the runs before it.
 // 89 -> 93 (2026-10-21, #675): four MySQL bare-name cells read every part's ids and compare them with the rows written to each database.
+// 93 -> 102 (2026-10-29, #719): column-grants cells whose oracle is a coded refusal, an unmoved checkpoint or the part set a refused run left.
 const PIN_PRESENCE: usize = 102; // ratchet-pin: cdc-census-presence
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a

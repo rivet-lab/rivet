@@ -734,6 +734,14 @@ impl MysqlChangeStream {
             .map(std::sync::Arc::new)
     }
 
+    /// Re-read the grants at this event unless it lets a pending re-read wait.
+    fn refuse_changed_grants_at(&mut self, data: &Option<EventData<'_>>) -> Result<()> {
+        if defers_the_grants_re_read(data) {
+            return Ok(());
+        }
+        self.refuse_changed_grants()
+    }
+
     /// Re-read the grants for the privilege statements met since the last re-read; refuse when a table's readable columns differ.
     fn refuse_changed_grants(&mut self) -> Result<()> {
         let Some((file, log_pos)) = self.grants_pending.take() else {
@@ -1206,9 +1214,7 @@ impl MysqlChangeStream {
         };
         let log_pos = ev.header().log_pos() as u64;
         let data = ev.read_data()?;
-        if !defers_the_grants_re_read(&data) {
-            self.refuse_changed_grants()?;
-        }
+        self.refuse_changed_grants_at(&data)?;
         match data {
             // ROTATE → the next binlog file; subsequent positions are in it.
             Some(EventData::RotateEvent(re)) => {
@@ -2541,13 +2547,7 @@ fn is_commit_statement(sql: &str) -> bool {
     )
 }
 
-/// Is the commit at `(file, pos)` PAST the open-time bound? — the pure heart of
-/// the bounded run's termination contract (see [`MysqlChangeStream::bound`]).
-/// Binlog files order by their numeric suffix (`binlog.000042`); a lexicographic
-/// compare breaks at the 999999 → 1000000 width rollover, so parse the ordinal
-/// (one server has one basename — rotation never changes it mid-stream). Fails
-/// open: an unparseable name is never "past" — the `BINLOG_DUMP_NON_BLOCK` EOF
-/// backstop still ends the run (delayed termination, never a dropped commit).
+/// Is the commit at `(file, pos)` past the open-time bound? Binlog files order by their numeric suffix; an unparseable name is never past.
 fn commit_past_bound(file: &str, pos: u64, bound: Option<&(String, u64)>) -> bool {
     let Some((bound_file, bound_pos)) = bound else {
         return false;

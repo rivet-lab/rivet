@@ -50,6 +50,7 @@ FIRST_RUN = {"SKIP": "the stream's first run delivered nothing", "PARTIAL": "the
 #: against the source as it is now (it plans the keys the source holds now), so its 42 runs leave the counter: 26 counted on main,
 #: 12 of the new crash-then-grow cells, 4 `run_resume_over_deleted_tasks_*` off `open_defect_`. The 24 left are `settle:` runs:
 #: 20 counted on main and the 4 `incremental_adding_settle_*`, opted out (OFF) on main and graded now.
+#: 2026-10-29 (#719): skip 53 -> 59 (CI measured 56 on main): 3 column-grants cells grade nothing by design (2 backfill recipes whose stream carries the rows, 1 `time_window`); closes when the oracle reads a relative window.
 VERDICT_CEILINGS: dict[str, dict[str, tuple[int, int]]] = {
     "ci": {
         "first-run": (0,  # ratchet-pin: rig-oracle-first-run
