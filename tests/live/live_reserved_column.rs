@@ -25,12 +25,7 @@ fn reserved_column_is_refused(e: SqlEngine, kind: WarehouseKind, column: &str) {
         "INSERT INTO {table} (id, {column}, v) VALUES (1, {}, 10), (2, {}, 20)",
         flags[0], flags[1]
     ));
-    let rig = w
-        .shape(
-            e.staged(e.rig(&table), "incremental", &["cursor_column: id"]),
-            "id",
-        )
-        .no_oracle(UNGRADED);
+    let rig = reserved_rig(&w, e, &table, false);
     rig.run_ok();
     let before = w.fingerprint(&rig, &table);
 
@@ -58,6 +53,57 @@ fn reserved_column_is_refused(e: SqlEngine, kind: WarehouseKind, column: &str) {
         w.pairs(&rig, &table, "id", "v", false, false),
         vec![(1, 10), (2, 20)],
         "`mode: full` delivers the rows the incremental load refused"
+    );
+}
+
+/// The incremental rig of `table` into `w`, keyed on `id`, with the oracle off (`UNGRADED`); a base-and-buffer layout when `base` is set.
+fn reserved_rig(w: &Warehouse, e: SqlEngine, table: &str, base: bool) -> Rig {
+    let rig = e.staged(e.rig(table), "incremental", &["cursor_column: id"]);
+    let rig = if base {
+        w.shape_base_buffer(rig, "id")
+    } else {
+        w.shape(rig, "id")
+    };
+    rig.no_oracle(UNGRADED)
+}
+
+/// A source gains a column called `column` after its first good load: the next `rivet compact` is refused by code and the warehouse is unchanged.
+fn reserved_column_is_refused_by_compact(e: SqlEngine, kind: WarehouseKind, column: &str) {
+    e.alive();
+    let Some(mut w) = Warehouse::of(kind, "rsvc") else {
+        return;
+    };
+    let (table, _guard) = e.create("rsvc", "id BIGINT PRIMARY KEY, v INT");
+    w.adopt(&table);
+    e.exec(&format!(
+        "INSERT INTO {table} (id, v) VALUES (1, 10), (2, 20)"
+    ));
+    let rig = reserved_rig(&w, e, &table, true);
+    rig.run_ok();
+    w.load(&rig);
+    let (add, ty, flag) = match e {
+        SqlEngine::Pg => ("ADD COLUMN", "BOOLEAN", "true"),
+        SqlEngine::Mysql => ("ADD COLUMN", "BOOLEAN", "1"),
+        _ => ("ADD", "BIT", "1"),
+    };
+    e.exec(&format!("ALTER TABLE {table} {add} {column} {ty}"));
+    e.exec(&format!(
+        "INSERT INTO {table} (id, v, {column}) VALUES (3, 30, {flag})"
+    ));
+    rig.run_ok();
+    let before = w.fingerprint(&rig, &table);
+
+    let out = rig.cli_env(&["compact"], w.load_envs());
+    assert_refused(&out, RESERVED);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains(&format!("`{column}`")) && said.contains("rivet OWNS"),
+        "the refusal names the column:\n{said}"
+    );
+    assert_eq!(
+        w.fingerprint(&rig, &table),
+        before,
+        "a refused compact touches no warehouse object"
     );
 }
 
@@ -113,4 +159,56 @@ fn reserved_column_is_refused_into_snowflake_mysql() {
 #[ignore = "live: requires docker compose mssql + Snowflake creds"]
 fn reserved_column_is_refused_into_snowflake_mssql() {
     reserved_column_is_refused(SqlEngine::Mssql, WarehouseKind::Snowflake, "__is_deleted");
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres + BigQuery creds"]
+fn reserved_column_is_refused_by_compact_into_bigquery_postgres() {
+    reserved_column_is_refused_by_compact(SqlEngine::Pg, WarehouseKind::BigQuery, "__is_deleted");
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql + BigQuery creds"]
+fn reserved_column_is_refused_by_compact_into_bigquery_mysql() {
+    reserved_column_is_refused_by_compact(
+        SqlEngine::Mysql,
+        WarehouseKind::BigQuery,
+        "__is_deleted",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + BigQuery creds"]
+fn reserved_column_is_refused_by_compact_into_bigquery_mssql() {
+    reserved_column_is_refused_by_compact(
+        SqlEngine::Mssql,
+        WarehouseKind::BigQuery,
+        "__is_deleted",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres + Snowflake creds"]
+fn reserved_column_is_refused_by_compact_into_snowflake_postgres() {
+    reserved_column_is_refused_by_compact(SqlEngine::Pg, WarehouseKind::Snowflake, "__is_deleted");
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql + Snowflake creds"]
+fn reserved_column_is_refused_by_compact_into_snowflake_mysql() {
+    reserved_column_is_refused_by_compact(
+        SqlEngine::Mysql,
+        WarehouseKind::Snowflake,
+        "__is_deleted",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + Snowflake creds"]
+fn reserved_column_is_refused_by_compact_into_snowflake_mssql() {
+    reserved_column_is_refused_by_compact(
+        SqlEngine::Mssql,
+        WarehouseKind::Snowflake,
+        "__is_deleted",
+    );
 }
