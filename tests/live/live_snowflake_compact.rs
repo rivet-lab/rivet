@@ -203,6 +203,80 @@ fn snowflake_compact_cycle(mut scn: CdcScenario, key: &str, value: &str, sf: &Sf
     );
 }
 
+/// A baseline staged under `layout: log_view` carries no `__is_deleted`: loaded into a base under the default layout, every row lands live.
+fn a_baseline_staged_without_the_flag_lands_live(
+    mut scn: CdcScenario,
+    pk: &str,
+    key: &str,
+    sf: &SfLive,
+) {
+    let table = scn.table.clone();
+    let _cleanup = sf.cleanup(&[&table]);
+    for id in 1..=5 {
+        scn.insert(id);
+    }
+    scn.settle();
+    scn.rig
+        .set_top_line(&sf.load_line(&format!(", pk: [{pk}], layout: log_view")));
+    scn.rig.run_ok();
+    scn.rig
+        .set_top_line(&sf.load_line(&format!(", pk: [{pk}]")));
+    let said = load_ok(&scn.rig);
+    assert!(said.contains("layout=base+buffer"), "{said}");
+    assert_eq!(
+        base_profile(sf, &table, key),
+        (5, 5, 0, 0, 15),
+        "five live rows, no NULL flag"
+    );
+}
+
+#[test]
+#[ignore = "live: requires postgres-cdc + Snowflake creds"]
+fn snowflake_baseline_without_the_flag_lands_live_postgres() {
+    let Some(sf) = SfLive::from_env("sfb_pg") else {
+        return;
+    };
+    let scn = CdcScenario::pg_with("sfb_pg", "id BIGINT PRIMARY KEY, v INT", |r, t| {
+        shape(r, t, "id", &sf)
+    });
+    a_baseline_staged_without_the_flag_lands_live(scn, "id", "id", &sf);
+}
+
+#[test]
+#[ignore = "live: requires mysql-cdc + Snowflake creds"]
+fn snowflake_baseline_without_the_flag_lands_live_mysql() {
+    let Some(sf) = SfLive::from_env("sfb_my") else {
+        return;
+    };
+    let scn = CdcScenario::mysql_with("sfb_my", "id BIGINT PRIMARY KEY, v INT", |r, t| {
+        shape(r, t, "id", &sf)
+    });
+    a_baseline_staged_without_the_flag_lands_live(scn, "id", "id", &sf);
+}
+
+#[test]
+#[ignore = "live: requires mssql-cdc + Snowflake creds"]
+fn snowflake_baseline_without_the_flag_lands_live_mssql() {
+    let Some(sf) = SfLive::from_env("sfb_ms") else {
+        return;
+    };
+    let scn = CdcScenario::mssql_with("sfb_ms", "id BIGINT PRIMARY KEY, v INT", |r, t| {
+        shape(r, t, "id", &sf)
+    });
+    a_baseline_staged_without_the_flag_lands_live(scn, "id", "id", &sf);
+}
+
+#[test]
+#[ignore = "live: requires mongo-rs + Snowflake creds"]
+fn snowflake_baseline_without_the_flag_lands_live_mongo() {
+    let Some(sf) = SfLive::from_env("sfb_mg") else {
+        return;
+    };
+    require_alive(LiveService::MongoRs);
+    let scn = CdcScenario::mongo_with("sfb_mg", |r, t| shape(r, t, "_id", &sf));
+    a_baseline_staged_without_the_flag_lands_live(scn, "_id", "CAST(_id AS INT)", &sf);
+}
+
 #[test]
 #[ignore = "live: requires postgres-cdc + Snowflake creds"]
 fn snowflake_compact_cycle_postgres() {
