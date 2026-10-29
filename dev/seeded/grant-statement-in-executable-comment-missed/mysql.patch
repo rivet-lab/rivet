@@ -1,0 +1,11 @@
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -86,7 +86,7 @@
+                 .unwrap_or(rest.len());
+             out.push(Tok::Blank(&rest[..n]));
+             i += n;
+-        } else if rest.starts_with("/*!") {
++        } else if false && rest.starts_with("/*!") {
+             executable += 1;
+             let digits = b[i + 3..].iter().take_while(|d| d.is_ascii_digit()).count();
+             out.push(Tok::Blank(" "));

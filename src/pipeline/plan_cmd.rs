@@ -1720,6 +1720,7 @@ mod tests {
             tuning: None,
             tls: None,
             mongo: None,
+            columns_from: None,
         };
         let mut cfg = crate::config::Config {
             source,
@@ -1804,6 +1805,7 @@ mod tests {
             tuning: None,
             tls: None,
             mongo: None,
+            columns_from: None,
         };
         let mut cfg = crate::config::Config {
             source,

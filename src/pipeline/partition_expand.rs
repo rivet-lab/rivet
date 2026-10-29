@@ -63,10 +63,14 @@ fn expand_one(
     params: Option<&HashMap<String, String>>,
     out: &mut Vec<ExportConfig>,
 ) -> Result<()> {
-    let base_query = export.resolve_query(config_dir, params)?;
+    let mut src = crate::source::create_source(source)
+        .map_err(|e| crate::pipeline::single::attach_connect_hint(e, source))?;
+    let projected = crate::plan::build::project_table_read(Some(src.as_mut()), source, export)?;
+    let base_query = projected
+        .as_ref()
+        .unwrap_or(export)
+        .resolve_query(config_dir, params)?;
     let st = source.source_type;
-
-    let mut src = crate::source::create_source(source)?;
 
     // I/O: the value span (SQL aggregates skip NULLs) + whether any NULLs exist.
     // The pure child-building below is split out so it is unit-testable without

@@ -1,0 +1,12 @@
+diff --git a/src/pipeline/job.rs b/src/pipeline/job.rs
+--- a/src/pipeline/job.rs
++++ b/src/pipeline/job.rs
+@@ -2054,7 +2054,7 @@
+             plan_warnings,
+             strict: opts.strict,
+             force: opts.force,
+-            cdc_leg: export.snapshot_parent.is_some(),
++            cdc_leg: false,
+         },
+         meta,
+     )

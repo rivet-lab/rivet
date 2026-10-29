@@ -4663,6 +4663,64 @@ fn roast_pg_cdc_refuses_a_config_whose_resolved_identity_routing_cannot_match() 
     );
 }
 
+/// A dotted `table:` is read as `schema.table` everywhere; a relation whose name holds a dot cannot be named.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+fn pg_cdc_a_relation_named_with_a_dot_is_refused_by_a_remedy_that_can_be_followed() {
+    let cdc_db = CdcDb::new("cdc_dotted");
+    let slot = unique_name("rivet_dotted_slot").to_lowercase();
+    let _slot = Slot::new(slot.clone());
+    let mut c = cdc_db.connect();
+    c.batch_execute(
+        "CREATE TABLE public.\"d.a\" (id int primary key, v text); \
+         CREATE SCHEMA d_s; \
+         CREATE TABLE d_s.t (id bigint primary key, v text); \
+         CREATE TABLE public.\"d_s.t\" (id bigint primary key, v text)",
+    )
+    .unwrap();
+    c.execute(
+        "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+        &[&slot],
+    )
+    .unwrap();
+    for (cfg, code, needle) in [
+        ("d.a", "RIVET_SOURCE_CDC_PREREQUISITE", "does not exist"),
+        (
+            "public.\"d.a\"",
+            "RIVET_SOURCE_CDC_TABLE_UNRESOLVED",
+            "Rename the relation",
+        ),
+        (
+            "public.d.a",
+            "RIVET_SOURCE_CDC_TABLE_UNRESOLVED",
+            "rename it",
+        ),
+    ] {
+        let rig = Rig::pg_cdc(cfg, &slot).source_url(cdc_db.url());
+        let out = rig.run();
+        assert_refused(&out, Refused::by_code(code, 1));
+        let said = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains(needle),
+            "`{cfg}`: the refusal must say `{needle}`: {said}"
+        );
+    }
+    c.batch_execute(
+        "INSERT INTO d_s.t VALUES (1,'in'),(2,'in'); INSERT INTO public.\"d_s.t\" VALUES (9,'foreign')",
+    )
+    .unwrap();
+    let rig = Rig::pg_cdc("d_s.t", &slot).source_url(cdc_db.url());
+    let batches = rig.run_and_read();
+    let mut ids = ids_of(&batches);
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![1, 2],
+        "only the relation `d_s.t` is captured: the dotted-name twin cannot route into the export"
+    );
+}
+
 /// A TRUNCATE on a captured table must FAIL the run, not vanish.
 ///
 /// `test_decoding` renders it as `table public.t: TRUNCATE: (no-flags)` — a line

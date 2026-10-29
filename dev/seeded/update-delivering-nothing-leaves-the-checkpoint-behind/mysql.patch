@@ -1,0 +1,15 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -1375,11 +1375,6 @@
+                         before.as_ref(),
+                         after.as_ref(),
+                     ) {
+-                        self.tx.push(
+-                            boundary_marker(op, &position),
+-                            crate::source::cdc::spill::encode_event,
+-                            &format_args!("{}:{log_pos}", self.file),
+-                        )?;
+                         continue;
+                     }
+                     // A cell with no faithful representation is a DEFERRED refusal,
