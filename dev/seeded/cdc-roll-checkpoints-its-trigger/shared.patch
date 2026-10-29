@@ -1,0 +1,48 @@
+diff --git a/src/pipeline/cdc/sink.rs b/src/pipeline/cdc/sink.rs
+--- a/src/pipeline/cdc/sink.rs
++++ b/src/pipeline/cdc/sink.rs
+@@ -563,15 +563,16 @@
+                 yielded_this_pass += 1;
+                 txn_seq.stamp(&mut ev);
+                 // The commit boundary is a property of the STREAM, not of any routed
+-                // table — record it for every event, whatever the routing filter does with
+-                // it, and after the event is buffered. MySQL marks only the
++                // table — record it BEFORE the routing filter. MySQL marks only the
+                 // LAST event of a transaction committed; if that event lands on an
+                 // uncaptured table (audit-log-written-last is a common ORM shape),
+                 // filtering first would drop the boundary, stall the checkpoint
+                 // forever, and duplicate the captured rows on every scheduler cycle.
+                 let committed = ev.committed;
+-                let commit_at = committed.then(|| ev.position.clone());
+-                let mut buffered = false;
++                if committed {
++                    last_commit = Some(ev.position.clone());
++                    unacked_commit = true;
++                }
+                 // Routing is a BLOCK, not a `continue`: the soft cap below must run
+                 // for every event, because a commit boundary is a STREAM property
+                 // that can land on an UNCAPTURED table (the `commit_boundary_on_an_
+@@ -667,18 +668,11 @@
+                         total_rows += 1;
+                         emitted += 1;
+                     }
+-                    buffered = true;
+-                }
+-                // Recorded AFTER the event is buffered: a roll between the record and the push
+-                // (the column-added roll above) would checkpoint and ack past an unwritten row.
+-                if let Some(at) = commit_at {
+-                    last_commit = Some(at);
+-                    unacked_commit = true;
+-                }
+-                if buffered && policy.should_roll(total_rows, total_bytes.bytes(), committed) {
+-                    roll_all(&mut sinks, stream, &run, &last_commit, &mut unacked_commit)?;
+-                    total_rows = 0;
+-                    total_bytes.reset();
++                    if policy.should_roll(total_rows, total_bytes.bytes(), committed) {
++                        roll_all(&mut sinks, stream, &run, &last_commit, &mut unacked_commit)?;
++                        total_rows = 0;
++                        total_bytes.reset();
++                    }
+                 }
+                 // SOFT cap, judged at the COMMIT BOUNDARY — the same treatment
+                 // `should_roll` gives every other budget. Judged per event, the cap
