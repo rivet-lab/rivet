@@ -53,7 +53,7 @@ fn quote_end(sql: &str, start: usize, quote: char) -> (usize, bool) {
     let mut j = start + 1;
     while j < b.len() {
         match b[j] {
-            b'\\' if quote != '`' => j += 1 + char_at(sql, j + 1).map_or(0, char::len_utf8),
+            b'\\' if quote != '`' => j += 2,
             c if c == q && b.get(j + 1) == Some(&q) => j += 2,
             c if c == q => return (j + 1, true),
             _ => j += char_at(sql, j).map_or(1, char::len_utf8),
@@ -158,12 +158,17 @@ mod tests {
             ("`a -- b` c", "`a -- b` c"),
             ("'it''s -- x' -- y\nz", "'it''s -- x' z"),
             ("'it\\'s -- x' -- y\nz", "'it\\'s -- x' z"),
+            ("'\u{e9}\\'x -- y' -- z\nw", "'\u{e9}\\'x -- y' w"),
+            ("'\\\u{e9}' -- z\nw", "'\\\u{e9}' w"),
+            ("'\\'' -- c\nd", "'\\'' d"),
             ("`a``b -- c` d", "`a``b -- c` d"),
+            ("`a\\` -- c\nd", "`a\\` d"),
             ("\"a\"\"b # c\" d", "\"a\"\"b # c\" d"),
             ("/*!80000 -- c\nREVOKE */", "REVOKE"),
             ("/*!80000 # c\nREVOKE */", "REVOKE"),
             ("/*!80000 /* c */ REVOKE */", "REVOKE"),
             ("/*!80000 x /*!50000 y */ z */", "x y z"),
+            ("/*!80000 a */ b */ c", "a b */ c"),
             ("/*!80000 'a */ b' */", "'a */ b'"),
             (
                 "/*!80000 \u{540d} -- \u{540d}\n\u{540d} */",
