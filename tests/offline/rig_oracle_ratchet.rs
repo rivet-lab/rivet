@@ -31,7 +31,8 @@ use std::path::{Path, PathBuf};
 // Raised 23 -> 24 (2026-10-08): the MongoDB oplog-gone cells run on a replica set container they start themselves, which the reader inside rivet-duckdb cannot reach.
 // 24 -> 21 (2026-10-15): the oracle reads a mixed-type MongoDB `_id` (pymongo, canonical extended JSON), so the three heterogeneous-`_id` full scans are graded.
 // 21 -> 22 (2026-10-21, #675): a bare MySQL CDC name only another database holds; the oracle reads the bare name in the connection database, so the cell reads the parts itself.
-const NO_ORACLE_CEILING: usize = 22; // ratchet-pin: no-oracle-opt-outs
+// 22 -> 24 (2026-10-29, #719): the column-grants cells for an UPDATE-only column and for a bare name another database holds; the oracle lists the source's columns as the account (refused on the UPDATE-only one) and reads the bare name in the connection database only.
+const NO_ORACLE_CEILING: usize = 24; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave: `.a_failed_run_may_leave(` and a raw run's `FAILED_RUN_LEAVES_ENV`.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).

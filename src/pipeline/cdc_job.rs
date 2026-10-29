@@ -565,6 +565,7 @@ pub(super) fn initial_snapshot_pending(
     let recipes = crate::config::resolve_backfill(export, &config.exports)
         .map_err(|why| crate::error::coded(crate::error::codes::CONFIG_CDC_SHAPE_INVALID, why))?;
 
+    crate::test_hook::maybe_pause_at("cdc_before_anchor");
     // The anchor — one entry point; `ensure_anchor` picks the engine's
     // mechanism (idempotent: a present anchor is never moved). After the refusal
     // above, so a refused config leaves no slot or checkpoint behind.
@@ -820,6 +821,7 @@ fn run_cdc_inner(
         Ok(u) => u,
         Err(e) => return (Vec::new(), Err(e)),
     };
+    crate::test_hook::maybe_pause_at("cdc_before_stream_open");
     let cdc = export.cdc.clone().unwrap_or_default();
     // `tables:` (multi-table, one stream) or the single `table:` — validation
     // guarantees exactly one of them is set.
