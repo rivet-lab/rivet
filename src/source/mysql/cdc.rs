@@ -4647,6 +4647,314 @@ mod tests {
             }
         }
     }
+
+    fn only(t: &str) -> Vec<String> {
+        vec![t.to_string()]
+    }
+
+    fn folded_verdict_of(sql: &str, db: &str, cfg: &[String], fold: bool) -> QueryVerdict {
+        query_verdict(
+            sql,
+            db,
+            SqlMode::default(),
+            &QueryScope {
+                projecting: true,
+                fold,
+                configured: cfg,
+            },
+        )
+    }
+
+    fn pair(d: &str, t: &str) -> Option<(String, String)> {
+        Some((d.to_string(), t.to_string()))
+    }
+
+    #[test]
+    fn a_table_rename_is_read_from_the_plural_and_the_equals_spellings() {
+        let t = |sql: &str| renamed_tables(sql, "shop", SqlMode::default());
+        assert_eq!(
+            t("RENAME TABLES orders TO orders_old"),
+            Some(vec![pair("shop", "orders"), pair("shop", "orders_old")])
+        );
+        assert_eq!(
+            t("rename tables a TO b, c.d to e.f"),
+            Some(vec![
+                pair("shop", "a"),
+                pair("shop", "b"),
+                pair("c", "d"),
+                pair("e", "f")
+            ])
+        );
+        assert_eq!(
+            t("ALTER TABLE orders RENAME = orders_old"),
+            Some(vec![pair("shop", "orders"), pair("shop", "orders_old")])
+        );
+        assert_eq!(
+            t("ALTER TABLE orders ADD COLUMN k INT, RENAME = archive.orders"),
+            Some(vec![pair("shop", "orders"), pair("archive", "orders")])
+        );
+        for sql in [
+            "RENAME TABLESPACE a TO b",
+            "RENAME USERS a TO b",
+            "ALTER TABLE orders RENAME COLUMN a TO b",
+            "ALTER TABLE orders RENAME INDEX a TO b",
+            "ALTER TABLE orders RENAME KEY a TO b",
+            "ALTER TABLE orders COMMENT = 'x', ADD COLUMN k INT",
+        ] {
+            assert_eq!(t(sql), None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_drop_is_read_from_the_plural_spelling() {
+        let t = |sql: &str| drop_table_targets(sql, "shop", SqlMode::default());
+        assert_eq!(
+            t("DROP TABLES IF EXISTS a, b.c"),
+            Some(vec![pair("shop", "a"), pair("b", "c")])
+        );
+        assert_eq!(t("drop tables orders"), Some(vec![pair("shop", "orders")]));
+        assert_eq!(t("DROP TABLE orders"), Some(vec![pair("shop", "orders")]));
+        for sql in [
+            "DROP TABLESPACE ts",
+            "DROP VIEW v",
+            "DROP DATABASE shop",
+            "",
+        ] {
+            assert_eq!(t(sql), None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_name_in_another_case_is_ours_exactly_when_the_server_folds_names() {
+        let cfg = only("shop.orders");
+        let ours = |resolved: Option<(&str, &str)>, cfg: &[String], fold: bool| {
+            undecodable_event_is_ours(resolved, cfg, fold)
+        };
+        assert!(ours(Some(("shop", "orders")), &cfg, false));
+        assert!(ours(Some(("shop", "orders")), &cfg, true));
+        assert!(!ours(Some(("SHOP", "orders")), &cfg, false));
+        assert!(!ours(Some(("shop", "ORDERS")), &cfg, false));
+        assert!(ours(Some(("SHOP", "orders")), &cfg, true));
+        assert!(ours(Some(("shop", "ORDERS")), &cfg, true));
+        assert!(ours(Some(("shop", "orders")), &only("SHOP.Orders"), true));
+        assert!(!ours(Some(("shop", "orders")), &only("SHOP.Orders"), false));
+        for fold in [false, true] {
+            assert!(!ours(Some(("shop", "other")), &cfg, fold), "{fold}");
+            assert!(!ours(Some(("other", "orders")), &cfg, fold), "{fold}");
+            assert!(ours(None, &cfg, fold), "{fold}");
+            assert!(ours(Some(("x", "y")), &[], fold), "{fold}");
+        }
+    }
+
+    #[test]
+    fn the_server_value_of_lower_case_table_names_decides_the_folding() {
+        assert!(!fold_names_from(Some("0")));
+        assert!(!fold_names_from(Some(" 0\n")));
+        assert!(fold_names_from(Some("1")));
+        assert!(fold_names_from(Some("2")));
+        assert!(fold_names_from(Some("")));
+        assert!(fold_names_from(None));
+    }
+
+    #[test]
+    fn every_statement_the_run_judges_follows_the_folding_of_the_server() {
+        let cfg = only("shop.orders");
+        let upper = [
+            "TRUNCATE SHOP.ORDERS",
+            "ALTER TABLE SHOP.ORDERS RENAME COLUMN a TO b",
+            "RENAME TABLE SHOP.ORDERS TO SHOP.OLD",
+            "DROP TABLE SHOP.ORDERS",
+            "UPDATE SHOP.ORDERS SET a = 1",
+        ];
+        let on = [
+            QueryVerdict::Truncated("SHOP".into(), "ORDERS".into()),
+            QueryVerdict::ColumnRenamed("SHOP".into(), "ORDERS".into()),
+            QueryVerdict::TableRenamed(pair("SHOP", "ORDERS")),
+            QueryVerdict::Dropped(pair("SHOP", "ORDERS")),
+            QueryVerdict::StatementWrite(pair("SHOP", "ORDERS")),
+        ];
+        for (sql, want) in upper.iter().zip(on) {
+            assert_eq!(folded_verdict_of(sql, "shop", &cfg, true), want, "{sql}");
+            assert_eq!(
+                folded_verdict_of(sql, "shop", &cfg, false),
+                QueryVerdict::Pass,
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            folded_verdict_of("TRUNCATE ORDERS", "SHOP", &cfg, true),
+            QueryVerdict::Truncated("SHOP".into(), "ORDERS".into())
+        );
+        assert_eq!(
+            folded_verdict_of("TRUNCATE ORDERS", "SHOP", &cfg, false),
+            QueryVerdict::Pass
+        );
+    }
+
+    #[test]
+    fn a_version_comment_takes_the_digits_the_server_takes_through_every_verdict() {
+        let cfg = only("shop.orders");
+        let cases = [
+            (
+                "/*!080400 ALTER TABLE orders RENAME COLUMN a TO b */",
+                QueryVerdict::ColumnRenamed("shop".into(), "orders".into()),
+            ),
+            (
+                "/*!80400 ALTER TABLE orders RENAME COLUMN a TO b */",
+                QueryVerdict::ColumnRenamed("shop".into(), "orders".into()),
+            ),
+            (
+                "/*!080400 RENAME TABLE orders TO orders_old */",
+                QueryVerdict::TableRenamed(pair("shop", "orders")),
+            ),
+            (
+                "/*!080400\nRENAME TABLE orders TO orders_old */",
+                QueryVerdict::TableRenamed(pair("shop", "orders")),
+            ),
+            (
+                "/*!080400 REVOKE SELECT (a) ON shop.orders FROM u */",
+                QueryVerdict::Privilege,
+            ),
+            (
+                "/*!80400 REVOKE SELECT (a) ON shop.orders FROM u */",
+                QueryVerdict::Privilege,
+            ),
+            (
+                "/*!080400 TRUNCATE orders */",
+                QueryVerdict::Truncated("shop".into(), "orders".into()),
+            ),
+            (
+                "/*!080400 DROP TABLE orders */",
+                QueryVerdict::Dropped(pair("shop", "orders")),
+            ),
+            (
+                "/*!080400 UPDATE orders SET a = 1 */",
+                QueryVerdict::StatementWrite(pair("shop", "orders")),
+            ),
+            (
+                "/*!080400 ALTER TABLE orders ADD COLUMN k INT */",
+                QueryVerdict::Pass,
+            ),
+        ];
+        for (sql, want) in cases {
+            assert_eq!(verdict_of(sql, "shop", true, &cfg), want, "{sql}");
+        }
+    }
+
+    #[test]
+    fn each_statement_gets_its_verdict_and_only_its_verdict() {
+        let cfg = only("shop.orders");
+        let t = |s: &str| pair("shop", s);
+        let cases: Vec<(&str, bool, &[String], QueryVerdict)> = vec![
+            (
+                "TRUNCATE orders",
+                false,
+                &cfg,
+                QueryVerdict::Truncated("shop".into(), "orders".into()),
+            ),
+            ("TRUNCATE other", true, &cfg, QueryVerdict::Pass),
+            (
+                "ALTER TABLE orders RENAME COLUMN a TO b",
+                true,
+                &cfg,
+                QueryVerdict::ColumnRenamed("shop".into(), "orders".into()),
+            ),
+            (
+                "ALTER TABLE orders RENAME COLUMN a TO b",
+                false,
+                &cfg,
+                QueryVerdict::Pass,
+            ),
+            (
+                "RENAME TABLE orders TO old",
+                true,
+                &cfg,
+                QueryVerdict::TableRenamed(t("orders")),
+            ),
+            (
+                "RENAME TABLE orders TO old",
+                false,
+                &cfg,
+                QueryVerdict::Pass,
+            ),
+            (
+                "RENAME TABLE x TO",
+                true,
+                &cfg,
+                QueryVerdict::TableRenamed(None),
+            ),
+            (
+                "DROP TABLE orders",
+                false,
+                &cfg,
+                QueryVerdict::Dropped(t("orders")),
+            ),
+            ("DROP TABLE other", false, &cfg, QueryVerdict::Pass),
+            (
+                "DROP TABLE other, orders",
+                false,
+                &cfg,
+                QueryVerdict::Dropped(t("orders")),
+            ),
+            ("DROP TABLE", false, &cfg, QueryVerdict::Dropped(None)),
+            (
+                "UPDATE orders SET a = 1",
+                false,
+                &cfg,
+                QueryVerdict::StatementWrite(t("orders")),
+            ),
+            ("UPDATE other SET a = 1", false, &cfg, QueryVerdict::Pass),
+            ("UPDATE (", false, &cfg, QueryVerdict::StatementWrite(None)),
+            (
+                "REVOKE SELECT (a) ON shop.orders FROM u",
+                false,
+                &cfg,
+                QueryVerdict::Privilege,
+            ),
+            ("COMMIT", false, &cfg, QueryVerdict::Commit),
+            ("XA COMMIT 'x'", false, &cfg, QueryVerdict::Commit),
+            ("BEGIN", false, &cfg, QueryVerdict::Pass),
+            ("XA PREPARE 'x'", false, &cfg, QueryVerdict::Pass),
+            ("SET NAMES gbk", false, &cfg, QueryVerdict::Pass),
+            ("", false, &cfg, QueryVerdict::Pass),
+        ];
+        for (sql, projecting, cfg, want) in cases {
+            assert_eq!(verdict_of(sql, "shop", projecting, cfg), want, "{sql}");
+        }
+    }
+
+    fn charset_var(id: u16) -> Vec<u8> {
+        let mut v = vec![4u8];
+        for _ in 0..3 {
+            v.extend_from_slice(&id.to_le_bytes());
+        }
+        v
+    }
+
+    #[test]
+    fn the_client_character_set_is_read_from_the_status_variables_of_the_event() {
+        assert_eq!(charset_of(&charset_var(28)), Some(28));
+        assert_eq!(charset_of(&charset_var(255)), Some(255));
+        let among = [sql_mode_var(0x4), charset_var(13)].concat();
+        assert_eq!(charset_of(&among), Some(13));
+        assert_eq!(charset_of(&sql_mode_var(0x4)), None);
+        assert_eq!(charset_of(&[]), None);
+        assert_eq!(charset_of(&charset_var(28)[..4]), None);
+    }
+
+    #[test]
+    fn a_statement_is_read_in_the_character_set_the_event_names() {
+        let hidden = b"ALTER TABLE t COMMENT = '\xE4\xB8\xAD\\', RENAME COLUMN a TO b";
+        let column_renamed = |status: &[u8]| {
+            let (sql, mode) = statement_of(hidden, status);
+            column_rename_target(&sql, "shop", mode)
+        };
+        assert_eq!(column_renamed(&charset_var(28)), pair("shop", "t"));
+        assert_eq!(column_renamed(&charset_var(255)), None);
+        assert_eq!(column_renamed(&[]), None);
+        let (sql, mode) = statement_of(b"x", &[charset_var(28), sql_mode_var(0x4)].concat());
+        assert_eq!((sql.as_ref(), mode), ("x", ANSI));
+    }
 }
 
 #[cfg(test)]
