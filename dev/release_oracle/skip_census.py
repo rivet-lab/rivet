@@ -50,11 +50,6 @@ FIRST_RUN = {"SKIP": "the stream's first run delivered nothing", "PARTIAL": "the
 #: against the source as it is now (it plans the keys the source holds now), so its 42 runs leave the counter: 26 counted on main,
 #: 12 of the new crash-then-grow cells, 4 `run_resume_over_deleted_tasks_*` off `open_defect_`. The 24 left are `settle:` runs:
 #: 20 counted on main and the 4 `incremental_adding_settle_*`, opted out (OFF) on main and graded now.
-#: 2026-10-29 (#719, CI run 40808245863 measured 61 on the branch, 56 on main a130fd97): skip 53 -> 59. The branch's own cells add 3 SKIPs
-#: that grade nothing by design: `a_column_grant_account_backfills_through_its_recipes_without_a_hidden_column_mysql` x2 (its `baseline`
-#: recipe feeds the CDC export's stream; the stream's PASS carries the rows) and `a_time_window_and_a_partitioned_export_under_the_policy_read_the_readable_columns_mysql`
-#: x1 (a `time_window` is relative to the run's clock). The 2 SKIPs of `a_declared_key_the_account_reads_is_accepted_while_the_primary_key_is_hidden_mysql`
-#: were closed instead: the cell declares `census_key("code")`, the one key its account can read, and the oracle grades it (PASS).
 VERDICT_CEILINGS: dict[str, dict[str, tuple[int, int]]] = {
     "ci": {
         "first-run": (0,  # ratchet-pin: rig-oracle-first-run

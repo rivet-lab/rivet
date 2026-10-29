@@ -175,7 +175,7 @@
           "default": null
         },
         "columns_from": {
-          "description": "`grants`: every export reads and delivers only the columns the source account may\n`SELECT`, in batch reads, baselines and the change stream (MySQL only).\n\nBatch reads and baselines are enforced by the server: the `SELECT` names only\nreadable columns. The MySQL change stream is a client-side projection: the binlog\ncarries every column of a changed row to rivet, which drops the unreadable ones before\nanything is written. That is data minimisation, not access control: restrict the\nreplication account itself if the values must not reach the rivet host.",
+          "description": "`grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only).",
           "anyOf": [
             {
               "$ref": "#/$defs/ColumnsFrom"

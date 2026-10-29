@@ -409,7 +409,7 @@ def _mysql_selectable(ora, db: str, leaf: str, cols: list[str]) -> set[str]:
         sql = f"SELECT {', '.join(f'`{c}`' for c in names)} FROM `{db}`.`{leaf}` LIMIT 0"
         try:
             ora.rows("SELECT * FROM mysql_query('my', " + _lit(sql) + ")")
-        except Exception as e:  # noqa: BLE001 — only the server's refusal of a column is an answer
+        except Exception as e:  # noqa: BLE001
             if "denied" not in str(e):
                 raise
             return False
@@ -494,7 +494,6 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         partial = len(selectable) < len(native)
         native = {c: n for c, n in native.items() if c in selectable}
         wide = [c for c, n in native.items() if (d := re.match(r"DECIMAL\((\d+)", n)) and int(d.group(1)) > 38]
-        # The scanner reads INVISIBLE columns too; `native` holds only the ones `SELECT *` returns.
         invisible = ora.rows(
             "SELECT * FROM mysql_query('my', " + _lit(
                 f"SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {_lit(schema or db)} "

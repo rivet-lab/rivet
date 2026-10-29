@@ -42,11 +42,7 @@ pub(crate) fn projection_sql(db: Option<&str>, table: &str, columns: &[String]) 
     format!("SELECT {} FROM {rel}", cols.join(", "))
 }
 
-/// The columns of `db.table` the connected account may `SELECT`, in table order;
-/// `INVISIBLE` columns are left out, as `SELECT *` leaves them out.
-///
-/// Each column is judged by preparing a `SELECT` of it alone, so roles, column grants
-/// and partial revokes are decided by the server, never re-derived from grant text.
+/// The columns of `db.table` the account may `SELECT` in table order, each judged by the server.
 pub(crate) fn readable_columns(
     conn: &mut mysql::Conn,
     db: &str,
@@ -101,8 +97,6 @@ fn relation_of(
 }
 
 /// The readable columns of every configured table, keyed by its configured name.
-///
-/// A bare name is read in `bare_db`'s database for it, else in `own_db`.
 pub(crate) fn readable_columns_of(
     conn: &mut mysql::Conn,
     configured: &[String],
@@ -128,10 +122,7 @@ fn primary_key_of(conn: &mut mysql::Conn, db: &str, table: &str) -> Result<Vec<S
     )?)
 }
 
-/// [`readable_columns_of`], and the key each table is told apart by must be readable: the `declared` key of a table (its `load.pk`), else its primary key.
-///
-/// A key column the listing does not show is judged by the server like any other column: an
-/// `INVISIBLE` one (a generated invisible primary key) is selectable though `SELECT *` omits it.
+/// The readable columns of every configured table, and the key each table is told apart by must be readable.
 pub(crate) fn resolve_grants(
     conn: &mut mysql::Conn,
     configured: &[String],
@@ -163,7 +154,6 @@ pub(crate) fn resolve_grants(
                          unique key in `load.pk`"
                     );
                 }
-                // A column the table does not have is the key check's own refusal, later.
                 Err(mysql::Error::MySqlError(_)) => {}
                 Err(e) => return Err(e.into()),
             }
@@ -192,8 +182,7 @@ pub(crate) fn changes_only_hidden<T: PartialEq>(
         && matches!((before, after), (Some((b, bb)), Some((a, ab))) if bb.is_empty() && ab.is_empty() && b == a)
 }
 
-/// A present image that does not carry one value per column of the table map: the writer's
-/// `binlog_row_image` was MINIMAL or NOBLOB, so positions no longer line up with names.
+/// A present image that does not carry one value per column of the table map.
 pub(crate) fn is_partial<T>(full: usize, row: Option<&(Vec<T>, Vec<usize>)>) -> bool {
     row.is_some_and(|(vals, _)| vals.len() != full)
 }

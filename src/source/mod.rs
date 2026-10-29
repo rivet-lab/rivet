@@ -292,8 +292,7 @@ pub trait Source: Send {
         )
     }
 
-    /// The columns of `table` this account may read and the `SELECT` naming only them
-    /// (`columns_from: grants`); `None` on an engine without column grants.
+    /// The columns of `table` this account may read and the `SELECT` naming only them; `None` without column grants.
     fn readable_columns(&mut self, _table: &str) -> Result<Option<cdc::ReadableColumns>> {
         Ok(None)
     }
@@ -446,7 +445,7 @@ pub(crate) fn code_a_missing_relation(
     ))
 }
 
-/// `err` of an export run under `columns_from: grants`, coded when the server refused a column the run reads: the grants moved after the columns were named. A batch export names them in its plan, so it is `RIVET_SOURCE_COLUMNS_UNREADABLE` (run `rivet plan` again); the snapshot leg of a change stream (`cdc_leg`) takes them from the grants the stream resolved once, so it is `RIVET_SOURCE_CDC_GRANTS_CHANGED` (re-run). Any other error, or one already coded, as it came.
+/// Code an export error under `columns_from: grants`: a refused column is COLUMNS_UNREADABLE for a batch, GRANTS_CHANGED for a stream leg.
 pub(crate) fn code_a_revoked_column(
     err: anyhow::Error,
     export: &str,

@@ -51,8 +51,7 @@ pub(crate) fn tx_cap_from_env(raw: Option<&str>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// The refusal for a change image that names `names` columns but carries `n` values (a PARTIAL
-/// image). Built once: the sink's flush guard and the MySQL reader's projection both raise it.
+/// The refusal for a PARTIAL change image: `names` columns but `n` values.
 pub(crate) fn partial_image_refusal(
     schema: &str,
     table: &str,
@@ -772,7 +771,7 @@ pub(crate) enum CdcEngineOpts {
         /// it is allowed to fail the run — otherwise one PARTIAL_JSON table is a
         /// server-wide outage for exports that never read it.
         configured_tables: Vec<String>,
-        /// `source.columns_from: grants`: the grants the run resolved before its anchor; the stream delivers only the columns the account may `SELECT` and refuses when they are not the ones it opens under.
+        /// The grants the run resolved before its anchor; the stream delivers only those columns and refuses when it opens under others.
         resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     /// PostgreSQL logical slot name.

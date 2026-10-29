@@ -372,7 +372,7 @@ pub(super) fn claim_checkpoint(config_path: &str, export: &ExportConfig) -> Resu
 pub(super) type RunGrants =
     std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
 
-/// Read the account's grants ONCE for a `columns_from: grants` MySQL CDC run: the snapshot legs, the stream open and its re-reads all take this value or refuse. `None` without the policy. A key the account cannot read is refused here, before the anchor or any part is written.
+/// Read the account's grants once for a `columns_from: grants` MySQL CDC run; `None` without the policy.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);

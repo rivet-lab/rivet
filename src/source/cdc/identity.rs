@@ -240,14 +240,9 @@ pub(crate) fn table_matches(
     schema: &str,
     table: &str,
 ) -> bool {
-    // A document store has no schema to qualify with: a collection name may hold dots
-    // (`my.coll`), so the whole string is the only reading.
     if engine == super::CdcEngine::Mongo {
         return cfg == table;
     }
-    // A SQL store reads a dotted string as `schema.table` ONLY. Matching the whole string
-    // against the table first let `db.t` capture a table literally named `db.t` in another
-    // database, delivering rows of a relation the config never named.
     match cfg.split_once('.') {
         Some((cs, ct)) => cs == schema && ct == table,
         None => cfg == table,

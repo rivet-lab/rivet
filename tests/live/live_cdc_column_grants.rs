@@ -1,5 +1,4 @@
-//! Live `source.columns_from: grants` (MySQL): a column-grant account delivers only
-//! the columns it may SELECT — by name and by value, in batch reads, baselines and the stream.
+//! Live `source.columns_from: grants` (MySQL): a column-grant account delivers only the columns it may SELECT.
 
 use std::path::Path;
 
@@ -391,7 +390,7 @@ fn run_parked_at(rig: &Rig, point: &str, ms: u64, during: impl FnOnce()) -> std:
     run_parked_through(rig, point, ms, vec![Box::new(during)])
 }
 
-/// As [`run_parked_at`] for a run that parks at `point` once per closure: each runs while the run sits at the point, and the marker is cleared so the next park is told from this one.
+/// As [`run_parked_at`] for a run that parks at `point` once per closure.
 fn run_parked_through<'a>(
     rig: &Rig,
     point: &str,
@@ -436,8 +435,7 @@ fn run_parked_through<'a>(
     child.wait_with_output().expect("reap the parked run")
 }
 
-/// An open continuous run over `seeded(label)` (account granted `id, name, pass`): a first part
-/// is made durable, the run parks, `act` writes to the source, and the run ends at `max_events`.
+/// An open continuous run over `seeded(label)`: `act` writes to the source while it parks, then it ends at `max_events`.
 fn an_open_run_with(label: &str, max_events: u32, act: impl FnOnce(&str, &GrantUser)) -> OpenRun {
     an_open_run_as(label, max_events, false, act)
 }
@@ -466,7 +464,7 @@ fn an_open_run_as<'a>(
 /// What the source does while an open run is parked: called with the table and the account.
 type Act<'a> = Box<dyn FnOnce(&str, &GrantUser) + 'a>;
 
-/// An open continuous run of the account `account(table)`: the run parks after each durable part, and `acts[i]` writes to the source during its i-th park; the run ends at `max_events`.
+/// An open continuous run of `account(table)`: `acts[i]` writes to the source during its i-th park.
 fn an_open_run_through<'a>(
     label: &str,
     max_events: u32,
@@ -553,7 +551,7 @@ fn a_revoke_stops_an_open_run_before_the_column_leaves(
     nothing_written_after_the_change_leaves(&mut run);
 }
 
-/// An open run that has already re-read the grants once (an unrelated `FLUSH PRIVILEGES`, then three rows), then `change` the account's grants and one row the changed grants hide.
+/// An open run that re-read the grants once, then `change` the account's grants and one row the changed grants hide.
 fn a_login_time_grant_change_after_an_earlier_re_read_stops_an_open_run(
     label: &str,
     account: impl FnOnce(&str) -> GrantUser,
@@ -753,7 +751,6 @@ fn seeded_with_blob(label: &str) -> (String, MysqlCdcTable) {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_partial_row_image_is_refused_before_it_is_projected_mysql() {
-    // `blob`: the table also holds a TEXT column before `name`, which NOBLOB leaves out of an image.
     type Case = (&'static str, &'static str, bool, fn(&str) -> String);
     let cases: [Case; 4] = [
         ("MINIMAL", "insert", false, |t| {
@@ -928,8 +925,7 @@ fn a_qualified_table_does_not_capture_a_table_named_by_its_qualified_string_in_a
     assert_eq!(changes(&parts), vec![("insert".into(), 2, "bob".into())]);
 }
 
-/// Every command that loads the config refuses `columns_from: grants` off MySQL, by code, before it
-/// connects or writes: a PostgreSQL, SQL Server, Oracle or MongoDB source would deliver every column.
+/// Every command that loads the config refuses `columns_from: grants` off MySQL, by code, before it connects or writes.
 fn columns_from_grants_is_refused_by_every_command(rigs: Vec<Rig>) {
     for rig in rigs {
         let rig = rig.source_line("columns_from: grants");
@@ -1002,7 +998,7 @@ fn columns_from_grants_is_refused_by_every_command_mongo() {
     ]);
 }
 
-/// The binlog `(file, position)` at the end of the LAST commit after `start` that wrote `table`; the oracle for "the checkpoint reached this transaction".
+/// The binlog `(file, position)` at the end of the last commit after `start` that wrote `table`.
 fn commit_end_after(start: &(String, u64), table: &str) -> (String, u64) {
     let mut c = root();
     let events: Vec<(u64, String, u64, String)> = c
@@ -1064,8 +1060,7 @@ fn the_stand_is_shared() -> bool {
     shared
 }
 
-/// A run under the policy anchored and baselined, then `writes` committed one by one: the
-/// checkpoint of the next run is exactly the end of the last commit (the one that wrote `watch`).
+/// A run under the policy, then `writes` committed one by one: the next checkpoint is the end of the last commit.
 fn the_checkpoint_follows_commits_of(
     what: &str,
     watch: impl Fn(&str, &str) -> String,
@@ -1585,7 +1580,7 @@ fn big_table(label: &str, rows: u32) -> (String, MysqlCdcTable) {
     (table, guard)
 }
 
-/// A first run over a throttled snapshot of a big table (then, if `two_tables`, of `seeded(label)`), the account granted `granted` on each. `act(last, user)` runs once the first table's snapshot is being read, with `last` the table read last. The policy is one value per run: the run is refused by code (exit 2), no table's parts carry two column sets, and a revoked value is never delivered.
+/// A first run over a throttled snapshot of a big table; `act` runs while the snapshot is read.
 fn the_policy_is_one_value_per_run(
     label: &str,
     granted: &str,
@@ -1619,7 +1614,6 @@ fn the_policy_is_one_value_per_run(
         );
     let mut child = rig.spawn_args_env(&[], &[]);
     let opened = std::time::Instant::now();
-    // A login of the account that has sat for a second is a throttled snapshot page loop: the grants were read before it began and the stream is not open yet.
     let mut c = root();
     while c
         .exec_first::<u64, _, _>(
@@ -2045,6 +2039,70 @@ fn the_policy_says_what_it_does_not_guarantee_at_check_and_at_the_start_of_a_run
     );
 }
 
+/// The columns `rivet check --target bigquery --json` types for the rig's export, or the refusal it ended with.
+fn checked_columns(rig: &Rig) -> Result<Vec<String>, std::process::Output> {
+    let out = rig.cli(&["check", "--target", "bigquery", "--json"]);
+    if !out.status.success() {
+        return Err(out);
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let first = stdout
+        .lines()
+        .find(|l| l.starts_with('{'))
+        .unwrap_or_else(|| panic!("a type report on stdout:\n{stdout}"));
+    let report: serde_json::Value = serde_json::from_str(first).unwrap();
+    Ok(report["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["column"].as_str().unwrap().to_string())
+        .collect())
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn the_type_report_probes_the_columns_of_the_policy_mysql() {
+    let (table, _table) = seeded("cg_chk");
+    let user = GrantUser::new(&table, "id, name");
+    let on = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .cdc("initial: snapshot")
+        .source_line("columns_from: grants");
+    assert_eq!(
+        checked_columns(&on).map_err(|o| said_by(&o)),
+        Ok(vec!["id".to_string(), "name".to_string()]),
+        "under the policy the type report types the columns the account reads, and runs"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn the_type_report_of_a_mysql_source_without_the_policy_is_as_on_main_mysql() {
+    let (table, _table) = seeded("cg_chk_off");
+    let user = GrantUser::new(&table, "id, name");
+    let off = Rig::mysql_cdc(&table)
+        .source_url(&user.url())
+        .cdc("initial: snapshot");
+    let denied =
+        checked_columns(&off).expect_err("without the policy the account's SELECT * is denied");
+    assert_refused(&denied, Refused::by_code("RIVET_SOURCE_QUERY_FAILED", 1));
+    assert!(
+        said_by(&denied).contains("SELECT command denied"),
+        "a column-restricted account without the policy is refused as before:\n{}",
+        said_by(&denied)
+    );
+    let root_off = Rig::mysql_cdc(&table).cdc("initial: snapshot");
+    assert_eq!(
+        checked_columns(&root_off).map_err(|o| said_by(&o)),
+        Ok(vec![
+            "id".to_string(),
+            "name".to_string(),
+            "pass".to_string()
+        ]),
+        "a root account without the policy types every column, as before"
+    );
+}
+
 /// One DDL met in the backlog: the writes before and after it, then what the run exited with, delivered and checkpointed.
 fn ddl_in_the_backlog(policy: bool, ddl: &str) -> String {
     let (table, _table) = seeded("cg_ddl");
@@ -2106,7 +2164,6 @@ fn the_ddl_run(exit: i32, code: &str, advanced: bool, names: &str, cells: &str) 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn ddl_in_the_backlog_is_met_as_before_mysql() {
-    // Captured on origin/main a130fd97 (policy off) and on be1a8310 (policy on) before the fix.
     let id_cells = r#"["1", "1", "1", "2", "3""#;
     let ann = r#""ann", "ann-after", "ann-before", "bob", "cid"]"#;
     let off: [(&str, String); 4] = [
@@ -2160,7 +2217,6 @@ fn ddl_in_the_backlog_is_met_as_before_mysql() {
     for (ddl, want) in off {
         assert_eq!(ddl_in_the_backlog(false, ddl), want, "policy off: {ddl}");
     }
-    // The policy on: a column added or dropped is met as before the rename refusal.
     let visible = the_ddl_run(
         0,
         "-",

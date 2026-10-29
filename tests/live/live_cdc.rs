@@ -4663,17 +4663,7 @@ fn roast_pg_cdc_refuses_a_config_whose_resolved_identity_routing_cannot_match() 
     );
 }
 
-/// A dotted `table:` is read as `schema.table` everywhere: a relation whose NAME holds a dot cannot
-/// be named, and its twin `schema.table` is the only relation `schema.table` means.
-///
-/// 1. `table: d.a` with only `public."d.a"` present reads schema `d`, which is absent: refused as
-///    a missing table (it does not name the dotted relation as its match).
-/// 2. `table: public."d.a"` resolves to the dotted relation and is refused by the routing guard
-///    with a remedy that can be followed: rename the relation (spelling `public.d.a` is read by the
-///    server's parser as a cross-database name).
-/// 3. `table: public.d.a` ends in a coded refusal, not in the server's raw error.
-/// 4. With both `d_s.t` and `public."d_s.t"` present, `table: d_s.t` captures `d_s.t` alone: the
-///    dotted-name twin cannot route into the export, so it is not an ambiguity.
+/// A dotted `table:` is read as `schema.table` everywhere; a relation whose name holds a dot cannot be named.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_a_relation_named_with_a_dot_is_refused_by_a_remedy_that_can_be_followed() {

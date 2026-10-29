@@ -106,9 +106,7 @@ fn refuse_hidden_read_columns(
     Ok(())
 }
 
-/// `export` reading only the columns the account may `SELECT`: its `table:` read under
-/// `source.columns_from: grants`, asked on `probe` when the caller holds one; `None` when
-/// there is nothing to project.
+/// `export` reading only the columns the account may `SELECT`, or `None` when there is nothing to project.
 pub(crate) fn project_table_read(
     probe: Option<&mut (dyn crate::source::Source + '_)>,
     source: &crate::config::SourceConfig,

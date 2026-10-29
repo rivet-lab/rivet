@@ -407,7 +407,6 @@ fn resolved_units(
             (Err(_), None) | (Ok(None), None) => unreachable!("every non-resolution has a reason"),
         }
     }
-    // `columns_from: grants`: probe the columns the run delivers, not `SELECT *` the account may not run.
     if config.source.source_type == SourceType::Mysql && config.source.columns_from_grants() {
         let tables: Vec<String> = units.iter().filter_map(|u| u.relation.clone()).collect();
         let readable =

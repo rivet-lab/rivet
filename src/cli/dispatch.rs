@@ -603,7 +603,6 @@ fn batch_plans(
         Some(name) => config.exports.iter().filter(|e| e.name == name).collect(),
         None => config.exports.iter().collect(),
     };
-    // `columns_from: grants` plans on a connection: one for every export, its connect hint on failure.
     let mut probe = if config.source.columns_from_grants() {
         Some(
             crate::source::create_source(&config.source)

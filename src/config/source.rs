@@ -68,14 +68,7 @@ pub struct SourceConfig {
     #[serde(default)]
     pub mongo: Option<MongoConfig>,
 
-    /// `grants`: every export reads and delivers only the columns the source account may
-    /// `SELECT`, in batch reads, baselines and the change stream (MySQL only).
-    ///
-    /// Batch reads and baselines are enforced by the server: the `SELECT` names only
-    /// readable columns. The MySQL change stream is a client-side projection: the binlog
-    /// carries every column of a changed row to rivet, which drops the unreadable ones before
-    /// anything is written. That is data minimisation, not access control: restrict the
-    /// replication account itself if the values must not reach the rivet host.
+    /// `grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns_from: Option<ColumnsFrom>,
 }

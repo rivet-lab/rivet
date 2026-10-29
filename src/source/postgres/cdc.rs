@@ -401,19 +401,6 @@ impl PgChangeStream {
     ) -> Result<()> {
         use anyhow::Context as _;
         for cfg in configured {
-            // RESOLUTION-FIRST — one decision instead of two. The catalog query
-            // returns every relation the configured string could mean under EITHER
-            // rule that is live today: what PostgreSQL itself would pick
-            // (`to_regclass`, which FOLDS case and accepts `db.schema.table`), and
-            // what the byte-exact router would capture (`sink::table_matches`: a bare
-            // name as the relname, a dotted string as `schema.table` split on the
-            // FIRST dot). The union goes through
-            // `identity::resolve_captured_table`, whose ambiguity arm subsumes the
-            // bare-name block that used to sit here AND the folded-twin case that
-            // `classify_routing`'s first arm catches after the fact: with both
-            // `mixedcase` and `"MixedCase"` present, `table: MixedCase` now refuses
-            // naming BOTH relations, where the fold arm named only the one the
-            // probe resolved.
             let matches: Vec<crate::source::cdc::identity::CatalogMatch> = client
                 .query(
                     // Every relkind logical decoding can name, VIEWS included: a view

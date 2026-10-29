@@ -459,7 +459,6 @@ impl MysqlChangeStream {
     ) -> Result<()> {
         let mut conn = connect_conn(url, tls)?;
         Self::refuse_unmet_prerequisites_on(&mut conn, configured_tables)?;
-        // Under grants the run's one grants read ([`Self::resolve_grants`]) is the probe: `SELECT *` is refused there.
         if columns_from_grants {
             return Ok(());
         }
@@ -706,7 +705,7 @@ impl MysqlChangeStream {
         super::column_grants::readable_columns_of(conn, configured, &own_db, &bare_db).map(Some)
     }
 
-    /// The readable columns of `configured` as a BATCH read sees them: a bare name is the connection's own database, as the export's own `SELECT` reads it; the stream's rule for a bare name (another database holding the only such table) is not a batch's.
+    /// The readable columns of `configured` as a batch read sees them: a bare name is the connection's own database.
     pub(crate) fn readable_for_batch(
         conn: &mut mysql::Conn,
         configured: &[String],
@@ -715,7 +714,7 @@ impl MysqlChangeStream {
         super::column_grants::readable_columns_of(conn, configured, &own_db, &HashMap::new())
     }
 
-    /// The grants of a `columns_from: grants` run, read ONCE on one connection before the anchor: the readable columns of each configured table, and its key (the `declared` one, else the primary key) judged readable. The snapshot legs, the stream open and the mid-run re-reads all take this value or refuse.
+    /// The grants of a `columns_from: grants` run, read once on one connection before the anchor.
     pub(crate) fn resolve_grants(
         url: &str,
         tls: Option<&TlsConfig>,
@@ -735,7 +734,7 @@ impl MysqlChangeStream {
             .map(std::sync::Arc::new)
     }
 
-    /// Re-read the grants once for the privilege statements met since the last re-read, before the next event is handled: refuse when a configured table's readable columns differ from the ones this run delivers.
+    /// Re-read the grants for the privilege statements met since the last re-read; refuse when a table's readable columns differ.
     fn refuse_changed_grants(&mut self) -> Result<()> {
         let Some((file, log_pos)) = self.grants_pending.take() else {
             return Ok(());
@@ -743,7 +742,6 @@ impl MysqlChangeStream {
         let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
             return Ok(());
         };
-        // A fresh login: global privileges and default roles are read only at login.
         let mut conn = connect_conn(url, tls.as_ref())?;
         let read = Self::readable_on(&mut conn, &self.configured_tables, true)?;
         let now = read.unwrap_or_default();
@@ -1100,7 +1098,6 @@ impl MysqlChangeStream {
         // at a part commit — so an idle bounded run (zero changes drained) would
         // otherwise leave no checkpoint, the next run would re-anchor to a newer
         // "current" position, and every change in between would be silently skipped.
-        // Under grants the readable-column read above is the probe: `SELECT *` is refused there.
         if readable.is_none() {
             Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
         }
@@ -1319,8 +1316,6 @@ impl MysqlChangeStream {
                         }
                     }
                 }
-                // `columns_from: grants`: only the readable columns of the table the sink routes
-                // this event to; an uncaptured table keeps its commit boundary and no values.
                 let captured_keep = self.readable.as_ref().map(|readable| {
                     self.configured_tables
                         .iter()
@@ -1352,8 +1347,6 @@ impl MysqlChangeStream {
                     let (before, after) = row?;
                     let before = before.map(render_row);
                     let after = after.map(render_row);
-                    // A partial image is refused BEFORE it is projected: cut by full-table
-                    // positions it would put a hidden value under a visible name.
                     if captured {
                         for img in [before.as_ref(), after.as_ref()] {
                             if super::column_grants::is_partial(full_arity, img) {
@@ -1366,8 +1359,6 @@ impl MysqlChangeStream {
                     }
                     let before = before.map(project);
                     let after = after.map(project);
-                    // `columns_from: grants`: an update of hidden columns only is not delivered,
-                    // but its row still carries the transaction's commit boundary.
                     if super::column_grants::changes_only_hidden(
                         captured,
                         before.as_ref(),
@@ -1577,7 +1568,6 @@ impl MysqlChangeStream {
                     statement_dml_refusal_message(target.as_ref()),
                 ));
             }
-            // `columns_from: grants`: a grant change is re-read where the binlog records it.
             Some(EventData::QueryEvent(qe)) if is_privilege_statement(&qe.query()) => {
                 self.grants_pending
                     .get_or_insert_with(|| (self.file.clone(), log_pos));
@@ -2136,7 +2126,7 @@ fn alter_tokens(sql: &str) -> Option<Vec<AlterToken>> {
     Some(out)
 }
 
-/// The table an `ALTER TABLE` QUERY event gives a column a new name (`RENAME COLUMN a TO b`, `CHANGE [COLUMN] a b ...`), as `(schema, table)`; `None` for any other statement.
+/// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name; `None` for any other statement.
 pub(crate) fn column_rename_target(sql: &str, event_db: &str) -> Option<(String, String)> {
     let tokens = alter_tokens(&executable_text(sql))?;
     let word = |i: usize, w: &str| matches!(tokens.get(i), Some(AlterToken::Word(t, false)) if t.eq_ignore_ascii_case(w));
@@ -2209,7 +2199,7 @@ fn refused_column_rename(
         .filter(|(sc, tb)| undecodable_event_is_ours(Some((sc, tb)), configured))
 }
 
-/// Refuse a column renamed under `columns_from: grants`: column privileges do not follow a rename and the grants read now name the column by its new name, so the rows logged before it would be delivered without the column.
+/// Refuse a column renamed under `columns_from: grants`: privileges do not follow a rename.
 pub(crate) fn column_rename_refusal_message(schema: &str, table: &str) -> String {
     format!(
         "mysql cdc: `{schema}.{table}` had a column renamed (ALTER TABLE ... RENAME COLUMN or \
@@ -2460,13 +2450,7 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
     )
 }
 
-/// A statement text as the server executes it: the body of `/*! … */` and `/*!NNNNN … */`
-/// is SQL (a server at or above that version runs it), every other `/* … */` span is a
-/// comment, and a space replaces each span so tokens never fuse. A `/*!` span is read as
-/// text whatever its version, so a gated statement is at worst a spurious stop, never a
-/// missed grant change, rename, truncate or drop. Every scan of a binlog statement reads
-/// it through here. Not a general SQL lexer: a `/*` inside a string literal is not
-/// something the statements these scans look for can contain.
+/// A statement text as the server executes it: `/*! */` bodies are SQL, other comments become a space.
 fn executable_text(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let mut rest = sql;
@@ -2490,7 +2474,7 @@ fn executable_text(sql: &str) -> String {
     out
 }
 
-/// Whether a pending grants re-read may wait past this event: another privilege statement, or an event that frames a transaction without carrying a row or settling one (a GTID, a rotate, a heartbeat).
+/// Whether a pending grants re-read may wait past this event.
 fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     match data {
         Some(EventData::QueryEvent(qe)) => is_privilege_statement(&qe.query()),
@@ -2507,9 +2491,7 @@ fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     }
 }
 
-/// A statement that can change what an account may read: `GRANT`, `REVOKE`, a user or role
-/// change, `SET DEFAULT ROLE`, `FLUSH PRIVILEGES`. Comments and case are ignored; executable
-/// comments (`/*!80000 REVOKE … */`) are statement text.
+/// A statement that can change what an account may read.
 fn is_privilege_statement(sql: &str) -> bool {
     let text = executable_text(sql);
     let mut w = text.split_whitespace().map(str::to_ascii_uppercase);
@@ -3928,7 +3910,7 @@ mod tests {
             None,
             vec!["cdc_idle_first".to_string()], // only its own table: a sibling test's DROP must not reach it
             None,
-            None, // no spill dir — these tests never cross the cap
+            None,
         )
         .unwrap();
         assert!(
@@ -3957,7 +3939,7 @@ mod tests {
             None,
             vec!["cdc_idle_first".to_string()], // only its own table: a sibling test's DROP must not reach it
             None,
-            None, // no spill dir — these tests never cross the cap
+            None,
         )
         .unwrap();
         let got = s2
@@ -4017,7 +3999,7 @@ mod tests {
             None,
             vec!["cdc_resume".to_string()],
             None,
-            None, // no spill dir — these tests never cross the cap
+            None,
         )
         .unwrap();
         let b = s2

@@ -1247,7 +1247,7 @@ struct TailPolicy<'a> {
     strict: bool,
     /// The run path's `--force`: a `--resume` with no chunk run to continue runs as a plain run. Apply's `--force` is another gate.
     force: bool,
-    /// The run is the snapshot leg of a change-stream export: its `SELECT` was fixed by the grants the stream resolved once, so a denial of a column in it is a grant change, not a stale plan.
+    /// The snapshot leg of a change-stream export: a column denial in it is a grant change, not a stale plan.
     cdc_leg: bool,
 }
 
@@ -1871,9 +1871,6 @@ fn run_export_job_inner(
         let cdc_config_dir = std::path::Path::new(config_path)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        // The account's grants, read once for the whole run: the legs, the stream open and its
-        // re-reads take this value or refuse. A key it cannot read is refused here, before the
-        // anchor.
         let grants = match super::cdc_job::resolve_grants(config, export) {
             Ok(g) => g,
             Err(e) => {
@@ -1954,7 +1951,6 @@ fn run_export_job_inner(
         export
     };
     let mut meta = MetaConn::open(&config.source);
-    // `columns_from: grants` plans on a connection, so a failed connect fails here, with its hint.
     let probe = if config.source.columns_from_grants() {
         match meta.require() {
             Ok(src) => Some(src),
