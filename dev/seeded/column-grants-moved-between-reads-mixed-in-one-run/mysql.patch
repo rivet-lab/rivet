@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -788,7 +788,7 @@
+         resolved: &HashMap<String, crate::source::cdc::ReadableColumns>,
+         now: &HashMap<String, crate::source::cdc::ReadableColumns>,
+     ) -> Result<()> {
+-        for table in configured {
++        for table in configured.iter().filter(|_| false) {
+             let (before, after) = (resolved.get(table), now.get(table));
+             if before.map(|c| &c.columns) == after.map(|c| &c.columns) {
+                 continue;

@@ -1,0 +1,13 @@
+diff --git a/src/config/source.rs b/src/config/source.rs
+index c5e17e08..779480be 100644
+--- a/src/config/source.rs
++++ b/src/config/source.rs
+@@ -626,7 +626,7 @@ impl SourceType {
+         match self {
+             SourceType::Mysql => true,
+             SourceType::Postgres | SourceType::Mssql | SourceType::Oracle | SourceType::Mongo => {
+-                false
++                true
+             }
+         }
+     }

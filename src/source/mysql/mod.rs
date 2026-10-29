@@ -21,7 +21,9 @@
 mod arrow_convert;
 pub(crate) use arrow_convert::time_outside_day;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 mod proxy;
+mod statement;
 
 use std::sync::Arc;
 
@@ -927,6 +929,16 @@ impl super::Source for MysqlSource {
         qualified_table: &str,
     ) -> Result<crate::source::TableIntrospection> {
         introspect_mysql_on(&mut self.pool.get_conn()?, qualified_table)
+    }
+
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        let tables = [table.to_string()];
+        let mut conn = self.pool.get_conn()?;
+        let mut readable = cdc::MysqlChangeStream::readable_for_batch(conn.as_mut(), &tables)?;
+        Ok(readable.remove(table))
     }
 
     fn export(

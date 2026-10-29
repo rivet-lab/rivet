@@ -1029,20 +1029,9 @@ fn flush(
         // A PARTIAL image (MySQL `binlog_row_image` other than FULL when WRITTEN, a
         // session override included) names every column but carries only some values.
         if let Some((n, nnames)) = named_image_arity_mismatch(ev) {
-            crate::rivet_bail!(
-                crate::error::codes::SOURCE_CDC_PREREQUISITE,
-                "cdc: {}.{}: a row image carries {n} value(s) under {} column \
-                     name(s) — a PARTIAL image, which rivet cannot map without \
-                     fabricating the missing cells as NULL. On MySQL this is \
-                     `binlog_row_image` set to something other than FULL when the \
-                     change was WRITTEN (a session override counts, and the open-time \
-                     probe reads only the global). Set `binlog_row_image = FULL` and \
-                     re-capture from before the affected DDL/DML; the changes are \
-                     still in the binlog, so this is a delay rather than a loss.",
-                ev.schema,
-                ev.table,
-                nnames
-            );
+            return Err(crate::source::cdc::partial_image_refusal(
+                &ev.schema, &ev.table, n, nnames,
+            ));
         }
     }
 

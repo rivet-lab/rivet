@@ -173,6 +173,17 @@
             }
           ],
           "default": null
+        },
+        "columns_from": {
+          "description": "`grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColumnsFrom"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -494,6 +505,16 @@
           "description": "`snapshot` — a consistent point-in-time read for the whole cursor\n(MongoDB 5.0+ replica set only).",
           "type": "string",
           "const": "snapshot"
+        }
+      ]
+    },
+    "ColumnsFrom": {
+      "description": "Where the source's column list comes from.",
+      "oneOf": [
+        {
+          "description": "The columns the source account may `SELECT`, as the server judges each one.",
+          "type": "string",
+          "const": "grants"
         }
       ]
     },

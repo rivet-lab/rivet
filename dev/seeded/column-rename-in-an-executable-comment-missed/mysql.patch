@@ -1,0 +1,11 @@
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2087,7 +2087,7 @@
+ 
+ /// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name; `None` for any other statement.
+ pub(crate) fn column_rename_target(sql: &str, event_db: &str) -> Option<(String, String)> {
+-    let tokens = alter_tokens(sql)?;
++    let tokens = alter_tokens(sql.split("/*").next().unwrap_or(""))?;
+     let word = |i: usize, w: &str| matches!(tokens.get(i), Some(AlterToken::Word(t, false)) if t.eq_ignore_ascii_case(w));
+     let mut at = 0;
+     if !word(at, "alter") {

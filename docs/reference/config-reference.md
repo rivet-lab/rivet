@@ -35,6 +35,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `tuning` | [TuningConfig](#tuningconfig) |  |  |
 | `tls` | [TlsConfig](#tlsconfig) |  | Transport security settings (ADR: SecOps). When absent, Rivet connects without TLS — a warning is emitted so operators are aware. See [`TlsConfig`]. |
 | `mongo` | [MongoConfig](#mongoconfig) |  | MongoDB-specific read options (`source.mongo:`). Honoured only when `type: mongo`; ignored by the SQL engines. See [`MongoConfig`]. |
+| `columns_from` | `grants` |  | `grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only). |
 
 ### `source.mongo` (MongoDB read options)
 

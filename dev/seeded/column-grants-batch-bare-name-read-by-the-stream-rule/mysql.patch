@@ -1,0 +1,14 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 53638066..27c3de2e 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -711,7 +711,8 @@ impl MysqlChangeStream {
+         configured: &[String],
+     ) -> Result<HashMap<String, crate::source::cdc::ReadableColumns>> {
+         let own_db = Self::own_db_on(conn);
+-        super::column_grants::readable_columns_of(conn, configured, &own_db, &HashMap::new())
++        let bare = Self::bare_name_databases(conn, &own_db, configured);
++        super::column_grants::readable_columns_of(conn, configured, &own_db, &bare)
+     }
+ 
+     /// The grants of a `columns_from: grants` run, read once on one connection before the anchor.

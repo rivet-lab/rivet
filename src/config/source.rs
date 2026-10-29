@@ -67,6 +67,18 @@ pub struct SourceConfig {
     /// `type: mongo`; ignored by the SQL engines. See [`MongoConfig`].
     #[serde(default)]
     pub mongo: Option<MongoConfig>,
+
+    /// `grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns_from: Option<ColumnsFrom>,
+}
+
+/// Where the source's column list comes from.
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ColumnsFrom {
+    /// The columns the source account may `SELECT`, as the server judges each one.
+    Grants,
 }
 
 /// MongoDB read-path knobs. All three address completeness/fidelity of a `full`
@@ -277,7 +289,24 @@ fn bracket_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Why this source cannot take `columns_from: grants`, if it cannot.
+pub(crate) fn columns_from_refusal(source: &SourceConfig) -> Option<String> {
+    (source.columns_from_grants() && !source.source_type.enforces_columns_from_grants()).then(|| {
+        format!(
+            "`source.columns_from: grants` is supported on MySQL sources only: a {} source would \
+             read and deliver every column of a row, hidden ones included. Remove `columns_from:` \
+             from `source:` or point `source:` at a MySQL server (other engines: rivet-lab/rivet#711)",
+            source.source_type.label()
+        )
+    })
+}
+
 impl SourceConfig {
+    /// `columns_from: grants` — only the columns the account may read are read and delivered.
+    pub fn columns_from_grants(&self) -> bool {
+        self.columns_from == Some(ColumnsFrom::Grants)
+    }
+
     /// Return a copy of this config with **all plaintext credential material stripped**,
     /// safe to embed in a persisted [`crate::plan::PlanArtifact`] (ADR-0005 PA9).
     ///
@@ -591,6 +620,16 @@ impl SourceType {
         !matches!(self, SourceType::Mongo)
     }
 
+    /// Whether this engine reads and delivers only the columns the account may `SELECT` under `columns_from: grants`.
+    pub fn enforces_columns_from_grants(self) -> bool {
+        match self {
+            SourceType::Mysql => true,
+            SourceType::Postgres | SourceType::Mssql | SourceType::Oracle | SourceType::Mongo => {
+                false
+            }
+        }
+    }
+
     /// The engine as `export_metrics.source_type` records it (`postgres`, `mysql`, `mssql`, `mongo`).
     pub fn ledger_label(self) -> String {
         self.label().to_string()
@@ -731,6 +770,8 @@ pub(super) fn mixed_connection_methods() -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn a_source_state_key_names_the_server_and_database_without_credentials() {
         use super::{SourceType, source_state_key};
@@ -867,8 +908,6 @@ mod tests {
         assert_eq!(b, "postgres://h2:5432/b");
     }
 
-    use super::*;
-
     // ── TlsMode::is_enforced ────────────────────────────────────────────────
 
     #[test]
@@ -903,6 +942,7 @@ mod tests {
             tuning: None,
             tls: None,
             mongo: None,
+            columns_from: None,
         }
     }
 

@@ -78,6 +78,66 @@ pub fn build_plan(
     )
 }
 
+/// Refuse a setting of `export` that reads a column the account may not `SELECT`: the server would answer it with a raw error, mid-run.
+fn refuse_hidden_read_columns(
+    table: &str,
+    export: &ExportConfig,
+    readable: &[String],
+) -> Result<()> {
+    let named = [
+        ("cursor_column", &export.cursor_column),
+        ("cursor_fallback_column", &export.cursor_fallback_column),
+        ("chunk_column", &export.chunk_column),
+        ("chunk_by_key", &export.chunk_by_key),
+        ("time_column", &export.time_column),
+        ("partition_by", &export.partition_by),
+    ];
+    for (setting, column) in named {
+        let Some(column) = column else { continue };
+        if !readable.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+                "`{table}`: `{setting}: {column}` names a column `{column}` this account may not SELECT \
+                 under `columns_from: grants`, so the read would fail on the server; nothing was read \
+                 or written. GRANT SELECT on `{column}`, or name a readable column in `{setting}`"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `export` reading only the columns the account may `SELECT`, or `None` when there is nothing to project.
+pub(crate) fn project_table_read(
+    probe: Option<&mut (dyn crate::source::Source + '_)>,
+    source: &crate::config::SourceConfig,
+    export: &ExportConfig,
+) -> Result<Option<ExportConfig>> {
+    let Some(table) = export
+        .table
+        .as_ref()
+        .filter(|_| source.columns_from_grants() && export.table_select.is_none())
+    else {
+        return Ok(None);
+    };
+    let readable = match probe {
+        Some(src) => src.readable_columns(table)?,
+        None => crate::source::connect(
+            source.source_type,
+            &source.resolve_url()?,
+            source.tls.as_ref(),
+            source.mongo.as_ref(),
+        )?
+        .readable_columns(table)?,
+    };
+    if let Some(readable) = &readable {
+        refuse_hidden_read_columns(table, export, &readable.columns)?;
+    }
+    let select = readable.map(|r| r.select);
+    let mut out = export.clone();
+    out.table_select = select;
+    Ok(Some(out))
+}
+
 /// [`build_plan`], with the chunk planner's catalog probe asked on `probe` when the caller holds one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_plan_on(
@@ -103,6 +163,9 @@ pub(crate) fn build_plan_on(
             export.name
         );
     }
+    let mut probe = probe;
+    let projected = project_table_read(probe.as_deref_mut(), &config.source, export)?;
+    let export = projected.as_ref().unwrap_or(export);
     let (resolved, written) = export.resolve_query_and_template(config_dir, params)?;
     let bounded = |q: String| {
         // #167: a `--split` range sub-export restricts the whole export to its key
@@ -1079,6 +1142,7 @@ mod tests {
             tuning: None,
             tls: None,
             mongo: None,
+            columns_from: None,
         }
     }
 

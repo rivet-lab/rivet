@@ -349,6 +349,7 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
                 // `--table` IS the routing filter on this path; empty means capture
                 // whatever the stream emits, which makes every event ours.
                 configured_tables: a.table.clone(),
+                resolved_grants: None,
             },
             CdcEngine::Postgres => CdcEngineOpts::Postgres {
                 slot: a.slot,
@@ -602,14 +603,34 @@ fn batch_plans(
         Some(name) => config.exports.iter().filter(|e| e.name == name).collect(),
         None => config.exports.iter().collect(),
     };
-    Ok(selected
+    let mut probe = if config.source.columns_from_grants() {
+        Some(
+            crate::source::create_source(&config.source)
+                .map_err(|e| crate::pipeline::attach_connect_hint(e, &config.source))?,
+        )
+    } else {
+        None
+    };
+    let mut plans = Vec::new();
+    for e in selected
         .into_iter()
         .filter(|e| e.mode != crate::config::ExportMode::Cdc)
-        .map(|e| {
-            let plan = crate::plan::build_plan(&config, e, config_dir, false, false, false, params);
-            (e.name.clone(), plan)
-        })
-        .collect())
+    {
+        let plan = crate::plan::build::build_plan_on(
+            probe
+                .as_deref_mut()
+                .map(|s| s as &mut dyn crate::source::Source),
+            &config,
+            e,
+            config_dir,
+            false,
+            false,
+            false,
+            params,
+        );
+        plans.push((e.name.clone(), plan));
+    }
+    Ok(plans)
 }
 
 /// The `--target` of `rivet check`, refused by code when it names no warehouse rivet types for.

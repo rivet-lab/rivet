@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2231,7 +2231,7 @@
+     event_db: &str,
+     configured: &[String],
+ ) -> Option<(String, String)> {
+-    if !projecting {
++    if true {
+         return None;
+     }
+     column_rename_target(sql, event_db)

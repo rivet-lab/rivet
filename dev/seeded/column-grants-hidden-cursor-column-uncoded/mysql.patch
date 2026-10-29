@@ -1,0 +1,12 @@
+diff --git a/src/plan/build.rs b/src/plan/build.rs
+--- a/src/plan/build.rs
++++ b/src/plan/build.rs
+@@ -94,7 +94,7 @@
+     ];
+     for (setting, column) in named {
+         let Some(column) = column else { continue };
+-        if !readable.iter().any(|c| c.eq_ignore_ascii_case(column)) {
++        if false && !readable.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+             crate::rivet_bail!(
+                 crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+                 "`{table}`: `{setting}: {column}` names a column `{column}` this account may not SELECT \

@@ -292,6 +292,11 @@ pub trait Source: Send {
         )
     }
 
+    /// The columns of `table` this account may read and the `SELECT` naming only them; `None` without column grants.
+    fn readable_columns(&mut self, _table: &str) -> Result<Option<cdc::ReadableColumns>> {
+        Ok(None)
+    }
+
     /// Return `TypeMapping` for every column in `query` without fetching rows.
     ///
     /// Used by `rivet check --type-report` to show the full type provenance
@@ -438,6 +443,41 @@ pub(crate) fn code_a_missing_relation(
              on purpose"
         ),
     ))
+}
+
+/// Code an export error under `columns_from: grants`: a refused column is COLUMNS_UNREADABLE for a batch, GRANTS_CHANGED for a stream leg.
+pub(crate) fn code_a_revoked_column(
+    err: anyhow::Error,
+    export: &str,
+    grants_on: bool,
+    cdc_leg: bool,
+) -> anyhow::Error {
+    if !grants_on || crate::error::code_of(&err).is_some() {
+        return err;
+    }
+    let Some(said) = mysql::column_grants::denied_by_server(&err) else {
+        return err;
+    };
+    if cdc_leg {
+        return crate::error::coded(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            format!(
+                "export '{export}': the account may no longer SELECT a column this snapshot reads \
+                 under `columns_from: grants` (the server said: {said}). The grants changed after \
+                 this run read them; the snapshot of this table was not completed and no change \
+                 stream was opened. Re-run: the run then reads the columns as they are now"
+            ),
+        );
+    }
+    crate::error::coded(
+        crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+        format!(
+            "export '{export}': the account may no longer SELECT a column this run reads under \
+             `columns_from: grants` (the server said: {said}). The grants changed after the plan \
+             or the settings named that column; nothing of this run was delivered. Run `rivet plan` \
+             again so the plan reads the columns the account may SELECT now, or GRANT SELECT on it"
+        ),
+    )
 }
 
 pub(crate) use crate::connect::driver_runtime;
