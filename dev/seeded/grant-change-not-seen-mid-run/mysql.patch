@@ -1,13 +1,13 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 0ff53467..4dfd4529 100644
+index 6bbc2d85..88e3711e 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -1600,7 +1600,7 @@ impl MysqlChangeStream {
-                 ));
-             }
-             Some(EventData::QueryEvent(qe))
--                if is_privilege_statement(&qe.query(), event_mode(&qe)) =>
-+                if false && is_privilege_statement(&qe.query(), event_mode(&qe)) =>
-             {
-                 self.grants_pending
-                     .get_or_insert_with(|| (self.file.clone(), log_pos));
+@@ -2277,7 +2277,7 @@ pub(crate) fn query_verdict(
+     if let Some(written) = statement_dml_target(sql, event_db, mode).filter(|t| ours(t.as_ref())) {
+         return QueryVerdict::StatementWrite(written);
+     }
+-    if is_privilege_statement(sql, mode) {
++    if false && is_privilege_statement(sql, mode) {
+         QueryVerdict::Privilege
+     } else if is_commit_statement(sql) {
+         QueryVerdict::Commit

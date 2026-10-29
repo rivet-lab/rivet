@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/statement.rs b/src/source/mysql/statement.rs
+index fdaa8162..6524cc6b 100644
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -78,7 +78,7 @@ fn version_digits(after_bang: &[u8]) -> usize {
+         && after_bang
+             .get(6)
+             .is_some_and(|c| matches!(c, b' ' | 9..=13));
+-    if six { 6 } else { 5 }
++    if six && false { 6 } else { 5 }
+ }
+ 
+ fn word_char(c: char) -> bool {

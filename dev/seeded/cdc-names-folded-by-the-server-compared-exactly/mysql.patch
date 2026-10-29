@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 6bbc2d85..0f331104 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -1678,7 +1678,7 @@ pub(crate) fn undecodable_event_is_ours(
+     }
+     match resolved {
+         None => true,
+-        Some((schema, table)) if fold => {
++        Some((schema, table)) if fold && false => {
+             let (schema, table) = (schema.to_lowercase(), table.to_lowercase());
+             configured.iter().any(|c| {
+                 crate::source::cdc::sink::table_matches(

@@ -1,13 +1,13 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 0ff53467..d7775147 100644
+index 6bbc2d85..82b7a134 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2005,7 +2005,7 @@ pub(crate) fn classify_mysql_routing(
- 
- /// The `sql_mode` a QUERY event was logged under; the default lexing when the event carries none.
- fn event_mode(qe: &QueryEvent<'_>) -> SqlMode {
--    mode_of(qe.status_vars_raw())
-+    mode_of(&qe.status_vars_raw()[..0])
+@@ -1984,7 +1984,7 @@ fn event_statement<'a>(qe: &'a QueryEvent<'_>) -> (std::borrow::Cow<'a, str>, Sq
+ fn statement_of<'a>(raw: &'a [u8], status_vars: &[u8]) -> (std::borrow::Cow<'a, str>, SqlMode) {
+     (
+         client_text(raw, charset_of(status_vars)),
+-        mode_of(status_vars),
++        mode_of(&status_vars[..0]),
+     )
  }
  
- /// The `sql_mode` among the raw status variables of a QUERY event; the default lexing when there is none.
