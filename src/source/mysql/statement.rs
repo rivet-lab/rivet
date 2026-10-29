@@ -164,20 +164,15 @@ pub(crate) fn client_text(raw: &[u8], charset: Option<u16>) -> std::borrow::Cow<
     let Some(layout) = charset.and_then(Layout::of_charset) else {
         return String::from_utf8_lossy(raw);
     };
-    let (mut out, mut i) = (String::with_capacity(raw.len()), 0usize);
-    while i < raw.len() {
-        let n = layout.char_len(&raw[i..]);
-        if n == 1 && raw[i].is_ascii() {
-            out.push(char::from(raw[i]));
-        } else {
-            out.push_str(
-                &layout
-                    .encoding()
-                    .decode_without_bom_handling(&raw[i..i + n])
-                    .0,
-            );
-        }
-        i += n;
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while !rest.is_empty() {
+        let n = layout.char_len(rest).max(1);
+        let Some((one, tail)) = rest.split_at_checked(n) else {
+            break;
+        };
+        out.push_str(&layout.encoding().decode_without_bom_handling(one).0);
+        rest = tail;
     }
     out.into()
 }
@@ -198,7 +193,8 @@ pub(crate) fn tokens(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
         } else if rest.starts_with("/*!") {
             executable += 1;
             out.push(Tok::Blank(" "));
-            i += 3 + version_digits(&b[i + 3..]);
+            let digits = version_digits(&b[i + 3..]);
+            i = sql.len() - rest.get(3 + digits..).map_or(0, str::len);
         } else if let Some(body) = rest.strip_prefix("/*") {
             out.push(Tok::Blank(" "));
             i = body.find("*/").map_or(sql.len(), |n| i + n + 4);
@@ -506,5 +502,61 @@ mod tests {
             "a UTF-8 client is read as before"
         );
         assert_eq!(client_text(b"select 1", None), "select 1");
+    }
+
+    #[test]
+    fn a_version_marker_with_too_few_digits_takes_none() {
+        for (after, want) in [
+            (&b""[..], 0),
+            (&b"8000"[..], 0),
+            (&b"80000"[..], 5),
+            (&b"800001"[..], 5),
+            (&b"080400"[..], 5),
+            (&b"080400 "[..], 6),
+            (&b"080400\t"[..], 6),
+            (&b"0804001 "[..], 5),
+            (&b"8000 x"[..], 0),
+        ] {
+            assert_eq!(version_digits(after), want, "{after:?}");
+        }
+    }
+
+    #[test]
+    fn a_trail_byte_outside_the_wide_range_does_not_join_its_lead() {
+        for t in [0x00u8, 0x20, 0x30, 0x3F, 0x7F, 0xFF] {
+            assert_eq!(Layout::Gbk.char_len(&[0x81, t]), 1, "gbk {t:#x}");
+            assert_eq!(
+                Layout::Gb18030.char_len(&[0x81, t, 0x20, 0x20]),
+                1,
+                "gb18030 {t:#x}"
+            );
+        }
+        for t in [0x40u8, 0x5C, 0x7E, 0x80, 0xFE] {
+            assert_eq!(Layout::Gbk.char_len(&[0x81, t]), 2, "gbk {t:#x}");
+            assert_eq!(
+                Layout::Gb18030.char_len(&[0x81, t, 0x20, 0x20]),
+                2,
+                "gb18030 {t:#x}"
+            );
+        }
+        assert_eq!(Layout::Gb18030.char_len(&[0x81, 0x30, 0x81, 0x30]), 4);
+        assert_eq!(Layout::Gb18030.char_len(&[0x81, 0x30, 0x81, 0x20]), 1);
+    }
+
+    #[test]
+    fn every_executable_comment_marker_is_walked_over_wherever_it_stands() {
+        let sql = "x /*!80000 a */ /*!080400 b */ c";
+        let text: String = tokens(sql, SqlMode::default())
+            .iter()
+            .map(|t| match t {
+                Tok::Blank(_) => " ".to_string(),
+                Tok::Word(w) => (*w).to_string(),
+                _ => "?".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            text.split_whitespace().collect::<Vec<_>>(),
+            ["x", "a", "b", "c"]
+        );
     }
 }
