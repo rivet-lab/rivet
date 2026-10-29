@@ -18,7 +18,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
-use mysql::binlog::events::{EventData, RowsEventData, TableMapEvent};
+use mysql::binlog::events::{
+    EventData, QueryEvent, RowsEventData, StatusVarVal, StatusVarsIterator, TableMapEvent,
+};
 use mysql::binlog::value::BinlogValue;
 use mysql::prelude::Queryable;
 use mysql::{BinlogDumpFlags, BinlogRequest, BinlogStream, Conn};
@@ -29,7 +31,7 @@ use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
-use crate::source::mysql::statement::{Tok, executable_text, tokens};
+use crate::source::mysql::statement::{SqlMode, Tok, tokens};
 
 /// A blocking iterator of canonical [`ChangeEvent`]s over a MySQL binlog stream.
 ///
@@ -1456,11 +1458,12 @@ impl MysqlChangeStream {
             // server, so refusing without asking whose relation it is would make
             // one truncated table an outage for exports that never read it.
             Some(EventData::QueryEvent(qe))
-                if truncate_target(&qe.query(), &qe.schema()).is_some_and(|(sc, tb)| {
-                    undecodable_event_is_ours(Some((&sc, &tb)), &self.configured_tables)
-                }) =>
+                if truncate_target(&qe.query(), &qe.schema(), event_mode(&qe)).is_some_and(
+                    |(sc, tb)| undecodable_event_is_ours(Some((&sc, &tb)), &self.configured_tables),
+                ) =>
             {
-                let (sc, tb) = truncate_target(&qe.query(), &qe.schema()).expect("just matched");
+                let (sc, tb) = truncate_target(&qe.query(), &qe.schema(), event_mode(&qe))
+                    .expect("just matched");
                 return Err(crate::source::cdc::checkpoint_identity::truncated(
                     truncate_refusal_message(&sc, &tb),
                 ));
@@ -1518,28 +1521,59 @@ impl MysqlChangeStream {
                     self.readable.is_some(),
                     &qe.query(),
                     &qe.schema(),
+                    event_mode(&qe),
                     &self.configured_tables,
                 )
                 .is_some() =>
             {
-                let (sc, tb) =
-                    refused_column_rename(true, &qe.query(), &qe.schema(), &self.configured_tables)
-                        .expect("just matched");
+                let (sc, tb) = refused_column_rename(
+                    true,
+                    &qe.query(),
+                    &qe.schema(),
+                    event_mode(&qe),
+                    &self.configured_tables,
+                )
+                .expect("just matched");
                 return Err(crate::source::cdc::checkpoint_identity::undecodable(
                     column_rename_refusal_message(&sc, &tb),
                 ));
             }
             Some(EventData::QueryEvent(qe))
-                if drop_table_targets(&qe.query(), &qe.schema()).is_some_and(|ts| {
-                    ts.iter().any(|t| {
-                        undecodable_event_is_ours(
-                            t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
-                            &self.configured_tables,
-                        )
-                    })
-                }) =>
+                if refused_table_rename(
+                    self.readable.is_some(),
+                    &qe.query(),
+                    &qe.schema(),
+                    event_mode(&qe),
+                    &self.configured_tables,
+                )
+                .is_some() =>
             {
-                let targets = drop_table_targets(&qe.query(), &qe.schema()).unwrap_or_default();
+                let target = refused_table_rename(
+                    true,
+                    &qe.query(),
+                    &qe.schema(),
+                    event_mode(&qe),
+                    &self.configured_tables,
+                )
+                .flatten();
+                return Err(crate::source::cdc::checkpoint_identity::undecodable(
+                    table_rename_refusal_message(target.as_ref()),
+                ));
+            }
+            Some(EventData::QueryEvent(qe))
+                if drop_table_targets(&qe.query(), &qe.schema(), event_mode(&qe)).is_some_and(
+                    |ts| {
+                        ts.iter().any(|t| {
+                            undecodable_event_is_ours(
+                                t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+                                &self.configured_tables,
+                            )
+                        })
+                    },
+                ) =>
+            {
+                let targets = drop_table_targets(&qe.query(), &qe.schema(), event_mode(&qe))
+                    .unwrap_or_default();
                 let ours = targets.iter().find(|t| {
                     undecodable_event_is_ours(
                         t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
@@ -1551,19 +1585,23 @@ impl MysqlChangeStream {
                 ));
             }
             Some(EventData::QueryEvent(qe))
-                if statement_dml_target(&qe.query(), &qe.schema()).is_some_and(|t| {
-                    undecodable_event_is_ours(
-                        t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
-                        &self.configured_tables,
-                    )
-                }) =>
+                if statement_dml_target(&qe.query(), &qe.schema(), event_mode(&qe))
+                    .is_some_and(|t| {
+                        undecodable_event_is_ours(
+                            t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+                            &self.configured_tables,
+                        )
+                    }) =>
             {
-                let target = statement_dml_target(&qe.query(), &qe.schema()).flatten();
+                let target =
+                    statement_dml_target(&qe.query(), &qe.schema(), event_mode(&qe)).flatten();
                 return Err(crate::source::cdc::checkpoint_identity::undecodable(
                     statement_dml_refusal_message(target.as_ref()),
                 ));
             }
-            Some(EventData::QueryEvent(qe)) if is_privilege_statement(&qe.query()) => {
+            Some(EventData::QueryEvent(qe))
+                if is_privilege_statement(&qe.query(), event_mode(&qe)) =>
+            {
                 self.grants_pending
                     .get_or_insert_with(|| (self.file.clone(), log_pos));
             }
@@ -1965,98 +2003,69 @@ pub(crate) fn classify_mysql_routing(
     }
 }
 
-/// The table a `TRUNCATE` QUERY event names, as `(schema, table)` — schema from
-/// the statement's qualifier when it has one, else the event's own database.
-///
-/// A TRUNCATE is logged as a QUERY event, never as rows, so the rows-event path
-/// never sees it and the `_ => {}` arm dropped it in silence. Measured 2026-08-24
-/// on the rivet-mysql-cdc-1 stand: 2 inserts then a TRUNCATE left the source table
-/// EMPTY while the run reported `status: success, rows: 2` — the identical
-/// divergence PostgreSQL had, by a different route.
-///
-/// Parses `TRUNCATE [TABLE] [`db`.]`tbl`` with optional backticks. Deliberately
-/// permissive about whitespace and case (MySQL logs the statement as written) and
-/// deliberately NOT a general SQL parser: anything it cannot read confidently
-/// returns `None` and falls through to the old behaviour, which is what it was
-/// before this existed.
-pub(crate) fn truncate_target(sql: &str, event_db: &str) -> Option<(String, String)> {
-    // Strip `/* … */` comments before tokenising. An adversarial pass predicted a
-    // hole here (sqlcommenter / Flyway / Rails append one to every statement) and
-    // MEASURING it did NOT reproduce: `SHOW BINLOG EVENTS` renders a trailing
-    // `/* xid=N */` that the QUERY event's own `query()` does not carry, and four
-    // live forms — trailing comment, leading comment, backticked, db-qualified —
-    // all refuse correctly on the 8.0 stand. Handled anyway because the cost is a
-    // few lines and the failure mode is a SILENT divergence: if any server version
-    // or client setting does deliver the text, this is the difference between a
-    // refusal and rows quietly left behind.
-    let stripped = executable_text(sql);
-    let t = stripped.trim().trim_end_matches(';').trim();
-    // Tokenised with BACKTICKS in mind, not by whitespace. A quoted MySQL identifier
-    // may contain a space or a dot — `` `odd name` `` and `` `odd.name` `` are both
-    // legal and both execute — and a whitespace split saw a trailing token and
-    // returned None, so the truncate was not recognised and the rows left the source
-    // with nothing to carry them. Found by writing the unit test the evidence matrix
-    // already claimed existed; a `.split_once('.')` over the raw text had the same
-    // shape, cutting `` `odd.name` `` into a database and a table that do not exist.
-    let rest = {
-        let mut r = t;
-        fn kw<'s>(r: &'s str, w: &str) -> Option<&'s str> {
-            // `get`, never a byte slice. `r[..w.len()]` PANICS when the boundary
-            // falls inside a multi-byte character, and this runs in a match guard
-            // for EVERY QueryEvent in the server-wide binlog — so an unquoted
-            // `TRUNCATE données` on a table nobody captures killed the process:
-            // `byte index 5 is not a char boundary`, exit 101, no run summary, no
-            // journal RunCompleted, no ledger row. The checkpoint stays before the
-            // DDL, so every later run panics at the same event and capture is wedged
-            // until someone hand-edits the file (round-13 bughunt, reproduced twice).
-            // The backticked form happened to be safe, which is why this survived.
-            let head = r.get(..w.len())?;
-            if head.eq_ignore_ascii_case(w) {
-                let after = &r[w.len()..];
-                if after.is_empty() || after.starts_with(char::is_whitespace) {
-                    return Some(after.trim_start());
-                }
-            }
-            None
-        }
-        r = kw(r, "truncate")?;
-        // The TABLE keyword is optional; a table genuinely NAMED `table` would be
-        // backticked, so an unquoted `table` here is always the keyword.
-        if let Some(after) = kw(r, "table") {
-            r = after;
-        }
-        r.trim()
-    };
+/// The `sql_mode` a QUERY event was logged under; the default lexing when the event carries none.
+fn event_mode(qe: &QueryEvent<'_>) -> SqlMode {
+    mode_of(qe.status_vars_raw())
+}
 
-    // One identifier, optionally qualified. Split on a dot only OUTSIDE backticks.
-    let b = rest.as_bytes();
-    let (mut i, mut in_tick, mut dot) = (0usize, false, None);
-    while i < b.len() {
-        match b[i] {
-            b'`' => {
-                if in_tick && b.get(i + 1) == Some(&b'`') {
-                    i += 2; // doubled backtick — an escaped tick inside the name
-                    continue;
-                }
-                in_tick = !in_tick;
-            }
-            b'.' if !in_tick && dot.is_none() => dot = Some(i),
-            // Anything after the identifier — a second name, a WHERE, a stray word —
-            // is a shape this reader does not claim to understand. Guessing here
-            // refuses the wrong table.
-            c if !in_tick && (c.is_ascii_whitespace() || c == b',') => return None,
-            _ => {}
-        }
-        i += 1;
+/// The `sql_mode` among the raw status variables of a QUERY event; the default lexing when there is none.
+fn mode_of(status_vars: &[u8]) -> SqlMode {
+    StatusVarsIterator::new(status_vars)
+        .find_map(|var| match var.get_value() {
+            Ok(StatusVarVal::SqlMode(flags)) => Some(SqlMode::from_bits(flags.0)),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// The pieces of `sql` that are not blanks, without the semicolons that end it.
+fn significant(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
+    let mut toks: Vec<_> = tokens(sql, mode)
+        .into_iter()
+        .filter(|t| !matches!(t, Tok::Blank(_)))
+        .collect();
+    while toks.last() == Some(&Tok::Punct(';')) {
+        toks.pop();
     }
-    if in_tick || rest.is_empty() {
+    toks
+}
+
+/// Whether the piece at `at` is the unquoted word `w`, in any case.
+fn word_is(toks: &[Tok<'_>], at: usize, w: &str) -> bool {
+    matches!(toks.get(at), Some(Tok::Word(t)) if t.eq_ignore_ascii_case(w))
+}
+
+/// The table name read at `at` as `(schema when given, table, index past it)`; `None` when no name stands there.
+fn table_name_at(toks: &[Tok<'_>], at: usize) -> Option<(Option<String>, String, usize)> {
+    let part = |i: usize| match toks.get(i)? {
+        Tok::Word(w) => Some((*w).to_string()),
+        quoted => quoted.identifier(),
+    };
+    let first = part(at)?;
+    match toks.get(at + 1) {
+        Some(Tok::Punct('.')) => Some((Some(first), part(at + 2)?, at + 3)),
+        _ => Some((None, first, at + 1)),
+    }
+}
+
+/// The `(schema, table)` a name read by [`table_name_at`] stands for, given the event's database.
+fn qualified(schema: Option<String>, table: String, event_db: &str) -> (String, String) {
+    (schema.unwrap_or_else(|| event_db.to_string()), table)
+}
+
+/// The table a `TRUNCATE` QUERY event names, as `(schema, table)`; `None` for any other statement or a shape this reader does not claim.
+pub(crate) fn truncate_target(
+    sql: &str,
+    event_db: &str,
+    mode: SqlMode,
+) -> Option<(String, String)> {
+    let toks = significant(sql, mode);
+    if !word_is(&toks, 0, "truncate") {
         return None;
     }
-    let unq = |s: &str| s.trim_matches('`').replace("``", "`");
-    match dot {
-        Some(at) => Some((unq(&rest[..at]), unq(&rest[at + 1..]))),
-        None => Some((event_db.to_string(), unq(rest))),
-    }
+    let at = 1 + usize::from(word_is(&toks, 1, "table"));
+    let (schema, table, end) = table_name_at(&toks, at)?;
+    (end == toks.len()).then(|| qualified(schema, table, event_db))
 }
 
 /// One token of an `ALTER TABLE` statement: a word (`true` when it was backticked), a quoted string, or one punctuation character.
@@ -2068,9 +2077,9 @@ enum AlterToken {
 }
 
 /// `sql` cut into [`AlterToken`]s; `None` for an unterminated quote.
-fn alter_tokens(sql: &str) -> Option<Vec<AlterToken>> {
+fn alter_tokens(sql: &str, mode: SqlMode) -> Option<Vec<AlterToken>> {
     let mut out = Vec::new();
-    for tok in tokens(sql) {
+    for tok in tokens(sql, mode) {
         match tok {
             Tok::Blank(_) => {}
             Tok::Word(w) => out.push(AlterToken::Word(w.to_string(), false)),
@@ -2085,63 +2094,138 @@ fn alter_tokens(sql: &str) -> Option<Vec<AlterToken>> {
     Some(out)
 }
 
-/// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name; `None` for any other statement.
-pub(crate) fn column_rename_target(sql: &str, event_db: &str) -> Option<(String, String)> {
-    let tokens = alter_tokens(sql)?;
-    let word = |i: usize, w: &str| matches!(tokens.get(i), Some(AlterToken::Word(t, false)) if t.eq_ignore_ascii_case(w));
-    let mut at = 0;
-    if !word(at, "alter") {
-        return None;
-    }
-    at += 1;
-    if word(at, "ignore") {
-        at += 1;
-    }
-    if !word(at, "table") {
-        return None;
-    }
-    at += 1;
-    let name = |i: usize| match tokens.get(i) {
+/// Whether the token at `i` is the unquoted word `w`, in any case.
+fn alter_word(tokens: &[AlterToken], i: usize, w: &str) -> bool {
+    matches!(tokens.get(i), Some(AlterToken::Word(t, false)) if t.eq_ignore_ascii_case(w))
+}
+
+/// The word at `i`, quoted or not.
+fn alter_name(tokens: &[AlterToken], i: usize) -> Option<String> {
+    match tokens.get(i) {
         Some(AlterToken::Word(t, _)) => Some(t.clone()),
         _ => None,
-    };
-    let first = name(at)?;
-    at += 1;
-    let (schema, table) = if tokens.get(at) == Some(&AlterToken::Punct('.')) {
-        let table = name(at + 1)?;
-        at += 2;
-        (first, table)
+    }
+}
+
+/// The table name read at `at` as `((schema, table), index past it)`; the event's database stands in for a missing qualifier.
+fn alter_table_name(
+    tokens: &[AlterToken],
+    at: usize,
+    event_db: &str,
+) -> Option<((String, String), usize)> {
+    let first = alter_name(tokens, at)?;
+    if tokens.get(at + 1) == Some(&AlterToken::Punct('.')) {
+        Some(((first, alter_name(tokens, at + 2)?), at + 3))
     } else {
-        (event_db.to_string(), first)
-    };
-    let (mut depth, mut spec_start) = (0usize, at);
-    for i in at..=tokens.len() {
-        let end = i == tokens.len() || (depth == 0 && tokens[i] == AlterToken::Punct(','));
-        if end {
-            let renames = if word(spec_start, "rename") && word(spec_start + 1, "column") {
+        Some(((event_db.to_string(), first), at + 1))
+    }
+}
+
+/// The table `ALTER [IGNORE] TABLE name` alters and the index of its first specification.
+fn alter_header(tokens: &[AlterToken], event_db: &str) -> Option<((String, String), usize)> {
+    let mut at = 0;
+    if !alter_word(tokens, at, "alter") {
+        return None;
+    }
+    at += 1;
+    if alter_word(tokens, at, "ignore") {
+        at += 1;
+    }
+    if !alter_word(tokens, at, "table") {
+        return None;
+    }
+    alter_table_name(tokens, at + 1, event_db)
+}
+
+/// The index at which each comma-separated specification of an `ALTER TABLE` starts, from `at` on.
+fn alter_spec_starts(tokens: &[AlterToken], at: usize) -> Vec<usize> {
+    let (mut depth, mut starts) = (0usize, vec![at]);
+    for (i, tok) in tokens.iter().enumerate().skip(at) {
+        match tok {
+            AlterToken::Punct('(') => depth += 1,
+            AlterToken::Punct(')') => depth = depth.saturating_sub(1),
+            AlterToken::Punct(',') if depth == 0 => starts.push(i + 1),
+            _ => {}
+        }
+    }
+    starts
+}
+
+/// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name; `None` for any other statement.
+pub(crate) fn column_rename_target(
+    sql: &str,
+    event_db: &str,
+    mode: SqlMode,
+) -> Option<(String, String)> {
+    let tokens = alter_tokens(sql, mode)?;
+    let (table, at) = alter_header(&tokens, event_db)?;
+    alter_spec_starts(&tokens, at)
+        .into_iter()
+        .any(|start| {
+            if alter_word(&tokens, start, "rename") && alter_word(&tokens, start + 1, "column") {
                 true
-            } else if word(spec_start, "change") {
-                let from = spec_start + 1 + usize::from(word(spec_start + 1, "column"));
-                match (name(from), name(from + 1)) {
+            } else if alter_word(&tokens, start, "change") {
+                let from = start + 1 + usize::from(alter_word(&tokens, start + 1, "column"));
+                match (alter_name(&tokens, from), alter_name(&tokens, from + 1)) {
                     (Some(old), Some(new)) => !old.eq_ignore_ascii_case(&new),
                     _ => false,
                 }
             } else {
                 false
-            };
-            if renames {
-                return Some((schema, table));
             }
-            spec_start = i + 1;
+        })
+        .then_some(table)
+}
+
+/// Every table a `RENAME TABLE` or an `ALTER TABLE ... RENAME [TO|AS] new` QUERY event touches, source and target (`None` for a name that cannot be read); `None` when the event renames no table.
+pub(crate) fn renamed_tables(
+    sql: &str,
+    event_db: &str,
+    mode: SqlMode,
+) -> Option<Vec<Option<(String, String)>>> {
+    let tokens = alter_tokens(sql, mode)?;
+    if alter_word(&tokens, 0, "rename") && alter_word(&tokens, 1, "table") {
+        let (mut out, mut at) = (Vec::new(), 2);
+        loop {
+            let Some((from, next)) = alter_table_name(&tokens, at, event_db) else {
+                out.push(None);
+                break;
+            };
+            out.push(Some(from));
+            if !alter_word(&tokens, next, "to") {
+                out.push(None);
+                break;
+            }
+            let Some((to, next)) = alter_table_name(&tokens, next + 1, event_db) else {
+                out.push(None);
+                break;
+            };
+            out.push(Some(to));
+            if tokens.get(next) != Some(&AlterToken::Punct(',')) {
+                break;
+            }
+            at = next + 1;
+        }
+        return Some(out);
+    }
+    let (table, at) = alter_header(&tokens, event_db)?;
+    let mut out = vec![Some(table)];
+    for start in alter_spec_starts(&tokens, at) {
+        if !alter_word(&tokens, start, "rename") {
             continue;
         }
-        match tokens[i] {
-            AlterToken::Punct('(') => depth += 1,
-            AlterToken::Punct(')') => depth = depth.saturating_sub(1),
-            _ => {}
+        let mut from = start + 1;
+        if alter_word(&tokens, from, "to") || alter_word(&tokens, from, "as") {
+            from += 1;
+        } else if ["column", "index", "key"]
+            .iter()
+            .any(|k| alter_word(&tokens, from, k))
+        {
+            continue;
         }
+        out.push(alter_table_name(&tokens, from, event_db).map(|(to, _)| to));
     }
-    None
+    (out.len() > 1).then_some(out)
 }
 
 /// The `(schema, table)` of a column rename a run that projects (`columns_from: grants`) refuses: one met on a table the run captures.
@@ -2149,13 +2233,52 @@ fn refused_column_rename(
     projecting: bool,
     sql: &str,
     event_db: &str,
+    mode: SqlMode,
     configured: &[String],
 ) -> Option<(String, String)> {
     if !projecting {
         return None;
     }
-    column_rename_target(sql, event_db)
+    column_rename_target(sql, event_db, mode)
         .filter(|(sc, tb)| undecodable_event_is_ours(Some((sc, tb)), configured))
+}
+
+/// The table a rename a run that projects refuses touches: `Some(None)` when a name could not be read, `None` when the run does not refuse the event.
+fn refused_table_rename(
+    projecting: bool,
+    sql: &str,
+    event_db: &str,
+    mode: SqlMode,
+    configured: &[String],
+) -> Option<Option<(String, String)>> {
+    if !projecting {
+        return None;
+    }
+    renamed_tables(sql, event_db, mode)?.into_iter().find(|t| {
+        undecodable_event_is_ours(
+            t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+            configured,
+        )
+    })
+}
+
+/// Refuse a captured table renamed under `columns_from: grants`: privileges stay with the name the table had.
+pub(crate) fn table_rename_refusal_message(target: Option<&(String, String)>) -> String {
+    let what = match target {
+        Some((schema, table)) if !schema.is_empty() => format!("`{schema}.{table}`"),
+        Some((_, table)) => format!("`{table}`"),
+        None => "a table this reader could not identify".to_string(),
+    };
+    format!(
+        "mysql cdc: {what} was renamed (RENAME TABLE, or ALTER TABLE ... RENAME) in the log \
+         being read, under `columns_from: grants`. MySQL does not move privileges when a table \
+         is renamed: they stay with the name, so the table now under a name is not the one \
+         its readable columns were granted on, and the rows logged before the rename and \
+         after it would be read through one table's columns and delivered as another's. \
+         Nothing past the rename was delivered. GRANT SELECT on the columns of the table that \
+         holds the name now, then: {}",
+        crate::source::cdc::checkpoint_identity::RECOVER
+    )
 }
 
 /// Refuse a column renamed under `columns_from: grants`: privileges do not follow a rename.
@@ -2174,53 +2297,29 @@ pub(crate) fn column_rename_refusal_message(schema: &str, table: &str) -> String
 pub(crate) fn drop_table_targets(
     sql: &str,
     event_db: &str,
+    mode: SqlMode,
 ) -> Option<Vec<Option<(String, String)>>> {
-    let stripped = executable_text(sql);
-    let mut rest = stripped.trim().trim_end_matches(';').trim();
-    for w in ["drop", "table"] {
-        let head = rest.get(..w.len())?;
-        let after = &rest[w.len()..];
-        if !head.eq_ignore_ascii_case(w)
-            || !(after.is_empty() || after.starts_with(char::is_whitespace))
-        {
-            return None;
-        }
-        rest = after.trim_start();
+    let toks = significant(sql, mode);
+    if !(word_is(&toks, 0, "drop") && word_is(&toks, 1, "table")) {
+        return None;
     }
-    if rest
-        .get(..9)
-        .is_some_and(|h| h.eq_ignore_ascii_case("if exists"))
-    {
-        rest = rest[9..].trim_start();
-    }
-    let (mut names, mut start, mut in_tick) = (Vec::new(), 0usize, false);
-    for (i, ch) in rest.char_indices() {
-        match ch {
-            '`' => in_tick = !in_tick,
-            ',' if !in_tick => {
-                names.push(&rest[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    names.push(&rest[start..]);
+    let at = 2 + 2 * usize::from(word_is(&toks, 2, "if") && word_is(&toks, 3, "exists"));
     Some(
-        names
-            .into_iter()
-            .map(|n| {
-                let n = n.trim();
-                let n = ["restrict", "cascade"]
-                    .iter()
-                    .find_map(|k| {
-                        n.len()
-                            .checked_sub(k.len() + 1)
-                            .and_then(|at| n.get(at..))
-                            .filter(|tail| tail.trim_start().eq_ignore_ascii_case(k))
-                            .map(|tail| n[..n.len() - tail.len()].trim())
-                    })
-                    .unwrap_or(n);
-                truncate_target(&format!("TRUNCATE {n}"), event_db)
+        toks[at..]
+            .split(|t| *t == Tok::Punct(','))
+            .map(|group| {
+                let group = match group {
+                    [rest @ .., Tok::Word(k)]
+                        if (k.eq_ignore_ascii_case("restrict")
+                            || k.eq_ignore_ascii_case("cascade"))
+                            && !matches!(rest.last(), None | Some(Tok::Punct('.'))) =>
+                    {
+                        rest
+                    }
+                    _ => group,
+                };
+                let (schema, table, end) = table_name_at(group, 0)?;
+                (end == group.len()).then(|| qualified(schema, table, event_db))
             })
             .collect(),
     )
@@ -2272,34 +2371,38 @@ pub(crate) fn drop_refusal_message(target: Option<&(String, String)>) -> String 
 }
 
 /// The table a statement-logged DML event writes: `None` when the event is not DML, `Some(None)` when it is but its target cannot be read.
-pub(crate) fn statement_dml_target(sql: &str, event_db: &str) -> Option<Option<(String, String)>> {
-    let stripped = executable_text(sql);
-    let mut words = stripped.split_whitespace();
-    let verb = words.next()?.to_ascii_lowercase();
-    let skip: &[&str] = match verb.as_str() {
+pub(crate) fn statement_dml_target(
+    sql: &str,
+    event_db: &str,
+    mode: SqlMode,
+) -> Option<Option<(String, String)>> {
+    let toks = significant(sql, mode);
+    let Some(Tok::Word(verb)) = toks.first() else {
+        return None;
+    };
+    let skip: &[&str] = match verb.to_ascii_lowercase().as_str() {
         "insert" | "replace" => &["low_priority", "delayed", "high_priority", "ignore", "into"],
         "update" => &["low_priority", "ignore"],
         "delete" => &["low_priority", "quick", "ignore", "from"],
         "load" => return Some(None),
         _ => return None,
     };
-    let mut token = words.find(|w| !skip.contains(&w.to_ascii_lowercase().as_str()))?;
-    token = token.split('(').next().unwrap_or(token);
-    let multi = token.ends_with(',') || words.next().is_some_and(|w| w.starts_with(','));
-    let unbalanced = token.matches('`').count() % 2 == 1;
-    if token.is_empty() || multi || unbalanced {
+    let at = 1 + toks[1..]
+        .iter()
+        .take_while(
+            |t| matches!(t, Tok::Word(w) if skip.contains(&w.to_ascii_lowercase().as_str())),
+        )
+        .count();
+    if at >= toks.len() {
+        return None;
+    }
+    let Some((schema, table, end)) = table_name_at(&toks, at) else {
+        return Some(None);
+    };
+    if toks.get(end) == Some(&Tok::Punct(',')) {
         return Some(None);
     }
-    let unq = |s: &str| s.trim_matches('`').replace("``", "`");
-    let (db, table) = match token.split_once("`.`").or_else(|| {
-        (!token.starts_with('`'))
-            .then(|| token.split_once('.'))
-            .flatten()
-    }) {
-        Some((d, t)) => (unq(d), unq(t)),
-        None => (event_db.to_string(), unq(token)),
-    };
-    Some(Some((db, table)))
+    Some(Some(qualified(schema, table, event_db)))
 }
 
 /// Refuse a change a writer logged as a SQL statement: this reader decodes only row events.
@@ -2412,7 +2515,7 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
 /// Whether a pending grants re-read may wait past this event.
 fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     match data {
-        Some(EventData::QueryEvent(qe)) => is_privilege_statement(&qe.query()),
+        Some(EventData::QueryEvent(qe)) => is_privilege_statement(&qe.query(), event_mode(qe)),
         Some(
             EventData::GtidEvent(_)
             | EventData::AnonymousGtidEvent(_)
@@ -2427,8 +2530,8 @@ fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
 }
 
 /// A statement that can change what an account may read.
-fn is_privilege_statement(sql: &str) -> bool {
-    let mut w = tokens(sql).into_iter().filter_map(|t| match t {
+fn is_privilege_statement(sql: &str, mode: SqlMode) -> bool {
+    let mut w = tokens(sql, mode).into_iter().filter_map(|t| match t {
         Tok::Blank(_) => None,
         Tok::Word(w) => Some(Some(w.to_ascii_uppercase())),
         _ => Some(None),
@@ -2709,7 +2812,7 @@ mod tests {
             "SET DEFAULT ROLE r TO u",
             "FLUSH PRIVILEGES;",
         ] {
-            assert!(is_privilege_statement(sql), "{sql}");
+            assert!(is_privilege_statement(sql, SqlMode::default()), "{sql}");
         }
         for sql in [
             "",
@@ -2733,7 +2836,7 @@ mod tests {
             "/*! unterminated",
             "ГРАНТ", // allow-cyrillic
         ] {
-            assert!(!is_privilege_statement(sql), "{sql}");
+            assert!(!is_privilege_statement(sql, SqlMode::default()), "{sql}");
         }
     }
 
@@ -2957,7 +3060,7 @@ mod tests {
 
     #[test]
     fn a_statement_that_gives_a_column_a_new_name_names_its_table() {
-        let t = |sql: &str| column_rename_target(sql, "shop");
+        let t = |sql: &str| column_rename_target(sql, "shop", SqlMode::default());
         let orders = Some(("shop".to_string(), "orders".to_string()));
         for renames in [
             "ALTER TABLE orders RENAME COLUMN name TO nm",
@@ -3005,18 +3108,30 @@ mod tests {
             "ALTER TABLE orders /*!80000 RENAME COLUMN name TO nm */",
             "/* app */ /*!80000 ALTER TABLE orders RENAME COLUMN name TO nm */ /* xid=7 */",
         ] {
-            assert_eq!(column_rename_target(wrapped, "shop"), orders, "{wrapped}");
+            assert_eq!(
+                column_rename_target(wrapped, "shop", SqlMode::default()),
+                orders,
+                "{wrapped}"
+            );
         }
         assert_eq!(
-            truncate_target("/*!50000 TRUNCATE TABLE orders */", "shop"),
+            truncate_target(
+                "/*!50000 TRUNCATE TABLE orders */",
+                "shop",
+                SqlMode::default()
+            ),
             orders
         );
         assert_eq!(
-            drop_table_targets("/*!50000 DROP TABLE orders */", "shop"),
+            drop_table_targets("/*!50000 DROP TABLE orders */", "shop", SqlMode::default()),
             Some(vec![orders.clone()])
         );
         assert_eq!(
-            statement_dml_target("/*!50000 INSERT INTO orders VALUES (1) */", "shop"),
+            statement_dml_target(
+                "/*!50000 INSERT INTO orders VALUES (1) */",
+                "shop",
+                SqlMode::default()
+            ),
             Some(orders)
         );
         for plain_comment in [
@@ -3024,12 +3139,15 @@ mod tests {
             "ALTER TABLE orders ADD COLUMN x INT /* RENAME COLUMN name TO nm */",
         ] {
             assert_eq!(
-                column_rename_target(plain_comment, "shop"),
+                column_rename_target(plain_comment, "shop", SqlMode::default()),
                 None,
                 "{plain_comment}"
             );
         }
-        assert_eq!(truncate_target("/* TRUNCATE TABLE orders */", "shop"), None);
+        assert_eq!(
+            truncate_target("/* TRUNCATE TABLE orders */", "shop", SqlMode::default()),
+            None
+        );
     }
 
     #[test]
@@ -3060,7 +3178,7 @@ mod tests {
     #[test]
     fn an_alter_statement_is_cut_into_names_strings_and_punctuation_whatever_it_holds() {
         use AlterToken::{Punct, Text};
-        let cut = |sql: &str| alter_tokens(sql);
+        let cut = |sql: &str| alter_tokens(sql, SqlMode::default());
         assert_eq!(cut("`a` x"), Some(vec![ticked("a"), bare("x")]));
         assert_eq!(cut("`a``b` x"), Some(vec![ticked("a`b"), bare("x")]));
         assert_eq!(cut("`a b.c`"), Some(vec![ticked("a b.c")]));
@@ -3186,7 +3304,11 @@ mod tests {
                 at("shop", "t"),
             ),
         ] {
-            assert_eq!(column_rename_target(sql, "shop"), want, "{sql}");
+            assert_eq!(
+                column_rename_target(sql, "shop", SqlMode::default()),
+                want,
+                "{sql}"
+            );
         }
         for sql in [
             "ALTER TABLE t CHANGE a a INT",
@@ -3214,7 +3336,11 @@ mod tests {
             "UPDATE t SET a = 'alter table t rename column a to b'",
             "",
         ] {
-            assert_eq!(column_rename_target(sql, "shop"), None, "{sql}");
+            assert_eq!(
+                column_rename_target(sql, "shop", SqlMode::default()),
+                None,
+                "{sql}"
+            );
         }
     }
 
@@ -3224,20 +3350,47 @@ mod tests {
         let only = |t: &str| vec![t.to_string()];
         let orders = Some(("shop".to_string(), "orders".to_string()));
         assert_eq!(
-            refused_column_rename(true, rename, "shop", &only("shop.orders")),
+            refused_column_rename(
+                true,
+                rename,
+                "shop",
+                SqlMode::default(),
+                &only("shop.orders")
+            ),
             orders
         );
-        assert_eq!(refused_column_rename(true, rename, "shop", &[]), orders);
         assert_eq!(
-            refused_column_rename(false, rename, "shop", &only("shop.orders")),
+            refused_column_rename(true, rename, "shop", SqlMode::default(), &[]),
+            orders
+        );
+        assert_eq!(
+            refused_column_rename(
+                false,
+                rename,
+                "shop",
+                SqlMode::default(),
+                &only("shop.orders")
+            ),
             None
         );
         assert_eq!(
-            refused_column_rename(true, rename, "shop", &only("shop.other")),
+            refused_column_rename(
+                true,
+                rename,
+                "shop",
+                SqlMode::default(),
+                &only("shop.other")
+            ),
             None
         );
         assert_eq!(
-            refused_column_rename(true, rename, "other", &only("shop.orders")),
+            refused_column_rename(
+                true,
+                rename,
+                "other",
+                SqlMode::default(),
+                &only("shop.orders")
+            ),
             None
         );
         assert_eq!(
@@ -3245,9 +3398,412 @@ mod tests {
                 true,
                 "ALTER TABLE orders ADD x INT",
                 "shop",
+                SqlMode::default(),
                 &only("shop.orders")
             ),
             None
+        );
+    }
+
+    const ANSI: SqlMode = SqlMode {
+        no_backslash_escapes: false,
+        ansi_quotes: true,
+    };
+    const NO_BACKSLASH: SqlMode = SqlMode {
+        no_backslash_escapes: true,
+        ansi_quotes: false,
+    };
+
+    fn sql_mode_var(bits: u64) -> Vec<u8> {
+        [&[1u8][..], &bits.to_le_bytes()].concat()
+    }
+
+    #[test]
+    fn a_sql_mode_status_var_is_read_from_the_event_and_found_among_others() {
+        assert_eq!(mode_of(&sql_mode_var(0x4)), ANSI);
+        assert_eq!(mode_of(&sql_mode_var(0x10_0000)), NO_BACKSLASH);
+        assert_eq!(mode_of(&sql_mode_var(0)), SqlMode::default());
+        let after_flags2 = [&[0u8, 0, 0, 0, 0][..], &sql_mode_var(0x4)].concat();
+        assert_eq!(mode_of(&after_flags2), ANSI);
+    }
+
+    #[test]
+    fn an_event_with_no_sql_mode_status_var_is_read_with_the_default_lexing() {
+        assert_eq!(mode_of(&[]), SqlMode::default());
+        assert_eq!(mode_of(&[0u8, 0, 0, 0, 0]), SqlMode::default());
+        assert_eq!(
+            mode_of(&sql_mode_var(0x4)[..5]),
+            SqlMode::default(),
+            "a sql_mode cut short is no sql_mode"
+        );
+    }
+
+    #[test]
+    fn a_rename_behind_a_quote_the_mode_makes_a_name_or_a_plain_string_is_found() {
+        let at = Some(("shop".to_string(), "orders".to_string()));
+        let cases = [
+            (
+                "ALTER TABLE orders COMMENT = 'x\\', RENAME COLUMN a TO b",
+                NO_BACKSLASH,
+                at.clone(),
+            ),
+            (
+                "ALTER TABLE orders COMMENT = 'x\\', RENAME COLUMN a TO b",
+                SqlMode::default(),
+                None,
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN \"x\\\" INT, RENAME COLUMN a TO b",
+                ANSI,
+                at.clone(),
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN \"x\\\" INT, RENAME COLUMN a TO b",
+                SqlMode::default(),
+                None,
+            ),
+            (
+                "ALTER TABLE orders COMMENT = 'it\\'s', RENAME COLUMN a TO b",
+                SqlMode::default(),
+                at.clone(),
+            ),
+            (
+                "ALTER TABLE orders COMMENT = 'it\\'s', RENAME COLUMN a TO b",
+                ANSI,
+                at.clone(),
+            ),
+            (
+                "ALTER TABLE orders COMMENT = 'it\\'s', RENAME COLUMN a TO b",
+                NO_BACKSLASH,
+                None,
+            ),
+            (
+                "ALTER TABLE orders COMMENT = 'x\\', ADD COLUMN extra INT",
+                NO_BACKSLASH,
+                None,
+            ),
+            (
+                "ALTER TABLE orders COMMENT = 'rename column a to b'",
+                NO_BACKSLASH,
+                None,
+            ),
+        ];
+        for (sql, mode, want) in cases {
+            assert_eq!(
+                column_rename_target(sql, "shop", mode),
+                want,
+                "{sql} {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rename_of_a_table_is_read_from_both_statements_that_carry_one() {
+        let at = |d: &str, n: &str| Some((d.to_string(), n.to_string()));
+        let t = |sql: &str| renamed_tables(sql, "shop", SqlMode::default());
+        assert_eq!(
+            t("RENAME TABLE orders TO orders_old"),
+            Some(vec![at("shop", "orders"), at("shop", "orders_old")])
+        );
+        assert_eq!(
+            t("rename table `shop`.`orders` to `shop`.`orders_old`, orders_new to orders"),
+            Some(vec![
+                at("shop", "orders"),
+                at("shop", "orders_old"),
+                at("shop", "orders_new"),
+                at("shop", "orders")
+            ])
+        );
+        assert_eq!(
+            t("/*!80000 RENAME TABLE a.t -- c\n TO b.t */"),
+            Some(vec![at("a", "t"), at("b", "t")])
+        );
+        assert_eq!(
+            t("ALTER TABLE orders RENAME TO archive.orders"),
+            Some(vec![at("shop", "orders"), at("archive", "orders")])
+        );
+        assert_eq!(
+            t("ALTER TABLE orders RENAME AS orders_old"),
+            Some(vec![at("shop", "orders"), at("shop", "orders_old")])
+        );
+        assert_eq!(
+            t("ALTER TABLE orders RENAME orders_old"),
+            Some(vec![at("shop", "orders"), at("shop", "orders_old")])
+        );
+        assert_eq!(
+            t("ALTER TABLE orders ADD COLUMN k INT, RENAME TO orders_old"),
+            Some(vec![at("shop", "orders"), at("shop", "orders_old")])
+        );
+        assert_eq!(
+            t("RENAME TABLE orders orders_old"),
+            Some(vec![at("shop", "orders"), None])
+        );
+        assert_eq!(
+            t("RENAME TABLE orders TO"),
+            Some(vec![at("shop", "orders"), None])
+        );
+        assert_eq!(t("RENAME TABLE"), Some(vec![None]));
+    }
+
+    #[test]
+    fn a_statement_that_renames_no_table_is_not_read_as_one() {
+        let t = |sql: &str, mode: SqlMode| renamed_tables(sql, "shop", mode);
+        for sql in [
+            "ALTER TABLE orders RENAME COLUMN a TO b",
+            "ALTER TABLE orders RENAME INDEX a TO b",
+            "ALTER TABLE orders RENAME KEY a TO b",
+            "ALTER TABLE orders ADD COLUMN `rename` INT",
+            "ALTER TABLE orders COMMENT = 'rename to somewhere'",
+            "ALTER TABLE orders ADD COLUMN k INT COMMENT 'x', ADD INDEX (a)",
+            "ALTER TABLE orders PARTITION BY HASH (rename) PARTITIONS 2",
+            "ALTER TABLE orders ADD CONSTRAINT c CHECK (rename = 1)",
+            "ALTER TABLE orders /* RENAME TO x */ ADD COLUMN k INT",
+            "ALTER TABLE orders ADD COLUMN k INT -- RENAME TO x",
+            "RENAME USER a TO b",
+            "RENAME ROLE a TO b",
+            "CREATE TABLE rename (a INT)",
+            "SELECT 'RENAME TABLE a TO b'",
+            "DROP TABLE orders",
+            "TRUNCATE orders",
+            "",
+            "ALTER TABLE",
+            "ALTER TABLE `unclosed RENAME TO x",
+        ] {
+            assert_eq!(t(sql, SqlMode::default()), None, "{sql}");
+        }
+        assert_eq!(
+            t(
+                "ALTER TABLE orders COMMENT = 'x\\', RENAME TO y",
+                NO_BACKSLASH
+            ),
+            Some(vec![
+                Some(("shop".to_string(), "orders".to_string())),
+                Some(("shop".to_string(), "y".to_string()))
+            ]),
+            "a backslash is no escape under NO_BACKSLASH_ESCAPES"
+        );
+        assert_eq!(
+            t(
+                "ALTER TABLE orders COMMENT = 'x\\', RENAME TO y",
+                SqlMode::default()
+            ),
+            None,
+            "a backslash escapes the quote by default, so the rest is one string"
+        );
+    }
+
+    #[test]
+    fn a_run_refuses_a_table_rename_only_when_it_projects_and_captures_a_table_it_touches() {
+        let only = |t: &str| vec![t.to_string()];
+        let swap = "RENAME TABLE orders TO orders_old, orders_new TO orders";
+        let orders = Some(Some(("shop".to_string(), "orders".to_string())));
+        let refuse = |projecting: bool, sql: &str, db: &str, cfg: &[String]| {
+            refused_table_rename(projecting, sql, db, SqlMode::default(), cfg)
+        };
+        assert_eq!(refuse(true, swap, "shop", &only("shop.orders")), orders);
+        assert_eq!(refuse(true, swap, "shop", &[]), orders);
+        assert_eq!(refuse(false, swap, "shop", &only("shop.orders")), None);
+        assert_eq!(refuse(true, swap, "shop", &only("shop.other")), None);
+        assert_eq!(refuse(true, swap, "other", &only("shop.orders")), None);
+        assert_eq!(
+            refuse(
+                true,
+                "RENAME TABLE staging TO orders",
+                "shop",
+                &only("shop.orders")
+            ),
+            orders,
+            "a table renamed onto a captured name is touched"
+        );
+        assert_eq!(
+            refuse(
+                true,
+                "ALTER TABLE orders RENAME TO orders_old",
+                "shop",
+                &only("shop.orders_old")
+            ),
+            Some(Some(("shop".to_string(), "orders_old".to_string()))),
+            "a table renamed from a captured name is touched"
+        );
+        assert_eq!(
+            refuse(true, "RENAME TABLE a TO", "shop", &only("shop.orders")),
+            Some(None),
+            "a name this reader cannot read is refused, as every other statement's"
+        );
+        assert_eq!(
+            refuse(
+                true,
+                "ALTER TABLE orders RENAME COLUMN a TO b",
+                "shop",
+                &only("shop.orders")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_table_rename_refusal_names_the_table_the_cause_and_the_rebaseline() {
+        let said = table_rename_refusal_message(Some(&("shop".to_string(), "orders".to_string())));
+        assert!(
+            said.starts_with(
+                "mysql cdc: `shop.orders` was renamed (RENAME TABLE, or ALTER TABLE ... RENAME) in the log being read, under `columns_from: grants`."
+            ),
+            "{said}"
+        );
+        assert!(
+            said.contains("MySQL does not move privileges when a table is renamed"),
+            "{said}"
+        );
+        assert!(
+            said.contains("GRANT SELECT on the columns of the table that holds the name now"),
+            "{said}"
+        );
+        assert!(
+            said.ends_with(crate::source::cdc::checkpoint_identity::RECOVER),
+            "{said}"
+        );
+        assert!(
+            table_rename_refusal_message(None).contains("a table this reader could not identify")
+        );
+    }
+
+    #[test]
+    fn truncate_drop_and_statement_writes_read_their_names_the_same_as_before_for_plain_and_backticked_names()
+     {
+        let at = |d: &str, n: &str| (d.to_string(), n.to_string());
+        let names = [
+            ("t", at("shop", "t")),
+            ("Orders", at("shop", "Orders")),
+            ("rivet.t", at("rivet", "t")),
+            ("`t`", at("shop", "t")),
+            ("`rivet`.`t`", at("rivet", "t")),
+            ("rivet.`t`", at("rivet", "t")),
+            ("`odd.name`", at("shop", "odd.name")),
+            ("`a``b`", at("shop", "a`b")),
+            ("`a`.`b``c`", at("a", "b`c")),
+            ("donn\u{e9}es", at("shop", "donn\u{e9}es")),
+            ("`\u{540d}`.`\u{8868}`", at("\u{540d}", "\u{8868}")),
+            ("$t", at("shop", "$t")),
+        ];
+        let m = SqlMode::default();
+        for (name, want) in names {
+            for tail in ["", " /* c */", " -- c", " # c"] {
+                for head in [
+                    "TRUNCATE ",
+                    "TRUNCATE TABLE ",
+                    "/* c */ truncate table ",
+                    "/*!50000 TRUNCATE */ ",
+                ] {
+                    let sql = format!("{head}{name}{tail}");
+                    assert_eq!(
+                        truncate_target(&sql, "shop", m),
+                        Some(want.clone()),
+                        "{sql}"
+                    );
+                }
+                for head in ["DROP TABLE ", "drop table if exists "] {
+                    let sql = format!("{head}{name}{tail}");
+                    assert_eq!(
+                        drop_table_targets(&sql, "shop", m),
+                        Some(vec![Some(want.clone())]),
+                        "{sql}"
+                    );
+                }
+                for (head, rest) in [
+                    ("INSERT INTO ", " VALUES (1)"),
+                    ("INSERT IGNORE INTO ", " (id) VALUES (1)"),
+                    ("REPLACE INTO ", " SELECT 1"),
+                    ("UPDATE ", " SET v = 1"),
+                    ("UPDATE LOW_PRIORITY IGNORE ", " SET v = 1"),
+                    ("DELETE FROM ", " WHERE id = 1"),
+                    ("DELETE QUICK FROM ", " WHERE id = 1"),
+                ] {
+                    let sql = format!("{head}{name}{rest}{tail}");
+                    assert_eq!(
+                        statement_dml_target(&sql, "shop", m),
+                        Some(Some(want.clone())),
+                        "{sql}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_drop_and_statement_writes_read_double_quoted_names_as_identifiers() {
+        let at = |d: &str, n: &str| (d.to_string(), n.to_string());
+        for mode in [ANSI, SqlMode::default()] {
+            assert_eq!(
+                truncate_target("TRUNCATE \"rivet\".\"t\"", "shop", mode),
+                Some(at("rivet", "t"))
+            );
+            assert_eq!(
+                truncate_target("TRUNCATE TABLE \"t\"", "shop", mode),
+                Some(at("shop", "t"))
+            );
+            assert_eq!(
+                truncate_target("TRUNCATE \"a\"\"b\"", "shop", mode),
+                Some(at("shop", "a\"b"))
+            );
+            assert_eq!(
+                drop_table_targets(
+                    "DROP TABLE IF EXISTS \"rivet\".\"t\", \"u\" RESTRICT",
+                    "shop",
+                    mode
+                ),
+                Some(vec![Some(at("rivet", "t")), Some(at("shop", "u"))])
+            );
+            assert_eq!(
+                statement_dml_target("UPDATE \"rivet\".\"t\" SET v = 1", "shop", mode),
+                Some(Some(at("rivet", "t")))
+            );
+            assert_eq!(
+                statement_dml_target("INSERT INTO \"t\" (id) VALUES (1)", "shop", mode),
+                Some(Some(at("shop", "t")))
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_read_whole_is_not_a_truncate_drop_or_write_target() {
+        let m = SqlMode::default();
+        for sql in [
+            "TRUNCATE",
+            "TRUNCATE TABLE",
+            "TRUNCATE `unclosed",
+            "TRUNCATE a b",
+            "TRUNCATE a, b",
+            "TRUNCATE a.b.c",
+            "TRUNCATE .t",
+            "TRUNCATE a.",
+        ] {
+            assert_eq!(truncate_target(sql, "shop", m), None, "{sql}");
+        }
+        assert_eq!(
+            drop_table_targets("DROP TABLE", "shop", m),
+            Some(vec![None])
+        );
+        assert_eq!(
+            drop_table_targets("DROP TABLE `unclosed", "shop", m),
+            Some(vec![None])
+        );
+        assert_eq!(
+            drop_table_targets("DROP TABLE a, b c", "shop", m),
+            Some(vec![Some(("shop".to_string(), "a".to_string())), None])
+        );
+        assert_eq!(
+            drop_table_targets("DROP TABLE restrict", "shop", m),
+            Some(vec![Some(("shop".to_string(), "restrict".to_string()))])
+        );
+        assert_eq!(
+            drop_table_targets("DROP TEMPORARY TABLE a", "shop", m),
+            None
+        );
+        assert_eq!(statement_dml_target("UPDATE", "shop", m), None);
+        assert_eq!(statement_dml_target("UPDATE (", "shop", m), Some(None));
+        assert_eq!(
+            statement_dml_target("UPDATE a,b SET v = 1", "shop", m),
+            Some(None)
         );
     }
 
@@ -3287,7 +3843,11 @@ mod tests {
             ("/*!80000 \u{540d} */", "  \u{540d}  "),
             ("a /*!80000 b */ c /* d */ e", "a   b   c   e"),
         ] {
-            assert_eq!(executable_text(sql), want, "{sql:?}");
+            assert_eq!(
+                crate::source::mysql::statement::executable_text(sql, SqlMode::default()),
+                want,
+                "{sql:?}"
+            );
         }
     }
 
@@ -3301,7 +3861,7 @@ mod tests {
 
     #[test]
     fn a_drop_table_names_every_table_it_removes() {
-        let t = |sql: &str| drop_table_targets(sql, "shop");
+        let t = |sql: &str| drop_table_targets(sql, "shop", SqlMode::default());
         let at = |d: &str, n: &str| Some((d.to_string(), n.to_string()));
         assert_eq!(
             t("DROP TABLE `orders` /* generated by server */"),
@@ -3337,7 +3897,7 @@ mod tests {
 
     #[test]
     fn a_statement_logged_dml_names_the_table_it_writes() {
-        let t = |sql: &str| statement_dml_target(sql, "shop");
+        let t = |sql: &str| statement_dml_target(sql, "shop", SqlMode::default());
         let at = |d: &str, n: &str| Some(Some((d.to_string(), n.to_string())));
         assert_eq!(t("INSERT INTO orders VALUES (1)"), at("shop", "orders"));
         assert_eq!(
@@ -3346,9 +3906,18 @@ mod tests {
         );
         assert_eq!(
             t("/* app */ REPLACE INTO `odd name` VALUES (1)"),
-            Some(None),
-            "a spaced name is not read by guess"
+            at("shop", "odd name"),
+            "a quoted name is read whole, spaces and all"
         );
+        assert_eq!(t("UPDATE `odd, name` SET v = 1"), at("shop", "odd, name"));
+        assert_eq!(
+            t("UPDATE `a`.`b`.`c` SET v = 1"),
+            at("a", "b"),
+            "a third part is not read"
+        );
+        assert_eq!(t("UPDATE `unclosed SET v = 1"), Some(None));
+        assert_eq!(t("UPDATE orders , items SET v = 1"), Some(None));
+        assert_eq!(t("DELETE"), None);
         assert_eq!(t("UPDATE `a`.`b` SET v = 1"), at("a", "b"));
         assert_eq!(t("DELETE FROM orders WHERE id = 1"), at("shop", "orders"));
         assert_eq!(
@@ -3379,7 +3948,7 @@ mod tests {
     /// forms every ORM appends.
     #[test]
     fn a_mysql_truncate_statement_resolves_the_table_it_names() {
-        let t = |sql: &str| truncate_target(sql, "shop");
+        let t = |sql: &str| truncate_target(sql, "shop", SqlMode::default());
 
         // Bare name ⇒ the event's own database, which is the only place it can come
         // from: a binlog QUERY event carries the schema separately from the SQL.
