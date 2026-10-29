@@ -1921,20 +1921,32 @@ fn a_schema_change_under_a_table_grant_is_refused_naming_the_column_that_appeare
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql() {
-    let connections = |label: &str, statements: u32| -> u64 {
+    let connections = |label: &str, statements: u32, privilege: bool| -> u64 {
+        let statement = |i: u32| {
+            if privilege {
+                format!("CREATE USER IF NOT EXISTS '{label}_{i}'@'%'")
+            } else {
+                format!("CREATE TABLE IF NOT EXISTS rivet.{label}_{i} (id INT)")
+            }
+        };
+        let undo = |i: u32| {
+            if privilege {
+                format!("DROP USER IF EXISTS '{label}_{i}'@'%'")
+            } else {
+                format!("DROP TABLE IF EXISTS rivet.{label}_{i}")
+            }
+        };
         let run = an_open_run_with(label, 4, |table, _user| {
             let mut c = root();
             for i in 0..statements {
-                c.query_drop(format!("CREATE USER IF NOT EXISTS '{label}_{i}'@'%'"))
-                    .unwrap();
+                c.query_drop(statement(i)).unwrap();
             }
             c.query_drop(format!("INSERT INTO rivet.{table} VALUES (7, 'eve', 'p7')"))
                 .unwrap();
         });
         let mut c = root();
         for i in 0..statements {
-            c.query_drop(format!("DROP USER IF EXISTS '{label}_{i}'@'%'"))
-                .unwrap();
+            c.query_drop(undo(i)).unwrap();
         }
         let opened: Option<u64> = c
             .exec_first(
@@ -1945,11 +1957,16 @@ fn privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_conne
             .unwrap();
         opened.unwrap_or(0)
     };
-    let few = connections("cg_conn_a", 2);
-    let many = connections("cg_conn_b", 40);
+    let few = connections("cg_conn_a", 2, true);
+    let many = connections("cg_conn_b", 40, true);
+    let plain = connections("cg_conn_c", 40, false);
     assert!(
         many <= few + 1,
         "40 privilege statements opened {many} connections as the run's account, 2 opened {few}: the cost of a statement is a connection"
+    );
+    assert!(
+        plain <= few + 1,
+        "40 statements that change no privilege opened {plain} connections as the run's account, 2 privilege statements opened {few}: only a privilege statement is re-read"
     );
 }
 

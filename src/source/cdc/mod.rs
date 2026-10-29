@@ -1660,15 +1660,7 @@ impl<'s> CdcSchemaResolver<'s> {
             readable.map_or_else(|| format!("SELECT * FROM {table}"), |r| r.select.clone());
         let mut mappings = match self.source().type_mappings(&select, overrides) {
             Ok(m) => m,
-            Err(e) if grants_moved_mid_resolve(readable.is_some(), &e) => {
-                crate::rivet_bail!(
-                    crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
-                    "mysql cdc: the account lost SELECT on a column of `{table}` between the stream's \
-                     read of the readable columns and its read of the schema; nothing past it was \
-                     delivered. Re-run: the run then reads the columns as they are now"
-                );
-            }
-            Err(e) => return Err(e),
+            Err(e) => return Err(schema_read_error(readable.is_some(), table, e)),
         };
         // A source column in the CDC meta namespace collides with the columns the
         // sink prepends, and the collision is silent in the direction that matters.
@@ -1796,6 +1788,21 @@ pub(crate) fn validate_table_ident(table: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The error of a schema read: a column refused while the run projects is a grant change, any other stays as it came.
+fn schema_read_error(projecting: bool, table: &str, err: anyhow::Error) -> anyhow::Error {
+    if !grants_moved_mid_resolve(projecting, &err) {
+        return err;
+    }
+    crate::error::coded(
+        crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+        format!(
+            "mysql cdc: the account lost SELECT on a column of `{table}` between the stream's \
+             read of the readable columns and its read of the schema; nothing past it was \
+             delivered. Re-run: the run then reads the columns as they are now"
+        ),
+    )
 }
 
 /// A schema read refused by the server's privilege check while the run projects: the grants moved since the readable set was read.
@@ -1992,6 +1999,36 @@ mod mod_decisions {
         assert_eq!(native_type_for(&[], "id"), None);
     }
 
+    #[test]
+    fn only_a_projecting_run_reads_a_denied_schema_read_as_moved_grants() {
+        let denied = || {
+            anyhow::Error::from(mysql::Error::MySqlError(mysql::MySqlError {
+                state: "42000".into(),
+                message: "SELECT command denied".into(),
+                code: 1143,
+            }))
+        };
+        assert!(super::grants_moved_mid_resolve(true, &denied()));
+        assert!(!super::grants_moved_mid_resolve(false, &denied()));
+        assert!(!super::grants_moved_mid_resolve(
+            true,
+            &anyhow::anyhow!("other")
+        ));
+
+        let moved = super::schema_read_error(true, "d.t", denied());
+        assert_eq!(
+            crate::error::code_of(&moved),
+            Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED)
+        );
+        assert!(format!("{moved:#}").contains("lost SELECT on a column of `d.t`"));
+        for (projecting, err) in [(false, denied()), (true, anyhow::anyhow!("other"))] {
+            let said = format!("{err:#}");
+            let kept = super::schema_read_error(projecting, "d.t", err);
+            assert_eq!(crate::error::code_of(&kept), None);
+            assert_eq!(format!("{kept:#}"), said);
+        }
+    }
+
     /// A checkpoint that cannot be READ is not a checkpoint that is ABSENT.
     ///
     /// `Position::load` returns `Ok(None)` on `NotFound` — "first run, anchor here"
@@ -2003,21 +2040,6 @@ mod mod_decisions {
     ///
     /// This is the same class the corrupt-JSON arm above it already refuses in
     /// prose, one line apart — it just had no test on the io side.
-    #[test]
-    fn only_a_projecting_run_reads_a_denied_schema_read_as_moved_grants() {
-        let denied = anyhow::Error::from(mysql::Error::MySqlError(mysql::MySqlError {
-            state: "42000".into(),
-            message: "SELECT command denied".into(),
-            code: 1143,
-        }));
-        assert!(super::grants_moved_mid_resolve(true, &denied));
-        assert!(!super::grants_moved_mid_resolve(false, &denied));
-        assert!(!super::grants_moved_mid_resolve(
-            true,
-            &anyhow::anyhow!("other")
-        ));
-    }
-
     #[test]
     fn an_unreadable_checkpoint_is_an_error_not_an_absent_one() {
         let dir = tempfile::tempdir().expect("temp dir");

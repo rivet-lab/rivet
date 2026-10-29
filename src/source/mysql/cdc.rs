@@ -1047,13 +1047,6 @@ impl MysqlChangeStream {
         // caller holds. An earlier version derived it here from the checkpoint
         // alone and fell back to a cwd-relative path — the shipped image runs at
         // `/`, where that is an EACCES at the exact moment the cap is crossed.
-        let with_dir = |mut s: Self| {
-            s.tx = crate::source::cdc::tx_buffer::TxBuffer::new(
-                crate::source::cdc::CdcEngine::Mysql,
-                spill_dir.clone(),
-            );
-            s
-        };
         // ONE connection for every question asked before the dump; it then dumps.
         let mut conn = connect_conn(url, tls)?;
         // Before the anchor is written: a refused first run leaves no checkpoint.
@@ -1063,6 +1056,16 @@ impl MysqlChangeStream {
             Self::refuse_grants_moved_since_resolved(&configured_tables, resolved, read)?;
         }
         let grants_source = readable.is_some().then(|| (url.to_string(), tls.cloned()));
+        let projecting = readable.is_some();
+        let with_dir = |mut s: Self| {
+            s.tx = crate::source::cdc::tx_buffer::TxBuffer::new(
+                crate::source::cdc::CdcEngine::Mysql,
+                spill_dir.clone(),
+            );
+            s.readable = readable;
+            s.grants_source = grants_source;
+            s
+        };
         if let Some(path) = ckpt
             && let Some(pos) = Position::load(path)?
             && let Some((file, p)) =
@@ -1090,15 +1093,8 @@ impl MysqlChangeStream {
             );
             verdict.verdict().enforce()?;
             let identity = (server_uuid, server_gtid);
-            return Self::open_on(conn, server_id, file, p, mode, identity, configured_tables).map(
-                |s| {
-                    with_dir(Self {
-                        readable,
-                        grants_source,
-                        ..s
-                    })
-                },
-            );
+            return Self::open_on(conn, server_id, file, p, mode, identity, configured_tables)
+                .map(with_dir);
         }
         // First run (no checkpoint yet): anchor at the current position and persist
         // it IMMEDIATELY. PostgreSQL pins its anchor server-side at open (slot
@@ -1106,7 +1102,7 @@ impl MysqlChangeStream {
         // at a part commit — so an idle bounded run (zero changes drained) would
         // otherwise leave no checkpoint, the next run would re-anchor to a newer
         // "current" position, and every change in between would be silently skipped.
-        if readable.is_none() {
+        if !projecting {
             Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
         }
         let (file, pos) = Self::current_coordinates(&mut conn)?;
@@ -1146,13 +1142,7 @@ impl MysqlChangeStream {
             identity?,
             configured_tables,
         )
-        .map(|s| {
-            with_dir(Self {
-                readable,
-                grants_source,
-                ..s
-            })
-        })
+        .map(with_dir)
     }
 
     /// One row of a spilled tail: decode it through the general frame, stamp it,
