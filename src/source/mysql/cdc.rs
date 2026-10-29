@@ -1047,9 +1047,7 @@ impl MysqlChangeStream {
         // caller holds. An earlier version derived it here from the checkpoint
         // alone and fell back to a cwd-relative path — the shipped image runs at
         // `/`, where that is an EACCES at the exact moment the cap is crossed.
-        // ONE connection for every question asked before the dump; it then dumps.
         let mut conn = connect_conn(url, tls)?;
-        // Before the anchor is written: a refused first run leaves no checkpoint.
         Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
         let readable = Self::readable_on(&mut conn, &configured_tables, resolved_grants.is_some())?;
         if let (Some(read), Some(resolved)) = (&readable, &resolved_grants) {
