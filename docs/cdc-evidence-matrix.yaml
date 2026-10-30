@@ -592,3 +592,12 @@ shapes:
     mssql: { sound: "mssql_retention_gap_refusal_remedy_recovers_the_rows_the_cleanup_removed (live_cdc_mssql.rs) — the change-table cleanup run past the checkpoint, the retention THROW, then the remedy. CAUGHT by make seeded-recall 2026-10-03." }
     mongo: { sound: "mongo_missing_checkpoint_refusal_on_a_changes_only_stream_remedy_recovers_the_document_written_while_it_was_gone (live_cdc_mongo.rs). CAUGHT by make seeded-recall 2026-10-03." }
     oracle: { sound: "oracle_cdc_truncate_refusal_remedy_leaves_no_removed_row_live_in_the_prefix (the truncated row went out as a change part first; RED on the remedy that kept the parts: source 1, delivered 2) and oracle_cdc_resume_past_log_retention_fails_loudly (live_cdc_oracledb.rs). CAUGHT by make seeded-recall 2026-10-03." }
+
+  - id: lost_file_checkpoint_is_refused_not_reanchored
+    what: "a stream anchored by a checkpoint FILE whose file is gone while the state DB records that the export wrote it must stop by code (RIVET_SOURCE_CDC_CHECKPOINT_INVALID, exit 5) and write nothing; the open that anchors at the current position with a warning and exit 0 loses every change committed since the lost position, and only a destination graded against the source sees it (rig oracle: source 2, delivered 1)"
+    mutant: "dev/seeded/cdc-lost-file-anchor-reanchors/shared.patch deletes the refusal arm of cdc_job::refuse_lost_file_anchor"
+    postgres: { na: "the slot is the anchor on the server; a missing slot is refused by the PriorRun guard (see remedy_recovers_from_its_own_state)" }
+    mysql: { sound: "mysql_lost_checkpoint_on_a_changes_only_stream_is_refused_not_reanchored, mysql_state_reset_lifts_a_lost_checkpoint_refusal (live_cdc.rs) and lib a_recorded_file_anchor_that_is_gone_is_refused_and_a_first_run_is_not. CAUGHT by make seeded-recall 2026-10-30." }
+    mssql: { sound: "mssql_lost_checkpoint_is_refused_not_reanchored (live_cdc_mssql.rs). CAUGHT by make seeded-recall 2026-10-30." }
+    mongo: { sound: "mongo_lost_checkpoint_is_refused_not_reanchored (live_cdc_mongo.rs). CAUGHT by make seeded-recall 2026-10-30." }
+    oracle: { sound: "oracle_cdc_lost_checkpoint_is_refused_not_reanchored (live_cdc_oracledb.rs). CAUGHT by make seeded-recall 2026-10-30." }
