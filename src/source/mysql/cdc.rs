@@ -2222,12 +2222,16 @@ fn name_shape(name: &str, fold: bool) -> String {
 
 /// Whether a name holding bytes the reader could not place can be a captured table: it can when some configured table has the same ASCII skeleton.
 fn unplaced_name_is_ours(schema: &str, table: &str, scope: &QueryScope<'_>) -> bool {
-    let shape = |n: &str| name_shape(n, scope.fold);
-    scope.configured.is_empty()
-        || scope.configured.iter().any(|c| match c.split_once('.') {
-            Some((cs, ct)) => shape(cs) == shape(schema) && shape(ct) == shape(table),
-            None => shape(c) == shape(table),
-        })
+    let shaped: Vec<String> = scope
+        .configured
+        .iter()
+        .map(|c| name_shape(c, scope.fold))
+        .collect();
+    let name = (
+        name_shape(schema, scope.fold),
+        name_shape(table, scope.fold),
+    );
+    undecodable_event_is_ours(Some((&name.0, &name.1)), &shaped, false)
 }
 
 /// What a QUERY event means to the reader; the table of a refusal is `None` when its name could not be read.
@@ -5145,10 +5149,10 @@ mod tests {
                 }
             }
         }
-        assert!(
-            missed.is_empty(),
-            "{} passed: {:?}",
+        assert_eq!(
             missed.len(),
+            0,
+            "passed: {:?}",
             &missed[..missed.len().min(8)]
         );
     }
@@ -5177,10 +5181,10 @@ mod tests {
                 }
             }
         }
-        assert!(
-            missed.is_empty(),
-            "{} passed: {:?}",
+        assert_eq!(
             missed.len(),
+            0,
+            "passed: {:?}",
             &missed[..missed.len().min(8)]
         );
     }

@@ -211,11 +211,17 @@ fn cut(raw: &[u8], layout: Option<Layout>) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(&first) = rest.first() {
-        let (one, tail) = rest.split_at(layout.map_or(1, |l| l.char_len(rest)));
-        out.push(match layout {
-            Some(l) if one.len() > 1 => plain(&l.encoding().decode_without_bom_handling(one).0),
-            _ if first.is_ascii() => char::from(first),
-            _ => UNPLACED,
+        let width = layout.map_or(1, |l| l.char_len(rest));
+        let (one, tail) = rest.split_at(width);
+        out.push(match (layout, width) {
+            (Some(l), 2..) => plain(&l.encoding().decode_without_bom_handling(one).0),
+            _ => {
+                if first.is_ascii() {
+                    char::from(first)
+                } else {
+                    UNPLACED
+                }
+            }
         });
         rest = tail;
     }
