@@ -1,0 +1,30 @@
+diff --git a/src/pipeline/job.rs b/src/pipeline/job.rs
+--- a/src/pipeline/job.rs
++++ b/src/pipeline/job.rs
+@@ -1615,13 +1615,6 @@ fn execute_resolved_plan(
+         reconcile_gate = reconcile_run_gate(&summary, could_not_verify.as_deref());
+     }
+ 
+-    let finalized = finalize_manifest(plan, tail.family, state, &summary, tail.kind);
+-    let manifest_gap = finalized.gap;
+-    if let Some(why) = &manifest_gap {
+-        summary.status = "failed".into();
+-        summary.error_message = Some(crate::redact::redact_secrets(why));
+-    }
+-
+     summary.journal.record(RunEvent::RunCompleted {
+         status: summary.status.clone(),
+         error_message: summary.error_message.clone(),
+@@ -1639,6 +1632,12 @@ fn execute_resolved_plan(
+ 
+     summary.print();
+     ledger_finish_owned_runs(state, &plan.export_name, &ledger_run_id, &summary);
++    let finalized = finalize_manifest(plan, tail.family, state, &summary, tail.kind);
++    let manifest_gap = finalized.gap;
++    if let Some(why) = &manifest_gap {
++        summary.status = "failed".into();
++        summary.error_message = Some(crate::redact::redact_secrets(why));
++    }
+     if marker_outlived_its_run(finalized.left_alone, &ledger_run_id, &summary.run_id) {
+         super::finalize::retire_running_marker(plan, &ledger_run_id);
+     }
