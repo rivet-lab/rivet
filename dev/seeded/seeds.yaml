@@ -4288,6 +4288,23 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: cdc-statement-blank-reading-stands-without-the-letter-reading
+    class: "the reading of a statement with every byte it cannot place as a blank refuses a statement the letter reading does not share a reason with, so an uncaptured RENAME TABLE or DROP TABLE of a non-ASCII name (latin1 `donn<E9>es`) reads as an unreadable name and a CHANGE that keeps a non-ASCII column name (`pr<E9>nom`) reads as a rename `pr` to `nom`: a false refusal with exit 5 and a re-baseline where main delivers with exit 0"
+    history: "PR #728 verifier block (2026-10-30), round 3; RED on the old head 150462e1 2026-10-30 (the rig oracle: latin1 RENAME TABLE of an uncaptured donn<E9>es and CHANGE pr<E9>nom pr<E9>nom exit 5 UNDECODABLE, main exits 0)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-blank-reading-stands-without-the-letter-reading/mysql.patch
+        cells: [an_uncaptured_table_renamed_under_a_non_ascii_name_is_met_as_before_in_a_client_character_set_mysql, a_change_that_keeps_the_non_ascii_name_of_a_column_is_met_as_before_in_a_client_character_set_mysql, "lib:a_name_in_a_client_character_set_never_stops_a_run_that_does_not_capture_its_table", "lib:a_rename_only_the_blank_reading_finds_stops_the_run_unless_the_letter_reading_keeps_the_name", "lib:a_table_name_the_blank_reading_cannot_read_stops_the_run_only_when_the_letter_reading_cannot_either"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
   - name: cdc-statement-read-as-utf8-whatever-the-client-charset
     class: "a statement sent in gbk, sjis, cp932, big5 or gb18030 is read as UTF-8, so a multibyte character whose trail byte is a backslash escapes the quote after it in the reader and not in the server, hiding a following RENAME COLUMN: the rename is delivered with exit 0 and the column's later changes are lost"
     history: "PR #719 follow-up (2026-10-29); RED on main 2026-10-29 (the rig oracle: `SET NAMES gbk` then a COMMENT ending in a multibyte backslash and a RENAME COLUMN exits 0, changes absent)"

@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 3a522950..f8e21dd2 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2311,7 +2311,7 @@ pub(crate) fn query_verdict(
+         event_db,
+         mode,
+         scope,
+-        Some(sql),
++        None,
+     ) {
+         QueryVerdict::Pass | QueryVerdict::Commit => read,
+         QueryVerdict::Privilege => QueryVerdict::Privilege,

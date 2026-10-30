@@ -1,13 +1,13 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 7dbc90e1..82aa8b0c 100644
+index 3a522950..a523fcdb 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2279,7 +2279,7 @@ pub(crate) fn query_verdict(
- fn read_verdict(sql: &str, event_db: &str, mode: SqlMode, scope: &QueryScope<'_>) -> QueryVerdict {
-     let ours = |t: Option<&(String, String)>| match t {
-         Some((sc, tb)) if sc.contains(UNPLACED) || tb.contains(UNPLACED) => {
--            unplaced_name_is_ours(sc, tb, scope)
-+            { let _ = (sc, tb); true }
+@@ -2334,7 +2334,7 @@ fn read_verdict(
+ ) -> QueryVerdict {
+     let ours = |t: &(String, String)| {
+         if t.0.contains(UNPLACED) || t.1.contains(UNPLACED) {
+-            unplaced_name_is_ours(&t.0, &t.1, scope)
++            { let _ = (&t.0, &t.1); true }
+         } else {
+             undecodable_event_is_ours(Some((&t.0, &t.1)), scope.configured, scope.fold)
          }
-         _ => undecodable_event_is_ours(
-             t.map(|(sc, tb)| (sc.as_str(), tb.as_str())),
