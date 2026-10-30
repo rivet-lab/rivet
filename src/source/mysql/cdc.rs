@@ -31,7 +31,7 @@ use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
-use crate::source::mysql::statement::{SqlMode, Tok, charset_name, client_text, tokens};
+use crate::source::mysql::statement::{SqlMode, Tok, UNPLACED, charset_name, client_text, tokens};
 
 /// A blocking iterator of canonical [`ChangeEvent`]s over a MySQL binlog stream.
 ///
@@ -2202,6 +2202,34 @@ pub(crate) fn renamed_tables(
     (out.len() > 1).then_some(out)
 }
 
+/// A name with each run of non-ASCII characters collapsed to one marker, lowercased when the server folds case.
+fn name_shape(name: &str, fold: bool) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut in_run = false;
+    for c in name.chars() {
+        if c.is_ascii() {
+            in_run = false;
+            out.push(if fold { c.to_ascii_lowercase() } else { c });
+        } else {
+            if !in_run {
+                out.push(UNPLACED);
+            }
+            in_run = true;
+        }
+    }
+    out
+}
+
+/// Whether a name holding bytes the reader could not place can be a captured table: it can when some configured table has the same ASCII skeleton.
+fn unplaced_name_is_ours(schema: &str, table: &str, scope: &QueryScope<'_>) -> bool {
+    let shape = |n: &str| name_shape(n, scope.fold);
+    scope.configured.is_empty()
+        || scope.configured.iter().any(|c| match c.split_once('.') {
+            Some((cs, ct)) => shape(cs) == shape(schema) && shape(ct) == shape(table),
+            None => shape(c) == shape(table),
+        })
+}
+
 /// What a QUERY event means to the reader; the table of a refusal is `None` when its name could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum QueryVerdict {
@@ -2231,7 +2259,7 @@ pub(crate) fn query_verdict(
     scope: &QueryScope<'_>,
 ) -> QueryVerdict {
     let read = read_verdict(sql, event_db, mode, scope);
-    if !sql.contains('\u{FFFD}') {
+    if !sql.contains(UNPLACED) {
         return read;
     }
     if !matches!(
@@ -2240,7 +2268,7 @@ pub(crate) fn query_verdict(
     ) {
         return read;
     }
-    match read_verdict(&sql.replace('\u{FFFD}', " "), event_db, mode, scope) {
+    match read_verdict(&sql.replace(UNPLACED, " "), event_db, mode, scope) {
         QueryVerdict::Pass | QueryVerdict::Commit => read,
         QueryVerdict::Privilege => QueryVerdict::Privilege,
         refused => QueryVerdict::Unreadable(Box::new(refused)),
@@ -2249,13 +2277,15 @@ pub(crate) fn query_verdict(
 
 /// The verdict of one reading of a QUERY event: the first of truncate, column rename, table rename, drop, statement write, privilege change, commit that applies.
 fn read_verdict(sql: &str, event_db: &str, mode: SqlMode, scope: &QueryScope<'_>) -> QueryVerdict {
-    let ours = |t: Option<&(String, String)>| {
-        t.is_some_and(|(sc, tb)| sc.contains('\u{FFFD}') || tb.contains('\u{FFFD}'))
-            || undecodable_event_is_ours(
-                t.map(|(sc, tb)| (sc.as_str(), tb.as_str())),
-                scope.configured,
-                scope.fold,
-            )
+    let ours = |t: Option<&(String, String)>| match t {
+        Some((sc, tb)) if sc.contains(UNPLACED) || tb.contains(UNPLACED) => {
+            unplaced_name_is_ours(sc, tb, scope)
+        }
+        _ => undecodable_event_is_ours(
+            t.map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+            scope.configured,
+            scope.fold,
+        ),
     };
     if let Some((sc, tb)) = truncate_target(sql, event_db, mode).filter(|t| ours(Some(t))) {
         return QueryVerdict::Truncated(sc, tb);
@@ -5007,28 +5037,6 @@ mod tests {
     }
 
     #[test]
-    fn a_byte_the_server_reads_as_a_blank_separates_the_words_of_a_statement() {
-        let cfg = only("shop.orders");
-        let truncated = QueryVerdict::Truncated("shop".into(), "orders".into());
-        assert_eq!(verdict_in(b"TRUNCATE\xA0orders", 8, &cfg), truncated);
-        assert_eq!(verdict_in(b"TRUNCATE\xFForders", 40, &cfg), truncated);
-        assert_eq!(
-            verdict_in(b"RENAME\xA0TABLE orders TO o2", 8, &cfg),
-            QueryVerdict::TableRenamed(pair("shop", "orders"))
-        );
-        assert_eq!(
-            verdict_in(b"TRUNCATE\xFForders", 8, &cfg),
-            QueryVerdict::Pass,
-            "0xFF is a letter in latin1"
-        );
-        assert_eq!(
-            verdict_in(b"TRUNCATE\xA0orders", 28, &cfg),
-            QueryVerdict::Pass,
-            "0xA0 is no blank in gbk"
-        );
-    }
-
-    #[test]
     fn a_byte_the_reader_cannot_place_stops_the_run_only_when_blank_it_would_be_a_refusal() {
         let cfg = only("shop.orders");
         let unreadable = |v| QueryVerdict::Unreadable(Box::new(v));
@@ -5072,13 +5080,184 @@ mod tests {
             ),
             (
                 &b"DROP TABLE orders\xE9"[..],
-                QueryVerdict::Dropped(pair("shop", "orders\u{FFFD}")),
+                unreadable(QueryVerdict::Dropped(pair("shop", "orders"))),
             ),
         ];
         for (raw, want) in cases {
             assert_eq!(
                 verdict_in(raw, 60000, &cfg),
                 want,
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+    }
+
+    #[test]
+    fn no_byte_above_ascii_in_a_character_set_without_pairs_hides_a_refused_statement() {
+        let cfg = only("shop.t");
+        let ids: Vec<u16> = crate::source::mysql::client_charsets::COLLATION_CHARSET
+            .iter()
+            .filter(|(_, name)| {
+                !matches!(
+                    *name,
+                    "utf8mb3"
+                        | "utf8mb4"
+                        | "binary"
+                        | "ascii"
+                        | "big5"
+                        | "gbk"
+                        | "sjis"
+                        | "cp932"
+                        | "gb18030"
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(ids.len() > 100, "{}", ids.len());
+        let plain: [(&[u8], &[u8], bool); 4] = [
+            (b"TRUNCATE", b"t", false),
+            (b"RENAME", b"TABLE t TO u", false),
+            (b"ALTER TABLE t RENAME", b"COLUMN a TO b", false),
+            (b"REVOKE", b"SELECT ON t FROM u", true),
+        ];
+        let mut missed = Vec::new();
+        for id in ids {
+            for x in 0x80u8..=0xFF {
+                for (head, tail, privilege) in plain {
+                    let direct = [head, &[x], tail].concat();
+                    let statement = [head, b" ", tail].concat();
+                    let commented = [&b"--"[..], &[x], b"\n", &statement].concat();
+                    for raw in [direct, commented] {
+                        let got = verdict_in(&raw, id, &cfg);
+                        let refused = if privilege {
+                            got == QueryVerdict::Privilege
+                        } else {
+                            !matches!(
+                                got,
+                                QueryVerdict::Pass | QueryVerdict::Commit | QueryVerdict::Privilege
+                            )
+                        };
+                        if !refused {
+                            missed.push(format!("{id} {}", String::from_utf8_lossy(&raw)));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "{} passed: {:?}",
+            missed.len(),
+            &missed[..missed.len().min(8)]
+        );
+    }
+
+    #[test]
+    fn a_control_byte_never_hides_a_refused_statement() {
+        let cfg = only("shop.t");
+        let mut missed = Vec::new();
+        for id in [8u16, 255, 63] {
+            for x in (0u8..0x20).filter(|x| !matches!(x, 9..=13)) {
+                for (raw, privilege) in [
+                    ([&b"TRUNCATE"[..], &[x], b"t"].concat(), false),
+                    ([&b"RENAME"[..], &[x], b"TABLE t TO u"].concat(), false),
+                    ([&b"REVOKE"[..], &[x], b"SELECT ON t FROM u"].concat(), true),
+                    ([&b"--"[..], &[x], b"\nTRUNCATE t"].concat(), false),
+                ] {
+                    let got = verdict_in(&raw, id, &cfg);
+                    let refused = if privilege {
+                        got == QueryVerdict::Privilege
+                    } else {
+                        !matches!(got, QueryVerdict::Pass | QueryVerdict::Commit)
+                    };
+                    if !refused {
+                        missed.push(format!("{id} {x:#x} {}", String::from_utf8_lossy(&raw)));
+                    }
+                }
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "{} passed: {:?}",
+            missed.len(),
+            &missed[..missed.len().min(8)]
+        );
+    }
+
+    #[test]
+    fn the_shape_of_a_name_is_folded_with_the_server_and_a_qualified_entry_keeps_its_schema() {
+        let (sql, _) = statement_of(b"TRUNCATE CAF\xE9", &charset_var(8));
+        let verdict = |cfg: &[String], fold| folded_verdict_of(&sql, "shop", cfg, fold);
+        let truncated = QueryVerdict::Truncated("shop".into(), "CAF\u{FFFD}".into());
+        assert_eq!(verdict(&only("shop.caf\u{e9}"), true), truncated);
+        assert_eq!(verdict(&only("shop.caf\u{e9}"), false), QueryVerdict::Pass);
+        assert_eq!(verdict(&only("caf\u{e9}"), true), truncated);
+        assert_eq!(verdict(&only("other.caf\u{e9}"), true), QueryVerdict::Pass);
+        assert_eq!(
+            verdict(&only("shop.caf"), true),
+            QueryVerdict::Unreadable(Box::new(QueryVerdict::Truncated(
+                "shop".into(),
+                "CAF".into()
+            )))
+        );
+    }
+
+    #[test]
+    fn a_name_with_a_byte_the_reader_cannot_place_is_ours_only_when_a_captured_name_has_its_shape()
+    {
+        let unreadable = |v| QueryVerdict::Unreadable(Box::new(v));
+        let accented = only("shop.caf\u{e9}");
+        for (raw, cfg, want) in [
+            (
+                &b"TRUNCATE caf\xE9"[..],
+                &accented,
+                QueryVerdict::Truncated("shop".into(), "caf\u{FFFD}".into()),
+            ),
+            (
+                &b"TRUNCATE caf\xC3\xA9"[..],
+                &accented,
+                QueryVerdict::Truncated("shop".into(), "caf\u{FFFD}\u{FFFD}".into()),
+            ),
+            (&b"TRUNCATE cafe\xE9"[..], &accented, QueryVerdict::Pass),
+            (&b"TRUNCATE other\xE9"[..], &accented, QueryVerdict::Pass),
+            (
+                &b"TRUNCATE orders\xE9"[..],
+                &only("shop.orders"),
+                unreadable(QueryVerdict::Truncated("shop".into(), "orders".into())),
+            ),
+            (
+                &b"TRUNCATE orders_d\xE9"[..],
+                &only("shop.orders"),
+                QueryVerdict::Pass,
+            ),
+            (
+                &b"DROP TABLE orders_d\xE9"[..],
+                &only("shop.orders"),
+                QueryVerdict::Pass,
+            ),
+            (
+                &b"TRUNCATE any\xE9"[..],
+                &Vec::<String>::new(),
+                QueryVerdict::Truncated("shop".into(), "any\u{FFFD}".into()),
+            ),
+        ] {
+            assert_eq!(
+                verdict_in(raw, 8, cfg),
+                want,
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+        for (id, raw) in [
+            (19u16, &b"TRUNCATE orders_d\xB0\xA1"[..]),
+            (19, b"DROP TABLE orders_d\xB0\xA1"),
+            (40, b"TRUNCATE orders_d\x82"),
+            (40, b"DROP TABLE orders_d\x82"),
+        ] {
+            assert_eq!(
+                verdict_in(raw, id, &only("shop.orders")),
+                QueryVerdict::Pass,
                 "{}",
                 String::from_utf8_lossy(raw)
             );

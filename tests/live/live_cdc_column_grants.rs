@@ -536,9 +536,19 @@ fn a_revoke_stops_an_open_run_before_the_column_leaves(
     label: &str,
     revoke: impl Fn(&str, &str) -> String,
 ) {
+    a_revoke_written_in_steps_stops_an_open_run(label, |table, user| vec![revoke(table, user)]);
+}
+
+/// As [`a_revoke_stops_an_open_run_before_the_column_leaves`] for a grant change written as the statements `steps(table, user)` on one session.
+fn a_revoke_written_in_steps_stops_an_open_run(
+    label: &str,
+    steps: impl Fn(&str, &str) -> Vec<String>,
+) {
     let mut run = an_open_run_with(label, 4, |table, user| {
         let mut c = root();
-        c.query_drop(revoke(table, &user.0)).unwrap();
+        for sql in steps(table, &user.0) {
+            c.query_drop(sql).unwrap();
+        }
         c.query_drop(format!(
             "INSERT INTO rivet.{table} VALUES (7, 'eve', 'REVOKED-7')"
         ))
@@ -1013,11 +1023,15 @@ fn commit_end_after(start: &(String, u64), table: &str) -> (String, u64) {
         .query_map(
             format!("SHOW BINLOG EVENTS IN '{}' FROM {}", start.0, start.1),
             |r: mysql::Row| {
+                let text = |at| {
+                    String::from_utf8_lossy(&r.get::<Vec<u8>, _>(at).unwrap_or_default())
+                        .into_owned()
+                };
                 (
                     r.get::<u64, _>(1).unwrap_or(0),
-                    r.get::<String, _>(2).unwrap_or_default(),
+                    text(2),
                     r.get::<u64, _>(4).unwrap_or(0),
-                    r.get::<String, _>(5).unwrap_or_default(),
+                    text(5),
                 )
             },
         )
@@ -3147,7 +3161,7 @@ fn statements_in_a_multibyte_client_character_set_are_met_as_before_under_the_po
 
 const RUN_RAW: [&str; 2] = ["PREPARE cg_raw FROM @s", "EXECUTE cg_raw"];
 
-fn raw(pieces: &'static str) -> String {
+fn raw(pieces: &str) -> String {
     format!("SET @s = CONCAT({pieces})")
 }
 
@@ -3273,4 +3287,176 @@ fn statements_with_high_bytes_the_server_reads_as_letters_are_met_as_before_mysq
     let cases: Vec<(bool, &[&str], &str)> =
         built.iter().map(|(p, s, w)| (*p, &s[..], *w)).collect();
     backlogs_end_as("cg_hibyte", &cases);
+}
+
+fn leak(text: impl Into<String>) -> &'static str {
+    Box::leak(text.into().into_boxed_str())
+}
+
+type Case = (bool, Vec<&'static str>, &'static str);
+
+/// A backlog case whose statement is `raw(pieces)` sent in the client character set `set`, then `tail`.
+fn raw_case(
+    policy: bool,
+    set: &str,
+    pieces: &str,
+    tail: &[&'static str],
+    want: &'static str,
+) -> Case {
+    let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE, leak(raw(pieces))];
+    steps.extend_from_slice(&RUN_RAW);
+    steps.extend_from_slice(tail);
+    (policy, steps, want)
+}
+
+fn end_as(label: &str, built: &[Case]) {
+    let cases: Vec<(bool, &[&str], &str)> =
+        built.iter().map(|(p, s, w)| (*p, &s[..], *w)).collect();
+    backlogs_end_as(label, &cases);
+}
+
+const COLLATION_2: &str = "SET character_set_client = 2";
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_byte_a_collation_reads_as_a_blank_separates_the_words_of_a_refused_statement_mysql() {
+    end_as(
+        "cg_czech",
+        &[
+            raw_case(
+                false,
+                COLLATION_2,
+                "'TRUNCATE', 0x88, 'rivet.{t}'",
+                &[],
+                REFUSED_TRUNCATED,
+            ),
+            raw_case(
+                true,
+                COLLATION_2,
+                "'RENAME', 0x88, 'TABLE rivet.{t} TO rivet.{t}_old'",
+                &[RECREATED],
+                REFUSED_UNDECODABLE,
+            ),
+            raw_case(
+                true,
+                COLLATION_2,
+                "'ALTER TABLE rivet.{t} RENAME', 0x9F, 'COLUMN name TO nm'",
+                &[UPDATED_AFTER_AS_NM],
+                REFUSED_UNDECODABLE,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_line_comment_the_server_opens_before_a_byte_of_the_client_character_set_hides_the_rest_of_the_line_mysql()
+ {
+    end_as(
+        "cg_dash",
+        &[
+            raw_case(
+                false,
+                "SET NAMES cp1250",
+                "'TRUNCATE rivet.{t} --', 0x81, ' x\n'",
+                &[],
+                REFUSED_TRUNCATED,
+            ),
+            raw_case(
+                true,
+                "SET NAMES macroman",
+                "'--', 0xCB, '\nRENAME TABLE rivet.{t} TO rivet.{t}_old'",
+                &[RECREATED],
+                REFUSED_UNDECODABLE,
+            ),
+            raw_case(
+                true,
+                "SET NAMES hebrew",
+                "'--', 0xFD, '\nALTER TABLE rivet.{t} RENAME COLUMN name TO nm'",
+                &[UPDATED_AFTER_AS_NM],
+                REFUSED_UNDECODABLE,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_statement_the_reader_cannot_place_is_refused_naming_its_character_set_and_the_statement_it_hides_mysql()
+ {
+    let column = raw_case(
+        true,
+        "SET NAMES cp1250",
+        "'ALTER TABLE rivet.{t} --', 0x81, '\nRENAME COLUMN name TO nm'",
+        &[UPDATED_AFTER_AS_NM],
+        REFUSED_UNDECODABLE,
+    );
+    let table = raw_case(
+        true,
+        "SET NAMES cp1250",
+        "'ALTER TABLE rivet.{t} --', 0x81, '\nRENAME TO rivet.{t}_old'",
+        &[RECREATED],
+        REFUSED_UNDECODABLE,
+    );
+    let said = [("column", column), ("table", table)].map(|(what, (policy, steps, _))| {
+        (
+            what,
+            statements_in_the_backlog(&format!("cg_unr_{what}"), policy, &steps).said,
+        )
+    });
+    let both = "holds bytes this reader cannot tell from blanks, sent in the client character set `cp1250` (collation id 26)";
+    assert!(said[0].1.contains(both), "{}", said[0].1);
+    assert!(said[0].1.contains("had a column renamed"), "{}", said[0].1);
+    assert!(said[1].1.contains(both), "{}", said[1].1);
+    assert!(
+        said[1]
+            .1
+            .contains("was renamed (RENAME TABLE, or ALTER TABLE ... RENAME)"),
+        "{}",
+        said[1].1
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn statements_on_a_table_the_run_does_not_capture_are_met_as_before_in_a_client_character_set_mysql()
+ {
+    let case = |policy: bool, set: &str, name: &str| -> Case {
+        let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+        for sql in [
+            format!("'CREATE TABLE rivet.{{t}}_d', {name}, ' (id INT)'"),
+            format!("'TRUNCATE rivet.{{t}}_d', {name}"),
+            format!("'DROP TABLE rivet.{{t}}_d', {name}"),
+        ] {
+            steps.push(leak(raw(&sql)));
+            steps.extend_from_slice(&RUN_RAW);
+        }
+        steps.push(UPDATED_AFTER);
+        (policy, steps, BOTH_DELIVERED)
+    };
+    end_as(
+        "cg_unc",
+        &[
+            case(false, "SET NAMES euckr", "0xB0A1"),
+            case(true, "SET NAMES euckr", "0xB0A1"),
+            case(false, "SET NAMES cp852", "0x82"),
+            case(true, "SET NAMES cp852", "0x82"),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_revoke_separated_from_its_keyword_by_a_byte_a_collation_reads_as_a_blank_stops_an_open_run_mysql()
+ {
+    a_revoke_written_in_steps_stops_an_open_run("cg_revc", |table, user| {
+        vec![
+            COLLATION_2.to_string(),
+            raw(&format!(
+                "'REVOKE', 0x88, 'SELECT (pass) ON rivet.{table} FROM ''{user}''@''%'''"
+            )),
+            RUN_RAW[0].to_string(),
+            RUN_RAW[1].to_string(),
+        ]
+    });
 }

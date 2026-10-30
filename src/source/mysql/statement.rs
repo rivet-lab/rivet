@@ -1,6 +1,6 @@
 //! One reading of a MySQL statement as the server lexes it: quotes, comments and executable comments.
 
-use super::client_charsets::{COLLATION_CHARSET, HIGH_SPACE};
+use super::client_charsets::COLLATION_CHARSET;
 
 /// One lexical piece of a statement; the raw text of the pieces in order is the statement with its comments read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,46 +163,23 @@ impl Layout {
     }
 }
 
-/// How the server cuts a statement into characters in a client character set that is not UTF-8.
-enum Reading {
+/// The character a byte the reader cannot place is read as: a letter to the lexer, and every consumer also reads the statement with it a blank.
+pub(crate) const UNPLACED: char = '\u{FFFD}';
+
+/// How the server cuts a statement into characters in a client character set.
+enum Cut {
+    Utf8,
+    Bytes,
     Pairs(Layout),
-    Bytes {
-        decoder: Option<&'static encoding_rs::Encoding>,
-        blanks: &'static [u8],
-    },
 }
 
-impl Reading {
-    /// The reading of the character set a QUERY event's client used (its collation id); `None` for the UTF-8 family and `binary`.
-    fn of_collation(id: u16) -> Option<Self> {
-        match charset_name(id) {
-            Some("utf8mb3" | "utf8mb4" | "binary" | "ascii") => None,
-            Some(n) if Layout::of_name(n).is_some() => Layout::of_name(n).map(Self::Pairs),
-            Some(n) => Some(Self::Bytes {
-                decoder: single_byte_decoder(n),
-                blanks: HIGH_SPACE
-                    .iter()
-                    .find(|(c, _)| *c == n)
-                    .map_or(&[], |(_, bytes)| *bytes),
-            }),
-            None => Some(Self::Bytes {
-                decoder: None,
-                blanks: &[],
-            }),
-        }
-    }
-
-    /// The text of one character of at least one byte: the character the server reads, a blank where it reads a blank, else U+FFFD.
-    fn character(&self, one: &[u8]) -> char {
-        match self {
-            Self::Pairs(layout) => plain(&layout.encoding().decode_without_bom_handling(one).0),
-            Self::Bytes { decoder, blanks } => {
-                if one.first().is_some_and(|b| blanks.contains(b)) {
-                    ' '
-                } else {
-                    decoder.map_or('\u{FFFD}', |e| plain(&e.decode_without_bom_handling(one).0))
-                }
-            }
+impl Cut {
+    /// The cut of the character set a QUERY event's client used (its collation id); the UTF-8 family, `binary` and an unrecorded set are read as UTF-8.
+    fn of_collation(id: Option<u16>) -> Self {
+        match id.map(charset_name) {
+            None | Some(Some("utf8mb3" | "utf8mb4" | "binary" | "ascii")) => Self::Utf8,
+            Some(Some(n)) => Layout::of_name(n).map_or(Self::Bytes, Self::Pairs),
+            Some(None) => Self::Bytes,
         }
     }
 }
@@ -215,65 +192,44 @@ pub(crate) fn charset_name(id: u16) -> Option<&'static str> {
         .map(|at| COLLATION_CHARSET[at].1)
 }
 
-/// The single-byte character sets whose high half encoding_rs maps as the server does.
-const SINGLE_BYTE: &[(&str, &encoding_rs::Encoding)] = &[
-    ("latin1", encoding_rs::WINDOWS_1252),
-    ("latin2", encoding_rs::ISO_8859_2),
-    ("latin5", encoding_rs::WINDOWS_1254),
-    ("latin7", encoding_rs::ISO_8859_13),
-    ("cp1250", encoding_rs::WINDOWS_1250),
-    ("cp1251", encoding_rs::WINDOWS_1251),
-    ("cp1256", encoding_rs::WINDOWS_1256),
-    ("cp1257", encoding_rs::WINDOWS_1257),
-    ("cp866", encoding_rs::IBM866),
-    ("koi8r", encoding_rs::KOI8_R),
-    ("koi8u", encoding_rs::KOI8_U),
-    ("greek", encoding_rs::ISO_8859_7),
-    ("hebrew", encoding_rs::ISO_8859_8),
-    ("tis620", encoding_rs::WINDOWS_874),
-    ("macroman", encoding_rs::MACINTOSH),
-];
-
-/// The decoder of a single-byte character set whose high half encoding_rs maps as the server does.
-fn single_byte_decoder(name: &str) -> Option<&'static encoding_rs::Encoding> {
-    SINGLE_BYTE
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, e)| *e)
-}
-
-/// The one character `text` decodes to when it is a non-ASCII, non-blank one; else U+FFFD, which the lexer takes for part of a name.
+/// The one character `text` decodes to when it is a non-ASCII, non-blank one; else the marker of a byte the reader cannot place.
 fn plain(text: &str) -> char {
     let mut chars = text.chars();
     match (chars.next(), chars.next()) {
-        (Some(c), None) if !c.is_ascii() && c != '\u{FFFD}' && !c.is_whitespace() => c,
-        _ => '\u{FFFD}',
+        (Some(c), None) if !c.is_ascii() && c != UNPLACED && !c.is_whitespace() => c,
+        _ => UNPLACED,
     }
 }
 
-/// A statement's bytes as text, cut into characters where the server cuts them in the client character set (its collation id); ASCII stays ASCII, a byte the server reads as a blank is a blank, every other high byte or pair is one non-blank character.
-pub(crate) fn client_text(raw: &[u8], charset: Option<u16>) -> std::borrow::Cow<'_, str> {
-    let Some(reading) = charset.and_then(Reading::of_collation) else {
-        return String::from_utf8_lossy(raw);
-    };
+/// A control byte other than ASCII whitespace, which a server may read as a blank or as a letter.
+fn unplaced_control(c: char) -> bool {
+    matches!(c, '\0'..='\x08' | '\x0E'..='\x1F')
+}
+
+/// `raw` cut into characters: a pair of `layout` is the character it encodes, every other byte of 0x80 and above the marker.
+fn cut(raw: &[u8], layout: Option<Layout>) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(&first) = rest.first() {
-        let n = match &reading {
-            Reading::Pairs(layout) => layout.char_len(rest).max(1),
-            Reading::Bytes { .. } => 1,
-        };
-        let Some((one, tail)) = rest.split_at_checked(n) else {
-            break;
-        };
-        out.push(if first.is_ascii() {
-            char::from(first)
-        } else {
-            reading.character(one)
+        let (one, tail) = rest.split_at(layout.map_or(1, |l| l.char_len(rest)));
+        out.push(match layout {
+            Some(l) if one.len() > 1 => plain(&l.encoding().decode_without_bom_handling(one).0),
+            _ if first.is_ascii() => char::from(first),
+            _ => UNPLACED,
         });
         rest = tail;
     }
-    out.into()
+    out
+}
+
+/// A statement's bytes as text, cut into characters where the server cuts them in the client character set (its collation id); a byte the reader cannot place, and a control byte, is the marker.
+pub(crate) fn client_text(raw: &[u8], charset: Option<u16>) -> std::borrow::Cow<'_, str> {
+    let text = match Cut::of_collation(charset) {
+        Cut::Utf8 => String::from_utf8_lossy(raw),
+        Cut::Bytes => cut(raw, None).into(),
+        Cut::Pairs(layout) => cut(raw, Some(layout)).into(),
+    };
+    text.replace(unplaced_control, "\u{FFFD}").into()
 }
 
 /// The statement cut into pieces the way the server lexes it: `/*! */` bodies are SQL (nested ones too), other comments, `#` and `-- ` lines become a blank, quoted text is one piece.
@@ -619,7 +575,7 @@ mod tests {
         for id in [13, 88, 95, 96] {
             assert_eq!(
                 client_text(b"\xC5\x85\x5C", Some(id)),
-                "\u{FF85}\u{FFFD}",
+                "\u{FFFD}\u{FFFD}",
                 "{id}"
             );
             assert_eq!(
@@ -655,66 +611,31 @@ mod tests {
     }
 
     #[test]
-    fn every_high_byte_of_a_single_byte_character_set_is_a_blank_exactly_where_the_server_reads_one()
-     {
-        let multibyte = ["big5", "gbk", "sjis", "cp932", "gb18030"];
+    fn every_byte_the_reader_cannot_place_is_one_marker_whatever_the_client_character_set() {
         let unclientable = ["ucs2", "utf16", "utf16le", "utf32"];
-        let utf8 = ["utf8mb3", "utf8mb4", "binary", "ascii"];
         for (id, name) in COLLATION_CHARSET {
-            if [&multibyte[..], &unclientable[..], &utf8[..]]
-                .concat()
-                .contains(name)
-            {
+            if unclientable.contains(name) {
                 continue;
             }
-            let blanks = HIGH_SPACE
-                .iter()
-                .find(|(n, _)| n == name)
-                .map_or(&[][..], |(_, b)| *b);
             for byte in 0..=0xFFu8 {
-                let raw = [byte];
-                let text = client_text(&raw, Some(*id));
-                let chars: Vec<char> = text.chars().collect();
-                assert_eq!(chars.len(), 1, "{name} {byte:#x}: {text:?}");
-                let want_blank = blanks.contains(&byte);
-                if byte.is_ascii() {
-                    assert_eq!(chars[0], char::from(byte), "{name} {byte:#x}");
-                } else if want_blank {
-                    assert_eq!(chars[0], ' ', "{name} {byte:#x}");
+                let bytes = [byte];
+                let text = client_text(&bytes, Some(*id));
+                let want = if byte.is_ascii() && !matches!(byte, 0..=8 | 0x0E..=0x1F) {
+                    char::from(byte)
                 } else {
-                    assert!(
-                        !chars[0].is_ascii() && !chars[0].is_whitespace(),
-                        "{name} {byte:#x}: {text:?}"
-                    );
-                }
+                    UNPLACED
+                };
+                assert_eq!(text, want.to_string(), "{name} {byte:#x}");
             }
         }
-    }
-
-    #[test]
-    fn the_blank_bytes_of_the_server_are_the_ones_measured_on_it() {
-        let has = |name: &str, byte: u8| {
-            HIGH_SPACE
-                .iter()
-                .any(|(n, b)| *n == name && b.contains(&byte))
-        };
-        for name in [
-            "latin1", "latin2", "cp1250", "greek", "hebrew", "latin5", "latin7", "armscii8",
-            "geostd8", "dec8",
-        ] {
-            assert!(has(name, 0xA0), "{name}");
-        }
-        for name in ["cp852", "cp866", "keybcs2"] {
-            assert!(has(name, 0xFF), "{name}");
-        }
-        assert_eq!(HIGH_SPACE.len(), 13);
-        assert_eq!(client_text(b"a\xA0b", Some(default_id("latin1"))), "a b");
         assert_eq!(
-            client_text(b"a\xFFb", Some(default_id("latin1"))),
-            "a\u{FF}b"
+            client_text(b"\x01 a\tb\r\n\x0B\x0C", None),
+            "\u{FFFD} a\tb\r\n\x0B\x0C"
         );
-        assert_eq!(client_text(b"a\xFFb", Some(default_id("cp852"))), "a b");
-        assert_eq!(client_text(b"caf\xE9", Some(8)), "caf\u{E9}");
+        assert_eq!(client_text(b"a\x1Fb", Some(255)), "a\u{FFFD}b");
+        assert_eq!(client_text(b"a\x7Fb", Some(255)), "a\x7Fb");
+        assert_eq!(client_text(b"caf\xE9", Some(8)), "caf\u{FFFD}");
+        assert_eq!(client_text(b"caf\xC3\xA9", Some(255)), "caf\u{E9}");
     }
 
     #[test]
