@@ -1,10 +1,10 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 3a522950..6b8435ce 100644
+index 1f10a191..0f9d0d91 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2127,7 +2127,7 @@ pub(crate) fn column_rename_target(
+@@ -2171,7 +2171,7 @@ pub(crate) fn column_rename_target(
+     event_db: &str,
      mode: SqlMode,
-     kept: &[usize],
  ) -> Option<(String, String)> {
 -    let tokens = alter_tokens(sql, mode)?;
 +    let tokens = alter_tokens(sql.split("/*").next().unwrap_or(""), mode)?;

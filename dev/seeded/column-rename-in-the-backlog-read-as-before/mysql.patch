@@ -1,13 +1,13 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 3a522950..46f2eb6e 100644
+index 1f10a191..50e43456 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2346,7 +2346,7 @@ fn read_verdict(
+@@ -2318,7 +2318,7 @@ pub(crate) fn query_verdict(
+         return QueryVerdict::Truncated(sc, tb);
      }
      if scope.projecting {
-         let kept = letter.map_or_else(Vec::new, |l| kept_change_specs(l, event_db, mode));
--        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode, &kept).filter(ours) {
-+        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode, &kept).filter(|t| ours(t) && sql.is_empty()) {
+-        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode).filter(ours) {
++        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode).filter(|t| ours(t) && sql.is_empty()) {
              return QueryVerdict::ColumnRenamed(sc, tb);
          }
-         let unread = kind_unread_in_letter(letter, |l| renamed_tables(l, event_db, mode));
+         if let Some(touched) =

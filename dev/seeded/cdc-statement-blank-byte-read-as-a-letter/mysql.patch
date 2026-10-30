@@ -1,13 +1,12 @@
-diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 3a522950..f6fb1513 100644
---- a/src/source/mysql/cdc.rs
-+++ b/src/source/mysql/cdc.rs
-@@ -2297,7 +2297,7 @@ pub(crate) fn query_verdict(
-     scope: &QueryScope<'_>,
- ) -> QueryVerdict {
-     let read = read_verdict(sql, event_db, mode, scope, None);
--    if !sql.contains(UNPLACED) {
-+    if true || !sql.contains(UNPLACED) {
-         return read;
-     }
-     if !matches!(
+diff --git a/src/source/mysql/statement.rs b/src/source/mysql/statement.rs
+index 6c9f207c..da5feafb 100644
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -221,7 +221,6 @@ impl Lexical {
+         match byte {
+             0x7F if after_dashes && !self.del_opens => UNPLACED,
+             0..=0x7F => char::from(byte),
+-            b if self.blank.contains(&b) => ' ',
+             b if after_dashes && self.opener.contains(&b) => '\x01',
+             _ => UNPLACED,
+         }

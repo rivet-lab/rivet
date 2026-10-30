@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/statement.rs b/src/source/mysql/statement.rs
+index 6c9f207c..0be991e2 100644
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -201,7 +201,7 @@ pub(crate) struct Lexical {
+ impl Lexical {
+     /// The lexing of the collation with this id; an id the table does not list lexes like ASCII.
+     pub(crate) fn of_collation(id: Option<u16>) -> Self {
+-        id.and_then(|id| LEXICAL.binary_search_by_key(&id, |(i, ..)| *i).ok())
++        id.and_then(|id| LEXICAL.binary_search_by_key(&id, |(i, ..)| *i).ok().filter(|_| false))
+             .map_or(
+                 Self {
+                     blank: &[],

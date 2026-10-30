@@ -1,13 +1,12 @@
 diff --git a/src/source/mysql/statement.rs b/src/source/mysql/statement.rs
-index 7163b61c..8e8036e1 100644
+index 6c9f207c..031e1078 100644
 --- a/src/source/mysql/statement.rs
 +++ b/src/source/mysql/statement.rs
-@@ -203,7 +203,7 @@ fn plain(text: &str) -> char {
- 
- /// A control byte other than ASCII whitespace, which a server may read as a blank or as a letter.
- fn unplaced_control(c: char) -> bool {
--    matches!(c, '\0'..='\x08' | '\x0E'..='\x1F')
-+    false && matches!(c, '\0'..='\x08' | '\x0E'..='\x1F')
- }
- 
- /// `raw` cut into characters: a pair of `layout` is the character it encodes, every other byte of 0x80 and above the marker.
+@@ -220,6 +220,7 @@ impl Lexical {
+     fn single(self, byte: u8, after_dashes: bool) -> char {
+         match byte {
+             0x7F if after_dashes && !self.del_opens => UNPLACED,
++            0..=0x08 | 0x0E..=0x1F => UNPLACED,
+             0..=0x7F => char::from(byte),
+             b if self.blank.contains(&b) => ' ',
+             b if after_dashes && self.opener.contains(&b) => '\x01',

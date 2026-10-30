@@ -4238,13 +4238,13 @@ seeds:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
   - name: cdc-statement-blank-byte-read-as-a-letter
-    class: "a byte of a client character set the server may read as a blank (0x88 in latin2_czech_cs, 0xA0 in latin1, a byte after `--` in cp1250, hebrew, latin7, macroman) is read only as a letter, so the words it separates join, or the comment it opens is not seen, and a RENAME, TRUNCATE or REVOKE behind it is not recognised: the statement is delivered with exit 0 and the later changes of the table are lost"
-    history: "PR #728 verifier block (2026-10-30), round 2; RED on the old head d442f429 2026-10-30 (the rig oracle: collation id 2 `TRUNCATE<88>t` exits 0 with no policy, cp1250 `TRUNCATE --<81>` newline exits 0)"
+    class: "a byte of a client character set the server reads as a blank (0xA0 in latin1, 0x88-0x8C and 0x9F in latin2_czech_cs) is read as a letter, so the words it separates join, or a `--` comment it follows is not seen as one and swallows the next line: a RENAME, TRUNCATE or REVOKE behind it is delivered or ignored with exit 0 and the later changes of the table are lost"
+    history: "PR #728 verifier block (2026-10-30), round 4; RED on the old head 1236ff11 and on main 2026-10-30 (the rig oracle: latin1 `--<A0>` swallowing a CHANGE exits 0)"
     scope: source
     engines:
       mysql:
         patch: cdc-statement-blank-byte-read-as-a-letter/mysql.patch
-        cells: [a_byte_a_collation_reads_as_a_blank_separates_the_words_of_a_refused_statement_mysql, a_revoke_separated_from_its_keyword_by_a_byte_a_collation_reads_as_a_blank_stops_an_open_run_mysql, a_line_comment_the_server_opens_before_a_byte_of_the_client_character_set_hides_the_rest_of_the_line_mysql, "lib:a_byte_the_reader_cannot_place_stops_the_run_only_when_blank_it_would_be_a_refusal", "lib:no_byte_above_ascii_in_a_character_set_without_pairs_hides_a_refused_statement"]
+        cells: [a_blank_byte_the_dash_comment_swallowed_does_not_hide_the_next_line_in_latin1_mysql, a_byte_a_collation_reads_as_a_blank_separates_the_words_of_a_refused_statement_mysql, a_revoke_separated_from_its_keyword_by_a_byte_a_collation_reads_as_a_blank_stops_an_open_run_mysql, "lib:every_single_byte_is_read_as_the_collation_table_says"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
@@ -4255,13 +4255,47 @@ seeds:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
   - name: cdc-statement-control-byte-read-as-a-letter
-    class: "a control byte (0x00-0x08, 0x0E-0x1F) in a statement is read as a letter although the server may read it as a blank in a collation, so the words it separates join and a refused statement behind it is not recognised: the statement is delivered with exit 0 and the later changes of the table are lost"
-    history: "PR #728 verifier block (2026-10-30), round 2; RED on the old head d442f429 2026-10-30 (the unit sweep of control bytes missed)"
+    class: "a control byte below 0x20 other than ASCII whitespace is read as a letter, so after `--` it opens no comment although the server opens one in every collation: the statement behind it is read as another statement, a multi-table DELETE or a CHANGE is matched to the wrong column, and the write or rename is delivered with exit 0"
+    history: "PR #728 verifier block (2026-10-30), round 4; RED on the old head 1236ff11 2026-10-30 (the rig oracle: a multi-table DELETE hidden behind `--<01>` exits 0 where main exits 5; a CHANGE list behind `--<01>` renames pass to pw with exit 0)"
     scope: source
     engines:
       mysql:
         patch: cdc-statement-control-byte-read-as-a-letter/mysql.patch
-        cells: ["lib:a_control_byte_never_hides_a_refused_statement", "lib:every_byte_the_reader_cannot_place_is_one_marker_whatever_the_client_character_set"]
+        cells: [a_control_byte_after_a_dash_opens_a_comment_that_hides_a_statement_write_mysql, a_change_after_a_comment_opened_by_a_control_byte_is_matched_to_its_own_column_mysql, a_statement_write_whose_table_follows_a_comment_opened_by_a_control_byte_is_refused_mysql, "lib:a_comment_a_control_byte_opens_hides_what_it_covers_and_exposes_what_follows", "lib:every_single_byte_is_read_as_the_collation_table_says"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-statement-collation-lexing-ignored
+    class: "every client collation is lexed like ASCII whatever the server reports for it: the bytes that open a `--` comment in cp1250, hebrew, macroman and others, 0x7F, and the high blanks are not seen, so a rename behind them is not recognised and is delivered with exit 0"
+    history: "PR #728 verifier block (2026-10-30), round 4; RED on main 2026-10-30 (the rig oracle: cp1250 `--<81>` newline then RENAME exits 0)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-collation-lexing-ignored/mysql.patch
+        cells: [a_line_comment_the_server_opens_before_a_byte_of_the_client_character_set_hides_the_rest_of_the_line_mysql, a_rename_behind_a_comment_a_collation_opens_is_refused_as_the_rename_it_is_mysql, "lib:every_single_byte_is_read_as_the_collation_table_says"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-statement-name-continuing-a-captured-one-is-ours
+    class: "a table name that holds a byte the reader cannot place is matched to a captured table by its ASCII letters alone, dropping the byte, so `clientèle` in latin1 is the captured `client`: a RENAME, TRUNCATE, DROP or statement-logged write of the other table stops the run with exit 5 and a re-baseline where main delivers with exit 0"
+    history: "PR #728 verifier block (2026-10-30), round 4; RED on the old head 1236ff11 2026-10-30 (the rig oracle: latin1 RENAME TABLE clientèle TO clientèle_old with `client` captured exits 5, main exits 0)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-name-continuing-a-captured-one-is-ours/mysql.patch
+        cells: [a_name_beginning_like_a_captured_table_and_continuing_with_a_letter_byte_is_not_that_table_mysql, "lib:a_table_whose_name_continues_a_captured_one_with_a_letter_byte_is_not_that_table"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
@@ -4279,23 +4313,6 @@ seeds:
       mysql:
         patch: cdc-statement-unplaced-name-is-always-ours/mysql.patch
         cells: [statements_on_a_table_the_run_does_not_capture_are_met_as_before_in_a_client_character_set_mysql, "lib:a_name_with_a_byte_the_reader_cannot_place_is_ours_only_when_a_captured_name_has_its_shape", "lib:the_shape_of_a_name_is_folded_with_the_server_and_a_qualified_entry_keeps_its_schema"]
-      postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
-      mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
-      oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
-      mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
-
-  - name: cdc-statement-blank-reading-stands-without-the-letter-reading
-    class: "the reading of a statement with every byte it cannot place as a blank refuses a statement the letter reading does not share a reason with, so an uncaptured RENAME TABLE or DROP TABLE of a non-ASCII name (latin1 `donn<E9>es`) reads as an unreadable name and a CHANGE that keeps a non-ASCII column name (`pr<E9>nom`) reads as a rename `pr` to `nom`: a false refusal with exit 5 and a re-baseline where main delivers with exit 0"
-    history: "PR #728 verifier block (2026-10-30), round 3; RED on the old head 150462e1 2026-10-30 (the rig oracle: latin1 RENAME TABLE of an uncaptured donn<E9>es and CHANGE pr<E9>nom pr<E9>nom exit 5 UNDECODABLE, main exits 0)"
-    scope: source
-    engines:
-      mysql:
-        patch: cdc-statement-blank-reading-stands-without-the-letter-reading/mysql.patch
-        cells: [an_uncaptured_table_renamed_under_a_non_ascii_name_is_met_as_before_in_a_client_character_set_mysql, a_change_that_keeps_the_non_ascii_name_of_a_column_is_met_as_before_in_a_client_character_set_mysql, "lib:a_name_in_a_client_character_set_never_stops_a_run_that_does_not_capture_its_table", "lib:a_rename_only_the_blank_reading_finds_stops_the_run_unless_the_letter_reading_keeps_the_name", "lib:a_table_name_the_blank_reading_cannot_read_stops_the_run_only_when_the_letter_reading_cannot_either"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
