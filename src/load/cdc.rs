@@ -26,6 +26,7 @@
 //! functions are also *warehouse*-specific ([`Warehouse`]): BigQuery reads JSON
 //! with `JSON_VALUE`, Snowflake with `PARSE_JSON(...):path`.
 
+use crate::source::cdc::order;
 use crate::types::target::{BqType, ChType, SfType, TargetColumnSpec, TargetStatus, TargetType};
 
 /// The source engine a change log came from — selects how `__pos` is parsed
@@ -42,7 +43,7 @@ pub enum SourceEngine {
     /// `{"_data":"826A4E0001..."}` — the change-stream resume token. `_data` is
     /// an order-preserving hex keystring (compared lexically, like SQL Server's
     /// lsn); the primary key is the document's `_id` column. See
-    /// `source::cdc::validate::parse_pos`, which keys Mongo `__pos` on `_data`.
+    /// `source::cdc::order`, which keys Mongo `__pos` on `_data`.
     Mongo,
 }
 
@@ -159,52 +160,25 @@ impl CompactOrder {
 }
 
 impl SourceEngine {
+    /// This engine's position order.
+    pub(crate) fn order_row(self) -> &'static order::Row {
+        match self {
+            SourceEngine::MySql => &order::MYSQL,
+            SourceEngine::Postgres => &order::POSTGRES,
+            SourceEngine::SqlServer => &order::SQL_SERVER,
+            SourceEngine::Mongo => &order::MONGO,
+        }
+    }
+
     /// The `ORDER BY` expressions (most-significant first) that totally-order
     /// the change log for this engine in `warehouse`'s SQL dialect: the parsed
     /// commit position, then `__seq`.
     pub(crate) fn order_exprs(self, warehouse: Warehouse) -> Vec<String> {
-        let pos: Vec<String> = match (warehouse, self) {
-            // ── BigQuery: JSON_VALUE + SPLIT(...)[OFFSET(n)] + CAST(... AS INT64)
-            (Warehouse::BigQuery, SourceEngine::MySql) => vec![
-                // Order by the binlog file's NUMERIC ordinal, not the raw string:
-                // '…999999' sorts AFTER '…1000000' lexically, so at a rollover the
-                // current-state view picked a stale row (bug hunt 2026-08-09, the
-                // load-view sibling of the validate PosKey ordinal fix #169).
-                "CAST(REGEXP_EXTRACT(JSON_VALUE(__pos,'$.file'), r'[0-9]+$') AS INT64)".into(),
-                "CAST(JSON_VALUE(__pos,'$.pos') AS INT64)".into(),
-            ],
-            (Warehouse::BigQuery, SourceEngine::Postgres) => vec![
-                "LPAD(SPLIT(JSON_VALUE(__pos,'$.lsn'),'/')[OFFSET(0)],8,'0')".into(),
-                "LPAD(SPLIT(JSON_VALUE(__pos,'$.lsn'),'/')[OFFSET(1)],8,'0')".into(),
-            ],
-            (Warehouse::BigQuery, SourceEngine::SqlServer) => {
-                vec!["JSON_VALUE(__pos,'$.lsn')".into()]
-            }
-            (Warehouse::BigQuery, SourceEngine::Mongo) => {
-                vec!["JSON_VALUE(__pos,'$._data')".into()]
-            }
-            // ── Snowflake: PARSE_JSON(__pos):path::type + SPLIT_PART(...,n)
-            (Warehouse::Snowflake, SourceEngine::MySql) => vec![
-                // Numeric binlog ordinal, not the raw string (rollover — see the
-                // BigQuery arm; bug hunt 2026-08-09, sibling of #169).
-                "TO_NUMBER(REGEXP_SUBSTR(PARSE_JSON(__pos):file::string, '[0-9]+$'))".into(),
-                "PARSE_JSON(__pos):pos::integer".into(),
-            ],
-            (Warehouse::Snowflake, SourceEngine::Postgres) => vec![
-                "LPAD(SPLIT_PART(PARSE_JSON(__pos):lsn::string,'/',1),8,'0')".into(),
-                "LPAD(SPLIT_PART(PARSE_JSON(__pos):lsn::string,'/',2),8,'0')".into(),
-            ],
-            (Warehouse::Snowflake, SourceEngine::SqlServer) => {
-                vec!["PARSE_JSON(__pos):lsn::string".into()]
-            }
-            (Warehouse::Snowflake, SourceEngine::Mongo) => {
-                vec!["PARSE_JSON(__pos):_data::string".into()]
-            }
-            // ── ClickHouse: the log's own version column (ADR-0035 CH3).
-            (Warehouse::ClickHouse, _) => vec!["__ver".into()],
+        let pos = match warehouse {
+            Warehouse::BigQuery => self.order_row().sql(order::Dialect::BigQuery),
+            Warehouse::Snowflake => self.order_row().sql(order::Dialect::Snowflake),
+            Warehouse::ClickHouse => vec!["__ver".into()],
         };
-        // `__seq` is always the final, least-significant tiebreak: it orders
-        // changes that share a commit position (same transaction).
         pos.into_iter()
             .chain(std::iter::once("__seq".to_string()))
             .collect()
@@ -275,22 +249,6 @@ pub fn flag_spec(warehouse: Warehouse) -> TargetColumnSpec {
     };
     meta_spec(DELETE_FLAG_COLUMN, ty)
 }
-
-/// The ClickHouse change log's version: `(source position << 128) | (__seq + 1)`,
-/// the position decoded from the `__pos` JSON's own shape; an unknown shape fails the insert (ADR-0035 CH3).
-pub(crate) const CLICKHOUSE_VERSION_EXPR: &str = "bitOr(bitShiftLeft(toUInt256(multiIf(\
-__pos IS NULL, toUInt128(0), \
-JSONHas(ifNull(__pos, ''), 'file'), bitOr(bitShiftLeft(toUInt128(toUInt64OrZero(extract(\
-JSONExtractString(ifNull(__pos, ''), 'file'), '[0-9]+$'))), 64), \
-toUInt128(JSONExtractUInt(ifNull(__pos, ''), 'pos'))), \
-position(JSONExtractString(ifNull(__pos, ''), 'lsn'), '/') > 0, \
-toUInt128(reinterpretAsUInt64(reverse(unhex(concat(\
-leftPad(splitByChar('/', JSONExtractString(ifNull(__pos, ''), 'lsn'))[1], 8, '0'), \
-leftPad(splitByChar('/', JSONExtractString(ifNull(__pos, ''), 'lsn'))[2], 8, '0')))))), \
-reinterpretAsUInt128(reverse(unhex(leftPad(JSONExtractString(ifNull(__pos, ''), 'lsn'), 32, '0')))))), \
-128), toUInt256(ifNull(__seq, -1) + 1)) + toUInt256(throwIf(\
-__pos IS NOT NULL AND NOT (JSONHas(ifNull(__pos, ''), 'file') OR JSONHas(ifNull(__pos, ''), 'lsn')), \
-'rivet: unrecognised __pos shape — no source position to version this row by (ADR-0035 CH3)'))";
 
 /// A half-open window on the partition column, as typed SQL literals: `lo..hi_exclusive`
 /// selects the buffer's winners one MERGE takes, `all_lo..all_hi_exclusive` is the whole
