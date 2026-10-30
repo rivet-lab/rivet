@@ -871,6 +871,7 @@ fn quarantine_move(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::plan::test_support::test_plan;
     use crate::state::FilePart;
 
     use super::*;
@@ -962,63 +963,15 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn m8_plan(dest: &std::path::Path) -> crate::plan::ResolvedRunPlan {
-        use crate::config::{DestinationConfig, DestinationType, SourceConfig, SourceType};
-        use crate::tuning::SourceTuning;
+        use crate::config::{DestinationConfig, DestinationType};
         crate::plan::ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
-            export_name: "orders".into(),
-            partition_rollover: None,
-            source_table: None,
-            base_query: "SELECT 1".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
-            strategy: crate::plan::ExtractionStrategy::Snapshot,
-            format: crate::config::FormatType::Parquet,
-            compression: crate::config::CompressionType::None,
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: Default::default(),
             destination: DestinationConfig {
                 destination_type: DestinationType::Local,
                 path: Some(dest.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            quality: None,
-            tuning: SourceTuning::from_config(None),
-            tuning_profile_label: "balanced".into(),
-            validate: false,
-            reconcile: false,
             resume: true,
-            source: SourceConfig {
-                source_type: SourceType::Postgres,
-                url: Some("postgresql://nobody@127.0.0.1:9999/nonexistent".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
-            },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
-            shape_drift_warn_factor: 0.0,
-            parquet: None,
+            ..test_plan()
         }
     }
 

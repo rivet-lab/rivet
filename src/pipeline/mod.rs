@@ -197,12 +197,12 @@ pub(crate) fn clamp_line(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SourceConfig, SourceType};
+    use crate::config::SourceConfig;
+    use crate::plan::test_support::test_plan;
     use crate::plan::{
         CompressionType, DestinationConfig, DestinationType, DiagnosticLevel, ExtractionStrategy,
-        FormatType, MetaColumns, ResolvedRunPlan, validate_plan,
+        ResolvedRunPlan, validate_plan,
     };
-    use crate::tuning::SourceTuning;
 
     #[test]
     fn strip_chunked_recovery_hint_strips_use_form() {
@@ -331,60 +331,20 @@ mod tests {
 
     fn minimal_plan() -> ResolvedRunPlan {
         ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
             export_name: "test_export".into(),
-            partition_rollover: None,
-            source_table: None,
-            base_query: "SELECT 1".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
-            strategy: ExtractionStrategy::Snapshot,
-            format: FormatType::Parquet,
             compression: CompressionType::default(),
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: MetaColumns::default(),
             destination: DestinationConfig {
                 destination_type: DestinationType::Local,
                 path: Some("./out".into()),
                 ..Default::default()
             },
-            quality: None,
-            tuning: SourceTuning::from_config(None),
             tuning_profile_label: "balanced (default)".into(),
-            validate: false,
-            reconcile: false,
-            resume: false,
             source: SourceConfig {
-                source_type: SourceType::Postgres,
                 url: Some("postgresql://localhost/test".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
+                ..test_plan().source
             },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
             shape_drift_warn_factor: 2.0,
-            parquet: None,
+            ..test_plan()
         }
     }
 

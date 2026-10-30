@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn a_chunk_with_rows_reports_them_and_commits_its_part() {
         let out = tempfile::tempdir().unwrap();
-        let mut plan = crate::pipeline::commit::tests::test_plan();
+        let mut plan = crate::plan::test_support::test_plan();
         plan.destination.path = Some(out.path().to_string_lossy().into_owned());
         let cp = ChunkedPlan {
             column: "id".into(),
