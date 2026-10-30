@@ -1171,6 +1171,56 @@ mod tests {
         );
     }
 
+    /// The documented default: a CDC part rolls at 256 MiB of buffered changes.
+    #[test]
+    fn the_default_rollover_budget_is_256_mib() {
+        assert_eq!(super::cdc_rollover_memory_bytes(None), Some(268_435_456));
+        assert_eq!(
+            super::cdc_rollover_memory_bytes(Some(256)),
+            Some(268_435_456)
+        );
+    }
+
+    /// The metrics row carries the longest chunk the run journaled.
+    #[test]
+    fn cdc_metric_row_carries_the_longest_chunk() {
+        use crate::journal::RunEvent;
+        let export = crate::config::sample_export("t");
+        let mut summary =
+            super::cdc_summary("r1", &export, "success", 100, 2, 5_000, 12_345, 50, None);
+        summary.journal.record(RunEvent::ChunkStarted {
+            chunk_index: 0,
+            start_key: String::new(),
+            end_key: String::new(),
+        });
+        summary.journal.record(RunEvent::ChunkCompleted {
+            chunk_index: 0,
+            rows: 1,
+            file_name: None,
+        });
+        let expected = summary.journal.longest_chunk_ms();
+        assert!(expected.is_some(), "a paired start and completion is timed");
+        let row = super::cdc_metric_row(&summary, None, None);
+        assert_eq!(row.longest_chunk_ms, expected);
+    }
+
+    /// A capture-instance export resolves its source object before the baseline.
+    #[test]
+    fn a_capture_instance_is_resolved_before_the_snapshot_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "source:\n  type: mssql\n  url: \"mssql://u:p@db.example.com/app\"\nexports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./cdc/o.ckpt\n      \
+             initial: snapshot\n      capture_instance: dbo_orders\n    destination: { type: local, path: ./out }\n";
+        let path = dir.path().join("rivet.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let config = crate::config::Config::load(&path.display().to_string()).unwrap();
+        let export = config.exports[0].clone();
+        let state = StateStore::open_in_memory().unwrap();
+        let err = super::initial_snapshot_pending(&config, &export, &state, dir.path(), None)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("TLS"), "{err:#}");
+    }
+
     #[test]
     fn cdc_warns_when_meta_columns_are_requested_on_a_cdc_export() {
         let mut e = crate::config::sample_export("orders");
