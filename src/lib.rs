@@ -121,6 +121,4 @@ pub mod preflight;
 pub(crate) mod quality;
 pub(crate) mod scalar;
 pub(crate) mod sql;
-#[cfg(test)]
-mod statement_truth;
 pub(crate) mod workers;

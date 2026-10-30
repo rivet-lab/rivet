@@ -76,8 +76,10 @@ impl Row {
         (0..self.sql.len())
             .step_by(2)
             .map(|i| {
-                u8::from_str_radix(&self.sql[i..i + 2], 16)
-                    .unwrap_or_else(|_| panic!("row {}: bad hex", self.id))
+                self.sql
+                    .get(i..i + 2)
+                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                    .unwrap_or_else(|| panic!("row {}: bad hex", self.id))
             })
             .collect()
     }

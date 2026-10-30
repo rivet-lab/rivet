@@ -5,7 +5,7 @@ use super::cdc::{
     statement_dml_target, truncate_target, undecodable_event_is_ours,
 };
 use super::statement::SqlMode;
-use crate::statement_truth::{Class, Direction, Known, Row, assert_ledgers, corpora};
+use crate::source::statement_truth::{Class, Direction, Known, Row, assert_ledgers, corpora};
 
 /// The class of refusal the reader gives one logged statement, in the order its event loop tries them.
 fn read(row: &Row, configured: &[String]) -> Class {

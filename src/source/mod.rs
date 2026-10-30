@@ -8,6 +8,8 @@ pub mod oracle;
 pub(crate) mod pg_numeric_wire;
 pub mod postgres;
 pub(crate) mod query;
+#[cfg(test)]
+mod statement_truth;
 pub(crate) mod value_checksum;
 
 use arrow::datatypes::SchemaRef;

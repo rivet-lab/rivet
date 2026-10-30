@@ -7,7 +7,7 @@ Rust test replays every recorded statement through the reader and compares the t
 
 MySQL is the first engine: the binlog reader's QUERY-event verdict (`src/source/mysql/cdc.rs`).
 Another engine adds a `dev/pytools/statement_truth_<engine>.py` module, a fixture directory and an
-adapter next to its reader; `dev/pytools/statement_truth.py` and `src/statement_truth.rs` do not change.
+adapter next to its reader; `dev/pytools/statement_truth.py` and `src/source/statement_truth.rs` do not change.
 
 ## The stand
 
@@ -66,7 +66,7 @@ whether `sql` is the logged event or, when the server logged nothing, the bytes 
 
 ## The replay test
 
-`src/statement_truth.rs` loads every fixture of an engine, replays each row through the adapter's
+`src/source/statement_truth.rs` loads every fixture of an engine, replays each row through the adapter's
 reader and sorts each disagreement: `missed` (the server changed what the reader captures and the
 reader passed it), `over` (the reader refused a statement that touched nothing it captures, or
 that failed) and `wrong` (both refused, differently). An adapter is a function from a row to a
