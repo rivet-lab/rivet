@@ -1615,9 +1615,13 @@ fn execute_resolved_plan(
         reconcile_gate = reconcile_run_gate(&summary, could_not_verify.as_deref());
     }
 
-    // Terminal journal entry BEFORE the print, so a later `finalize_manifest`
-    // gap that flips the status is NOT in the journal on either entry point
-    // (one behaviour, not two — the round-5 apply-journal-bypass fix).
+    let finalized = finalize_manifest(plan, tail.family, state, &summary, tail.kind);
+    let manifest_gap = finalized.gap;
+    if let Some(why) = &manifest_gap {
+        summary.status = "failed".into();
+        summary.error_message = Some(crate::redact::redact_secrets(why));
+    }
+
     summary.journal.record(RunEvent::RunCompleted {
         status: summary.status.clone(),
         error_message: summary.error_message.clone(),
@@ -1634,42 +1638,9 @@ fn execute_resolved_plan(
     }
 
     summary.print();
-    // Transition the run-status ledger to its terminal status — the manifest
-    // written just below is a PROJECTION of this record, so both carry the same
-    // status. A crash before here leaves the row `running`; supersession by a
-    // later run reconciles it (no age timer).
     ledger_finish_owned_runs(state, &plan.export_name, &ledger_run_id, &summary);
-    // Order matters: write the manifest first, then run the manifest-aware
-    // `--validate` pass against the destination, then persist the metrics
-    // row, then write the run report.  The report sees the verification
-    // verdict only because we run it before `finalize_run_report`; the
-    // metrics row must also wait for `finalize_validate_manifest`, which can
-    // downgrade `summary.validated` — recording earlier left `rivet metrics`
-    // permanently saying validated=pass for a run whose report says it
-    // failed.  The notification fires last so it carries the most complete
-    // summary.
-    // A run whose manifest never landed is NOT a success, whatever its rows say.
-    // The parts are durable and the counts are right — and no manifest names them,
-    // so the loader will not read them. Reporting success there is a claim the
-    // artifacts do not support.
-    //
-    // The status has already been printed and the ledger row already closed by
-    // this point, so both are corrected: the metrics row is written below and
-    // picks up the new status, and the ledger row is re-closed. The manifest
-    // itself cannot be re-written to say `failed` — failing to write it is the
-    // problem.
-    let finalized = finalize_manifest(plan, tail.family, state, &summary, tail.kind);
-    let manifest_gap = finalized.gap;
     if marker_outlived_its_run(finalized.left_alone, &ledger_run_id, &summary.run_id) {
         super::finalize::retire_running_marker(plan, &ledger_run_id);
-    }
-    if let Some(why) = &manifest_gap {
-        summary.status = "failed".into();
-        // redact-at-assignment (round-8): this string reaches summary.json AND
-        // the Slack payload verbatim — the main failure path redacts, this one
-        // skipped it.
-        summary.error_message = Some(crate::redact::redact_secrets(why));
-        ledger_finish_owned_runs(state, &plan.export_name, &ledger_run_id, &summary);
     }
     // Round-2 audit #12: advance the incremental cursor now that the destination
     // manifest is durable — never before. A failure here loses nothing (the data +
@@ -2186,7 +2157,7 @@ mod snapshot_leg_tests {
         let dir = tempfile::tempdir().unwrap();
         let state = StateStore::open_in_memory().unwrap();
         let config = dir.path().join("rivet.yaml").to_string_lossy().into_owned();
-        let expanded = crate::pipeline::commit::tests::test_plan();
+        let expanded = crate::plan::test_support::test_plan();
         assert!(unexpanded_partition_error(&expanded).is_none());
         let mut unexpanded = expanded.clone();
         unexpanded.destination.prefix = Some("x/{partition}".into());
@@ -2242,7 +2213,7 @@ mod snapshot_leg_tests {
     #[test]
     fn an_unreachable_source_fails_the_run_and_its_summary() {
         let dir = tempfile::tempdir().unwrap();
-        let mut plan = crate::pipeline::commit::tests::test_plan();
+        let mut plan = crate::plan::test_support::test_plan();
         plan.destination.path = Some(dir.path().to_string_lossy().into_owned());
         let state = StateStore::open_in_memory().unwrap();
         let config = dir.path().join("rivet.yaml").to_string_lossy().into_owned();
@@ -2413,6 +2384,7 @@ mod snapshot_leg_tests {
 
 #[cfg(test)]
 mod tests {
+    use crate::plan::test_support::test_plan;
 
     /// A resume that ADOPTS a prior run's id must still close the row the ledger
     /// was opened under — both wrappers, through one seam.
@@ -3720,12 +3692,8 @@ mod tests {
     // ── plan fixtures ───────────────────────────────────────────────────────
 
     use crate::config::QualityConfig;
-    use crate::config::{
-        CompressionType, DestinationConfig, DestinationType, FormatType, MetaColumns, SourceConfig,
-        SourceType,
-    };
+    use crate::config::SourceConfig;
     use crate::plan::{ChunkedPlan, ExtractionStrategy, ResolvedRunPlan};
-    use crate::tuning::SourceTuning;
 
     #[test]
     fn a_settle_column_that_is_not_temporal_fails_before_the_query_runs() {
@@ -3790,18 +3758,7 @@ mod tests {
 
     fn chunked_plan_with_quality(quality: Option<QualityConfig>) -> ResolvedRunPlan {
         ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
-            export_name: "orders".into(),
-            partition_rollover: None,
-            source_table: None,
             base_query: "SELECT id FROM orders".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
             strategy: ExtractionStrategy::Chunked(ChunkedPlan {
                 column: "id".into(),
                 chunk_size: 100,
@@ -3811,47 +3768,12 @@ mod tests {
                 checkpoint: false,
                 max_attempts: 3,
             }),
-            format: FormatType::Parquet,
-            compression: CompressionType::None,
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: MetaColumns::default(),
-            destination: DestinationConfig {
-                destination_type: DestinationType::Local,
-                path: Some("/tmp".into()),
-                ..Default::default()
-            },
             quality,
-            tuning: SourceTuning::from_config(None),
-            tuning_profile_label: "balanced".into(),
-            validate: false,
-            reconcile: false,
-            resume: false,
             source: SourceConfig {
-                source_type: SourceType::Postgres,
                 url: Some("postgresql://nobody@127.0.0.1:9999/x".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
+                ..test_plan().source
             },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
-            shape_drift_warn_factor: 0.0,
-            parquet: None,
+            ..test_plan()
         }
     }
 

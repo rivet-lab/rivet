@@ -124,7 +124,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     fn plan(max_retries: u32) -> ResolvedRunPlan {
-        let mut p = crate::pipeline::commit::tests::test_plan();
+        let mut p = crate::plan::test_support::test_plan();
         p.tuning.max_retries = max_retries;
         p.tuning.retry_backoff_ms = 0;
         p

@@ -721,7 +721,7 @@ mod tests {
             StateStore::open_at_path(&db).unwrap(),
             StateStore::open_at_path(&db).unwrap(),
         );
-        let mut plan = crate::pipeline::commit::tests::test_plan();
+        let mut plan = crate::plan::test_support::test_plan();
         let export = plan.export_name.clone();
         let actions = || RepairPlan {
             rivet_version: String::new(),
@@ -1266,7 +1266,7 @@ mod tests {
     fn a_missing_or_invalid_report_and_a_prefix_without_a_manifest_are_refused_by_code() {
         let dir = tempfile::tempdir().unwrap();
         let state = StateStore::open_in_memory().unwrap();
-        let plan = crate::pipeline::commit::tests::test_plan();
+        let plan = crate::plan::test_support::test_plan();
         let missing = dir.path().join("absent.json").to_str().unwrap().to_string();
         let err = load_or_build_reconcile(
             &plan,

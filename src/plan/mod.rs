@@ -45,6 +45,8 @@ pub use crate::config::{
 
 pub(crate) mod build;
 mod contract;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use build::{build_plan, parse_column_overrides_pub};
 pub use contract::{

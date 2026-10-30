@@ -383,6 +383,15 @@ scenarios:
     mongo_parallel: { na: "no mid-run delivery position — mongo_parallel takes a quiescent full scan with no checkpoint/cursor advance; the manifest is written once at finalize and a crash re-runs the whole export (steady-state no-loss/no-dup covered by mongo_batch_parallel_integer_id_no_loss_or_dup)" }
     cdc:            { test: roast_manifest_is_durable_before_the_slot_is_acked }
 
+  - id: manifest_gap_is_a_failed_run
+    what: "a run whose terminal manifest.json write failed is `failed` in the run journal (`rivet journal`) and on the run card, on `rivet run` and `rivet apply`; the journal row and the card are written by the shared tail `execute_resolved_plan` after `finalize_manifest`, never by a runner."
+    single:         { test: run_journals_a_run_whose_manifest_never_landed_as_failed_postgres }
+    chunked:        { na: "the journal row and the card are written by the shared tail after the runner returns, so the cell on `single` drives the one path every runner reaches (ADR-0028); no chunked loop writes either" }
+    chunked_checkpoint: { na: "the journal row and the card are written by the shared tail after the runner returns, so the cell on `single` drives the one path every runner reaches (ADR-0028); no checkpoint loop writes either" }
+    keyset:         { na: "the journal row and the card are written by the shared tail after the runner returns, so the cell on `single` drives the one path every runner reaches (ADR-0028); no keyset loop writes either" }
+    mongo_parallel: { test: run_journals_a_run_whose_manifest_never_landed_as_failed_mongo }
+    cdc:            { na: "a CDC drain writes its own manifests and then its own journal row (cdc_job.rs), with no later manifest verdict that could flip the status" }
+
   - id: cursor_ownership_guard
     what: "a persisted cursor records its column/key on write (export_state.cursor_column, v26) and a run on another column refuses it instead of matching nothing"
     single:         { test: incremental_cursor_change_mysql }
