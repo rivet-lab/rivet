@@ -227,6 +227,31 @@ fn audit_apply_rejects_tampered_plan() {
     );
 }
 
+/// A PostgreSQL incremental export whose destination `manifest.json` the test turns into a directory.
+fn manifest_gap_rig(export: &str, out: &std::path::Path) -> Rig {
+    declare_the_manifest_gap(
+        Rig::pg_batch(export)
+            .query("SELECT id, updated_at FROM orders")
+            .source_url_env("DATABASE_URL")
+            .mode("incremental")
+            .export_line("cursor_column: updated_at"),
+    )
+    .dest_path(out.to_path_buf())
+}
+
+/// `rig` declared to fail at its manifest after its part is written.
+pub(crate) fn declare_the_manifest_gap(rig: Rig) -> Rig {
+    rig.a_failed_run_may_leave(
+        &[Leftover::OrphanPart, Leftover::FileLog],
+        "the run fails at the manifest, after its part is written",
+    )
+}
+
+/// Make the manifest write of the export that writes into `dir` fail while its parts still land.
+pub(crate) fn block_manifest(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir.join("manifest.json")).expect("block manifest.json");
+}
+
 // ─── the apply wrapper must obey the manifest gap too ────────────────────────
 
 /// `rivet apply` reaches the SAME single-export runner `rivet run` does, so it
@@ -252,16 +277,7 @@ fn apply_must_not_advance_the_cursor_when_the_manifest_did_not_land() {
     let out_dir = tempfile::tempdir().unwrap();
     let cfg_dir = tempfile::tempdir().unwrap();
     let export = unique_name("orders_incr");
-    let rig = Rig::pg_batch(&export)
-        .a_failed_run_may_leave(
-            &[Leftover::OrphanPart, Leftover::FileLog],
-            "the apply fails at the manifest, after its part is written",
-        )
-        .query("SELECT id, updated_at FROM orders")
-        .source_url_env("DATABASE_URL")
-        .mode("incremental")
-        .export_line("cursor_column: updated_at")
-        .dest_path(out_dir.path().to_path_buf());
+    let rig = manifest_gap_rig(&export, out_dir.path());
     let cfg = rig.config_path();
     let plan_path = cfg_dir.path().join("plan.json");
 
@@ -272,8 +288,7 @@ fn apply_must_not_advance_the_cursor_when_the_manifest_did_not_land() {
         String::from_utf8_lossy(&plan_out.stderr)
     );
 
-    // Block the manifest write: a directory cannot be replaced by a file rename.
-    std::fs::create_dir_all(out_dir.path().join("manifest.json")).expect("block manifest.json");
+    block_manifest(out_dir.path());
 
     let apply_out = rig.apply_env(&plan_path, &[], &[("DATABASE_URL", POSTGRES_URL)]);
     let stderr = String::from_utf8_lossy(&apply_out.stderr).into_owned();
