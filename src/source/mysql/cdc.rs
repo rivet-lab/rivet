@@ -2234,19 +2234,16 @@ pub(crate) fn query_verdict(
     if !sql.contains('\u{FFFD}') {
         return read;
     }
+    if !matches!(
+        read,
+        QueryVerdict::Pass | QueryVerdict::Commit | QueryVerdict::Privilege
+    ) {
+        return read;
+    }
     match read_verdict(&sql.replace('\u{FFFD}', " "), event_db, mode, scope) {
         QueryVerdict::Pass | QueryVerdict::Commit => read,
-        QueryVerdict::Privilege if matches!(read, QueryVerdict::Pass) => QueryVerdict::Privilege,
-        QueryVerdict::Privilege => read,
-        refused
-            if matches!(
-                read,
-                QueryVerdict::Pass | QueryVerdict::Commit | QueryVerdict::Privilege
-            ) =>
-        {
-            QueryVerdict::Unreadable(Box::new(refused))
-        }
-        _ => read,
+        QueryVerdict::Privilege => QueryVerdict::Privilege,
+        refused => QueryVerdict::Unreadable(Box::new(refused)),
     }
 }
 
@@ -5060,6 +5057,10 @@ mod tests {
                 &b"GRANT\xE9SELECT ON shop.orders TO u"[..],
                 QueryVerdict::Privilege,
             ),
+            (
+                &b"GRANT SELECT ON shop.orders\xE9 TO u"[..],
+                QueryVerdict::Privilege,
+            ),
             (&b"TRUNCATE\xE9other"[..], QueryVerdict::Pass),
             (
                 &b"INSERT INTO other VALUES ('\xE9')"[..],
@@ -5101,7 +5102,20 @@ mod tests {
         );
         for err in [&truncated, &renamed] {
             assert_eq!(crate::error::classify_exit(err), 5);
+            assert!(
+                format!("{err:#}").contains(
+                    "holds bytes this reader cannot tell from blanks, sent in the client \
+                     character set `latin1` (collation id 8)"
+                ),
+                "{err:#}"
+            );
         }
+        let plain = refusal_of(&QueryVerdict::TableRenamed(pair("shop", "orders")), Some(8))
+            .expect("refuses");
+        assert!(
+            !format!("{plain:#}").contains("cannot tell from blanks"),
+            "{plain:#}"
+        );
         assert_eq!(
             unreadable_refusal_message(Some(8), "mysql cdc: X"),
             "mysql cdc: a statement in the log being read holds bytes this reader cannot tell \
