@@ -2160,25 +2160,32 @@ fn pg_cdc_rollover_1_delivers_the_commits_behind_an_idle_runs_barrier() {
     );
 }
 
-/// A lost checkpoint's warning remedy, followed as printed, re-reads a row written while it was gone.
+/// The printed re-baseline remedy for a lost changes-only checkpoint re-reads the missed row.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc + the rivet-duckdb oracle"]
-fn mysql_missing_checkpoint_warning_remedy_recovers_the_row_written_while_it_was_gone() {
+fn mysql_missing_checkpoint_refusal_on_a_changes_only_stream_remedy_recovers_the_row_written_while_it_was_gone()
+ {
     let mut s = CdcScenario::mysql_with("cdc_ckgap", "id INT PRIMARY KEY, v BIGINT", |r, _| r);
     s.rig.run_ok();
     s.insert(1);
     s.rig.run_ok();
     std::fs::remove_file(s.rig.checkpoint()).expect("the checkpoint the run wrote");
     s.insert(2);
-    let said = s.rig.run_ok_capture_known_defect(
-        "undelivered rows",
-        "known defect: a lost MySQL checkpoint on a stream with no baseline re-anchors with \
-         only a warning, so the row written in the gap is lost until the warning's \
-         re-baseline runs",
+    let out = s.rig.run_args(&[]);
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_CDC_CHECKPOINT_INVALID", 5),
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        said.contains("mysql cdc: no checkpoint at") && said.contains(REBASELINE_REMEDY),
-        "the re-anchor warns with the re-baseline remedy:\n{said}"
+        said.contains("is missing, but the state DB records that export")
+            && said.contains("rivet state reset -c")
+            && said.contains(REBASELINE_REMEDY),
+        "the refusal names the state record and both remedies:\n{said}"
     );
     follow_rebaseline_remedy(&mut s.rig, false);
     assert_eq!(
@@ -2186,6 +2193,29 @@ fn mysql_missing_checkpoint_warning_remedy_recovers_the_row_written_while_it_was
         [1, 2].into(),
         "the remedy's baseline holds the row written while the checkpoint was gone"
     );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc + the rivet-duckdb oracle"]
+fn mysql_lost_checkpoint_on_a_changes_only_stream_is_refused_not_reanchored() {
+    let mut s = CdcScenario::mysql_with("cdc_ckno", "id INT PRIMARY KEY, v BIGINT", |r, _| r);
+    assert_a_lost_checkpoint_is_refused_not_reanchored(&mut s, false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc + the rivet-duckdb oracle"]
+fn mysql_lost_checkpoint_under_a_baseline_stream_is_refused_not_reanchored() {
+    let mut s = CdcScenario::mysql_with("cdc_cksn", "id INT PRIMARY KEY, v BIGINT", |r, _| {
+        r.cdc_line("initial: snapshot")
+    });
+    assert_a_lost_checkpoint_is_refused_not_reanchored(&mut s, true);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc + the rivet-duckdb oracle"]
+fn mysql_state_reset_lifts_a_lost_checkpoint_refusal() {
+    let mut s = CdcScenario::mysql_with("cdc_ckrst", "id INT PRIMARY KEY, v BIGINT", |r, _| r);
+    assert_state_reset_lifts_a_lost_checkpoint_refusal(&mut s);
 }
 
 /// A checkpoint lost under a completed baseline: the refusal's remedy, followed as printed, re-reads the row written since.

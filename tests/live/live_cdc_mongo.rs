@@ -248,10 +248,11 @@ fn mongo_cdc_initial_snapshot_covers_preexisting_rows() {
     );
 }
 
-/// A lost checkpoint's warning remedy, followed as printed, re-reads a document written while it was gone.
+/// The printed re-baseline remedy for a lost changes-only checkpoint re-reads the missed document.
 #[test]
 #[ignore = "live: requires docker compose up -d mongo-rs + the rivet-duckdb oracle"]
-fn mongo_missing_checkpoint_warning_remedy_recovers_the_document_written_while_it_was_gone() {
+fn mongo_missing_checkpoint_refusal_on_a_changes_only_stream_remedy_recovers_the_document_written_while_it_was_gone()
+ {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let mut s = CdcScenario::mongo_with("cdc_ckgap", |r, _| r);
@@ -260,22 +261,41 @@ fn mongo_missing_checkpoint_warning_remedy_recovers_the_document_written_while_i
     s.rig.run_ok();
     std::fs::remove_file(s.rig.checkpoint()).expect("the checkpoint the run wrote");
     s.insert(2);
-    let said = s.rig.run_ok_capture_known_defect(
-        "undelivered rows",
-        "known defect: a lost MongoDB checkpoint on a stream with no baseline re-anchors with \
-         only a warning, so the document written in the gap is lost until the warning's \
-         re-baseline runs",
-    );
+    let want = Refused::by_code("RIVET_SOURCE_CDC_CHECKPOINT_INVALID", 5);
+    let out = s.rig.run_args(&[]);
+    assert_refused(&out, want);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        said.contains("mongodb cdc: no checkpoint at") && said.contains(REBASELINE_REMEDY),
-        "the re-anchor warns with the re-baseline remedy:\n{said}"
+        said.contains("is missing, but the state DB records that export")
+            && said.contains("rivet state reset -c")
+            && said.contains(REBASELINE_REMEDY),
+        "the refusal names the state record and both remedies:\n{said}"
     );
+    assert_refused(&s.rig.run_args(&[]), want);
     follow_rebaseline_remedy(&mut s.rig, false);
     assert_eq!(
         walkdir_parquet_ids(&s.rig.out_dir(), "snapshot"),
         ["1".to_string(), "2".to_string()].into(),
         "the remedy's baseline holds the document written while the checkpoint was gone"
     );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d mongo-rs + the rivet-duckdb oracle"]
+fn mongo_lost_checkpoint_is_refused_not_reanchored() {
+    require_alive(LiveService::MongoRs);
+    require_alive(LiveService::DuckDb);
+    let mut s = CdcScenario::mongo_with("cdc_ckno", |r, _| r);
+    assert_a_lost_checkpoint_is_refused_not_reanchored(&mut s, false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d mongo-rs + the rivet-duckdb oracle"]
+fn mongo_state_reset_lifts_a_lost_checkpoint_refusal() {
+    require_alive(LiveService::MongoRs);
+    require_alive(LiveService::DuckDb);
+    let mut s = CdcScenario::mongo_with("cdc_ckrst", |r, _| r);
+    assert_state_reset_lifts_a_lost_checkpoint_refusal(&mut s);
 }
 
 /// Distinct `_id` values across `.parquet` files under any subdir of `root`

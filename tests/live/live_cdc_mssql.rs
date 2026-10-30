@@ -887,6 +887,22 @@ fn mssql_cdc_resume_past_retention_errors_not_a_silent_gap() {
     );
 }
 
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC + the rivet-duckdb oracle"]
+fn mssql_lost_checkpoint_is_refused_not_reanchored() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let mut s = CdcScenario::mssql_with("cdc_ckno", "id INT PRIMARY KEY, v INT", |r, _| r);
+    assert_a_lost_checkpoint_is_refused_not_reanchored(&mut s, false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC + the rivet-duckdb oracle"]
+fn mssql_state_reset_lifts_a_lost_checkpoint_refusal() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let mut s = CdcScenario::mssql_with("cdc_ckrst", "id INT PRIMARY KEY, v INT", |r, _| r);
+    assert_state_reset_lifts_a_lost_checkpoint_refusal(&mut s);
+}
+
 /// A resume past change-table retention: the refusal's remedy, followed as printed, re-reads the rows the cleanup removed.
 #[test]
 #[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC + the rivet-duckdb oracle"]
