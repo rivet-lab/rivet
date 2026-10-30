@@ -1864,9 +1864,13 @@ fn run_export_job_inner(
                 return (Err(e), summary);
             }
         };
+        if let Err(e) = super::cdc_job::refuse_lost_file_anchor(config, export, state, config_path)
+        {
+            let summary = synthetic_failed_summary(&export.name, &e);
+            crate::notify::maybe_send(config.notifications.as_ref(), &summary);
+            return (Err(e), summary);
+        }
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
-            // The batch pool `--parallel-exports` runs on: every leg runs, each on its
-            // own state connection, and a finished snapshot is recorded as it lands.
             let _flags = super::run::RenderFlags::set(super::run::multi_export_mode(), Some(true));
             let (harm, _) = super::run::RunHarmBracket::open(&config.source);
             let legs: Vec<&ExportConfig> = pending.iter().collect();
@@ -1896,9 +1900,17 @@ fn run_export_job_inner(
             done
         };
         let outcome = cdc_outcome_with_legs(&export.name, outcomes, || {
-            super::cdc_job::run_cdc_export(config_path, config, export, state, opts.strict, grants)
+            let outcome = super::cdc_job::run_cdc_export(
+                config_path,
+                config,
+                export,
+                state,
+                opts.strict,
+                grants,
+            );
+            super::cdc_job::record_file_anchor(config, export, state, config_path, &outcome.0);
+            outcome
         });
-        // The parent of a child process knows the export's run only by the id reported here.
         outcome.1.emit_finished();
         return outcome;
     }
