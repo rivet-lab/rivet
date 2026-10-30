@@ -5,9 +5,8 @@
   digits, or six when the seventh character is a blank (`/*!080400 RENAME TABLE ... */` on MySQL 8.4); on
   a server with `lower_case_table_names` 1 or 2 (read once when the stream opens) `TRUNCATE SHOP.ORDERS`,
   `DROP TABLE`, a rename and a statement-logged write name the captured `shop.orders`, and on a server with
-  0 a table in another case is another table (a column rename of it is no longer refused); a statement sent
-  in `gbk`, `gb18030`, `sjis`, `cp932` or `big5` is decoded in that character set, so a multibyte character
-  ending in a backslash no longer hides a `RENAME COLUMN`; `RENAME TABLES` and `ALTER TABLE t RENAME = t2`
+  0 a table in another case is another table (a column rename of it is no longer refused); a statement
+  is cut into characters where the server cuts it in the client character set it was sent in, so a multibyte character ending in a backslash (or a `sjis`/`cp932` pair the encoding standard cannot map) no longer hides a `RENAME COLUMN`, and a byte the server reads as a blank in a single-byte set (`0xA0` in `latin1` and nine more sets, `0xFF` in `cp852`, `cp866`, `keybcs2`) separates the words it separates on the server; a statement holding bytes the reader cannot place that would be a refusal if they were blanks is refused in that refusal code, naming the character set; `RENAME TABLES` and `ALTER TABLE t RENAME = t2`
   are table renames like `RENAME TABLE` and `ALTER TABLE t RENAME TO t2`. Each of these was delivered or
   ignored with exit 0 and the renamed table's or column's later changes were lost; each is now refused
   with `RIVET_SOURCE_CDC_UNDECODABLE` or `RIVET_SOURCE_CDC_TRUNCATED` (exit 5) at the statement. The

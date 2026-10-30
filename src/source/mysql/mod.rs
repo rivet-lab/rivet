@@ -19,12 +19,12 @@
 //!   is exhaustively unit-tested in isolation (no live MySQL needed).
 
 mod arrow_convert;
-#[rustfmt::skip]
-mod client_charsets;
 pub(crate) use arrow_convert::time_outside_day;
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
 mod proxy;
+#[rustfmt::skip]
+mod client_charsets;
 mod statement;
 
 use std::sync::Arc;

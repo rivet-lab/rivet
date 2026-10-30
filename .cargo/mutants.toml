@@ -668,11 +668,10 @@ exclude_re = [
     # never closes a transaction and the arm deletion captures no rows (full cycle).
     "replace MysqlChangeStream::close_transaction_at -> bool",
     "delete match arm Some\\(EventData::RowsEvent\\(re\\)\\) in MysqlChangeStream::fill",
-    # 2026-10-29 (#719): live-only arms of the same reader, each RED under the mutant on the live stand: xid -> a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql, XA PREPARE -> a_prepared_xa_branch_is_never_published_by_another_transactions_commit, QueryEvent -> a_table_swap_of_a_captured_table_is_refused_under_the_policy_mysql, commit `!` -> roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_transaction.
+    # 2026-10-29 (#719): live-only arms of the same reader, each RED under the mutant on the live stand: xid -> a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql, XA PREPARE -> a_prepared_xa_branch_is_never_published_by_another_transactions_commit, QueryEvent -> a_table_swap_of_a_captured_table_is_refused_under_the_policy_mysql.
     "delete match arm Some\\(EventData::XidEvent\\(_\\)\\) in MysqlChangeStream::fill",
     "delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill",
     "delete match arm Some\\(EventData::QueryEvent\\(qe\\)\\) in MysqlChangeStream::fill",
-    "delete ! in MysqlChangeStream::fill",
     # 2026-10-29 (#719): live-only, RED under the mutant: privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql (a QueryEvent cannot be built offline).
     "delete match arm Some\\(EventData::QueryEvent\\(qe\\)\\) in defers_the_grants_re_read",
     # 2026-10-29 (#719): one SHOW VARIABLES read; true is RED in a_column_renamed_in_another_case_is_refused_exactly_when_the_server_folds_names_on_this_server_mysql (lctn 0), false in a_table_renamed_in_another_case_is_refused_exactly_when_the_server_folds_names_on_this_server_mysql (lctn 1).

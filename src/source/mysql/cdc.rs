@@ -1536,12 +1536,14 @@ impl MysqlChangeStream {
                         self.grants_pending
                             .get_or_insert_with(|| (self.file.clone(), log_pos));
                     }
-                    QueryVerdict::Commit => {
-                        if !self.close_transaction_at(log_pos) {
-                            return Ok(false);
-                        }
-                    }
-                    _ => {}
+                    QueryVerdict::Commit => return Ok(self.close_transaction_at(log_pos)),
+                    QueryVerdict::Truncated(..)
+                    | QueryVerdict::ColumnRenamed(..)
+                    | QueryVerdict::TableRenamed(..)
+                    | QueryVerdict::Dropped(..)
+                    | QueryVerdict::StatementWrite(..)
+                    | QueryVerdict::Unreadable(..)
+                    | QueryVerdict::Pass => {}
                 }
             }
             // #200-2: a compressed transaction. `binlog_transaction_compression`

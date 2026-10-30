@@ -4237,6 +4237,23 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: cdc-statement-blank-byte-read-as-a-letter
+    class: "a byte the server reads as a blank in a single-byte client character set (0xA0 in latin1, latin2, cp1250, greek, hebrew, latin5, latin7, armscii8, geostd8, dec8; 0xFF in cp852, cp866, keybcs2) is read as part of a name, so the words it separates join and a RENAME or TRUNCATE behind it is not recognised: the statement is delivered with exit 0 and the later changes of the table are lost"
+    history: "PR #728 verifier block (2026-10-30); RED on the old head 2026-10-30 (the rig oracle: a latin1 statement with 0xA0 between its words exits 0 under the grants policy, changes absent)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-blank-byte-read-as-a-letter/mysql.patch
+        cells: [a_byte_the_server_reads_as_a_blank_separates_the_words_of_a_refused_statement_mysql, "lib:every_high_byte_of_a_single_byte_character_set_is_a_blank_exactly_where_the_server_reads_one", "lib:a_byte_the_server_reads_as_a_blank_separates_the_words_of_a_statement"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
   - name: cdc-statement-read-as-utf8-whatever-the-client-charset
     class: "a statement sent in gbk, sjis, cp932, big5 or gb18030 is read as UTF-8, so a multibyte character whose trail byte is a backslash escapes the quote after it in the reader and not in the server, hiding a following RENAME COLUMN: the rename is delivered with exit 0 and the column's later changes are lost"
     history: "PR #719 follow-up (2026-10-29); RED on main 2026-10-29 (the rig oracle: `SET NAMES gbk` then a COMMENT ending in a multibyte backslash and a RENAME COLUMN exits 0, changes absent)"
@@ -4244,7 +4261,7 @@ seeds:
     engines:
       mysql:
         patch: cdc-statement-read-as-utf8-whatever-the-client-charset/mysql.patch
-        cells: [a_column_renamed_after_a_multibyte_character_ending_in_a_backslash_is_refused_mysql, a_quote_closed_after_a_multibyte_character_ending_in_a_backslash_is_not_refused_mysql, "lib:a_statement_is_read_in_the_character_set_the_event_names", "lib:the_client_character_set_is_read_from_the_status_variables_of_the_event"]
+        cells: [a_column_renamed_after_a_multibyte_character_ending_in_a_backslash_is_refused_mysql, a_quote_closed_after_a_multibyte_character_ending_in_a_backslash_is_not_refused_mysql, "lib:a_statement_is_read_in_the_character_set_the_event_names", "lib:the_client_character_set_is_read_from_the_status_variables_of_the_event", a_comment_ending_in_a_pair_the_encoding_standard_cannot_map_does_not_hide_a_rename_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:

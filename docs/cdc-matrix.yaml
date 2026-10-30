@@ -232,9 +232,9 @@ scenarios:
     oracle:   { test: oracle_cdc_table_switched_to_another_over_its_baseline_is_refused_and_switched_back_continues }
 
   - id: cdc_mysql_statement_read_as_the_server_reads_it
-    what: "under `source.columns_from: grants` a MySQL binlog statement is decided on the text the server read: 5 or 6 digit version comments, `RENAME TABLES`, `ALTER ... RENAME = t2`, `DROP TABLES`, names compared case-insensitively when the server folds them (lower_case_table_names 1 or 2), and a multibyte client character set whose trail byte is a backslash; `RENAME INDEX/KEY/COLUMN` are not table renames"
+    what: "under `source.columns_from: grants` a MySQL binlog statement is decided on the text the server read: 5 or 6 digit version comments, `RENAME TABLES`, `ALTER ... RENAME = t2`, `DROP TABLES`, names compared case-insensitively when the server folds them (lower_case_table_names 1 or 2), a multibyte client character set whose trail byte is a backslash or whose pair the encoding standard cannot map, and a single-byte one whose high byte the server reads as a blank (a statement rivet cannot place is refused in the code of the refusal it may hide); `RENAME INDEX/KEY/COLUMN` are not table renames"
     postgres: { na: "no statement text in the logical stream: DDL is not decoded from WAL, so there is no statement for rivet to read" }
-    mysql:    { test: a_table_renamed_with_tables_or_by_equals_is_refused_under_the_policy_mysql }
+    mysql:    { test: a_table_renamed_with_tables_or_by_equals_is_refused_under_the_policy_mysql, note: "a pair the encoding standard cannot map: a_comment_ending_in_a_pair_the_encoding_standard_cannot_map_does_not_hide_a_rename_mysql; a high byte the server reads as a blank: a_byte_the_server_reads_as_a_blank_separates_the_words_of_a_refused_statement_mysql; high bytes the server reads as letters stay as before: statements_with_high_bytes_the_server_reads_as_letters_are_met_as_before_mysql" }
     mssql:    { na: "no statement text in the capture: the change tables carry rows, not the DDL that shaped them" }
     mongo:    { na: "no statement text in the change stream: a rename arrives as a `rename` event, not as SQL" }
     oracle:   { na: "`columns_from: grants` is enforced on MySQL sources only and refused at config load on every other engine (rivet-lab/rivet#711), so no grants policy reads an Oracle statement" }

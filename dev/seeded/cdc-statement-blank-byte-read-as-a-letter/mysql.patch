@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/statement.rs b/src/source/mysql/statement.rs
+index 57254af5..d63aae21 100644
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -194,7 +194,7 @@ impl Reading {
+         match self {
+             Self::Pairs(layout) => plain(&layout.encoding().decode_without_bom_handling(one).0),
+             Self::Bytes { decoder, blanks } => {
+-                if one.first().is_some_and(|b| blanks.contains(b)) {
++                if false && one.first().is_some_and(|b| blanks.contains(b)) {
+                     ' '
+                 } else {
+                     decoder.map_or('\u{FFFD}', |e| plain(&e.decode_without_bom_handling(one).0))
