@@ -139,11 +139,9 @@ fn classify_op(op: &OperationType) -> OpClass {
     }
 }
 
-/// The `_data` hex of a change-stream resume token — an order-preserving keystring
-/// (`{"_data": "82…"}`), so lexical comparison is oplog order. Used to tell a
-/// bounded run whether the stream has advanced past its open-time target.
+/// The `_data` keystring of a resume token, whose lexical order is oplog order.
 fn token_data(v: &serde_json::Value) -> Option<String> {
-    v.get("_data").and_then(|d| d.as_str()).map(String::from)
+    crate::source::cdc::order::MONGO.first_text(v)
 }
 
 /// `token_data` is the resume token's identity — the string every bound and resume
@@ -329,13 +327,6 @@ fn encode_resume_token(token: &mongodb::change_stream::event::ResumeToken) -> Re
              server (support floor is MongoDB 4.4)"
         );
     }
-    // `_data` FIRST so the `__pos` column string-sorts in oplog order: `_data` is
-    // the order-preserving resume keystring, whereas `rt` is the full token (with
-    // `_typeBits`) whose hex is NOT length-stable across events, so a `rt`-first
-    // `__pos` mis-orders the downstream MERGE dedup when token lengths differ
-    // (bug-hunt). Robust to serde_json's preserve_order either way: with it on,
-    // insertion order wins (`_data` first); with it off, keys sort (`"_data"` <
-    // `"rt"`). See `cdc::validate::parse_pos` which keys on `_data`.
     Ok(Position::new(
         serde_json::json!({ "_data": data, "rt": hex }),
     ))

@@ -156,70 +156,8 @@ impl<'a> RunStore<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        CompressionType, DestinationConfig, DestinationType, FormatType, SourceConfig, SourceType,
-    };
+    use crate::plan::test_support::test_plan;
     use crate::plan::{ExtractionStrategy, ResolvedRunPlan};
-    use crate::tuning::SourceTuning;
-
-    fn test_plan(export_name: &str) -> ResolvedRunPlan {
-        ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
-            export_name: export_name.into(),
-            partition_rollover: None,
-            source_table: None,
-            base_query: "SELECT 1".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
-            strategy: ExtractionStrategy::Snapshot,
-            format: FormatType::Parquet,
-            compression: CompressionType::None,
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: Default::default(),
-            destination: DestinationConfig {
-                destination_type: DestinationType::Local,
-                path: Some("/tmp".into()),
-                ..Default::default()
-            },
-            quality: None,
-            tuning: SourceTuning::from_config(None),
-            tuning_profile_label: "balanced".into(),
-            validate: false,
-            reconcile: false,
-            resume: false,
-            source: SourceConfig {
-                source_type: SourceType::Postgres,
-                url: Some("postgresql://nobody@127.0.0.1:9999/nonexistent".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
-            },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
-            shape_drift_warn_factor: 0.0,
-            parquet: None,
-        }
-    }
 
     fn test_summary(plan: &ResolvedRunPlan, run_id: &str) -> RunSummary {
         let mut s = RunSummary::stub_for_testing(run_id, plan.export_name.clone());
@@ -234,7 +172,7 @@ mod tests {
         // Snapshot mode hits this path: no cursor, no progression.
         // `commit()` must succeed without touching state.
         let state = StateStore::open_in_memory().unwrap();
-        let plan = test_plan("orders");
+        let plan = test_plan();
         let summary = test_summary(&plan, "run-noop");
 
         RunStore::finalize(&state, &plan, &summary)
@@ -244,7 +182,10 @@ mod tests {
 
     /// The cursor-carrying shape: an incremental plan on `updated_at`.
     fn incremental_plan(export_name: &str) -> ResolvedRunPlan {
-        let mut plan = test_plan(export_name);
+        let mut plan = ResolvedRunPlan {
+            export_name: export_name.into(),
+            ..test_plan()
+        };
         plan.strategy = ExtractionStrategy::Incremental(crate::plan::IncrementalCursorPlan {
             primary_column: "updated_at".into(),
             fallback_column: None,
@@ -324,7 +265,7 @@ mod tests {
     #[test]
     fn a_cursor_from_a_strategy_without_an_identity_is_refused() {
         let state = StateStore::open_in_memory().unwrap();
-        let plan = test_plan("orders");
+        let plan = test_plan();
         let summary = test_summary(&plan, "run-1");
         let err = RunStore::finalize(&state, &plan, &summary)
             .with_cursor("99".into())
@@ -344,7 +285,7 @@ mod tests {
     #[test]
     fn finalize_with_progression_incremental_writes_progression_row() {
         let state = StateStore::open_in_memory().unwrap();
-        let plan = test_plan("orders");
+        let plan = test_plan();
         let summary = test_summary(&plan, "run-2");
 
         RunStore::finalize(&state, &plan, &summary)
@@ -367,7 +308,7 @@ mod tests {
         // but exercises the call through the RunStore facade — proving
         // the Chunked variant dispatches through the same chunked walk.
         let state = StateStore::open_in_memory().unwrap();
-        let plan = test_plan("orders");
+        let plan = test_plan();
         let summary = test_summary(&plan, "run-3");
 
         state.create_chunk_run("run-3", "orders", "h", 3).unwrap();
@@ -437,7 +378,7 @@ mod tests {
         // completions; the progression update must not fail or write a
         // bogus boundary.
         let state = StateStore::open_in_memory().unwrap();
-        let plan = test_plan("orders");
+        let plan = test_plan();
         let summary = test_summary(&plan, "run-empty");
 
         state

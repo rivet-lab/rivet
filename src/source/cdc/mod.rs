@@ -15,6 +15,7 @@
 
 pub(crate) mod checkpoint_identity;
 pub(crate) mod identity;
+pub(crate) mod order;
 pub(crate) mod partition_guard;
 /// The routing rule under the name the engines call it by; the file sink is `pipeline::cdc::sink`.
 pub(crate) mod sink {
@@ -133,9 +134,9 @@ impl PriorRun {
     }
 }
 
-/// An opaque, engine-shaped resume position — MySQL `{file, pos}`, a PostgreSQL
-/// LSN, a SQL Server LSN. Persisted verbatim as the checkpoint; each engine
-/// interprets its own shape when resuming. Compared only for equality.
+/// An engine-shaped resume position — MySQL `{file, pos}`, a PostgreSQL LSN, a SQL Server
+/// LSN, a Mongo resume token, Oracle SCNs. Persisted verbatim as the checkpoint; each engine
+/// interprets its own shape when resuming. Its order is defined in [`order`], not here.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Position(pub(crate) std::sync::Arc<Json>);
 
