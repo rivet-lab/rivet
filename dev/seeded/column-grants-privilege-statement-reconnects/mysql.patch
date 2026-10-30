@@ -1,5 +1,5 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index a6e0cf1c..7e677b02 100644
+index 59a6655c..7f737c17 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
 @@ -1576,8 +1576,8 @@ impl MysqlChangeStream {
@@ -12,4 +12,4 @@ index a6e0cf1c..7e677b02 100644
 +                        self.refuse_changed_grants()?;
                      }
                      QueryVerdict::Commit => {
-                         let commit = json!({"at": event_start, "query": sql});
+                         let commit = json!({"at": event_start, "query": qe.query()});

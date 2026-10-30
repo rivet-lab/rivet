@@ -1580,7 +1580,7 @@ impl MysqlChangeStream {
                             .get_or_insert_with(|| (self.file.clone(), log_pos));
                     }
                     QueryVerdict::Commit => {
-                        let commit = json!({"at": event_start, "query": sql});
+                        let commit = json!({"at": event_start, "query": qe.query()});
                         return Ok(self.close_transaction_at(log_pos, commit));
                     }
                     QueryVerdict::Truncated(..)
