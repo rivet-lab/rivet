@@ -1,16 +1,16 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 53638066..df934d64 100644
+index 6aad4a3e..3912f06d 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -104,6 +104,7 @@ pub(crate) struct MysqlChangeStream {
-     grants_source: Option<(String, Option<TlsConfig>)>,
-     /// `(file, position)` of the first privilege statement not yet answered by a re-read: consecutive statements share one.
+@@ -109,6 +109,7 @@ pub(crate) struct MysqlChangeStream {
      grants_pending: Option<(String, u64)>,
+     /// Whether the binlog is between a `BEGIN` and the commit that closes it: no privilege statement can sit inside.
+     in_transaction: bool,
 +    grants_conn: Option<mysql::Conn>,
  }
  
  impl MysqlChangeStream {
-@@ -742,8 +743,12 @@ impl MysqlChangeStream {
+@@ -776,8 +777,12 @@ impl MysqlChangeStream {
          let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
              return Ok(());
          };
@@ -24,10 +24,10 @@ index 53638066..df934d64 100644
          let now = read.unwrap_or_default();
          let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
              r.get(t).map(|c| c.columns.clone())
-@@ -894,6 +899,7 @@ impl MysqlChangeStream {
-             readable: None,
+@@ -929,6 +934,7 @@ impl MysqlChangeStream {
              grants_source: None,
              grants_pending: None,
+             in_transaction: false,
 +            grants_conn: None,
          })
      }

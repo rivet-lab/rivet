@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 6aad4a3e..04b7311d 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2632,7 +2632,7 @@ pub(crate) fn statement_mentions<'a>(raw: &[u8], configured: &'a [String]) -> Op
+         !bare.is_empty()
+             && raw
+                 .windows(bare.len())
+-                .any(|window| window.eq_ignore_ascii_case(bare))
++                .any(|window| window == bare)
+     })
+ }
+ 

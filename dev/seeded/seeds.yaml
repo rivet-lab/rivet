@@ -3692,13 +3692,13 @@ seeds:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
   - name: grant-change-not-seen-mid-run
-    class: "a `REVOKE` in the binlog of an open MySQL CDC run is not re-read: the run keeps delivering the revoked column"
-    history: "the client's DevOps asked that a hidden column never reach BigQuery in any mode (2026-10-28); RED from this patch: the open run ends without RIVET_SOURCE_CDC_GRANTS_CHANGED"
+    class: "a privilege statement in the binlog of an open MySQL CDC run that names no captured table marks no re-read of the grants: a database-level REVOKE or a default role taken away is not seen and the run keeps delivering the revoked column"
+    history: "the client's DevOps asked that a hidden column never reach BigQuery in any mode (2026-10-28), recut for the name rule (2026-10-31, #728); RED from this patch: the open run ends without RIVET_SOURCE_CDC_GRANTS_CHANGED"
     scope: source
     engines:
       mysql:
         patch: grant-change-not-seen-mid-run/mysql.patch
-        cells: [a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql]
+        cells: [a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql, a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql, a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
@@ -3780,23 +3780,6 @@ seeds:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on Oracle at config load (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on MongoDB at config load (columns_from_grants_is_refused_by_every_command_mongo)"
-
-  - name: grant-statement-in-executable-comment-missed
-    class: "a `REVOKE` written as an executable comment (`/*!80000 REVOKE ... */`) is read as a comment, so an open MySQL CDC run keeps delivering the revoked column"
-    history: "found reviewing PR #719 (2026-10-28), the binlog records the statement verbatim; RED from this patch: the open run ends without RIVET_SOURCE_CDC_GRANTS_CHANGED"
-    scope: source
-    engines:
-      postgres:
-        na: "the grant-change detector of a binlog stream exists on MySQL only: `columns_from: grants` is refused on PostgreSQL at config load (columns_from_grants_is_refused_by_every_command_postgres)"
-      mysql:
-        patch: grant-statement-in-executable-comment-missed/mysql.patch
-        cells: [a_revoke_written_as_an_executable_comment_stops_an_open_run_too_mysql, a_revoke_behind_a_line_comment_in_an_executable_comment_stops_an_open_run_mysql, "lib:privilege_statements_are_told_from_every_other_statement"]
-      mssql:
-        na: "the grant-change detector of a binlog stream exists on MySQL only: `columns_from: grants` is refused on SQL Server at config load (columns_from_grants_is_refused_by_every_command_mssql)"
-      oracle:
-        na: "the grant-change detector of a binlog stream exists on MySQL only: `columns_from: grants` is refused on Oracle at config load (columns_from_grants_is_refused_by_every_command_oracle)"
-      mongo:
-        na: "the grant-change detector of a binlog stream exists on MySQL only: `columns_from: grants` is refused on MongoDB at config load (columns_from_grants_is_refused_by_every_command_mongo)"
 
   - name: qualified-table-matches-a-literal-dotted-name
     class: "a qualified `table: schema.table` also captures a table literally named `schema.table` in another schema or database: its rows are delivered into the export"
@@ -3935,8 +3918,8 @@ seeds:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
   - name: column-grants-privilege-statement-reconnects
-    class: "every privilege statement in the binlog backlog opens a new connection as the run's account to re-read the grants: a backlog of consecutive GRANT/REVOKE statements opens a connection each, where one re-read answers them all"
-    history: "PR #719 review B9 (2026-10-29); RED from this patch: 40 privilege statements opened 67 connections as the run's account"
+    class: "every statement of the binlog backlog opens a new connection as the run's account to re-read the grants: a backlog of consecutive statements opens a connection each, where one re-read answers them all"
+    history: "PR #719 review B9 (2026-10-29), recut for the name rule (2026-10-31, #728); RED from this patch: 40 statements opened more connections as the run's account than 2 do"
     scope: source
     engines:
       mysql:
@@ -3951,14 +3934,14 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
-  - name: column-grants-plain-statement-re-read
-    class: "every QUERY event of the backlog is read as a privilege statement: a DDL or any other statement opens a new connection as the run's account to re-read the grants, where only GRANT/REVOKE/user/role statements change what the account may read"
-    history: "PR #719 live mutants pass (2026-10-29); RED from this patch: 40 statements that change no privilege opened 58 connections as the run's account, 2 privilege statements opened 19"
+  - name: column-grants-statement-in-a-transaction-re-read
+    class: "a statement-format write inside BEGIN ... COMMIT marks a re-read of the grants as a statement outside a transaction does, so a transaction of statements costs a connection as the run's account that no privilege statement can need"
+    history: "#728 (2026-10-31); RED from this patch: the frame of a statement inside a transaction marks a re-read"
     scope: source
     engines:
       mysql:
-        patch: column-grants-plain-statement-re-read/mysql.patch
-        cells: [privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql]
+        patch: column-grants-statement-in-a-transaction-re-read/mysql.patch
+        cells: ["lib:a_statement_marks_a_re_read_only_outside_a_transaction_and_outside_its_frame"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
@@ -3985,6 +3968,40 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: column-grants-statement-name-match-dropped
+    class: "under `columns_from: grants` a binlog statement that names a captured table (ALTER TABLE ... ADD INDEX, ADD COLUMN, a rename, a drop) is met as any other statement: the stream goes on and the rows after it are read through columns the statement may have changed"
+    history: "#728 owner decision (2026-10-31); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
+    scope: source
+    engines:
+      mysql:
+        patch: column-grants-statement-name-match-dropped/mysql.patch
+        cells: [an_add_index_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql, an_add_column_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql, "lib:a_statement_mentions_a_captured_table_by_its_bare_name_in_any_case_and_any_place"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: column-grants-statement-name-match-case-sensitive
+    class: "the name of a captured table is matched in the statement bytes case-sensitively: a statement spelling it in another case (the server folds it under lower_case_table_names) is met as any other statement"
+    history: "#728 owner decision (2026-10-31); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
+    scope: source
+    engines:
+      mysql:
+        patch: column-grants-statement-name-match-case-sensitive/mysql.patch
+        cells: [a_statement_spelling_the_table_name_in_another_case_is_refused_mysql, "lib:a_statement_mentions_a_captured_table_by_its_bare_name_in_any_case_and_any_place"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
   - name: statement-line-comment-read-as-text
     class: "a `-- ` or `#` line comment in a binlog statement is read as statement text, so a column rename or a privilege statement written behind one is missed: the run exits 0 with the renamed column's later changes lost, or keeps delivering a revoked column"
     history: "PR #719 final verification (2026-10-29); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
@@ -3992,7 +4009,7 @@ seeds:
     engines:
       mysql:
         patch: statement-line-comment-read-as-text/mysql.patch
-        cells: [a_column_renamed_after_a_dash_comment_is_refused_not_silently_dropped_mysql, a_column_renamed_after_a_hash_comment_is_refused_not_silently_dropped_mysql, a_revoke_behind_a_line_comment_in_an_executable_comment_stops_an_open_run_mysql, "lib:every_comment_kind_is_a_blank_and_quoted_text_is_kept_as_written"]
+        cells: [a_column_renamed_after_a_dash_comment_is_refused_not_silently_dropped_mysql, a_column_renamed_after_a_hash_comment_is_refused_not_silently_dropped_mysql, "lib:every_comment_kind_is_a_blank_and_quoted_text_is_kept_as_written"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
@@ -4162,7 +4179,7 @@ seeds:
     engines:
       mysql:
         patch: column-grants-schema-change-names-no-column/mysql.patch
-        cells: [a_schema_change_under_a_table_grant_is_refused_naming_the_column_that_appeared_mysql]
+        cells: [a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
