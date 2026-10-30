@@ -1679,8 +1679,7 @@ mod tests {
         assert_eq!(got, "1\twin\n2\twin\n3\twin\n4\twin\n5\twin");
     }
 
-    /// A `__pos` of no known shape (a Mongo resume token) fails the insert loudly instead
-    /// of versioning the row 0, where insert order would decide the winner.
+    /// A `__pos` of no known shape, or a Mongo one without a clusterTime, fails the insert loudly.
     #[test]
     #[ignore = "live: requires docker compose clickhouse"]
     fn an_unknown_position_shape_fails_the_insert() {
@@ -1713,11 +1712,23 @@ mod tests {
             ))
         };
         let known = insert(r#"{"lsn":"0/1"}"#);
-        let unknown = insert(r#"{"_data":"8263"}"#);
+        let mongo = insert(r#"{"_data":"8263","ct":5,"ord":1}"#);
+        let legacy = insert(r#"{"_data":"8263"}"#);
+        let unknown = insert(r#"{"x":1}"#);
         loader.query(&format!("DROP DATABASE {db}")).unwrap();
         known.expect("a PostgreSQL LSN is versioned");
-        let e = format!("{:#}", unknown.expect_err("a resume token has no version"));
+        mongo.expect("a Mongo position with a clusterTime is versioned");
+        let e = format!(
+            "{:#}",
+            unknown.expect_err("a shape of no engine has no version")
+        );
         assert!(e.contains("unrecognised __pos shape"), "{e}");
+        let e = format!(
+            "{:#}",
+            legacy.expect_err("a Mongo token alone has no version")
+        );
+        assert!(e.contains("carries no clusterTime"), "{e}");
+        assert!(e.contains("truncate the __changes table"), "{e}");
     }
 
     /// Through a named collection ClickHouse reads the part itself: columns match by

@@ -4222,3 +4222,20 @@ seeds:
           - apply_journals_a_run_whose_manifest_never_landed_as_failed_mongo
           - a_sequential_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mongo
           - a_parallel_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mongo
+
+  - name: mongo-cdc-ordinal-restarts-on-resume
+    class: a MongoDB CDC run opened from a checkpoint restarts its ordinal among events sharing a clusterTime at 0 instead of restoring it, so the continuation of a transaction cut between two events ranks below the events already delivered and a ClickHouse view keeps the older image of a key
+    history: ClickHouse ordering probe 2026-10-30 (shuffled insertion, 2 shards on 7.0), clusterTime alone 3 wrong keys, an ordinal reset on resume 57 inversions, an ordinal restored from the checkpoint 0 wrong keys
+    scope: source
+    engines:
+      postgres:
+        na: "the position is an LSN, unique per commit; there is no ordinal to restore (pg_cdc_* and a_postgres_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source)"
+      mysql:
+        na: "the position is a binlog file and offset, unique per event; there is no ordinal to restore"
+      mssql:
+        na: "the position is an LSN with a sequence value, unique per change; there is no ordinal to restore"
+      oracle:
+        na: "the position is an SCN with a row sequence the log supplies; there is no ordinal to restore"
+      mongo:
+        patch: mongo-cdc-ordinal-restarts-on-resume/mongo.patch
+        cells: [a_mongo_transaction_cut_mid_tie_loads_in_source_order, a_mongo_run_killed_mid_tie_resumes_in_source_order]

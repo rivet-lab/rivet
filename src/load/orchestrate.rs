@@ -78,9 +78,6 @@ pub fn run_loads(args: LoadArgs) -> Result<()> {
     } else {
         None
     };
-    if let Some(why) = engine.and_then(|e| unsupported_cdc_target(e, &plans)) {
-        crate::rivet_bail!(crate::error::codes::CONFIG_SOURCE_MODE_UNSUPPORTED, "{why}");
-    }
     // Route each table by its declared `mode:`; `pk:` and `allow_source_drift:`
     // come from the `load:` block, so the CLI carries no per-mode flags.
     // Per-table FAULT ISOLATION, mirroring `rivet run` (pipeline/run.rs): collect
@@ -511,18 +508,6 @@ pub(super) fn snapshot_over_full_table_refusal(
          snapshot of the same table — the snapshot is a new baseline, so keep one: drop the \
          table (the snapshot replaces it){keep}"
     )
-}
-
-/// Why a CDC load from `engine` cannot reach one of `plans`' targets, or `None`.
-pub(super) fn unsupported_cdc_target(
-    engine: load::cdc::SourceEngine,
-    plans: &[load::plan::LoadPlan],
-) -> Option<String> {
-    plans
-        .iter()
-        .filter(|p| p.mode == load::plan::LoadMode::Cdc)
-        .find_map(|p| p.load.target.cdc_refusal(engine.source_type()))
-        .map(str::to_string)
 }
 
 /// Fold every per-plan failure into ONE error, or `None` when nothing failed.
@@ -5586,39 +5571,6 @@ mod live_only_decisions {
         assert!(
             ch.contains("drop the table") && !ch.contains("without `initial"),
             "{ch}"
-        );
-    }
-
-    /// Only a MongoDB stream into ClickHouse is refused: another engine, another
-    /// warehouse, or a batch load of a Mongo export all proceed (ADR-0035 CH7).
-    #[test]
-    fn only_mongo_cdc_into_clickhouse_is_refused() {
-        use crate::load::cdc::SourceEngine;
-        let into = |mode, target| {
-            let mut p = plan_at(mode, "gs://b/base");
-            p.load.target = target;
-            p
-        };
-        let ch = || load::plan::LoadTarget::Clickhouse {
-            url: "u".into(),
-            database: "d".into(),
-            user: "x".into(),
-            password_env: "P".into(),
-            named_collection: None,
-            ca_file: None,
-        };
-        let why = unsupported_cdc_target(SourceEngine::Mongo, &[into(LoadMode::Cdc, ch())])
-            .expect("mongo CDC into ClickHouse refuses");
-        assert!(why.contains("ADR-0035 CH7"), "{why}");
-        let bq = plan_at(LoadMode::Cdc, "gs://b/base");
-        assert_eq!(unsupported_cdc_target(SourceEngine::Mongo, &[bq]), None);
-        assert_eq!(
-            unsupported_cdc_target(SourceEngine::Mongo, &[into(LoadMode::Full, ch())]),
-            None
-        );
-        assert_eq!(
-            unsupported_cdc_target(SourceEngine::Postgres, &[into(LoadMode::Cdc, ch())]),
-            None
         );
     }
 

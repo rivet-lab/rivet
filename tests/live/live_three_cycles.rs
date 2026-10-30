@@ -848,6 +848,18 @@ fn cdc_into_clickhouse_three_cycles_mysql() {
 }
 
 #[test]
+#[ignore = "live: requires mongo-rs + clickhouse + fake-gcs"]
+fn cdc_into_clickhouse_three_cycles_mongo() {
+    three_cdc_cycles(WarehouseKind::ClickHouse, |shape| {
+        seeded(CdcScenario::mongo_collection_with(
+            "cyc_cdc",
+            &unique_name("cyc_cdc"),
+            |r, _| shape(r, "_id"),
+        ))
+    });
+}
+
+#[test]
 #[ignore = "live: requires mssql-cdc (SQL Server Agent) + clickhouse + fake-gcs"]
 fn cdc_into_clickhouse_three_cycles_mssql() {
     let _serial = cross_process_serial("mssql_cdc");

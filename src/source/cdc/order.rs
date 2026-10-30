@@ -73,11 +73,19 @@ pub(crate) enum ChPack {
     Pair(Part, Part),
 }
 
+/// An older position shape of a row that has no integer form, refused with its own message.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChLegacy {
+    pub field: &'static str,
+    pub refusal: &'static str,
+}
+
 /// A row's contribution to the ClickHouse version expression.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ChArm {
     pub when: ChWhen,
     pub pack: ChPack,
+    pub legacy: Option<ChLegacy>,
 }
 
 /// One engine's position order.
@@ -96,6 +104,14 @@ const POS: Part = Part {
     field: "pos",
     kind: PartKind::Number,
 };
+const MONGO_CT: Part = Part {
+    field: "ct",
+    kind: PartKind::Number,
+};
+const MONGO_ORD: Part = Part {
+    field: "ord",
+    kind: PartKind::Number,
+};
 const PG_LSN: Part = Part {
     field: "lsn",
     kind: PartKind::PgLsn,
@@ -112,6 +128,7 @@ pub(crate) const MYSQL: Row = Row {
     clickhouse: Some(ChArm {
         when: ChWhen::HasField("file"),
         pack: ChPack::Pair(FILE, POS),
+        legacy: None,
     }),
 };
 
@@ -125,15 +142,24 @@ pub(crate) const ORACLE: Row = Row {
     clickhouse: None,
 };
 
-/// Mongo `{_data, rt}`, ordered by the resume token keystring.
+/// Mongo `{_data, rt, ct, ord}`: the warehouse views order by the resume token keystring, ClickHouse by `(ct, ord)`.
 pub(crate) const MONGO: Row = Row {
     sniff: Sniff::Str("_data"),
     parts: &[Part {
         field: "_data",
         kind: PartKind::KeyString,
     }],
-    clickhouse: None,
+    clickhouse: Some(ChArm {
+        when: ChWhen::HasField("ct"),
+        pack: ChPack::Pair(MONGO_CT, MONGO_ORD),
+        legacy: Some(ChLegacy {
+            field: "_data",
+            refusal: MONGO_LEGACY_REFUSAL,
+        }),
+    }),
 };
+
+const MONGO_LEGACY_REFUSAL: &str = "rivet: this MongoDB __pos carries no clusterTime (it was written by a rivet that did not stamp one), so ClickHouse cannot order it against its neighbours; re-baseline the stream so every part is re-written, and truncate the __changes table before the next load (ADR-0035 CH7)";
 
 /// PostgreSQL `{lsn: "hi/lo"}`.
 pub(crate) const POSTGRES: Row = Row {
@@ -142,6 +168,7 @@ pub(crate) const POSTGRES: Row = Row {
     clickhouse: Some(ChArm {
         when: ChWhen::Contains("lsn", "/"),
         pack: ChPack::Single(PG_LSN),
+        legacy: None,
     }),
 };
 
@@ -152,6 +179,7 @@ pub(crate) const SQL_SERVER: Row = Row {
     clickhouse: Some(ChArm {
         when: ChWhen::Otherwise,
         pack: ChPack::Single(MSSQL_LSN),
+        legacy: None,
     }),
 };
 
@@ -340,17 +368,33 @@ pub(crate) fn clickhouse_version_expr() -> String {
         if !markers.contains(&arm.marker()) {
             markers.push(arm.marker());
         }
+        if let Some(l) = arm.legacy
+            && !markers.contains(&l.field)
+        {
+            markers.push(l.field);
+        }
     }
     let known = markers
         .iter()
         .map(|f| format!("JSONHas(ifNull(__pos, ''), '{f}')"))
         .collect::<Vec<_>>()
         .join(" OR ");
+    let mut legacy = String::new();
+    for (arm, _) in &arms {
+        if let Some(l) = arm.legacy {
+            legacy += &format!(
+                " + toUInt256(throwIf(JSONHas(ifNull(__pos, ''), '{}') AND NOT JSONHas(ifNull(__pos, ''), '{}'), '{}'))",
+                l.field,
+                arm.marker(),
+                l.refusal
+            );
+        }
+    }
     format!(
         "bitOr(bitShiftLeft(toUInt256(multiIf(__pos IS NULL, toUInt128(0), {cases})), 128), \
 toUInt256(ifNull(__seq, -1) + 1)) + toUInt256(throwIf(\
 __pos IS NOT NULL AND NOT ({known}), \
-'rivet: unrecognised __pos shape — no source position to version this row by (ADR-0035 CH3)'))"
+'rivet: unrecognised __pos shape — no source position to version this row by (ADR-0035 CH3)')){legacy}"
     )
 }
 
@@ -359,17 +403,29 @@ mod tests {
     use super::*;
 
     const VERSION_EXPR: &str = concat!(
-        "bitOr(bitShiftLeft(toUInt256(multiIf(__pos IS NULL, toUInt128(0), JSONHas(ifNull(__pos",
-        ", ''), 'file'), bitOr(bitShiftLeft(toUInt128(toUInt64OrZero(extract(JSONExtractString(",
-        "ifNull(__pos, ''), 'file'), '[0-9]+$'))), 64), toUInt128(JSONExtractUInt(ifNull(__pos,",
-        " ''), 'pos'))), position(JSONExtractString(ifNull(__pos, ''), 'lsn'), '/') > 0, toUInt",
-        "128(reinterpretAsUInt64(reverse(unhex(concat(leftPad(splitByChar('/', JSONExtractStrin",
-        "g(ifNull(__pos, ''), 'lsn'))[1], 8, '0'), leftPad(splitByChar('/', JSONExtractString(i",
-        "fNull(__pos, ''), 'lsn'))[2], 8, '0')))))), reinterpretAsUInt128(reverse(unhex(leftPad",
-        "(JSONExtractString(ifNull(__pos, ''), 'lsn'), 32, '0')))))), 128), toUInt256(ifNull(__",
-        "seq, -1) + 1)) + toUInt256(throwIf(__pos IS NOT NULL AND NOT (JSONHas(ifNull(__pos, ''",
-        "), 'file') OR JSONHas(ifNull(__pos, ''), 'lsn')), 'rivet: unrecognised __pos shape — n",
-        "o source position to version this row by (ADR-0035 CH3)'))",
+        "bitOr(bitShiftLeft(toUInt256(multiIf(__pos IS NULL, toUInt128(0), ",
+        "JSONHas(ifNull(__pos, ''), 'file'), bitOr(bitShiftLeft(toUInt128(toUInt64OrZero(extract(",
+        "JSONExtractString(ifNull(__pos, ''), 'file'), '[0-9]+$'))), 64), ",
+        "toUInt128(JSONExtractUInt(ifNull(__pos, ''), 'pos'))), ",
+        "JSONHas(ifNull(__pos, ''), 'ct'), bitOr(bitShiftLeft(",
+        "toUInt128(JSONExtractUInt(ifNull(__pos, ''), 'ct')), 64), ",
+        "toUInt128(JSONExtractUInt(ifNull(__pos, ''), 'ord'))), ",
+        "position(JSONExtractString(ifNull(__pos, ''), 'lsn'), '/') > 0, ",
+        "toUInt128(reinterpretAsUInt64(reverse(unhex(concat(",
+        "leftPad(splitByChar('/', JSONExtractString(ifNull(__pos, ''), 'lsn'))[1], 8, '0'), ",
+        "leftPad(splitByChar('/', JSONExtractString(ifNull(__pos, ''), 'lsn'))[2], 8, '0')))))), ",
+        "reinterpretAsUInt128(reverse(unhex(leftPad(",
+        "JSONExtractString(ifNull(__pos, ''), 'lsn'), 32, '0')))))), 128), ",
+        "toUInt256(ifNull(__seq, -1) + 1)) + toUInt256(throwIf(__pos IS NOT NULL AND NOT (",
+        "JSONHas(ifNull(__pos, ''), 'file') OR JSONHas(ifNull(__pos, ''), 'ct') OR ",
+        "JSONHas(ifNull(__pos, ''), '_data') OR JSONHas(ifNull(__pos, ''), 'lsn')), ",
+        "'rivet: unrecognised __pos shape — no source position to version this row by ",
+        "(ADR-0035 CH3)')) + toUInt256(throwIf(JSONHas(ifNull(__pos, ''), '_data') AND NOT ",
+        "JSONHas(ifNull(__pos, ''), 'ct'), '",
+        "rivet: this MongoDB __pos carries no clusterTime (it was written by a rivet that did not ",
+        "stamp one), so ClickHouse cannot order it against its neighbours; re-baseline the ",
+        "stream so every part is re-written, and truncate the __changes table before the next ",
+        "load (ADR-0035 CH7)'))",
     );
 
     fn k(s: &str) -> Option<Key> {
@@ -393,7 +449,7 @@ mod tests {
     #[test]
     fn every_clickhouse_arm_has_an_integer_form_and_otherwise_is_last() {
         let arms: Vec<ChArm> = ROWS.iter().filter_map(|r| r.clickhouse).collect();
-        assert_eq!(arms.len(), 3);
+        assert_eq!(arms.len(), 4);
         assert!(arms.iter().all(|a| a.value().is_some()));
         let otherwise: Vec<usize> = arms
             .iter()
@@ -406,9 +462,33 @@ mod tests {
 
     #[test]
     fn a_row_without_an_integer_form_has_no_clickhouse_arm() {
-        assert!(MONGO.clickhouse.is_none() && ORACLE.clickhouse.is_none());
+        assert!(ORACLE.clickhouse.is_none() && MONGO.clickhouse.is_some());
         assert!(PartKind::KeyString.clickhouse("_data").is_none());
         assert!(PartKind::DecimalText.clickhouse("commit_scn").is_none());
+    }
+
+    #[test]
+    fn the_mongo_clickhouse_arm_orders_by_cluster_time_then_ordinal_and_the_key_stays_on_data() {
+        let arm = MONGO.clickhouse.unwrap();
+        assert!(matches!(arm.when, ChWhen::HasField("ct")));
+        assert!(matches!(
+            arm.pack,
+            ChPack::Pair(
+                Part {
+                    field: "ct",
+                    kind: PartKind::Number
+                },
+                Part {
+                    field: "ord",
+                    kind: PartKind::Number
+                }
+            )
+        ));
+        assert_eq!(arm.legacy.map(|l| l.field), Some("_data"));
+        assert_eq!(
+            k(r#"{"_data":"826A","rt":"0e","ct":7,"ord":3}"#),
+            k(r#"{"_data":"826A","rt":"0e"}"#)
+        );
     }
 
     #[test]

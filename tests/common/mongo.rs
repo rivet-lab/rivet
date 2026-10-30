@@ -245,6 +245,56 @@ impl MongoTest {
         });
     }
 
+    /// `ops` upserts then a delete of `delete_id`, all inside ONE transaction.
+    pub fn txn_updates_then_delete(&self, name: &str, ops: &[(i64, &str, &str)], delete_id: i64) {
+        self.rt.block_on(async {
+            let mut s = self
+                .client
+                .start_session()
+                .await
+                .expect("mongo: start_session");
+            s.start_transaction()
+                .await
+                .expect("mongo: start_transaction");
+            let c = self.coll(name);
+            for (id, field, val) in ops {
+                c.update_one(doc! { "_id": id }, doc! { "$set": { *field: *val } })
+                    .upsert(true)
+                    .session(&mut s)
+                    .await
+                    .expect("mongo: txn update");
+            }
+            c.delete_one(doc! { "_id": delete_id })
+                .session(&mut s)
+                .await
+                .expect("mongo: txn delete");
+            s.commit_transaction().await.expect("mongo: commit");
+        });
+    }
+
+    /// `(collection, id, field, value)` upserts applied inside ONE transaction, in order.
+    pub fn txn_updates_across(&self, ops: &[(&str, i64, &str, &str)]) {
+        self.rt.block_on(async {
+            let mut s = self
+                .client
+                .start_session()
+                .await
+                .expect("mongo: start_session");
+            s.start_transaction()
+                .await
+                .expect("mongo: start_transaction");
+            for (name, id, field, val) in ops {
+                self.coll(name)
+                    .update_one(doc! { "_id": id }, doc! { "$set": { *field: *val } })
+                    .upsert(true)
+                    .session(&mut s)
+                    .await
+                    .expect("mongo: txn update");
+            }
+            s.commit_transaction().await.expect("mongo: commit");
+        });
+    }
+
     /// One transaction upserting into TWO collections — the boundary ends on the
     /// second (the "uncaptured" one). Exercises a CDC config that routes only the
     /// first collection while a transaction spans both.

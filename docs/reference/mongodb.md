@@ -257,7 +257,7 @@ Each change row carries three metadata columns:
 | column | meaning |
 | ------ | ------- |
 | `__op` | `insert` \| `update` \| `delete` |
-| `__pos` | the resume token — a **distinct, order-preserving** position per event |
+| `__pos` | a JSON position per event: `_data` (the resume token, a **distinct, order-preserving** key), `rt` (its lossless form), `ct` (the event's clusterTime, `seconds << 32 \| increment`) and `ord` (its ordinal among the events with that clusterTime). Order by `_data`, or by `(ct, ord)`: both agree |
 | `__seq` | always `0` for Mongo (see [Dedup ordering](#dedup-ordering)) |
 
 ### Scheduling
@@ -561,6 +561,13 @@ Deliberately **N/A** (not gaps):
   the change log, order by `__pos` alone and keep the last row per `_id` (deletes
   remove). Unlike SQL engines, Mongo gives **every** event a distinct `__pos`
   even inside one transaction, so `__seq` is always `0`.
+  A ClickHouse load orders by `(ct, ord)`: the change log's version is
+  `((ct << 64) | ord) << 128` (ADR-0035 CH7). `ord` is kept in the checkpoint
+  with the resume token, so a run that stops between two events of one
+  transaction (`max_events`, a crash) continues the count. A `__pos` written
+  before `ct` existed (a part from an older rivet) is refused by the ClickHouse
+  load with a message naming the remedy: re-baseline the stream so every part is
+  re-written, and truncate the `__changes` table.
 - **Keyset needs a single `_id` type.** Keyset paging (and `parallel`) seeks with
   `$gt`, which MongoDB **type-brackets** — it cannot cross from one BSON `_id`
   type to another (a numeric cursor never matches a string `_id`, even though
