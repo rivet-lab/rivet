@@ -99,6 +99,12 @@ pub const PROXYSQL_URL: &str = "mysql://rivet:rivet@127.0.0.1:6033/rivet";
 /// MySQL whose server time zone is `+03:00` (`mysql-tz`, :3397). Opt in: `docker compose --profile tz up -d proxysql-tz`.
 pub const MYSQL_TZ_URL: &str = "mysql://rivet:rivet@127.0.0.1:3397/rivet";
 
+/// MySQL CDC server only the `RESET MASTER` cells use (`mysql-reset`, :3317), gtid OFF.
+pub const MYSQL_RESET_URL: &str = "mysql://rivet:rivet@127.0.0.1:3317/rivet";
+
+/// Root on [`MYSQL_RESET_URL`]'s server, for `RESET MASTER` and `FLUSH BINARY LOGS`.
+pub const MYSQL_RESET_ROOT_URL: &str = "mysql://root:rivet@127.0.0.1:3317/rivet";
+
 /// ProxySQL in front of `mysql-tz` that answers every `SET time_zone` with OK and never forwards it (`proxysql-tz`, :6097).
 pub const PROXYSQL_TZ_URL: &str = "mysql://rivet:rivet@127.0.0.1:6097/rivet";
 
@@ -387,6 +393,8 @@ pub enum LiveService {
     ProxySql,
     /// MySQL at server time zone `+03:00`. TCP :3397.
     MysqlTz,
+    /// MySQL CDC server reserved for `RESET MASTER` cells. TCP :3317.
+    MysqlReset,
     /// ProxySQL dropping `SET time_zone` in front of `mysql-tz`. TCP :6097.
     ProxySqlTz,
     /// ADR-0014 Parquet validator: `python:3.12-slim + duckdb`. No TCP port —
@@ -468,6 +476,11 @@ impl LiveService {
                 "127.0.0.1",
                 3397,
                 "service `mysql-tz` — run: docker compose --profile tz up -d mysql-tz",
+            ),
+            LiveService::MysqlReset => (
+                "127.0.0.1",
+                3317,
+                "service `mysql-reset` — run: docker compose --profile cdc up -d mysql-reset",
             ),
             LiveService::ProxySqlTz => (
                 "127.0.0.1",
