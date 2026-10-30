@@ -1,9 +1,9 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 6bbc2d85..f8431a3a 100644
+index 3a522950..a417c00d 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2277,7 +2277,7 @@ pub(crate) fn query_verdict(
-     if let Some(written) = statement_dml_target(sql, event_db, mode).filter(|t| ours(t.as_ref())) {
+@@ -2366,7 +2366,7 @@ fn read_verdict(
+     if let Some(written) = statement_dml_target(sql, event_db, mode).filter(|t| slot(t, unread)) {
          return QueryVerdict::StatementWrite(written);
      }
 -    if is_privilege_statement(sql, mode) {

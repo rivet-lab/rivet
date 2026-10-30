@@ -1,12 +1,12 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 6bbc2d85..cb5f69dc 100644
+index 3a522950..9e4a1c5d 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2264,6 +2264,7 @@ pub(crate) fn query_verdict(
-             return QueryVerdict::ColumnRenamed(sc, tb);
+@@ -2351,6 +2351,7 @@ fn read_verdict(
          }
+         let unread = kind_unread_in_letter(letter, |l| renamed_tables(l, event_db, mode));
          if let Some(touched) = renamed_tables(sql, event_db, mode)
 +            .filter(|_| sql.is_empty())
-             .and_then(|ts| ts.into_iter().find(|t| ours(t.as_ref())))
+             .and_then(|ts| ts.into_iter().find(|t| slot(t, unread)))
          {
              return QueryVerdict::TableRenamed(touched);
