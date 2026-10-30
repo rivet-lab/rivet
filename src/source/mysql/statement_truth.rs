@@ -31,7 +31,6 @@ fn class_of(verdict: &QueryVerdict) -> Class {
         QueryVerdict::TableRenamed(..) => Class::RenameTable,
         QueryVerdict::Dropped(..) => Class::Drop,
         QueryVerdict::StatementWrite(..) => Class::StatementWrite,
-        QueryVerdict::Unreadable(inner) => class_of(inner),
         QueryVerdict::Privilege => Class::Privilege,
         QueryVerdict::Commit | QueryVerdict::Pass => Class::None,
     }
@@ -40,32 +39,11 @@ fn class_of(verdict: &QueryVerdict) -> Class {
 /// The disagreements with the server accepted on 2026-10-30, each with a ceiling and what closes it.
 const LEDGER: &[Known] = &[
     Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "coll.",
-        rows: 9,
-        reason: "2026-10-30: collation 84 (big5_bin) decodes 0xC7xx as kana in encoding_rs and as Cyrillic in MySQL, the captured name is not found; open",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "op.col_change_case",
-        rows: 4,
-        reason: "2026-10-30: CHANGE amount AMOUNT reads as the same column; open",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "otherdb.col_change_case",
-        rows: 4,
-        reason: "2026-10-30: CHANGE amount AMOUNT reads as the same column; open",
-    },
-    Known {
         direction: Direction::Over,
         server: None,
-        case: "coll.",
-        rows: 44,
-        reason: "2026-10-30: an uncaptured ujis name that cannot be placed has the shape of a captured one and is refused; accepted, refusing is the safe side",
+        case: "gadget.",
+        rows: 16,
+        reason: "2026-10-30: a `--` followed by a NUL is no comment to the server (1064, never logged) and the reader reads it as one; refused; accepted, no event exists",
     },
     Known {
         direction: Direction::Over,
@@ -108,20 +86,6 @@ const LEDGER: &[Known] = &[
         case: "uncaptured.",
         rows: 4,
         reason: "2026-10-30: a REVOKE the server rejects (1147) is never logged; refused by kind; accepted, no event exists",
-    },
-    Known {
-        direction: Direction::Over,
-        server: None,
-        case: "sweep.after_name",
-        rows: 4751,
-        reason: "2026-10-30: a statement with an unreadable byte after the name is rejected by the server (1064) and never logged; refused as unreadable; accepted",
-    },
-    Known {
-        direction: Direction::Over,
-        server: None,
-        case: "sweep.between",
-        rows: 5261,
-        reason: "2026-10-30: a statement with an unreadable byte between keywords is rejected by the server (1064) and never logged; refused as unreadable; accepted",
     },
 ];
 

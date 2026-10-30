@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/statement.rs b/src/source/mysql/statement.rs
+index 8c56aed4..2dbf634d 100644
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -388,6 +388,7 @@ fn cut(raw: &[u8], layout: Option<Layout>, charset: &str, lex: Lexical) -> Strin
+ 
+ /// The character the server stores for a high byte of a character set, the marker when the byte is no character of it or one the lexer may not read as a letter.
+ fn high_byte(charset: &str, byte: u8) -> char {
++    if byte >= 0x80 { return UNPLACED; }
+     HIGH_BYTES
+         .binary_search_by_key(&charset, |(n, _)| n)
+         .ok()

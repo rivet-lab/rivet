@@ -4339,6 +4339,108 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: cdc-statement-lone-lead-kept-in-the-name
+    class: "a lead byte that starts no character, directly after a table name, is read as a letter of the name, so `TRUNCATE rivet.t<0xE0>` names a table the server does not and the refusal of a captured table is missed (the server drops the lead with the rest of the name when the character it claims does not fit)"
+    history: "PR #728 round 4 (2026-10-30); RED on the round-3 head 61ee4069 against the server corpus of #734 (the statement_truth replay: missed rows on 8.0, 8.4 lctn=0 and 8.4 lctn=1)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-lone-lead-kept-in-the-name/mysql.patch
+        cells: [a_lead_byte_that_starts_no_character_after_a_table_name_is_dropped_with_it_mysql, "lib:a_lead_that_starts_no_character_inside_a_utf8mb4_name_is_dropped_when_its_character_does_not_fit", "lib:a_lead_that_starts_no_character_inside_a_name_is_dropped_in_each_pair_layout", "lib:every_server_fixture_agrees_with_the_binlog_reader"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-statement-final-nul-read-as-a-name-character
+    class: "the NUL that ends a statement text is read as a character of the last name, so `TRUNCATE rivet.t<NUL>` names a table the server does not and the refusal of a captured table is missed"
+    history: "PR #728 round 4 (2026-10-30); RED on the round-3 head 61ee4069 against the server corpus of #734 (the statement_truth replay: missed rows on 8.0, 8.4 lctn=0 and 8.4 lctn=1)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-final-nul-read-as-a-name-character/mysql.patch
+        cells: [the_nul_that_ends_a_statement_is_not_part_of_the_table_name_mysql, "lib:the_one_nul_that_ends_a_statement_is_not_part_of_it", "lib:every_server_fixture_agrees_with_the_binlog_reader"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-column-case-only-change-is-no-rename
+    class: "a `CHANGE name NAME` that only changes the case of a column is read as no rename, although the server renames the column and the binlog names it NAME, so the column is delivered under a name the policy never granted"
+    history: "PR #728 round 4 (2026-10-30); RED on the round-3 head 61ee4069 against the server corpus of #734 (the rig oracle: the CHANGE exits 0 on the round-3 head)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-column-case-only-change-is-no-rename/mysql.patch
+        cells: [a_change_that_only_changes_the_case_of_a_column_is_refused_as_the_rename_it_is_mysql, "lib:a_statement_that_gives_a_column_a_new_name_names_its_table"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-statement-pair-fixes-ignored
+    class: "a pair of a multibyte client character set whose server mapping differs from the encoding standard (big5, gbk, sjis, cp932, ujis, euckr, gb2312) is read as the standard maps it, so a name the server stores under one character is compared under another and a captured table is missed or an uncaptured one refused"
+    history: "PR #728 round 4 (2026-10-30); RED on the round-3 head 61ee4069 against the server corpus of #734 (the statement_truth replay: missed rows on 8.0, 8.4 lctn=0 and 8.4 lctn=1)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-pair-fixes-ignored/mysql.patch
+        cells: ["lib:a_name_in_each_pair_layout_is_decoded_to_the_text_the_server_stores", "lib:every_server_fixture_agrees_with_the_binlog_reader"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-statement-high-bytes-read-as-unplaced
+    class: "a high byte of a single-byte client character set (latin1, cp1251, koi8r, macroman and the rest) is read as a byte nobody can place, so a name the server stores as letters is never matched with the captured table that has them"
+    history: "PR #728 round 4 (2026-10-30); RED on the round-3 head 61ee4069 against the server corpus of #734 (the statement_truth replay: missed rows on 8.0, 8.4 lctn=0 and 8.4 lctn=1)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-high-bytes-read-as-unplaced/mysql.patch
+        cells: ["lib:a_single_byte_name_is_decoded_to_the_text_the_server_stores", "lib:every_single_byte_is_read_as_the_collation_table_says", "lib:every_server_fixture_agrees_with_the_binlog_reader"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-statement-triple-lead-counted-as-a-pair
+    class: "the 0x8F lead of ujis and eucjpms is cut as a two-byte character, so the three-byte character after it is split and its last byte starts the next one: a name is cut where the server does not cut it"
+    history: "PR #728 round 4 (2026-10-30); RED on the round-3 head 61ee4069 against the server corpus of #734 (the statement_truth replay: missed rows on 8.0, 8.4 lctn=0 and 8.4 lctn=1)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-triple-lead-counted-as-a-pair/mysql.patch
+        cells: ["lib:a_name_in_each_pair_layout_is_decoded_to_the_text_the_server_stores"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
   - name: journal-manifest-gap
     class: "a run whose terminal manifest.json write failed is recorded `success` in the run journal and on the run card, because the journal row and the card are finished before the manifest is written and the failed status is set only afterwards"
     history: "found 2026-10-30 by a rivet-verifier probe (manifest.json a directory: exit non-zero, ledger and metrics failed, `rivet journal` success with no error, a multi-export card still the success glyph); RED on main 2026-10-30 (journal read back through `rivet journal`, PostgreSQL)"

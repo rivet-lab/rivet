@@ -3473,6 +3473,80 @@ fn an_uncaptured_table_renamed_under_a_non_ascii_name_is_met_as_before_in_a_clie
     );
 }
 
+const UPDATED_AFTER_AS_UPPER: &str = "UPDATE rivet.{t} SET NAME = 'ann-after' WHERE id = 1";
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_lead_byte_that_starts_no_character_after_a_table_name_is_dropped_with_it_mysql() {
+    end_as(
+        "cg_lead",
+        &[
+            raw_case(
+                false,
+                "SET NAMES utf8mb4",
+                "'TRUNCATE rivet.{t}', 0xE0",
+                &[],
+                REFUSED_TRUNCATED,
+            ),
+            raw_case(
+                false,
+                "SET NAMES gbk",
+                "'TRUNCATE rivet.{t}', 0x81",
+                &[],
+                REFUSED_TRUNCATED,
+            ),
+            raw_case(
+                false,
+                "SET NAMES ujis",
+                "'TRUNCATE rivet.{t}', 0x8F",
+                &[],
+                REFUSED_TRUNCATED,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn the_nul_that_ends_a_statement_is_not_part_of_the_table_name_mysql() {
+    end_as(
+        "cg_nul",
+        &[
+            raw_case(
+                false,
+                "SET NAMES utf8mb4",
+                "'TRUNCATE rivet.{t}', 0x00",
+                &[],
+                REFUSED_TRUNCATED,
+            ),
+            raw_case(
+                false,
+                "SET NAMES latin1",
+                "'TRUNCATE rivet.{t} ', 0x00",
+                &[],
+                REFUSED_TRUNCATED,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_change_that_only_changes_the_case_of_a_column_is_refused_as_the_rename_it_is_mysql() {
+    end_as(
+        "cg_chcase",
+        &[(
+            true,
+            vec![
+                UPDATED_BEFORE,
+                "ALTER TABLE rivet.{t} CHANGE name NAME VARCHAR(20)",
+                UPDATED_AFTER_AS_UPPER,
+            ],
+            REFUSED_UNDECODABLE,
+        )],
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_change_that_keeps_the_non_ascii_name_of_a_column_is_met_as_before_in_a_client_character_set_mysql()
