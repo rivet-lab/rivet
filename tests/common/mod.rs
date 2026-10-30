@@ -220,6 +220,86 @@ pub fn apply_rebaseline_remedy(rig: &mut Rig, has_baseline: bool) {
     }
 }
 
+/// The refusal a lost checkpoint gets, by code, with the re-baseline remedy and the phrases `says`.
+fn assert_lost_checkpoint_refusal(rig: &Rig, says: &[&str]) {
+    let out = rig.run_args(&[]);
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_CDC_CHECKPOINT_INVALID", 5),
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        says.iter().all(|p| said.contains(p)) && said.contains(REBASELINE_REMEDY),
+        "the refusal says {says:?} and names the re-baseline remedy:\n{said}"
+    );
+}
+
+/// The phrases of the refusal a lost checkpoint gets when only the state DB's record of the stream's anchor proves the file existed.
+fn lost_anchor_phrases(rig: &Rig) -> Vec<String> {
+    vec![
+        "is missing, but the state DB records that export".to_string(),
+        format!("`rivet state reset -c {}", rig.config_path().display()),
+    ]
+}
+
+/// A stream whose checkpoint file is lost after a delivered run is refused by code on every later run, writes nothing and leaves no checkpoint, whatever was written at the source meanwhile; `baseline` is true when a completed snapshot (not the state DB's record) is what proves the file existed.
+pub fn assert_a_lost_checkpoint_is_refused_not_reanchored(s: &mut CdcScenario, baseline: bool) {
+    let phrases = match baseline {
+        true => vec!["is missing but prior-run evidence exists".to_string()],
+        false => lost_anchor_phrases(&s.rig),
+    };
+    let says: Vec<&str> = phrases.iter().map(String::as_str).collect();
+    s.rig.run_ok();
+    s.insert(1);
+    s.settle();
+    s.rig.run_ok();
+    let delivered = files_under(&s.rig.out_dir());
+    std::fs::remove_file(s.rig.checkpoint()).expect("the checkpoint the run wrote");
+    s.insert(2);
+    s.settle();
+    assert_lost_checkpoint_refusal(&s.rig, &says);
+    s.insert(3);
+    s.settle();
+    assert_lost_checkpoint_refusal(&s.rig, &says);
+    assert!(
+        !s.rig.checkpoint().exists(),
+        "a refused run leaves no checkpoint behind"
+    );
+    assert_eq!(
+        files_under(&s.rig.out_dir()),
+        delivered,
+        "a refused run writes nothing"
+    );
+}
+
+/// The refusal's `rivet state reset` remedy accepts the loss: the next run anchors at the current position and the stream delivers from there.
+pub fn assert_state_reset_lifts_a_lost_checkpoint_refusal(s: &mut CdcScenario) {
+    let phrases = lost_anchor_phrases(&s.rig);
+    let says: Vec<&str> = phrases.iter().map(String::as_str).collect();
+    s.rig.run_ok();
+    s.insert(1);
+    s.settle();
+    s.rig.run_ok();
+    std::fs::remove_file(s.rig.checkpoint()).expect("the checkpoint the run wrote");
+    assert_lost_checkpoint_refusal(&s.rig, &says);
+    let reset = s
+        .rig
+        .cli(&["state", "reset", "--export", s.rig.export_name()]);
+    assert!(
+        reset.status.success(),
+        "`rivet state reset` runs from the refused state:\n{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    s.rig.run_ok();
+    s.insert(2);
+    s.settle();
+    s.rig.run_ok();
+}
+
 /// One source write on an `(id, v)` table, engine-neutral.
 #[derive(Clone, Copy)]
 pub enum Churn {

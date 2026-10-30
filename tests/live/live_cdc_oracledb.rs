@@ -155,6 +155,22 @@ fn oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it() {
 
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_lost_checkpoint_is_refused_not_reanchored() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let mut s = CdcScenario::oracle_with("ora_ckno", |r, _| r);
+    assert_a_lost_checkpoint_is_refused_not_reanchored(&mut s, false);
+}
+
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_state_reset_lifts_a_lost_checkpoint_refusal() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let mut s = CdcScenario::oracle_with("ora_ckrst", |r, _| r);
+    assert_state_reset_lifts_a_lost_checkpoint_refusal(&mut s);
+}
+
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_resume_captures_only_new_changes() {
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();

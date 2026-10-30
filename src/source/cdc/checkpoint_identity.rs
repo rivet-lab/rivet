@@ -24,6 +24,23 @@ pub(crate) fn checkpoint_invalid(why: String) -> anyhow::Error {
     refusal(crate::error::codes::SOURCE_CDC_CHECKPOINT_INVALID, why)
 }
 
+/// Refuse a run whose checkpoint file is gone while the state DB records that export `export` wrote it: `SOURCE_CDC_CHECKPOINT_INVALID`, exit 5.
+pub(crate) fn lost_file_anchor(
+    engine: &str,
+    checkpoint: &std::path::Path,
+    config: &str,
+    export: &str,
+) -> anyhow::Error {
+    checkpoint_invalid(format!(
+        "{engine} cdc: checkpoint '{}' is missing, but the state DB records that export '{export}' \
+         wrote it on an earlier run — anchoring at the current position would silently skip every \
+         change committed since. Restore the checkpoint file from the volume or worker that held \
+         it; or, to accept the loss of those changes and anchor at the current position, run \
+         `rivet state reset -c {config} -e {export}`; or: {RECOVER}",
+        checkpoint.display()
+    ))
+}
+
 /// Refuse a resume position the source's log no longer reaches (dropped slot, purged binlog, rolled oplog): `SOURCE_CDC_LOG_GAP`, exit 5.
 pub(crate) fn log_gap(why: String) -> anyhow::Error {
     refusal(crate::error::codes::SOURCE_CDC_LOG_GAP, why)
