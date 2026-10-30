@@ -142,6 +142,20 @@ const LEDGER: &[Known] = &[
         rows: 4,
         reason: "2026-10-30: a REVOKE the server rejects (1147) is never logged; refused by kind; accepted, no event exists",
     },
+    Known {
+        direction: Direction::Missed,
+        server: None,
+        case: "gadget.blank_between",
+        rows: 45,
+        reason: "2026-10-30: a non-ASCII blank byte of a client collation (0xA0, 0xFF, 0x88-0x8C) is not read as a blank, so the CHANGE after it is not seen; open, round 4 of PR #728 (its head 1236ff11 misses it too)",
+    },
+    Known {
+        direction: Direction::Over,
+        server: None,
+        case: "gadget.",
+        rows: 16,
+        reason: "2026-10-30: a NUL byte in a statement is rejected by the server (1064) and never logged; the reader refuses by text; accepted, no event exists",
+    },
 ];
 
 #[test]

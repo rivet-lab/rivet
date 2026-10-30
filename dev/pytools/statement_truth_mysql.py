@@ -461,9 +461,10 @@ def families(base: Snap, cap: set) -> list[Family]:
     out = []
     for db in sorted(base):
         native = sorted(t for t in base[db] if not t.isascii())
-        if native:
-            first = next(t for t in native if (db, t) in cap)
-            out.append(Family(db, first, next(t for t in native if (db, t) not in cap), base[db][first][0][1]))
+        held = [t for t in native if (db, t) in cap]
+        spare = [t for t in native if (db, t) not in cap]
+        if held and spare:
+            out.append(Family(db, held[0], spare[0], base[db][held[0]][0][1]))
     return out
 
 
@@ -672,6 +673,74 @@ def cases_sweep(defaults: list[tuple[int, str, str]]) -> list[Case]:
     ]
 
 
+CTL_BYTES = [*range(0x20), 0x7F]
+
+DML_GADGETS = {
+    "dml_delete": b"DELETE audit_log --%s\n, orders FROM orders JOIN audit_log ON orders.id = audit_log.id",
+    "dml_update": b"UPDATE audit_log --%s\n, orders SET orders.amount = orders.amount + 1 WHERE orders.id = audit_log.id",
+}
+
+CHANGE_GADGETS = {
+    "change": b"ALTER TABLE orders CHANGE id id INT NOT NULL --%s, CHANGE amount amount INT NOT NULL /*\n, CHANGE note note2 VARCHAR(40) COMMENT '*/ -- '",
+    "rename_col": b"ALTER TABLE orders CHANGE id id INT NOT NULL --%s, CHANGE amount amount INT NOT NULL /*\n, RENAME COLUMN note TO note2, COMMENT '*/ -- '",
+}
+
+BLANK_GADGET = b"ALTER TABLE orders CHANGE id id INT NOT NULL --%s, CHANGE amount amount INT NOT NULL\n, CHANGE%snote note2 VARCHAR(40)"
+
+NEAR_DB = "st_near"
+NEAR_TO_DB = "st_near_to"
+NEAR_CLIENTS = {UTF8MB4: "client\u00e8le", 8: "client\u00e8le", 26: "client\u010dle", 51: "client\u044b"}
+
+NEAR_OPS = {
+    "rename": "RENAME TABLE {n} TO {o}",
+    "alter_rename_to": "ALTER TABLE {n} RENAME TO {o}",
+    "alter_change": "ALTER TABLE {n} CHANGE amount amount2 INT NOT NULL",
+    "drop": "DROP TABLE {n}",
+    "trunc": "TRUNCATE TABLE {n}",
+    "insert": "INSERT INTO {n} VALUES (100, 1, 'x')",
+}
+
+
+def blank_bytes(conn: Conn, ids: list[int]) -> dict[int, list[int]]:
+    """Per client collation id, the bytes the server's lexer reads as a blank: SELECT<byte>1000 answers 1000."""
+    out: dict[int, list[int]] = {}
+    for cid in ids:
+        if conn.query(f"SET character_set_client = {cid}").errno:
+            continue
+        out[cid] = [
+            b for b in SWEEP_BYTES
+            if (r := conn.query(b"SELECT" + bytes([b]) + b"1000")).errno == 0 and r.rows == [[b"1000"]]
+        ]
+    conn.must("SET character_set_client = utf8mb4")
+    return out
+
+
+def cases_gadgets(names: dict[int, tuple[str, str]], blanks: dict[int, list[int]]) -> list[Case]:
+    """Round-4 gadgets: control bytes closing a comment inside multi-table DML and mixed CHANGE specs, a blank byte between specs, near-name tables."""
+    out: list[Case] = []
+
+    def add(cid: str, tag: str, coll: int, mode: str, db: str, raw: bytes | None) -> None:
+        if raw is not None:
+            out.append(Case(cid, f"gadget.{tag}", coll, mode, db, raw, (db,)))
+
+    for coll in (UTF8MB4, 8):
+        for b in CTL_BYTES:
+            for tag, tpl in DML_GADGETS.items():
+                add(f"D.{coll}.{tag}.{b:02x}", tag, coll, "default", ASCII_DB, tpl % bytes([b]))
+            for mode in ("default", "ansi", "nobs"):
+                for tag, tpl in CHANGE_GADGETS.items():
+                    add(f"D.{coll}.{tag}.{mode}.{b:02x}", tag, coll, mode, ASCII_DB, tpl % bytes([b]))
+    for coll in sorted(names):
+        for b in blanks.get(coll, []):
+            add(f"D.{coll}.blank.{b:02x}", "blank_between", coll, "default", ASCII_DB, BLANK_GADGET % (bytes([b]), bytes([b])))
+    for coll, name in NEAR_CLIENTS.items():
+        charset = names[coll][0]
+        for op, tpl in NEAR_OPS.items():
+            add(f"D.{coll}.near.{op}", f"near_{op}", coll, "default", NEAR_DB, encode(tpl.format(n=q(name), o=q(name + "_old")), charset))
+        add(f"D.{coll}.near.rename_into", "near_rename_into", coll, "default", NEAR_TO_DB, encode(f"RENAME TABLE tmp TO {q(name)}", charset))
+    return out
+
+
 class Session:
     """The case connection: changes charset, sql_mode and database only when a case needs another."""
 
@@ -869,7 +938,7 @@ def generate(server: str, subset: str | None = None) -> tuple[dict, list[dict]]:
     names = {cid: (cs, name) for cid, cs, name, _ in colls}
     pairs = [(cid, cs, name) for cid, cs, name, _ in colls]
     defaults = [(cid, cs, name) for cid, cs, name, d in colls if d]
-    which = subset or "ABC"
+    which = subset or "ABCD"
     cases: list[Case] = []
     if "A" in which:
         cases += cases_collations(pairs, families(base, cap))
@@ -877,6 +946,10 @@ def generate(server: str, subset: str | None = None) -> tuple[dict, list[dict]]:
         cases += cases_sweep(defaults)
     if "C" in which:
         cases += cases_matrix()
+    if "D" in which:
+        probe = Conn(cfg.port)
+        cases += cases_gadgets(names, blank_bytes(probe, sorted(names)))
+        probe.close()
     if len({c.id for c in cases}) != len(cases):
         raise RuntimeError("case ids must be unique")
     groups: dict[tuple[int, str], list[Case]] = defaultdict(list)

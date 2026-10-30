@@ -37,12 +37,12 @@ make statement-truth-generate   # rewrites dev/fixtures/statement_truth/mysql/<s
 make statement-truth-check      # regenerates and diffs; exit 1 on any difference
 ```
 
-`generate` and `check` take `--server NAME` (repeatable) to run one server. `--subset A|B|C` (any
+`generate` and `check` take `--server NAME` (repeatable) to run one server. `--subset A|B|C|D` (any
 combination) runs a slice of the corpus and prints its size and speed without touching a fixture;
 `--dump PATH` writes the slice for inspection. `check` prints the removed, added and changed rows;
 a server patch release that changes only its version string is reported, not failed.
 
-A fixture holds about 36,000 rows (300 KB gzipped) per server. The stand is up in about ten seconds
+A fixture holds about 38,000 rows (310 KB gzipped) per server. The stand is up in about ten seconds
 with the images present; the three servers regenerate side by side in 9 to 14 minutes, which `check`
 repeats. The password hash a `CREATE USER` or `ALTER USER` event logs is replaced by `<hash>` because it
 carries a random salt; nothing else in a regeneration varies.
@@ -58,6 +58,13 @@ What is sent, per server:
   names, literals and comments) at 18 positions (direct, after `-- `, `#`, inside `/* */`, in
   version comments of 5 and 6 digits, spelled with quotes and qualifiers), under `ANSI_QUOTES` and
   `NO_BACKSLASH_ESCAPES` on and off.
+- D: gadgets from reviews of the reader. A control byte after `--` inside a multi-table `DELETE` or
+  `UPDATE` (statement format) and inside mixed `CHANGE` / `RENAME COLUMN` specs that hide a real
+  rename behind a `/*` in a line comment, in utf8mb4 and latin1, under three sql_modes. A blank byte
+  (probed on the server per client charset, `SELECT<byte>1000`) after `--` and between `CHANGE`
+  and the column, for every collation. Tables whose names only differ from a captured one by a
+  non-ASCII suffix (`client` captured, `client` plus an accented letter not), renamed, altered,
+  dropped, truncated and written, in utf8mb4, latin1, cp1250 and cp1251.
 
 The verdict of a row is read off the server: the `Com_*` counters of the statement, the table
 fingerprints before and after, and the bytes the binlog logged. A row is
