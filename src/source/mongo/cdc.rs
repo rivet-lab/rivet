@@ -108,6 +108,23 @@ impl OrdinalClock {
     }
 }
 
+/// The `(ct, ord)` of an event, or the refusal for an event the server sent without a clusterTime.
+fn stamp_event(
+    clock: &mut OrdinalClock,
+    cluster_time: Option<mongodb::bson::Timestamp>,
+) -> Result<(u64, u64)> {
+    match cluster_time {
+        Some(t) => Ok(clock.stamp(cluster_time_u64(t))),
+        None => crate::rivet_bail!(
+            crate::error::codes::SOURCE_CDC_PREREQUISITE,
+            "mongodb cdc: the server sent a change event with no clusterTime, which every \
+             change event of MongoDB 4.4 and later carries; rivet cannot order that event \
+             against the ones around it, so nothing after it was read. Point `source.url` \
+             at a MongoDB 4.4 or later replica set or sharded cluster, then re-run"
+        ),
+    }
+}
+
 /// A clusterTime as one integer, seconds in the high half and the increment in the low.
 fn cluster_time_u64(t: mongodb::bson::Timestamp) -> u64 {
     (u64::from(t.time) << 32) + u64::from(t.increment)
@@ -331,15 +348,10 @@ pub(crate) fn until_current_bound(
     })
 }
 
-/// Persist a resume token as a [`Position`] LOSSLESSLY. A token can carry a BSON
-/// binary `_typeBits` field (for typed sort keys — e.g. an integer `_id`), and a
-/// plain `serde_json` round-trip mangles that binary, so the server rejects it on
-/// resume (`Bad resume token`, error 40648). We store the token's raw BSON bytes
-/// (hex) — a faithful round-trip — plus the order-preserving `_data` keystring
-/// for the `until_current` bound. See the version-matrix live test that caught it.
+/// Persist a resume token as a [`Position`] losslessly, stamped with its `(clusterTime, ordinal)`.
 fn encode_resume_token(
     token: &mongodb::change_stream::event::ResumeToken,
-    stamp: Option<(u64, u64)>,
+    (ct, ord): (u64, u64),
 ) -> Result<Position> {
     let bson = mongodb::bson::to_bson(token)?;
     let doc = bson.as_document().ok_or_else(|| {
@@ -352,11 +364,6 @@ fn encode_resume_token(
     doc.to_writer(&mut buf)?;
     let hex = super::bytes_to_hex(&buf);
     let data = doc.get_str("_data").ok();
-    // Round-6: a token whose `_data` is NOT a string (BinData-era, MongoDB
-    // 3.6-4.0 shapes) would flow through as `"_data": null` — and a NULL parse
-    // key INSIDE the non-NULL-__pos group ranks differently per warehouse
-    // (Snowflake NULLS FIRST would crown it newest). Unreachable on supported
-    // servers; refuse rather than mis-order silently if it ever appears.
     if data.is_none() && doc.get("_data").is_some() {
         crate::rivet_bail!(
             crate::error::codes::SOURCE_CDC_PREREQUISITE,
@@ -366,12 +373,9 @@ fn encode_resume_token(
              server (support floor is MongoDB 4.4)"
         );
     }
-    let mut pos = serde_json::json!({ "_data": data, "rt": hex });
-    if let Some((ct, ord)) = stamp {
-        pos["ct"] = ct.into();
-        pos["ord"] = ord.into();
-    }
-    Ok(Position::new(pos))
+    Ok(Position::new(
+        serde_json::json!({ "_data": data, "rt": hex, "ct": ct, "ord": ord }),
+    ))
 }
 
 /// Inverse of [`encode_resume_token`], with a fallback to the pre-lossless
@@ -623,7 +627,7 @@ impl MongoChangeStream {
     pub(crate) fn anchor_position(&self) -> Option<Position> {
         self.stream
             .resume_token()
-            .and_then(|t| encode_resume_token(&t, Some((0, 0))).ok())
+            .and_then(|t| encode_resume_token(&t, (0, 0)).ok())
     }
 }
 
@@ -727,7 +731,7 @@ fn to_change_event(
     cse: ChangeStreamEvent<Document>,
     canonical: bool,
     db_name: &str,
-    stamp: Option<(u64, u64)>,
+    stamp: (u64, u64),
 ) -> Result<ChangeEvent> {
     let op = match cse.operation_type {
         OperationType::Insert => ChangeOp::Insert,
@@ -1022,8 +1026,10 @@ impl ChangeStream for MongoChangeStream {
                             _ => {}
                         }
                     }
-                    let stamp = cse.cluster_time.map(|t| clock.stamp(cluster_time_u64(t)));
-                    return Some(to_change_event(cse, canonical, db_name, stamp));
+                    return Some(
+                        stamp_event(clock, cse.cluster_time)
+                            .and_then(|stamp| to_change_event(cse, canonical, db_name, stamp)),
+                    );
                 }
                 OpClass::Skip => {
                     let coll = cse.ns.as_ref().and_then(|n| n.coll.as_deref());
@@ -1460,6 +1466,29 @@ mod ordinal_tests {
 
     /// A clusterTime is its seconds in the high half and its increment in the low half.
     #[test]
+    fn an_event_without_a_cluster_time_is_refused_with_the_server_side_cause() {
+        let mut clock = OrdinalClock::default();
+        let err = stamp_event(&mut clock, None).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_SOURCE_CDC_PREREQUISITE")
+        );
+        assert_eq!(
+            err.to_string(),
+            "mongodb cdc: the server sent a change event with no clusterTime, which every change event of MongoDB 4.4 and later carries; rivet cannot order that event against the ones around it, so nothing after it was read. Point `source.url` at a MongoDB 4.4 or later replica set or sharded cluster, then re-run"
+        );
+        let t = |time, increment| mongodb::bson::Timestamp { time, increment };
+        assert_eq!(
+            stamp_event(&mut clock, Some(t(1, 2))).unwrap(),
+            (cluster_time_u64(t(1, 2)), 0)
+        );
+        assert_eq!(
+            stamp_event(&mut clock, Some(t(1, 2))).unwrap(),
+            (cluster_time_u64(t(1, 2)), 1)
+        );
+    }
+
+    #[test]
     fn a_cluster_time_packs_seconds_over_increment() {
         let t = |time, increment| mongodb::bson::Timestamp { time, increment };
         assert_eq!(cluster_time_u64(t(1, 2)), (1 << 32) | 2);
@@ -1471,7 +1500,7 @@ mod ordinal_tests {
     #[test]
     fn the_largest_cluster_time_survives_the_checkpoint_json() {
         let token = decode_resume_token(&json!({ "_data": "826A" })).unwrap();
-        let pos = encode_resume_token(&token, Some((u64::MAX, u64::MAX - 1))).unwrap();
+        let pos = encode_resume_token(&token, (u64::MAX, u64::MAX - 1)).unwrap();
         let text = pos.json().to_string();
         let back: serde_json::Value = serde_json::from_str(&text).unwrap();
         let c = OrdinalClock::from_checkpoint(&back);
@@ -1488,9 +1517,14 @@ mod ordinal_tests {
     #[test]
     fn the_position_shapes_a_checkpoint_may_hold_all_decode_to_the_same_token() {
         let token = decode_resume_token(&json!({ "_data": "826A4E" })).unwrap();
-        let old = encode_resume_token(&token, None).unwrap();
-        let stamped = encode_resume_token(&token, Some((7, 3))).unwrap();
-        let anchor = encode_resume_token(&token, Some((0, 0))).unwrap();
+        let stamped = encode_resume_token(&token, (7, 3)).unwrap();
+        let anchor = encode_resume_token(&token, (0, 0)).unwrap();
+        let mut unstamped = stamped.json().clone();
+        unstamped
+            .as_object_mut()
+            .unwrap()
+            .retain(|k, _| k != "ct" && k != "ord");
+        let old = Position::new(unstamped);
         let keys = |p: &Position| {
             let mut k: Vec<String> = p.json().as_object().unwrap().keys().cloned().collect();
             k.sort();

@@ -34,8 +34,7 @@ use std::path::{Path, PathBuf};
 // 22 -> 26 (2026-10-29, #719): column-grants cells the oracle cannot grade (a bare name another database holds, the generated invisible key, a DDL in the backlog, the grant changed between two reads); closes when the oracle reads the account's columns.
 // 26 -> 27 (2026-10-29): the reserved-source-column cells load a `mode: full` remedy whose table holds a source column called `__is_deleted`; the warehouse oracle filters on that name, so the cell reads the rows through the second client.
 // 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
-// 28 -> 29 (2026-10-30): the one shared helper of the MongoDB cells cut mid-transaction by max_events grades the whole by reading ClickHouse back against Mongo; closes when the oracle grades a run cut by max_events.
-const NO_ORACLE_CEILING: usize = 29; // ratchet-pin: no-oracle-opt-outs
+const NO_ORACLE_CEILING: usize = 28; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave: `.a_failed_run_may_leave(` and a raw run's `FAILED_RUN_LEAVES_ENV`.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).

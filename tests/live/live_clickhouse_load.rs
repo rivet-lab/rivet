@@ -3065,19 +3065,32 @@ fn a_column_added_while_a_mysql_cdc_run_is_open_loads_into_clickhouse_with_every
 
 const MONGO_RS_PORT: u16 = 27018;
 
-/// A Mongo CDC export of collection `t` in `mdb` staged on fake-gcs and loaded into `db`.
-fn mongo_cdc_into_clickhouse(mdb: &str, db: &Db) -> Rig {
+/// A Mongo CDC export of collection `t` in `mdb` staged on fake-gcs under `prefix` and loaded into `db`.
+fn mongo_cdc_into_clickhouse_at(mdb: &str, db: &Db, prefix: &str) -> Rig {
     Rig::mongo_cdc("t")
         .source_url(&MongoTest::url(MONGO_RS_PORT, mdb))
-        .dest_gcs(BUCKET, &unique_name("chmcdc"), FAKE_GCS_ENDPOINT)
+        .dest_gcs(BUCKET, prefix, FAKE_GCS_ENDPOINT)
         .top_line(&load_line(CLICKHOUSE_HTTP_URL, db, "").replace("pk: [id]", "pk: [_id]"))
 }
 
-/// The same export cut after two events per run; the whole is graded by reading ClickHouse back against Mongo.
-fn mongo_cdc_cut_into_clickhouse(mdb: &str, db: &Db) -> Rig {
-    mongo_cdc_into_clickhouse(mdb, db)
-        .cdc("max_events: 2")
-        .no_oracle("max_events cuts each run mid-stream; ClickHouse read back against Mongo grades the whole")
+/// A Mongo CDC export of collection `t` in `mdb` staged on fake-gcs and loaded into `db`.
+fn mongo_cdc_into_clickhouse(mdb: &str, db: &Db) -> Rig {
+    mongo_cdc_into_clickhouse_at(mdb, db, &unique_name("chmcdc"))
+}
+
+/// A run killed once the first event it read is acked, so the rest of its transaction waits for the next run.
+fn kill_after_the_first_ack(rig: &Rig) {
+    let killed = rig.run_with_env("RIVET_TEST_PANIC_AT", "cdc_after_ack");
+    assert!(!killed.status.success(), "the hook must kill the run");
+}
+
+/// Ties seen in the change log: how many distinct clusterTimes the changes carry and the highest ordinal.
+fn tie_shape(db: &Db) -> String {
+    ch(&format!(
+        "SELECT uniqExact(JSONExtractUInt(__pos, 'ct')), max(JSONExtractUInt(__pos, 'ord')) \
+         FROM {}.t__changes WHERE __op IS NOT NULL FORMAT TSV",
+        db.0
+    ))
 }
 
 /// The live `(_id, v)` pairs of the ClickHouse view of `t`, ordered by id.
@@ -3172,8 +3185,7 @@ fn a_mongo_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source() {
     assert_snapshot_rows_version_zero_and_changes_strictly_ordered(&db);
 }
 
-/// Both ends of a tie group: one transaction (one clusterTime) writing two keys several
-/// times, delivered two events per run with a load after each; ClickHouse equals Mongo.
+/// One transaction (one clusterTime) writing two keys several times, its eight events delivered across runs each killed after one acked event; ClickHouse equals Mongo.
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
 fn a_mongo_transaction_cut_mid_tie_loads_in_source_order() {
@@ -3183,7 +3195,7 @@ fn a_mongo_transaction_cut_mid_tie_loads_in_source_order() {
     m.drop_collection("t");
     m.upsert_set("t", 1, "v", "seed");
     let db = Db::new("rivet_chtest");
-    let rig = mongo_cdc_cut_into_clickhouse(&mdb, &db);
+    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("rollover: 2");
     rig.run_ok();
 
     m.txn_updates_then_delete(
@@ -3199,16 +3211,13 @@ fn a_mongo_transaction_cut_mid_tie_loads_in_source_order() {
         ],
         1,
     );
-    for _ in 0..4 {
-        rig.run_ok();
-        load(&rig);
+    for _ in 0..3 {
+        kill_after_the_first_ack(&rig);
     }
+    rig.run_ok();
+    load(&rig);
     assert_eq!(
-        ch(&format!(
-            "SELECT uniqExact(JSONExtractUInt(__pos, 'ct')), max(JSONExtractUInt(__pos, 'ord')) \
-             FROM {}.t__changes WHERE __op IS NOT NULL FORMAT TSV",
-            db.0
-        )),
+        tie_shape(&db),
         "1\t7",
         "all eight events share one clusterTime and the ordinal ran 0..=7 across four runs"
     );
@@ -3218,7 +3227,7 @@ fn a_mongo_transaction_cut_mid_tie_loads_in_source_order() {
     assert_eq!(clickhouse_rows_mongo_state(&db), want);
 }
 
-/// The same transaction, the first run killed after its checkpoint is saved and before its ack.
+/// The same transaction with a surviving key, the first run killed after its checkpoint is saved and before its ack.
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
 fn a_mongo_run_killed_mid_tie_resumes_in_source_order() {
@@ -3228,7 +3237,7 @@ fn a_mongo_run_killed_mid_tie_resumes_in_source_order() {
     m.drop_collection("t");
     m.upsert_set("t", 1, "v", "seed");
     let db = Db::new("rivet_chtest");
-    let rig = mongo_cdc_cut_into_clickhouse(&mdb, &db);
+    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("rollover: 2");
     rig.run_ok();
 
     m.txn_updates_then_delete(
@@ -3238,17 +3247,62 @@ fn a_mongo_run_killed_mid_tie_resumes_in_source_order() {
             (1, "v", "a2"),
             (1, "v", "a3"),
             (1, "v", "a4"),
+            (2, "v", "w1"),
+            (2, "v", "w2"),
         ],
         1,
     );
     let killed = rig.run_with_env("RIVET_TEST_PANIC_AT", "cdc_after_checkpoint_before_ack");
     assert!(!killed.status.success(), "the hook must kill the run");
-    for _ in 0..3 {
-        rig.run_ok();
-        load(&rig);
-    }
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        tie_shape(&db),
+        "1\t6",
+        "all seven events share one clusterTime and the ordinal ran 0..=6 across the kill"
+    );
     let want = m.current_state_i64("t", "v");
-    assert!(want.is_empty(), "the key ends deleted: {want:?}");
+    assert!(!want.contains_key(&1), "key 1 ends deleted: {want:?}");
+    assert_eq!(want[&2], "w2");
+    assert_eq!(clickhouse_rows_mongo_state(&db), want);
+}
+
+/// The same transaction, the first run killed after its parts are written and before its checkpoint: the replay stamps the same positions.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_mongo_run_killed_before_its_checkpoint_replays_the_same_tie_in_source_order() {
+    require_mongo_cdc_into_clickhouse();
+    let mdb = unique_name("chmcdc_replay");
+    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    m.drop_collection("t");
+    m.upsert_set("t", 1, "v", "seed");
+    let db = Db::new("rivet_chtest");
+    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("rollover: 2");
+    rig.run_ok();
+
+    m.txn_updates_then_delete(
+        "t",
+        &[
+            (1, "v", "a1"),
+            (1, "v", "a2"),
+            (1, "v", "a3"),
+            (1, "v", "a4"),
+            (2, "v", "w1"),
+            (2, "v", "w2"),
+        ],
+        1,
+    );
+    let killed = rig.run_with_env("RIVET_TEST_PANIC_AT", "cdc_after_flush_before_ack");
+    assert!(!killed.status.success(), "the hook must kill the run");
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        tie_shape(&db),
+        "1\t6",
+        "the replay re-stamps the seven events 0..=6, none twice"
+    );
+    let want = m.current_state_i64("t", "v");
+    assert_eq!(want[&2], "w2");
     assert_eq!(clickhouse_rows_mongo_state(&db), want);
 }
 
@@ -3291,7 +3345,7 @@ fn a_mongo_transaction_across_collections_loads_the_captured_one_in_source_order
     m.drop_collection("u");
     m.upsert_set("t", 1, "v", "seed");
     let db = Db::new("rivet_chtest");
-    let rig = mongo_cdc_cut_into_clickhouse(&mdb, &db);
+    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("rollover: 2");
     rig.run_ok();
 
     m.txn_updates_across(&[
@@ -3302,10 +3356,11 @@ fn a_mongo_transaction_across_collections_loads_the_captured_one_in_source_order
         ("t", 1, "v", "a3"),
         ("t", 2, "v", "b1"),
     ]);
-    for _ in 0..3 {
-        rig.run_ok();
-        load(&rig);
+    for _ in 0..2 {
+        kill_after_the_first_ack(&rig);
     }
+    rig.run_ok();
+    load(&rig);
     let want = m.current_state_i64("t", "v");
     assert_eq!(want[&1], "a3");
     assert_eq!(clickhouse_rows_mongo_state(&db), want);
@@ -3353,5 +3408,73 @@ fn a_mongo_checkpoint_from_before_the_ordinal_is_adopted_and_loads_in_source_ord
         clickhouse_rows_mongo_state(&db),
         m.current_state_i64("t", "v"),
         "the adopted stream loads in source order"
+    );
+}
+
+/// Parts an older rivet stamped with `_data` only are refused before any write, and the printed re-baseline loads the stream equal to the source.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs + RIVET_PREV_RELEASE_BIN"]
+fn a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_remedy_loads_it() {
+    require_mongo_cdc_into_clickhouse();
+    let mdb = unique_name("chmcdc_legacy");
+    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    m.drop_collection("t");
+    for id in 1..=3 {
+        m.upsert_set("t", id, "v", &format!("seed{id}"));
+    }
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chmcdc");
+    let load_line = load_line(CLICKHOUSE_HTTP_URL, &db, "").replace("pk: [id]", "pk: [_id]");
+    let mut rig = mongo_cdc_into_clickhouse_at(&mdb, &db, &prefix).cdc("initial: snapshot");
+    rig.rebuilt(Rig::clear_top_lines);
+    rig.config_path();
+    let Some(old) = rig.as_previous_release() else {
+        return;
+    };
+    old.run_ok();
+    rig.set_top_line(&load_line);
+    rig.run_ok();
+
+    let refused = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert_refused(
+        &refused,
+        Refused::by_code("RIVET_LOAD_CDC_POSITION_UNORDERABLE", 5),
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        said.contains(REBASELINE_REMEDY)
+            && said.contains("Nothing was written and no table was created"),
+        "the refusal names the remedy and the untouched warehouse:\n{said}"
+    );
+    assert_eq!(
+        ch(&format!(
+            "SELECT count() FROM system.tables WHERE database = '{}' AND name IN ('t', 't__changes') FORMAT TSV",
+            db.0
+        )),
+        "0",
+        "the refusal comes before any table is created"
+    );
+
+    let _ = std::fs::remove_file(rig.checkpoint());
+    assert!(fake_gcs_delete_prefix(BUCKET, &prefix) > 0);
+    assert!(clear_cdc_snapshot(&rig.config_path(), rig.export_name(), &prefix) > 0);
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        clickhouse_rows_mongo_state(&db),
+        m.current_state_i64("t", "v"),
+        "the remedy loads the stream equal to the source"
+    );
+    assert_eq!(
+        ch(&format!(
+            "SELECT count(), countIf(JSONHas(__pos, 'ct')) FROM {}.t__changes FORMAT TSV",
+            db.0
+        )),
+        "3\t3",
+        "every row of the re-baselined stream carries the clusterTime"
     );
 }

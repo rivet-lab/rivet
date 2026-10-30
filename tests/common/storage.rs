@@ -577,6 +577,27 @@ pub fn fake_gcs_put(bucket: &str, key: &str, bytes: &[u8]) {
     );
 }
 
+/// Delete every object under `prefix` in a fake-gcs bucket; returns how many went.
+pub fn fake_gcs_delete_prefix(bucket: &str, prefix: &str) -> usize {
+    let names = fake_gcs_names(bucket, prefix);
+    let http = reqwest::blocking::Client::new();
+    for name in &names {
+        let resp = http
+            .delete(format!(
+                "http://127.0.0.1:4443/storage/v1/b/{bucket}/o/{}",
+                name.replace('/', "%2F")
+            ))
+            .send()
+            .expect("fake-gcs delete");
+        assert!(
+            resp.status().is_success(),
+            "fake-gcs delete of {name}: {}",
+            resp.status()
+        );
+    }
+    names.len()
+}
+
 /// Object names under `prefix` in a fake-gcs bucket; empty when none match.
 pub fn fake_gcs_names(bucket: &str, prefix: &str) -> Vec<String> {
     fake_gcs_list_json(bucket, prefix)["items"]

@@ -159,7 +159,7 @@ pub(crate) const MONGO: Row = Row {
     }),
 };
 
-const MONGO_LEGACY_REFUSAL: &str = "rivet: this MongoDB __pos carries no clusterTime (it was written by a rivet that did not stamp one), so ClickHouse cannot order it against its neighbours; re-baseline the stream so every part is re-written, and truncate the __changes table before the next load (ADR-0035 CH7)";
+const MONGO_LEGACY_REFUSAL: &str = "rivet: this MongoDB __pos carries no clusterTime (the part was written by a rivet older than the clusterTime stamp), so ClickHouse cannot order it against its neighbours (ADR-0035 CH7)";
 
 /// PostgreSQL `{lsn: "hi/lo"}`.
 pub(crate) const POSTGRES: Row = Row {
@@ -340,6 +340,17 @@ impl ChArm {
     }
 }
 
+/// The refusal for a `__pos` of an older shape ClickHouse cannot version, or `None` when the position can be ordered.
+pub(crate) fn clickhouse_legacy_refusal(pos: &str) -> Option<&'static str> {
+    let json: Json = serde_json::from_str(pos).ok()?;
+    let object = json.as_object()?;
+    ROWS.iter()
+        .filter_map(|r| r.clickhouse)
+        .filter_map(|arm| Some((arm.legacy?, arm.marker())))
+        .find(|(l, marker)| object.contains_key(l.field) && !object.contains_key(*marker))
+        .map(|(l, _)| l.refusal)
+}
+
 /// The ClickHouse change log's version: `(source position << 128) | (__seq + 1)`, the
 /// position decoded from the `__pos` JSON's own shape; an unknown shape fails the insert (ADR-0035 CH3).
 pub(crate) fn clickhouse_version_expr() -> String {
@@ -422,14 +433,34 @@ mod tests {
         "'rivet: unrecognised __pos shape — no source position to version this row by ",
         "(ADR-0035 CH3)')) + toUInt256(throwIf(JSONHas(ifNull(__pos, ''), '_data') AND NOT ",
         "JSONHas(ifNull(__pos, ''), 'ct'), '",
-        "rivet: this MongoDB __pos carries no clusterTime (it was written by a rivet that did not ",
-        "stamp one), so ClickHouse cannot order it against its neighbours; re-baseline the ",
-        "stream so every part is re-written, and truncate the __changes table before the next ",
-        "load (ADR-0035 CH7)'))",
+        "rivet: this MongoDB __pos carries no clusterTime (the part was written by a rivet older ",
+        "than the clusterTime stamp), so ClickHouse cannot order it against its neighbours ",
+        "(ADR-0035 CH7)'))",
     );
 
     fn k(s: &str) -> Option<Key> {
         key(&serde_json::from_str::<Json>(s).unwrap())
+    }
+
+    #[test]
+    fn only_a_mongo_position_without_cluster_time_is_legacy() {
+        for legacy in [r#"{"_data":"82","rt":"82"}"#, r#"{"_data":"82"}"#] {
+            assert_eq!(
+                clickhouse_legacy_refusal(legacy),
+                Some(MONGO_LEGACY_REFUSAL)
+            );
+        }
+        for fine in [
+            r#"{"_data":"82","rt":"82","ct":0,"ord":0}"#,
+            r#"{"_data":"82","ct":9,"ord":3}"#,
+            r#"{"file":"binlog.000001","pos":4}"#,
+            r#"{"lsn":"0/1"}"#,
+            r#"{"x":1}"#,
+            "not json",
+            "[1]",
+        ] {
+            assert_eq!(clickhouse_legacy_refusal(fine), None, "{fine}");
+        }
     }
 
     #[test]
