@@ -106,7 +106,6 @@
 - [Benchmark report — v0.5.0 (historical)](archive/benchmark_report_v0.5.0.md)
 - [Mutation-testing plan](mutation-plan.md)
 - [Seeded-defect recall](seeded-recall.md)
-- [Statement truth: the reader against the server](statement-truth.md)
 - [Release checklist](release-checklist.md)
 - [Terminal walkthroughs](gifs/README.md)
 

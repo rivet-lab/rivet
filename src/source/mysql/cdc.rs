@@ -31,7 +31,7 @@ use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
-use crate::source::mysql::statement::{SqlMode, Tok, UNPLACED, client_text, tokens};
+use crate::source::mysql::statement::{SqlMode, Tok, tokens};
 
 /// A blocking iterator of canonical [`ChangeEvent`]s over a MySQL binlog stream.
 ///
@@ -95,8 +95,6 @@ pub(crate) struct MysqlChangeStream {
     own_db: String,
     /// The database each bare configured name means ([`Self::bare_name_database`]), read at open.
     bare_db: HashMap<String, String>,
-    /// Whether the server compares table and schema names without case (`lower_case_table_names` 1 or 2), read at open.
-    fold_names: bool,
     /// The server's `(server_uuid, gtid_executed)` at open, written into EVERY
     /// position this stream persists — the anchor wrote it and the commit save
     /// dropped it, so one captured transaction disarmed the foreign-server refusal.
@@ -109,6 +107,8 @@ pub(crate) struct MysqlChangeStream {
     grants_source: Option<(String, Option<TlsConfig>)>,
     /// `(file, position)` of the first privilege statement not yet answered by a re-read: consecutive statements share one.
     grants_pending: Option<(String, u64)>,
+    /// Whether the binlog is between a `BEGIN` and the commit that closes it: no privilege statement can sit inside.
+    in_transaction: bool,
 }
 
 impl MysqlChangeStream {
@@ -750,6 +750,22 @@ impl MysqlChangeStream {
             .map(std::sync::Arc::new)
     }
 
+    /// Track the transaction frame and mark a re-read for a statement that may change privileges: any statement outside a transaction that is not a frame.
+    fn note_statement(&mut self, raw: &[u8], log_pos: u64) {
+        match raw {
+            b"BEGIN" => self.in_transaction = true,
+            b"ROLLBACK" => self.in_transaction = false,
+            _ if self.readable.is_some()
+                && !self.in_transaction
+                && !is_transaction_control(raw) =>
+            {
+                self.grants_pending
+                    .get_or_insert_with(|| (self.file.clone(), log_pos));
+            }
+            _ => {}
+        }
+    }
+
     /// Re-read the grants at this event unless it lets a pending re-read wait.
     fn refuse_changed_grants_at(&mut self, data: &Option<EventData<'_>>) -> Result<()> {
         if defers_the_grants_re_read(data) {
@@ -830,20 +846,6 @@ impl MysqlChangeStream {
         Ok(Self::readable_on(&mut conn, tables, true)?.unwrap_or_default())
     }
 
-    /// Whether the server folds the case of table and schema names (`lower_case_table_names` other than 0).
-    fn fold_names_on(conn: &mut mysql::Conn) -> Result<bool> {
-        use mysql::prelude::Queryable as _;
-        let row: Option<(String, String)> = conn
-            .query_first("SHOW GLOBAL VARIABLES WHERE Variable_name = 'lower_case_table_names'")
-            .map_err(|e| {
-                crate::error::coded(
-                    crate::error::codes::SOURCE_QUERY_FAILED,
-                    format!("mysql cdc: reading lower_case_table_names: {e}"),
-                )
-            })?;
-        Ok(fold_names_from(row.as_ref().map(|(_, v)| v.as_str())))
-    }
-
     /// `SELECT DATABASE()`, empty for a db-less URL.
     fn own_db_on(conn: &mut mysql::Conn) -> String {
         use mysql::prelude::Queryable as _;
@@ -890,7 +892,6 @@ impl MysqlChangeStream {
             .flatten()
             .unwrap_or_default();
         let bare_db = Self::bare_name_databases(&mut conn, &own_db, &configured_tables);
-        let fold_names = Self::fold_names_on(&mut conn)?;
         conn.query_drop(format!(
             "SET SESSION net_write_timeout = {DUMP_WRITE_TIMEOUT_SECS}"
         ))
@@ -928,12 +929,12 @@ impl MysqlChangeStream {
             // name, and the wire-side comparison's fixed reference.
             own_db,
             bare_db,
-            fold_names,
             identity,
             row_image,
             readable: None,
             grants_source: None,
             grants_pending: None,
+            in_transaction: false,
         })
     }
 
@@ -1227,6 +1228,7 @@ impl MysqlChangeStream {
     /// Shared by the `Xid` and `Query('COMMIT')` arms: two commit markers, one
     /// framing. Duplicating it is how the second one drifts.
     fn close_transaction_at(&mut self, log_pos: u64, commit: Json) -> bool {
+        self.in_transaction = false;
         if commit_past_bound(&self.file, log_pos, self.bound.as_ref()) {
             self.tx.clear();
             self.past_bound = true;
@@ -1267,6 +1269,9 @@ impl MysqlChangeStream {
         let event_start = log_pos.saturating_sub(ev.header().event_size() as u64);
         let data = ev.read_data()?;
         self.refuse_changed_grants_at(&data)?;
+        if let Some(EventData::QueryEvent(qe)) = &data {
+            self.note_statement(qe.query_raw(), log_pos);
+        }
         match data {
             // ROTATE → the next binlog file; subsequent positions are in it.
             Some(EventData::RotateEvent(re)) => {
@@ -1325,11 +1330,7 @@ impl MysqlChangeStream {
                         let named =
                             resolved.map(|(tme, _)| (tme.database_name(), tme.table_name()));
                         let named = named.as_ref().map(|(d, t)| (d.as_ref(), t.as_ref()));
-                        if undecodable_event_is_ours(
-                            named,
-                            &self.configured_tables,
-                            self.fold_names,
-                        ) {
+                        if undecodable_event_is_ours(named, &self.configured_tables) {
                             return Err(undecodable_rows_event_refusal(other));
                         }
                         return Ok(true); // another table's — the routing filter would drop it anyway
@@ -1341,11 +1342,7 @@ impl MysqlChangeStream {
                 let schema = tme.database_name().to_string();
                 let table = tme.table_name().to_string();
                 let Some(image_names) = image_names else {
-                    if undecodable_event_is_ours(
-                        Some((&schema, &table)),
-                        &self.configured_tables,
-                        self.fold_names,
-                    ) {
+                    if undecodable_event_is_ours(Some((&schema, &table)), &self.configured_tables) {
                         return Err(nameless_rows_refusal(&schema, &table, &self.file, log_pos));
                     }
                     return Ok(true); // another table's — the routing filter would drop it anyway
@@ -1510,6 +1507,33 @@ impl MysqlChangeStream {
                     return Ok(false);
                 }
             }
+            // A commit that is NOT an Xid. `Xid` is written only by a
+            // transactional storage engine's own commit; a MyISAM/MEMORY write, and
+            // every `XA COMMIT`, close the transaction with a QUERY event instead.
+            // With no arm for it those rows fell to `_ => {}` and stayed buffered
+            // FOREVER: the run captured zero, exited 0, and the checkpoint never
+            // moved — silent, total, and indistinguishable from an idle source.
+            //
+            // `XA PREPARE` deliberately does NOT release: the transaction is not
+            // committed yet, and releasing there would publish rows a later
+            // `XA ROLLBACK` erases.
+            // A TRUNCATE is a QUERY event, never rows — so the rows path below
+            // never sees it and the `_ => {}` arm dropped it silently, leaving the
+            // destination holding rows the source no longer has. Table-addressed
+            // for the reason #281 measured: the binlog carries every table on the
+            // server, so refusing without asking whose relation it is would make
+            // one truncated table an outage for exports that never read it.
+            Some(EventData::QueryEvent(qe))
+                if truncate_target(&qe.query(), &qe.schema(), event_mode(&qe)).is_some_and(
+                    |(sc, tb)| undecodable_event_is_ours(Some((&sc, &tb)), &self.configured_tables),
+                ) =>
+            {
+                let (sc, tb) = truncate_target(&qe.query(), &qe.schema(), event_mode(&qe))
+                    .expect("just matched");
+                return Err(crate::source::cdc::checkpoint_identity::truncated(
+                    truncate_refusal_message(&sc, &tb),
+                ));
+            }
             // `XA PREPARE` arrives as a BINARY `XaPrepareLogEvent` on 5.7.7+, never
             // as a QueryEvent — so `is_commit_statement`'s "deliberately not XA
             // PREPARE" arm grades a string this reader cannot receive, and the
@@ -1531,7 +1555,6 @@ impl MysqlChangeStream {
                     undecodable_event_is_ours(
                         Some((&ev.schema, &ev.table)),
                         &self.configured_tables,
-                        self.fold_names,
                     )
                 }) {
                     return Err(crate::source::cdc::checkpoint_identity::undecodable(
@@ -1559,36 +1582,103 @@ impl MysqlChangeStream {
                 // but only after they had already corrupted that transaction's framing.
                 self.tx.clear();
             }
-            Some(EventData::QueryEvent(qe)) => {
-                let (sql, mode) = event_statement(&qe);
-                let verdict = query_verdict(
-                    &sql,
+            Some(EventData::QueryEvent(qe))
+                if refused_column_rename(
+                    self.readable.is_some(),
+                    &qe.query(),
                     &qe.schema(),
-                    mode,
-                    &QueryScope {
-                        projecting: self.readable.is_some(),
-                        fold: self.fold_names,
-                        configured: &self.configured_tables,
+                    event_mode(&qe),
+                    &self.configured_tables,
+                )
+                .is_some() =>
+            {
+                let (sc, tb) = refused_column_rename(
+                    true,
+                    &qe.query(),
+                    &qe.schema(),
+                    event_mode(&qe),
+                    &self.configured_tables,
+                )
+                .expect("just matched");
+                return Err(crate::source::cdc::checkpoint_identity::undecodable(
+                    column_rename_refusal_message(&sc, &tb),
+                ));
+            }
+            Some(EventData::QueryEvent(qe))
+                if refused_table_rename(
+                    self.readable.is_some(),
+                    &qe.query(),
+                    &qe.schema(),
+                    event_mode(&qe),
+                    &self.configured_tables,
+                )
+                .is_some() =>
+            {
+                let target = refused_table_rename(
+                    true,
+                    &qe.query(),
+                    &qe.schema(),
+                    event_mode(&qe),
+                    &self.configured_tables,
+                )
+                .flatten();
+                return Err(crate::source::cdc::checkpoint_identity::undecodable(
+                    table_rename_refusal_message(target.as_ref()),
+                ));
+            }
+            Some(EventData::QueryEvent(qe))
+                if drop_table_targets(&qe.query(), &qe.schema(), event_mode(&qe)).is_some_and(
+                    |ts| {
+                        ts.iter().any(|t| {
+                            undecodable_event_is_ours(
+                                t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+                                &self.configured_tables,
+                            )
+                        })
                     },
-                );
-                if let Some(refusal) = refusal_of(&verdict) {
-                    return Err(refusal);
-                }
-                match verdict {
-                    QueryVerdict::Privilege => {
-                        self.grants_pending
-                            .get_or_insert_with(|| (self.file.clone(), log_pos));
-                    }
-                    QueryVerdict::Commit => {
-                        let commit = json!({"at": event_start, "query": qe.query()});
-                        return Ok(self.close_transaction_at(log_pos, commit));
-                    }
-                    QueryVerdict::Truncated(..)
-                    | QueryVerdict::ColumnRenamed(..)
-                    | QueryVerdict::TableRenamed(..)
-                    | QueryVerdict::Dropped(..)
-                    | QueryVerdict::StatementWrite(..)
-                    | QueryVerdict::Pass => {}
+                ) =>
+            {
+                let targets = drop_table_targets(&qe.query(), &qe.schema(), event_mode(&qe))
+                    .unwrap_or_default();
+                let ours = targets.iter().find(|t| {
+                    undecodable_event_is_ours(
+                        t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+                        &self.configured_tables,
+                    )
+                });
+                return Err(crate::source::cdc::checkpoint_identity::truncated(
+                    drop_refusal_message(ours.and_then(|t| t.as_ref())),
+                ));
+            }
+            Some(EventData::QueryEvent(qe))
+                if statement_dml_target(&qe.query(), &qe.schema(), event_mode(&qe))
+                    .is_some_and(|t| {
+                        undecodable_event_is_ours(
+                            t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+                            &self.configured_tables,
+                        )
+                    }) =>
+            {
+                let target =
+                    statement_dml_target(&qe.query(), &qe.schema(), event_mode(&qe)).flatten();
+                return Err(crate::source::cdc::checkpoint_identity::undecodable(
+                    statement_dml_refusal_message(target.as_ref()),
+                ));
+            }
+            Some(EventData::QueryEvent(qe))
+                if self.readable.is_some()
+                    && statement_mentions(qe.query_raw(), &self.configured_tables).is_some() =>
+            {
+                let table = statement_mentions(qe.query_raw(), &self.configured_tables)
+                    .expect("just matched");
+                return Err(crate::source::cdc::checkpoint_identity::undecodable(
+                    statement_mention_refusal_message(table),
+                ));
+            }
+            Some(EventData::QueryEvent(qe)) if is_commit_statement(&qe.query()) => {
+                let commit = json!({"at": event_start, "query": qe.query()});
+                if !self.close_transaction_at(log_pos, commit) {
+                    return Ok(false);
                 }
             }
             // #200-2: a compressed transaction. `binlog_transaction_compression`
@@ -1697,24 +1787,12 @@ fn boundary_marker(op: ChangeOp, position: &Position) -> ChangeEvent {
 pub(crate) fn undecodable_event_is_ours(
     resolved: Option<(&str, &str)>,
     configured: &[String],
-    fold: bool,
 ) -> bool {
     if configured.is_empty() {
         return true;
     }
     match resolved {
         None => true,
-        Some((schema, table)) if fold => {
-            let (schema, table) = (schema.to_lowercase(), table.to_lowercase());
-            configured.iter().any(|c| {
-                crate::source::cdc::sink::table_matches(
-                    crate::source::cdc::CdcEngine::Mysql,
-                    &c.to_lowercase(),
-                    &schema,
-                    &table,
-                )
-            })
-        }
         Some((schema, table)) => configured.iter().any(|c| {
             crate::source::cdc::sink::table_matches(
                 crate::source::cdc::CdcEngine::Mysql,
@@ -1724,11 +1802,6 @@ pub(crate) fn undecodable_event_is_ours(
             )
         }),
     }
-}
-
-/// Whether a `lower_case_table_names` value folds names: any value but `0`; an absent value folds, because over-refusing is recoverable and a missed rename is not.
-fn fold_names_from(value: Option<&str>) -> bool {
-    value.is_none_or(|v| v.trim() != "0")
 }
 
 fn classify_rows_event(ev: &RowsEventData<'_>) -> UndecodableRows {
@@ -2001,25 +2074,9 @@ pub(crate) fn classify_mysql_routing(
     }
 }
 
-/// The statement of a QUERY event as its client character set spells it, and the `sql_mode` it was logged under.
-fn event_statement<'a>(qe: &'a QueryEvent<'_>) -> (std::borrow::Cow<'a, str>, SqlMode) {
-    statement_of(qe.query_raw(), qe.status_vars_raw())
-}
-
-/// The statement bytes read in the character set the status variables name, and the `sql_mode` among them.
-fn statement_of<'a>(raw: &'a [u8], status_vars: &[u8]) -> (std::borrow::Cow<'a, str>, SqlMode) {
-    (
-        client_text(raw, charset_of(status_vars)),
-        mode_of(status_vars),
-    )
-}
-
-/// The character set id the client of a QUERY event sent its statement in, among its raw status variables.
-fn charset_of(status_vars: &[u8]) -> Option<u16> {
-    StatusVarsIterator::new(status_vars).find_map(|var| match var.get_value() {
-        Ok(StatusVarVal::Charset { charset_client, .. }) => Some(charset_client),
-        _ => None,
-    })
+/// The `sql_mode` a QUERY event was logged under; the default lexing when the event carries none.
+fn event_mode(qe: &QueryEvent<'_>) -> SqlMode {
+    mode_of(qe.status_vars_raw())
 }
 
 /// The `sql_mode` among the raw status variables of a QUERY event; the default lexing when there is none.
@@ -2181,7 +2238,7 @@ pub(crate) fn column_rename_target(
             } else if alter_word(&tokens, start, "change") {
                 let from = start + 1 + usize::from(alter_word(&tokens, start + 1, "column"));
                 match (alter_name(&tokens, from), alter_name(&tokens, from + 1)) {
-                    (Some(old), Some(new)) => old != new,
+                    (Some(old), Some(new)) => !old.eq_ignore_ascii_case(&new),
                     _ => false,
                 }
             } else {
@@ -2191,16 +2248,14 @@ pub(crate) fn column_rename_target(
         .then_some(table)
 }
 
-/// Every table a `RENAME TABLE[S]` or an `ALTER TABLE ... RENAME [TO|AS] new` QUERY event touches, source and target (`None` for a name that cannot be read); `None` when the event renames no table.
+/// Every table a `RENAME TABLE` or an `ALTER TABLE ... RENAME [TO|AS] new` QUERY event touches, source and target (`None` for a name that cannot be read); `None` when the event renames no table.
 pub(crate) fn renamed_tables(
     sql: &str,
     event_db: &str,
     mode: SqlMode,
 ) -> Option<Vec<Option<(String, String)>>> {
     let tokens = alter_tokens(sql, mode)?;
-    if alter_word(&tokens, 0, "rename")
-        && (alter_word(&tokens, 1, "table") || alter_word(&tokens, 1, "tables"))
-    {
+    if alter_word(&tokens, 0, "rename") && alter_word(&tokens, 1, "table") {
         let (mut out, mut at) = (Vec::new(), 2);
         loop {
             let Some((from, next)) = alter_table_name(&tokens, at, event_db) else {
@@ -2231,10 +2286,7 @@ pub(crate) fn renamed_tables(
             continue;
         }
         let mut from = start + 1;
-        if alter_word(&tokens, from, "to")
-            || alter_word(&tokens, from, "as")
-            || tokens.get(from) == Some(&AlterToken::Punct('='))
-        {
+        if alter_word(&tokens, from, "to") || alter_word(&tokens, from, "as") {
             from += 1;
         } else if ["column", "index", "key"]
             .iter()
@@ -2247,127 +2299,38 @@ pub(crate) fn renamed_tables(
     (out.len() > 1).then_some(out)
 }
 
-/// A name with each run of non-ASCII characters collapsed to one marker, lowercased when the server folds case.
-fn name_shape(name: &str, fold: bool) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut in_run = false;
-    for c in name.chars() {
-        if c.is_ascii() {
-            in_run = false;
-            out.push(if fold { c.to_ascii_lowercase() } else { c });
-        } else {
-            if !in_run {
-                out.push(UNPLACED);
-            }
-            in_run = true;
-        }
-    }
-    out
-}
-
-/// Whether a name holding bytes the reader could not place can be a captured table: it can when some configured table has the same ASCII skeleton.
-fn unplaced_name_is_ours(schema: &str, table: &str, scope: &QueryScope<'_>) -> bool {
-    let shaped: Vec<String> = scope
-        .configured
-        .iter()
-        .map(|c| name_shape(c, scope.fold))
-        .collect();
-    let name = (
-        name_shape(schema, scope.fold),
-        name_shape(table, scope.fold),
-    );
-    undecodable_event_is_ours(Some((&name.0, &name.1)), &shaped, false)
-}
-
-/// What a QUERY event means to the reader; the table of a refusal is `None` when its name could not be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum QueryVerdict {
-    Truncated(String, String),
-    ColumnRenamed(String, String),
-    TableRenamed(Option<(String, String)>),
-    Dropped(Option<(String, String)>),
-    StatementWrite(Option<(String, String)>),
-    Privilege,
-    Commit,
-    Pass,
-}
-
-/// What a run knows when it judges a QUERY event: whether it projects columns, whether the server folds name case, and the tables it captures.
-pub(crate) struct QueryScope<'a> {
-    pub(crate) projecting: bool,
-    pub(crate) fold: bool,
-    pub(crate) configured: &'a [String],
-}
-
-/// The verdict of a QUERY event: the first of truncate, column rename, table rename, drop, statement write, privilege change, commit that applies.
-pub(crate) fn query_verdict(
+/// The `(schema, table)` of a column rename a run that projects (`columns_from: grants`) refuses: one met on a table the run captures.
+fn refused_column_rename(
+    projecting: bool,
     sql: &str,
     event_db: &str,
     mode: SqlMode,
-    scope: &QueryScope<'_>,
-) -> QueryVerdict {
-    let ours = |t: &(String, String)| {
-        if t.0.contains(UNPLACED) || t.1.contains(UNPLACED) {
-            unplaced_name_is_ours(&t.0, &t.1, scope)
-        } else {
-            undecodable_event_is_ours(Some((&t.0, &t.1)), scope.configured, scope.fold)
-        }
-    };
-    let slot = |t: &Option<(String, String)>| t.as_ref().is_none_or(ours);
-    if let Some((sc, tb)) = truncate_target(sql, event_db, mode).filter(ours) {
-        return QueryVerdict::Truncated(sc, tb);
+    configured: &[String],
+) -> Option<(String, String)> {
+    if !projecting {
+        return None;
     }
-    if scope.projecting {
-        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode).filter(ours) {
-            return QueryVerdict::ColumnRenamed(sc, tb);
-        }
-        if let Some(touched) =
-            renamed_tables(sql, event_db, mode).and_then(|ts| ts.into_iter().find(slot))
-        {
-            return QueryVerdict::TableRenamed(touched);
-        }
-    }
-    if let Some(dropped) =
-        drop_table_targets(sql, event_db, mode).and_then(|ts| ts.into_iter().find(slot))
-    {
-        return QueryVerdict::Dropped(dropped);
-    }
-    if let Some(written) = statement_dml_target(sql, event_db, mode).filter(slot) {
-        return QueryVerdict::StatementWrite(written);
-    }
-    if is_privilege_statement(sql, mode) {
-        QueryVerdict::Privilege
-    } else if is_commit_statement(sql) {
-        QueryVerdict::Commit
-    } else {
-        QueryVerdict::Pass
-    }
+    column_rename_target(sql, event_db, mode)
+        .filter(|(sc, tb)| undecodable_event_is_ours(Some((sc, tb)), configured))
 }
 
-/// The refusal a verdict that stops the run raises, `None` for one that lets the event pass.
-fn refusal_of(verdict: &QueryVerdict) -> Option<anyhow::Error> {
-    let (truncating, message) = refusal_parts(verdict)?;
-    Some(if truncating {
-        crate::source::cdc::checkpoint_identity::truncated(message)
-    } else {
-        crate::source::cdc::checkpoint_identity::undecodable(message)
+/// The table a rename a run that projects refuses touches: `Some(None)` when a name could not be read, `None` when the run does not refuse the event.
+fn refused_table_rename(
+    projecting: bool,
+    sql: &str,
+    event_db: &str,
+    mode: SqlMode,
+    configured: &[String],
+) -> Option<Option<(String, String)>> {
+    if !projecting {
+        return None;
+    }
+    renamed_tables(sql, event_db, mode)?.into_iter().find(|t| {
+        undecodable_event_is_ours(
+            t.as_ref().map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+            configured,
+        )
     })
-}
-
-/// Whether the refusal of a verdict is a `SOURCE_CDC_TRUNCATED` one, and its message; `None` for a verdict that stops nothing.
-fn refusal_parts(verdict: &QueryVerdict) -> Option<(bool, String)> {
-    match verdict {
-        QueryVerdict::Truncated(sc, tb) => Some((true, truncate_refusal_message(sc, tb))),
-        QueryVerdict::ColumnRenamed(sc, tb) => Some((false, column_rename_refusal_message(sc, tb))),
-        QueryVerdict::TableRenamed(target) => {
-            Some((false, table_rename_refusal_message(target.as_ref())))
-        }
-        QueryVerdict::Dropped(target) => Some((true, drop_refusal_message(target.as_ref()))),
-        QueryVerdict::StatementWrite(target) => {
-            Some((false, statement_dml_refusal_message(target.as_ref())))
-        }
-        QueryVerdict::Privilege | QueryVerdict::Commit | QueryVerdict::Pass => None,
-    }
 }
 
 /// Refuse a captured table renamed under `columns_from: grants`: privileges stay with the name the table had.
@@ -2401,14 +2364,14 @@ pub(crate) fn column_rename_refusal_message(schema: &str, table: &str) -> String
     )
 }
 
-/// The tables a `DROP TABLE[S]` QUERY event removes (`None` for an unreadable name); `None` when the event is not one.
+/// The tables a `DROP TABLE` QUERY event removes (`None` for an unreadable name); `None` when the event is not one.
 pub(crate) fn drop_table_targets(
     sql: &str,
     event_db: &str,
     mode: SqlMode,
 ) -> Option<Vec<Option<(String, String)>>> {
     let toks = significant(sql, mode);
-    if !(word_is(&toks, 0, "drop") && (word_is(&toks, 1, "table") || word_is(&toks, 1, "tables"))) {
+    if !(word_is(&toks, 0, "drop") && word_is(&toks, 1, "table")) {
         return None;
     }
     let at = 2 + 2 * usize::from(word_is(&toks, 2, "if") && word_is(&toks, 3, "exists"));
@@ -2623,9 +2586,7 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
 /// Whether a pending grants re-read may wait past this event.
 fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     match data {
-        Some(EventData::QueryEvent(qe)) => {
-            statement_is_privilege(qe.query_raw(), qe.status_vars_raw())
-        }
+        Some(EventData::QueryEvent(qe)) => !is_transaction_control(qe.query_raw()),
         Some(
             EventData::GtidEvent(_)
             | EventData::AnonymousGtidEvent(_)
@@ -2639,30 +2600,47 @@ fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     }
 }
 
-/// Whether the statement bytes, read in the character set the status variables name, change what an account may read.
-fn statement_is_privilege(raw: &[u8], status_vars: &[u8]) -> bool {
-    let (sql, mode) = statement_of(raw, status_vars);
-    is_privilege_statement(&sql, mode)
+/// A statement the server writes to frame a transaction, in the exact form it writes it.
+pub(crate) fn is_transaction_control(raw: &[u8]) -> bool {
+    matches!(raw, b"BEGIN" | b"COMMIT" | b"ROLLBACK")
+        || [
+            &b"XA START "[..],
+            b"XA END ",
+            b"XA PREPARE ",
+            b"XA COMMIT ",
+            b"XA ROLLBACK ",
+            b"SAVEPOINT ",
+            b"ROLLBACK TO ",
+        ]
+        .iter()
+        .any(|prefix| raw.starts_with(prefix))
 }
 
-/// A statement that can change what an account may read.
-fn is_privilege_statement(sql: &str, mode: SqlMode) -> bool {
-    let mut w = tokens(sql, mode).into_iter().filter_map(|t| match t {
-        Tok::Blank(_) => None,
-        Tok::Word(w) => Some(Some(w.to_ascii_uppercase())),
-        _ => Some(None),
-    });
-    let mut next = || w.next().flatten();
-    matches!(
-        (next().as_deref(), next().as_deref(), next().as_deref()),
-        (Some("GRANT" | "REVOKE"), ..)
-            | (
-                Some("CREATE" | "DROP" | "ALTER" | "RENAME"),
-                Some("USER" | "ROLE"),
-                _
-            )
-            | (Some("SET"), Some("DEFAULT"), Some("ROLE"))
-            | (Some("FLUSH"), Some("PRIVILEGES"), _)
+/// The first captured table whose bare name occurs in the statement bytes in any case, none for a frame of a transaction.
+pub(crate) fn statement_mentions<'a>(raw: &[u8], configured: &'a [String]) -> Option<&'a str> {
+    if is_transaction_control(raw) {
+        return None;
+    }
+    configured.iter().map(String::as_str).find(|name| {
+        let bare = name.rsplit('.').next().unwrap_or(name).as_bytes();
+        !bare.is_empty()
+            && raw
+                .windows(bare.len())
+                .any(|window| window.eq_ignore_ascii_case(bare))
+    })
+}
+
+/// Refuse a statement that names a captured table under `columns_from: grants`: its effect on the columns the account may read is not read from its text.
+pub(crate) fn statement_mention_refusal_message(table: &str) -> String {
+    format!(
+        "mysql cdc: a statement in the log being read names the captured table `{table}`, \
+         under `columns_from: grants`. Its text is not read to tell a rename of the table or of \
+         a column (privileges stay with the name and do not follow a rename), a drop or a \
+         change of the columns, from a statement that leaves them as they are, so the rows \
+         logged before it and after it could be read through different columns. Nothing past \
+         the statement was delivered. GRANT SELECT on the columns the export needs if they \
+         are missing, then: {}",
+        crate::source::cdc::checkpoint_identity::RECOVER
     )
 }
 
@@ -2704,16 +2682,13 @@ fn commit_past_bound(file: &str, pos: u64, bound: Option<&(String, u64)>) -> boo
     let Some((bound_file, bound_pos)) = bound else {
         return false;
     };
-    let (Some(cur), Some(bnd)) = (binlog_file_ordinal(file), binlog_file_ordinal(bound_file))
-    else {
+    let (Some(cur), Some(bnd)) = (
+        crate::source::cdc::order::binlog_ordinal(file),
+        crate::source::cdc::order::binlog_ordinal(bound_file),
+    ) else {
         return false;
     };
     cur > bnd || (cur == bnd && pos > *bound_pos)
-}
-
-/// The numeric suffix of a binlog file name (`mysql-bin.000042` → 42).
-pub(crate) fn binlog_file_ordinal(name: &str) -> Option<u64> {
-    name.rsplit_once('.')?.1.parse().ok()
 }
 
 /// Decode a binlog row's cells to typed [`RivetValue`]s (structural — no string
@@ -2904,58 +2879,6 @@ mod tests {
     /// the re-read stops at), on a refusal that can legitimately persist for
     /// hours. Each pinned phrase below is a CLAIM the code makes true; drift the
     /// message and this names which promise broke.
-    #[test]
-    fn privilege_statements_are_told_from_every_other_statement() {
-        for sql in [
-            "GRANT SELECT (id) ON rivet.t TO 'u'@'%'",
-            "  revoke select (pass) on rivet.t from u",
-            "/* xid=1 */ /* note */ GRANT r TO u",
-            "/*!80000 REVOKE SELECT (pass) ON rivet.t FROM u */",
-            "/*!REVOKE SELECT (pass) ON rivet.t FROM u */",
-            "/*!80000 -- note\nREVOKE SELECT (pass) ON rivet.t FROM u */",
-            "/*!80000 # note\nREVOKE SELECT (pass) ON rivet.t FROM u */",
-            "/*!80000 /* note */ REVOKE SELECT (pass) ON rivet.t FROM u */",
-            "-- note\nGRANT r TO u",
-            "# note\nGRANT r TO u",
-            "--\tnote\nGRANT r TO u",
-            "/*!80000 GRANT SELECT (id) ON rivet.t TO u */",
-            "/* xid=1 */ /*!50000 CREATE USER u */",
-            "/*!80000 FLUSH */ PRIVILEGES",
-            "CREATE USER 'u'@'%' IDENTIFIED BY 'p'",
-            "drop role r",
-            "ALTER USER u DEFAULT ROLE r",
-            "RENAME USER a TO b",
-            "SET DEFAULT ROLE r TO u",
-            "FLUSH PRIVILEGES;",
-        ] {
-            assert!(is_privilege_statement(sql, SqlMode::default()), "{sql}");
-        }
-        for sql in [
-            "",
-            "/* unterminated",
-            "BEGIN",
-            "COMMIT",
-            "CREATE TABLE grants (id INT)",
-            "INSERT INTO grant_log VALUES (1)",
-            "FLUSH TABLES",
-            "SET ROLE r",
-            "ALTER TABLE t ADD COLUMN revoke_at INT",
-            "/* GRANT */ UPDATE t SET a = 1",
-            "/*+ SET_VAR(x=1) */ UPDATE t SET a = 1",
-            "/*!80000 UPDATE t SET revoke_at = 1 */",
-            "-- GRANT r TO u\nUPDATE t SET a = 1",
-            "# GRANT r TO u\nUPDATE t SET a = 1",
-            "/*!80000 -- GRANT r TO u\nUPDATE t SET a = 1 */",
-            "'GRANT' r TO u",
-            "\"REVOKE\" x FROM u",
-            "`GRANT` r TO u",
-            "/*! unterminated",
-            "ГРАНТ", // allow-cyrillic
-        ] {
-            assert!(!is_privilege_statement(sql, SqlMode::default()), "{sql}");
-        }
-    }
-
     #[test]
     fn the_xa_spill_refusal_names_the_stop_the_loop_and_the_ladder() {
         let msg = xa_prepare_spilled_tail_refusal_message(7);
@@ -3190,10 +3113,6 @@ mod tests {
         ] {
             assert_eq!(t(renames), orders, "{renames}");
         }
-        assert_eq!(
-            t("ALTER TABLE orders CHANGE name NAME VARCHAR(30)"),
-            Some(("shop".to_string(), "orders".to_string()))
-        );
         let other = t("ALTER TABLE `odd.name` RENAME COLUMN a TO b");
         assert_eq!(other, Some(("shop".to_string(), "odd.name".to_string())));
         assert_eq!(
@@ -3205,7 +3124,7 @@ mod tests {
             "ALTER TABLE orders DROP COLUMN name",
             "ALTER TABLE orders RENAME TO orders2",
             "ALTER TABLE orders RENAME INDEX a TO b",
-            "ALTER TABLE orders CHANGE name name VARCHAR(30)",
+            "ALTER TABLE orders CHANGE name NAME VARCHAR(30)",
             "ALTER TABLE orders MODIFY COLUMN name VARCHAR(30)",
             "ALTER TABLE orders ADD COLUMN c VARCHAR(5) COMMENT 'RENAME COLUMN a TO b'",
             "ALTER TABLE orders ADD (a INT, change INT)",
@@ -3349,7 +3268,6 @@ mod tests {
             ),
             ("ALTER TABLE s.t CHANGE a b INT", at("s", "t")),
             ("ALTER TABLE t CHANGE COLUMN a b INT", at("shop", "t")),
-            ("ALTER TABLE t CHANGE COLUMN a A INT", at("shop", "t")),
             ("ALTER TABLE t CHANGE `a` `b` INT", at("shop", "t")),
             ("ALTER TABLE t ADD x INT, CHANGE a b INT", at("shop", "t")),
             (
@@ -3433,6 +3351,7 @@ mod tests {
         }
         for sql in [
             "ALTER TABLE t CHANGE a a INT",
+            "ALTER TABLE t CHANGE COLUMN a A INT",
             "ALTER TABLE t CHANGE `a` a VARCHAR(5)",
             "ALTER TABLE t CHANGE",
             "ALTER TABLE t CHANGE COLUMN",
@@ -3464,48 +3383,64 @@ mod tests {
         }
     }
 
-    fn verdict_of(sql: &str, db: &str, projecting: bool, cfg: &[String]) -> QueryVerdict {
-        query_verdict(
-            sql,
-            db,
-            SqlMode::default(),
-            &QueryScope {
-                projecting,
-                fold: false,
-                configured: cfg,
-            },
-        )
-    }
-
     #[test]
-    fn a_run_refuses_a_column_rename_only_when_it_projects_and_captures_the_table() {
+    fn a_run_refuses_a_rename_only_when_it_projects_and_captures_the_table() {
         let rename = "ALTER TABLE orders RENAME COLUMN a TO b";
         let only = |t: &str| vec![t.to_string()];
-        let renamed = QueryVerdict::ColumnRenamed("shop".into(), "orders".into());
+        let orders = Some(("shop".to_string(), "orders".to_string()));
         assert_eq!(
-            verdict_of(rename, "shop", true, &only("shop.orders")),
-            renamed
-        );
-        assert_eq!(verdict_of(rename, "shop", true, &[]), renamed);
-        for (projecting, db, cfg) in [
-            (false, "shop", only("shop.orders")),
-            (true, "shop", only("shop.other")),
-            (true, "other", only("shop.orders")),
-        ] {
-            assert_eq!(
-                verdict_of(rename, db, projecting, &cfg),
-                QueryVerdict::Pass,
-                "{projecting} {db} {cfg:?}"
-            );
-        }
-        assert_eq!(
-            verdict_of(
-                "ALTER TABLE orders ADD x INT",
-                "shop",
+            refused_column_rename(
                 true,
+                rename,
+                "shop",
+                SqlMode::default(),
                 &only("shop.orders")
             ),
-            QueryVerdict::Pass
+            orders
+        );
+        assert_eq!(
+            refused_column_rename(true, rename, "shop", SqlMode::default(), &[]),
+            orders
+        );
+        assert_eq!(
+            refused_column_rename(
+                false,
+                rename,
+                "shop",
+                SqlMode::default(),
+                &only("shop.orders")
+            ),
+            None
+        );
+        assert_eq!(
+            refused_column_rename(
+                true,
+                rename,
+                "shop",
+                SqlMode::default(),
+                &only("shop.other")
+            ),
+            None
+        );
+        assert_eq!(
+            refused_column_rename(
+                true,
+                rename,
+                "other",
+                SqlMode::default(),
+                &only("shop.orders")
+            ),
+            None
+        );
+        assert_eq!(
+            refused_column_rename(
+                true,
+                "ALTER TABLE orders ADD x INT",
+                "shop",
+                SqlMode::default(),
+                &only("shop.orders")
+            ),
+            None
         );
     }
 
@@ -3700,27 +3635,15 @@ mod tests {
     fn a_run_refuses_a_table_rename_only_when_it_projects_and_captures_a_table_it_touches() {
         let only = |t: &str| vec![t.to_string()];
         let swap = "RENAME TABLE orders TO orders_old, orders_new TO orders";
-        let at = |t: &str| QueryVerdict::TableRenamed(Some(("shop".to_string(), t.to_string())));
+        let orders = Some(Some(("shop".to_string(), "orders".to_string())));
         let refuse = |projecting: bool, sql: &str, db: &str, cfg: &[String]| {
-            verdict_of(sql, db, projecting, cfg)
+            refused_table_rename(projecting, sql, db, SqlMode::default(), cfg)
         };
-        assert_eq!(
-            refuse(true, swap, "shop", &only("shop.orders")),
-            at("orders")
-        );
-        assert_eq!(refuse(true, swap, "shop", &[]), at("orders"));
-        assert_eq!(
-            refuse(false, swap, "shop", &only("shop.orders")),
-            QueryVerdict::Pass
-        );
-        assert_eq!(
-            refuse(true, swap, "shop", &only("shop.other")),
-            QueryVerdict::Pass
-        );
-        assert_eq!(
-            refuse(true, swap, "other", &only("shop.orders")),
-            QueryVerdict::Pass
-        );
+        assert_eq!(refuse(true, swap, "shop", &only("shop.orders")), orders);
+        assert_eq!(refuse(true, swap, "shop", &[]), orders);
+        assert_eq!(refuse(false, swap, "shop", &only("shop.orders")), None);
+        assert_eq!(refuse(true, swap, "shop", &only("shop.other")), None);
+        assert_eq!(refuse(true, swap, "other", &only("shop.orders")), None);
         assert_eq!(
             refuse(
                 true,
@@ -3728,7 +3651,7 @@ mod tests {
                 "shop",
                 &only("shop.orders")
             ),
-            at("orders"),
+            orders,
             "a table renamed onto a captured name is touched"
         );
         assert_eq!(
@@ -3738,12 +3661,12 @@ mod tests {
                 "shop",
                 &only("shop.orders_old")
             ),
-            at("orders_old"),
+            Some(Some(("shop".to_string(), "orders_old".to_string()))),
             "a table renamed from a captured name is touched"
         );
         assert_eq!(
             refuse(true, "RENAME TABLE a TO", "shop", &only("shop.orders")),
-            QueryVerdict::TableRenamed(None),
+            Some(None),
             "a name this reader cannot read is refused, as every other statement's"
         );
         assert_eq!(
@@ -3753,16 +3676,7 @@ mod tests {
                 "shop",
                 &only("shop.orders")
             ),
-            QueryVerdict::ColumnRenamed("shop".into(), "orders".into())
-        );
-        assert_eq!(
-            refuse(
-                true,
-                "ALTER TABLE orders RENAME INDEX a TO b",
-                "shop",
-                &only("shop.orders")
-            ),
-            QueryVerdict::Pass
+            None
         );
     }
 
@@ -4287,23 +4201,23 @@ mod tests {
         let cfg = vec!["rivet.orders".to_string()];
 
         assert!(
-            undecodable_event_is_ours(Some(("rivet", "orders")), &cfg, false),
+            undecodable_event_is_ours(Some(("rivet", "orders")), &cfg),
             "our own table must refuse — skipping loses the change while the \
              transaction commits and the checkpoint advances past it"
         );
         assert!(
-            !undecodable_event_is_ours(Some(("rivet", "audit")), &cfg, false),
+            !undecodable_event_is_ours(Some(("rivet", "audit")), &cfg),
             "another table must NOT fail this run: the routing filter would have \
              dropped it anyway, so refusing turns one PARTIAL_JSON table into a \
              server-wide outage"
         );
         assert!(
-            undecodable_event_is_ours(None, &cfg, false),
+            undecodable_event_is_ours(None, &cfg),
             "an UNRESOLVED table must refuse — guessing 'not mine' with no TABLE_MAP \
              is the silent drop this path exists to prevent"
         );
         assert!(
-            undecodable_event_is_ours(Some(("rivet", "audit")), &[], false),
+            undecodable_event_is_ours(Some(("rivet", "audit")), &[]),
             "`rivet cdc` with no --table captures whatever the stream emits, so \
              every event is ours"
         );
@@ -4311,7 +4225,7 @@ mod tests {
         // routes it — the guard must ask the SAME question the router does, or it
         // protects a set the run does not actually capture.
         assert!(
-            undecodable_event_is_ours(Some(("otherdb", "orders")), &["orders".to_string()], false),
+            undecodable_event_is_ours(Some(("otherdb", "orders")), &["orders".to_string()]),
             "a bare config name matches any schema, like sink::table_matches"
         );
     }
@@ -4484,16 +4398,6 @@ mod tests {
             99,
             Some(&("garbage".to_string(), 0))
         ));
-    }
-
-    #[test]
-    fn binlog_file_ordinal_parses_the_numeric_suffix() {
-        assert_eq!(binlog_file_ordinal("mysql-bin.000042"), Some(42));
-        assert_eq!(binlog_file_ordinal("binlog.1000000"), Some(1000000));
-        // Dotted basenames take the LAST dot (rsplit).
-        assert_eq!(binlog_file_ordinal("my.replica.000007"), Some(7));
-        assert_eq!(binlog_file_ordinal("no-suffix"), None);
-        assert_eq!(binlog_file_ordinal("binlog.notanum"), None);
     }
 
     /// The dump thread must outlive a long store flush: its session `net_write_timeout` is
@@ -4741,741 +4645,78 @@ mod tests {
         }
     }
 
-    fn only(t: &str) -> Vec<String> {
-        vec![t.to_string()]
-    }
-
-    fn folded_verdict_of(sql: &str, db: &str, cfg: &[String], fold: bool) -> QueryVerdict {
-        query_verdict(
-            sql,
-            db,
-            SqlMode::default(),
-            &QueryScope {
-                projecting: true,
-                fold,
-                configured: cfg,
-            },
-        )
-    }
-
-    fn pair(d: &str, t: &str) -> Option<(String, String)> {
-        Some((d.to_string(), t.to_string()))
-    }
-
     #[test]
-    fn a_table_rename_is_read_from_the_plural_and_the_equals_spellings() {
-        let t = |sql: &str| renamed_tables(sql, "shop", SqlMode::default());
-        assert_eq!(
-            t("RENAME TABLES orders TO orders_old"),
-            Some(vec![pair("shop", "orders"), pair("shop", "orders_old")])
-        );
-        assert_eq!(
-            t("rename tables a TO b, c.d to e.f"),
-            Some(vec![
-                pair("shop", "a"),
-                pair("shop", "b"),
-                pair("c", "d"),
-                pair("e", "f")
-            ])
-        );
-        assert_eq!(
-            t("ALTER TABLE orders RENAME = orders_old"),
-            Some(vec![pair("shop", "orders"), pair("shop", "orders_old")])
-        );
-        assert_eq!(
-            t("ALTER TABLE orders ADD COLUMN k INT, RENAME = archive.orders"),
-            Some(vec![pair("shop", "orders"), pair("archive", "orders")])
-        );
-        for sql in [
-            "RENAME TABLESPACE a TO b",
-            "RENAME USERS a TO b",
-            "ALTER TABLE orders RENAME COLUMN a TO b",
-            "ALTER TABLE orders RENAME INDEX a TO b",
-            "ALTER TABLE orders RENAME KEY a TO b",
-            "ALTER TABLE orders COMMENT = 'x', ADD COLUMN k INT",
+    fn a_frame_of_a_transaction_is_told_by_its_exact_text_only() {
+        for frame in [
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "XA START X'31',X'',1",
+            "XA END X'31',X'',1",
+            "XA PREPARE X'31',X'',1",
+            "XA COMMIT X'31',X'',1",
+            "XA ROLLBACK X'31',X'',1",
+            "SAVEPOINT `orders`",
+            "ROLLBACK TO `orders`",
         ] {
-            assert_eq!(t(sql), None, "{sql}");
+            assert!(is_transaction_control(frame.as_bytes()), "{frame}");
         }
-    }
-
-    #[test]
-    fn a_drop_is_read_from_the_plural_spelling() {
-        let t = |sql: &str| drop_table_targets(sql, "shop", SqlMode::default());
-        assert_eq!(
-            t("DROP TABLES IF EXISTS a, b.c"),
-            Some(vec![pair("shop", "a"), pair("b", "c")])
-        );
-        assert_eq!(t("drop tables orders"), Some(vec![pair("shop", "orders")]));
-        assert_eq!(t("DROP TABLE orders"), Some(vec![pair("shop", "orders")]));
-        for sql in [
-            "DROP TABLESPACE ts",
-            "DROP VIEW v",
-            "DROP DATABASE shop",
+        for text in [
             "",
+            "begin",
+            "commit",
+            "BEGIN ",
+            "COMMIT;",
+            "/* x */ COMMIT",
+            "BEGIN WORK",
+            "XA",
+            "SAVEPOINT",
+            "ROLLBACK WORK",
+            "GRANT SELECT ON t TO u",
+            "ALTER TABLE orders ADD INDEX i (id)",
         ] {
-            assert_eq!(t(sql), None, "{sql}");
+            assert!(!is_transaction_control(text.as_bytes()), "{text}");
         }
     }
 
     #[test]
-    fn a_name_in_another_case_is_ours_exactly_when_the_server_folds_names() {
-        let cfg = only("shop.orders");
-        let ours = |resolved: Option<(&str, &str)>, cfg: &[String], fold: bool| {
-            undecodable_event_is_ours(resolved, cfg, fold)
-        };
-        assert!(ours(Some(("shop", "orders")), &cfg, false));
-        assert!(ours(Some(("shop", "orders")), &cfg, true));
-        assert!(!ours(Some(("SHOP", "orders")), &cfg, false));
-        assert!(!ours(Some(("shop", "ORDERS")), &cfg, false));
-        assert!(ours(Some(("SHOP", "orders")), &cfg, true));
-        assert!(ours(Some(("shop", "ORDERS")), &cfg, true));
-        assert!(ours(Some(("shop", "orders")), &only("SHOP.Orders"), true));
-        assert!(!ours(Some(("shop", "orders")), &only("SHOP.Orders"), false));
-        for fold in [false, true] {
-            assert!(!ours(Some(("shop", "other")), &cfg, fold), "{fold}");
-            assert!(!ours(Some(("other", "orders")), &cfg, fold), "{fold}");
-            assert!(ours(None, &cfg, fold), "{fold}");
-            assert!(ours(Some(("x", "y")), &[], fold), "{fold}");
-        }
-    }
-
-    #[test]
-    fn the_server_value_of_lower_case_table_names_decides_the_folding() {
-        assert!(!fold_names_from(Some("0")));
-        assert!(!fold_names_from(Some(" 0\n")));
-        assert!(fold_names_from(Some("1")));
-        assert!(fold_names_from(Some("2")));
-        assert!(fold_names_from(Some("")));
-        assert!(fold_names_from(None));
-    }
-
-    #[test]
-    fn every_statement_the_run_judges_follows_the_folding_of_the_server() {
-        let cfg = only("shop.orders");
-        let upper = [
-            "TRUNCATE SHOP.ORDERS",
-            "ALTER TABLE SHOP.ORDERS RENAME COLUMN a TO b",
-            "RENAME TABLE SHOP.ORDERS TO SHOP.OLD",
-            "DROP TABLE SHOP.ORDERS",
-            "UPDATE SHOP.ORDERS SET a = 1",
-        ];
-        let on = [
-            QueryVerdict::Truncated("SHOP".into(), "ORDERS".into()),
-            QueryVerdict::ColumnRenamed("SHOP".into(), "ORDERS".into()),
-            QueryVerdict::TableRenamed(pair("SHOP", "ORDERS")),
-            QueryVerdict::Dropped(pair("SHOP", "ORDERS")),
-            QueryVerdict::StatementWrite(pair("SHOP", "ORDERS")),
-        ];
-        for (sql, want) in upper.iter().zip(on) {
-            assert_eq!(folded_verdict_of(sql, "shop", &cfg, true), want, "{sql}");
-            assert_eq!(
-                folded_verdict_of(sql, "shop", &cfg, false),
-                QueryVerdict::Pass,
-                "{sql}"
-            );
-        }
-        assert_eq!(
-            folded_verdict_of("TRUNCATE ORDERS", "SHOP", &cfg, true),
-            QueryVerdict::Truncated("SHOP".into(), "ORDERS".into())
-        );
-        assert_eq!(
-            folded_verdict_of("TRUNCATE ORDERS", "SHOP", &cfg, false),
-            QueryVerdict::Pass
-        );
-    }
-
-    #[test]
-    fn a_version_comment_takes_the_digits_the_server_takes_through_every_verdict() {
-        let cfg = only("shop.orders");
-        let cases = [
-            (
-                "/*!080400 ALTER TABLE orders RENAME COLUMN a TO b */",
-                QueryVerdict::ColumnRenamed("shop".into(), "orders".into()),
-            ),
-            (
-                "/*!80400 ALTER TABLE orders RENAME COLUMN a TO b */",
-                QueryVerdict::ColumnRenamed("shop".into(), "orders".into()),
-            ),
-            (
-                "/*!080400 RENAME TABLE orders TO orders_old */",
-                QueryVerdict::TableRenamed(pair("shop", "orders")),
-            ),
-            (
-                "/*!080400\nRENAME TABLE orders TO orders_old */",
-                QueryVerdict::TableRenamed(pair("shop", "orders")),
-            ),
-            (
-                "/*!080400 REVOKE SELECT (a) ON shop.orders FROM u */",
-                QueryVerdict::Privilege,
-            ),
-            (
-                "/*!80400 REVOKE SELECT (a) ON shop.orders FROM u */",
-                QueryVerdict::Privilege,
-            ),
-            (
-                "/*!080400 TRUNCATE orders */",
-                QueryVerdict::Truncated("shop".into(), "orders".into()),
-            ),
-            (
-                "/*!080400 DROP TABLE orders */",
-                QueryVerdict::Dropped(pair("shop", "orders")),
-            ),
-            (
-                "/*!080400 UPDATE orders SET a = 1 */",
-                QueryVerdict::StatementWrite(pair("shop", "orders")),
-            ),
-            (
-                "/*!080400 ALTER TABLE orders ADD COLUMN k INT */",
-                QueryVerdict::Pass,
-            ),
-        ];
-        for (sql, want) in cases {
-            assert_eq!(verdict_of(sql, "shop", true, &cfg), want, "{sql}");
-        }
-    }
-
-    #[test]
-    fn each_statement_gets_its_verdict_and_only_its_verdict() {
-        let cfg = only("shop.orders");
-        let t = |s: &str| pair("shop", s);
-        let cases: Vec<(&str, bool, &[String], QueryVerdict)> = vec![
-            (
-                "TRUNCATE orders",
-                false,
-                &cfg,
-                QueryVerdict::Truncated("shop".into(), "orders".into()),
-            ),
-            ("TRUNCATE other", true, &cfg, QueryVerdict::Pass),
-            (
-                "ALTER TABLE orders RENAME COLUMN a TO b",
-                true,
-                &cfg,
-                QueryVerdict::ColumnRenamed("shop".into(), "orders".into()),
-            ),
-            (
-                "ALTER TABLE orders RENAME COLUMN a TO b",
-                false,
-                &cfg,
-                QueryVerdict::Pass,
-            ),
-            (
-                "RENAME TABLE orders TO old",
-                true,
-                &cfg,
-                QueryVerdict::TableRenamed(t("orders")),
-            ),
-            (
-                "RENAME TABLE orders TO old",
-                false,
-                &cfg,
-                QueryVerdict::Pass,
-            ),
-            (
-                "RENAME TABLE x TO",
-                true,
-                &cfg,
-                QueryVerdict::TableRenamed(None),
-            ),
-            (
-                "DROP TABLE orders",
-                false,
-                &cfg,
-                QueryVerdict::Dropped(t("orders")),
-            ),
-            ("DROP TABLE other", false, &cfg, QueryVerdict::Pass),
-            (
-                "DROP TABLE other, orders",
-                false,
-                &cfg,
-                QueryVerdict::Dropped(t("orders")),
-            ),
-            ("DROP TABLE", false, &cfg, QueryVerdict::Dropped(None)),
-            (
-                "UPDATE orders SET a = 1",
-                false,
-                &cfg,
-                QueryVerdict::StatementWrite(t("orders")),
-            ),
-            ("UPDATE other SET a = 1", false, &cfg, QueryVerdict::Pass),
-            ("UPDATE (", false, &cfg, QueryVerdict::StatementWrite(None)),
-            (
-                "REVOKE SELECT (a) ON shop.orders FROM u",
-                false,
-                &cfg,
-                QueryVerdict::Privilege,
-            ),
-            ("COMMIT", false, &cfg, QueryVerdict::Commit),
-            ("XA COMMIT 'x'", false, &cfg, QueryVerdict::Commit),
-            ("BEGIN", false, &cfg, QueryVerdict::Pass),
-            ("XA PREPARE 'x'", false, &cfg, QueryVerdict::Pass),
-            ("SET NAMES gbk", false, &cfg, QueryVerdict::Pass),
-            ("", false, &cfg, QueryVerdict::Pass),
-        ];
-        for (sql, projecting, cfg, want) in cases {
-            assert_eq!(verdict_of(sql, "shop", projecting, cfg), want, "{sql}");
-        }
-    }
-
-    fn charset_var(id: u16) -> Vec<u8> {
-        let mut v = vec![4u8];
-        for _ in 0..3 {
-            v.extend_from_slice(&id.to_le_bytes());
-        }
-        v
-    }
-
-    #[test]
-    fn the_client_character_set_is_read_from_the_status_variables_of_the_event() {
-        assert_eq!(charset_of(&charset_var(28)), Some(28));
-        assert_eq!(charset_of(&charset_var(255)), Some(255));
-        let among = [sql_mode_var(0x4), charset_var(13)].concat();
-        assert_eq!(charset_of(&among), Some(13));
-        assert_eq!(charset_of(&sql_mode_var(0x4)), None);
-        assert_eq!(charset_of(&[]), None);
-        assert_eq!(charset_of(&charset_var(28)[..4]), None);
-    }
-
-    fn verdict_in(raw: &[u8], charset: u16, cfg: &[String]) -> QueryVerdict {
-        let (sql, mode) = statement_of(raw, &charset_var(charset));
-        query_verdict(
-            &sql,
-            "shop",
-            mode,
-            &QueryScope {
-                projecting: true,
-                fold: false,
-                configured: cfg,
-            },
-        )
-    }
-
-    fn lexical_row(id: u16) -> (&'static [u8], &'static [u8], bool) {
-        crate::source::mysql::client_charsets::LEXICAL
-            .iter()
-            .find(|(i, ..)| *i == id)
-            .map_or((&[][..], &[][..], true), |(_, b, o, d)| (*b, *o, *d))
-    }
-
-    fn server_blank(id: u16, byte: u8) -> bool {
-        matches!(byte, 9..=13 | b' ') || lexical_row(id).0.contains(&byte)
-    }
-
-    fn server_opens_a_comment_after_dashes(id: u16, byte: u8) -> bool {
-        match byte {
-            0..=0x20 => true,
-            0x21..=0x7E => false,
-            0x7F => lexical_row(id).2,
-            _ => server_blank(id, byte) || lexical_row(id).1.contains(&byte),
-        }
-    }
-
-    type Refusal = fn(&QueryVerdict) -> bool;
-
-    #[derive(Clone, Copy, PartialEq)]
-    enum Seam {
-        Direct,
-        Dashes,
-        Both,
-    }
-
-    #[test]
-    fn every_byte_of_every_client_collation_is_read_as_the_server_table_says_part_0() {
-        sweep_collations_against_the_server_table(0);
-    }
-
-    #[test]
-    fn every_byte_of_every_client_collation_is_read_as_the_server_table_says_part_1() {
-        sweep_collations_against_the_server_table(1);
-    }
-
-    #[test]
-    fn every_byte_of_every_client_collation_is_read_as_the_server_table_says_part_2() {
-        sweep_collations_against_the_server_table(2);
-    }
-
-    #[test]
-    fn every_byte_of_every_client_collation_is_read_as_the_server_table_says_part_3() {
-        sweep_collations_against_the_server_table(3);
-    }
-
-    fn sweep_collations_against_the_server_table(part: usize) {
-        use crate::source::mysql::client_charsets::{COLLATION_CHARSET, PAIR_LEADS};
-        use Seam::{Both, Dashes, Direct};
-        let cfg = only("shop.t");
-        let write: Refusal = |v| matches!(v, QueryVerdict::StatementWrite(_));
-        let column: Refusal = |v| matches!(v, QueryVerdict::ColumnRenamed(..));
-        let privilege: Refusal = |v| *v == QueryVerdict::Privilege;
-        let ops: [(&[u8], &[u8], Refusal, Seam); 11] = [
-            (
-                b"TRUNCATE",
-                b"t",
-                |v| matches!(v, QueryVerdict::Truncated(..)),
-                Both,
-            ),
-            (
-                b"DROP",
-                b"TABLE t",
-                |v| matches!(v, QueryVerdict::Dropped(_)),
-                Both,
-            ),
-            (
-                b"RENAME",
-                b"TABLE t TO u",
-                |v| matches!(v, QueryVerdict::TableRenamed(_)),
-                Both,
-            ),
-            (b"ALTER TABLE t CHANGE", b"a b INT", column, Both),
-            (b"ALTER TABLE t RENAME", b"COLUMN a TO b", column, Both),
-            (b"DELETE", b"other, t FROM t JOIN other ON 1", write, Direct),
-            (b"UPDATE", b"other, t SET t.a = 1", write, Direct),
-            (
-                b"DELETE other",
-                b", t FROM t JOIN other ON 1",
-                write,
-                Dashes,
-            ),
-            (b"UPDATE other", b", t SET t.a = 1", write, Dashes),
-            (b"REVOKE", b"SELECT ON t FROM u", privilege, Direct),
-            (b"", b"REVOKE SELECT ON t FROM u", privilege, Dashes),
-        ];
-        let mut wrong = Vec::new();
-        let mut cells = 0usize;
-        for (id, name) in COLLATION_CHARSET.iter().skip(part).step_by(4) {
-            if ["ucs2", "utf16", "utf16le", "utf32"].contains(name) {
-                continue;
-            }
-            let pairs = PAIR_LEADS.iter().any(|(n, _)| n == name);
-            let bytes = (0u8..=0x20)
-                .chain([0x7F])
-                .chain(0x80..=0xFF)
-                .filter(|b| !pairs || *b < 0x80);
-            for (head, tail, refused, seam) in ops {
-                let glued = |sep: &[u8]| [head, sep, tail].concat();
-                let (blank_ref, letter_ref) = (
-                    verdict_in(&glued(b" "), *id, &cfg),
-                    verdict_in(&glued(b"x"), *id, &cfg),
-                );
-                let (open_ref, closed_ref) = (
-                    verdict_in(&glued(b" -- \n"), *id, &cfg),
-                    verdict_in(&glued(b" --x\n"), *id, &cfg),
-                );
-                if seam != Dashes {
-                    assert!(refused(&blank_ref), "{name} {head:?}: {blank_ref:?}");
-                    assert!(!refused(&letter_ref), "{name} {head:?}: {letter_ref:?}");
-                }
-                if seam != Direct {
-                    assert!(refused(&open_ref), "{name} {head:?}: {open_ref:?}");
-                    assert!(!refused(&closed_ref), "{name} {head:?}: {closed_ref:?}");
-                }
-                for byte in bytes.clone() {
-                    let mut cases = Vec::new();
-                    let leads_a_claim = (*name == "utf8mb4" && byte >= 0xE0)
-                        || (["ujis", "eucjpms"].contains(name) && byte == 0x8F);
-                    if seam != Dashes && !leads_a_claim {
-                        let want = if server_blank(*id, byte) {
-                            &blank_ref
-                        } else {
-                            &letter_ref
-                        };
-                        cases.push((glued(&[byte]), want.clone(), "a blank"));
-                    }
-                    if seam != Direct {
-                        let want = if server_opens_a_comment_after_dashes(*id, byte) {
-                            &open_ref
-                        } else {
-                            &closed_ref
-                        };
-                        cases.push((
-                            glued(&[b' ', b'-', b'-', byte, b'\n']),
-                            want.clone(),
-                            "an opener",
-                        ));
-                    }
-                    for (raw, want, what) in cases {
-                        cells += 1;
-                        let control = byte != 0x7F && byte < 0x20 && !server_blank(*id, byte);
-                        let want = if what == "a blank" && (control || byte == 0x7F) {
-                            verdict_in(&raw, 255, &cfg)
-                        } else {
-                            want
-                        };
-                        let got = verdict_in(&raw, *id, &cfg);
-                        if got != want {
-                            wrong.push(format!(
-                                "{id} {name} {byte:#x} {} -> {got:?}, the table wants {want:?} ({what})",
-                                String::from_utf8_lossy(&raw).escape_debug()
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        assert!(cells > 60_000, "{cells}");
-        assert_eq!(
-            wrong.len(),
-            0,
-            "{} of {cells}: {:#?}",
-            wrong.len(),
-            &wrong[..wrong.len().min(8)]
-        );
-    }
-
-    #[test]
-    fn a_collation_the_table_does_not_list_lexes_like_ascii() {
-        let cfg = only("shop.t");
-        for id in [60000u16, 9999] {
-            assert_eq!(verdict_in(b"TRUNCATE\xA0t", id, &cfg), QueryVerdict::Pass);
-            assert_eq!(verdict_in(b"TRUNCATE\xFFt", id, &cfg), QueryVerdict::Pass);
-            assert_eq!(
-                verdict_in(b"TRUNCATE --\x01\nt", id, &cfg),
-                QueryVerdict::Truncated("shop".into(), "t".into())
-            );
-            assert_eq!(
-                verdict_in(b"TRUNCATE --\x7F\nt", id, &cfg),
-                QueryVerdict::Truncated("shop".into(), "t".into())
-            );
-        }
-    }
-
-    #[test]
-    fn a_name_in_a_client_character_set_never_stops_a_run_that_does_not_capture_its_table() {
-        let cfg = only("shop.orders");
-        let names: [(u16, &[u8]); 7] = [
-            (8, b"donn\xE9es"),
-            (51, b"\xEF\xF0\xE8\xE2\xE5\xF2"),
-            (51, b"nom\xEF\xF0\xE8_1"),
-            (26, b"donn\xE9es"),
-            (19, b"\xC7\xD1\xB1\xDB"),
-            (11, b"\x96\xBC\x91\x4F"),
-            (28, b"\xC3\xFB\xD7\xD6"),
-        ];
-        let templates = [
-            "RENAME TABLE {n} TO {n}_old",
-            "RENAME TABLE `{n}` TO `{n}_old`",
-            "RENAME TABLE {n} TO other",
-            "ALTER TABLE {n} ADD COLUMN c INT",
-            "ALTER TABLE {n} RENAME TO {n}_old",
-            "ALTER TABLE {n} CHANGE a b INT",
-            "DROP TABLE {n}",
-            "DROP TABLE IF EXISTS {n}, {n}_old",
-            "TRUNCATE TABLE {n}",
-            "INSERT INTO {n} VALUES (1)",
-            "UPDATE {n} SET a = 1",
-            "DELETE FROM {n} WHERE a = 1",
-            "CREATE TABLE {n} (id INT)",
-            "REPLACE INTO {n} VALUES (1)",
-            "ALTER TABLE orders CHANGE {n} {n} VARCHAR(30)",
-            "ALTER TABLE orders CHANGE COLUMN {n} {n} VARCHAR(30)",
-            "ALTER TABLE orders ADD COLUMN {n} VARCHAR(30)",
-            "ALTER TABLE orders MODIFY COLUMN {n} VARCHAR(30)",
-            "ALTER TABLE orders ADD INDEX ({n})",
-            "ALTER TABLE orders CHANGE {n} {n} VARCHAR(30) AFTER id",
-            "ALTER TABLE orders ADD COLUMN {n} INT AFTER {n}_old",
-        ];
-        let mut refused = Vec::new();
-        for (id, name) in names {
-            for template in templates {
-                let parts: Vec<&[u8]> = template.split("{n}").map(str::as_bytes).collect();
-                let raw = parts.join(name);
-                let got = verdict_in(&raw, id, &cfg);
-                if got != QueryVerdict::Pass {
-                    refused.push(format!("{id} {} -> {got:?}", String::from_utf8_lossy(&raw)));
-                }
-            }
-        }
-        assert_eq!(refused.len(), 0, "refused: {refused:#?}");
-    }
-
-    #[test]
-    fn a_table_whose_name_continues_a_captured_one_with_a_letter_byte_is_not_that_table() {
-        let cfg = only("shop.client");
-        let templates: [&[u8]; 6] = [
-            b"RENAME TABLE client\xE8le TO client\xE8le_old",
-            b"RENAME TABLE client\xE8le_old TO client\xE8le",
-            b"RENAME TABLE tmp TO client\xE8le",
-            b"INSERT INTO client\xE8le VALUES (1)",
-            b"TRUNCATE client\xE8le",
-            b"DROP TABLE client\xE8le",
-        ];
-        for id in [8u16, 26, 51, 255] {
-            for raw in templates {
-                assert_eq!(
-                    verdict_in(raw, id, &cfg),
-                    QueryVerdict::Pass,
-                    "{id} {}",
-                    String::from_utf8_lossy(raw)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_comment_a_control_byte_opens_hides_what_it_covers_and_exposes_what_follows() {
-        let cfg = only("shop.orders");
-        let renamed = QueryVerdict::ColumnRenamed("shop".into(), "orders".into());
-        let hidden_change: &[u8] = b"ALTER TABLE orders CHANGE id id INT --\x01, CHANGE name name \
-            VARCHAR(20) /*\n, CHANGE pass pw VARCHAR(20) COMMENT '*/ -- '";
-        let latin1_change: &[u8] = b"ALTER TABLE orders CHANGE id id INT --\xA0, CHANGE name name \
-            VARCHAR(20)\n, CHANGE\xA0pass pw VARCHAR(20)";
-        let multi_delete: &[u8] =
-            b"DELETE other --\x01\n, orders FROM orders JOIN other ON orders.id = other.id";
-        for (raw, id, want) in [
-            (hidden_change, 255u16, renamed.clone()),
-            (hidden_change, 8, renamed.clone()),
-            (latin1_change, 8, renamed.clone()),
-            (multi_delete, 255, QueryVerdict::StatementWrite(None)),
-            (multi_delete, 8, QueryVerdict::StatementWrite(None)),
-            (multi_delete, 51, QueryVerdict::StatementWrite(None)),
-            (
-                b"ALTER TABLE orders CHANGE id id INT, CHANGE name name VARCHAR(20), CHANGE pass pw VARCHAR(20)",
-                255,
-                renamed.clone(),
-            ),
-            (
-                b"ALTER TABLE orders CHANGE id id INT, CHANGE name name VARCHAR(20) --\x01, CHANGE pass pw VARCHAR(20)\n",
-                255,
-                QueryVerdict::Pass,
-            ),
+    fn a_statement_mentions_a_captured_table_by_its_bare_name_in_any_case_and_any_place() {
+        let configured = vec!["shop.orders".to_string(), "Items".to_string()];
+        let hit = |sql: &[u8]| statement_mentions(sql, &configured);
+        for (sql, table) in [
+            ("ALTER TABLE orders ADD INDEX i (id)", "shop.orders"),
+            ("alter table ORDERS add index i (id)", "shop.orders"),
+            ("ALTER TABLE other.Orders RENAME TO x", "shop.orders"),
+            ("RENAME TABLE a TO `orders_old`", "shop.orders"),
+            ("DROP TABLE /*!80000 orders */", "shop.orders"),
+            ("DROP TABLE ord/**/ers, items", "Items"),
+            ("DELETE x --\u{1}\n, y FROM ITEMS", "Items"),
+            ("TRUNCATE neworders", "shop.orders"),
         ] {
-            assert_eq!(
-                verdict_in(raw, id, &cfg),
-                want,
-                "{id} {}",
-                String::from_utf8_lossy(raw).escape_debug()
-            );
+            assert_eq!(hit(sql.as_bytes()), Some(table), "{sql}");
         }
-    }
-
-    #[test]
-    fn the_shape_of_a_name_is_folded_with_the_server_and_a_qualified_entry_keeps_its_schema() {
-        let (sql, _) = statement_of(b"TRUNCATE CAF\xE9", &charset_var(8));
-        let verdict = |cfg: &[String], fold| folded_verdict_of(&sql, "shop", cfg, fold);
-        let truncated = QueryVerdict::Truncated("shop".into(), "CAF\u{e9}".into());
-        assert_eq!(verdict(&only("shop.caf\u{e9}"), true), truncated);
-        assert_eq!(verdict(&only("shop.caf\u{e9}"), false), QueryVerdict::Pass);
-        assert_eq!(verdict(&only("caf\u{e9}"), true), truncated);
-        assert_eq!(verdict(&only("other.caf\u{e9}"), true), QueryVerdict::Pass);
-        assert_eq!(verdict(&only("shop.caf"), true), QueryVerdict::Pass);
-    }
-
-    #[test]
-    fn a_name_the_reader_placed_is_compared_exactly_not_by_shape() {
-        let caf = QueryVerdict::Truncated("shop".into(), "caf\u{e9}".into());
+        assert_eq!(hit(b"SAVEPOINT `orders`"), None);
+        assert_eq!(hit(b"BEGIN"), None);
+        assert_eq!(hit(b"CREATE TABLE ord_ers (id INT)"), None);
+        assert_eq!(hit(b"GRANT SELECT ON shop.other TO u"), None);
+        assert_eq!(hit(b"ALTER TABLE orde\xffrs ADD INDEX i (id)"), None);
+        assert_eq!(hit(b""), None);
         assert_eq!(
-            verdict_in(b"TRUNCATE caf\xC3\xA9", 255, &only("shop.caf\u{e9}")),
-            caf
-        );
-        assert_eq!(
-            verdict_in(b"TRUNCATE caf\xC3\xA9", 255, &only("shop.caf\u{e8}")),
-            QueryVerdict::Pass
+            statement_mentions(b"ALTER TABLE orders ADD INDEX i (id)", &[]),
+            None
         );
     }
 
     #[test]
-    fn a_pair_that_decodes_to_a_blank_does_not_separate_the_words_around_it() {
-        assert_eq!(
-            verdict_in(b"TRUNCATE\x81\x40t", 13, &only("shop.t")),
-            QueryVerdict::Pass
+    fn the_mention_refusal_names_the_table_and_the_remedy() {
+        let msg = statement_mention_refusal_message("shop.orders");
+        assert!(msg.contains("`shop.orders`"), "{msg}");
+        assert!(msg.contains("columns_from: grants"), "{msg}");
+        assert!(
+            msg.contains("Nothing past the statement was delivered"),
+            "{msg}"
         );
-    }
-
-    #[test]
-    fn a_name_with_a_byte_the_reader_cannot_place_is_ours_only_when_a_captured_name_has_its_shape()
-    {
-        let accented = only("shop.caf\u{e9}");
-        assert_eq!(
-            verdict_in(b"TRUNCATE caf\xFF", 255, &accented),
-            QueryVerdict::Truncated("shop".into(), "caf\u{FFFD}".into())
-        );
-        assert_eq!(
-            verdict_in(b"TRUNCATE cafe\xFF", 255, &accented),
-            QueryVerdict::Pass
-        );
-        for (raw, cfg, want) in [
-            (
-                &b"TRUNCATE caf\xE9"[..],
-                &accented,
-                QueryVerdict::Truncated("shop".into(), "caf\u{e9}".into()),
-            ),
-            (&b"TRUNCATE caf\xC3\xA9"[..], &accented, QueryVerdict::Pass),
-            (&b"TRUNCATE caf\x81"[..], &accented, QueryVerdict::Pass),
-            (&b"TRUNCATE cafe\xE9"[..], &accented, QueryVerdict::Pass),
-            (&b"TRUNCATE other\xE9"[..], &accented, QueryVerdict::Pass),
-            (
-                &b"TRUNCATE orders\xE9"[..],
-                &only("shop.orders"),
-                QueryVerdict::Pass,
-            ),
-            (
-                &b"TRUNCATE orders_d\xE9"[..],
-                &only("shop.orders"),
-                QueryVerdict::Pass,
-            ),
-            (
-                &b"DROP TABLE orders_d\xE9"[..],
-                &only("shop.orders"),
-                QueryVerdict::Pass,
-            ),
-            (
-                &b"TRUNCATE any\xE9"[..],
-                &Vec::<String>::new(),
-                QueryVerdict::Truncated("shop".into(), "any\u{e9}".into()),
-            ),
-        ] {
-            assert_eq!(
-                verdict_in(raw, 8, cfg),
-                want,
-                "{}",
-                String::from_utf8_lossy(raw)
-            );
-        }
-        for (id, raw) in [
-            (19u16, &b"TRUNCATE orders_d\xB0\xA1"[..]),
-            (19, b"DROP TABLE orders_d\xB0\xA1"),
-            (40, b"TRUNCATE orders_d\x82"),
-            (40, b"DROP TABLE orders_d\x82"),
-        ] {
-            assert_eq!(
-                verdict_in(raw, id, &only("shop.orders")),
-                QueryVerdict::Pass,
-                "{}",
-                String::from_utf8_lossy(raw)
-            );
-        }
-    }
-
-    #[test]
-    fn a_privilege_statement_is_found_in_the_character_set_the_event_names() {
-        let revoke = b"REVOKE\xA0SELECT ON t FROM u";
-        for (id, want) in [
-            (8u16, true),
-            (1, false),
-            (255, false),
-            (2, false),
-            (3, true),
-        ] {
-            assert_eq!(
-                statement_is_privilege(revoke, &charset_var(id)),
-                want,
-                "{id}"
-            );
-        }
-        assert!(statement_is_privilege(b"REVOKE SELECT ON t FROM u", &[]));
-        assert!(!statement_is_privilege(b"TRUNCATE t", &charset_var(8)));
-    }
-
-    #[test]
-    fn a_statement_is_read_in_the_character_set_the_event_names() {
-        let hidden = b"ALTER TABLE t COMMENT = '\xE4\xB8\xAD\\', RENAME COLUMN a TO b";
-        let column_renamed = |status: &[u8]| {
-            let (sql, mode) = statement_of(hidden, status);
-            column_rename_target(&sql, "shop", mode)
-        };
-        assert_eq!(column_renamed(&charset_var(28)), pair("shop", "t"));
-        assert_eq!(column_renamed(&charset_var(255)), None);
-        assert_eq!(column_renamed(&[]), None);
-        let (sql, mode) = statement_of(b"x", &[charset_var(28), sql_mode_var(0x4)].concat());
-        assert_eq!((sql.as_ref(), mode), ("x", ANSI));
+        assert!(msg.contains("Re-baseline the stream"), "{msg}");
     }
 }
 

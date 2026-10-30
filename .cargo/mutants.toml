@@ -604,6 +604,25 @@ exclude_re = [
     # ack -> Ok(())               ⇒ roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot FAILS
     "replace PgChangeStream::release_empty_frontier with \\(\\)$",
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
+    # The match GUARD on the MySQL TRUNCATE arm sits inside that same live-only body.
+    # Flipping it to `true`/`false` is the addressed/un-addressed pair that the live
+    # test grades directly (`if true` fails the bystander half; disabling fails the
+    # refusal half) — both run by hand on the same date. Excluded here rather than
+    # left MISSED, because an operator-shaped entry that IS graded live is the
+    # honest form; what would be wrong is an ungraded decision hiding in glue.
+    # The mutant NAME embeds the guard EXPRESSION between "match guard" and
+    # "with true/false", so a pattern written as `replace match guard with true in
+    # …` matches nothing. The gate caught that as a DEAD exclusion — which is the
+    # right verdict and exactly the failure mode a hand-written regex has here
+    # (an over-escaped one earlier in this session matched nothing too, and would
+    # have left the gate red while looking handled).
+    #
+    # Anchored on the guard's own call instead. Both directions are graded LIVE by
+    # roast_mysql_cdc_refuses_a_truncate_instead_of_silently_diverging: `true`
+    # fails its bystander half (an export that does not capture the truncated
+    # table must still complete), `false` fails the refusal half. Run by hand
+    # 2026-08-24, mutant applied and reverted each time.
+    "replace match guard truncate_target.*MysqlChangeStream::fill",
 
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
     # `in_quotes && next == '"'` guard on the escaped-quote arm cannot change what
@@ -668,14 +687,6 @@ exclude_re = [
     # never closes a transaction and the arm deletion captures no rows (full cycle).
     "replace MysqlChangeStream::close_transaction_at -> bool",
     "delete match arm Some\\(EventData::RowsEvent\\(re\\)\\) in MysqlChangeStream::fill",
-    # 2026-10-29 (#719): live-only arms of the same reader, each RED under the mutant on the live stand: xid -> a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql, XA PREPARE -> a_prepared_xa_branch_is_never_published_by_another_transactions_commit, QueryEvent -> a_table_swap_of_a_captured_table_is_refused_under_the_policy_mysql.
-    "delete match arm Some\\(EventData::XidEvent\\(x\\)\\) in MysqlChangeStream::fill",
-    "delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill",
-    "delete match arm Some\\(EventData::QueryEvent\\(qe\\)\\) in MysqlChangeStream::fill",
-    # 2026-10-29 (#719): live-only, RED under the mutant: privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql (a QueryEvent cannot be built offline).
-    "delete match arm Some\\(EventData::QueryEvent\\(qe\\)\\) in defers_the_grants_re_read",
-    # 2026-10-29 (#719): one SHOW VARIABLES read; true is RED in a_column_renamed_in_another_case_is_refused_exactly_when_the_server_folds_names_on_this_server_mysql (lctn 0), false in a_table_renamed_in_another_case_is_refused_exactly_when_the_server_folds_names_on_this_server_mysql (lctn 1).
-    "replace MysqlChangeStream::fold_names_on -> Result<bool>",
     # `pin_plan_to_its_run` (load/pin.rs) lists a real store's manifests
     # and reads the state DB; the decision it feeds — rebuilding the plan from one
     # run's spec — is `retype_plan` (unit-tested). Stubbed to `Ok(plan.clone())` it

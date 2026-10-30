@@ -285,6 +285,8 @@ services:
       retries: 30
 
   mysql-cdc:
+    # Version-matrix knob (staff class #3): nightly runs the CDC
+    # conformance lane against other tags via MYSQL_CDC_TAG.
     image: mysql:${MYSQL_CDC_TAG:-8.0}
     profiles: ["cdc"]
     # binlog is ON by default in MySQL 8 (ROW format); set a server id and grant
@@ -298,7 +300,6 @@ services:
       # writer pools + gremlins + grant tests) — same environment-ceiling
       # class as PG max_replication_slots.
       - "--max-connections=400"
-      - "--lower-case-table-names=${MYSQL_CDC_LCTN:-0}"
       # FULL puts column NAMES into TABLE_MAP optional metadata (8.0.1+); rivet
       # refuses MINIMAL (MySQL's own default), which maps values by position.
       - "--loose-binlog-row-metadata=FULL" # loose: 5.7 (the scout lane) has no such variable
@@ -949,39 +950,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
-
-  # ---- MySQL statement-truth stand: dev/pytools/statement_truth.py (docs/statement-truth.md) ----
-  mysql-stmt-80: &mysql-stmt
-    image: mysql:8.0
-    profiles: ["mysql-stmt"]
-    environment:
-      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
-      MYSQL_ROOT_HOST: "%"
-    ports:
-      - "127.0.0.1:3331:3306"
-    tmpfs:
-      - /var/lib/mysql
-    volumes:
-      - ./dev/stmt_truth/mysql/seed:/docker-entrypoint-initdb.d:ro
-      - ./dev/stmt_truth/mysql/stmt.cnf:/etc/mysql/conf.d/stmt.cnf:ro
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot"]
-      interval: 3s
-      timeout: 3s
-      retries: 60
-
-  mysql-stmt-84:
-    <<: *mysql-stmt
-    image: mysql:8.4
-    ports:
-      - "127.0.0.1:3332:3306"
-
-  mysql-stmt-84-lctn1:
-    <<: *mysql-stmt
-    image: mysql:8.4
-    command: ["--lower-case-table-names=1"]
-    ports:
-      - "127.0.0.1:3333:3306"
 
 volumes:
   postgres_state_data:

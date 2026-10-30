@@ -1,13 +1,13 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 1f10a191..966494c8 100644
+index 0ff53467..3f2ba560 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2322,7 +2322,7 @@ pub(crate) fn query_verdict(
-             return QueryVerdict::ColumnRenamed(sc, tb);
-         }
-         if let Some(touched) =
--            renamed_tables(sql, event_db, mode).and_then(|ts| ts.into_iter().find(slot))
-+            renamed_tables(sql, event_db, mode).filter(|_| sql.is_empty()).and_then(|ts| ts.into_iter().find(slot))
-         {
-             return QueryVerdict::TableRenamed(touched);
-         }
+@@ -2251,7 +2251,7 @@ fn refused_table_rename(
+     mode: SqlMode,
+     configured: &[String],
+ ) -> Option<Option<(String, String)>> {
+-    if !projecting {
++    if !projecting || !sql.is_empty() {
+         return None;
+     }
+     renamed_tables(sql, event_db, mode)?.into_iter().find(|t| {

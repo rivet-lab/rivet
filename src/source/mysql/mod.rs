@@ -23,11 +23,7 @@ pub(crate) use arrow_convert::time_outside_day;
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
 mod proxy;
-#[rustfmt::skip]
-mod client_charsets;
 mod statement;
-#[cfg(test)]
-mod statement_truth;
 
 use std::sync::Arc;
 

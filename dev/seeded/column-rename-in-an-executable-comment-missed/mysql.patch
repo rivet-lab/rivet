@@ -1,8 +1,8 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 1f10a191..0f9d0d91 100644
+index 0ff53467..663e3e65 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2171,7 +2171,7 @@ pub(crate) fn column_rename_target(
+@@ -2157,7 +2157,7 @@ pub(crate) fn column_rename_target(
      event_db: &str,
      mode: SqlMode,
  ) -> Option<(String, String)> {

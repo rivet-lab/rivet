@@ -784,12 +784,6 @@ SKIP_ALLOWED: dict[str, str] = {
     "live_destination_parity::a_relative_destination_path_moved_by_the_upgrade_is_refused_until_the_files_follow":
         "skips only when the previous release already anchors a relative destination.path beside its config "
         "(0.32.0 on): the move it refuses arises from a release before 0.32 only",
-    "live_cdc_column_grants::a_rename_in_a_six_digit_version_comment_is_refused_under_the_policy_on_this_server_mysql":
-        "skips only on a server that reads five version digits (MySQL 8.0); the nightly 8.4 lane runs it",
-    "live_cdc_column_grants::a_revoke_in_a_six_digit_version_comment_stops_an_open_run_on_this_server_mysql":
-        "skips only on a server that reads five version digits (MySQL 8.0); the nightly 8.4 lane runs it",
-    "live_cdc_column_grants::a_schema_spelled_in_another_case_is_refused_when_the_server_folds_names_on_this_server_mysql":
-        "skips only on a server with lower_case_table_names=0; the nightly lower_case_table_names=1 lane runs it",
 }
 
 

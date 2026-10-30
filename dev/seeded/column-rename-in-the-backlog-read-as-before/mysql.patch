@@ -1,13 +1,13 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 1f10a191..50e43456 100644
+index 0ff53467..60cfc15e 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2318,7 +2318,7 @@ pub(crate) fn query_verdict(
-         return QueryVerdict::Truncated(sc, tb);
+@@ -2236,7 +2236,7 @@ fn refused_column_rename(
+     mode: SqlMode,
+     configured: &[String],
+ ) -> Option<(String, String)> {
+-    if !projecting {
++    if true {
+         return None;
      }
-     if scope.projecting {
--        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode).filter(ours) {
-+        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode).filter(|t| ours(t) && sql.is_empty()) {
-             return QueryVerdict::ColumnRenamed(sc, tb);
-         }
-         if let Some(touched) =
+     column_rename_target(sql, event_db, mode)

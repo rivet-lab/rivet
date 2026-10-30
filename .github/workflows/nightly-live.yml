@@ -384,7 +384,7 @@ jobs:
   # every cell went red on 2026-10-01..02 (no oracle reader, and a real MySQL 5.7
   # defect) while the run's verdict ignored them.
   cdc-version-scout:
-    name: CDC vs ${{ matrix.engine }}:${{ matrix.tag }}${{ matrix.lctn && format(' lctn={0}', matrix.lctn) || '' }}
+    name: CDC vs ${{ matrix.engine }}:${{ matrix.tag }}
     timeout-minutes: 30
     runs-on: ubuntu-latest
     strategy:
@@ -392,7 +392,6 @@ jobs:
       matrix:
         include:
           - { engine: mysql, tag: "8.4", env: MYSQL_CDC_TAG }
-          - { engine: mysql, tag: "8.4", env: MYSQL_CDC_TAG, lctn: "1" }
           - { engine: mysql, tag: "5.7", env: MYSQL_CDC_TAG }
           - { engine: postgres, tag: "13", env: POSTGRES_CDC_TAG }
           - { engine: postgres, tag: "17", env: POSTGRES_CDC_TAG }
@@ -409,7 +408,6 @@ jobs:
         # graded cell failed on `No such container: rivet-duckdb` (2026-10-01..02).
         run: |
           export ${{ matrix.env }}=${{ matrix.tag }}
-          export MYSQL_CDC_LCTN=${{ matrix.lctn || '0' }}
           mkdir -p tests/.live-tmp
           docker compose --profile cdc up -d mysql-cdc postgres-cdc
           docker compose up -d --wait duckdb
@@ -432,16 +430,6 @@ jobs:
           # the same reason (the failover cell was red here every night from 2026-10-13).
           cargo nextest run --run-ignored ignored-only --no-fail-fast \
             -E "binary(live_suite) and test($FILTER) and not (test(gcs) or test(toxiproxy) or test(from_a_standby) or test(failover_to_the_standby))"
-      - name: Column-grants cells
-        if: matrix.engine == 'mysql' && matrix.tag != '5.7'
-        run: |
-          cargo nextest run --run-ignored ignored-only --no-fail-fast \
-            -E "binary(live_suite) and test(live_cdc_column_grants::)"
-      - name: Client character set table matches the server
-        if: matrix.engine == 'mysql' && matrix.tag == '8.4' && !matrix.lctn
-        run: |
-          python3 -m pip install --quiet pymysql
-          python3 dev/pytools/mysql_client_charsets.py check "$(docker compose ps -q mysql-cdc)"
       - name: Stop services
         if: always()
         run: docker compose down -v
@@ -532,20 +520,3 @@ jobs:
       - name: Stop services
         if: always()
         run: docker compose down -v
-
-  mysql-statement-truth:
-    name: MySQL statement truth (corpus vs the stand)
-    timeout-minutes: 150
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Start the statement-truth stand
-        run: python3 dev/pytools/statement_truth.py mysql up
-      - name: Regenerate the corpus from the servers and diff it against the fixtures
-        run: python3 dev/pytools/statement_truth.py mysql check
-      - name: Dump stand logs on failure
-        if: failure()
-        run: docker compose --profile mysql-stmt logs --no-color --tail 100
-      - name: Stop the stand
-        if: always()
-        run: python3 dev/pytools/statement_truth.py mysql down

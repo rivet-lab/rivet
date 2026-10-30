@@ -104,8 +104,7 @@ const BASELINE: &[(&str, usize, usize, usize, usize)] = &[
     ("src/load/bigquery/mod.rs::append_changelog", 0, 0, 1, 0),
     ("src/load/bigquery/mod.rs::compact", 0, 0, 0, 1),
     ("src/load/bigquery/mod.rs::rebuild_changelog", 0, 0, 0, 1),
-    // 2026-10-30: not 4 to 3, the commit-statement arm returns the verdict of the close instead of negating it (#728).
-    ("src/source/mysql/cdc.rs::fill", 0, 1, 3, 0),
+    ("src/source/mysql/cdc.rs::fill", 0, 1, 4, 0),
     ("src/source/postgres/cdc.rs::fill", 1, 1, 3, 1),
     // Excluded 2026-10-01; its transaction-group close moved out to `tx_buffer::close_runs`.
     ("src/source/mssql/cdc.rs::fill", 0, 0, 1, 0),

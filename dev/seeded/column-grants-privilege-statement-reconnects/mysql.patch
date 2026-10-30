@@ -1,15 +1,15 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 59a6655c..7f737c17 100644
+index 3a224652..d45a8295 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -1576,8 +1576,8 @@ impl MysqlChangeStream {
-                 }
-                 match verdict {
-                     QueryVerdict::Privilege => {
--                        self.grants_pending
--                            .get_or_insert_with(|| (self.file.clone(), log_pos));
-+                        self.grants_pending = Some((self.file.clone(), log_pos));
-+                        self.refuse_changed_grants()?;
-                     }
-                     QueryVerdict::Commit => {
-                         let commit = json!({"at": event_start, "query": qe.query()});
+@@ -1645,8 +1645,8 @@ impl MysqlChangeStream {
+             Some(EventData::QueryEvent(qe))
+                 if is_privilege_statement(&qe.query(), event_mode(&qe)) =>
+             {
+-                self.grants_pending
+-                    .get_or_insert_with(|| (self.file.clone(), log_pos));
++                self.grants_pending = Some((self.file.clone(), log_pos));
++                self.refuse_changed_grants()?;
+             }
+             Some(EventData::QueryEvent(qe)) if is_commit_statement(&qe.query()) => {
+                 let commit = json!({"at": event_start, "query": qe.query()});

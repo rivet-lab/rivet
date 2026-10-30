@@ -58,7 +58,6 @@ clap = { version = "4", features = ["derive", "env"] }
 clap-markdown = "0.1"
 csv = "1"
 env_logger = "0.11"
-encoding_rs = "0.8"
 libc = "0.2"
 log = "0.4"
 # Percent-encode the user/password when building a connection URL from structured
@@ -185,7 +184,6 @@ regex = "1"
 csv = "1"
 serde_json = "1"
 serde_yaml_ng = "0.10"
-flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 # OPT-3: property-based type round-trip (tests/type_roundtrip/property.rs).
 proptest = "1"
