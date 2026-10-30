@@ -4321,3 +4321,40 @@ seeds:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: journal-manifest-gap
+    class: "a run whose terminal manifest.json write failed is recorded `success` in the run journal and on the run card, because the journal row and the card are finished before the manifest is written and the failed status is set only afterwards"
+    history: "found 2026-10-30 by a rivet-verifier probe (manifest.json a directory: exit non-zero, ledger and metrics failed, `rivet journal` success with no error, a multi-export card still the success glyph); RED on main 2026-10-30 (journal read back through `rivet journal`, PostgreSQL)"
+    scope: source
+    patch: journal-manifest-gap/shared.patch
+    engines:
+      postgres:
+        cells:
+          - run_journals_a_run_whose_manifest_never_landed_as_failed_postgres
+          - apply_journals_a_run_whose_manifest_never_landed_as_failed_postgres
+          - a_sequential_run_cards_a_manifest_gap_as_failed_beside_a_good_export_postgres
+          - a_parallel_run_cards_a_manifest_gap_as_failed_beside_a_good_export_postgres
+      mysql:
+        cells:
+          - run_journals_a_run_whose_manifest_never_landed_as_failed_mysql
+          - apply_journals_a_run_whose_manifest_never_landed_as_failed_mysql
+          - a_sequential_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mysql
+          - a_parallel_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mysql
+      mssql:
+        cells:
+          - run_journals_a_run_whose_manifest_never_landed_as_failed_mssql
+          - apply_journals_a_run_whose_manifest_never_landed_as_failed_mssql
+          - a_sequential_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mssql
+          - a_parallel_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mssql
+      oracle:
+        cells:
+          - run_journals_a_run_whose_manifest_never_landed_as_failed_oracle
+          - apply_journals_a_run_whose_manifest_never_landed_as_failed_oracle
+          - a_sequential_run_cards_a_manifest_gap_as_failed_beside_a_good_export_oracle
+          - a_parallel_run_cards_a_manifest_gap_as_failed_beside_a_good_export_oracle
+      mongo:
+        cells:
+          - run_journals_a_run_whose_manifest_never_landed_as_failed_mongo
+          - apply_journals_a_run_whose_manifest_never_landed_as_failed_mongo
+          - a_sequential_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mongo
+          - a_parallel_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mongo

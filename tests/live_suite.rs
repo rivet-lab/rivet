@@ -61,6 +61,8 @@ mod gate_tls_failures;
 mod gremlin;
 #[path = "live/gremlin_cdc.rs"]
 mod gremlin_cdc;
+#[path = "live/journal_manifest_gap.rs"]
+mod journal_manifest_gap;
 #[path = "live/live_audit_suspects.rs"]
 mod live_audit_suspects;
 #[path = "live/live_azure_multipart.rs"]
@@ -93,6 +95,8 @@ mod live_cdc_mongo;
 mod live_cdc_mssql;
 #[path = "live/live_cdc_multi_table_cycle.rs"]
 mod live_cdc_multi_table_cycle;
+#[path = "live/live_cdc_mysql_reset.rs"]
+mod live_cdc_mysql_reset;
 #[path = "live/live_cdc_oracle.rs"]
 mod live_cdc_oracle;
 #[cfg(feature = "oracle")]

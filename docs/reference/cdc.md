@@ -576,6 +576,15 @@ host, and rivet refuses one written by a different server (it records `server_uu
 If you fail over (to a different replica, or to the primary), [re-baseline](cdc-failure-modes.md#the-shape-of-every-recovery) the
 stream on the new host.
 
+**MySQL — a `RESET MASTER` does not pass for the same binlog.** The checkpoint also
+records the commit it ends at (where that event starts and its xid or `COMMIT` text), and
+a resume reads that event back with `SHOW BINLOG EVENTS`. A binlog that `RESET MASTER`
+renumbered back to the checkpoint's file name holds other events there, so rivet refuses
+to resume (`RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT`, exit 5) instead of reading from an
+offset in another file, with GTID on or off. Recover with a
+[re-baseline](cdc-failure-modes.md#the-shape-of-every-recovery). A checkpoint written
+before rivet recorded the commit resumes with a warning.
+
 **SQL Server — the checkpoint follows a failover, and nothing else.** An availability
 group's replicas share one log, so a checkpoint written on the primary resumes on a
 secondary (verified live). The checkpoint records the database's `family_guid` and

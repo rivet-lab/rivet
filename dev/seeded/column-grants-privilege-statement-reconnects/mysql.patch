@@ -1,8 +1,8 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 6a37da00..468f1eda 100644
+index a6e0cf1c..7e677b02 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -1533,8 +1533,8 @@ impl MysqlChangeStream {
+@@ -1576,8 +1576,8 @@ impl MysqlChangeStream {
                  }
                  match verdict {
                      QueryVerdict::Privilege => {
@@ -11,5 +11,5 @@ index 6a37da00..468f1eda 100644
 +                        self.grants_pending = Some((self.file.clone(), log_pos));
 +                        self.refuse_changed_grants()?;
                      }
-                     QueryVerdict::Commit => return Ok(self.close_transaction_at(log_pos)),
-                     QueryVerdict::Truncated(..)
+                     QueryVerdict::Commit => {
+                         let commit = json!({"at": event_start, "query": sql});
