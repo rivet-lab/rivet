@@ -3142,3 +3142,133 @@ fn statements_in_a_multibyte_client_character_set_are_met_as_before_under_the_po
         ],
     );
 }
+
+const RUN_RAW: [&str; 2] = ["PREPARE cg_raw FROM @s", "EXECUTE cg_raw"];
+
+fn raw(pieces: &'static str) -> String {
+    format!("SET @s = CONCAT({pieces})")
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_comment_ending_in_a_pair_the_encoding_standard_cannot_map_does_not_hide_a_rename_mysql() {
+    let comment =
+        raw("'ALTER TABLE rivet.{t} COMMENT = ''', 0xC5855C, ''', RENAME COLUMN name TO nm'");
+    let swap = raw(
+        "'ALTER TABLE rivet.{t} COMMENT = ''', 0xC5855C, ''', RENAME COLUMN name TO pass, RENAME COLUMN pass TO name'",
+    );
+    let mut steps: Vec<Vec<&str>> = Vec::new();
+    for cs in ["sjis", "cp932"] {
+        for (statement, tail) in [(&comment, UPDATED_AFTER_AS_NM), (&swap, UPDATED_AFTER)] {
+            let set: &str = Box::leak(format!("SET NAMES {cs}").into_boxed_str());
+            let statement: &str = Box::leak(statement.clone().into_boxed_str());
+            steps.push(vec![
+                set,
+                UPDATED_BEFORE,
+                statement,
+                RUN_RAW[0],
+                RUN_RAW[1],
+                tail,
+            ]);
+        }
+    }
+    let cases: Vec<(bool, &[&str], &str)> = steps
+        .iter()
+        .map(|s| (true, &s[..], REFUSED_UNDECODABLE))
+        .collect();
+    backlogs_end_as("cg_pair", &cases);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_byte_the_server_reads_as_a_blank_separates_the_words_of_a_refused_statement_mysql() {
+    let rename = raw("'RENAME', 0xA0, 'TABLE rivet.{t} TO rivet.{t}_old'");
+    let alter = raw("'ALTER', 0xA0, 'TABLE rivet.{t} RENAME COLUMN name TO nm'");
+    let truncate = raw("'TRUNCATE', 0xA0, 'rivet.{t}'");
+    let truncate_cp852 = raw("'TRUNCATE', 0xFF, 'rivet.{t}'");
+    let run: &[&str] = &RUN_RAW;
+    let case =
+        |policy: bool, set: &str, statement: &str, tail: &[&'static str], want: &'static str| {
+            let mut steps: Vec<&'static str> = vec![
+                Box::leak(set.to_string().into_boxed_str()),
+                UPDATED_BEFORE,
+                Box::leak(statement.to_string().into_boxed_str()),
+            ];
+            steps.extend_from_slice(run);
+            steps.extend_from_slice(tail);
+            (policy, steps, want)
+        };
+    let built = [
+        case(
+            true,
+            "SET NAMES latin1",
+            &rename,
+            &[RECREATED],
+            REFUSED_UNDECODABLE,
+        ),
+        case(
+            true,
+            "SET NAMES latin1",
+            &alter,
+            &[UPDATED_AFTER_AS_NM],
+            REFUSED_UNDECODABLE,
+        ),
+        case(false, "SET NAMES latin1", &truncate, &[], REFUSED_TRUNCATED),
+        case(true, "SET NAMES latin1", &truncate, &[], REFUSED_TRUNCATED),
+        case(
+            false,
+            "SET NAMES cp852",
+            &truncate_cp852,
+            &[],
+            REFUSED_TRUNCATED,
+        ),
+    ];
+    let cases: Vec<(bool, &[&str], &str)> =
+        built.iter().map(|(p, s, w)| (*p, &s[..], *w)).collect();
+    backlogs_end_as("cg_blank", &cases);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn statements_with_high_bytes_the_server_reads_as_letters_are_met_as_before_mysql() {
+    let latin1_comment =
+        raw("'ALTER TABLE rivet.{t} COMMENT = ''caf', 0xE9, ''', ADD COLUMN extra INT'");
+    let latin1_rename =
+        raw("'ALTER TABLE rivet.{t} COMMENT = ''caf', 0xE9, ''', RENAME COLUMN name TO nm'");
+    let macroman_comment =
+        raw("'ALTER TABLE rivet.{t} COMMENT = ''caf', 0x8E, ''', ADD COLUMN extra INT'");
+    let run: &[&str] = &RUN_RAW;
+    let case = |set: &str, statement: &str, tail: &'static str, want: &'static str| {
+        let mut steps: Vec<&'static str> = vec![
+            Box::leak(set.to_string().into_boxed_str()),
+            UPDATED_BEFORE,
+            Box::leak(statement.to_string().into_boxed_str()),
+        ];
+        steps.extend_from_slice(run);
+        steps.push(tail);
+        (true, steps, want)
+    };
+    let built = [
+        case(
+            "SET NAMES latin1",
+            &latin1_comment,
+            UPDATED_AFTER,
+            BOTH_DELIVERED,
+        ),
+        case(
+            "SET NAMES latin1",
+            &latin1_rename,
+            UPDATED_AFTER_AS_NM,
+            REFUSED_UNDECODABLE,
+        ),
+        case(
+            "SET NAMES macroman",
+            &macroman_comment,
+            UPDATED_AFTER,
+            BOTH_DELIVERED,
+        ),
+    ];
+    let cases: Vec<(bool, &[&str], &str)> =
+        built.iter().map(|(p, s, w)| (*p, &s[..], *w)).collect();
+    backlogs_end_as("cg_hibyte", &cases);
+}

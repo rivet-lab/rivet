@@ -31,7 +31,7 @@ use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
-use crate::source::mysql::statement::{SqlMode, Tok, client_text, tokens};
+use crate::source::mysql::statement::{SqlMode, Tok, charset_name, client_text, tokens};
 
 /// A blocking iterator of canonical [`ChangeEvent`]s over a MySQL binlog stream.
 ///
@@ -1518,7 +1518,7 @@ impl MysqlChangeStream {
             }
             Some(EventData::QueryEvent(qe)) => {
                 let (sql, mode) = event_statement(&qe);
-                match query_verdict(
+                let verdict = query_verdict(
                     &sql,
                     &qe.schema(),
                     mode,
@@ -1527,32 +1527,11 @@ impl MysqlChangeStream {
                         fold: self.fold_names,
                         configured: &self.configured_tables,
                     },
-                ) {
-                    QueryVerdict::Truncated(sc, tb) => {
-                        return Err(crate::source::cdc::checkpoint_identity::truncated(
-                            truncate_refusal_message(&sc, &tb),
-                        ));
-                    }
-                    QueryVerdict::ColumnRenamed(sc, tb) => {
-                        return Err(crate::source::cdc::checkpoint_identity::undecodable(
-                            column_rename_refusal_message(&sc, &tb),
-                        ));
-                    }
-                    QueryVerdict::TableRenamed(target) => {
-                        return Err(crate::source::cdc::checkpoint_identity::undecodable(
-                            table_rename_refusal_message(target.as_ref()),
-                        ));
-                    }
-                    QueryVerdict::Dropped(target) => {
-                        return Err(crate::source::cdc::checkpoint_identity::truncated(
-                            drop_refusal_message(target.as_ref()),
-                        ));
-                    }
-                    QueryVerdict::StatementWrite(target) => {
-                        return Err(crate::source::cdc::checkpoint_identity::undecodable(
-                            statement_dml_refusal_message(target.as_ref()),
-                        ));
-                    }
+                );
+                if let Some(refusal) = refusal_of(&verdict, charset_of(qe.status_vars_raw())) {
+                    return Err(refusal);
+                }
+                match verdict {
                     QueryVerdict::Privilege => {
                         self.grants_pending
                             .get_or_insert_with(|| (self.file.clone(), log_pos));
@@ -1562,7 +1541,7 @@ impl MysqlChangeStream {
                             return Ok(false);
                         }
                     }
-                    QueryVerdict::Pass => {}
+                    _ => {}
                 }
             }
             // #200-2: a compressed transaction. `binlog_transaction_compression`
@@ -2229,6 +2208,7 @@ pub(crate) enum QueryVerdict {
     TableRenamed(Option<(String, String)>),
     Dropped(Option<(String, String)>),
     StatementWrite(Option<(String, String)>),
+    Unreadable(Box<QueryVerdict>),
     Privilege,
     Commit,
     Pass,
@@ -2241,19 +2221,42 @@ pub(crate) struct QueryScope<'a> {
     pub(crate) configured: &'a [String],
 }
 
-/// The verdict of one QUERY event, decided once: the first of truncate, column rename, table rename, drop, statement write, privilege change, commit that applies.
+/// The verdict of the statement as read, then as read with every U+FFFD (a byte the reader cannot place) a blank: a refusal only the second reading reaches stops the run as unreadable.
 pub(crate) fn query_verdict(
     sql: &str,
     event_db: &str,
     mode: SqlMode,
     scope: &QueryScope<'_>,
 ) -> QueryVerdict {
+    let read = read_verdict(sql, event_db, mode, scope);
+    if !sql.contains('\u{FFFD}') {
+        return read;
+    }
+    match read_verdict(&sql.replace('\u{FFFD}', " "), event_db, mode, scope) {
+        QueryVerdict::Pass | QueryVerdict::Commit => read,
+        QueryVerdict::Privilege if matches!(read, QueryVerdict::Pass) => QueryVerdict::Privilege,
+        QueryVerdict::Privilege => read,
+        refused
+            if matches!(
+                read,
+                QueryVerdict::Pass | QueryVerdict::Commit | QueryVerdict::Privilege
+            ) =>
+        {
+            QueryVerdict::Unreadable(Box::new(refused))
+        }
+        _ => read,
+    }
+}
+
+/// The verdict of one reading of a QUERY event: the first of truncate, column rename, table rename, drop, statement write, privilege change, commit that applies.
+fn read_verdict(sql: &str, event_db: &str, mode: SqlMode, scope: &QueryScope<'_>) -> QueryVerdict {
     let ours = |t: Option<&(String, String)>| {
-        undecodable_event_is_ours(
-            t.map(|(sc, tb)| (sc.as_str(), tb.as_str())),
-            scope.configured,
-            scope.fold,
-        )
+        t.is_some_and(|(sc, tb)| sc.contains('\u{FFFD}') || tb.contains('\u{FFFD}'))
+            || undecodable_event_is_ours(
+                t.map(|(sc, tb)| (sc.as_str(), tb.as_str())),
+                scope.configured,
+                scope.fold,
+            )
     };
     if let Some((sc, tb)) = truncate_target(sql, event_db, mode).filter(|t| ours(Some(t))) {
         return QueryVerdict::Truncated(sc, tb);
@@ -2284,6 +2287,54 @@ pub(crate) fn query_verdict(
     } else {
         QueryVerdict::Pass
     }
+}
+
+/// The refusal a verdict that stops the run raises, `None` for one that lets the event pass; an unreadable one says so before the refusal it hides.
+fn refusal_of(verdict: &QueryVerdict, charset: Option<u16>) -> Option<anyhow::Error> {
+    let (truncating, message) = refusal_parts(verdict)?;
+    let message = match verdict {
+        QueryVerdict::Unreadable(_) => unreadable_refusal_message(charset, &message),
+        _ => message,
+    };
+    Some(if truncating {
+        crate::source::cdc::checkpoint_identity::truncated(message)
+    } else {
+        crate::source::cdc::checkpoint_identity::undecodable(message)
+    })
+}
+
+/// Whether the refusal of a verdict is a `SOURCE_CDC_TRUNCATED` one, and its message; `None` for a verdict that stops nothing.
+fn refusal_parts(verdict: &QueryVerdict) -> Option<(bool, String)> {
+    match verdict {
+        QueryVerdict::Truncated(sc, tb) => Some((true, truncate_refusal_message(sc, tb))),
+        QueryVerdict::ColumnRenamed(sc, tb) => Some((false, column_rename_refusal_message(sc, tb))),
+        QueryVerdict::TableRenamed(target) => {
+            Some((false, table_rename_refusal_message(target.as_ref())))
+        }
+        QueryVerdict::Dropped(target) => Some((true, drop_refusal_message(target.as_ref()))),
+        QueryVerdict::StatementWrite(target) => {
+            Some((false, statement_dml_refusal_message(target.as_ref())))
+        }
+        QueryVerdict::Unreadable(inner) => refusal_parts(inner),
+        QueryVerdict::Privilege | QueryVerdict::Commit | QueryVerdict::Pass => None,
+    }
+}
+
+/// The refusal of a statement whose bytes the reader cannot place: it names the client character set, then the refusal the statement is if those bytes are blanks.
+pub(crate) fn unreadable_refusal_message(charset: Option<u16>, inner: &str) -> String {
+    let set = match charset {
+        Some(id) => match charset_name(id) {
+            Some(name) => format!("`{name}` (collation id {id})"),
+            None => format!("collation id {id}, which this reader does not know"),
+        },
+        None => "not recorded in the event".to_string(),
+    };
+    format!(
+        "mysql cdc: a statement in the log being read holds bytes this reader cannot tell from \
+         blanks, sent in the client character set {set}; the server may read it as the following, \
+         so the run stops instead of guessing. {}",
+        inner.strip_prefix("mysql cdc: ").unwrap_or(inner)
+    )
 }
 
 /// Refuse a captured table renamed under `columns_from: grants`: privileges stay with the name the table had.
@@ -4940,6 +4991,136 @@ mod tests {
         assert_eq!(charset_of(&sql_mode_var(0x4)), None);
         assert_eq!(charset_of(&[]), None);
         assert_eq!(charset_of(&charset_var(28)[..4]), None);
+    }
+
+    fn verdict_in(raw: &[u8], charset: u16, cfg: &[String]) -> QueryVerdict {
+        let (sql, mode) = statement_of(raw, &charset_var(charset));
+        query_verdict(
+            &sql,
+            "shop",
+            mode,
+            &QueryScope {
+                projecting: true,
+                fold: false,
+                configured: cfg,
+            },
+        )
+    }
+
+    #[test]
+    fn a_byte_the_server_reads_as_a_blank_separates_the_words_of_a_statement() {
+        let cfg = only("shop.orders");
+        let truncated = QueryVerdict::Truncated("shop".into(), "orders".into());
+        assert_eq!(verdict_in(b"TRUNCATE\xA0orders", 8, &cfg), truncated);
+        assert_eq!(verdict_in(b"TRUNCATE\xFForders", 40, &cfg), truncated);
+        assert_eq!(
+            verdict_in(b"RENAME\xA0TABLE orders TO o2", 8, &cfg),
+            QueryVerdict::TableRenamed(pair("shop", "orders"))
+        );
+        assert_eq!(
+            verdict_in(b"TRUNCATE\xFForders", 8, &cfg),
+            QueryVerdict::Pass,
+            "0xFF is a letter in latin1"
+        );
+        assert_eq!(
+            verdict_in(b"TRUNCATE\xA0orders", 28, &cfg),
+            QueryVerdict::Pass,
+            "0xA0 is no blank in gbk"
+        );
+    }
+
+    #[test]
+    fn a_byte_the_reader_cannot_place_stops_the_run_only_when_blank_it_would_be_a_refusal() {
+        let cfg = only("shop.orders");
+        let unreadable = |v| QueryVerdict::Unreadable(Box::new(v));
+        let cases = [
+            (
+                &b"TRUNCATE\xE9orders"[..],
+                unreadable(QueryVerdict::Truncated("shop".into(), "orders".into())),
+            ),
+            (
+                &b"RENAME\xE9TABLE orders TO o2"[..],
+                unreadable(QueryVerdict::TableRenamed(pair("shop", "orders"))),
+            ),
+            (
+                &b"DROP\xE9TABLE orders"[..],
+                unreadable(QueryVerdict::Dropped(pair("shop", "orders"))),
+            ),
+            (
+                &b"UPDATE\xE9orders SET a = 1"[..],
+                unreadable(QueryVerdict::StatementWrite(pair("shop", "orders"))),
+            ),
+            (
+                &b"ALTER\xE9TABLE orders RENAME COLUMN a TO b"[..],
+                unreadable(QueryVerdict::ColumnRenamed("shop".into(), "orders".into())),
+            ),
+            (
+                &b"GRANT\xE9SELECT ON shop.orders TO u"[..],
+                QueryVerdict::Privilege,
+            ),
+            (&b"TRUNCATE\xE9other"[..], QueryVerdict::Pass),
+            (
+                &b"INSERT INTO other VALUES ('\xE9')"[..],
+                QueryVerdict::Pass,
+            ),
+            (
+                &b"TRUNCATE orders /* \xE9 */"[..],
+                QueryVerdict::Truncated("shop".into(), "orders".into()),
+            ),
+            (
+                &b"DROP TABLE orders\xE9"[..],
+                QueryVerdict::Dropped(pair("shop", "orders\u{FFFD}")),
+            ),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(
+                verdict_in(raw, 60000, &cfg),
+                want,
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_statement_is_refused_in_the_code_of_the_refusal_it_hides() {
+        let hides = |v: QueryVerdict| {
+            refusal_of(&QueryVerdict::Unreadable(Box::new(v)), Some(8)).expect("refuses")
+        };
+        let truncated = hides(QueryVerdict::Truncated("shop".into(), "orders".into()));
+        assert_eq!(
+            crate::error::error_code(&truncated),
+            Some(crate::error::codes::SOURCE_CDC_TRUNCATED.id)
+        );
+        let renamed = hides(QueryVerdict::TableRenamed(pair("shop", "orders")));
+        assert_eq!(
+            crate::error::error_code(&renamed),
+            Some(crate::error::codes::SOURCE_CDC_UNDECODABLE.id)
+        );
+        for err in [&truncated, &renamed] {
+            assert_eq!(crate::error::classify_exit(err), 5);
+        }
+        assert_eq!(
+            unreadable_refusal_message(Some(8), "mysql cdc: X"),
+            "mysql cdc: a statement in the log being read holds bytes this reader cannot tell \
+             from blanks, sent in the client character set `latin1` (collation id 8); the server \
+             may read it as the following, so the run stops instead of guessing. X"
+        );
+        assert!(
+            unreadable_refusal_message(Some(60000), "Y")
+                .contains("collation id 60000, which this reader does not know")
+        );
+        assert!(
+            unreadable_refusal_message(None, "Y")
+                .contains("character set not recorded in the event")
+        );
+        for passes in [
+            QueryVerdict::Pass,
+            QueryVerdict::Commit,
+            QueryVerdict::Privilege,
+        ] {
+            assert!(refusal_of(&passes, None).is_none());
+        }
     }
 
     #[test]
