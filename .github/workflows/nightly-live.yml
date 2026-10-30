@@ -439,7 +439,9 @@ jobs:
             -E "binary(live_suite) and test(live_cdc_column_grants::)"
       - name: Client character set table matches the server
         if: matrix.engine == 'mysql' && matrix.tag == '8.4' && !matrix.lctn
-        run: python3 dev/pytools/mysql_client_charsets.py "$(docker compose ps -q mysql-cdc)" check
+        run: |
+          python3 -m pip install --quiet pymysql
+          python3 dev/pytools/mysql_client_charsets.py check "$(docker compose ps -q mysql-cdc)"
       - name: Stop services
         if: always()
         run: docker compose down -v

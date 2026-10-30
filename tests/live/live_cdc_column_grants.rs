@@ -3384,8 +3384,7 @@ fn a_line_comment_the_server_opens_before_a_byte_of_the_client_character_set_hid
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_statement_the_reader_cannot_place_is_refused_naming_its_character_set_and_the_statement_it_hides_mysql()
- {
+fn a_rename_behind_a_comment_a_collation_opens_is_refused_as_the_rename_it_is_mysql() {
     let column = raw_case(
         true,
         "SET NAMES cp1250",
@@ -3406,10 +3405,10 @@ fn a_statement_the_reader_cannot_place_is_refused_naming_its_character_set_and_t
             statements_in_the_backlog(&format!("cg_unr_{what}"), policy, &steps).said,
         )
     });
-    let both = "holds bytes this reader cannot tell from blanks, sent in the client character set `cp1250` (collation id 26)";
-    assert!(said[0].1.contains(both), "{}", said[0].1);
+    for (_, text) in &said {
+        assert!(!text.contains("cannot tell from blanks"), "{text}");
+    }
     assert!(said[0].1.contains("had a column renamed"), "{}", said[0].1);
-    assert!(said[1].1.contains(both), "{}", said[1].1);
     assert!(
         said[1]
             .1
@@ -3514,4 +3513,202 @@ fn a_revoke_separated_from_its_keyword_by_a_byte_a_collation_reads_as_a_blank_st
             RUN_RAW[1].to_string(),
         ]
     });
+}
+
+const STATEMENT_FORMAT: &str = "SET SESSION binlog_format = 'STATEMENT'";
+const UPDATED_AFTER_AS_PW: &str = "UPDATE rivet.{t} SET pw = 'ann-after' WHERE id = 1";
+
+/// A backlog case that runs `before` after the character set `set`, then the statement `pieces`, then `tail`.
+fn lexed_case(
+    policy: bool,
+    set: &str,
+    before: &[&'static str],
+    pieces: &str,
+    tail: &[&'static str],
+    want: &'static str,
+) -> Case {
+    let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+    steps.extend_from_slice(before);
+    steps.push(leak(raw(pieces)));
+    steps.extend_from_slice(&RUN_RAW);
+    steps.extend_from_slice(tail);
+    (policy, steps, want)
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_control_byte_after_a_dash_opens_a_comment_that_hides_a_statement_write_mysql() {
+    let update = "'UPDATE rivet --', 0x01, '\n.{t} SET name = ''stmt'' WHERE id = 2'";
+    let delete = "'DELETE FROM rivet --', 0x01, '\n.{t} WHERE id = 2'";
+    let before = [STATEMENT_FORMAT];
+    end_as(
+        "cg_ctl_w",
+        &[
+            lexed_case(
+                true,
+                "SET NAMES utf8mb4",
+                &before,
+                update,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                false,
+                "SET NAMES utf8mb4",
+                &before,
+                update,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES latin1",
+                &before,
+                update,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES cp1250",
+                &before,
+                update,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES utf8mb4",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                false,
+                "SET NAMES utf8mb4",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES latin1",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES cp1250",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_change_after_a_comment_opened_by_a_control_byte_is_matched_to_its_own_column_mysql() {
+    let change = "'ALTER TABLE rivet.{t} CHANGE id id INT --', 0x01, ', CHANGE name name VARCHAR(20) /*\n, CHANGE pass pw VARCHAR(20) COMMENT ''*/ -- '''";
+    end_as(
+        "cg_ctl_c",
+        &[
+            lexed_case(
+                true,
+                "SET NAMES utf8mb4",
+                &[],
+                change,
+                &[UPDATED_AFTER_AS_PW],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES latin1",
+                &[],
+                change,
+                &[UPDATED_AFTER_AS_PW],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES utf8mb4",
+                &[],
+                "'ALTER TABLE rivet.{t} CHANGE id id INT, CHANGE name name VARCHAR(20), CHANGE pass pw VARCHAR(20)'",
+                &[UPDATED_AFTER_AS_PW],
+                REFUSED_UNDECODABLE,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_blank_byte_the_dash_comment_swallowed_does_not_hide_the_next_line_in_latin1_mysql() {
+    let change = "'ALTER TABLE rivet.{t} CHANGE id id INT --', 0xA0, ', CHANGE name name VARCHAR(20)\n, CHANGE', 0xA0, 'pass pw VARCHAR(20)'";
+    end_as(
+        "cg_nbsp_c",
+        &[lexed_case(
+            true,
+            "SET NAMES latin1",
+            &[],
+            change,
+            &[UPDATED_AFTER_AS_PW],
+            REFUSED_UNDECODABLE,
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_name_beginning_like_a_captured_table_and_continuing_with_a_letter_byte_is_not_that_table_mysql()
+ {
+    let case = |policy: bool, set: &str| -> Case {
+        let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+        for sql in [
+            "'CREATE TABLE rivet.{t}', 0xE8, 'le (id INT PRIMARY KEY)'",
+            "'RENAME TABLE rivet.{t}', 0xE8, 'le TO rivet.{t}', 0xE8, 'le_old'",
+            "'RENAME TABLE rivet.{t}', 0xE8, 'le_old TO rivet.{t}', 0xE8, 'le'",
+            "'TRUNCATE rivet.{t}', 0xE8, 'le'",
+            "'DROP TABLE rivet.{t}', 0xE8, 'le'",
+        ] {
+            steps.push(leak(raw(sql)));
+            steps.extend_from_slice(&RUN_RAW);
+        }
+        steps.push(UPDATED_AFTER);
+        (policy, steps, BOTH_DELIVERED)
+    };
+    let statement_write = |set: &str| -> Case {
+        let mut steps: Vec<&'static str> = vec![
+            leak(set),
+            UPDATED_BEFORE,
+            STATEMENT_FORMAT,
+            leak(raw(
+                "'CREATE TABLE rivet.{t}', 0xE8, 'le (id INT PRIMARY KEY)'",
+            )),
+        ];
+        steps.extend_from_slice(&RUN_RAW);
+        steps.push(leak(raw("'INSERT INTO rivet.{t}', 0xE8, 'le VALUES (2)'")));
+        steps.extend_from_slice(&RUN_RAW);
+        steps.push(leak(raw("'DROP TABLE rivet.{t}', 0xE8, 'le'")));
+        steps.extend_from_slice(&RUN_RAW);
+        steps.push("SET SESSION binlog_format = 'ROW'");
+        steps.push(UPDATED_AFTER);
+        (true, steps, BOTH_DELIVERED)
+    };
+    end_as(
+        "cg_f4",
+        &[
+            case(true, "SET NAMES latin1"),
+            case(true, "SET NAMES cp1250"),
+            case(true, "SET NAMES cp1251"),
+            case(false, "SET NAMES latin1"),
+            statement_write("SET NAMES latin1"),
+        ],
+    );
 }

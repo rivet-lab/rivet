@@ -1,6 +1,6 @@
 //! One reading of a MySQL statement as the server lexes it: quotes, comments and executable comments.
 
-use super::client_charsets::COLLATION_CHARSET;
+use super::client_charsets::{COLLATION_CHARSET, LEXICAL};
 
 /// One lexical piece of a statement; the raw text of the pieces in order is the statement with its comments read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,8 +187,46 @@ impl Layout {
     }
 }
 
-/// The character a byte the reader cannot place is read as: a letter to the lexer, and every consumer also reads the statement with it a blank.
+/// The character a byte the reader cannot place is read as: a letter to the lexer, neither a blank nor the start of a comment.
 pub(crate) const UNPLACED: char = '\u{FFFD}';
+
+/// What a client collation does to the bytes the lexer meets, as the server reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lexical {
+    pub(crate) blank: &'static [u8],
+    pub(crate) opener: &'static [u8],
+    pub(crate) del_opens: bool,
+}
+
+impl Lexical {
+    /// The lexing of the collation with this id; an id the table does not list lexes like ASCII.
+    pub(crate) fn of_collation(id: Option<u16>) -> Self {
+        id.and_then(|id| LEXICAL.binary_search_by_key(&id, |(i, ..)| *i).ok())
+            .map_or(
+                Self {
+                    blank: &[],
+                    opener: &[],
+                    del_opens: true,
+                },
+                |at| Self {
+                    blank: LEXICAL[at].1,
+                    opener: LEXICAL[at].2,
+                    del_opens: LEXICAL[at].3,
+                },
+            )
+    }
+
+    /// The character one byte stands for, `after_dashes` being whether `--` precedes it: a blank high byte is a space, a high byte that opens a comment is a control character, a 0x7F that opens none is a letter, any other high byte the marker.
+    fn single(self, byte: u8, after_dashes: bool) -> char {
+        match byte {
+            0x7F if after_dashes && !self.del_opens => UNPLACED,
+            0..=0x7F => char::from(byte),
+            b if self.blank.contains(&b) => ' ',
+            b if after_dashes && self.opener.contains(&b) => '\x01',
+            _ => UNPLACED,
+        }
+    }
+}
 
 /// How the server cuts a statement into characters in a client character set.
 enum Cut {
@@ -225,13 +263,8 @@ fn plain(text: &str) -> char {
     }
 }
 
-/// A control byte other than ASCII whitespace, which a server may read as a blank or as a letter.
-fn unplaced_control(c: char) -> bool {
-    matches!(c, '\0'..='\x08' | '\x0E'..='\x1F')
-}
-
-/// `raw` cut into characters: a pair of `layout` is the character it encodes, every other byte of 0x80 and above the marker.
-fn cut(raw: &[u8], layout: Option<Layout>) -> String {
+/// `raw` cut into characters: a pair of `layout` is the character it encodes, every other byte is what `lex` reads it as.
+fn cut(raw: &[u8], layout: Option<Layout>, lex: Lexical) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(&first) = rest.first() {
@@ -239,27 +272,21 @@ fn cut(raw: &[u8], layout: Option<Layout>) -> String {
         let (one, tail) = rest.split_at(width);
         out.push(match (layout, width) {
             (Some(l), 2..) => plain(&l.encoding().decode_without_bom_handling(one).0),
-            _ => {
-                if first.is_ascii() {
-                    char::from(first)
-                } else {
-                    UNPLACED
-                }
-            }
+            _ => lex.single(first, out.ends_with("--")),
         });
         rest = tail;
     }
     out
 }
 
-/// A statement's bytes as text, cut into characters where the server cuts them in the client character set (its collation id); a byte the reader cannot place, and a control byte, is the marker.
+/// A statement's bytes as text, cut into characters where the server cuts them in the client character set (its collation id) and with the blanks and comment openers that collation has; UTF-8 and an unrecorded set are read as UTF-8.
 pub(crate) fn client_text(raw: &[u8], charset: Option<u16>) -> std::borrow::Cow<'_, str> {
-    let text = match Cut::of_collation(charset) {
+    let lex = Lexical::of_collation(charset);
+    match Cut::of_collation(charset) {
         Cut::Utf8 => String::from_utf8_lossy(raw),
-        Cut::Bytes => cut(raw, None).into(),
-        Cut::Pairs(layout) => cut(raw, Some(layout)).into(),
-    };
-    text.replace(unplaced_control, "\u{FFFD}").into()
+        Cut::Bytes => cut(raw, None, lex).into(),
+        Cut::Pairs(layout) => cut(raw, Some(layout), lex).into(),
+    }
 }
 
 /// The statement cut into pieces the way the server lexes it: `/*! */` bodies are SQL (nested ones too), other comments, `#` and `-- ` lines become a blank, quoted text is one piece.
@@ -672,29 +699,55 @@ mod tests {
         assert_eq!(client_text(&[0x82, 0xA0], Some(sjis)).as_ref(), "\u{3042}");
     }
 
+    fn row(id: u16) -> Lexical {
+        Lexical::of_collation(Some(id))
+    }
+
     #[test]
-    fn every_byte_the_reader_cannot_place_is_one_marker_whatever_the_client_character_set() {
+    fn every_single_byte_is_read_as_the_collation_table_says() {
         let unclientable = ["ucs2", "utf16", "utf16le", "utf32"];
+        let mut cells = 0;
         for (id, name) in COLLATION_CHARSET {
             if unclientable.contains(name) {
                 continue;
             }
+            let lex = row(*id);
+            let utf8 = matches!(*name, "utf8mb3" | "utf8mb4" | "binary" | "ascii");
             for byte in 0..=0xFFu8 {
-                let bytes = [byte];
-                let text = client_text(&bytes, Some(*id));
-                let want = if byte.is_ascii() && !matches!(byte, 0..=8 | 0x0E..=0x1F) {
-                    char::from(byte)
-                } else {
-                    UNPLACED
+                let one = [byte];
+                let text = client_text(&one, Some(*id));
+                let want = match byte {
+                    0..=0x7F => char::from(byte),
+                    b if lex.blank.contains(&b)
+                        && !matches!(*name, "utf8mb3" | "utf8mb4" | "binary" | "ascii") =>
+                    {
+                        ' '
+                    }
+                    _ => UNPLACED,
                 };
                 assert_eq!(text, want.to_string(), "{name} {byte:#x}");
+                let raw = [b"--", &one[..], b"\nx"].concat();
+                let dashed = client_text(&raw, Some(*id));
+                let opens = matches!(
+                    tokens(&dashed, SqlMode::default()).first(),
+                    Some(Tok::Blank(_))
+                );
+                let want_opens = match byte {
+                    0..=0x20 => true,
+                    0x21..=0x7E => false,
+                    0x7F => lex.del_opens,
+                    b => !utf8 && (lex.blank.contains(&b) || lex.opener.contains(&b)),
+                };
+                assert_eq!(opens, want_opens, "{name} {byte:#x}");
+                cells += 2;
             }
         }
+        assert!(cells > 100_000, "{cells}");
         assert_eq!(
             client_text(b"\x01 a\tb\r\n\x0B\x0C", None),
-            "\u{FFFD} a\tb\r\n\x0B\x0C"
+            "\x01 a\tb\r\n\x0B\x0C"
         );
-        assert_eq!(client_text(b"a\x1Fb", Some(255)), "a\u{FFFD}b");
+        assert_eq!(client_text(b"a\x1Fb", Some(255)), "a\x1Fb");
         assert_eq!(client_text(b"a\x7Fb", Some(255)), "a\x7Fb");
         assert_eq!(client_text(b"caf\xE9", Some(8)), "caf\u{FFFD}");
         assert_eq!(client_text(b"caf\xC3\xA9", Some(255)), "caf\u{E9}");
