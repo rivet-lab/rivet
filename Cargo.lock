@@ -3903,6 +3903,7 @@ dependencies = [
  "csv",
  "encoding_rs",
  "env_logger",
+ "flate2",
  "futures-util",
  "indicatif",
  "jsonwebtoken",

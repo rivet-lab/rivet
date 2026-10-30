@@ -26,6 +26,8 @@ mod proxy;
 #[rustfmt::skip]
 mod client_charsets;
 mod statement;
+#[cfg(test)]
+mod statement_truth;
 
 use std::sync::Arc;
 
