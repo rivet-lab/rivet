@@ -192,11 +192,11 @@ pub(crate) fn charset_name(id: u16) -> Option<&'static str> {
         .map(|at| COLLATION_CHARSET[at].1)
 }
 
-/// The one character `text` decodes to when it is a non-ASCII, non-blank one; else the marker of a byte the reader cannot place.
+/// The one character `text` decodes to when it is a non-blank one (a pair never decodes to ASCII); else the marker of a byte the reader cannot place.
 fn plain(text: &str) -> char {
     let mut chars = text.chars();
     match (chars.next(), chars.next()) {
-        (Some(c), None) if !c.is_ascii() && c != UNPLACED && !c.is_whitespace() => c,
+        (Some(c), None) if c != UNPLACED && !c.is_whitespace() => c,
         _ => UNPLACED,
     }
 }
@@ -211,7 +211,7 @@ fn cut(raw: &[u8], layout: Option<Layout>) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(&first) = rest.first() {
-        let width = layout.map_or(1, |l| l.char_len(rest));
+        let width = layout.map_or(1, |l| l.char_len(rest).max(1));
         let (one, tail) = rest.split_at(width);
         out.push(match (layout, width) {
             (Some(l), 2..) => plain(&l.encoding().decode_without_bom_handling(one).0),
@@ -614,6 +614,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn no_pair_of_a_multibyte_character_set_decodes_to_ascii_or_a_blank_the_lexer_would_read() {
+        for (name, _) in PAIR_LEADS {
+            let id = default_id(name);
+            for lead in 0x81..=0xFEu8 {
+                for trail in 0x30..=0xFEu8 {
+                    let raw = [lead, trail];
+                    let text = client_text(&raw, Some(id));
+                    let mut chars = text.chars();
+                    if let (Some(c), None) = (chars.next(), chars.next()) {
+                        assert!(!c.is_ascii(), "{name} {lead:#x} {trail:#x}");
+                    }
+                }
+            }
+        }
+        let gb = default_id("gb18030");
+        for lead in 0x81..=0xFEu8 {
+            for third in 0x81..=0xFEu8 {
+                let raw = [lead, 0x30, third, 0x30];
+                let text = client_text(&raw, Some(gb));
+                assert!(text.chars().all(|c| !c.is_ascii()), "{lead:#x} {third:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pair_that_decodes_to_a_blank_is_a_marker_not_a_blank() {
+        let sjis = default_id("sjis");
+        assert_eq!(client_text(&[0x81, 0x40], Some(sjis)).as_ref(), "\u{FFFD}");
+        assert_eq!(client_text(&[0x82, 0xA0], Some(sjis)).as_ref(), "\u{3042}");
     }
 
     #[test]

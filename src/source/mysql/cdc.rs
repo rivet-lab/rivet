@@ -5208,6 +5208,29 @@ mod tests {
     }
 
     #[test]
+    fn a_name_the_reader_placed_is_compared_exactly_not_by_shape() {
+        let caf = QueryVerdict::Truncated("shop".into(), "caf\u{e9}".into());
+        assert_eq!(
+            verdict_in(b"TRUNCATE caf\xC3\xA9", 255, &only("shop.caf\u{e9}")),
+            caf
+        );
+        assert_eq!(
+            verdict_in(b"TRUNCATE caf\xC3\xA9", 255, &only("shop.caf\u{e8}")),
+            QueryVerdict::Pass
+        );
+    }
+
+    #[test]
+    fn a_pair_that_decodes_to_a_blank_stops_a_run_that_captures_the_table_behind_it() {
+        let unreadable =
+            QueryVerdict::Unreadable(Box::new(QueryVerdict::Truncated("shop".into(), "t".into())));
+        assert_eq!(
+            verdict_in(b"TRUNCATE\x81\x40t", 13, &only("shop.t")),
+            unreadable
+        );
+    }
+
+    #[test]
     fn a_name_with_a_byte_the_reader_cannot_place_is_ours_only_when_a_captured_name_has_its_shape()
     {
         let unreadable = |v| QueryVerdict::Unreadable(Box::new(v));
