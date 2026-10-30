@@ -750,19 +750,13 @@ impl MysqlChangeStream {
             .map(std::sync::Arc::new)
     }
 
-    /// Track the transaction frame and mark a re-read for a statement that may change privileges: any statement outside a transaction that is not a frame.
+    /// Track the transaction frame and mark a re-read for a statement that may change privileges.
     fn note_statement(&mut self, raw: &[u8], log_pos: u64) {
-        match raw {
-            b"BEGIN" => self.in_transaction = true,
-            b"ROLLBACK" => self.in_transaction = false,
-            _ if self.readable.is_some()
-                && !self.in_transaction
-                && !is_transaction_control(raw) =>
-            {
-                self.grants_pending
-                    .get_or_insert_with(|| (self.file.clone(), log_pos));
-            }
-            _ => {}
+        let (in_transaction, marks) = statement_frame(self.in_transaction, raw);
+        self.in_transaction = in_transaction;
+        if marks && self.readable.is_some() {
+            self.grants_pending
+                .get_or_insert_with(|| (self.file.clone(), log_pos));
         }
     }
 
@@ -2597,6 +2591,18 @@ fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
             | EventData::IgnorableEvent(_),
         ) => true,
         _ => false,
+    }
+}
+
+/// Whether a transaction is open after this statement, and whether the statement marks a grants re-read: any statement outside a transaction that is not a frame.
+pub(crate) fn statement_frame(in_transaction: bool, raw: &[u8]) -> (bool, bool) {
+    match raw {
+        b"BEGIN" => (true, false),
+        b"ROLLBACK" => (false, false),
+        _ => (
+            in_transaction,
+            !in_transaction && !is_transaction_control(raw),
+        ),
     }
 }
 
@@ -4705,6 +4711,30 @@ mod tests {
             statement_mentions(b"ALTER TABLE orders ADD INDEX i (id)", &[]),
             None
         );
+    }
+
+    #[test]
+    fn a_statement_marks_a_re_read_only_outside_a_transaction_and_outside_its_frame() {
+        assert_eq!(statement_frame(false, b"BEGIN"), (true, false));
+        assert_eq!(statement_frame(true, b"BEGIN"), (true, false));
+        assert_eq!(statement_frame(true, b"ROLLBACK"), (false, false));
+        assert_eq!(statement_frame(false, b"ROLLBACK"), (false, false));
+        assert_eq!(statement_frame(true, b"COMMIT"), (true, false));
+        assert_eq!(statement_frame(false, b"COMMIT"), (false, false));
+        assert_eq!(statement_frame(false, b"SAVEPOINT `a`"), (false, false));
+        assert_eq!(
+            statement_frame(false, b"GRANT SELECT ON db.* TO u"),
+            (false, true)
+        );
+        assert_eq!(
+            statement_frame(false, b"CREATE TABLE t (id INT)"),
+            (false, true)
+        );
+        assert_eq!(
+            statement_frame(true, b"INSERT INTO t VALUES (1)"),
+            (true, false)
+        );
+        assert_eq!(statement_frame(false, b""), (false, true));
     }
 
     #[test]
