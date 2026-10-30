@@ -585,17 +585,13 @@ fn is_port_closed(e: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::test_support::test_plan;
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    use crate::config::{
-        CompressionType, DestinationConfig, DestinationType, FormatType, MetaColumns, SourceConfig,
-        SourceType,
-    };
-    use crate::plan::ExtractionStrategy;
-    use crate::tuning::SourceTuning;
+    use crate::config::SourceConfig;
 
     #[test]
     fn only_a_multi_part_run_suffixes_its_part_names() {
@@ -701,60 +697,12 @@ mod tests {
 
     fn minimal_plan() -> ResolvedRunPlan {
         ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
             export_name: "test_export".into(),
-            partition_rollover: None,
-            source_table: None,
-            base_query: "SELECT 1".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
-            strategy: ExtractionStrategy::Snapshot,
-            format: FormatType::Parquet,
-            compression: CompressionType::None,
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: MetaColumns::default(),
-            destination: DestinationConfig {
-                destination_type: DestinationType::Local,
-                path: Some("/tmp".into()),
-                ..Default::default()
-            },
-            quality: None,
-            tuning: SourceTuning::from_config(None),
-            tuning_profile_label: "balanced".into(),
-            validate: false,
-            reconcile: false,
-            resume: false,
             source: SourceConfig {
-                source_type: SourceType::Postgres,
                 url: Some("postgresql://localhost/test".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
+                ..test_plan().source
             },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
-            shape_drift_warn_factor: 0.0,
-            parquet: None,
+            ..test_plan()
         }
     }
 
@@ -1106,7 +1054,7 @@ mod tests {
     #[test]
     fn a_stored_cursor_past_the_success_manifest_is_refused_by_code() {
         let dir = tempfile::tempdir().unwrap();
-        let mut plan = super::super::commit::tests::test_plan();
+        let mut plan = crate::plan::test_support::test_plan();
         plan.strategy =
             crate::plan::ExtractionStrategy::Incremental(crate::plan::IncrementalCursorPlan {
                 primary_column: "id".into(),

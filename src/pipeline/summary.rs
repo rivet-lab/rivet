@@ -1226,6 +1226,7 @@ fn fmt_thousands(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::test_support::test_plan;
 
     #[test]
     fn run_scoped_tag_strips_a_redundant_export_prefix_but_keeps_a_bare_run_id() {
@@ -1361,66 +1362,21 @@ mod tests {
 
     #[test]
     fn render_produces_a_single_string_with_trailing_newline() {
-        use crate::plan::{
-            CompressionType, DestinationConfig, DestinationType, ExtractionStrategy, FormatType,
-            MetaColumns, ResolvedRunPlan,
-        };
-        use crate::tuning::SourceTuning;
+        use crate::plan::{CompressionType, DestinationConfig, DestinationType, ResolvedRunPlan};
         let plan = ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
-            export_name: "orders".into(),
-            partition_rollover: None,
-            source_table: None,
-            base_query: "SELECT 1".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
-            strategy: ExtractionStrategy::Snapshot,
-            format: FormatType::Parquet,
             compression: CompressionType::default(),
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: MetaColumns::default(),
             destination: DestinationConfig {
                 destination_type: DestinationType::Local,
                 path: Some("./out".into()),
                 ..Default::default()
             },
-            quality: None,
-            tuning: SourceTuning::from_config(None),
             tuning_profile_label: "balanced (default)".into(),
-            validate: false,
-            reconcile: false,
-            resume: false,
             source: crate::config::SourceConfig {
-                source_type: crate::config::SourceType::Postgres,
                 url: Some("postgresql://localhost/test".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
+                ..test_plan().source
             },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
             shape_drift_warn_factor: 2.0,
-            parquet: None,
+            ..test_plan()
         };
         let mut s = RunSummary::new(&plan);
         s.status = "success".into();
@@ -1572,66 +1528,22 @@ mod tests {
 
     #[test]
     fn render_compact_strips_chunked_recovery_hint_for_failed() {
-        use crate::plan::{
-            CompressionType, DestinationConfig, DestinationType, ExtractionStrategy, FormatType,
-            MetaColumns, ResolvedRunPlan,
-        };
-        use crate::tuning::SourceTuning;
+        use crate::plan::{CompressionType, DestinationConfig, DestinationType, ResolvedRunPlan};
         let plan = ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
             export_name: "events".into(),
-            partition_rollover: None,
-            source_table: None,
-            base_query: "SELECT 1".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
-            strategy: ExtractionStrategy::Snapshot,
-            format: FormatType::Parquet,
             compression: CompressionType::default(),
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: MetaColumns::default(),
             destination: DestinationConfig {
                 destination_type: DestinationType::Local,
                 path: Some("./out".into()),
                 ..Default::default()
             },
-            quality: None,
-            tuning: SourceTuning::from_config(None),
             tuning_profile_label: "balanced (default)".into(),
-            validate: false,
-            reconcile: false,
-            resume: false,
             source: crate::config::SourceConfig {
-                source_type: crate::config::SourceType::Postgres,
                 url: Some("postgresql://localhost/test".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
+                ..test_plan().source
             },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
             shape_drift_warn_factor: 2.0,
-            parquet: None,
+            ..test_plan()
         };
         let mut s = RunSummary::new(&plan);
         s.status = "failed".into();
@@ -1658,66 +1570,22 @@ mod tests {
     }
 
     fn plan_for(export_name: &str) -> crate::plan::ResolvedRunPlan {
-        use crate::plan::{
-            CompressionType, DestinationConfig, DestinationType, ExtractionStrategy, FormatType,
-            MetaColumns, ResolvedRunPlan,
-        };
-        use crate::tuning::SourceTuning;
+        use crate::plan::{CompressionType, DestinationConfig, DestinationType, ResolvedRunPlan};
         ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
             export_name: export_name.into(),
-            partition_rollover: None,
-            source_table: None,
-            base_query: "SELECT 1".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
-            strategy: ExtractionStrategy::Snapshot,
-            format: FormatType::Parquet,
             compression: CompressionType::default(),
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: MetaColumns::default(),
             destination: DestinationConfig {
                 destination_type: DestinationType::Local,
                 path: Some("./out".into()),
                 ..Default::default()
             },
-            quality: None,
-            tuning: SourceTuning::from_config(None),
             tuning_profile_label: "balanced (default)".into(),
-            validate: false,
-            reconcile: false,
-            resume: false,
             source: crate::config::SourceConfig {
-                source_type: crate::config::SourceType::Postgres,
                 url: Some("postgresql://localhost/test".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
+                ..test_plan().source
             },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
             shape_drift_warn_factor: 2.0,
-            parquet: None,
+            ..test_plan()
         }
     }
 

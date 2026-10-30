@@ -1932,7 +1932,7 @@ mod tests {
     /// A page the sink rotated hands back the part that landed before a later part failed.
     #[test]
     fn a_page_that_fails_part_way_still_hands_back_its_durable_part() {
-        let mut plan = crate::pipeline::commit::tests::test_plan();
+        let mut plan = crate::plan::test_support::test_plan();
         plan.partition_rollover = Some(crate::plan::rollover::PartitionRollover {
             column: "d".into(),
             granularity: crate::config::load::Granularity::Day,
