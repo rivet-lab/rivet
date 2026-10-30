@@ -93,6 +93,8 @@ mod live_cdc_mongo;
 mod live_cdc_mssql;
 #[path = "live/live_cdc_multi_table_cycle.rs"]
 mod live_cdc_multi_table_cycle;
+#[path = "live/live_cdc_mysql_reset.rs"]
+mod live_cdc_mysql_reset;
 #[path = "live/live_cdc_oracle.rs"]
 mod live_cdc_oracle;
 #[cfg(feature = "oracle")]

@@ -317,6 +317,30 @@ services:
       timeout: 3s
       retries: 10
 
+  mysql-reset:
+    image: mysql:8.0
+    profiles: ["cdc"]
+    command:
+      - "--default-authentication-plugin=mysql_native_password"
+      - "--server-id=7"
+      - "--log-bin=binlog"
+      - "--binlog-format=ROW"
+      - "--binlog-row-metadata=FULL"
+    environment:
+      MYSQL_ROOT_PASSWORD: rivet
+      MYSQL_USER: rivet
+      MYSQL_PASSWORD: rivet
+      MYSQL_DATABASE: rivet
+    ports:
+      - "3317:3306"
+    volumes:
+      - ./dev/cdc/mysql-grant.sql:/docker-entrypoint-initdb.d/grant.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-privet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   mssql-cdc:
     image: mcr.microsoft.com/mssql/server:2022-latest
     profiles: ["cdc"]

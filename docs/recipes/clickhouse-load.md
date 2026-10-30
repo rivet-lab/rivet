@@ -177,9 +177,11 @@ load:
   starts that table over (a full load keeps serving the old table until its swap).
   ADR-0035 CH13 lists every statement.
 - **MySQL binlog renumbering.** The version orders MySQL changes by binlog file number,
-  then offset. After `RESET MASTER`, or a failover to a server whose binlog files are
-  numbered lower, new changes carry lower versions and lose to older versions of the
-  same keys.
+  then offset. A checkpoint is refused on another server and after a `RESET MASTER`
+  (`RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT`), and its remedy empties `<table>__changes`.
+  A stream without `cdc.initial: snapshot` whose checkpoint was deleted after a
+  `RESET MASTER` still starts over at the new, lower positions, and its changes lose to
+  older versions of the same keys.
 - **Grants.** The load's user needs, on the target database (measured on 24.8):
 
   ```sql

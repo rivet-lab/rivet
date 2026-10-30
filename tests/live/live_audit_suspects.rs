@@ -60,8 +60,10 @@ fn mysql_cdc_a_statement_logged_insert_is_captured_or_refused_never_dropped() {
             format!("SHOW BINLOG EVENTS IN '{file}'"),
             |r: mysql::Row| {
                 (
-                    r.get::<String, _>(2).unwrap_or_default(),
-                    r.get::<String, _>(5).unwrap_or_default(),
+                    String::from_utf8_lossy(&r.get::<Vec<u8>, _>(2).unwrap_or_default())
+                        .into_owned(),
+                    String::from_utf8_lossy(&r.get::<Vec<u8>, _>(5).unwrap_or_default())
+                        .into_owned(),
                 )
             },
         )

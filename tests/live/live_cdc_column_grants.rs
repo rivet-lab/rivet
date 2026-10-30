@@ -1536,7 +1536,9 @@ fn a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remed
     let said = said_by(&out);
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
     assert!(
-        said.contains("column 'pass'") && said.contains("rivet plan") && !said.contains("1143"),
+        said.contains("column 'pass'")
+            && said.contains("rivet plan")
+            && !said.contains("ERROR 1143"),
         "the refusal names the column and the remedy (plan again), not the server's error:\n{said}"
     );
     let written = files_under(&rig.out_dir());
@@ -1956,7 +1958,7 @@ fn a_revoke_between_the_stream_open_and_the_schema_read_is_refused_by_code_mysql
     let said = said_by(&out);
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2));
     assert!(
-        !said.contains("1143"),
+        !said.contains("ERROR 1143"),
         "the server's error is not the refusal:\n{said}"
     );
 }

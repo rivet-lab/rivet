@@ -122,6 +122,17 @@ impl MysqlChangeStream {
         }))
     }
 
+    /// The commit position at `log_pos`, carrying the identity and the fingerprint of the commit event that ends there.
+    fn commit_position_at(&self, log_pos: u64, commit: Json) -> Position {
+        Position::new(json!({
+            "file": self.file,
+            "pos": log_pos,
+            "server_uuid": self.identity.0,
+            "gtid_executed": self.identity.1,
+            "commit": commit,
+        }))
+    }
+
     /// Open a stream from an explicit `(binlog_file, pos)` coordinate.
     ///
     /// A [`DrainMode::BoundedAtOpen`] run sets `BINLOG_DUMP_NON_BLOCK` (the
@@ -968,6 +979,33 @@ impl MysqlChangeStream {
         Ok(c.exec_first("SELECT GTID_SUBSET(?, ?)", (subset, superset))?)
     }
 
+    /// The binlog event the server holds at the recorded commit's start in `file`, or the server's 1220 refusal to read one there.
+    fn event_at(
+        c: &mut mysql::Conn,
+        file: &str,
+        commit: Option<&Json>,
+    ) -> Result<std::result::Result<Option<BinlogEventAt>, String>> {
+        use mysql::prelude::Queryable;
+        let Some(at) = commit.and_then(|c| c.get("at")).and_then(Json::as_u64) else {
+            return Ok(Ok(None));
+        };
+        let quoted = file.replace('\\', "\\\\").replace('\'', "''");
+        match c.query_first::<(Vec<u8>, u64, Vec<u8>, u64, u64, Vec<u8>), _>(format!(
+            "SHOW BINLOG EVENTS IN '{quoted}' FROM {at} LIMIT 1"
+        )) {
+            Ok(row) => Ok(Ok(row.map(|(_, pos, kind, _, end, info)| BinlogEventAt {
+                pos,
+                kind: String::from_utf8_lossy(&kind).into_owned(),
+                end,
+                info: String::from_utf8_lossy(&info).into_owned(),
+            }))),
+            Err(mysql::Error::MySqlError(e)) if e.code == 1220 => Ok(Err(e.message)),
+            Err(e) => Err(anyhow::Error::new(e).context(format!(
+                "mysql cdc: reading the checkpoint's commit event at `{file}:{at}`"
+            ))),
+        }
+    }
+
     fn current_coordinates(c: &mut mysql::Conn) -> Result<(String, u64)> {
         let row: mysql::Row = match c.query_first("SHOW BINARY LOG STATUS") {
             Ok(Some(row)) => row,
@@ -1023,7 +1061,7 @@ impl MysqlChangeStream {
             )
         })?;
         Position::new(serde_json::json!({
-            "file": file, "pos": pos, "server_uuid": uuid, "gtid_executed": gtid
+            "file": file, "pos": pos, "server_uuid": uuid, "gtid_executed": gtid, "commit": null
         }))
         .save(ckpt)
     }
@@ -1111,6 +1149,10 @@ impl MysqlChangeStream {
                 contained,
             );
             verdict.verdict().enforce()?;
+            let found = Self::event_at(&mut conn, &file, pos.0.get("commit"))?;
+            commit_verdict(&file, p, pos.0.get("commit"), found)
+                .verdict()
+                .enforce()?;
             let identity = (server_uuid, server_gtid);
             return Self::open_on(conn, server_id, file, p, mode, identity, configured_tables)
                 .map(with_dir);
@@ -1184,13 +1226,13 @@ impl MysqlChangeStream {
     ///
     /// Shared by the `Xid` and `Query('COMMIT')` arms: two commit markers, one
     /// framing. Duplicating it is how the second one drifts.
-    fn close_transaction_at(&mut self, log_pos: u64) -> bool {
+    fn close_transaction_at(&mut self, log_pos: u64, commit: Json) -> bool {
         if commit_past_bound(&self.file, log_pos, self.bound.as_ref()) {
             self.tx.clear();
             self.past_bound = true;
             return false;
         }
-        let commit = self.position_at(log_pos);
+        let commit = self.commit_position_at(log_pos, commit);
         // #158: commit position on all, committed on the transaction's LAST event —
         // on disk when it spilled (`TxBuffer::close_transaction`).
         match self
@@ -1222,6 +1264,7 @@ impl MysqlChangeStream {
             }
         };
         let log_pos = ev.header().log_pos() as u64;
+        let event_start = log_pos.saturating_sub(ev.header().event_size() as u64);
         let data = ev.read_data()?;
         self.refuse_changed_grants_at(&data)?;
         match data {
@@ -1462,8 +1505,8 @@ impl MysqlChangeStream {
             // XID = transaction commit. Stamp the commit position on every change
             // in the transaction and mark the last one committed, then release the
             // whole transaction atomically.
-            Some(EventData::XidEvent(_)) => {
-                if !self.close_transaction_at(log_pos) {
+            Some(EventData::XidEvent(x)) => {
+                if !self.close_transaction_at(log_pos, json!({"at": event_start, "xid": x.xid})) {
                     return Ok(false);
                 }
             }
@@ -1536,7 +1579,10 @@ impl MysqlChangeStream {
                         self.grants_pending
                             .get_or_insert_with(|| (self.file.clone(), log_pos));
                     }
-                    QueryVerdict::Commit => return Ok(self.close_transaction_at(log_pos)),
+                    QueryVerdict::Commit => {
+                        let commit = json!({"at": event_start, "query": qe.query()});
+                        return Ok(self.close_transaction_at(log_pos, commit));
+                    }
                     QueryVerdict::Truncated(..)
                     | QueryVerdict::ColumnRenamed(..)
                     | QueryVerdict::TableRenamed(..)
@@ -5423,6 +5469,62 @@ mod identity_recovery_order {
     }
 }
 
+/// One `SHOW BINLOG EVENTS` row: where the event starts and ends, its type, and the server's rendering of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BinlogEventAt {
+    pub(crate) pos: u64,
+    pub(crate) kind: String,
+    pub(crate) end: u64,
+    pub(crate) info: String,
+}
+
+/// Whether the commit the checkpoint recorded still ends at `pos` in `file`: a binlog renumbered by `RESET MASTER` reuses the name, not the events.
+pub(crate) fn commit_verdict(
+    file: &str,
+    pos: u64,
+    recorded: Option<&Json>,
+    found: std::result::Result<Option<BinlogEventAt>, String>,
+) -> CheckpointIdentity {
+    let Some(recorded) = recorded else {
+        return CheckpointIdentity::CommitUnrecorded {
+            file: file.to_string(),
+        };
+    };
+    let Some(at) = recorded.get("at").and_then(Json::as_u64) else {
+        return CheckpointIdentity::Ok;
+    };
+    let moved = |found: String| CheckpointIdentity::CommitMoved {
+        file: file.to_string(),
+        pos,
+        recorded: recorded.to_string(),
+        found,
+    };
+    let event = match found {
+        Err(why) if why.contains("Could not find target log") => return CheckpointIdentity::Ok,
+        Err(why) => return moved(why),
+        Ok(None) => return moved("no event".to_string()),
+        Ok(Some(event)) => event,
+    };
+    let same = event.pos == at
+        && event.end == pos
+        && match (
+            recorded.get("xid").and_then(Json::as_u64),
+            recorded.get("query").and_then(Json::as_str),
+        ) {
+            (Some(xid), _) => event.kind == "Xid" && event.info.contains(&format!("xid={xid} ")),
+            (None, Some(query)) => event.kind == "Query" && event.info == query,
+            (None, None) => false,
+        };
+    if same {
+        CheckpointIdentity::Ok
+    } else {
+        moved(format!(
+            "{} at {}..{}: {}",
+            event.kind, event.pos, event.end, event.info
+        ))
+    }
+}
+
 /// The outcome of [`MysqlChangeStream::checkpoint_identity_verdict`].
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CheckpointIdentity {
@@ -5438,13 +5540,37 @@ pub(crate) enum CheckpointIdentity {
     GtidNotContained { checkpoint: String, server: String },
     /// Same server, but the server gave no containment answer for a non-empty GTID set.
     GtidUnanswered,
+    /// The checkpoint predates commit fingerprints, so a renumbered binlog cannot be ruled out.
+    CommitUnrecorded { file: String },
+    /// The commit the checkpoint ends at is no longer the event at that offset of `file`.
+    CommitMoved {
+        file: String,
+        pos: u64,
+        recorded: String,
+        found: String,
+    },
 }
 
 impl CheckpointIdentity {
     /// The refusal text, or `None` when the resume may proceed.
     pub(crate) fn refusal(&self) -> Option<String> {
         match self {
-            Self::Ok | Self::Unverifiable | Self::GtidUnanswered => None,
+            Self::Ok
+            | Self::Unverifiable
+            | Self::GtidUnanswered
+            | Self::CommitUnrecorded { .. } => None,
+            Self::CommitMoved {
+                file,
+                pos,
+                recorded,
+                found,
+            } => Some(format!(
+                "mysql cdc: the checkpoint resumes at `{file}:{pos}` after the commit {recorded}, \
+                 but the server holds {found} there — `{file}` is a different file of the same \
+                 name, which is what a `RESET MASTER` leaves once the numbering reaches the \
+                 checkpoint's file again. Resuming would skip whatever the new file holds before \
+                 that offset, silently."
+            )),
             Self::ForeignServer { checkpoint, server } => Some(format!(
                 "mysql cdc: this checkpoint was written by server `{checkpoint}` and \
                  the connection is to `{server}`. Binlog coordinates are per-server: \
@@ -5488,6 +5614,11 @@ impl CheckpointIdentity {
                  resuming on the server uuid alone."
                     .to_string(),
             ),
+            Self::CommitUnrecorded { file } => Some(format!(
+                "mysql cdc: this checkpoint records no commit fingerprint (it was written before \
+                 rivet recorded one), so a `RESET MASTER` that renumbered the binlog back to \
+                 `{file}` cannot be ruled out; resuming on the coordinates alone."
+            )),
             _ => None,
         }
     }
@@ -5703,6 +5834,116 @@ mod error_code_tests {
         assert_eq!(
             err.to_string(),
             "mysql: binlog disabled (binlog status empty)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod commit_fingerprint {
+    use super::{BinlogEventAt, CheckpointIdentity, IdentityVerdict, commit_verdict};
+    use serde_json::json;
+
+    /// An Xid event as `SHOW BINLOG EVENTS` renders it.
+    fn xid(pos: u64, end: u64, xid: u64) -> Result<Option<BinlogEventAt>, String> {
+        Ok(Some(BinlogEventAt {
+            pos,
+            kind: "Xid".into(),
+            end,
+            info: format!("COMMIT /* xid={xid} */"),
+        }))
+    }
+
+    /// The fingerprint passes only where the same commit still ends at the checkpoint.
+    #[test]
+    fn a_resume_passes_only_where_the_recorded_commit_still_ends_at_the_checkpoint() {
+        let rec = json!({"at": 457, "xid": 39});
+        assert_eq!(
+            commit_verdict("binlog.000005", 488, Some(&rec), xid(457, 488, 39)),
+            CheckpointIdentity::Ok
+        );
+        for (found, why) in [
+            (xid(457, 488, 3903), "another transaction"),
+            (xid(457, 512, 39), "an event of another size"),
+            (xid(400, 488, 39), "an event at another start"),
+            (Ok(None), "no event"),
+            (
+                Err("ERROR 1220: Error reading Log_event at position 457".into()),
+                "an unreadable offset",
+            ),
+            (xid(457, 488, 390), "an xid that only shares a prefix"),
+        ] {
+            assert!(
+                matches!(
+                    commit_verdict("binlog.000005", 488, Some(&rec), found),
+                    CheckpointIdentity::CommitMoved { .. }
+                ),
+                "{why}"
+            );
+        }
+    }
+
+    /// A Query `COMMIT` is matched by its text, and a missing file is left to the dump's log-gap refusal.
+    #[test]
+    fn a_query_commit_matches_by_text_and_a_missing_file_is_the_log_gap() {
+        let rec = json!({"at": 900, "query": "COMMIT"});
+        let query = |info: &str| {
+            Ok(Some(BinlogEventAt {
+                pos: 900,
+                kind: "Query".into(),
+                end: 950,
+                info: info.into(),
+            }))
+        };
+        assert_eq!(
+            commit_verdict("b.1", 950, Some(&rec), query("COMMIT")),
+            CheckpointIdentity::Ok
+        );
+        assert!(matches!(
+            commit_verdict("b.1", 950, Some(&rec), query("BEGIN")),
+            CheckpointIdentity::CommitMoved { .. }
+        ));
+        assert_eq!(
+            commit_verdict(
+                "b.1",
+                950,
+                Some(&rec),
+                Err("ERROR 1220: Could not find target log".into())
+            ),
+            CheckpointIdentity::Ok
+        );
+    }
+
+    /// An anchor records no commit and passes; a checkpoint from before fingerprints warns; a moved commit is the coded refusal.
+    #[test]
+    fn an_old_checkpoint_warns_and_a_moved_commit_refuses_with_exit_5() {
+        assert_eq!(
+            commit_verdict("b.1", 4, Some(&serde_json::Value::Null), Ok(None)),
+            CheckpointIdentity::Ok
+        );
+        assert!(matches!(
+            commit_verdict("b.1", 4, None, Ok(None)).verdict(),
+            IdentityVerdict::Unverifiable(w) if w.contains("records no commit fingerprint") && w.contains("`b.1`")
+        ));
+        let moved = commit_verdict(
+            "binlog.000005",
+            488,
+            Some(&json!({"at": 457, "xid": 39})),
+            xid(457, 488, 3903),
+        );
+        let err = moved.verdict().enforce().expect_err("refuses");
+        assert_eq!(crate::error::classify_exit(&err), 5, "{err}");
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT")
+        );
+        let why = err.to_string();
+        assert!(
+            why.contains("binlog.000005:488") && why.contains("xid=3903"),
+            "{why}"
+        );
+        assert!(
+            why.ends_with(crate::source::cdc::checkpoint_identity::RECOVER),
+            "{why}"
         );
     }
 }
