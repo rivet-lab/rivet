@@ -3516,6 +3516,7 @@ fn a_revoke_separated_from_its_keyword_by_a_byte_a_collation_reads_as_a_blank_st
 }
 
 const STATEMENT_FORMAT: &str = "SET SESSION binlog_format = 'STATEMENT'";
+const OTHER_TABLE: &str = "CREATE TABLE rivet.{t}_old (id INT PRIMARY KEY)";
 const UPDATED_AFTER_AS_PW: &str = "UPDATE rivet.{t} SET pw = 'ann-after' WHERE id = 1";
 
 /// A backlog case that runs `before` after the character set `set`, then the statement `pieces`, then `tail`.
@@ -3535,14 +3536,59 @@ fn lexed_case(
     (policy, steps, want)
 }
 
+/// Leaves a statement no run can identify in the binlog: the nextest override `threads-required = "num-test-threads"` runs it alone.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_control_byte_after_a_dash_opens_a_comment_that_hides_a_statement_write_mysql() {
+    let delete = "'DELETE rivet.{t}_old --', 0x01, '\n, rivet.{t} FROM rivet.{t} JOIN rivet.{t}_old ON rivet.{t}.id = rivet.{t}_old.id'";
+    let before = [STATEMENT_FORMAT, OTHER_TABLE];
+    end_as(
+        "cg_ctl_w",
+        &[
+            lexed_case(
+                true,
+                "SET NAMES utf8mb4",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                false,
+                "SET NAMES utf8mb4",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES latin1",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES cp1250",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_statement_write_whose_table_follows_a_comment_opened_by_a_control_byte_is_refused_mysql() {
     let update = "'UPDATE rivet --', 0x01, '\n.{t} SET name = ''stmt'' WHERE id = 2'";
     let delete = "'DELETE FROM rivet --', 0x01, '\n.{t} WHERE id = 2'";
     let before = [STATEMENT_FORMAT];
     end_as(
-        "cg_ctl_w",
+        "cg_ctl_d",
         &[
             lexed_case(
                 true,
