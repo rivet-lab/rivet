@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/statement.rs b/src/source/mysql/statement.rs
+index 7163b61c..8e8036e1 100644
+--- a/src/source/mysql/statement.rs
++++ b/src/source/mysql/statement.rs
+@@ -203,7 +203,7 @@ fn plain(text: &str) -> char {
+ 
+ /// A control byte other than ASCII whitespace, which a server may read as a blank or as a letter.
+ fn unplaced_control(c: char) -> bool {
+-    matches!(c, '\0'..='\x08' | '\x0E'..='\x1F')
++    false && matches!(c, '\0'..='\x08' | '\x0E'..='\x1F')
+ }
+ 
+ /// `raw` cut into characters: a pair of `layout` is the character it encodes, every other byte of 0x80 and above the marker.
