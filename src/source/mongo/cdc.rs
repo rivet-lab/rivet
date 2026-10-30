@@ -110,7 +110,7 @@ impl OrdinalClock {
 
 /// A clusterTime as one integer, seconds in the high half and the increment in the low.
 fn cluster_time_u64(t: mongodb::bson::Timestamp) -> u64 {
-    (u64::from(t.time) << 32) | u64::from(t.increment)
+    (u64::from(t.time) << 32) + u64::from(t.increment)
 }
 
 /// How a whole-db change-stream operation is handled: a document change we emit,

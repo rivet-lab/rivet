@@ -3081,7 +3081,7 @@ fn mongo_cdc_cut_into_clickhouse(mdb: &str, db: &Db) -> Rig {
 }
 
 /// The live `(_id, v)` pairs of the ClickHouse view of `t`, ordered by id.
-fn clickhouse_mongo_state(db: &Db) -> std::collections::BTreeMap<i64, String> {
+fn clickhouse_rows_mongo_state(db: &Db) -> std::collections::BTreeMap<i64, String> {
     ch(&format!(
         "SELECT toString(_id), JSONExtractString(toString(document), 'v') \
          FROM {}.t WHERE NOT __is_deleted ORDER BY _id FORMAT TSV",
@@ -3153,7 +3153,10 @@ fn a_mongo_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source() {
 
     rig.run_ok();
     load(&rig);
-    assert_eq!(clickhouse_mongo_state(&db), m.current_state_i64("t", "v"));
+    assert_eq!(
+        clickhouse_rows_mongo_state(&db),
+        m.current_state_i64("t", "v")
+    );
 
     m.upsert_set("t", 5, "v", "new");
     m.upsert_set("t", 1, "v", "u1");
@@ -3162,7 +3165,10 @@ fn a_mongo_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source() {
     m.txn_updates("t", &[(3, "v", "t1"), (3, "v", "t2"), (3, "v", "t3")]);
     rig.run_ok();
     load(&rig);
-    assert_eq!(clickhouse_mongo_state(&db), m.current_state_i64("t", "v"));
+    assert_eq!(
+        clickhouse_rows_mongo_state(&db),
+        m.current_state_i64("t", "v")
+    );
     assert_snapshot_rows_version_zero_and_changes_strictly_ordered(&db);
 }
 
@@ -3209,7 +3215,7 @@ fn a_mongo_transaction_cut_mid_tie_loads_in_source_order() {
     let want = m.current_state_i64("t", "v");
     assert!(!want.contains_key(&1), "key 1 ends deleted: {want:?}");
     assert_eq!(want[&2], "b4");
-    assert_eq!(clickhouse_mongo_state(&db), want);
+    assert_eq!(clickhouse_rows_mongo_state(&db), want);
 }
 
 /// The same transaction, the first run killed after its checkpoint is saved and before its ack.
@@ -3243,7 +3249,7 @@ fn a_mongo_run_killed_mid_tie_resumes_in_source_order() {
     }
     let want = m.current_state_i64("t", "v");
     assert!(want.is_empty(), "the key ends deleted: {want:?}");
-    assert_eq!(clickhouse_mongo_state(&db), want);
+    assert_eq!(clickhouse_rows_mongo_state(&db), want);
 }
 
 /// An update read back after its document was deleted, and updates whose lookup image is the latest state.
@@ -3271,7 +3277,7 @@ fn a_mongo_update_looked_up_after_a_delete_loads_as_deleted() {
     load(&rig);
     let want = m.current_state_i64("t", "v");
     assert_eq!(want[&1], "reborn");
-    assert_eq!(clickhouse_mongo_state(&db), want);
+    assert_eq!(clickhouse_rows_mongo_state(&db), want);
 }
 
 /// One transaction spanning the captured and an uncaptured collection, then more writes.
@@ -3302,7 +3308,7 @@ fn a_mongo_transaction_across_collections_loads_the_captured_one_in_source_order
     }
     let want = m.current_state_i64("t", "v");
     assert_eq!(want[&1], "a3");
-    assert_eq!(clickhouse_mongo_state(&db), want);
+    assert_eq!(clickhouse_rows_mongo_state(&db), want);
 }
 
 /// Drops `ct` and `ord` from every object of a JSON value, the shape an older rivet wrote.
@@ -3344,7 +3350,7 @@ fn a_mongo_checkpoint_from_before_the_ordinal_is_adopted_and_loads_in_source_ord
     rig.run_ok();
     load(&rig);
     assert_eq!(
-        clickhouse_mongo_state(&db),
+        clickhouse_rows_mongo_state(&db),
         m.current_state_i64("t", "v"),
         "the adopted stream loads in source order"
     );
