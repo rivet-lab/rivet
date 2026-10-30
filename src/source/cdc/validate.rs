@@ -15,6 +15,7 @@
 use crate::destination::Destination;
 use crate::error::Result;
 use crate::manifest::{MANIFEST_FILENAME, RunManifest, join_key};
+use crate::source::cdc::order::{self, Key};
 
 /// Outcome of a `__pos` continuity check over one CDC run's output.
 #[derive(Default)]
@@ -33,76 +34,9 @@ impl PositionCheck {
     }
 }
 
-/// A `__pos` value normalised to a comparable key. Within a run every position is
-/// the same engine's shape, so cross-variant comparison never happens (the derived
-/// `Ord`'s discriminant tie-break is irrelevant).
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum PosKey {
-    /// MySQL binlog: the file's numeric ORDINAL, then pos. Stored as the
-    /// ordinal (not the filename) because a lexical filename compare inverts at
-    /// the 999999 → 1000000 suffix-width rollover — the exact break the engine's
-    /// `commit_past_bound` parses the ordinal to avoid (bug hunt 2026-08-08).
-    /// A binlog name with no numeric suffix keeps its filename via `BinlogRaw`
-    /// so two such never compare equal by accident.
-    Binlog(u64, u64),
-    /// Oracle commit SCN, compared as a number (a string compare puts "999" after "1000").
-    Scn(u64),
-    /// A binlog file whose name has no parseable ordinal — ordered by name,
-    /// then pos. Never mixed with `Binlog` in a real run (one server, one
-    /// basename), but kept distinct so the fallback is not silently equal.
-    BinlogRaw(String, u64),
-    /// PostgreSQL LSN `hi/lo` (hex) → a single u64.
-    PgLsn(u64),
-    /// SQL Server LSN — fixed-width hex, lexically comparable.
-    Lsn(String),
-}
-
-/// Parse one `__pos` JSON string (`{"file":…,"pos":…}` or `{"lsn":…}`) into a
-/// comparable key.
-fn parse_pos(s: &str) -> Option<PosKey> {
-    let v: serde_json::Value = serde_json::from_str(s).ok()?;
-    if let (Some(file), Some(pos)) = (v.get("file").and_then(|x| x.as_str()), v.get("pos")) {
-        let pos = pos.as_u64()?;
-        // Order by the numeric ordinal (shared parser with the engine's
-        // commit_past_bound), falling back to the raw name only when there is
-        // no suffix to parse.
-        return Some(match crate::source::mysql::cdc::binlog_file_ordinal(file) {
-            Some(ord) => PosKey::Binlog(ord, pos),
-            None => PosKey::BinlogRaw(file.to_string(), pos),
-        });
-    }
-    // MongoDB change-stream position `{"_data": <hex>, "rt": <hex>}`: `_data` is
-    // the resume-token keystring, order-preserving under lexical compare (oplog
-    // order). Key on it — a `Utf8` string key, like a generic LSN. Without this
-    // arm `rivet validate --depth full` failed on every healthy mongo CDC output.
-    if let Some(scn) = v.get("commit_scn").and_then(|x| x.as_str()) {
-        return scn.parse().ok().map(PosKey::Scn);
-    }
-    if let Some(data) = v.get("_data").and_then(|x| x.as_str()) {
-        return Some(PosKey::Lsn(data.to_string()));
-    }
-    let lsn = v.get("lsn").and_then(|x| x.as_str())?;
-    if let Some((hi, lo)) = lsn.split_once('/') {
-        let hi = u64::from_str_radix(hi, 16).ok()?;
-        let lo = u64::from_str_radix(lo, 16).ok()?;
-        // A PostgreSQL LSN's low half is 32 bits. A wider one is malformed, and
-        // folding it in anyway makes a WRONG comparable key out of nonsense — the
-        // ordering check would then compare positions that mean nothing and report
-        // either a phantom backwards jump or a false clean. `None` routes it to the
-        // `unparseable __pos` violation instead, which is what the caller already
-        // knows how to say.
-        //
-        if lo >> 32 != 0 {
-            return None;
-        }
-        // `+`, not `|`. With the guard above the halves are provably disjoint, so
-        // the two produce the same number — but `|` vs `^` is then EQUIVALENT and
-        // unkillable, while `+` vs `*` is not (`0/FFFFFFFF` and `1/0` both collapse
-        // to 0 under `*`, so the ordering assertions catch it). Same value, a graded
-        // operator instead of an unkillable one.
-        return Some(PosKey::PgLsn((hi << 32) + lo));
-    }
-    Some(PosKey::Lsn(lsn.to_string()))
+/// Parse one `__pos` JSON string into its comparable key; the order itself is owned by [`order`].
+fn parse_pos(s: &str) -> Option<Key> {
+    order::key(&serde_json::from_str(s).ok()?)
 }
 
 /// Read the `__pos` column (Utf8) out of a Parquet part body. The body is staged
@@ -290,7 +224,7 @@ pub(crate) fn check_positions(dest: &dyn Destination, prefix: &str) -> Result<Po
 /// Pure half: the monotonicity invariant over `(part_id, __pos)` in part→row
 /// order, lifted out of the IO so it is testable without a destination.
 fn check_order(items: &[(u32, String)]) -> (Option<String>, Option<String>, Vec<String>) {
-    let mut prev: Option<PosKey> = None;
+    let mut prev: Option<Key> = None;
     let (mut first, mut last, mut violations) = (None, None, Vec::new());
     for (part_id, raw) in items {
         let Some(key) = parse_pos(raw) else {
@@ -328,8 +262,9 @@ mod v016_checkpoint_compat {
     //! the shape-only check stays green — while a user's 0.16 checkpoint
     //! silently re-anchors and skips every change since it was written.
 
-    use super::{PosKey, parse_pos};
+    use super::parse_pos;
     use crate::source::cdc::Position;
+    use crate::source::cdc::order::{Key, Val};
 
     const DIR: &str = "tests/fixtures/compat/v0.16";
 
@@ -549,7 +484,7 @@ mod v016_checkpoint_compat {
         let raw = serde_json::to_string(&p.0).expect("serialize");
         assert_eq!(
             parse_pos(&raw),
-            Some(PosKey::Binlog(4, 150_838_422)),
+            Some(Key(vec![Val::Num(4), Val::Num(150_838_422)])),
             "the 0.16 MySQL checkpoint must still resume at the SAME file+pos;              a renamed or newly-required field re-anchors the stream instead"
         );
     }
@@ -561,7 +496,7 @@ mod v016_checkpoint_compat {
         // PG's `0/1A2B3C4D` is parsed into a single u64 (hi<<32 | lo).
         assert_eq!(
             parse_pos(&raw),
-            Some(PosKey::PgLsn(0x1A2B_3C4D)),
+            Some(Key(vec![Val::Num(0x1A2B_3C4D)])),
             "the 0.16 PostgreSQL checkpoint must still resume at the same LSN"
         );
 
@@ -569,7 +504,7 @@ mod v016_checkpoint_compat {
         let raw = serde_json::to_string(&ms.0).expect("serialize");
         assert_eq!(
             parse_pos(&raw),
-            Some(PosKey::Lsn("0000003400001A2B0003".into())),
+            Some(Key(vec![Val::Text("0000003400001A2B0003".into())])),
             "the 0.16 SQL Server checkpoint must still resume at the same LSN"
         );
     }
@@ -591,16 +526,11 @@ mod tests {
             parse_pos(r#"{"file":"binlog.000046","pos":999}"#).unwrap()
                 < parse_pos(r#"{"file":"binlog.000047","pos":4}"#).unwrap()
         );
-        // ROLLOVER (bug hunt 2026-08-08): binlog.1000000 comes AFTER
-        // binlog.999999 ordinally, though "1000000" < "999999" lexically. The
-        // old String-keyed PosKey ordered these backwards, so validate's
-        // monotonicity check misjudged a rotation across the width boundary.
         assert!(
             parse_pos(r#"{"file":"binlog.999999","pos":10}"#).unwrap()
                 < parse_pos(r#"{"file":"binlog.1000000","pos":1}"#).unwrap(),
             "ordinal order: .1000000 is newer than .999999 despite lexical order"
         );
-        // A no-suffix name falls back to BinlogRaw and never equals an ordinal key.
         assert_ne!(
             parse_pos(r#"{"file":"binlog","pos":1}"#).unwrap(),
             parse_pos(r#"{"file":"binlog.000001","pos":1}"#).unwrap()

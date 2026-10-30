@@ -2632,16 +2632,13 @@ fn commit_past_bound(file: &str, pos: u64, bound: Option<&(String, u64)>) -> boo
     let Some((bound_file, bound_pos)) = bound else {
         return false;
     };
-    let (Some(cur), Some(bnd)) = (binlog_file_ordinal(file), binlog_file_ordinal(bound_file))
-    else {
+    let (Some(cur), Some(bnd)) = (
+        crate::source::cdc::order::binlog_ordinal(file),
+        crate::source::cdc::order::binlog_ordinal(bound_file),
+    ) else {
         return false;
     };
     cur > bnd || (cur == bnd && pos > *bound_pos)
-}
-
-/// The numeric suffix of a binlog file name (`mysql-bin.000042` → 42).
-pub(crate) fn binlog_file_ordinal(name: &str) -> Option<u64> {
-    name.rsplit_once('.')?.1.parse().ok()
 }
 
 /// Decode a binlog row's cells to typed [`RivetValue`]s (structural — no string
@@ -4403,16 +4400,6 @@ mod tests {
             99,
             Some(&("garbage".to_string(), 0))
         ));
-    }
-
-    #[test]
-    fn binlog_file_ordinal_parses_the_numeric_suffix() {
-        assert_eq!(binlog_file_ordinal("mysql-bin.000042"), Some(42));
-        assert_eq!(binlog_file_ordinal("binlog.1000000"), Some(1000000));
-        // Dotted basenames take the LAST dot (rsplit).
-        assert_eq!(binlog_file_ordinal("my.replica.000007"), Some(7));
-        assert_eq!(binlog_file_ordinal("no-suffix"), None);
-        assert_eq!(binlog_file_ordinal("binlog.notanum"), None);
     }
 
     /// The dump thread must outlive a long store flush: its session `net_write_timeout` is
