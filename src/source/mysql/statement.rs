@@ -126,15 +126,18 @@ enum Layout {
     Gb18030,
 }
 
+/// The multibyte client character sets and their layouts.
+const LAYOUTS: &[(&str, Layout)] = &[
+    ("big5", Layout::Big5),
+    ("gbk", Layout::Gbk),
+    ("sjis", Layout::Sjis),
+    ("cp932", Layout::Sjis),
+    ("gb18030", Layout::Gb18030),
+];
+
 impl Layout {
     fn of_name(name: &str) -> Option<Self> {
-        match name {
-            "big5" => Some(Self::Big5),
-            "gbk" => Some(Self::Gbk),
-            "sjis" | "cp932" => Some(Self::Sjis),
-            "gb18030" => Some(Self::Gb18030),
-            _ => None,
-        }
+        LAYOUTS.iter().find(|(n, _)| *n == name).map(|(_, l)| *l)
     }
 
     fn encoding(self) -> &'static encoding_rs::Encoding {
@@ -212,26 +215,31 @@ pub(crate) fn charset_name(id: u16) -> Option<&'static str> {
         .map(|at| COLLATION_CHARSET[at].1)
 }
 
+/// The single-byte character sets whose high half encoding_rs maps as the server does.
+const SINGLE_BYTE: &[(&str, &encoding_rs::Encoding)] = &[
+    ("latin1", encoding_rs::WINDOWS_1252),
+    ("latin2", encoding_rs::ISO_8859_2),
+    ("latin5", encoding_rs::WINDOWS_1254),
+    ("latin7", encoding_rs::ISO_8859_13),
+    ("cp1250", encoding_rs::WINDOWS_1250),
+    ("cp1251", encoding_rs::WINDOWS_1251),
+    ("cp1256", encoding_rs::WINDOWS_1256),
+    ("cp1257", encoding_rs::WINDOWS_1257),
+    ("cp866", encoding_rs::IBM866),
+    ("koi8r", encoding_rs::KOI8_R),
+    ("koi8u", encoding_rs::KOI8_U),
+    ("greek", encoding_rs::ISO_8859_7),
+    ("hebrew", encoding_rs::ISO_8859_8),
+    ("tis620", encoding_rs::WINDOWS_874),
+    ("macroman", encoding_rs::MACINTOSH),
+];
+
 /// The decoder of a single-byte character set whose high half encoding_rs maps as the server does.
 fn single_byte_decoder(name: &str) -> Option<&'static encoding_rs::Encoding> {
-    Some(match name {
-        "latin1" => encoding_rs::WINDOWS_1252,
-        "latin2" => encoding_rs::ISO_8859_2,
-        "latin5" => encoding_rs::WINDOWS_1254,
-        "latin7" => encoding_rs::ISO_8859_13,
-        "cp1250" => encoding_rs::WINDOWS_1250,
-        "cp1251" => encoding_rs::WINDOWS_1251,
-        "cp1256" => encoding_rs::WINDOWS_1256,
-        "cp1257" => encoding_rs::WINDOWS_1257,
-        "cp866" => encoding_rs::IBM866,
-        "koi8r" => encoding_rs::KOI8_R,
-        "koi8u" => encoding_rs::KOI8_U,
-        "greek" => encoding_rs::ISO_8859_7,
-        "hebrew" => encoding_rs::ISO_8859_8,
-        "tis620" => encoding_rs::WINDOWS_874,
-        "macroman" => encoding_rs::MACINTOSH,
-        _ => return None,
-    })
+    SINGLE_BYTE
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, e)| *e)
 }
 
 /// The one character `text` decodes to when it is a non-ASCII, non-blank one; else U+FFFD, which the lexer takes for part of a name.
