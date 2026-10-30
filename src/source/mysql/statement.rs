@@ -1,6 +1,6 @@
 //! One reading of a MySQL statement as the server lexes it: quotes, comments and executable comments.
 
-use super::client_charsets::{COLLATION_CHARSET, LEXICAL};
+use super::client_charsets::{COLLATION_CHARSET, HIGH_BYTES, LEXICAL, PAIR_FIXES};
 
 /// One lexical piece of a statement; the raw text of the pieces in order is the statement with its comments read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,13 +130,18 @@ fn line_comment_starts(rest: &str) -> bool {
         })
 }
 
-/// A client character set whose multibyte characters can end in a backslash or a backtick byte.
+/// A multibyte client character set and the layout of its two-byte characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
     Big5,
     Gbk,
     Sjis,
+    Cp932,
     Gb18030,
+    Gb2312,
+    Ujis,
+    EucJpMs,
+    EucKr,
 }
 
 /// The multibyte client character sets and their layouts.
@@ -144,8 +149,12 @@ const LAYOUTS: &[(&str, Layout)] = &[
     ("big5", Layout::Big5),
     ("gbk", Layout::Gbk),
     ("sjis", Layout::Sjis),
-    ("cp932", Layout::Sjis),
+    ("cp932", Layout::Cp932),
     ("gb18030", Layout::Gb18030),
+    ("gb2312", Layout::Gb2312),
+    ("ujis", Layout::Ujis),
+    ("eucjpms", Layout::EucJpMs),
+    ("euckr", Layout::EucKr),
 ];
 
 impl Layout {
@@ -153,12 +162,21 @@ impl Layout {
         LAYOUTS.iter().find(|(n, _)| *n == name).map(|(_, l)| *l)
     }
 
+    fn name(self) -> &'static str {
+        LAYOUTS
+            .iter()
+            .find(|(_, l)| *l == self)
+            .map_or("", |(n, _)| n)
+    }
+
     fn encoding(self) -> &'static encoding_rs::Encoding {
         match self {
             Self::Big5 => encoding_rs::BIG5,
-            Self::Gbk => encoding_rs::GBK,
-            Self::Sjis => encoding_rs::SHIFT_JIS,
+            Self::Gbk | Self::Gb2312 => encoding_rs::GBK,
+            Self::Sjis | Self::Cp932 => encoding_rs::SHIFT_JIS,
             Self::Gb18030 => encoding_rs::GB18030,
+            Self::Ujis | Self::EucJpMs => encoding_rs::EUC_JP,
+            Self::EucKr => encoding_rs::EUC_KR,
         }
     }
 
@@ -171,20 +189,96 @@ impl Layout {
                 [0x81..=0xFE, 0x30..=0x39, 0x81..=0xFE, 0x30..=0x39, ..]
             )
         );
+        let triple = matches!(
+            (self, b),
+            (
+                Self::Ujis | Self::EucJpMs,
+                [0x8F, 0xA1..=0xFE, 0xA1..=0xFE, ..]
+            )
+        );
         let pair = matches!(
             (self, b),
             (Self::Big5, [0xA1..=0xF9, 0x40..=0x7E | 0xA1..=0xFE, ..])
-                | (Self::Sjis, [0x81..=0x9F | 0xE0..=0xFC, 0x40..=0x7E | 0x80..=0xFC, ..])
+                | (
+                    Self::Sjis | Self::Cp932,
+                    [0x81..=0x9F | 0xE0..=0xFC, 0x40..=0x7E | 0x80..=0xFC, ..]
+                )
                 | (Self::Gbk | Self::Gb18030, [0x81..=0xFE, 0x40..=0x7E | 0x80..=0xFE, ..])
+                | (Self::Gb2312, [0xA1..=0xF7, 0xA1..=0xFE, ..])
+                | (
+                    Self::Ujis | Self::EucJpMs,
+                    [0xA1..=0xFE, 0xA1..=0xFE, ..] | [0x8E, 0xA1..=0xDF, ..]
+                )
+                | (Self::EucKr, [0x81..=0xFE, 0x41..=0x5A | 0x61..=0x7A | 0x81..=0xFE, ..])
         );
         if wide {
             4
+        } else if triple {
+            3
         } else if pair {
             2
         } else {
             1
         }
     }
+
+    /// The bytes the server counts a character at the start of `b` to have when `b[0]` leads one, whether or not the rest of it is there.
+    fn lead_claim(self, b: &[u8]) -> usize {
+        match (self, b) {
+            (Self::Gb18030, [0x81..=0xFE, 0x30..=0x39, ..]) => 4,
+            (Self::Ujis | Self::EucJpMs, [0x8F, ..]) => 3,
+            (Self::Big5, [0xA1..=0xF9, ..])
+            | (Self::Sjis | Self::Cp932, [0x81..=0x9F | 0xE0..=0xFC, ..])
+            | (Self::Gbk | Self::Gb18030 | Self::EucKr, [0x81..=0xFE, ..])
+            | (Self::Gb2312, [0xA1..=0xFE, ..])
+            | (Self::Ujis | Self::EucJpMs, [0x8E | 0xA1..=0xFE, ..]) => 2,
+            _ => 0,
+        }
+    }
+
+    /// The character a two-byte pair decodes to by the encoding standard, the marker when it is not one character the lexer may read.
+    fn decoded(self, pair: &[u8]) -> char {
+        plain(&self.encoding().decode_without_bom_handling(pair).0)
+    }
+
+    /// The character the server stores for this pair when it is not the one the encoding standard decodes it to.
+    fn fixed(self, pair: &[u8]) -> Option<char> {
+        let key = (self.name(), pair[0], pair[1]);
+        let at = PAIR_FIXES.partition_point(|&(n, l, lo, ..)| (n, l, lo) <= key);
+        let &(n, l, lo, hi, base) = PAIR_FIXES.get(at.checked_sub(1)?)?;
+        ((n, l) == (key.0, key.1) && key.2 <= hi).then(|| {
+            char::from_u32(base + u32::from(key.2 - lo))
+                .filter(|_| base != 0)
+                .unwrap_or(UNPLACED)
+        })
+    }
+
+    /// The character the server stores for this character of the client.
+    fn character(self, one: &[u8]) -> char {
+        match one {
+            [_, _, _] => UNPLACED,
+            [_, _] => self.fixed(one).unwrap_or_else(|| self.decoded(one)),
+            _ => self.decoded(one),
+        }
+    }
+}
+
+/// The bytes of the identifier that follow a lead which starts no character, if the character it claims does not fit in them: the server drops them from the name.
+fn swallowed(rest: &[u8], claim: usize, lex: Lexical) -> usize {
+    let run = rest
+        .iter()
+        .take_while(|&&b| {
+            b.is_ascii_alphanumeric()
+                || b == b'_'
+                || b == b'$'
+                || b >= 0x80 && !lex.blank.contains(&b)
+        })
+        .count();
+    if claim > 0 && run < claim { run } else { 0 }
+}
+
+fn ends_in_word(out: &str) -> bool {
+    out.chars().next_back().is_some_and(word_char)
 }
 
 /// The character a byte the reader cannot place is read as: a letter to the lexer, neither a blank nor the start of a comment.
@@ -231,17 +325,19 @@ impl Lexical {
 /// How the server cuts a statement into characters in a client character set.
 enum Cut {
     Utf8,
-    Bytes,
+    Utf8Mb4,
+    Bytes(&'static str),
     Pairs(Layout),
 }
 
 impl Cut {
-    /// The cut of the character set a QUERY event's client used (its collation id); the UTF-8 family, `binary` and an unrecorded set are read as UTF-8.
+    /// The cut of the character set a QUERY event's client used (its collation id); the other UTF-8 sets, `binary` and an unrecorded set are read as UTF-8.
     fn of_collation(id: Option<u16>) -> Self {
         match id.map(charset_name) {
-            None | Some(Some("utf8mb3" | "utf8mb4" | "binary" | "ascii")) => Self::Utf8,
-            Some(Some(n)) => Layout::of_name(n).map_or(Self::Bytes, Self::Pairs),
-            Some(None) => Self::Bytes,
+            Some(Some("utf8mb4")) => Self::Utf8Mb4,
+            None | Some(Some("utf8mb3" | "binary" | "ascii")) => Self::Utf8,
+            Some(Some(n)) => Layout::of_name(n).map_or(Self::Bytes(n), Self::Pairs),
+            Some(None) => Self::Bytes(""),
         }
     }
 }
@@ -263,30 +359,94 @@ fn plain(text: &str) -> char {
     }
 }
 
-/// `raw` cut into characters: a pair of `layout` is the character it encodes, every other byte is what `lex` reads it as.
-fn cut(raw: &[u8], layout: Option<Layout>, lex: Lexical) -> String {
+/// `raw` cut into characters: a pair of `layout` is the character it encodes, every other byte is what `lex` reads it as, and a lead that starts no character inside an identifier is dropped with the rest of the identifier when its character would not fit.
+fn cut(raw: &[u8], layout: Option<Layout>, charset: &str, lex: Lexical) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(&first) = rest.first() {
         let width = layout.map_or(1, |l| l.char_len(rest).max(1));
+        let dropped = match layout {
+            Some(l) if width == 1 && ends_in_word(&out) => swallowed(rest, l.lead_claim(rest), lex),
+            _ => 0,
+        };
+        if dropped > 0 {
+            rest = &rest[dropped..];
+            continue;
+        }
         let (one, tail) = rest.split_at(width);
-        out.push(match (layout, width) {
-            (Some(l), 2..) => plain(&l.encoding().decode_without_bom_handling(one).0),
-            _ => lex.single(first, out.ends_with("--")),
+        out.push(match layout {
+            Some(l) if width >= 2 => l.character(one),
+            _ => match lex.single(first, out.ends_with("--")) {
+                UNPLACED if first >= 0x80 => high_byte(charset, first),
+                c => c,
+            },
         });
         rest = tail;
     }
     out
 }
 
+/// The character the server stores for a high byte of a character set, the marker when the byte is no character of it or one the lexer may not read as a letter.
+fn high_byte(charset: &str, byte: u8) -> char {
+    HIGH_BYTES
+        .binary_search_by_key(&charset, |(n, _)| n)
+        .ok()
+        .and_then(|at| HIGH_BYTES[at].1.chars().nth(usize::from(byte - 0x80)))
+        .filter(|c| c.is_alphanumeric() || !c.is_ascii() && !c.is_whitespace())
+        .unwrap_or(UNPLACED)
+}
+
+/// The bytes a UTF-8 lead claims, 0 for a byte that leads nothing.
+fn utf8_claim(lead: u8) -> usize {
+    match lead {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xFE => 4,
+        _ => 0,
+    }
+}
+
+/// `raw` as UTF-8 text: an invalid sequence is the marker, except a lead inside an identifier that the server drops with the rest of it.
+fn cut_utf8(raw: &[u8]) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Err(e) = std::str::from_utf8(rest) {
+        let (good, bad) = rest.split_at(e.valid_up_to());
+        out.push_str(&String::from_utf8_lossy(good));
+        let dropped = if ends_in_word(&out) {
+            swallowed(bad, utf8_claim(bad[0]), Lexical::of_collation(None))
+        } else {
+            0
+        };
+        if dropped > 0 {
+            rest = &bad[dropped..];
+        } else {
+            out.push(UNPLACED);
+            rest = &bad[e.error_len().unwrap_or(bad.len())..];
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(rest));
+    out
+}
+
+/// The statement without the one NUL that ends it (the server reads it as the end of the text, not as a character).
+fn without_final_nul(text: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str> {
+    let kept = text.trim_end_matches(|c: char| matches!(c, ' ' | '\t'..='\r' | ';'));
+    match kept.strip_suffix('\0') {
+        Some(head) => format!("{head}{}", &text[kept.len()..]).into(),
+        None => text,
+    }
+}
+
 /// A statement's bytes as text, cut into characters where the server cuts them in the client character set (its collation id) and with the blanks and comment openers that collation has; UTF-8 and an unrecorded set are read as UTF-8.
 pub(crate) fn client_text(raw: &[u8], charset: Option<u16>) -> std::borrow::Cow<'_, str> {
     let lex = Lexical::of_collation(charset);
-    match Cut::of_collation(charset) {
+    without_final_nul(match Cut::of_collation(charset) {
         Cut::Utf8 => String::from_utf8_lossy(raw),
-        Cut::Bytes => cut(raw, None, lex).into(),
-        Cut::Pairs(layout) => cut(raw, Some(layout), lex).into(),
-    }
+        Cut::Utf8Mb4 => cut_utf8(raw).into(),
+        Cut::Bytes(n) => cut(raw, None, n, lex).into(),
+        Cut::Pairs(layout) => cut(raw, Some(layout), layout.name(), lex).into(),
+    })
 }
 
 /// The statement cut into pieces the way the server lexes it: `/*! */` bodies are SQL (nested ones too), other comments, `#` and `-- ` lines become a blank, quoted text is one piece.
@@ -582,10 +742,10 @@ mod tests {
             Some(false)
         );
         assert_eq!(first_quote_is_closed(b"'\x81\x30\x81\\'", 248), Some(true));
-        assert_eq!(client_text(b"A\x81", Some(28)), "A\u{FFFD}");
-        assert_eq!(client_text(b"A\x81 B", Some(28)), "A\u{FFFD} B");
-        assert_eq!(client_text(b"A\x81\x7F", Some(28)), "A\u{FFFD}\x7F");
-        assert_eq!(client_text(b"A\xA4\x20", Some(1)), "A\u{FFFD} ");
+        assert_eq!(client_text(b"A\x81", Some(28)), "A");
+        assert_eq!(client_text(b"A\x81 B", Some(28)), "A B");
+        assert_eq!(client_text(b"A\x81\x7F", Some(28)), "A\x7F");
+        assert_eq!(client_text(b"A\xA4\x20", Some(1)), "A ");
         assert_eq!(client_text(b"A\xA0\x5C", Some(1)), "A\u{FFFD}\\");
     }
 
@@ -630,18 +790,9 @@ mod tests {
     #[test]
     fn a_pair_the_encoding_standard_cannot_map_is_one_character_and_hides_its_trail() {
         for id in [13, 88, 95, 96] {
-            assert_eq!(
-                client_text(b"\xC5\x85\x5C", Some(id)),
-                "\u{FFFD}\u{FFFD}",
-                "{id}"
-            );
-            assert_eq!(
-                first_quote_is_closed(b"'\xC5\x85\x5C'", id),
-                Some(true),
-                "{id}"
-            );
+            assert_eq!(client_text(b"\x85\x5C", Some(id)), "\u{FFFD}", "{id}");
+            assert_eq!(first_quote_is_closed(b"'\x85\x5C'", id), Some(true), "{id}");
         }
-        assert_eq!(client_text(b"\x85\x5C", Some(88)), "\u{FFFD}");
     }
 
     #[test]
@@ -703,6 +854,15 @@ mod tests {
         Lexical::of_collation(Some(id))
     }
 
+    fn stored(charset: &str, byte: u8) -> char {
+        HIGH_BYTES
+            .iter()
+            .find(|(n, _)| *n == charset)
+            .and_then(|(_, chars)| chars.chars().nth(usize::from(byte - 0x80)))
+            .filter(|c| c.is_alphanumeric() || !c.is_ascii() && !c.is_whitespace())
+            .unwrap_or(UNPLACED)
+    }
+
     #[test]
     fn every_single_byte_is_read_as_the_collation_table_says() {
         let unclientable = ["ucs2", "utf16", "utf16le", "utf32"];
@@ -718,14 +878,15 @@ mod tests {
                 let text = client_text(&one, Some(*id));
                 let want = match byte {
                     0..=0x7F => char::from(byte),
-                    b if lex.blank.contains(&b)
-                        && !matches!(*name, "utf8mb3" | "utf8mb4" | "binary" | "ascii") =>
-                    {
-                        ' '
-                    }
-                    _ => UNPLACED,
+                    b if lex.blank.contains(&b) && !utf8 => ' ',
+                    b => stored(name, b),
                 };
-                assert_eq!(text, want.to_string(), "{name} {byte:#x}");
+                let want = if byte == 0 {
+                    String::new()
+                } else {
+                    want.to_string()
+                };
+                assert_eq!(text, want, "{name} {byte:#x}");
                 let raw = [b"--", &one[..], b"\nx"].concat();
                 let dashed = client_text(&raw, Some(*id));
                 let opens = matches!(
@@ -749,7 +910,8 @@ mod tests {
         );
         assert_eq!(client_text(b"a\x1Fb", Some(255)), "a\x1Fb");
         assert_eq!(client_text(b"a\x7Fb", Some(255)), "a\x7Fb");
-        assert_eq!(client_text(b"caf\xE9", Some(8)), "caf\u{FFFD}");
+        assert_eq!(client_text(b"caf\xE9", Some(8)), "caf\u{E9}");
+        assert_eq!(client_text(b"caf\xA0t", Some(8)), "caf t");
         assert_eq!(client_text(b"caf\xC3\xA9", Some(255)), "caf\u{E9}");
     }
 
@@ -762,6 +924,156 @@ mod tests {
         assert_eq!(charset_name(255), Some("utf8mb4"));
         assert_eq!(client_text("t\u{8868}".as_bytes(), Some(45)), "t\u{8868}");
         assert_eq!(client_text(b"A\xE9", Some(63)), "A\u{FFFD}");
+    }
+
+    #[test]
+    fn the_one_nul_that_ends_a_statement_is_not_part_of_it() {
+        for (raw, want) in [
+            (&b"TRUNCATE t\0"[..], "TRUNCATE t"),
+            (b"TRUNCATE t \0", "TRUNCATE t "),
+            (b"TRUNCATE t\0 ;", "TRUNCATE t ;"),
+            (b"TRUNCATE t\0\0", "TRUNCATE t\0"),
+            (b"TRUNCATE t\0x", "TRUNCATE t\0x"),
+            (b"TRUNCATE t\0 \0", "TRUNCATE t\0 "),
+            (b"\0", ""),
+        ] {
+            for id in [None, Some(8), Some(255), Some(13)] {
+                assert_eq!(client_text(raw, id), want, "{raw:?} {id:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lead_that_starts_no_character_inside_a_utf8mb4_name_is_dropped_when_its_character_does_not_fit()
+     {
+        for (raw, want) in [
+            (&b"zq\xE0"[..], "zq"),
+            (b"zq\xC3", "zq"),
+            (b"zq\xF0\x9F", "zq"),
+            (b"zq\xE0a b", "zq b"),
+            (b"zq\xE0abc", "zq\u{FFFD}abc"),
+            (b"zq\xC3\xA9", "zq\u{E9}"),
+            (b" \xE0", " \u{FFFD}"),
+            (b"zq\xFF", "zq\u{FFFD}"),
+            (b"zq\x80", "zq\u{FFFD}"),
+        ] {
+            assert_eq!(client_text(raw, Some(255)), want, "{raw:?}");
+        }
+        for id in [33, 11, 63, 83, 192] {
+            assert_eq!(client_text(b"zq\xE0", Some(id)), "zq\u{FFFD}", "{id}");
+        }
+    }
+
+    #[test]
+    fn a_lead_that_starts_no_character_inside_a_name_is_dropped_in_each_pair_layout() {
+        for (name, raw, want) in [
+            ("sjis", &b"A\x81"[..], "A"),
+            ("sjis", b"A\x81 B", "A B"),
+            ("sjis", b"A\x81A", "A\u{3001}"),
+            ("gbk", b"A\x81", "A"),
+            ("big5", b"A\xA4", "A"),
+            ("ujis", b"A\x8F", "A"),
+            ("ujis", b"A\x8Fbc", "A\u{FFFD}bc"),
+            ("eucjpms", b"A\x8Fb", "A"),
+            ("euckr", b"A\x81", "A"),
+            ("gb2312", b"A\xA1", "A"),
+            ("cp932", b"A\x81", "A"),
+            ("gb18030", b"A\x81\x30", "A"),
+            ("sjis", b" \x81", " \u{FFFD}"),
+        ] {
+            assert_eq!(
+                client_text(raw, Some(default_id(name))),
+                want,
+                "{name} {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_in_each_pair_layout_is_decoded_to_the_text_the_server_stores() {
+        for (name, raw, want) in [
+            ("ujis", &b"\xA4\xA2"[..], "\u{3042}"),
+            ("ujis", b"\x8E\xB1", "\u{FF71}"),
+            ("ujis", b"\x8F\xB0\xA1", "\u{FFFD}"),
+            ("eucjpms", b"\xA4\xA2", "\u{3042}"),
+            ("euckr", b"\xB0\xA1", "\u{AC00}"),
+            ("gb2312", b"\xB0\xA1", "\u{554A}"),
+            ("cp932", b"\x82\xA0", "\u{3042}"),
+            ("sjis", b"\x82\xA0", "\u{3042}"),
+            ("gbk", b"\xB0\xA1", "\u{554A}"),
+            ("big5", b"\xA4\x40", "\u{4E00}"),
+            ("big5", b"\xC7\xB1", "\u{414}"),
+            ("big5", b"\xC7\xB3", "\u{401}"),
+        ] {
+            assert_eq!(
+                client_text(raw, Some(default_id(name))),
+                want,
+                "{name} {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_byte_name_is_decoded_to_the_text_the_server_stores() {
+        for (name, raw, want) in [
+            ("latin1", &b"caf\xE9"[..], "caf\u{E9}"),
+            ("latin1", b"caf\xA0t", "caf t"),
+            ("latin2", b"\xB1", "\u{105}"),
+            ("cp1251", b"\xC0", "\u{410}"),
+            ("koi8r", b"\xC1", "\u{430}"),
+        ] {
+            assert_eq!(
+                client_text(raw, Some(default_id(name))),
+                want,
+                "{name} {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_statement_of_ascii_or_valid_utf8_is_read_the_same_in_every_client_collation() {
+        for (id, name) in COLLATION_CHARSET {
+            if ["ucs2", "utf16", "utf16le", "utf32"].contains(name) {
+                continue;
+            }
+            for raw in [
+                &b"ALTER TABLE t CHANGE a b INT; -- x"[..],
+                b"TRUNCATE `t`",
+                b"DROP TABLE a.b, c.d",
+            ] {
+                assert_eq!(
+                    client_text(raw, Some(*id)),
+                    String::from_utf8_lossy(raw),
+                    "{id} {name}"
+                );
+            }
+        }
+        for id in [33, 45, 46, 255] {
+            assert_eq!(
+                client_text("TRUNCATE caf\u{E9}".as_bytes(), Some(id)),
+                "TRUNCATE caf\u{E9}",
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "feeds dev/pytools/mysql_client_charsets.py"]
+    fn dump_pair_decodes() {
+        for (name, layout) in LAYOUTS {
+            for lead in 0x80..=0xFFu8 {
+                for trail in 0x00..=0xFFu8 {
+                    let pair = [lead, trail];
+                    if layout.char_len(&pair) == 2 {
+                        let read = match layout.decoded(&pair) {
+                            UNPLACED => "-".to_string(),
+                            c => format!("{:X}", u32::from(c)),
+                        };
+                        println!("PAIR {name} {lead:02X}{trail:02X} {read}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

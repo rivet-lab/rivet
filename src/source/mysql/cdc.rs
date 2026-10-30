@@ -2181,7 +2181,7 @@ pub(crate) fn column_rename_target(
             } else if alter_word(&tokens, start, "change") {
                 let from = start + 1 + usize::from(alter_word(&tokens, start + 1, "column"));
                 match (alter_name(&tokens, from), alter_name(&tokens, from + 1)) {
-                    (Some(old), Some(new)) => !old.eq_ignore_ascii_case(&new),
+                    (Some(old), Some(new)) => old != new,
                     _ => false,
                 }
             } else {
@@ -3187,6 +3187,10 @@ mod tests {
         ] {
             assert_eq!(t(renames), orders, "{renames}");
         }
+        assert_eq!(
+            t("ALTER TABLE orders CHANGE name NAME VARCHAR(30)"),
+            Some(("shop".to_string(), "orders".to_string()))
+        );
         let other = t("ALTER TABLE `odd.name` RENAME COLUMN a TO b");
         assert_eq!(other, Some(("shop".to_string(), "odd.name".to_string())));
         assert_eq!(
@@ -3198,7 +3202,7 @@ mod tests {
             "ALTER TABLE orders DROP COLUMN name",
             "ALTER TABLE orders RENAME TO orders2",
             "ALTER TABLE orders RENAME INDEX a TO b",
-            "ALTER TABLE orders CHANGE name NAME VARCHAR(30)",
+            "ALTER TABLE orders CHANGE name name VARCHAR(30)",
             "ALTER TABLE orders MODIFY COLUMN name VARCHAR(30)",
             "ALTER TABLE orders ADD COLUMN c VARCHAR(5) COMMENT 'RENAME COLUMN a TO b'",
             "ALTER TABLE orders ADD (a INT, change INT)",
@@ -3342,6 +3346,7 @@ mod tests {
             ),
             ("ALTER TABLE s.t CHANGE a b INT", at("s", "t")),
             ("ALTER TABLE t CHANGE COLUMN a b INT", at("shop", "t")),
+            ("ALTER TABLE t CHANGE COLUMN a A INT", at("shop", "t")),
             ("ALTER TABLE t CHANGE `a` `b` INT", at("shop", "t")),
             ("ALTER TABLE t ADD x INT, CHANGE a b INT", at("shop", "t")),
             (
@@ -3425,7 +3430,6 @@ mod tests {
         }
         for sql in [
             "ALTER TABLE t CHANGE a a INT",
-            "ALTER TABLE t CHANGE COLUMN a A INT",
             "ALTER TABLE t CHANGE `a` a VARCHAR(5)",
             "ALTER TABLE t CHANGE",
             "ALTER TABLE t CHANGE COLUMN",
@@ -5152,7 +5156,9 @@ mod tests {
                 }
                 for byte in bytes.clone() {
                     let mut cases = Vec::new();
-                    if seam != Dashes {
+                    let leads_a_claim = (*name == "utf8mb4" && byte >= 0xE0)
+                        || (["ujis", "eucjpms"].contains(name) && byte == 0x8F);
+                    if seam != Dashes && !leads_a_claim {
                         let want = if server_blank(*id, byte) {
                             &blank_ref
                         } else {
@@ -5331,7 +5337,7 @@ mod tests {
     fn the_shape_of_a_name_is_folded_with_the_server_and_a_qualified_entry_keeps_its_schema() {
         let (sql, _) = statement_of(b"TRUNCATE CAF\xE9", &charset_var(8));
         let verdict = |cfg: &[String], fold| folded_verdict_of(&sql, "shop", cfg, fold);
-        let truncated = QueryVerdict::Truncated("shop".into(), "CAF\u{FFFD}".into());
+        let truncated = QueryVerdict::Truncated("shop".into(), "CAF\u{e9}".into());
         assert_eq!(verdict(&only("shop.caf\u{e9}"), true), truncated);
         assert_eq!(verdict(&only("shop.caf\u{e9}"), false), QueryVerdict::Pass);
         assert_eq!(verdict(&only("caf\u{e9}"), true), truncated);
@@ -5364,17 +5370,22 @@ mod tests {
     fn a_name_with_a_byte_the_reader_cannot_place_is_ours_only_when_a_captured_name_has_its_shape()
     {
         let accented = only("shop.caf\u{e9}");
+        assert_eq!(
+            verdict_in(b"TRUNCATE caf\xFF", 255, &accented),
+            QueryVerdict::Truncated("shop".into(), "caf\u{FFFD}".into())
+        );
+        assert_eq!(
+            verdict_in(b"TRUNCATE cafe\xFF", 255, &accented),
+            QueryVerdict::Pass
+        );
         for (raw, cfg, want) in [
             (
                 &b"TRUNCATE caf\xE9"[..],
                 &accented,
-                QueryVerdict::Truncated("shop".into(), "caf\u{FFFD}".into()),
+                QueryVerdict::Truncated("shop".into(), "caf\u{e9}".into()),
             ),
-            (
-                &b"TRUNCATE caf\xC3\xA9"[..],
-                &accented,
-                QueryVerdict::Truncated("shop".into(), "caf\u{FFFD}\u{FFFD}".into()),
-            ),
+            (&b"TRUNCATE caf\xC3\xA9"[..], &accented, QueryVerdict::Pass),
+            (&b"TRUNCATE caf\x81"[..], &accented, QueryVerdict::Pass),
             (&b"TRUNCATE cafe\xE9"[..], &accented, QueryVerdict::Pass),
             (&b"TRUNCATE other\xE9"[..], &accented, QueryVerdict::Pass),
             (
@@ -5395,7 +5406,7 @@ mod tests {
             (
                 &b"TRUNCATE any\xE9"[..],
                 &Vec::<String>::new(),
-                QueryVerdict::Truncated("shop".into(), "any\u{FFFD}".into()),
+                QueryVerdict::Truncated("shop".into(), "any\u{e9}".into()),
             ),
         ] {
             assert_eq!(
