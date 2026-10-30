@@ -61,6 +61,8 @@ mod gate_tls_failures;
 mod gremlin;
 #[path = "live/gremlin_cdc.rs"]
 mod gremlin_cdc;
+#[path = "live/journal_manifest_gap.rs"]
+mod journal_manifest_gap;
 #[path = "live/live_audit_suspects.rs"]
 mod live_audit_suspects;
 #[path = "live/live_azure_multipart.rs"]
