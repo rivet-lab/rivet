@@ -285,7 +285,6 @@ services:
       retries: 30
 
   mysql-cdc:
-    # Version-matrix knobs: MYSQL_CDC_TAG (server tag) and MYSQL_CDC_LCTN (lower_case_table_names).
     image: mysql:${MYSQL_CDC_TAG:-8.0}
     profiles: ["cdc"]
     # binlog is ON by default in MySQL 8 (ROW format); set a server id and grant

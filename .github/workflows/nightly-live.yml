@@ -432,11 +432,14 @@ jobs:
           # the same reason (the failover cell was red here every night from 2026-10-13).
           cargo nextest run --run-ignored ignored-only --no-fail-fast \
             -E "binary(live_suite) and test($FILTER) and not (test(gcs) or test(toxiproxy) or test(from_a_standby) or test(failover_to_the_standby))"
-      - name: Column-grants cells that depend on the server
+      - name: Column-grants cells
         if: matrix.engine == 'mysql' && matrix.tag != '5.7'
         run: |
           cargo nextest run --run-ignored ignored-only --no-fail-fast \
-            -E "binary(live_suite) and test(live_cdc_column_grants::) and test(_on_this_server_mysql)"
+            -E "binary(live_suite) and test(live_cdc_column_grants::)"
+      - name: Client character set table matches the server
+        if: matrix.engine == 'mysql' && matrix.tag == '8.4' && !matrix.lctn
+        run: python3 dev/pytools/mysql_client_charsets.py "$(docker compose ps -q mysql-cdc)" check
       - name: Stop services
         if: always()
         run: docker compose down -v

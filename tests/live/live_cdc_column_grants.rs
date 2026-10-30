@@ -2763,7 +2763,7 @@ fn the_server_folds_names() -> bool {
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_rename_in_a_six_digit_version_comment_is_refused_under_the_policy_on_this_server_mysql() {
     if !the_server_reads_six_digit_version_comments() {
-        return;
+        return skip_live("this server reads five version digits; the 8.4 lane runs the cell");
     }
     backlogs_end_as(
         "cg_v6",
@@ -2825,7 +2825,7 @@ fn a_rename_in_a_six_digit_version_comment_is_refused_under_the_policy_on_this_s
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_revoke_in_a_six_digit_version_comment_stops_an_open_run_on_this_server_mysql() {
     if !the_server_reads_six_digit_version_comments() {
-        return;
+        return skip_live("this server reads five version digits; the 8.4 lane runs the cell");
     }
     a_revoke_stops_an_open_run_before_the_column_leaves("cg_rev6", |table, user| {
         format!("/*!080400 REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
@@ -3030,7 +3030,9 @@ fn a_statement_write_in_another_case_is_refused_exactly_when_the_server_folds_na
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_schema_spelled_in_another_case_is_refused_when_the_server_folds_names_on_this_server_mysql() {
     if !the_server_folds_names() {
-        return;
+        return skip_live(
+            "this server keeps names as written; the lower_case_table_names=1 lane runs the cell",
+        );
     }
     backlogs_end_as(
         "cg_foldsc",
