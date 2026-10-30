@@ -2120,6 +2120,26 @@ fn alter_spec_starts(tokens: &[AlterToken], at: usize) -> Vec<usize> {
     starts
 }
 
+/// What each specification of an `ALTER TABLE` does to a column name: `Some(true)` renames one, `Some(false)` is a `CHANGE` that keeps the name, `None` is neither.
+fn column_spec_effects(tokens: &[AlterToken], at: usize) -> Vec<Option<bool>> {
+    alter_spec_starts(tokens, at)
+        .into_iter()
+        .map(|start| {
+            if alter_word(tokens, start, "rename") && alter_word(tokens, start + 1, "column") {
+                Some(true)
+            } else if alter_word(tokens, start, "change") {
+                let from = start + 1 + usize::from(alter_word(tokens, start + 1, "column"));
+                match (alter_name(tokens, from), alter_name(tokens, from + 1)) {
+                    (Some(old), Some(new)) => Some(!old.eq_ignore_ascii_case(&new)),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name; `None` for any other statement.
 pub(crate) fn column_rename_target(
     sql: &str,
@@ -2128,21 +2148,8 @@ pub(crate) fn column_rename_target(
 ) -> Option<(String, String)> {
     let tokens = alter_tokens(sql, mode)?;
     let (table, at) = alter_header(&tokens, event_db)?;
-    alter_spec_starts(&tokens, at)
-        .into_iter()
-        .any(|start| {
-            if alter_word(&tokens, start, "rename") && alter_word(&tokens, start + 1, "column") {
-                true
-            } else if alter_word(&tokens, start, "change") {
-                let from = start + 1 + usize::from(alter_word(&tokens, start + 1, "column"));
-                match (alter_name(&tokens, from), alter_name(&tokens, from + 1)) {
-                    (Some(old), Some(new)) => !old.eq_ignore_ascii_case(&new),
-                    _ => false,
-                }
-            } else {
-                false
-            }
-        })
+    column_spec_effects(&tokens, at)
+        .contains(&Some(true))
         .then_some(table)
 }
 
@@ -2262,7 +2269,7 @@ pub(crate) fn query_verdict(
     mode: SqlMode,
     scope: &QueryScope<'_>,
 ) -> QueryVerdict {
-    let read = read_verdict(sql, event_db, mode, scope);
+    let read = read_verdict(sql, event_db, mode, scope, None);
     if !sql.contains(UNPLACED) {
         return read;
     }
@@ -2272,45 +2279,82 @@ pub(crate) fn query_verdict(
     ) {
         return read;
     }
-    match read_verdict(&sql.replace(UNPLACED, " "), event_db, mode, scope) {
+    match read_verdict(
+        &sql.replace(UNPLACED, " "),
+        event_db,
+        mode,
+        scope,
+        Some(sql),
+    ) {
         QueryVerdict::Pass | QueryVerdict::Commit => read,
         QueryVerdict::Privilege => QueryVerdict::Privilege,
         refused => QueryVerdict::Unreadable(Box::new(refused)),
     }
 }
 
-/// The verdict of one reading of a QUERY event: the first of truncate, column rename, table rename, drop, statement write, privilege change, commit that applies.
-fn read_verdict(sql: &str, event_db: &str, mode: SqlMode, scope: &QueryScope<'_>) -> QueryVerdict {
-    let ours = |t: Option<&(String, String)>| match t {
-        Some((sc, tb)) if sc.contains(UNPLACED) || tb.contains(UNPLACED) => {
-            unplaced_name_is_ours(sc, tb, scope)
-        }
-        _ => undecodable_event_is_ours(
-            t.map(|(sc, tb)| (sc.as_str(), tb.as_str())),
-            scope.configured,
-            scope.fold,
-        ),
+/// Whether the blank reading may stop the run on a table name it could not read: always for the letter reading itself, else only when the letter reading does not read the statement as that kind.
+fn kind_unread_in_letter<T>(letter: Option<&str>, read: impl Fn(&str) -> Option<T>) -> bool {
+    letter.is_none_or(|l| read(l).is_none())
+}
+
+/// Whether a column rename the blank reading finds may stop the run: always for the letter reading itself, else unless the letter reading reads the same specification as a `CHANGE` that keeps its name.
+fn column_rename_stands(sql: &str, letter: Option<&str>, event_db: &str, mode: SqlMode) -> bool {
+    let effects = |s: &str| {
+        let tokens = alter_tokens(s, mode)?;
+        let (_, at) = alter_header(&tokens, event_db)?;
+        Some(column_spec_effects(&tokens, at))
     };
-    if let Some((sc, tb)) = truncate_target(sql, event_db, mode).filter(|t| ours(Some(t))) {
+    let Some(letter) = letter else { return true };
+    match (effects(sql), effects(letter)) {
+        (Some(blank), Some(kept)) if blank.len() == kept.len() => blank
+            .iter()
+            .zip(&kept)
+            .any(|(b, k)| *b == Some(true) && *k != Some(false)),
+        _ => true,
+    }
+}
+
+/// The verdict of one reading of a QUERY event: the first of truncate, column rename, table rename, drop, statement write, privilege change, commit that applies; `letter` is the statement as first read when this is the blank reading.
+fn read_verdict(
+    sql: &str,
+    event_db: &str,
+    mode: SqlMode,
+    scope: &QueryScope<'_>,
+    letter: Option<&str>,
+) -> QueryVerdict {
+    let ours = |t: &(String, String)| {
+        if t.0.contains(UNPLACED) || t.1.contains(UNPLACED) {
+            unplaced_name_is_ours(&t.0, &t.1, scope)
+        } else {
+            undecodable_event_is_ours(Some((&t.0, &t.1)), scope.configured, scope.fold)
+        }
+    };
+    let slot =
+        |t: &Option<(String, String)>, unread_stands: bool| t.as_ref().map_or(unread_stands, ours);
+    if let Some((sc, tb)) = truncate_target(sql, event_db, mode).filter(ours) {
         return QueryVerdict::Truncated(sc, tb);
     }
     if scope.projecting {
-        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode).filter(|t| ours(Some(t)))
+        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode)
+            .filter(|t| ours(t) && column_rename_stands(sql, letter, event_db, mode))
         {
             return QueryVerdict::ColumnRenamed(sc, tb);
         }
+        let unread = kind_unread_in_letter(letter, |l| renamed_tables(l, event_db, mode));
         if let Some(touched) = renamed_tables(sql, event_db, mode)
-            .and_then(|ts| ts.into_iter().find(|t| ours(t.as_ref())))
+            .and_then(|ts| ts.into_iter().find(|t| slot(t, unread)))
         {
             return QueryVerdict::TableRenamed(touched);
         }
     }
+    let unread = kind_unread_in_letter(letter, |l| drop_table_targets(l, event_db, mode));
     if let Some(dropped) = drop_table_targets(sql, event_db, mode)
-        .and_then(|ts| ts.into_iter().find(|t| ours(t.as_ref())))
+        .and_then(|ts| ts.into_iter().find(|t| slot(t, unread)))
     {
         return QueryVerdict::Dropped(dropped);
     }
-    if let Some(written) = statement_dml_target(sql, event_db, mode).filter(|t| ours(t.as_ref())) {
+    let unread = kind_unread_in_letter(letter, |l| statement_dml_target(l, event_db, mode));
+    if let Some(written) = statement_dml_target(sql, event_db, mode).filter(|t| slot(t, unread)) {
         return QueryVerdict::StatementWrite(written);
     }
     if is_privilege_statement(sql, mode) {
@@ -5187,6 +5231,124 @@ mod tests {
             "passed: {:?}",
             &missed[..missed.len().min(8)]
         );
+    }
+
+    #[test]
+    fn a_name_in_a_client_character_set_never_stops_a_run_that_does_not_capture_its_table() {
+        let cfg = only("shop.orders");
+        let names: [(u16, &[u8]); 7] = [
+            (8, b"donn\xE9es"),
+            (51, b"\xEF\xF0\xE8\xE2\xE5\xF2"),
+            (51, b"nom\xEF\xF0\xE8_1"),
+            (26, b"donn\xE9es"),
+            (19, b"\xC7\xD1\xB1\xDB"),
+            (11, b"\x96\xBC\x91\x4F"),
+            (28, b"\xC3\xFB\xD7\xD6"),
+        ];
+        let templates = [
+            "RENAME TABLE {n} TO {n}_old",
+            "RENAME TABLE `{n}` TO `{n}_old`",
+            "RENAME TABLE {n} TO other",
+            "ALTER TABLE {n} ADD COLUMN c INT",
+            "ALTER TABLE {n} RENAME TO {n}_old",
+            "ALTER TABLE {n} CHANGE a b INT",
+            "DROP TABLE {n}",
+            "DROP TABLE IF EXISTS {n}, {n}_old",
+            "TRUNCATE TABLE {n}",
+            "INSERT INTO {n} VALUES (1)",
+            "UPDATE {n} SET a = 1",
+            "DELETE FROM {n} WHERE a = 1",
+            "CREATE TABLE {n} (id INT)",
+            "REPLACE INTO {n} VALUES (1)",
+            "ALTER TABLE orders CHANGE {n} {n} VARCHAR(30)",
+            "ALTER TABLE orders CHANGE COLUMN {n} {n} VARCHAR(30)",
+            "ALTER TABLE orders ADD COLUMN {n} VARCHAR(30)",
+            "ALTER TABLE orders MODIFY COLUMN {n} VARCHAR(30)",
+            "ALTER TABLE orders ADD INDEX ({n})",
+            "ALTER TABLE orders CHANGE {n} {n} VARCHAR(30) AFTER id",
+            "ALTER TABLE orders ADD COLUMN {n} INT AFTER {n}_old",
+        ];
+        let mut refused = Vec::new();
+        for (id, name) in names {
+            for template in templates {
+                let parts: Vec<&[u8]> = template.split("{n}").map(str::as_bytes).collect();
+                let raw = parts.join(name);
+                let got = verdict_in(&raw, id, &cfg);
+                if got != QueryVerdict::Pass {
+                    refused.push(format!("{id} {} -> {got:?}", String::from_utf8_lossy(&raw)));
+                }
+            }
+        }
+        assert_eq!(refused.len(), 0, "refused: {refused:#?}");
+    }
+
+    #[test]
+    fn a_rename_only_the_blank_reading_finds_stops_the_run_unless_the_letter_reading_keeps_the_name()
+     {
+        let cfg = only("shop.orders");
+        let renamed = QueryVerdict::ColumnRenamed("shop".into(), "orders".into());
+        let unreadable = QueryVerdict::Unreadable(Box::new(renamed.clone()));
+        let cases: [(&[u8], QueryVerdict); 7] = [
+            (
+                b"ALTER TABLE orders CHANGE pr\xE9nom pr\xE9nom INT",
+                QueryVerdict::Pass,
+            ),
+            (
+                b"ALTER TABLE orders CHANGE COLUMN pr\xE9nom pr\xE9nom INT",
+                QueryVerdict::Pass,
+            ),
+            (
+                b"ALTER TABLE orders CHANGE pr\xE9nom pr\xE9nom INT, RENAME\xE9COLUMN a TO b",
+                unreadable.clone(),
+            ),
+            (
+                b"ALTER TABLE orders CHANGE pr\xE9nom pr\xE9nom INT, CHANGE a b INT",
+                renamed.clone(),
+            ),
+            (
+                b"ALTER TABLE orders CHANGE pr\xE9nom nom\xE9 INT",
+                renamed.clone(),
+            ),
+            (b"ALTER TABLE orders CHANGE\xE9a b INT", unreadable.clone()),
+            (
+                b"ALTER TABLE orders CHANGE pr\xE9nom pr\xE9nom INT --\xE9, ADD x INT",
+                unreadable,
+            ),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(
+                verdict_in(raw, 8, &cfg),
+                want,
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_name_the_blank_reading_cannot_read_stops_the_run_only_when_the_letter_reading_cannot_either()
+     {
+        let cfg = only("shop.orders");
+        let cases: [(&[u8], QueryVerdict); 4] = [
+            (b"DROP TABLE donn\xE9es", QueryVerdict::Pass),
+            (
+                b"DROP\xE9TABLE a b",
+                QueryVerdict::Unreadable(Box::new(QueryVerdict::Dropped(None))),
+            ),
+            (b"RENAME TABLE donn\xE9es TO other", QueryVerdict::Pass),
+            (
+                b"RENAME\xE9TABLE a TO",
+                QueryVerdict::Unreadable(Box::new(QueryVerdict::TableRenamed(None))),
+            ),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(
+                verdict_in(raw, 8, &cfg),
+                want,
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
     }
 
     #[test]

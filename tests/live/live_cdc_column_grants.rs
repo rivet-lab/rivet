@@ -3447,6 +3447,59 @@ fn statements_on_a_table_the_run_does_not_capture_are_met_as_before_in_a_client_
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn an_uncaptured_table_renamed_under_a_non_ascii_name_is_met_as_before_in_a_client_character_set_mysql()
+ {
+    let case = |policy: bool, set: &str, name: &str| -> Case {
+        let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+        for sql in [
+            format!("'CREATE TABLE rivet.{{t}}_d', {name}, ' (id INT)'"),
+            format!("'RENAME TABLE rivet.{{t}}_d', {name}, ' TO rivet.{{t}}_d', {name}, '_old'"),
+            format!("'DROP TABLE rivet.{{t}}_d', {name}, '_old'"),
+        ] {
+            steps.push(leak(raw(&sql)));
+            steps.extend_from_slice(&RUN_RAW);
+        }
+        steps.push(UPDATED_AFTER);
+        (policy, steps, BOTH_DELIVERED)
+    };
+    end_as(
+        "cg_unr_nm",
+        &[
+            case(false, "SET NAMES latin1", "0x646F6E6EE96573"),
+            case(true, "SET NAMES latin1", "0x646F6E6EE96573"),
+            case(true, "SET NAMES cp1251", "0x6E6F6DEFF0E85F31"),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_change_that_keeps_the_non_ascii_name_of_a_column_is_met_as_before_in_a_client_character_set_mysql()
+ {
+    let case = |policy: bool, set: &str, name: &str| -> Case {
+        let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+        for sql in [
+            format!("'ALTER TABLE rivet.{{t}} ADD COLUMN ', {name}, ' VARCHAR(30)'"),
+            format!("'ALTER TABLE rivet.{{t}} CHANGE ', {name}, ' ', {name}, ' VARCHAR(40)'"),
+        ] {
+            steps.push(leak(raw(&sql)));
+            steps.extend_from_slice(&RUN_RAW);
+        }
+        steps.push(UPDATED_AFTER);
+        (policy, steps, BOTH_DELIVERED)
+    };
+    end_as(
+        "cg_chg_nm",
+        &[
+            case(false, "SET NAMES latin1", "0x7072E96E6F6D"),
+            case(true, "SET NAMES latin1", "0x7072E96E6F6D"),
+            case(true, "SET NAMES cp1251", "0x6E6F6DEFF0E85F31"),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_revoke_separated_from_its_keyword_by_a_byte_a_collation_reads_as_a_blank_stops_an_open_run_mysql()
  {
     a_revoke_written_in_steps_stops_an_open_run("cg_revc", |table, user| {
