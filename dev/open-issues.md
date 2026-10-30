@@ -266,11 +266,10 @@ the same as a run that never built one. Now `(docker image built)`.
   layout.
 
 ### Architecture review 2026-09-25 (ClickHouse, PR #308) — the rest, researched
-- **#3, position order written twice** (`SourceEngine::order_exprs` per warehouse and
-  `CLICKHOUSE_VERSION_EXPR`): kept apart — the ROW_NUMBER warehouses compare text, ClickHouse
-  needs an integer — but the silent half is closed: an unknown `__pos` shape now fails the
-  insert. Drift is caught by the live version-order test (PG LSN, binlog rollover, MSSQL
-  LSN, snapshot vs pre-anchor), not by a shared definition.
+- **#3, position order written twice**: closed. `src/source/cdc/order.rs` owns the order per
+  engine as data; validate, the BigQuery and Snowflake dedup views and the ClickHouse
+  `__ver` expression are all built from it. The live version-order test still grades the
+  ClickHouse half end to end.
 - **#4, the live-only purity gate matches exclusions by bare function name**, so an
   exclusion written for `<impl … for BigQueryLoader>::materialize` also covers every other
   adapter's `materialize`. ClickHouse's HTTP methods now carry their own explicit entries,

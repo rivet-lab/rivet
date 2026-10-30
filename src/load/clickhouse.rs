@@ -728,7 +728,7 @@ fn changelog_shape<'a>(
         not_null: pk,
         version_column: format!(
             ",\n  `__ver` UInt256 MATERIALIZED {}",
-            cdc::CLICKHOUSE_VERSION_EXPR
+            crate::source::cdc::order::clickhouse_version_expr()
         ),
     })
 }
