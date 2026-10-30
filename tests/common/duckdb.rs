@@ -496,6 +496,7 @@ pub enum OracleEngine {
     MssqlMain,
     MongoMain,
     MysqlCdc,
+    MysqlReset,
     MssqlCdc,
     MongoRs,
 }
@@ -508,7 +509,7 @@ impl OracleEngine {
     fn extension(self) -> &'static str {
         match self {
             Self::Postgres | Self::PostgresCdc => "postgres",
-            Self::MysqlCdc | Self::MysqlMain => "mysql",
+            Self::MysqlCdc | Self::MysqlReset | Self::MysqlMain => "mysql",
             Self::MssqlCdc | Self::MssqlMain => "mssql",
             Self::MongoRs | Self::MongoMain => "mongo",
         }
@@ -535,7 +536,7 @@ impl OracleEngine {
     pub fn passthrough(self) -> &'static str {
         match self {
             Self::Postgres | Self::PostgresCdc => "postgres_query('src', '{sql}')",
-            Self::MysqlCdc | Self::MysqlMain => "mysql_query('src', '{sql}')",
+            Self::MysqlCdc | Self::MysqlReset | Self::MysqlMain => "mysql_query('src', '{sql}')",
             Self::MssqlCdc | Self::MssqlMain => "mssql_scan('src', '{sql}')",
             Self::MongoRs | Self::MongoMain => panic!("{self:?} has no SQL passthrough"),
         }
@@ -545,7 +546,7 @@ impl OracleEngine {
     pub fn scanner_settings(self) -> &'static str {
         match self {
             Self::Postgres | Self::PostgresCdc => "SET pg_use_text_protocol = true;",
-            Self::MysqlCdc | Self::MysqlMain => {
+            Self::MysqlCdc | Self::MysqlReset | Self::MysqlMain => {
                 "SET mysql_tinyint1_as_boolean = false; SET mysql_session_time_zone = '+00:00';"
             }
             _ => "",
@@ -585,6 +586,13 @@ impl OracleEngine {
             Self::MysqlCdc => (
                 format!(
                     "ATTACH 'host=mysql-cdc port=3306 user=root password=rivet \
+                     database={database}' AS src (TYPE mysql, READ_ONLY);"
+                ),
+                format!("src.{table}"),
+            ),
+            Self::MysqlReset => (
+                format!(
+                    "ATTACH 'host=mysql-reset port=3306 user=root password=rivet \
                      database={database}' AS src (TYPE mysql, READ_ONLY);"
                 ),
                 format!("src.{table}"),
