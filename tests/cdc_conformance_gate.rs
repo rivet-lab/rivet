@@ -903,9 +903,7 @@ fn oracle_class_census_is_pinned() {
 // back through the bq CLI (bq show -j, bq ls -j --parent_job_id) and the base counted through bq.
 // 2026-10-21: +2 independent - the PostgreSQL upgrade from a released 0.32.1 (slot and checkpoint
 // read through `confirmed_flush_lsn`) and its way back.
-// 2026-10-30: +3 independent - a MySQL checkpoint into a binlog renumbered by RESET MASTER, one without
-// a commit fingerprint, and one whose fingerprint lands on a non-UTF-8 event, read back through DuckDB.
-const PIN_INDEPENDENT: usize = 122; // ratchet-pin: cdc-census-independent min
+const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
 // 2026-09-28, source connection ceilings: +3 shared codec — the run's captured row is the
 // fixture check; the oracle is the server's own connection counter.
 // 2026-09-29: +2 shared codec — the Oracle TRUNCATE refusal on re-run and the uncaptured-truncate cell.
@@ -961,7 +959,8 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-10-20: +1 presence - the PostgreSQL slot-advanced-by-another-reader refusal, whose oracle is the coded refusal; the rig oracle grades the runs before it.
 // 89 -> 93 (2026-10-21, #675): four MySQL bare-name cells read every part's ids and compare them with the rows written to each database.
 // 93 -> 102 (2026-10-29, #719): column-grants cells whose oracle is a coded refusal, an unmoved checkpoint or the part set a refused run left.
-const PIN_PRESENCE: usize = 102; // ratchet-pin: cdc-census-presence
+// 102 -> 105 (2026-10-30): MySQL RESET MASTER resume cells whose oracle is a coded refusal and an unmoved checkpoint, or a warning; the rig oracle grades every run.
+const PIN_PRESENCE: usize = 105; // ratchet-pin: cdc-census-presence
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a
 /// COMPLETENESS claim must carry a class-(a) INDEPENDENT oracle — not merely

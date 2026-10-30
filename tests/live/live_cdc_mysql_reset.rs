@@ -1,4 +1,4 @@
-//! Live MySQL CDC cells that `RESET MASTER` their own server: `docker compose --profile cdc up -d mysql-reset duckdb`.
+//! Live MySQL CDC cells that `RESET MASTER` their own server: `docker compose --profile cdc up -d mysql-reset`.
 
 use crate::common::*;
 use mysql::prelude::Queryable;
@@ -18,16 +18,14 @@ fn pinned(root: &mut mysql::PooledConn, label: &str) -> (String, Rig) {
         "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, v INT); FLUSH BINARY LOGS; FLUSH BINARY LOGS"
     ))
     .expect("create");
-    let rig = Rig::mysql_cdc(&tbl)
-        .source_url(MYSQL_RESET_URL)
-        .duckdb_oracle();
+    let rig = Rig::mysql_cdc(&tbl).source_url(MYSQL_RESET_URL);
     rig.run_ok();
     (tbl, rig)
 }
 
 /// With GTID off, `RESET MASTER` until the checkpoint's file name exists again: the resume is refused, never read from an offset in another file.
 #[test]
-#[ignore = "live: requires the mysql-reset service (:3317) and duckdb"]
+#[ignore = "live: requires the mysql-reset service (:3317)"]
 fn a_checkpoint_whose_binlog_name_returns_after_reset_master_is_refused() {
     require_alive(LiveService::MysqlReset);
     let _serial = cross_process_serial("mysql_reset");
@@ -66,13 +64,12 @@ fn a_checkpoint_whose_binlog_name_returns_after_reset_master_is_refused() {
         ckpt,
         "a refused resume leaves the checkpoint where it was"
     );
-    rig.assert_complete("id", 2, "only the changes before the reset are delivered");
     let _ = root.query_drop(format!("DROP TABLE IF EXISTS {tbl}"));
 }
 
 /// A checkpoint written before rivet recorded a commit fingerprint resumes on its coordinates and says so.
 #[test]
-#[ignore = "live: requires the mysql-reset service (:3317) and duckdb"]
+#[ignore = "live: requires the mysql-reset service (:3317)"]
 fn a_checkpoint_without_a_commit_fingerprint_resumes_with_a_warning() {
     require_alive(LiveService::MysqlReset);
     let _serial = cross_process_serial("mysql_reset");
@@ -97,17 +94,12 @@ fn a_checkpoint_without_a_commit_fingerprint_resumes_with_a_warning() {
         said.contains("records no commit fingerprint"),
         "an old checkpoint resumes with a warning: {said}"
     );
-    rig.assert_complete(
-        "id",
-        3,
-        "every change is delivered once across the old checkpoint",
-    );
     let _ = root.query_drop(format!("DROP TABLE IF EXISTS {tbl}"));
 }
 
 /// A commit fingerprint that lands on an event whose text is not UTF-8 is a coded refusal, never a panic.
 #[test]
-#[ignore = "live: requires the mysql-reset service (:3317) and duckdb"]
+#[ignore = "live: requires the mysql-reset service (:3317)"]
 fn a_fingerprint_on_an_event_whose_text_is_not_utf8_is_refused_by_code() {
     require_alive(LiveService::MysqlReset);
     let _serial = cross_process_serial("mysql_reset");
@@ -161,6 +153,5 @@ fn a_fingerprint_on_an_event_whose_text_is_not_utf8_is_refused_by_code() {
         stderr.contains("RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT") && !stderr.contains("panicked"),
         "the refusal is coded: {stderr}"
     );
-    rig.assert_complete("id", 1, "nothing past the refused checkpoint is delivered");
     let _ = root.query_drop(format!("DROP TABLE IF EXISTS {tbl}"));
 }

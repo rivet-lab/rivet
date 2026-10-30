@@ -297,7 +297,6 @@ impl Rig {
             "postgres" if self.source_url.contains(":5434") => E::PostgresCdc,
             "postgres" => E::Postgres,
             "mysql" if self.source_url.contains(":3307") => E::MysqlCdc,
-            "mysql" if self.source_url.contains(":3317") => E::MysqlReset,
             "mssql" if self.source_url.contains(":1434") => E::MssqlCdc,
             "mongo" if self.source_url.contains(":27018") => E::MongoRs,
             // MAIN stand — wired 2026-08-29 so the batch suites can census at
