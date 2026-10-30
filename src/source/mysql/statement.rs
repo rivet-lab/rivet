@@ -73,14 +73,27 @@ impl SqlMode {
 
 /// How many version digits a `/*!` marker consumes: none under five digits, six when the sixth digit is followed by whitespace, else five.
 fn version_digits(after_bang: &[u8]) -> usize {
-    if !after_bang.iter().take(5).all(u8::is_ascii_digit) || after_bang.len() < 5 {
-        return 0;
+    match after_bang {
+        [
+            b'0'..=b'9',
+            b'0'..=b'9',
+            b'0'..=b'9',
+            b'0'..=b'9',
+            b'0'..=b'9',
+            b'0'..=b'9',
+            b' ' | 9..=13,
+            ..,
+        ] => 6,
+        [
+            b'0'..=b'9',
+            b'0'..=b'9',
+            b'0'..=b'9',
+            b'0'..=b'9',
+            b'0'..=b'9',
+            ..,
+        ] => 5,
+        _ => 0,
     }
-    let six = after_bang.get(5).is_some_and(u8::is_ascii_digit)
-        && after_bang
-            .get(6)
-            .is_some_and(|c| matches!(c, b' ' | 9..=13));
-    if six { 6 } else { 5 }
 }
 
 fn word_char(c: char) -> bool {
@@ -151,14 +164,25 @@ impl Layout {
 
     /// The byte length of the character at the start of `b`, as the server's `my_ismbchar` counts it.
     fn char_len(self, b: &[u8]) -> usize {
-        let wide_trail = |t: u8| matches!(t, 0x40..=0x7E | 0x80..=0xFE);
-        match (self, b) {
-            (Self::Big5, [0xA1..=0xF9, 0x40..=0x7E | 0xA1..=0xFE, ..]) => 2,
-            (Self::Gbk, [0x81..=0xFE, t, ..]) if wide_trail(*t) => 2,
-            (Self::Sjis, [0x81..=0x9F | 0xE0..=0xFC, 0x40..=0x7E | 0x80..=0xFC, ..]) => 2,
-            (Self::Gb18030, [0x81..=0xFE, 0x30..=0x39, 0x81..=0xFE, 0x30..=0x39, ..]) => 4,
-            (Self::Gb18030, [0x81..=0xFE, t, ..]) if wide_trail(*t) => 2,
-            _ => 1,
+        let wide = matches!(
+            (self, b),
+            (
+                Self::Gb18030,
+                [0x81..=0xFE, 0x30..=0x39, 0x81..=0xFE, 0x30..=0x39, ..]
+            )
+        );
+        let pair = matches!(
+            (self, b),
+            (Self::Big5, [0xA1..=0xF9, 0x40..=0x7E | 0xA1..=0xFE, ..])
+                | (Self::Sjis, [0x81..=0x9F | 0xE0..=0xFC, 0x40..=0x7E | 0x80..=0xFC, ..])
+                | (Self::Gbk | Self::Gb18030, [0x81..=0xFE, 0x40..=0x7E | 0x80..=0xFE, ..])
+        );
+        if wide {
+            4
+        } else if pair {
+            2
+        } else {
+            1
         }
     }
 }

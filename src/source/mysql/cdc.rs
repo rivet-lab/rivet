@@ -2120,37 +2120,64 @@ fn alter_spec_starts(tokens: &[AlterToken], at: usize) -> Vec<usize> {
     starts
 }
 
-/// What each specification of an `ALTER TABLE` does to a column name: `Some(true)` renames one, `Some(false)` is a `CHANGE` that keeps the name, `None` is neither.
-fn column_spec_effects(tokens: &[AlterToken], at: usize) -> Vec<Option<bool>> {
-    alter_spec_starts(tokens, at)
-        .into_iter()
-        .map(|start| {
-            if alter_word(tokens, start, "rename") && alter_word(tokens, start + 1, "column") {
-                Some(true)
-            } else if alter_word(tokens, start, "change") {
-                let from = start + 1 + usize::from(alter_word(tokens, start + 1, "column"));
-                match (alter_name(tokens, from), alter_name(tokens, from + 1)) {
-                    (Some(old), Some(new)) => Some(!old.eq_ignore_ascii_case(&new)),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name; `None` for any other statement.
+/// The `(schema, table)` an `ALTER TABLE` QUERY event gives a column a new name, leaving out the specifications at the ordinals in `kept`; `None` for any other statement.
 pub(crate) fn column_rename_target(
     sql: &str,
     event_db: &str,
     mode: SqlMode,
+    kept: &[usize],
 ) -> Option<(String, String)> {
     let tokens = alter_tokens(sql, mode)?;
     let (table, at) = alter_header(&tokens, event_db)?;
-    column_spec_effects(&tokens, at)
-        .contains(&Some(true))
+    alter_spec_starts(&tokens, at)
+        .into_iter()
+        .enumerate()
+        .filter(|(k, _)| !kept.contains(k))
+        .map(|(_, start)| start)
+        .any(|start| {
+            if alter_word(&tokens, start, "rename") && alter_word(&tokens, start + 1, "column") {
+                true
+            } else if alter_word(&tokens, start, "change") {
+                let from = start + 1 + usize::from(alter_word(&tokens, start + 1, "column"));
+                match (alter_name(&tokens, from), alter_name(&tokens, from + 1)) {
+                    (Some(old), Some(new)) => !old.eq_ignore_ascii_case(&new),
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        })
         .then_some(table)
+}
+/// The ordinals of the specifications of an `ALTER TABLE` that `CHANGE` a column to the name it already has.
+fn kept_change_specs(sql: &str, event_db: &str, mode: SqlMode) -> Vec<usize> {
+    let tokens = alter_tokens(sql, mode).unwrap_or_default();
+    let Some((_, at)) = alter_header(&tokens, event_db) else {
+        return Vec::new();
+    };
+    alter_spec_starts(&tokens, at)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, start)| keeps_column_name(&tokens[*start..]))
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// Whether a specification is `CHANGE [COLUMN] old new` with the two names equal.
+fn keeps_column_name(spec: &[AlterToken]) -> bool {
+    let word = |t: &AlterToken, w: &str| matches!(t, AlterToken::Word(x, false) if x.eq_ignore_ascii_case(w));
+    let Some((change, rest)) = spec.split_first() else {
+        return false;
+    };
+    let names = rest
+        .split_first()
+        .filter(|(column, _)| word(column, "column"))
+        .map_or(rest, |(_, tail)| tail);
+    matches!(
+        names,
+        [AlterToken::Word(a, _), AlterToken::Word(b, _), ..]
+            if word(change, "change") && a.eq_ignore_ascii_case(b)
+    )
 }
 
 /// Every table a `RENAME TABLE[S]` or an `ALTER TABLE ... RENAME [TO|AS] new` QUERY event touches, source and target (`None` for a name that cannot be read); `None` when the event renames no table.
@@ -2297,23 +2324,6 @@ fn kind_unread_in_letter<T>(letter: Option<&str>, read: impl Fn(&str) -> Option<
     letter.is_none_or(|l| read(l).is_none())
 }
 
-/// Whether a column rename the blank reading finds may stop the run: always for the letter reading itself, else unless the letter reading reads the same specification as a `CHANGE` that keeps its name.
-fn column_rename_stands(sql: &str, letter: Option<&str>, event_db: &str, mode: SqlMode) -> bool {
-    let effects = |s: &str| {
-        let tokens = alter_tokens(s, mode)?;
-        let (_, at) = alter_header(&tokens, event_db)?;
-        Some(column_spec_effects(&tokens, at))
-    };
-    let Some(letter) = letter else { return true };
-    match (effects(sql), effects(letter)) {
-        (Some(blank), Some(kept)) if blank.len() == kept.len() => blank
-            .iter()
-            .zip(&kept)
-            .any(|(b, k)| *b == Some(true) && *k != Some(false)),
-        _ => true,
-    }
-}
-
 /// The verdict of one reading of a QUERY event: the first of truncate, column rename, table rename, drop, statement write, privilege change, commit that applies; `letter` is the statement as first read when this is the blank reading.
 fn read_verdict(
     sql: &str,
@@ -2335,9 +2345,8 @@ fn read_verdict(
         return QueryVerdict::Truncated(sc, tb);
     }
     if scope.projecting {
-        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode)
-            .filter(|t| ours(t) && column_rename_stands(sql, letter, event_db, mode))
-        {
+        let kept = letter.map_or_else(Vec::new, |l| kept_change_specs(l, event_db, mode));
+        if let Some((sc, tb)) = column_rename_target(sql, event_db, mode, &kept).filter(ours) {
             return QueryVerdict::ColumnRenamed(sc, tb);
         }
         let unread = kind_unread_in_letter(letter, |l| renamed_tables(l, event_db, mode));
@@ -3215,7 +3224,7 @@ mod tests {
 
     #[test]
     fn a_statement_that_gives_a_column_a_new_name_names_its_table() {
-        let t = |sql: &str| column_rename_target(sql, "shop", SqlMode::default());
+        let t = |sql: &str| column_rename_target(sql, "shop", SqlMode::default(), &[]);
         let orders = Some(("shop".to_string(), "orders".to_string()));
         for renames in [
             "ALTER TABLE orders RENAME COLUMN name TO nm",
@@ -3264,7 +3273,7 @@ mod tests {
             "/* app */ /*!80000 ALTER TABLE orders RENAME COLUMN name TO nm */ /* xid=7 */",
         ] {
             assert_eq!(
-                column_rename_target(wrapped, "shop", SqlMode::default()),
+                column_rename_target(wrapped, "shop", SqlMode::default(), &[]),
                 orders,
                 "{wrapped}"
             );
@@ -3294,7 +3303,7 @@ mod tests {
             "ALTER TABLE orders ADD COLUMN x INT /* RENAME COLUMN name TO nm */",
         ] {
             assert_eq!(
-                column_rename_target(plain_comment, "shop", SqlMode::default()),
+                column_rename_target(plain_comment, "shop", SqlMode::default(), &[]),
                 None,
                 "{plain_comment}"
             );
@@ -3460,7 +3469,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                column_rename_target(sql, "shop", SqlMode::default()),
+                column_rename_target(sql, "shop", SqlMode::default(), &[]),
                 want,
                 "{sql}"
             );
@@ -3492,7 +3501,7 @@ mod tests {
             "",
         ] {
             assert_eq!(
-                column_rename_target(sql, "shop", SqlMode::default()),
+                column_rename_target(sql, "shop", SqlMode::default(), &[]),
                 None,
                 "{sql}"
             );
@@ -3629,7 +3638,7 @@ mod tests {
         ];
         for (sql, mode, want) in cases {
             assert_eq!(
-                column_rename_target(sql, "shop", mode),
+                column_rename_target(sql, "shop", mode, &[]),
                 want,
                 "{sql} {mode:?}"
             );
@@ -5288,7 +5297,7 @@ mod tests {
         let cfg = only("shop.orders");
         let renamed = QueryVerdict::ColumnRenamed("shop".into(), "orders".into());
         let unreadable = QueryVerdict::Unreadable(Box::new(renamed.clone()));
-        let cases: [(&[u8], QueryVerdict); 7] = [
+        let cases: [(&[u8], QueryVerdict); 8] = [
             (
                 b"ALTER TABLE orders CHANGE pr\xE9nom pr\xE9nom INT",
                 QueryVerdict::Pass,
@@ -5312,7 +5321,11 @@ mod tests {
             (b"ALTER TABLE orders CHANGE\xE9a b INT", unreadable.clone()),
             (
                 b"ALTER TABLE orders CHANGE pr\xE9nom pr\xE9nom INT --\xE9, ADD x INT",
-                unreadable,
+                QueryVerdict::Pass,
+            ),
+            (
+                b"ALTER TABLE orders CHANGE pr\xE9nom pr\xE9nom INT --\xE9, RENAME COLUMN a TO b",
+                renamed.clone(),
             ),
         ];
         for (raw, want) in cases {
@@ -5512,7 +5525,7 @@ mod tests {
         let hidden = b"ALTER TABLE t COMMENT = '\xE4\xB8\xAD\\', RENAME COLUMN a TO b";
         let column_renamed = |status: &[u8]| {
             let (sql, mode) = statement_of(hidden, status);
-            column_rename_target(&sql, "shop", mode)
+            column_rename_target(&sql, "shop", mode, &[])
         };
         assert_eq!(column_renamed(&charset_var(28)), pair("shop", "t"));
         assert_eq!(column_renamed(&charset_var(255)), None);
