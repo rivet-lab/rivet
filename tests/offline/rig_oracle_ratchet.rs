@@ -259,16 +259,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str)] = &[
         "known defect: a PostgreSQL slot dropped under a stream with no checkpoint or baseline",
     ),
     (
-        "mysql_missing_checkpoint_warning_remedy_recovers_the_row_written_while_it_was_gone",
-        "undelivered rows",
-        "known defect: a lost MySQL checkpoint on a stream with no baseline",
-    ),
-    (
-        "mongo_missing_checkpoint_warning_remedy_recovers_the_document_written_while_it_was_gone",
-        "undelivered rows",
-        "known defect: a lost MongoDB checkpoint on a stream with no baseline",
-    ),
-    (
         "pg_duplicate_run",
         "a failed run left: resume-point",
         "known defect: a checkpointed run its quality gate fails is recorded in export_progression",
