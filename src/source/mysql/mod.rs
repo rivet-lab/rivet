@@ -24,6 +24,8 @@ pub(crate) mod cdc;
 pub(crate) mod column_grants;
 mod proxy;
 mod statement;
+#[cfg(test)]
+mod statement_truth;
 
 use std::sync::Arc;
 

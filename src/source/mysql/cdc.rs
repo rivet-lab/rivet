@@ -2273,7 +2273,7 @@ pub(crate) fn renamed_tables(
 }
 
 /// The `(schema, table)` of a column rename a run that projects (`columns_from: grants`) refuses: one met on a table the run captures.
-fn refused_column_rename(
+pub(crate) fn refused_column_rename(
     projecting: bool,
     sql: &str,
     event_db: &str,
@@ -2288,7 +2288,7 @@ fn refused_column_rename(
 }
 
 /// The table a rename a run that projects refuses touches: `Some(None)` when a name could not be read, `None` when the run does not refuse the event.
-fn refused_table_rename(
+pub(crate) fn refused_table_rename(
     projecting: bool,
     sql: &str,
     event_db: &str,
@@ -2574,7 +2574,7 @@ fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
 }
 
 /// A statement that can change what an account may read.
-fn is_privilege_statement(sql: &str, mode: SqlMode) -> bool {
+pub(crate) fn is_privilege_statement(sql: &str, mode: SqlMode) -> bool {
     let mut w = tokens(sql, mode).into_iter().filter_map(|t| match t {
         Tok::Blank(_) => None,
         Tok::Word(w) => Some(Some(w.to_ascii_uppercase())),
