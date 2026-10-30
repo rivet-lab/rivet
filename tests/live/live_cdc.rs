@@ -1,12 +1,4 @@
-//! Live CDC regression — locks the invariants the CDC build kept getting wrong:
-//! at-least-once resume (no gap, no dup) and the run being recorded in the state
-//! DB (metric + journal) like a batch export.
-//!
-//! Gated `#[ignore]` like the other `live_*` tests — needs the dedicated CDC
-//! engines (the `cdc` profile: MySQL :3307 with a REPLICATION grant, PostgreSQL
-//! :5434 with `wal_level=logical`). Run with:
-//!     docker compose --profile cdc up -d postgres-cdc mysql-cdc
-//!     cargo test --test live_suite -- --ignored
+//! Live CDC regression — locks the invariants the CDC build kept getting wrong.
 
 use crate::common::MysqlCdcTable as Table;
 use crate::common::*;
@@ -26,10 +18,7 @@ fn cdc_rig(tbl: &str, ckpt: &std::path::Path, out: &std::path::Path) -> Rig {
         .dest_path(out.to_path_buf())
 }
 
-/// Config PATH in a CALLER-owned dir, via [`Rig::config_in`] — the rig-level
-/// answer to the temporary-rig-drop trap this helper used to work around with
-/// a hand-yaml round-trip through the caller dir. Tests that need
-/// `run_args_env` (fault injection) take [`cdc_rig`] instead.
+/// Config PATH in a CALLER-owned dir, via [`Rig::config_in`].
 fn cdc_config(
     d: &tempfile::TempDir,
     tbl: &str,
@@ -39,9 +28,7 @@ fn cdc_config(
     cdc_rig(tbl, ckpt, out).config_in(d.path())
 }
 
-/// Template-equivalence golden: the rig must render EXACTLY the config the
-/// hand-rolled template produced — the contract guarantee for migrating this
-/// file's 20+ resume/crash tests without touching their plumbing semantics.
+/// Template-equivalence golden.
 #[test]
 fn rig_renders_the_exact_legacy_cdc_template() {
     let yaml = Rig::mysql_cdc("t1")
@@ -59,8 +46,7 @@ fn rig_renders_the_exact_legacy_cdc_template() {
     );
 }
 
-/// The single `.parquet` part written under `dir` (CDC + batch each write one for
-/// these small fixtures).
+/// The single `.parquet` part written under `dir` (CDC + batch each write one for these small fixtures).
 fn find_parquet_part(dir: &std::path::Path) -> std::path::PathBuf {
     std::fs::read_dir(dir)
         .unwrap()
@@ -69,8 +55,7 @@ fn find_parquet_part(dir: &std::path::Path) -> std::path::PathBuf {
         .expect("a .parquet part")
 }
 
-/// `(column, Arrow type)` for the part — the surface the type-fidelity assertion
-/// compares against a batch export.
+/// `(column, Arrow type)` for the part.
 fn parquet_fields(dir: &std::path::Path) -> Vec<(String, arrow::datatypes::DataType)> {
     let f = std::fs::File::open(find_parquet_part(dir)).unwrap();
     let b = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(f).unwrap();
@@ -81,8 +66,7 @@ fn parquet_fields(dir: &std::path::Path) -> Vec<(String, arrow::datatypes::DataT
         .collect()
 }
 
-/// The single string value under `col` in the part — for asserting captured
-/// content (e.g. a JSON column round-trips as valid JSON text).
+/// The single string value under `col` in the part.
 fn parquet_one_string(dir: &std::path::Path, col: &str) -> String {
     use arrow::array::{Array, StringArray};
     let f = std::fs::File::open(find_parquet_part(dir)).unwrap();
@@ -104,8 +88,7 @@ fn full_config(d: &tempfile::TempDir, tbl: &str, out: &std::path::Path) -> std::
     full_rig(tbl, out, "parquet").config_in(d.path())
 }
 
-/// The `<tbl>_batch` table-form full export against a Postgres `url` — the
-/// batch side of the PG cdc-vs-batch parity oracles.
+/// The `<tbl>_batch` table-form full export against a Postgres `url`.
 fn pg_full_rig(tbl: &str, url: &str, out: &std::path::Path) -> Rig {
     Rig::pg_batch(tbl)
         .export_named(&format!("{tbl}_batch"))
@@ -113,8 +96,7 @@ fn pg_full_rig(tbl: &str, url: &str, out: &std::path::Path) -> Rig {
         .dest_path(out.to_path_buf())
 }
 
-/// The `<tbl>_batch` SELECT-* full export against the CDC MySQL — the batch
-/// side of every cdc-vs-batch parity oracle in this file.
+/// The `<tbl>_batch` SELECT-* full export against the CDC MySQL.
 fn full_rig(tbl: &str, out: &std::path::Path, format: &'static str) -> Rig {
     Rig::mysql_batch(&format!("{tbl}_batch"))
         .query(&format!("SELECT * FROM {tbl}"))
@@ -126,10 +108,6 @@ fn full_rig(tbl: &str, out: &std::path::Path, format: &'static str) -> Rig {
 #[test]
 #[ignore = "live: requires docker compose mysql (binlog ROW + REPLICATION grant)"]
 fn cdc_column_types_match_a_batch_full_export() {
-    // The keep-vs-coarsen invariant, end to end: a CDC export and a batch `mode: full`
-    // of the *same* table must produce identical Arrow types for every source column
-    // (int widths, decimal precision/scale, timestamp, JSON-as-Utf8). Catches CDC
-    // drifting from the batch schema builder.
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_types");
     let _drop = Table(tbl.clone());
@@ -157,7 +135,7 @@ fn cdc_column_types_match_a_batch_full_export() {
     std::fs::create_dir_all(&cdc_out).unwrap();
     std::fs::create_dir_all(&batch_out).unwrap();
     run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &cdc_out));
-    run_rivet_ok(&full_config(&d, &tbl, &batch_out)); // run_cdc just runs `rivet run`
+    run_rivet_ok(&full_config(&d, &tbl, &batch_out));
 
     let cdc: std::collections::HashMap<_, _> = parquet_fields(&cdc_out).into_iter().collect();
     for (name, batch_ty) in parquet_fields(&batch_out) {
@@ -169,15 +147,12 @@ fn cdc_column_types_match_a_batch_full_export() {
             "column {name}: cdc type {cdc_ty:?} must match batch type {batch_ty:?}"
         );
     }
-    // and CDC adds its meta columns the batch export doesn't have
     assert!(cdc.contains_key("__op") && cdc.contains_key("__pos"));
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql (binlog ROW + REPLICATION grant)"]
 fn cdc_captures_json_as_valid_json() {
-    // A MySQL JSON column rides through the binlog as JSONB; the sink must emit valid
-    // JSON text, not a debug rendering of the driver value.
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_json");
     let _drop = Table(tbl.clone());
@@ -209,10 +184,6 @@ fn cdc_captures_json_as_valid_json() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_picks_up_a_column_added_between_runs() {
-    // Schema-drift harness: the sink resolves the table schema at the START of each
-    // run, so a column added *between* runs is captured on the next run. (Within a
-    // single run the schema is frozen at the first flush — that's the documented
-    // limitation; run-to-run re-resolution is how drift is actually handled.)
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_drift");
     let _drop = Table(tbl.clone());
@@ -224,7 +195,6 @@ fn cdc_picks_up_a_column_added_between_runs() {
         .checkpoint_path(ckpt.clone())
         .pin_binlog_here();
 
-    // Run 1: capture a row under the original (id, v) schema.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1, 10)"))
         .unwrap();
     let out1 = d.path().join("out1");
@@ -233,13 +203,11 @@ fn cdc_picks_up_a_column_added_between_runs() {
     let f1: std::collections::HashMap<_, _> = parquet_fields(&out1).into_iter().collect();
     assert!(!f1.contains_key("w"), "run 1 predates the added column");
 
-    // Add a column, then a row that uses it.
     c.query_drop(format!("ALTER TABLE {tbl} ADD COLUMN w VARCHAR(20)"))
         .unwrap();
     c.query_drop(format!("INSERT INTO {tbl} VALUES (2, 20, 'hello')"))
         .unwrap();
 
-    // Run 2 (resume): re-resolves the schema → the new column is captured.
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out2).unwrap();
     run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out2));
@@ -254,11 +222,6 @@ fn cdc_picks_up_a_column_added_between_runs() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_throughput_drains_a_large_backlog() {
-    // Lag/throughput harness (#6): rivet exposes no replication-lag metric (a
-    // documented limitation), so this measures the next best proxy — how fast a
-    // backlog drains — and logs rows/s. It's also the only CDC test at non-trivial
-    // scale (the others use tiny fixtures), so it doubles as a correctness-at-scale
-    // check: every one of N changes must be captured.
     const N: i64 = 5_000;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_bench");
@@ -271,7 +234,6 @@ fn cdc_throughput_drains_a_large_backlog() {
         .checkpoint_path(ckpt.clone())
         .pin_binlog_here();
 
-    // Seed N changes (1000-row INSERT batches).
     let mut id = 0;
     while id < N {
         let end = (id + 1000).min(N);
@@ -281,16 +243,12 @@ fn cdc_throughput_drains_a_large_backlog() {
         id = end;
     }
 
-    // Drain the backlog, timed.
     let out = d.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
     let t = std::time::Instant::now();
     run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out));
     let secs = t.elapsed().as_secs_f64();
 
-    // Correctness at scale: nothing dropped under volume — graded by DuckDB
-    // (independent codec), not by rivet's own counter (harness audit: the
-    // suite's ONLY at-scale CDC test was manifest_rows-only).
     assert_eq!(manifest_rows(&out), N, "all {N} changes must be captured");
     assert_eq!(
         duckdb_dir_scalar(&out, "count(DISTINCT id)", None),
@@ -298,8 +256,6 @@ fn cdc_throughput_drains_a_large_backlog() {
         "the destination must HOLD all {N} ids, not merely count them"
     );
 
-    // Throughput: logged for trend-watching, plus a generous wall-clock ceiling so
-    // a catastrophic perf regression fails the test without machine-variance flake.
     eprintln!(
         "CDC throughput: {N} changes drained in {secs:.2}s = {:.0} rows/s",
         N as f64 / secs
@@ -313,11 +269,6 @@ fn cdc_throughput_drains_a_large_backlog() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_intra_transaction_updates_get_distinct_seq() {
-    // A PK updated many times in ONE transaction: every change shares the commit
-    // __pos, so ordering a current-state dedup by __pos alone picks an ARBITRARY
-    // row (observed live: `counter = 1` for a row whose committed value was N).
-    // `__seq` — the intra-transaction ordinal — restores the total order.
-    // Regression for the silently-wrong current-state class.
     const N: i64 = 200;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_seq");
@@ -334,7 +285,6 @@ fn cdc_intra_transaction_updates_get_distinct_seq() {
         .checkpoint_path(ckpt.clone())
         .pin_binlog_here();
 
-    // N updates of the SAME row in a SINGLE transaction.
     c.query_drop("START TRANSACTION").unwrap();
     for i in 1..=N {
         c.query_drop(format!("UPDATE {tbl} SET counter = {i} WHERE id = 1"))
@@ -352,11 +302,6 @@ fn cdc_intra_transaction_updates_get_distinct_seq() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_sum_reconciles_across_intra_txn_updates() {
-    // The strong end-to-end oracle: SUM(v) on the source must equal SUM(v) on
-    // the target deduped STRICTLY by (__pos, __seq), row order discarded (as an
-    // unordered warehouse table forces). Every transaction updates one PK 2–4
-    // times, so a __pos-only dedup would pick an intermediate `v` and skew the
-    // sum — this reconciles only because __seq totally-orders the log.
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_sum");
     let _drop = Table(tbl.clone());
@@ -398,13 +343,6 @@ fn cdc_sum_reconciles_across_intra_txn_updates() {
     );
 }
 
-// Idle-first-run anchor model (per-engine, see the anchor-model process rule): MySQL's ONLY resume
-// anchor is the client checkpoint file, and the sink writes it at part commits —
-// so the first checkpointed open must persist its coordinates immediately, or an
-// idle bounded run (zero changes drained) leaves no anchor and the next run
-// re-anchors to a newer "current" position, silently skipping every change in
-// between. This is the binary-level (`rivet run`) mirror of the stream-level
-// regression `first_run_with_zero_changes_pins_the_checkpoint_at_open`.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_idle_first_run_then_change_is_captured_not_skipped() {
@@ -416,7 +354,6 @@ fn cdc_idle_first_run_then_change_is_captured_not_skipped() {
         .unwrap();
     let _guard = Table(tbl.clone());
 
-    // Run 1: checkpoint path configured, no file yet, nothing to capture.
     let ckpt = d.path().join("cdc.ckpt");
     let out1 = d.path().join("out1");
     std::fs::create_dir_all(&out1).unwrap();
@@ -427,11 +364,9 @@ fn cdc_idle_first_run_then_change_is_captured_not_skipped() {
         "an idle first run must still pin the open position to the checkpoint"
     );
 
-    // A change lands BETWEEN the idle run and the next scheduler cycle.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1, 100)"))
         .unwrap();
 
-    // Run 2 resumes from the pinned position and must capture it.
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out2).unwrap();
     run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out2));
@@ -450,10 +385,6 @@ fn cdc_idle_first_run_then_change_is_captured_not_skipped() {
 #[test]
 #[ignore = "live: requires docker compose mysql (binlog ROW + REPLICATION grant)"]
 fn cdc_crash_after_flush_before_ack_re_reads_on_resume() {
-    // The at-least-once guarantee under a crash: the durable sequence is
-    // flush → checkpoint → ack. A crash AFTER the part is durable but BEFORE the
-    // checkpoint advances must NOT lose the change — the resume re-reads it. (If the
-    // checkpoint were saved before the flush, this run would lose the two changes.)
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_crash");
     let _drop = Table(tbl.clone());
@@ -467,7 +398,6 @@ fn cdc_crash_after_flush_before_ack_re_reads_on_resume() {
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"))
         .unwrap();
 
-    // Run 1 crashes right after the part is flushed, before the checkpoint+ack.
     let crash_out = d.path().join("crash");
     std::fs::create_dir_all(&crash_out).unwrap();
     let crashed = cdc_rig(&tbl, &ckpt, &crash_out).run_args_env(
@@ -479,8 +409,6 @@ fn cdc_crash_after_flush_before_ack_re_reads_on_resume() {
         "the injected crash must fail run 1"
     );
 
-    // Run 2 (no crash): the checkpoint never advanced, so it resumes from the same
-    // position and re-reads both changes — nothing was lost to the crash.
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out2).unwrap();
     run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out2));
@@ -495,8 +423,6 @@ fn cdc_crash_after_flush_before_ack_re_reads_on_resume() {
         "the re-read parquet must hold exactly the un-acked changes"
     );
 }
-
-// ─── PostgreSQL: the slot-advance side of at-least-once ──────────────────────
 
 fn pg_cdc_config(
     d: &tempfile::TempDir,
@@ -523,7 +449,6 @@ fn pg_cdc_resume_captures_only_new_changes() {
     ))
     .unwrap();
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
-    // The slot must exist *before* the changes so it captures them; the guard drops it.
     c.execute(
         "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
         &[&slot],
@@ -537,8 +462,6 @@ fn pg_cdc_resume_captures_only_new_changes() {
     run_rivet_ok(&pg_cdc_config(&d, &tbl, &slot, &out1));
     assert_eq!(manifest_rows(&out1), 2, "run 1 drains the 2 changes");
 
-    // Resume: the slot's confirmed_flush advanced after the durable write, so run 2
-    // peeks only the new changes — the PostgreSQL at-least-once / no-re-read guarantee.
     c.execute(&format!("INSERT INTO {tbl} VALUES (3,30),(4,40)"), &[])
         .unwrap();
     let out2 = d.path().join("out2");
@@ -559,9 +482,6 @@ fn pg_cdc_resume_captures_only_new_changes() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_intra_transaction_updates_get_distinct_seq() {
-    // Peer of cdc_intra_transaction_updates_get_distinct_seq. PostgreSQL emits
-    // every change of a transaction at the COMMIT lsn (and marks each
-    // `committed`), so __pos ties them — __seq restores the order.
     use postgres::NoTls;
     const N: i64 = 200;
     let d = tempfile::tempdir().unwrap();
@@ -581,7 +501,6 @@ fn pg_cdc_intra_transaction_updates_get_distinct_seq() {
     )
     .unwrap();
 
-    // N updates of the SAME row in ONE transaction (a DO block is one txn).
     c.batch_execute(&format!(
         "DO $$ BEGIN FOR i IN 1..{N} LOOP UPDATE {tbl} SET counter = i WHERE id = 1; END LOOP; END $$"
     ))
@@ -597,7 +516,6 @@ fn pg_cdc_intra_transaction_updates_get_distinct_seq() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_sum_reconciles_across_intra_txn_updates() {
-    // Peer of cdc_sum_reconciles_across_intra_txn_updates for PostgreSQL.
     use postgres::NoTls;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_pg_sum");
@@ -644,10 +562,7 @@ fn pg_cdc_sum_reconciles_across_intra_txn_updates() {
     );
 }
 
-/// Assert every source column of the batch export is byte-for-byte identical
-/// (type AND value, via ArrayData equality) in the CDC output — the parity
-/// oracle that caught the uuid/time/interval/NULL-text losses on PostgreSQL
-/// and the timestamp/bit/year/enum/binary losses on MySQL.
+/// Assert every source column of the batch export is byte-for-byte identical.
 fn assert_cdc_matches_batch(cdc_out: &std::path::Path, batch_out: &std::path::Path) {
     let batch = read_one_batch(batch_out);
     let cdc = read_one_batch(cdc_out);
@@ -666,13 +581,6 @@ fn assert_cdc_matches_batch(cdc_out: &std::path::Path, batch_out: &std::path::Pa
     assert!(cdc.schema().index_of("__op").is_ok() && cdc.schema().index_of("__pos").is_ok());
 }
 
-// CSV parity: the second (and last) CDC output format. The writer is shared
-// with batch, so given ArrayData parity this SHOULD follow — but "should
-// follow" is a construction argument, and the CSV renderer has its own
-// per-type formatting (decimal text, datetime text, NULL). Compare the
-// rendered text cell-for-cell. Values are comma/quote-free by construction so
-// a positional split is exact (the CDC line prefixes __op and a JSON __pos
-// that DO contain commas — compare from the right).
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_csv_rendering_matches_batch_csv() {
@@ -697,7 +605,7 @@ fn cdc_csv_rendering_matches_batch_csv() {
         .checkpoint_path(ckpt.clone())
         .dest_path(out.clone());
     let cfg = cdc_rig.config_path();
-    run_rivet_ok(&cfg); // pin
+    run_rivet_ok(&cfg);
     c.query_drop(format!(
         "INSERT INTO {tbl} VALUES \
          (1, 999999999999.9999, '2035-08-07 09:08:07.987654', '2024-03-15', \
@@ -730,8 +638,6 @@ fn cdc_csv_rendering_matches_batch_csv() {
     );
     const DATA_COLS: usize = 6;
     for (cl, bl) in cdc_lines.iter().zip(batch_lines.iter()) {
-        // Data columns are the LAST 6 fields of the CDC line (after __op and
-        // the comma-bearing quoted __pos) and the whole batch line.
         let cdc_tail: Vec<&str> = cl.rsplitn(DATA_COLS + 1, ',').collect();
         let cdc_data: Vec<&str> = cdc_tail[..DATA_COLS].iter().rev().cloned().collect();
         let batch_data: Vec<&str> = bl.split(',').collect();
@@ -742,19 +648,11 @@ fn cdc_csv_rendering_matches_batch_csv() {
     }
 }
 
-// Non-UTC source server, MySQL: the client's server runs in a local zone
-// (`SET GLOBAL time_zone`), sessions inherit it. TIMESTAMP is stored as a UTC
-// instant and rendered per session zone; rivet's batch session pins UTC and
-// the binlog carries the raw epoch — so BOTH paths must yield the same UTC
-// instant, and DATETIME (naive wall-clock) must stay the literal wall-clock.
-// Pinned because every existing test runs the server at UTC where a
-// zone-handling bug is invisible.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_non_utc_server_timezone_matches_batch_and_utc_instant() {
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("cdc_tz_my");
-    // SET GLOBAL needs SYSTEM_VARIABLES_ADMIN — use the container's root.
     let root_url = MYSQL_CDC_URL.replace("rivet:rivet@", "root:rivet@");
     let mut admin = mysql::Conn::new(mysql::Opts::from_url(&root_url).unwrap()).unwrap();
     use mysql::prelude::Queryable as _;
@@ -776,7 +674,6 @@ fn cdc_non_utc_server_timezone_matches_batch_and_utc_instant() {
     }
     let _tz = TzGuard(old_tz, root_url);
 
-    // A FRESH session (inherits the +09:00 global) creates and fills the table.
     let mut c = conn();
     c.query_drop(format!("DROP TABLE IF EXISTS {tbl}")).unwrap();
     c.query_drop(format!(
@@ -790,8 +687,7 @@ fn cdc_non_utc_server_timezone_matches_batch_and_utc_instant() {
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::create_dir_all(&out).unwrap();
     std::fs::create_dir_all(&batch_out).unwrap();
-    run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out)); // pin
-    // Wall-clock noon in +09:00 == 03:00:00Z.
+    run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out));
     c.query_drop(format!(
         "INSERT INTO {tbl} VALUES (1, '2024-06-15 12:00:00', '2024-06-15 12:00:00')"
     ))
@@ -809,13 +705,11 @@ fn cdc_non_utc_server_timezone_matches_batch_and_utc_instant() {
             .unwrap()
             .value(0)
     };
-    // TIMESTAMP: the UTC instant (12:00+09 → 03:00Z), NOT the wall-clock.
     assert_eq!(
         val("ts"),
         1_718_420_400_000_000,
         "TIMESTAMP must be the UTC instant 2024-06-15T03:00:00Z"
     );
-    // DATETIME: the naive wall-clock, zone-independent.
     assert_eq!(
         val("dt"),
         1_718_452_800_000_000,
@@ -823,18 +717,10 @@ fn cdc_non_utc_server_timezone_matches_batch_and_utc_instant() {
     );
 }
 
-// Non-UTC source server, PostgreSQL: test_decoding renders TIMESTAMPTZ in the
-// POLLING SESSION's zone — a non-UTC database default changes the rendered
-// offset ('… 12:00:00+09'), and the parser must still recover the same UTC
-// instant the batch path reads over the binary protocol.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_non_utc_database_timezone_matches_batch() {
     let d = tempfile::tempdir().unwrap();
-    // Isolated DB (see CdcDb): this test ALTERs the DATABASE-level timezone, which
-    // on the shared `rivet` DB would flip the rendering for every parallel test
-    // (and vice versa). Its own DB confines the change — dropped with the DB, so
-    // no RESET guard is needed.
     let cdc_db = CdcDb::new("cdc_tz");
     let tbl = unique_name("cdc_tz_pg");
     let slot = unique_name("rivet_tz_slot");
@@ -895,12 +781,6 @@ fn pg_cdc_non_utc_database_timezone_matches_batch() {
     );
 }
 
-// Unchanged-TOAST corruption (graph-surfaced), end to end. An UPDATE that leaves
-// an externally-stored TOAST column untouched renders it as the unquoted
-// `unchanged-toast-datum` marker in the new tuple — the value is NOT in the WAL.
-// With REPLICA IDENTITY FULL the real value rides the `old-key` pre-image; rivet
-// must recover it by NAME and NEVER write the literal marker string as data
-// (the same silent-corruption class as the uuid→null loss caught live on GCS).
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_unchanged_toast_recovers_from_replica_identity_full() {
@@ -910,8 +790,6 @@ fn pg_cdc_unchanged_toast_recovers_from_replica_identity_full() {
     let slot = unique_name("rivet_toast_full_slot");
     let _slot = Slot::new(slot.clone());
     let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
-    // EXTERNAL storage forces out-of-line TOAST (no compression); FULL puts the
-    // pre-image value in `old-key`, so the unchanged column is recoverable.
     c.batch_execute(&format!(
         "DROP TABLE IF EXISTS {tbl}; \
          CREATE TABLE {tbl} (id INT PRIMARY KEY, small TEXT, big TEXT); \
@@ -924,14 +802,7 @@ fn pg_cdc_unchanged_toast_recovers_from_replica_identity_full() {
         &[&slot],
     )
     .unwrap();
-    // RAII, not trailing drops: a panic in the assertions below would otherwise
-    // leak the slot on the shared :5434 CDC db and pin WAL against
-    // max_replication_slots=32, cascading into unrelated PG-CDC failures that
-    // mask the real regression (r6 bughunt — the class the file's own SlotGuard
-    // comment documents; the fix had guarded one test only).
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
-    // Incompressible >2KB value → genuine external TOAST; then touch only `small`
-    // so `big` decodes as the unchanged-toast marker in the new tuple.
     c.batch_execute(&format!(
         "INSERT INTO {tbl} (id, small, big) VALUES \
            (1, 'a', (SELECT string_agg(md5(g::text || random()::text), '') \
@@ -973,10 +844,6 @@ fn pg_cdc_unchanged_toast_recovers_from_replica_identity_full() {
     );
 }
 
-// The DEFAULT replica-identity case: the pre-image carries only the key, so the
-// unchanged externally-stored value is nowhere in the WAL. rivet must fail LOUD
-// (never fabricate the marker as data) and name the upstream fix, not silently
-// corrupt or null the column.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_unchanged_toast_without_full_identity_fails_loud() {
@@ -986,7 +853,6 @@ fn pg_cdc_unchanged_toast_without_full_identity_fails_loud() {
     let slot = unique_name("rivet_toast_default_slot");
     let _slot = Slot::new(slot.clone());
     let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
-    // EXTERNAL storage but DEFAULT replica identity (PK only) — no pre-image value.
     c.batch_execute(&format!(
         "DROP TABLE IF EXISTS {tbl}; \
          CREATE TABLE {tbl} (id INT PRIMARY KEY, small TEXT, big TEXT); \
@@ -998,8 +864,6 @@ fn pg_cdc_unchanged_toast_without_full_identity_fails_loud() {
         &[&slot],
     )
     .unwrap();
-    // RAII (r6 bughunt): the run_expect_fail below panics if rivet DOESN'T fail
-    // loud — the trailing drop would then leak the slot on :5434.
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
     c.batch_execute(&format!(
         "INSERT INTO {tbl} (id, small, big) VALUES \
@@ -1025,17 +889,7 @@ fn pg_cdc_unchanged_toast_without_full_identity_fails_loud() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_non_iso_datestyle_and_escape_bytea_match_batch() {
-    // Session-state rendering (the process rules): test_decoding renders values in the
-    // polling session's FORMAT, not just its timezone. A non-default database
-    // `datestyle` ('German, DMY') nulled every timestamp (rivet's ISO parser
-    // failed on DMY text) and a non-hex `bytea_output` ('escape') corrupted every
-    // bytea — both silent, found by the source-parity sweep under a flipped
-    // session. The CDC reader now sets datestyle/bytea_output for each read of the slot, so CDC
-    // matches a batch export (binary protocol, format-immune) regardless.
     let d = tempfile::tempdir().unwrap();
-    // Isolated DB (see CdcDb): ALTERing the DATABASE-level datestyle/bytea_output
-    // on the shared `rivet` DB would corrupt the rendering for every parallel test.
-    // Its own DB confines it — dropped with the DB, no RESET guard needed.
     let cdc_db = CdcDb::new("cdc_fmt");
     let tbl = unique_name("cdc_fmt_pg");
     let slot = unique_name("rivet_fmt_slot");
@@ -1071,16 +925,12 @@ fn pg_cdc_non_iso_datestyle_and_escape_bytea_match_batch() {
     run_rivet_ok(&rig.config_path());
     let batch_rig = pg_full_rig(&tbl, cdc_db.url(), &batch_out);
     run_rivet_ok(&batch_rig.config_path());
-    // Batch reads via the binary protocol (format-immune); CDC via test_decoding
-    // TEXT. Equal ⇒ the session-state pin held: date not nulled, bytea not mangled.
     assert_cdc_matches_batch(&out, &batch_out);
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_lmt_timestamptz_under_a_named_zone_matches_batch() {
-    // A named zone renders a pre-1893 Berlin instant with a SECONDS offset (+00:53:28)
-    // the text parser cannot read; the reader reads the slot under TimeZone = 'UTC' so it renders +00.
     let d = tempfile::tempdir().unwrap();
     let cdc_db = CdcDb::new("cdc_lmt");
     let tbl = unique_name("cdc_lmt_pg");
@@ -1122,8 +972,6 @@ fn pg_cdc_lmt_timestamptz_under_a_named_zone_matches_batch() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_domain_columns_decode_as_their_base_type_and_match_batch() {
-    // test_decoding labels a domain cell with the DOMAIN's name; the reader resolves it
-    // to the base type, or an integer/date/boolean domain builds NULL for every row.
     let d = tempfile::tempdir().unwrap();
     let cdc_db = CdcDb::new("cdc_domain");
     let tbl = unique_name("cdc_domain_pg");
@@ -1161,11 +1009,6 @@ fn pg_cdc_domain_columns_decode_as_their_base_type_and_match_batch() {
     assert_cdc_matches_batch(&out, &batch_out);
 }
 
-// UPDATE and DELETE through the typed surface — the matrix tests pin INSERT
-// after-images only; this pins that an UPDATE's after-image carries every
-// column type identically to a batch export of the post-update state, and a
-// DELETE's key-image carries the typed PK. "Same builder by construction" is
-// not a test; this is.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_update_and_delete_carry_full_types() {
@@ -1186,7 +1029,7 @@ fn cdc_update_and_delete_carry_full_types() {
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::create_dir_all(&out).unwrap();
     std::fs::create_dir_all(&batch_out).unwrap();
-    run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out)); // pin
+    run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out));
     c.query_drop(format!(
         "INSERT INTO {tbl} VALUES (1, 1.5000, '2024-01-01 00:00:00', '01:02:03', \
          'a', 'x', 0xAA, 1, 'v1')"
@@ -1194,8 +1037,6 @@ fn cdc_update_and_delete_carry_full_types() {
     .unwrap();
     run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out));
 
-    // UPDATE every column; the after-image must equal a batch export of the
-    // post-update state, type for type, value for value.
     c.query_drop(format!(
         "UPDATE {tbl} SET amount=999999999999.9999, dt='2035-08-07 09:08:07.987654', \
          tm='23:59:59.999999', en='c', st='x,y,z', vb=0xDEADBEEF, \
@@ -1221,7 +1062,6 @@ fn cdc_update_and_delete_carry_full_types() {
         );
     }
 
-    // DELETE: the key-image event carries the typed PK.
     c.query_drop(format!("DELETE FROM {tbl} WHERE id=1"))
         .unwrap();
     let del_out = d.path().join("del");
@@ -1239,8 +1079,6 @@ fn cdc_update_and_delete_carry_full_types() {
     assert_eq!(id.value(0), 1);
 }
 
-// PostgreSQL flavour — arrays, interval, uuid and numeric included in the
-// updated surface (test_decoding emits the full after-image row).
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_update_and_delete_carry_full_types() {
@@ -1318,11 +1156,6 @@ fn pg_cdc_update_and_delete_carry_full_types() {
     assert_eq!(id.value(0), 1);
 }
 
-// Hostile values, PostgreSQL: ±Infinity/NaN FLOAT8 are representable and must
-// ride CDC ArrayData-equal to batch; 'NaN'::NUMERIC is NOT representable in a
-// Parquet decimal(18,2) — the batch export fails LOUDLY on it
-// ("unsupported NaN/infinity payload"), and CDC must fail the same way, never
-// silently NULL the cell.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_hostile_floats_match_batch_and_nan_numeric_fails_loudly() {
@@ -1344,7 +1177,6 @@ fn pg_cdc_hostile_floats_match_batch_and_nan_numeric_fails_loudly() {
     )
     .unwrap();
 
-    // Leg 1: hostile FLOATS (representable) — full parity required.
     c.batch_execute(&format!(
         "INSERT INTO {tbl} VALUES
            (1, 'Infinity', '-Infinity', 1.50),
@@ -1362,7 +1194,6 @@ fn pg_cdc_hostile_floats_match_batch_and_nan_numeric_fails_loudly() {
     run_rivet_ok(&batch_rig.config_path());
     assert_cdc_matches_batch(&cdc_out, &batch_out);
 
-    // Leg 2: 'NaN'::NUMERIC — the CDC run must FAIL, naming the payload.
     c.execute(
         &format!("INSERT INTO {tbl} VALUES (5, 1.0, 1.0, 'NaN')"),
         &[],
@@ -1390,10 +1221,6 @@ fn pg_cdc_hostile_floats_match_batch_and_nan_numeric_fails_loudly() {
     );
 }
 
-// Hostile values, MySQL: a zero-date ('0000-00-00 00:00:00', insertable with
-// sql_mode='') degrades to NULL on BOTH paths (no epoch equivalent exists —
-// pinned as parity, not silence), and a NUL byte embedded in a VARCHAR
-// survives both paths byte-for-byte.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_hostile_zero_date_and_nul_string_match_batch() {
@@ -1413,7 +1240,7 @@ fn cdc_hostile_zero_date_and_nul_string_match_batch() {
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::create_dir_all(&out).unwrap();
     std::fs::create_dir_all(&batch_out).unwrap();
-    run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out)); // pin
+    run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out));
     c.query_drop("SET SESSION sql_mode=''").unwrap();
     c.query_drop(format!(
         "INSERT INTO {tbl} VALUES (1, '0000-00-00 00:00:00', CONCAT('a', CHAR(0), 'b'), \
@@ -1425,7 +1252,6 @@ fn cdc_hostile_zero_date_and_nul_string_match_batch() {
     run_rivet_ok(&full_config(&d, &tbl, &batch_out));
     assert_cdc_matches_batch(&out, &batch_out);
 
-    // And pin the zero-date outcome explicitly: NULL, not epoch garbage.
     use arrow::array::{Array, TimestampMicrosecondArray};
     let b = read_one_batch(&out);
     let dt_idx = b.schema().index_of("dt").unwrap();
@@ -1444,15 +1270,10 @@ fn cdc_hostile_zero_date_and_nul_string_match_batch() {
         );
         assert!(!arr.is_null(1), "{col}: a real TIMESTAMP stays");
     }
-    // The NUL byte survives inside the string.
     let s = parquet_one_string(&out, "s");
     assert_eq!(s.as_bytes(), b"a\0b", "embedded NUL survives byte-for-byte");
 }
 
-// Table-qualified `columns:` overrides on a multi-table stream: the bare key
-// applies everywhere, `"table.column"` targets ONE table and wins over the
-// bare key there — the out-of-the-box answer to same-named columns needing
-// different overrides in schema-wide CDC.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_qualified_overrides_target_one_table_bare_applies_to_the_rest() {
@@ -1471,7 +1292,6 @@ fn cdc_qualified_overrides_target_one_table_bare_applies_to_the_rest() {
     let out = d.path().join("out");
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::create_dir_all(&out).unwrap();
-    // Bare `v: text` hits every table; the qualified key retargets ONLY tb.
     let rig = Rig::mysql_cdc(&ta)
         .tables(&[&ta, &tb])
         .export_named("app_cdc")
@@ -1482,7 +1302,7 @@ fn cdc_qualified_overrides_target_one_table_bare_applies_to_the_rest() {
         .dest_path(out.clone());
     let cfg = rig.config_path();
 
-    run_rivet_ok(&cfg); // pin
+    run_rivet_ok(&cfg);
     c.query_drop(format!("INSERT INTO {ta} VALUES (1, -42)"))
         .unwrap();
     c.query_drop(format!("INSERT INTO {tb} VALUES (1, 7)"))
@@ -1513,12 +1333,6 @@ fn cdc_qualified_overrides_target_one_table_bare_applies_to_the_rest() {
     assert_eq!(bv.value(0), 70_000, "7 at scale 4");
 }
 
-// Same column NAME, different TYPES across tables of one multi-table stream:
-// resolution is per-table by construction (each TableOutput resolves its own
-// schema and cell fixes), so `a.v INT` and `b.v DECIMAL(10,2)` and
-// `c.v ENUM(…)` must land as three different, correctly-typed columns — no
-// cross-table bleed. Pinned because schema-wide CDC makes name collisions the
-// NORM, not the exception.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_multi_table_same_column_name_different_types_resolve_per_table() {
@@ -1549,7 +1363,7 @@ fn cdc_multi_table_same_column_name_different_types_resolve_per_table() {
         .dest_path(out.clone());
     let cfg = rig.config_path();
 
-    run_rivet_ok(&cfg); // pin
+    run_rivet_ok(&cfg);
     c.query_drop(format!("INSERT INTO {ta} VALUES (1, -42)"))
         .unwrap();
     c.query_drop(format!("INSERT INTO {tb} VALUES (1, 13.37)"))
@@ -1568,7 +1382,6 @@ fn cdc_multi_table_same_column_name_different_types_resolve_per_table() {
     assert_eq!(ty_of(&ta), DataType::Int32, "a.v stays INT");
     assert_eq!(ty_of(&tb), DataType::Decimal128(10, 2), "b.v stays DECIMAL");
     assert_eq!(ty_of(&tc), DataType::Utf8, "c.v stays ENUM→Utf8");
-    // Values: the enum INDEX must have become its label in c, while a kept -42.
     assert_eq!(parquet_one_string(&out.join(&tc), "v"), "off");
     use arrow::array::{Decimal128Array, Int32Array};
     let a = read_one_batch(&out.join(&ta));
@@ -1587,10 +1400,6 @@ fn cdc_multi_table_same_column_name_different_types_resolve_per_table() {
     assert_eq!(bv.value(0), 1337, "13.37 at scale 2");
 }
 
-// `cdc.initial: snapshot` — the safe switch ordering enforced by construction:
-// anchor → snapshot → drain in ONE run. The invariant this pins: rows that
-// exist BEFORE the first run land in `snapshot/`, changes AFTER land in the
-// change stream, and a second run does NOT re-snapshot. No row is in neither.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_initial_snapshot_covers_preexisting_rows_then_streams() {
@@ -1601,7 +1410,6 @@ fn cdc_initial_snapshot_covers_preexisting_rows_then_streams() {
     c.query_drop(format!("CREATE TABLE {tbl} (id INT PRIMARY KEY, v INT)"))
         .unwrap();
     let _guard = Table(tbl.clone());
-    // Pre-existing rows — the base CDC alone would never deliver.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"))
         .unwrap();
 
@@ -1614,7 +1422,6 @@ fn cdc_initial_snapshot_covers_preexisting_rows_then_streams() {
         .dest_path(out.clone());
     let cfg = rig.config_path();
 
-    // Run 1: anchor → snapshot(2 rows) → drain(0).
     run_rivet_ok(&cfg);
     let snap = out.join("snapshot");
     assert_eq!(
@@ -1644,7 +1451,6 @@ fn cdc_initial_snapshot_covers_preexisting_rows_then_streams() {
     };
     assert_eq!(snap_parts(), 1);
 
-    // A change AFTER the snapshot → the stream, not a re-snapshot.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (3,30)"))
         .unwrap();
     run_rivet_ok(&cfg);
@@ -1657,13 +1463,6 @@ fn cdc_initial_snapshot_covers_preexisting_rows_then_streams() {
     assert_eq!(snap_parts(), 1, "run 2 must NOT re-snapshot");
 }
 
-// Load parity: the `initial: snapshot` leg and the CDC stream BOTH feed one
-// `<table>__changes` log (snapshot rows with __op/__pos/__seq NULL), and the
-// current-state view is `SELECT * EXCEPT(__op,__pos,__seq,__rn)`. batch-only
-// meta_columns injected on the snapshot leg ONLY would give it columns the CDC
-// parquet lacks — appending both into one `__changes` table then mismatches
-// (the exact "read CDC, backfill history via batch, load breaks because columns
-// don't match" failure). The synth snapshot must therefore drop meta_columns.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_initial_snapshot_leg_drops_batch_meta_columns_for_load_parity() {
@@ -1680,8 +1479,6 @@ fn cdc_initial_snapshot_leg_drops_batch_meta_columns_for_load_parity() {
     let out = d.path().join("out");
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::create_dir_all(&out).unwrap();
-    // The CDC export REQUESTS batch meta columns — they must be dropped from the
-    // snapshot leg so its parquet matches the CDC stream's columns.
     let rig = Rig::mysql_cdc(&tbl)
         .cdc_line("initial: snapshot")
         .export_line("meta_columns: { exported_at: true, row_hash: true }")
@@ -1692,18 +1489,6 @@ fn cdc_initial_snapshot_leg_drops_batch_meta_columns_for_load_parity() {
 
     let snap = out.join("snapshot");
     let snap_cols: Vec<String> = parquet_fields(&snap).into_iter().map(|(n, _)| n).collect();
-    // The meta columns are `_rivet_exported_at` / `_rivet_row_hash` (SINGLE
-    // underscore, src/enrich.rs) — a `__rivet` (double) check silently never
-    // matched, so this assertion was VACUOUS (green even if the leg leaked them).
-    // Caught while RED-proving the sibling cdc→warehouse DuckDB-load test.
-    //
-    // The two meta columns are now ASYMMETRIC, and load parity is exactly why
-    // (§5h / cdc_job.rs::synth_snapshot_export): `exported_at` is a per-run stamp
-    // only the batch leg can produce, so keeping it would make the snapshot
-    // parquet's columns differ from the CDC leg's and break the shared
-    // `__changes` append — it is cleared. `row_hash` is produced by BOTH legs, so
-    // it is INHERITED on purpose; dropping it here is what would break parity,
-    // leaving half the appended table NULL in that column.
     assert!(
         !snap_cols.iter().any(|c| c == "_rivet_exported_at"),
         "snapshot leg must NOT carry `_rivet_exported_at` — only the batch leg can \
@@ -1721,9 +1506,6 @@ fn cdc_initial_snapshot_leg_drops_batch_meta_columns_for_load_parity() {
         "snapshot leg still carries the source columns; got {snap_cols:?}"
     );
 
-    // Stream a post-snapshot change and confirm the CDC parquet's DATA columns
-    // are exactly the snapshot's (the loader adds __op/__pos/__seq on top) — so
-    // the two parquets append into one `__changes` log without a mismatch.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (3,30)"))
         .unwrap();
     run_rivet_ok(&cfg);
@@ -1737,12 +1519,6 @@ fn cdc_initial_snapshot_leg_drops_batch_meta_columns_for_load_parity() {
     );
 }
 
-// Roast finding #28 (feature composition): ensure_anchor ran with
-// resume_expected=false on EVERY run of an `initial: snapshot` export — so a
-// VANISHED slot was silently recreated at the current position BEFORE the
-// vanished-slot protection could fire, and everything since the drop was
-// silently lost. With resume evidence present (a completed snapshot marker /
-// a checkpoint position), a missing slot must be a LOUD failure.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_initial_snapshot_vanished_slot_fails_loudly_not_recreates() {
@@ -1766,26 +1542,20 @@ fn pg_initial_snapshot_vanished_slot_fails_loudly_not_recreates() {
         .dest_path(out.clone());
     let cfg = rig.config_path();
 
-    // Run 1: anchor + snapshot(1 row) + drain(0).
     run_rivet_ok(&cfg);
     assert_eq!(manifest_rows(&out.join("snapshot")), 1);
 
-    // The slot vanishes (admin cleanup / WAL-size invalidation), and a change
-    // lands that the dropped slot would have carried.
     c.execute("SELECT pg_drop_replication_slot($1)", &[&slot])
         .unwrap();
     c.execute(&format!("INSERT INTO {tbl} VALUES (2,20)"), &[])
         .unwrap();
 
-    // Run 2 MUST fail loudly — silently recreating the slot at the current
-    // position would skip row 2 forever while reporting success.
     let res = run_rivet_env(&["run", "--config", cfg.to_str().unwrap()], &[]);
     assert!(
         !res.status.success(),
         "a vanished slot with a completed snapshot behind it must FAIL, not silently re-anchor"
     );
     let stderr = String::from_utf8_lossy(&res.stderr);
-    // No checkpoint is configured, so the only evidence the anchor step found is the snapshot.
     let expected = format!(
         "pg cdc: slot '{slot}' is missing but a prior run completed this export's snapshot (the \
          state DB's `cdc_snapshot` row or the destination's snapshot/_SUCCESS marker) — the slot \
@@ -1798,7 +1568,7 @@ fn pg_initial_snapshot_vanished_slot_fails_loudly_not_recreates() {
     );
 }
 
-/// The slot-created warning's remedy, followed as printed, re-reads a row written while the slot was gone.
+/// The slot-created warning's remedy, followed as printed.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
 fn pg_slot_created_warning_remedy_recovers_the_row_written_while_the_slot_was_gone() {
@@ -1840,7 +1610,7 @@ fn pg_slot_created_warning_remedy_recovers_the_row_written_while_the_slot_was_go
     );
 }
 
-/// A slot lost under a completed baseline: the refusal's remedy, followed as printed, re-reads the row written in the gap.
+/// A slot lost under a completed baseline.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
 fn pg_missing_slot_refusal_remedy_recovers_the_row_written_while_the_slot_was_gone() {
@@ -1875,7 +1645,7 @@ fn pg_missing_slot_refusal_remedy_recovers_the_row_written_while_the_slot_was_go
     );
 }
 
-/// A `tables:` stream whose slot was lost under a completed baseline: the remedy, followed as printed, re-reads every table.
+/// A `tables:` stream whose slot was lost under a completed baseline.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
 fn pg_multi_table_missing_slot_refusal_remedy_re_reads_every_table() {
@@ -1921,7 +1691,7 @@ fn pg_multi_table_missing_slot_refusal_remedy_re_reads_every_table() {
     }
 }
 
-/// A truncate after its rows went out as change parts: the slot advanced as the refusal says, then the remedy, leaves the prefix holding only the source's rows.
+/// A truncate after its rows went out as change parts.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
 fn pg_truncate_refusal_remedy_leaves_no_removed_row_live_in_the_prefix() {
@@ -1972,7 +1742,7 @@ fn pg_truncate_refusal_remedy_leaves_no_removed_row_live_in_the_prefix() {
     );
 }
 
-/// A `tables:` stream whose truncate transaction also wrote another table: the slot advance skips that row, and the remedy's re-read of every table recovers it.
+/// A `tables:` stream whose truncate transaction also wrote another table.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
 fn pg_multi_table_truncate_remedy_recovers_the_other_tables_row_the_advance_skipped() {
@@ -2116,7 +1886,7 @@ fn mysql_table_switched_to_another_over_its_baseline_is_refused_and_switched_bac
     );
 }
 
-/// Unchanged: a table added to `tables:` that the stream never captured gets its baseline, with no refusal.
+/// Unchanged: a table added to `tables:` that the stream never captured gets its baseline.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
 fn pg_table_added_to_tables_mid_stream_is_baselined() {
@@ -2140,7 +1910,7 @@ fn pg_table_added_to_tables_mid_stream_is_baselined() {
     );
 }
 
-/// `rollover: 1` in config mode: an idle bounded run leaves its drain barrier at the head of the slot, which fills the next run's one-row peek; the commits behind it must still arrive.
+/// `rollover: 1` in config mode.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
 fn pg_cdc_rollover_1_delivers_the_commits_behind_an_idle_runs_barrier() {
@@ -2218,7 +1988,7 @@ fn mysql_state_reset_lifts_a_lost_checkpoint_refusal() {
     assert_state_reset_lifts_a_lost_checkpoint_refusal(&mut s);
 }
 
-/// A checkpoint lost under a completed baseline: the refusal's remedy, followed as printed, re-reads the row written since.
+/// A checkpoint lost under a completed baseline.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc + the rivet-duckdb oracle"]
 fn mysql_missing_checkpoint_refusal_remedy_recovers_the_row_written_while_it_was_gone() {
@@ -2243,11 +2013,6 @@ fn mysql_missing_checkpoint_refusal_remedy_recovers_the_row_written_while_it_was
     );
 }
 
-// Ultrareview bug_002 (live): a transaction whose LAST event lands on an
-// UNCAPTURED table (audit-log-written-last, the ubiquitous ORM shape) must
-// still advance the checkpoint — MySQL marks only that last event committed.
-// Before the fix the checkpoint stalled forever and every scheduler cycle
-// re-captured (and re-wrote) the same rows.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_mixed_transaction_ending_on_uncaptured_table_advances_checkpoint() {
@@ -2267,9 +2032,8 @@ fn cdc_mixed_transaction_ending_on_uncaptured_table_advances_checkpoint() {
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::create_dir_all(&out1).unwrap();
     std::fs::create_dir_all(&out2).unwrap();
-    run_rivet_ok(&cdc_config(&d, &orders, &ckpt, &out1)); // pin
+    run_rivet_ok(&cdc_config(&d, &orders, &ckpt, &out1));
 
-    // ONE transaction: captured table first, uncaptured table LAST.
     c.query_drop("START TRANSACTION").unwrap();
     c.query_drop(format!("INSERT INTO {orders} VALUES (1, 10)"))
         .unwrap();
@@ -2278,16 +2042,12 @@ fn cdc_mixed_transaction_ending_on_uncaptured_table_advances_checkpoint() {
     c.query_drop("COMMIT").unwrap();
 
     run_rivet_ok(&cdc_config(&d, &orders, &ckpt, &out1));
-    // CONTENT, not count (harness audit): the fixture's two tables share id 1,
-    // so a mis-route of the audit row kept the count at 1 and passed.
     assert_eq!(
         cdc_id_ops(&out1),
         vec![(1, "insert".to_string())],
         "exactly the ORDERS row — the audit row must not be routed here"
     );
 
-    // Run 3 with NO new changes must capture ZERO — a stalled checkpoint
-    // would re-read the same transaction and duplicate the row.
     run_rivet_ok(&cdc_config(&d, &orders, &ckpt, &out2));
     assert_eq!(
         manifest_rows(&out2),
@@ -2296,9 +2056,6 @@ fn cdc_mixed_transaction_ending_on_uncaptured_table_advances_checkpoint() {
     );
 }
 
-// Conformance: the stream-property commit boundary, PostgreSQL flavour.
-// PG stamps committed=true on every event (commit-LSN framing), so the MySQL
-// stall cannot occur structurally — this pins that property per engine.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_mixed_transaction_ending_on_uncaptured_table_advances_checkpoint() {
@@ -2347,8 +2104,6 @@ fn pg_cdc_mixed_transaction_ending_on_uncaptured_table_advances_checkpoint() {
     );
 }
 
-// Conformance: schema-qualified `table:` routing, MySQL flavour (the schema
-// part is the database name on MySQL).
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_schema_qualified_table_config_captures_events() {
@@ -2364,7 +2119,7 @@ fn cdc_schema_qualified_table_config_captures_events() {
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::create_dir_all(&out).unwrap();
     let qualified = format!("rivet.{tbl}");
-    run_rivet_ok(&cdc_config(&d, &qualified, &ckpt, &out)); // pin
+    run_rivet_ok(&cdc_config(&d, &qualified, &ckpt, &out));
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1, 10)"))
         .unwrap();
     run_rivet_ok(&cdc_config(&d, &qualified, &ckpt, &out));
@@ -2375,9 +2130,6 @@ fn cdc_schema_qualified_table_config_captures_events() {
     );
 }
 
-// Ultrareview bug_004 (live): a schema-qualified `table:` (`public.<t>`) —
-// the shape rivet's own batch docs promote — must route events, not silently
-// produce a 0-row success.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_schema_qualified_table_config_captures_events() {
@@ -2411,11 +2163,6 @@ fn pg_cdc_schema_qualified_table_config_captures_events() {
     );
 }
 
-// Roast finding #25: the snapshot synth export INHERITED skip_empty — an
-// EMPTY table with skip_empty=true wrote no snapshot/_SUCCESS, so the marker
-// check re-snapshotted on every run, forever. The handoff must converge: an
-// empty snapshot still completes (0-row manifest + _SUCCESS), and run 2 goes
-// straight to draining.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_initial_snapshot_of_an_empty_table_converges_despite_skip_empty() {
@@ -2445,7 +2192,6 @@ fn cdc_initial_snapshot_of_an_empty_table_converges_despite_skip_empty() {
     );
     let stamp = std::fs::metadata(&marker).unwrap().modified().unwrap();
 
-    // Run 2 must NOT re-snapshot (marker untouched) and must drain the change.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1, 10)"))
         .unwrap();
     run_rivet_ok(&cfg);
@@ -2457,7 +2203,6 @@ fn cdc_initial_snapshot_of_an_empty_table_converges_despite_skip_empty() {
     assert_eq!(manifest_rows(&out), 1, "the change streams normally");
 }
 
-// PostgreSQL flavour: the slot IS the anchor (no checkpoint required).
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_initial_snapshot_covers_preexisting_rows_then_streams() {
@@ -2503,10 +2248,6 @@ fn pg_cdc_initial_snapshot_covers_preexisting_rows_then_streams() {
     );
 }
 
-// `columns:` type overrides must apply to CDC exactly like batch — pinned for
-// the finding that resolve_cdc_columns passed an EMPTY override map, silently
-// ignoring the config's declarations. The canonical use: `bigint unsigned` →
-// `decimal(20,0)` so a BigQuery-bound export loads (BQ has no unsigned 64).
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_column_overrides_apply_like_batch() {
@@ -2626,7 +2367,7 @@ fn mysql_cdc_float_override_on_a_decimal_matches_the_servers_double_and_batch() 
     assert_cdc_matches_batch(&cdc_out, &batch_out);
 }
 
-/// A bare PostgreSQL `numeric` arrives on CDC as the server's exact text, labelled server_text, with no policy warning.
+/// A bare PostgreSQL `numeric` arrives on CDC as the server's exact text, labelled server_text.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_bare_numeric_is_delivered_as_labelled_server_text() {
@@ -2704,9 +2445,6 @@ fn pg_cdc_bare_numeric_is_delivered_as_labelled_server_text() {
     assert_eq!(got, want, "each value is the server's own n::text");
 }
 
-// Slot multiplexing: several tables through ONE PostgreSQL slot (`tables:`),
-// each landing under its own sub-prefix with its own manifest — and the shared
-// position still resumes correctly (second run captures nothing twice).
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_multi_table_stream_uses_one_slot_and_resumes() {
@@ -2715,7 +2453,6 @@ fn pg_cdc_multi_table_stream_uses_one_slot_and_resumes() {
     let t1 = unique_name("rivet_cdc_ma");
     let t2 = unique_name("rivet_cdc_mb");
     let slot = unique_name("rivet_multi_slot");
-    // Before the first run: a run that creates the slot and then fails must not leak it.
     let _slot = Slot::new(slot.clone());
     let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
     for t in [&t1, &t2] {
@@ -2737,7 +2474,6 @@ fn pg_cdc_multi_table_stream_uses_one_slot_and_resumes() {
         .dest_path(out.clone());
     let cfg = rig.config_path();
 
-    // Run 1 creates the ONE slot and drains nothing.
     run_rivet_ok(&cfg);
     let n: i64 = c
         .query_one(
@@ -2748,7 +2484,6 @@ fn pg_cdc_multi_table_stream_uses_one_slot_and_resumes() {
         .get(0);
     assert_eq!(n, 1, "two tables ride ONE slot");
 
-    // Changes in both tables → one run captures both, routed per table.
     c.execute(&format!("INSERT INTO {t1} VALUES (1,10),(2,20)"), &[])
         .unwrap();
     c.execute(&format!("INSERT INTO {t2} VALUES (7,70)"), &[])
@@ -2767,26 +2502,11 @@ fn pg_cdc_multi_table_stream_uses_one_slot_and_resumes() {
         "table 2 parquet holds exactly its own changes (routing, not just counts)"
     );
 
-    // Resume: the shared position advanced once for both tables.
     run_rivet_ok(&cfg);
     assert_eq!(manifest_rows(&out.join(&t1)), 0, "no re-read for table 1");
     assert_eq!(manifest_rows(&out.join(&t2)), 0, "no re-read for table 2");
 }
 
-// #252, half 1: `check --target` on a multiplex `tables:` export must emit one
-// RESOLVER document per captured table, not one per export.
-//
-// A multiplex export has no `table:` and no `query:`, so resolving "the export's
-// query" bailed and the type report was dropped with a `warn` — under `--json`
-// the export's line was the TUNING diagnostic (`export_name`, no `columns`)
-// instead. That is what `rivet load` consumes for the native schema, so a whole
-// schema captured through one stream could not be loaded at all.
-//
-// Driven through the real binary (the resolver runs in-process for `load` too),
-// and the per-table `columns:` narrowing is asserted alongside: a multiplex unit
-// must be typed with THIS table's overrides — bare keys everywhere, a
-// `"<table>.<column>"` key only on its own table — the same precedence the
-// capture applies, or `check` and `run` describe different Parquet.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_multi_table_check_target_emits_one_resolver_document_per_table() {
@@ -2807,8 +2527,6 @@ fn pg_cdc_multi_table_check_target_emits_one_resolver_document_per_table() {
         PgTable::adopt_on(POSTGRES_CDC_URL, t2.clone()),
     );
 
-    // No `run` here: the report is resolved from the source catalog, so this
-    // needs no slot, no capture and no destination bytes.
     let rig = Rig::pg_cdc(&t1, &slot)
         .tables(&[&t1, &t2])
         .export_named("app_cdc")
@@ -2821,9 +2539,6 @@ fn pg_cdc_multi_table_check_target_emits_one_resolver_document_per_table() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    // NDJSON: the type-report lines are the ones carrying `columns`. A
-    // diagnostic-only line (the pre-fix shape) has none, so this filter is
-    // exactly the assertion — it counts documents the loader could USE.
     let docs: Vec<serde_json::Value> = stdout
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
@@ -2855,9 +2570,6 @@ fn pg_cdc_multi_table_check_target_emits_one_resolver_document_per_table() {
             .collect();
         assert_eq!(cols, vec!["id", "v"], "table {t} columns");
     }
-    // The qualified override lands on t2 ONLY: BigQuery STRING there, INT64 on
-    // the table it does not name. A unit typed with the export's whole override
-    // map would make both STRING.
     let target_of = |t: &str| {
         by_table(t)["columns"].as_array().unwrap()[1]["target_type"]
             .as_str()
@@ -2873,8 +2585,6 @@ fn pg_cdc_multi_table_check_target_emits_one_resolver_document_per_table() {
     );
 }
 
-// MySQL flavour of the multi-table stream: one binlog connection + one
-// checkpoint for both tables, idle-first-run pin included.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_multi_table_stream_one_binlog_connection_and_resumes() {
@@ -2899,7 +2609,6 @@ fn cdc_multi_table_stream_one_binlog_connection_and_resumes() {
         .dest_path(out.clone());
     let cfg = rig.config_path();
 
-    // Run 1: pins the checkpoint (idle-first-run) with zero captures.
     run_rivet_ok(&cfg);
     assert!(ckpt.exists(), "idle first run pins the shared checkpoint");
 
@@ -2926,11 +2635,6 @@ fn cdc_multi_table_stream_one_binlog_connection_and_resumes() {
     assert_eq!(manifest_rows(&out.join(&tb)), 0, "resume: no re-read");
 }
 
-// The cloud sub-prefix regression, end to end against a real GCS API
-// (fake-gcs): a multi-table CDC export must land each table under
-// `<prefix>/<table>/…` with '/'-separated object keys. The mangled flat keys
-// this pins against (`<prefix>/<table>cdc-….parquet`) shipped to a real bucket
-// first — the multi-table live tests only used local destinations.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc + fake-gcs"]
 fn cdc_multi_table_to_gcs_lands_per_table_prefixes() {
@@ -2955,18 +2659,15 @@ fn cdc_multi_table_to_gcs_lands_per_table_prefixes() {
         .checkpoint_path(ckpt.clone())
         .dest_gcs(bucket, &prefix, FAKE_GCS_ENDPOINT);
     let cfg = rig.config_path();
-    // The rig's cloud dest renders prefix "<prefix>/<export>/" — the per-TABLE
-    // subprefixes under test now hang off that root.
     let root = format!("{prefix}/app_cdc");
 
-    run_rivet_ok(&cfg); // pin
+    run_rivet_ok(&cfg);
     c.query_drop(format!("INSERT INTO {ta} VALUES (1,10),(2,20)"))
         .unwrap();
     c.query_drop(format!("INSERT INTO {tb} VALUES (7,70)"))
         .unwrap();
-    run_rivet_ok(&cfg); // capture → upload
+    run_rivet_ok(&cfg);
 
-    // List the object keys under the prefix via the GCS JSON API.
     let body = reqwest::blocking::get(format!(
         "{FAKE_GCS_ENDPOINT}/storage/v1/b/{bucket}/o?prefix={prefix}"
     ))
@@ -3003,9 +2704,6 @@ fn cdc_multi_table_to_gcs_lands_per_table_prefixes() {
     }
 }
 
-// Retention, MySQL flavour: a checkpoint whose binlog file the server no longer
-// has (purged — or, as forged here, simply nonexistent) must fail the run
-// LOUDLY, never fall back to "start from current" and silently skip the gap.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_resume_from_missing_binlog_fails_loudly_not_silently() {
@@ -3017,8 +2715,6 @@ fn cdc_resume_from_missing_binlog_fails_loudly_not_silently() {
         .unwrap();
     let _guard = Table(tbl.clone());
 
-    // A checkpoint pointing at a binlog file the server does not have — the
-    // exact shape a purged-past-retention resume presents.
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::write(&ckpt, r#"{"file":"binlog.999999","pos":4}"#).unwrap();
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1, 10)"))
@@ -3038,11 +2734,6 @@ fn cdc_resume_from_missing_binlog_fails_loudly_not_silently() {
     );
 }
 
-// #99, MySQL flavour: a corrupt/truncated checkpoint must FAIL the run loudly,
-// never be swallowed (`.ok().flatten()`) into "no checkpoint". On a client-anchor
-// engine that swallow re-anchors at `SHOW MASTER STATUS` (current) and silently
-// skips every change since the last good position. The guard fires at the shared
-// cdc_job resume-plan site (`Position::load`) every engine hits before anchoring.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_corrupt_checkpoint_fails_loud_not_silently_absent() {
@@ -3054,20 +2745,16 @@ fn cdc_corrupt_checkpoint_fails_loud_not_silently_absent() {
         .unwrap();
     let _guard = Table(tbl.clone());
 
-    // Run 1 pins a valid checkpoint at the open position.
     let ckpt = d.path().join("cdc.ckpt");
     let out1 = d.path().join("out1");
     std::fs::create_dir_all(&out1).unwrap();
     run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out1));
     assert!(ckpt.exists(), "run 1 pins a checkpoint");
 
-    // The checkpoint is corrupted (a truncated write / disk fault); a change lands
-    // that a silent re-anchor at 'current' would skip.
     std::fs::write(&ckpt, b"{ not valid json at all").unwrap();
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1, 100)"))
         .unwrap();
 
-    // Run 2 must FAIL loudly — never exit 0 having silently re-anchored past id=1.
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out2).unwrap();
     let res = run_rivet_env(
@@ -3101,10 +2788,6 @@ fn cdc_corrupt_checkpoint_fails_loud_not_silently_absent() {
     );
 }
 
-// Retention, PostgreSQL flavour (RED for the finding): a prior run's checkpoint
-// exists but the slot is GONE (dropped by an operator / invalidated and removed)
-// — recreating it at the current position would silently skip every change
-// since the drop. The run must fail loudly and demand a re-snapshot.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_vanished_slot_with_checkpoint_fails_loudly_not_recreates() {
@@ -3120,8 +2803,6 @@ fn pg_cdc_vanished_slot_with_checkpoint_fails_loudly_not_recreates() {
     .unwrap();
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
 
-    // Run 1 (with a checkpoint configured): creates the slot, captures one
-    // change, persists the checkpoint.
     let out1 = d.path().join("out1");
     std::fs::create_dir_all(&out1).unwrap();
     let ckpt = d.path().join("cdc.ckpt");
@@ -3141,13 +2822,11 @@ fn pg_cdc_vanished_slot_with_checkpoint_fails_loudly_not_recreates() {
     assert_eq!(manifest_rows(&out2), 1, "run 2 captured the change");
     assert!(ckpt.exists(), "checkpoint persisted");
 
-    // The slot vanishes behind rivet's back; a change lands after.
     c.execute("SELECT pg_drop_replication_slot($1)", &[&slot])
         .unwrap();
     c.execute(&format!("INSERT INTO {tbl} VALUES (2,20)"), &[])
         .unwrap();
 
-    // Run 3 must FAIL loudly — recreating the slot would silently skip id=2.
     let out3 = d.path().join("out3");
     std::fs::create_dir_all(&out3).unwrap();
     let rig3 = rig_for(&out3);
@@ -3157,7 +2836,6 @@ fn pg_cdc_vanished_slot_with_checkpoint_fails_loudly_not_recreates() {
         "a vanished slot with an existing checkpoint must fail the run, not silently re-create"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // A changes-only export's drain checks only the checkpoint, so the refusal names it alone.
     let expected = format!(
         "pg cdc: slot '{slot}' is missing but the checkpoint file holds a position from a prior \
          run — the slot was dropped or invalidated, and the changes since then are no longer in \
@@ -3169,11 +2847,6 @@ fn pg_cdc_vanished_slot_with_checkpoint_fails_loudly_not_recreates() {
     );
 }
 
-// #99, PostgreSQL flavour — the engine where the bug actually lived. A prior
-// run's checkpoint is corrupt (truncated / not JSON); swallowing it into "no
-// checkpoint" let PG treat the run as a fresh first anchor, recreate a dropped
-// slot at 'current', and permanently skip every change since the loss (the
-// anti-gap guard never fired). The corrupt checkpoint must fail the run loudly.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_corrupt_checkpoint_fails_loud_not_silently_absent() {
@@ -3196,14 +2869,11 @@ fn pg_cdc_corrupt_checkpoint_fails_loud_not_silently_absent() {
             .dest_path(out.to_path_buf())
     };
 
-    // Run 1 (idle) creates the slot — PG anchors server-side, so an idle run
-    // does not yet write the checkpoint FILE (unlike the client-anchor engines).
     let out1 = d.path().join("out1");
     std::fs::create_dir_all(&out1).unwrap();
     let rig1 = rig_for(&out1);
     run_rivet_ok(&rig1.config_path());
 
-    // Run 2 captures a change and pins a valid checkpoint file.
     c.execute(&format!("INSERT INTO {tbl} VALUES (1,10)"), &[])
         .unwrap();
     let out2 = d.path().join("out2");
@@ -3213,13 +2883,10 @@ fn pg_cdc_corrupt_checkpoint_fails_loud_not_silently_absent() {
     assert_eq!(manifest_rows(&out2), 1, "run 2 captures the change");
     assert!(ckpt.exists(), "run 2 pins a checkpoint");
 
-    // The checkpoint is corrupted; a change lands that reading it as absent +
-    // re-anchoring would skip.
     std::fs::write(&ckpt, b"{ truncated").unwrap();
     c.execute(&format!("INSERT INTO {tbl} VALUES (2,20)"), &[])
         .unwrap();
 
-    // Run 3 must FAIL loudly — never read the corrupt checkpoint as absent.
     let out3 = d.path().join("out3");
     std::fs::create_dir_all(&out3).unwrap();
     let rig3 = rig_for(&out3);
@@ -3243,10 +2910,6 @@ fn pg_cdc_corrupt_checkpoint_fails_loud_not_silently_absent() {
     );
 }
 
-// `rivet doctor` CDC health: the slot / abandoned-slot probes automate the
-// monitoring docs/reference/cdc.md asks operators to do by hand. The foreign
-// inactive slot here re-enacts a real incident: an abandoned ingestr slot was
-// found pinning WAL on this project's own dev instance.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn doctor_reports_cdc_slot_health_and_flags_foreign_inactive_slots() {
@@ -3263,7 +2926,6 @@ fn doctor_reports_cdc_slot_health_and_flags_foreign_inactive_slots() {
     ))
     .unwrap();
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
-    // A foreign, inactive slot — some other tool created it and walked away.
     c.execute(
         "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
         &[&foreign_slot],
@@ -3278,14 +2940,12 @@ fn doctor_reports_cdc_slot_health_and_flags_foreign_inactive_slots() {
         serde_json::from_slice(&out.stdout).expect("doctor --json output");
     let checks = report["checks"].as_array().expect("checks array");
 
-    // The export's own slot: absent → healthy "created on the first run".
     let own = checks
         .iter()
         .find(|c| c["name"].as_str().unwrap_or("").contains(&own_slot))
         .expect("own-slot check present");
     assert_eq!(own["ok"], true, "absent slot is healthy: {own}");
 
-    // The abandoned foreign slot is surfaced by name (small → note, not FAIL).
     let foreign = checks
         .iter()
         .find(|c| {
@@ -3308,12 +2968,6 @@ fn doctor_reports_cdc_slot_health_and_flags_foreign_inactive_slots() {
     );
 }
 
-// Idle-first-run anchor model (per-engine, see the anchor-model process rule): PostgreSQL pins the
-// resume position server-side the moment the slot is created — so a first run
-// that drains ZERO changes still anchors, and a change landing between two idle
-// scheduler cycles is captured by the next one. This pins that property (the
-// exact hole MySQL shipped with, where the client checkpoint was the only anchor
-// and an idle run never wrote it).
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_idle_first_run_then_change_is_captured_not_skipped() {
@@ -3321,7 +2975,6 @@ fn pg_cdc_idle_first_run_then_change_is_captured_not_skipped() {
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_pgidle");
     let slot = unique_name("rivet_idle_slot");
-    // Before the first run: a run that creates the slot and then fails must not leak it.
     let _slot = Slot::new(slot.clone());
     let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
     c.batch_execute(&format!(
@@ -3330,17 +2983,14 @@ fn pg_cdc_idle_first_run_then_change_is_captured_not_skipped() {
     .unwrap();
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
 
-    // Run 1: the slot does not exist yet — rivet creates it and drains nothing.
     let out1 = d.path().join("out1");
     std::fs::create_dir_all(&out1).unwrap();
     run_rivet_ok(&pg_cdc_config(&d, &tbl, &slot, &out1));
     assert_eq!(manifest_rows(&out1), 0, "idle run 1 drains nothing");
 
-    // A change lands BETWEEN the idle run and the next scheduler cycle.
     c.execute(&format!("INSERT INTO {tbl} VALUES (1,10)"), &[])
         .unwrap();
 
-    // Run 2 must capture it — the slot created in run 1 pinned the position.
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out2).unwrap();
     run_rivet_ok(&pg_cdc_config(&d, &tbl, &slot, &out2));
@@ -3359,9 +3009,6 @@ fn pg_cdc_idle_first_run_then_change_is_captured_not_skipped() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_crash_after_flush_before_ack_does_not_advance_the_slot() {
-    // PostgreSQL is the consume-on-read engine — the one where reordering flush/ack
-    // would actually lose data. A crash after the part is durable but before the slot
-    // advances must leave the slot un-advanced, so the resume re-reads (at-least-once).
     use postgres::NoTls;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_pgcrash");
@@ -3381,7 +3028,6 @@ fn pg_cdc_crash_after_flush_before_ack_does_not_advance_the_slot() {
     c.execute(&format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"), &[])
         .unwrap();
 
-    // Run 1 crashes after the part is flushed, before the slot advances.
     let crash_out = d.path().join("crash");
     std::fs::create_dir_all(&crash_out).unwrap();
     let crashed = run_rivet_env(
@@ -3397,7 +3043,6 @@ fn pg_cdc_crash_after_flush_before_ack_does_not_advance_the_slot() {
         "the injected crash must fail run 1"
     );
 
-    // Run 2: the slot never advanced, so the peek still sees both changes.
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out2).unwrap();
     run_rivet_ok(&pg_cdc_config(&d, &tbl, &slot, &out2));
@@ -3416,15 +3061,6 @@ fn pg_cdc_crash_after_flush_before_ack_does_not_advance_the_slot() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_crash_in_a_re_drain_pass_stays_at_least_once() {
-    // The sink re-drain loop calls roll_all (flush → checkpoint → ack) ONCE PER
-    // PASS, so it introduces a new crash window: a crash while acking an
-    // uncaptured span in an EARLY pass, before the captured data of a LATER pass
-    // is read. This must stay at-least-once: the pass-1 ack advances the slot
-    // ONLY over the consumed uncaptured span (never into the not-yet-read
-    // captured transaction), so resume reads the captured transaction WHOLE — no
-    // loss, no duplication. `cdc_after_ack` fires on the first (uncaptured-span)
-    // ack. Oracle: the source table A; assert distinct == count == 12 (no loss,
-    // no dup) after the crash + resume.
     use postgres::NoTls;
     let d = tempfile::tempdir().unwrap();
     let a = unique_name("rivet_cdc_rdcap");
@@ -3445,8 +3081,6 @@ fn roast_pg_cdc_crash_in_a_re_drain_pass_stays_at_least_once() {
         &[&slot],
     )
     .unwrap();
-    // A large UNCAPTURED transaction (pass 1 consumes + acks it), THEN A's
-    // in-bound data as ONE 12-row transaction (read only after the slot slides).
     c.execute(
         &format!("INSERT INTO {b} SELECT g, g FROM generate_series(1, 100) g"),
         &[],
@@ -3463,14 +3097,12 @@ fn roast_pg_cdc_crash_in_a_re_drain_pass_stays_at_least_once() {
     let rig = Rig::pg_cdc(&a, &slot)
         .cdc("rollover: 5")
         .dest_path(out.clone());
-    // Run 1 crashes right after the FIRST ack (the pass-1 uncaptured-span ack).
     let crashed = rig.run_args_env(&[], &[("RIVET_TEST_PANIC_AT", "cdc_after_ack")]);
     assert!(
         !crashed.status.success(),
         "the injected crash must fail run 1"
     );
 
-    // Run 2 resumes from wherever the crash left the slot.
     let rig2 = Rig::pg_cdc(&a, &slot).dest_path(out.clone());
     run_rivet_ok(&rig2.config_path());
 
@@ -3494,17 +3126,6 @@ fn roast_pg_cdc_crash_in_a_re_drain_pass_stays_at_least_once() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
-    // A single source transaction LARGER than `rollover` must roll + ack as ONE
-    // unit — the sink's "never split a transaction across parts" invariant. Every
-    // `test_decoding` event carried `committed: true`, so the sink used to roll +
-    // checkpoint + ack MID-transaction (after `rollover` rows); a crash between
-    // that ack and the tail's flush advanced the slot PAST the transaction's
-    // commit, and resume (reading strictly after the slot) never re-read the tail
-    // — an at-least-once break. Fix: the adapter marks only the LAST event of a
-    // transaction committed. RED-proof: one 12-row transaction at rollover 5,
-    // crash at `cdc_after_ack` (the first ack). With the bug that ack lands after
-    // 5 rows and the crash loses 7; atomic, it lands after all 12 and the run's
-    // part holds the whole transaction. Oracle: the union of all parts on disk.
     use postgres::NoTls;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_pgatomic");
@@ -3521,7 +3142,6 @@ fn roast_pg_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
         &[&slot],
     )
     .unwrap();
-    // ONE transaction, 12 rows (> 2× the rollover of 5).
     c.execute(
         &format!("INSERT INTO {tbl} SELECT g, g FROM generate_series(0, 11) g"),
         &[],
@@ -3533,14 +3153,12 @@ fn roast_pg_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
     let rig = Rig::pg_cdc(&tbl, &slot)
         .cdc("rollover: 5")
         .dest_path(out.clone());
-    // Run 1 crashes right after the FIRST ack.
     let crashed = rig.run_args_env(&[], &[("RIVET_TEST_PANIC_AT", "cdc_after_ack")]);
     assert!(
         !crashed.status.success(),
         "the injected crash must fail run 1"
     );
 
-    // Run 2 resumes from the slot (whatever position the crash left it at).
     let rig2 = Rig::pg_cdc(&tbl, &slot).dest_path(out.clone());
     run_rivet_ok(&rig2.config_path());
 
@@ -3559,17 +3177,6 @@ fn roast_pg_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn roast_mysql_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
-    // MySQL sibling of the PG atomicity roast — the matrix cell was `na` on the
-    // reasoning "the binlog adapter marks only the XID event committed", but that
-    // is CURRENT-CORRECTNESS, not immunity: MySQL stamps the shared COMMIT position
-    // on EVERY event of the transaction (`ev.position = commit.clone()`), exactly
-    // like PG's shared commit LSN. The only thing stopping a mid-transaction
-    // roll+checkpoint+ack is `ev.committed = i + 1 == n`. Flip that to `true` (the
-    // committed-on-every-event mutant) and a crash between the first ack and the
-    // tail's flush advances the binlog checkpoint PAST the commit — resume reads
-    // strictly after it and loses the tail. RED-proof: one 12-row transaction at
-    // rollover 5, crash at `cdc_after_ack`. Buggy: first ack after 5 rows → 5 ids
-    // survive; atomic: first ack after all 12 → 12 ids. Oracle: union of parts.
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_myatomic");
     let mut c = conn();
@@ -3583,11 +3190,7 @@ fn roast_mysql_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
     let rig = Rig::mysql_cdc(&tbl)
         .cdc("rollover: 5")
         .dest_path(out.clone());
-    // MySQL has NO server-side anchor — pin the binlog checkpoint at open, BEFORE
-    // the transaction, or the next run re-anchors to the current position and skips.
     rig.run_ok();
-    // ONE transaction of 12 rows (> 2× the rollover of 5) — a single multi-row
-    // INSERT is one commit.
     let vals = (0..12)
         .map(|i| format!("({i},{i})"))
         .collect::<Vec<_>>()
@@ -3595,14 +3198,12 @@ fn roast_mysql_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
     c.query_drop(format!("INSERT INTO {tbl} VALUES {vals}"))
         .unwrap();
 
-    // Run 1 crashes right after the FIRST ack.
     let crashed = rig.run_args_env(&[], &[("RIVET_TEST_PANIC_AT", "cdc_after_ack")]);
     assert!(
         !crashed.status.success(),
         "the injected crash must fail run 1"
     );
 
-    // Run 2 resumes from the checkpoint the crash left behind.
     run_rivet_ok(&rig.config_path());
 
     let got: std::collections::BTreeSet<i64> =
@@ -3617,13 +3218,10 @@ fn roast_mysql_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
     );
 }
 
-/// Rows of the spilled transaction in the two crash-mid-tail tests: over the cap of 4 and past 2× the rollover of 5.
+/// Rows of the spilled transaction in the two crash-mid-tail tests.
 const SPILL_CRASH_ROWS: i64 = 12;
 
 /// Run 1 spills the transaction's tail and crashes at the first ack that follows a roll with parts; returns its stderr.
-///
-/// Not `cdc_after_ack`: on a shared source server another test's commit on an uncaptured table
-/// rolls and acks a row-less span first, and a crash there leaves this fixture inert (gate 2026-10-16).
 fn crash_with_a_spilled_tail(rig: &Rig) -> String {
     let crashed = rig.run_with_envs(&[
         ("RIVET_CDC_MAX_TX_ROWS", "4"),
@@ -3661,12 +3259,6 @@ fn assert_spilled_transaction_whole_once(ids: &[i64]) {
 }
 
 /// A crash while a spilled PostgreSQL transaction is replayed must lose none of it on resume.
-///
-/// One 12-row transaction over a cap of 4 (head in memory, tail on disk) at
-/// rollover 5, crash at the first ack. Framed correctly, the only `committed` row is
-/// the tail's last, so the first ack follows the whole transaction. Marking spilled
-/// rows `committed` lets the sink ack the commit LSN after 5 rows, and the slot then
-/// sits past the rows still on disk.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_a_crash_mid_spilled_tail_loses_no_transaction_on_resume() {
@@ -3712,10 +3304,6 @@ fn roast_pg_cdc_a_crash_mid_spilled_tail_loses_no_transaction_on_resume() {
 }
 
 /// A crash while a spilled MySQL transaction is replayed must lose none of it on resume.
-///
-/// The MySQL sibling: the binlog checkpoint is the transaction's commit position on
-/// every row, so a `committed` on a spilled row lets the sink checkpoint that
-/// position after 5 rows, and the resume reads strictly after it.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn roast_mysql_cdc_a_crash_mid_spilled_tail_loses_no_transaction_on_resume() {
@@ -3732,7 +3320,6 @@ fn roast_mysql_cdc_a_crash_mid_spilled_tail_loses_no_transaction_on_resume() {
     let rig = Rig::mysql_cdc(&tbl)
         .cdc("rollover: 5")
         .dest_path(out.clone());
-    // MySQL has no server-side anchor: pin the checkpoint BEFORE the transaction.
     rig.run_ok();
     let vals = (0..SPILL_CRASH_ROWS)
         .map(|i| format!("({i},{i})"))
@@ -3764,10 +3351,6 @@ fn pg_full_config(d: &tempfile::TempDir, tbl: &str, out: &std::path::Path) -> st
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_column_types_match_batch_export() {
     use postgres::NoTls;
-    // FULL type parity with the batch export — every column, including the tz-aware
-    // `timestamptz`, lands with the identical Arrow type a `mode: full` export
-    // produces. (timestamptz is carried as the UTC instant + zone label, exactly like
-    // batch — see docs/reference/cdc-type-parity.md.)
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_pgtypes");
     let slot = unique_name("rivet_types_slot");
@@ -3826,7 +3409,6 @@ fn cdc_resume_captures_only_new_changes() {
         .checkpoint_path(ckpt.clone())
         .pin_binlog_here();
 
-    // First batch of changes, then capture: drains exactly these two.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"))
         .unwrap();
     let out1 = d.path().join("out1");
@@ -3838,9 +3420,6 @@ fn cdc_resume_captures_only_new_changes() {
         "run 1 should capture the 2 new changes"
     );
 
-    // Two more changes; the resume run (same checkpoint, now advanced) must pick
-    // up ONLY these — no gap, no re-read of the first two (the at-least-once /
-    // PostgreSQL at-most-once regression).
     c.query_drop(format!("INSERT INTO {tbl} VALUES (3,30),(4,40)"))
         .unwrap();
     let out2 = d.path().join("out2");
@@ -3874,20 +3453,12 @@ fn cdc_run_is_recorded_in_state_db() {
         .pin_binlog_here();
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,10),(2,20),(3,30)"))
         .unwrap();
-    // `census_oracle()` owns the workdir, the destination AND the config placement —
-    // the state DB lives beside the config, and the oracle reads from inside a
-    // container. Hand-building those paths in a test body is the smell the rig
-    // exists to remove; the first version of this test did it and put the ledger
-    // somewhere the census could not see.
     let rig = Rig::mysql_cdc(&tbl)
         .checkpoint_path(ckpt.clone())
         .census_oracle();
     rig.run_ok();
     let out = rig.out_dir();
     let db = out.parent().expect("shared dir").join(".rivet_state.db");
-
-    // A CDC run must show up like a batch run: an export_metrics row with mode=cdc,
-    // and a run_journal entry (FileWritten + RunCompleted) so `rivet journal` works.
 
     let sql = rusqlite::Connection::open(&db).expect("state db");
 
@@ -3901,14 +3472,6 @@ fn cdc_run_is_recorded_in_state_db() {
     assert_eq!(mode, "cdc");
     assert_eq!(rows, 3, "metric total_rows = captured changes");
 
-    // The ledger RECONCILED against the artifacts, not read on its own. An oracle
-    // census found this test asserting `export_metrics.total_rows == 3` and nothing
-    // else — so a run recording 3 while delivering 2 passed it, which is the shape
-    // rivet's own counters can never catch. `duckdb_row_census` was written for
-    // exactly this and had ZERO callers in the tree; its docstring names this gap.
-    //
-    // Four numbers from one DuckDB session, sharing no code with rivet: the SOURCE
-    // table, the delivered parquet, `export_metrics.total_rows`, `file_log.row_count`.
     let census = rig.row_census();
     assert_eq!(
         census.delivered, 3,
@@ -3935,16 +3498,9 @@ fn cdc_run_is_recorded_in_state_db() {
     );
 }
 
-// ─── schema drift + bounded-run termination (coverage-matrix gap fills) ──────
-
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_column_added_mid_stream_is_captured() {
-    // Schema-drift peer of cdc_picks_up_a_column_added_between_runs for PostgreSQL.
-    // The sink re-resolves the table schema at the start of each run, and
-    // test_decoding renders each change against the table's CURRENT column list,
-    // so a column added between runs is captured on the next run — the pgoutput/
-    // test_decoding column-add path the matrix flagged as never live-exercised.
     use postgres::NoTls;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_pgdrift");
@@ -3962,7 +3518,6 @@ fn pg_cdc_column_added_mid_stream_is_captured() {
     )
     .unwrap();
 
-    // Run 1: capture a row under the original (id, v) schema.
     c.execute(&format!("INSERT INTO {tbl} VALUES (1, 10)"), &[])
         .unwrap();
     let out1 = d.path().join("out1");
@@ -3973,13 +3528,11 @@ fn pg_cdc_column_added_mid_stream_is_captured() {
         "run 1 predates the added column"
     );
 
-    // Add a column, then a row that uses it.
     c.batch_execute(&format!(
         "ALTER TABLE {tbl} ADD COLUMN w TEXT; INSERT INTO {tbl} VALUES (2, 20, 'hello')"
     ))
     .unwrap();
 
-    // Run 2 (resume, same slot): re-resolves the schema → the new column is captured.
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out2).unwrap();
     run_rivet_ok(&pg_cdc_config(&d, &tbl, &slot, &out2));
@@ -3993,10 +3546,6 @@ fn pg_cdc_column_added_mid_stream_is_captured() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_until_current_terminates_under_sustained_writes() {
-    // Peer of the Mongo roast_until_current_terminates_under_sustained_writes.
-    // A bounded run must (1) TERMINATE at the open-time WAL bound even while a
-    // writer keeps committing — a drain loop that chases a moving "current" hangs
-    // forever — and (2) still capture the pre-open backlog. Assert both.
     use postgres::NoTls;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_pghb");
@@ -4014,16 +3563,11 @@ fn pg_cdc_until_current_terminates_under_sustained_writes() {
     )
     .unwrap();
 
-    // Pre-open backlog: ids 0..30 (the slot captures them because it exists first).
     for i in 0..30i64 {
         c.execute(&format!("INSERT INTO {tbl} VALUES ({i},{i})"), &[])
             .unwrap();
     }
 
-    // A writer committing continuously while the bounded run drains. RAII
-    // (BgWriter): if run_rivet_bounded panics on a non-zero exit, the writer is
-    // stopped+joined on unwind — never detached to hammer a table its guard is
-    // dropping (r7 bughunt). Declared after _tbl/_slot so it drops first.
     let tbl_bg = tbl.clone();
     let _bg = BgWriter::spawn(move |stop| {
         let mut w = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("bg connect");
@@ -4046,7 +3590,6 @@ fn pg_cdc_until_current_terminates_under_sustained_writes() {
         elapsed.is_some(),
         "until_current must terminate under sustained writes (killed at the 30s ceiling)"
     );
-    // Termination must NOT come from dropping the backlog.
     let ids: std::collections::BTreeSet<i64> =
         duckdb_dir_parquet_i64(&out, "id").into_iter().collect();
     for i in 0..30 {
@@ -4061,10 +3604,6 @@ fn pg_cdc_until_current_terminates_under_sustained_writes() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_until_current_terminates_under_sustained_writes() {
-    // MySQL peer: the binlog is a live tail, so this is the engine most at risk of
-    // a drain loop that never reaches its stop condition under continuous writes.
-    // The bound must be pinned at the open-time binlog position; the backlog must
-    // still survive.
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_myhb");
     let _drop = Table(tbl.clone());
@@ -4074,14 +3613,12 @@ fn cdc_until_current_terminates_under_sustained_writes() {
     let ckpt = d.path().join("cdc.ckpt");
     Rig::mysql_cdc(&tbl)
         .checkpoint_path(ckpt.clone())
-        .pin_binlog_here(); // pin before the backlog
+        .pin_binlog_here();
 
-    // Pre-open backlog: ids 0..30.
     let vals: Vec<String> = (0..30).map(|i| format!("({i},{i})")).collect();
     c.query_drop(format!("INSERT INTO {tbl} VALUES {}", vals.join(",")))
         .unwrap();
 
-    // A writer committing continuously while the bounded run drains.
     let tbl_bg = tbl.clone();
     let mut bg = BgWriter::spawn(move |stop_bg| {
         let mut w = conn();
@@ -4116,20 +3653,9 @@ fn cdc_until_current_terminates_under_sustained_writes() {
     }
 }
 
-// ─── Open-time bound: "until current" means current AS OF OPEN, not a chase ──
-
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_until_current_open_bound_two_runs_lose_nothing() {
-    // The RED shape for the pinned open-time WAL bound. `rollover: 5` makes the
-    // peek limit 5 while the writer below commits faster than one roll cycle
-    // (encode + part write + ack), so every re-peek returns a FULL batch and
-    // the catch-up exit (short/empty peek) never fires — a drain chasing the
-    // moving head runs to the kill ceiling. With the bound pinned at open,
-    // run 1 is O(backlog at open) and terminates; run 2 (writer stopped)
-    // drains the deferred tail. The distinct id union re-read from the parquet
-    // must equal the SOURCE table's committed id set — the bound defers,
-    // never drops (oracle: the source, not rivet's own counters).
     use postgres::NoTls;
     let tbl = unique_name("rivet_cdc_pgob");
     let slot = unique_name("rivet_ob_slot");
@@ -4146,18 +3672,11 @@ fn roast_pg_until_current_open_bound_two_runs_lose_nothing() {
     )
     .unwrap();
 
-    // Pre-open backlog: ids 0..30.
     for i in 0..30i64 {
         c.execute(&format!("INSERT INTO {tbl} VALUES ({i},{i})"), &[])
             .unwrap();
     }
 
-    // A writer committing a 10-row transaction every ~5 ms — each is 12 peek
-    // rows (BEGIN + 10 + COMMIT), so ≥ one roll cycle's worth (the ×3-scaled
-    // peek budget of 15) lands between refills and a chase-the-head drain sees
-    // a FULL peek every time: the catch-up exit (short/empty peek) never
-    // fires. Paced (not flooding) so the pre-open backlog stays small enough
-    // for run 1 to reach its bound inside the kill ceiling at 5-row parts.
     let tbl_bg = tbl.clone();
     let mut bg = BgWriter::spawn(move |stop_bg| {
         let mut w = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("bg connect");
@@ -4180,10 +3699,6 @@ fn roast_pg_until_current_open_bound_two_runs_lose_nothing() {
          (killed at the 30s ceiling ⇒ the drain chased the moving head)"
     );
 
-    // Writer stopped ⇒ every committed change predates run 2's own bound.
-    // Run 2 drains the deferred tail at the DEFAULT rollover (5-row parts would
-    // grind through a multi-thousand-row tail one tiny parquet file at a time)
-    // into the SAME prefix — parts are run-unique, both runs' rows accumulate.
     let rig2 = Rig::pg_cdc(&tbl, &slot).dest_path(rig.out_dir());
     let elapsed2 = run_rivet_bounded(&rig2.config_path(), std::time::Duration::from_secs(60));
     assert!(
@@ -4210,28 +3725,14 @@ fn roast_pg_until_current_open_bound_two_runs_lose_nothing() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn roast_mysql_until_current_open_bound_two_runs_lose_nothing() {
-    // MySQL peer of roast_pg_until_current_open_bound_two_runs_lose_nothing, but
-    // a DIFFERENT contract: on MySQL termination comes from the engine, not the
-    // explicit bound. `BINLOG_DUMP_NON_BLOCK` stops the dump at the log end as of
-    // dump-start — empirically it terminates even under a flooding writer with
-    // the (file, pos) bound DISABLED (verified by the disable-bound RED probe:
-    // the run still exited). So the open-time (file, pos) ceiling is a
-    // PRECISE-STOP refinement over NON_BLOCK, not load-bearing for termination —
-    // the load-bearing engines are PostgreSQL (continuous slot re-peek, see
-    // roast_pg_until_current_open_bound_two_runs_lose_nothing at rollover 5) and
-    // MongoDB (tailable stream — disabling its pin hangs the sustained test).
-    // What THIS test proves is DEFER-NOT-DROP: run 1 captures a prefix and exits,
-    // run 2 drains the tail, and the union re-read from the parquet equals the
-    // SOURCE id set. Oracle: the source table, never rivet's own counters.
     let tbl = unique_name("rivet_cdc_myob");
     let _drop = Table(tbl.clone());
     let mut c = conn();
     c.query_drop(format!("CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, v INT)"))
         .unwrap();
     let rig = Rig::mysql_cdc(&tbl);
-    rig.pin_binlog_here(); // pin before the backlog
+    rig.pin_binlog_here();
 
-    // Pre-open backlog: ids 0..30.
     let vals: Vec<String> = (0..30).map(|i| format!("({i},{i})")).collect();
     c.query_drop(format!("INSERT INTO {tbl} VALUES {}", vals.join(",")))
         .unwrap();
@@ -4255,7 +3756,6 @@ fn roast_mysql_until_current_open_bound_two_runs_lose_nothing() {
         "run 1 must terminate under sustained writes (NON_BLOCK EOF; killed at 30s)"
     );
 
-    // Writer stopped ⇒ every committed change predates run 2's own bound.
     let elapsed2 = run_rivet_bounded(&cfg, std::time::Duration::from_secs(60));
     assert!(
         elapsed2.is_some(),
@@ -4277,37 +3777,7 @@ fn roast_mysql_until_current_open_bound_two_runs_lose_nothing() {
     );
 }
 
-/// A throwaway PostgreSQL database on the CDC server, isolating a test's logical
-/// slot from every other test's WAL. A `test_decoding` slot decodes its
-/// database's ENTIRE WAL, so a DENSITY- or slot-state-sensitive CDC test
-/// (reach-the-open-bound-in-one-pass, confirmed_flush advance) FLAKES on the
-/// shared `rivet` DB when parallel tests inject foreign WAL into the same slot's
-/// view (the failing `cargo test --ignored` lanes run these in parallel). Its
-/// own database makes the slot see only this test's WAL — parallel-safe by
-/// construction, no `--test-threads=1` needed. Dropped (backends terminated) on
-/// teardown; the table + slot live inside it, so no separate guards are needed.
-/// A PARTITIONED parent must be refused at OPEN — before the slot is acked past
-/// changes no event could ever route.
-///
-/// The second half of #279. That fix taught the reader to UNQUOTE the wire
-/// identity; this one compares that identity to what the CONFIG asked for, the
-/// cross-check the SQL Server arm has carried since the capture-instance find
-/// (`mssql/cdc.rs`). The reachable shape is not a mixed-case name — the schema
-/// probe (`SELECT * FROM {table}`) already fails loudly on those — it is a
-/// partitioned table, where the probe succeeds PERFECTLY (the parent has a full,
-/// correct column list) and `test_decoding` then names the PARTITION every row
-/// physically landed in.
-///
-/// Measured before the guard (2026-08-24, pg14 stand — this test's RED):
-/// 2 committed rows → `status: success`, `rows: 0`, `files: 0`, slot
-/// `0/AE5F8BB8` → `0/AE6010D8`, and `pg_logical_slot_peek_changes` EMPTY
-/// afterwards. Re-running with the config corrected to the partition recovered
-/// NOTHING while the source still held both rows. Worse than the SQL Server
-/// case this is modelled on, where the change table's own retention made the
-/// same routing bug a delay: here PostgreSQL frees the WAL and it is gone.
-///
-/// Isolated in its OWN database (see `CdcDb`): the guard reads `pg_class`, and
-/// the assertion is about a slot position a parallel test's WAL would perturb.
+/// A throwaway PostgreSQL database on the CDC server.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_refuses_a_partitioned_parent_before_acking_the_slot() {
@@ -4334,7 +3804,6 @@ fn roast_pg_cdc_refuses_a_partitioned_parent_before_acking_the_slot() {
         &[],
     )
     .unwrap();
-    // The SOURCE oracle, asked of PostgreSQL itself — never rivet's counters.
     let source_rows: i64 = c
         .query_one(&format!("SELECT count(*) FROM {parent}"), &[])
         .unwrap()
@@ -4348,8 +3817,6 @@ fn roast_pg_cdc_refuses_a_partitioned_parent_before_acking_the_slot() {
         .unwrap()
         .get(0);
 
-    // The config a user writes: the LOGICAL table. Its schema probe succeeds —
-    // which is exactly why this was silent.
     let wrong = Rig::pg_cdc(&format!("public.{parent}"), &slot).source_url(cdc_db.url());
     let out = run_rivet(&["run", "--config", wrong.config_path().to_str().unwrap()]);
     let said = format!(
@@ -4369,9 +3836,6 @@ fn roast_pg_cdc_refuses_a_partitioned_parent_before_acking_the_slot() {
          Output:\n{said}"
     );
 
-    // The slot must NOT have moved. Failing at open only buys anything if it
-    // happens BEFORE the ack: this assert is the whole difference between a
-    // config error and two rows nobody can get back.
     let moved: bool = c
         .query_one(
             &format!(
@@ -4388,9 +3852,6 @@ fn roast_pg_cdc_refuses_a_partitioned_parent_before_acking_the_slot() {
          now and the guard bought nothing"
     );
 
-    // Defer-not-drop: with the partition named, the same slot still holds every
-    // change. Oracle: the parts the MANIFEST declares, re-read — never the
-    // manifest's own `row_count`, and compared to the source count above.
     let right = Rig::pg_cdc(&format!("public.{part}"), &slot).source_url(cdc_db.url());
     run_rivet_ok(&right.config_path());
     let captured: usize = right
@@ -4404,13 +3865,6 @@ fn roast_pg_cdc_refuses_a_partitioned_parent_before_acking_the_slot() {
          un-acked slot — that is what makes the refusal a delay, not a loss"
     );
 
-    // The refusal offers TWO ways out and a message may only promise what
-    // something checks. The partition-by-name route is proven above; this is the
-    // other one — `mode: full` reads THROUGH the parent, because a batch SELECT
-    // resolves partitions the way any query does and never sees a wire identity
-    // at all. Untested, "snapshot the parent with mode: full" would be a remedy
-    // nobody had run — the class the process rules records as a hint that cannot recover
-    // from the state it is offered in.
     let snapshot = Rig::pg_batch(&format!("public.{parent}"))
         .source_url(cdc_db.url())
         .mode("full");
@@ -4423,19 +3877,7 @@ fn roast_pg_cdc_refuses_a_partitioned_parent_before_acking_the_slot() {
     );
 }
 
-/// The manifest-scoped read-back must disagree with a glob — asserted through the
-/// READER the CDC tests actually use, not through a sibling helper.
-///
-/// The first version of this test staged parquet and asserted on
-/// `duckdb_declared_assert_complete`. It never called `read_cdc_changes`,
-/// `cdc_id_ops` or `declared_parquet_parts`, so a mutant that undid the whole
-/// commit — `declared_parquet_parts(dir)` back to `files_with_extension(dir,
-/// "parquet")` — left it GREEN. Measured, by an adversarial pass, on exactly that
-/// mutant. It read like proof of the change and proved a different function.
-///
-/// This drives a real CDC run, then removes ONE part from the manifest while
-/// leaving the FILE on disk — the shape a crash leaves — and asserts the reader
-/// every crash/resume cell depends on reads short of the directory.
+/// The manifest-scoped read-back must disagree with a glob.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn the_cdc_reader_reads_the_manifest_declared_parts_not_the_directory() {
@@ -4453,8 +3895,6 @@ fn the_cdc_reader_reads_the_manifest_declared_parts_not_the_directory() {
         &[&slot],
     )
     .unwrap();
-    // Two SEPARATE transactions at rollover 1 ⇒ two parts. One part could not
-    // express the difference this test exists to measure.
     for i in 1..=2i64 {
         c.execute(&format!("INSERT INTO {tbl} VALUES ({i},{i})"), &[])
             .unwrap();
@@ -4480,8 +3920,6 @@ fn the_cdc_reader_reads_the_manifest_declared_parts_not_the_directory() {
         .count();
     assert_eq!(files_on_disk, 2, "two committed parts on disk");
 
-    // Under-declare: drop the LAST part from every manifest, leave the file. This
-    // is what a crash between the part write and the manifest write leaves behind.
     for entry in std::fs::read_dir(&out).unwrap().flatten() {
         let path = entry.path();
         let is_manifest = path
@@ -4514,25 +3952,6 @@ fn the_cdc_reader_reads_the_manifest_declared_parts_not_the_directory() {
 }
 
 /// A configured MySQL VIEW must be refused at open — the binlog can never name it.
-///
-/// Found by an ADVERSARIAL re-check of a matrix cell this session had written as
-/// `na` ("no MySQL relation emits under a name other than the configured one").
-/// That cell generalized a correct, measured result — a RANGE-partitioned table
-/// DOES capture through a config naming the parent — into a false universal. An
-/// updatable view reproduces the PostgreSQL partitioned-parent shape exactly: the
-/// binlog `Table_map` names the BASE table, routing is byte-exact, and every
-/// change is dropped.
-///
-/// MEASURED before the guard (2026-08-24): 3 rows committed through a view gave
-/// `rows: 0, files: 0, status: success, exit 0`, with the checkpoint advanced
-/// 54945184 -> 54945514 past the commit, and fixing the config recovered NOTHING
-/// from that checkpoint.
-///
-/// Unlike PostgreSQL this is RECOVERABLE — MySQL binlog retention does not depend
-/// on the reader, so the events are still in the log and deleting the checkpoint
-/// re-reads them. The message says so, and this test asserts it does, because
-/// telling an operator to re-snapshot when a checkpoint reset would do is its own
-/// kind of wrong answer.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn roast_mysql_cdc_refuses_a_view_whose_binlog_identity_is_the_base_table() {
@@ -4575,10 +3994,6 @@ fn roast_mysql_cdc_refuses_a_view_whose_binlog_identity_is_the_base_table() {
          deleting the checkpoint; an operator told to re-snapshot would do work they \
          do not need. Got: {msg}"
     );
-    // The refusal must NOT arrive wearing the binlog-grants hint. It is a config
-    // problem, and `create_change_stream` wraps the open call in MYSQL_CDC_HINT —
-    // the same trap the checkpoint validation was hoisted out of, which is why the
-    // routing precheck runs before that wrap rather than inside open.
     assert!(
         !msg.contains("REPLICATION SLAVE") && !msg.contains("binlog_format"),
         "a routing/config refusal must not be prefixed with a permissions hint — an \
@@ -4586,14 +4001,12 @@ fn roast_mysql_cdc_refuses_a_view_whose_binlog_identity_is_the_base_table() {
          Got: {msg}"
     );
 
-    // Not too WIDE: the base table itself must still capture normally. Oracle is
-    // the manifest-declared parts re-read, compared to what the source holds.
     let base_rig = || {
         Rig::mysql_cdc(&base)
             .checkpoint_path(d.path().join("b.ckpt"))
             .dest_path(d.path().join("out_base"))
     };
-    base_rig().run_ok(); // anchor
+    base_rig().run_ok();
     c.query_drop(format!("INSERT INTO {base} VALUES (1,10),(2,20),(3,30)"))
         .unwrap();
     let rows: usize = base_rig().run_and_read().iter().map(|b| b.num_rows()).sum();
@@ -4604,26 +4017,7 @@ fn roast_mysql_cdc_refuses_a_view_whose_binlog_identity_is_the_base_table() {
     );
 }
 
-/// The three routing hazards an adversarial pass found in the FIRST version of
-/// this guard, which read only `relkind`.
-///
-/// All three end the same way — a run that reports success while capturing
-/// nothing, or worse — and all three are invisible to a relkind check:
-///
-/// 1. **A folded twin.** The config string is read by two resolvers with different
-///    case rules: the schema probe interpolates it into `SELECT * FROM {table}` and
-///    lets PostgreSQL FOLD it; the sink routes BYTE-EXACT. With both `"MixedCase"`
-///    and `mixedcase` present, MEASURED: exit 0 throughout, writes to `mixedcase`
-///    captured `rows: 0` with no warning, and writes to `"MixedCase"` landed under
-///    the WRONG table's schema — columns `id, other_col, extra`, the real `v`
-///    values absent entirely. Silent column loss on top of silent event loss.
-/// 2. **A 3-part name.** `to_regclass` accepts `db.schema.table` when `db` is the
-///    current database, so the probe resolves while `table_matches` splits on the
-///    FIRST dot and compares `db` against the schema — never matching.
-/// 3. **UNLOGGED.** No WAL at all, so no event can ever exist for it.
-///
-/// Isolated in its OWN database: the guard reads `pg_class`, and a case-collision
-/// fixture on the shared DB would be visible to every parallel test.
+/// The three routing hazards an adversarial pass found in the FIRST version of this guard.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_refuses_a_config_whose_resolved_identity_routing_cannot_match() {
@@ -4631,9 +4025,6 @@ fn roast_pg_cdc_refuses_a_config_whose_resolved_identity_routing_cannot_match() 
     let slot = unique_name("rivet_ident_slot").to_lowercase();
     let _slot = Slot::new(slot.clone());
     let mut c = cdc_db.connect();
-    // The case collision, spelled the way a real schema acquires one: a quoted
-    // relation plus an unquoted sibling. Different COLUMNS on purpose — that is
-    // what makes the wrong-schema write visible.
     c.batch_execute(
         "CREATE TABLE \"MixedCase\" (id int, v text); \
          CREATE TABLE mixedcase (id int, other_col text, extra text); \
@@ -4668,9 +4059,6 @@ fn roast_pg_cdc_refuses_a_config_whose_resolved_identity_routing_cannot_match() 
             "the refusal for `{cfg}` must name `{must_say}` — that is the whole \
              remediation. Output:\n{said}"
         );
-        // A config problem must NOT arrive wearing the wal_level/REPLICATION hint:
-        // an operator would go read the permissions docs for a problem that is not
-        // there. Same trap the MySQL side was hoisted out of.
         assert!(
             !said.contains("wal_level=logical and a role"),
             "a routing refusal must not be prefixed with the permissions hint. \
@@ -4678,8 +4066,6 @@ fn roast_pg_cdc_refuses_a_config_whose_resolved_identity_routing_cannot_match() 
         );
     }
 
-    // Not too WIDE: an ordinary table on the same database still captures. Oracle
-    // is the manifest-declared parts, compared to what the source holds.
     c.batch_execute("CREATE TABLE plain_ok (id int primary key, v text)")
         .unwrap();
     c.execute("INSERT INTO plain_ok VALUES (1,'a'),(2,'b')", &[])
@@ -4693,7 +4079,7 @@ fn roast_pg_cdc_refuses_a_config_whose_resolved_identity_routing_cannot_match() 
     );
 }
 
-/// A dotted `table:` is read as `schema.table` everywhere; a relation whose name holds a dot cannot be named.
+/// A dotted `table:` is read as `schema.table` everywhere.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_a_relation_named_with_a_dot_is_refused_by_a_remedy_that_can_be_followed() {
@@ -4752,24 +4138,6 @@ fn pg_cdc_a_relation_named_with_a_dot_is_refused_by_a_remedy_that_can_be_followe
 }
 
 /// A TRUNCATE on a captured table must FAIL the run, not vanish.
-///
-/// `test_decoding` renders it as `table public.t: TRUNCATE: (no-flags)` — a line
-/// with no columns, so the parser that builds a change out of the column list had
-/// nothing to return and dropped it into its catch-all `None`. The
-/// `unknown -> default` shape the CDC evidence audit found on all four engines.
-///
-/// Measured before the guard (2026-08-24, pg14 stand — this test's RED):
-/// 2 inserts then a TRUNCATE left the source table EMPTY while the run reported
-/// `status: success, rows: 2` and wrote both inserts to the destination. Zero
-/// occurrences of the word at `RUST_LOG=trace` — not a quiet log, no log.
-///
-/// The divergence is PERMANENT, which is why this bails rather than warns: the
-/// rows left the source with no DELETE events to carry them, so no later capture
-/// can reconcile the destination back. A warning would leave a destination that
-/// disagrees with its source forever and call the run a success.
-///
-/// Isolated in its OWN database (see `CdcDb`): the slot decodes the whole DB, so
-/// a parallel test's TRUNCATE on the shared one would fail this run instead.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging() {
@@ -4792,8 +4160,6 @@ fn roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging() {
     c.execute(&format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"), &[])
         .unwrap();
     c.execute(&format!("TRUNCATE {tbl}"), &[]).unwrap();
-    // The SOURCE oracle, asked of PostgreSQL: the truncate really emptied it, so
-    // any row in the destination is a row that does not exist.
     let source_rows: i64 = c
         .query_one(&format!("SELECT count(*) FROM {tbl}"), &[])
         .unwrap()
@@ -4809,11 +4175,6 @@ fn roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging() {
             "the stream delivers the rows it read before the TRUNCATE it refuses",
         )
         .source_url(cdc_db.url());
-    // Through the rig, like every other live test here: `run_expect_fail` asserts
-    // the non-zero exit AND returns stdout+stderr, so the hand-rolled
-    // `run_rivet(&["run", "--config", …])` this used to call was a second way of
-    // doing what the rig already does — the per-file command wrapper the rig exists
-    // to have replaced.
     let said = rig.run_expect_fail();
     assert!(
         said.contains("TRUNCATE"),
@@ -4828,14 +4189,6 @@ fn roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging() {
          Output:\n{said}"
     );
 
-    // ── and it must be TABLE-ADDRESSED ────────────────────────────────────────
-    //
-    // The slot decodes the whole DATABASE, so this TRUNCATE is in the stream every
-    // other export on it reads. Failing without asking whose relation it is makes
-    // one truncated table an outage for exports that never touch it — the MySQL
-    // undecodable-rows guard's measured lesson (#281), pinned here before it could
-    // bite again. This export is anchored on the SAME slot span that holds the
-    // truncate, so the event is inside its window by construction.
     let other_slot = unique_name("rivet_trunc_slot_b").to_lowercase();
     let _other_slot = Slot::new(other_slot.clone());
     c.execute(
@@ -4854,18 +4207,6 @@ fn roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging() {
          capture its own change"
     );
 
-    // ── and a MULTI-relation truncate must be caught wherever ours sits ───────
-    //
-    // `TRUNCATE a, b` decodes as ONE line naming both
-    // (`table public.a, public.b: TRUNCATE: (no-flags)`), and so does every
-    // CASCADE that pulls in referencing tables. The FIRST version of this guard
-    // read that list as a single name and let the statement through: MEASURED,
-    // with the captured table configured, the source ended EMPTY while the run
-    // reported `status: success, rows: 1`. An adversarial pass found it; re-reading
-    // the code had not.
-    //
-    // Ours goes SECOND on purpose — a first-position-only fixture would pass
-    // against the very defect this exists to catch.
     let third_slot = unique_name("rivet_trunc_slot_c").to_lowercase();
     let _third_slot = Slot::new(third_slot.clone());
     c.execute(
@@ -4888,30 +4229,14 @@ fn roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging() {
         "a TRUNCATE naming our table SECOND in a list must still refuse, and name \
          OUR table rather than whichever came first. Output:\n{said2}"
     );
-    // ── and the refusal must not WEDGE the capture ────────────────────────────
-    //
-    // The peek is non-consuming, so the slot still sits on the truncate commit:
-    // every later run meets it first and clean changes queued BEHIND it are
-    // blocked, while the un-acked slot pins WAL. MEASURED: an ordinary INSERT
-    // after the truncate leaves the second run failing identically.
-    //
-    // The message's first version said only "re-snapshot (mode: full)" — which on
-    // PostgreSQL does not move the SLOT and therefore does not recover. This is
-    // the same defect the unchanged-TOAST refusal had, found the same day by an
-    // adversarial pass, in a guard I wrote after fixing that one.
     c.execute(&format!("INSERT INTO {tbl} VALUES (77,770)"), &[])
         .unwrap();
-    // `run_expect_fail` panics if the run SUCCEEDS, which is exactly the assertion:
-    // a clean change queued behind the truncate must still be blocked. If this ever
-    // stops panicking the wedge is gone and the message should be softened.
     let _still_wedged = rig.run_expect_fail();
     assert!(
         said.contains("pg_replication_slot_advance"),
         "the refusal must name the way OUT of the wedge, not only the re-snapshot: \
          re-snapshotting alone leaves the slot where it is. Got:\n{said}"
     );
-    // The route the message names must actually work: advance past the last truncate's
-    // commit, not past every pending commit, or the clean (77,770) behind it is skipped.
     let past: String = c
         .query_one(
             &format!(
@@ -4949,19 +4274,7 @@ fn roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging() {
     );
 }
 
-/// MySQL peer of `roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging`,
-/// and the same divergence by a DIFFERENT route: a TRUNCATE is logged as a QUERY
-/// event, never as rows, so the rows path never sees it and the `_ => {}` arm
-/// dropped it silently.
-///
-/// Measured before the guard (2026-08-24, rivet-mysql-cdc-1): 2 inserts then a
-/// TRUNCATE left the source table EMPTY while the run reported
-/// `status: success, rows: 2`.
-///
-/// The engines differ in the mechanism and agree on the outcome, which is why
-/// both cells are `test` in the fail-loud ledger rather than one being inferred
-/// from the other. SQL Server needs neither: it REFUSES the truncate itself
-/// (Msg 4711 on a CDC-enabled table), so the divergence cannot be created.
+/// MySQL peer of `roast_pg_cdc_refuses_a_truncate_instead_of_silently_diverging`.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn roast_mysql_cdc_refuses_a_truncate_instead_of_silently_diverging() {
@@ -4983,13 +4296,11 @@ fn roast_mysql_cdc_refuses_a_truncate_instead_of_silently_diverging() {
             .checkpoint_path(ck.to_path_buf())
             .dest_path(d.path().join("out"))
     };
-    rig().run_ok(); // anchor before the truncate lands
+    rig().run_ok();
 
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"))
         .unwrap();
     c.query_drop(format!("TRUNCATE {tbl}")).unwrap();
-    // The SOURCE oracle: the truncate really emptied it, so any row the run ships
-    // is a row that does not exist.
     let left: Option<i64> = c
         .query_first(format!("SELECT count(*) FROM {tbl}"))
         .unwrap();
@@ -5003,10 +4314,6 @@ fn roast_mysql_cdc_refuses_a_truncate_instead_of_silently_diverging() {
          destination with nothing to retract them. Got: {msg}"
     );
 
-    // Table-addressed, same as the undecodable-rows guard beside it (#281): the
-    // binlog carries every table on the server, so an export that does not capture
-    // the truncated table must still complete. Anchored BEFORE the truncate, so
-    // the event is inside its window by construction rather than by timing.
     let other_ck = d.path().join("tr_other.ckpt");
     let other_rig = || {
         Rig::mysql_cdc(&other)
@@ -5029,18 +4336,7 @@ fn roast_mysql_cdc_refuses_a_truncate_instead_of_silently_diverging() {
     );
 }
 
-/// An unqualified `table:` means the relation the search_path resolves, and a same-named
-/// relation of another schema never reaches its export.
-///
-/// History. `sink::table_matches` matches a bare config name against any schema (a MongoDB
-/// collection has no qualifier and may contain dots), so on PostgreSQL `table: orders` once
-/// routed `public.orders` AND `archive.orders` into one export, the foreign rows re-labelled by
-/// column name (`INSERT INTO bh2.bhx VALUES (2,'FROM_OTHER_SCHEMA')` came back as `id=2,
-/// val='FROM_OTHER_SCHEMA'`) or written as all-NULL rows. That was refused from 2026-08-25, which
-/// also refused the config `rivet init` writes for a `public` table beside a same-named table in
-/// another schema (#675). Now the stream drops the other schema's events by the search_path rule
-/// (`routes`), so the config runs and delivers only its own rows, the matview case included
-/// (`test_decoding` decodes a materialized view).
+/// An unqualified `table:` means the relation the search_path resolves.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_a_bare_table_name_beside_a_same_named_relation_gets_no_foreign_row() {
@@ -5073,8 +4369,6 @@ fn roast_pg_cdc_a_bare_table_name_beside_a_same_named_relation_gets_no_foreign_r
         "only the search_path table's row; never the other schema's"
     );
 
-    // A MATERIALIZED VIEW of the same name in another schema is decoded too, and stays out.
-    // The other schema's TRUNCATE is not this stream's either: the run is not refused for it.
     c.batch_execute(&format!("TRUNCATE other.{tbl}")).unwrap();
     rig.run_ok();
     assert_eq!(ids_read_all(&rig.out_dir()), vec![1]);
@@ -5103,8 +4397,6 @@ impl CdcDb {
         let name = unique_name(label).to_lowercase();
         let mut admin = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls)
             .expect("connect cdc admin");
-        // CREATE DATABASE cannot run inside a transaction — a single simple-query
-        // batch_execute autocommits it.
         admin
             .batch_execute(&format!("CREATE DATABASE {name}"))
             .expect("create dedicated cdc db");
@@ -5143,18 +4435,6 @@ impl Drop for CdcDb {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_reaches_open_bound_past_a_large_empty_ddl_span() {
-    // Ultracode r2 finding: a pure-EMPTY (DDL) span LARGER than one peek window,
-    // sitting ahead of in-bound captured data, was drained only one window per
-    // run — empty transactions yield NO events to the sink, so the sink's
-    // re-drain ack never fires; only the adapter's `release_empty_frontier`
-    // advances the slot, and it used to release just one window before
-    // `next_change` returned None and the run wrote _SUCCESS with the in-bound
-    // data still unread. Fix: `next_change` now walks the WHOLE empty span in one
-    // call (release → re-peek loop). rollover 5 makes the window ~2 empty
-    // transactions, so a 40-transaction DDL burst is ~20 windows. Oracle: the
-    // SOURCE table A — one bounded run must capture all 12 rows.
-    // Isolated in its OWN database so parallel tests' WAL never enters this slot's
-    // view — the slot decodes the whole DB, the very premise this test exercises.
     let cdc_db = CdcDb::new("cdc_ddlspan");
     let a = unique_name("rivet_cdc_ddlspan");
     let slot = unique_name("rivet_ddl_slot");
@@ -5167,16 +4447,12 @@ fn roast_pg_cdc_reaches_open_bound_past_a_large_empty_ddl_span() {
         &[&slot],
     )
     .unwrap();
-    // A large EMPTY span: 40 DDL transactions (row-less BEGIN/COMMIT) ≫ one
-    // window at rollover 5 — created AFTER the slot so they are in the WAL ahead
-    // of A's in-bound rows.
     for i in 0..40 {
         c.batch_execute(&format!(
             "CREATE TABLE {a}_ddl_{i} (x int); DROP TABLE {a}_ddl_{i}"
         ))
         .unwrap();
     }
-    // A's in-bound data, behind the empty span.
     for i in 0..12i64 {
         c.execute(&format!("INSERT INTO {a} VALUES ({i},{i})"), &[])
             .unwrap();
@@ -5207,16 +4483,6 @@ fn roast_pg_cdc_reaches_open_bound_past_a_large_empty_ddl_span() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_empty_transaction_churn_must_not_pin_the_slot() {
-    // DDL-only churn decodes as EMPTY transactions (BEGIN/COMMIT, no rows):
-    // nothing reaches the sink, so the sink never acks, and the slot keeps
-    // pinning WAL from before the noise — on an idle database, forever (the
-    // uncaptured-DML case is different: it yields events and acks via the
-    // bug-hunt-K final roll). A run that yields NOTHING must release the
-    // data-free span itself — advancing past it can lose nothing by
-    // construction. Oracle: the slot's confirmed_flush_lsn, asked of PostgreSQL
-    // itself, never rivet's counters.
-    // Isolated in its OWN database (see CdcDb): this test asserts confirmed_flush_lsn
-    // against PostgreSQL, which a parallel test's WAL on the shared DB would perturb.
     let cdc_db = CdcDb::new("cdc_empty");
     let tbl = unique_name("rivet_cdc_pgempty");
     let slot = unique_name("rivet_empty_slot");
@@ -5234,7 +4500,7 @@ fn roast_pg_cdc_empty_transaction_churn_must_not_pin_the_slot() {
 
     let rig = Rig::pg_cdc(&tbl, &slot).source_url(cdc_db.url());
     let cfg = rig.config_path();
-    run_rivet_ok(&cfg); // baseline bounded run (captures nothing)
+    run_rivet_ok(&cfg);
     let before: String = c
         .query_one(
             "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1",
@@ -5243,7 +4509,6 @@ fn roast_pg_cdc_empty_transaction_churn_must_not_pin_the_slot() {
         .unwrap()
         .get(0);
 
-    // Empty-transaction churn: each DDL pair decodes as row-less transactions.
     for i in 0..20 {
         c.batch_execute(&format!(
             "CREATE TABLE {tbl}_junk_{i} (id INT); DROP TABLE {tbl}_junk_{i}"
@@ -5251,7 +4516,7 @@ fn roast_pg_cdc_empty_transaction_churn_must_not_pin_the_slot() {
         .unwrap();
     }
 
-    run_rivet_ok(&cfg); // captures nothing — but must release the empty span
+    run_rivet_ok(&cfg);
     let advanced: bool = c
         .query_one(
             &format!(
@@ -5270,22 +4535,6 @@ fn roast_pg_cdc_empty_transaction_churn_must_not_pin_the_slot() {
 }
 
 /// `rivet cdc --max-events` must not be able to WEDGE a checkpointed CLI run.
-///
-/// The CLI leg of the driver-bypass this closed: the file sink deferred the cap
-/// to a commit boundary, the NDJSON loop (`cdc::run`, i.e. `rivet cdc` with no
-/// `--output`) broke on the event count alone. Nothing was LOST — the checkpoint
-/// save is gated on `committed`, so a cut transaction re-emits on resume — but a
-/// transaction LONGER than the cap held no boundary to save, so the checkpoint
-/// never advanced and every run re-printed the same prefix and stopped in the
-/// same place. Silent, and shaped like a config problem.
-///
-/// MySQL, deliberately: it is the engine whose NDJSON resume IS the checkpoint
-/// file (`dispatch.rs` — PostgreSQL re-reads from its slot on this path and does
-/// not ack by design, so the wedge is invisible there). MySQL also buffers a
-/// transaction and releases it whole at XID with only the LAST row `committed`,
-/// which is exactly the shape that has no boundary to stop at mid-way.
-///
-/// RED before the fix: run 2 re-emits rows 1..=2 forever.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn roast_mysql_cdc_cli_max_events_below_a_transaction_still_advances_the_checkpoint() {
@@ -5301,10 +4550,8 @@ fn roast_mysql_cdc_cli_max_events_below_a_transaction_still_advances_the_checkpo
     let ckpt = d.path().join("ck");
     Rig::mysql_cdc(&tbl)
         .checkpoint_path(ckpt.clone())
-        .pin_binlog_here(); // anchor at NOW, so only what follows is in scope
+        .pin_binlog_here();
 
-    // ONE transaction of five rows — longer than the cap below, and released
-    // whole at its XID, so a hard per-event stop lands with no boundary to save.
     c.query_drop(format!(
         "INSERT INTO {tbl} VALUES (1,1),(2,2),(3,3),(4,4),(5,5)"
     ))
@@ -5334,8 +4581,6 @@ fn roast_mysql_cdc_cli_max_events_below_a_transaction_still_advances_the_checkpo
 
     let first = cdc_run().expect("run 1 must terminate");
     let ids1 = ndjson_after_ids(&first, &tbl);
-    // The cap is SOFT: it overshoots to the commit boundary rather than cutting
-    // the transaction, which is the only way it can checkpoint at all.
     assert_eq!(
         ids1,
         (1..=5).collect::<std::collections::BTreeSet<i64>>(),
@@ -5355,17 +4600,6 @@ fn roast_mysql_cdc_cli_max_events_below_a_transaction_still_advances_the_checkpo
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_ndjson_until_current_terminates_and_emits_backlog() {
-    // The NDJSON driver (`rivet cdc` without --output) shares
-    // create_change_stream with the file sink — this anchors the CLI path
-    // (matrix: cdc_ndjson_bounded). Termination here is the driver's own: the
-    // NDJSON path uses ONE `PeekBound::Unbounded` peek (a single snapshot query),
-    // so it terminates regardless of the open-time bound — the bound only clips
-    // which rows that one snapshot yields, it is not load-bearing for
-    // termination (the ACKING file-sink path re-peeks on PostgreSQL, and the
-    // tailable stream on MongoDB, are what genuinely need the bound). What THIS
-    // test proves: the CLI path terminates and emits the
-    // whole pre-open backlog to stdout. No ack by design (stdout is not durable,
-    // ADR-0023): the slot is left for the consumer.
     use postgres::NoTls;
     let tbl = unique_name("rivet_cdc_pgnd");
     let slot = unique_name("rivet_nd_slot");
@@ -5408,9 +4642,6 @@ fn roast_pg_cdc_ndjson_until_current_terminates_and_emits_backlog() {
             &slot,
             "--table",
             &tbl,
-            // Bounded (until-current) is the DEFAULT now; `--stream` opts into
-            // continuous. This roast asserts the default terminates + emits the
-            // backlog, so it passes no flag.
         ],
         std::time::Duration::from_secs(30),
     );
@@ -5430,20 +4661,6 @@ fn roast_pg_cdc_ndjson_until_current_terminates_and_emits_backlog() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_reaches_open_bound_past_a_large_uncaptured_transaction() {
-    // The density-below-1/3 gap (ultracode HIGH): a bounded run captures table A
-    // but the slot decodes the WHOLE database, so an UNCAPTURED table B's large
-    // transaction sits in the WAL ahead of A's in-bound changes. The slot only
-    // advances on a captured-row ack, and B's rows are dropped by the routing
-    // filter — so a peek window smaller than B's transaction re-read the same
-    // span forever, the run exhausted, and it wrote _SUCCESS with ZERO of A's
-    // in-bound rows (deferred to the next run — the O(backlog-at-open) contract
-    // broken). With the sink re-drain loop the end-of-pass ack advances the slot
-    // past B, and the next pass reads A. rollover: 5 makes any B transaction of
-    // >15 rows exceed the old escalated window. Oracle: the SOURCE table A.
-    // Isolated in its OWN database (see CdcDb): the slot decodes the whole DB, so
-    // table B's large uncaptured transaction — and no parallel test's WAL — sits
-    // ahead of A. Lowercase names only: PostgreSQL folds unquoted identifiers, so
-    // test_decoding renders (and routing matches) the lowercased table name.
     let cdc_db = CdcDb::new("cdc_dens");
     let a = unique_name("rivet_cdc_capa");
     let b = unique_name("rivet_cdc_forgnb");
@@ -5461,14 +4678,11 @@ fn roast_pg_cdc_reaches_open_bound_past_a_large_uncaptured_transaction() {
     )
     .unwrap();
 
-    // One large UNCAPTURED transaction (200 rows) lands in the WAL BEFORE A's
-    // in-bound data — this is the span the peek window cannot fit at rollover 5.
     c.execute(
         &format!("INSERT INTO {b} SELECT g, g FROM generate_series(1, 200) g"),
         &[],
     )
     .unwrap();
-    // A's in-bound backlog: ids 0..30, committed after B's tx, before open.
     for i in 0..30i64 {
         c.execute(&format!("INSERT INTO {a} VALUES ({i},{i})"), &[])
             .unwrap();
@@ -5496,19 +4710,7 @@ fn roast_pg_cdc_reaches_open_bound_past_a_large_uncaptured_transaction() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_drain_releases_pinned_wal_and_advances_xmin() {
-    // Harm metric (the "an abandoned slot fills the disk" caveat): an un-consumed
-    // logical slot pins WAL and holds `catalog_xmin` (blocks vacuum). The
-    // consumer position that governs release is `confirmed_flush_lsn` — the ack
-    // advances it, and `restart_lsn` (the actual WAL floor) follows at the next
-    // checkpoint. A bounded until_current drain must advance confirmed_flush past
-    // the drained span (so `pg_wal_lsn_diff(current, confirmed_flush_lsn)`
-    // collapses) and let catalog_xmin move forward. Oracle: the server's own
-    // pg_replication_slots, never rivet's counters. RED-able: a drain that
-    // captured but did not ack leaves confirmed_flush pinned.
     let d = tempfile::tempdir().unwrap();
-    // Isolated DB (see CdcDb): the bounded drain must capture the WHOLE 20k backlog
-    // in one pass, which parallel tests' foreign WAL in a shared-DB slot's view
-    // would break (density). Its own DB gives the slot only this test's WAL.
     let cdc_db = CdcDb::new("cdc_walret");
     let tbl = unique_name("rivet_cdc_walret");
     let slot = unique_name("rivet_walret_slot");
@@ -5533,7 +4735,6 @@ fn roast_pg_cdc_drain_releases_pinned_wal_and_advances_xmin() {
         .get(0)
     };
     let cf_before = confirmed(&mut c);
-    // Generate a backlog (≈20k rows of WAL) the slot now pins.
     c.execute(
         &format!(
             "INSERT INTO {tbl} SELECT g, g%1000, repeat('x',80) FROM generate_series(1,20000) g"
@@ -5541,9 +4742,6 @@ fn roast_pg_cdc_drain_releases_pinned_wal_and_advances_xmin() {
         &[],
     )
     .unwrap();
-    // Prove the slot IS pinning a real backlog. (pg_current_wal_lsn is the WHOLE
-    // server's position, so this can be INFLATED by parallel tests' WAL — that
-    // only makes it more clearly > 1 MB, so it stays a valid "is pinning" check.)
     let pinned_before: i64 = c
         .query_one(
             &format!("SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '{cf_before}'::pg_lsn)::bigint"),
@@ -5568,11 +4766,6 @@ fn roast_pg_cdc_drain_releases_pinned_wal_and_advances_xmin() {
         20000,
         "the drain must capture the whole backlog"
     );
-    // The release metric is confirmed_flush's OWN advance (per-slot), NOT
-    // pg_wal_lsn_diff(pg_current_wal_lsn(), ..): pg_current_wal_lsn is the whole
-    // server's WAL, so parallel tests' WAL would swamp a "current - confirmed_flush"
-    // reading (it FAILED that way — retained went UP under load). This advance is
-    // this slot's alone.
     let cf_after = confirmed(&mut c);
     let advanced: i64 = c
         .query_one(
@@ -5592,13 +4785,6 @@ fn roast_pg_cdc_drain_releases_pinned_wal_and_advances_xmin() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_captures_a_silent_update_a_watermark_sync_would_miss() {
-    // The reason log-based CDC exists: it captures a row change that touches a
-    // value WITHOUT bumping `updated_at` — the exact update a watermark /
-    // incremental sync (`WHERE updated_at > last_seen`) MISSES. Assert (1) the
-    // source's `updated_at` is UNCHANGED by the silent update (so a watermark
-    // sync at that timestamp would never re-read the row), and (2) CDC captured
-    // the update with the NEW value anyway. Oracle: the source row's updated_at
-    // (proves the miss) + the parquet (proves the capture).
     use postgres::NoTls;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_silent");
@@ -5617,7 +4803,6 @@ fn roast_pg_cdc_captures_a_silent_update_a_watermark_sync_would_miss() {
     )
     .unwrap();
 
-    // Insert a row with a fixed watermark.
     c.execute(
         &format!("INSERT INTO {tbl} VALUES (1, 0, '2020-01-01T00:00:00Z')"),
         &[],
@@ -5628,7 +4813,6 @@ fn roast_pg_cdc_captures_a_silent_update_a_watermark_sync_would_miss() {
         .unwrap()
         .get(0);
 
-    // SILENT update — changes view_count, does NOT touch updated_at.
     c.execute(&format!("UPDATE {tbl} SET v = 42 WHERE id = 1"), &[])
         .unwrap();
     let wm_after: chrono::DateTime<chrono::Utc> = c
@@ -5644,7 +4828,6 @@ fn roast_pg_cdc_captures_a_silent_update_a_watermark_sync_would_miss() {
     std::fs::create_dir_all(&out).unwrap();
     run_rivet_ok(&pg_cdc_config(&d, &tbl, &slot, &out));
 
-    // CDC caught both the insert and the SILENT update, with the new view_count.
     let ops = cdc_id_ops(&out);
     assert_eq!(
         ops,
@@ -5662,12 +4845,6 @@ fn roast_pg_cdc_captures_a_silent_update_a_watermark_sync_would_miss() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_oversized_transaction_bails_loud_not_oom() {
-    // Memory backstop: a transaction is buffered WHOLE (never split across parts),
-    // so an oversized one would grow the buffer unbounded → OOM. The adapter caps
-    // the per-transaction buffer at `max_tx_rows()` and bails LOUDLY instead. The
-    // cap is 5M by default; `RIVET_CDC_MAX_TX_ROWS` lowers it so this is testable
-    // without a 5-million-row transaction. Oracle: the run FAILS with the cap
-    // message (never a silent OOM / partial capture).
     use postgres::NoTls;
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("rivet_cdc_bigtx");
@@ -5684,7 +4861,6 @@ fn roast_pg_cdc_oversized_transaction_bails_loud_not_oom() {
         &[&slot],
     )
     .unwrap();
-    // ONE transaction of 20 rows — over the cap-of-10 this run sets.
     c.execute(
         &format!("INSERT INTO {tbl} SELECT g, g FROM generate_series(1, 20) g"),
         &[],
@@ -5709,18 +4885,6 @@ fn roast_pg_cdc_oversized_transaction_bails_loud_not_oom() {
 #[test]
 #[ignore = "live+gate-only: requires the cdc-standby profile — python3 -m dev.pytools.cdc_stand standby (pg-cdc-standby on :5436)"]
 fn roast_pg_cdc_bounded_on_a_standby_fails_loud() {
-    // A bounded (until_current) CDC run against a PostgreSQL STANDBY (in recovery)
-    // must fail LOUD with an actionable message: pg_current_wal_lsn() is
-    // unavailable in recovery and a logical slot cannot be created there. The
-    // adapter checks pg_is_in_recovery() up front and names the escape (stream
-    // continuously, or point at the primary) — not a raw "recovery is in
-    // progress". Oracle: the run fails, stderr names the standby + the fix.
-    //
-    // Opt-in profile: the cdc-standby pair (python3 -m dev.pytools.cdc_stand standby, :5436) is
-    // NOT part of the default `cdc` stack, so a plain `--ignored` live run does
-    // not provision it. Self-gate: SKIP (loudly) when :5436 is unreachable rather
-    // than fail on a Connection-refused that never reaches the recovery check
-    // under test. When the profile IS up, the assertions below run for real.
     let standby_url = PG_STANDBY_URL;
     if std::net::TcpStream::connect_timeout(
         &"127.0.0.1:5436".parse().unwrap(),
@@ -5740,8 +4904,6 @@ fn roast_pg_cdc_bounded_on_a_standby_fails_loud() {
     let _slot = Slot::on(standby_url, slot.clone());
     let out = d.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
-    // A standby is just a source_url override on the canonical CDC rig — no
-    // bespoke YAML. run_expect_fail asserts the non-zero exit and returns stderr.
     let rig = Rig::pg_cdc(&tbl, &slot)
         .source_url(standby_url)
         .dest_path(out);
@@ -5751,14 +4913,6 @@ fn roast_pg_cdc_bounded_on_a_standby_fails_loud() {
         "the failure must name the standby and the escape (stream continuously / point at the \
          primary) — got:\n{err}"
     );
-    // The message alone is EQUIVALENT-masked: a fallback guard at the
-    // pg_current_wal_lsn() bound-snapshot emits the same text — but only AFTER
-    // pg_create_logical_replication_slot(), which on a standby BLOCKS for minutes
-    // waiting for a consistent point and then LEAKS a WAL-pinning slot. The
-    // proactive pg_is_in_recovery() check is what fails fast and never touches
-    // the slot. Isolate it: after a bounded run refused a standby, NO slot with
-    // our name may exist there. (Disabling the proactive check regresses this to
-    // a leaked slot — the RED lever for the fast-fail contract.)
     let mut sc = postgres::Client::connect(standby_url, postgres::NoTls).expect("connect standby");
     let slot_created: bool = sc
         .query_one(
@@ -5843,7 +4997,7 @@ const PG_FAILOVER_PRIMARY: &str = PG_STANDBY_PRIMARY_URL;
 const PG_FAILOVER_STANDBY: &str = PG_STANDBY_URL;
 const PG_FAILOVER_URL: &str = "RIVET_FAILOVER_URL";
 
-/// A capture on the primary (ids 1-2), then ids 3-4 written while the same config is pointed at the standby.
+/// A capture on the primary (ids 1-2).
 struct PgFailover {
     rig: Rig,
     _guards: (PgTable, Slot, Slot),
@@ -5915,7 +5069,7 @@ fn pg_failover(tag: &str, with_checkpoint: bool, mark: impl FnOnce(Rig) -> Rig) 
             String::from_utf8_lossy(&out.stderr)
         );
     };
-    on_primary(&rig); // creates the slot on the primary
+    on_primary(&rig);
     p.batch_execute(&format!("INSERT INTO {tbl} VALUES (1, 10), (2, 20)"))
         .unwrap();
     on_primary(&rig);
@@ -5939,7 +5093,7 @@ fn pg_failover(tag: &str, with_checkpoint: bool, mark: impl FnOnce(Rig) -> Rig) 
     panic!("fixture: the standby never received ids 3-4");
 }
 
-/// With a checkpoint, a failover to a server without the slot is refused, not resumed on a new slot.
+/// With a checkpoint, a failover to a server without the slot is refused.
 #[test]
 #[ignore = "live+gate-only: requires the cdc-standby profile — python3 -m dev.pytools.cdc_stand standby (pg-cdc-primary :5437 → pg-cdc-standby :5436)"]
 fn a_pg_failover_to_the_standby_with_a_checkpoint_is_refused_not_resumed_on_a_new_slot() {
@@ -5959,9 +5113,7 @@ fn a_pg_failover_to_the_standby_with_a_checkpoint_is_refused_not_resumed_on_a_ne
     );
 }
 
-/// Strict known defect (graded by the rig oracle): without a checkpoint, a failover to the standby
-/// creates a new slot there with only a warning, and the rows written during the switch (ids 3-4)
-/// are lost; the oracle reports "now passes" once rivet refuses or follows instead.
+/// Strict known defect (graded by the rig oracle).
 #[test]
 #[ignore = "live+gate-only: requires the cdc-standby profile — python3 -m dev.pytools.cdc_stand standby (pg-cdc-primary :5437 → pg-cdc-standby :5436)"]
 fn a_pg_failover_to_the_standby_without_a_checkpoint_loses_the_rows_written_during_the_switch() {
@@ -5986,9 +5138,7 @@ fn a_pg_failover_to_the_standby_without_a_checkpoint_loses_the_rows_written_duri
     );
 }
 
-/// Strict known defect (PostgreSQL CDC failover step): a logical slot does not exist on the promoted
-/// server, so the run is refused; passes while that holds, fails ("did not panic") once rivet follows
-/// the failover and captures ids 1-4 exactly once.
+/// Strict known defect (PostgreSQL CDC failover step).
 #[test]
 #[ignore = "live+gate-only: requires the cdc-standby profile — python3 -m dev.pytools.cdc_stand standby (pg-cdc-primary :5437 → pg-cdc-standby :5436)"]
 #[should_panic(expected = "rivet did not follow the failover")]
@@ -6010,12 +5160,6 @@ fn pg_cdc_follows_a_failover_to_the_standby() {
 }
 
 /// Finding #3: MySQL CDC enriches ENUM/SET labels from information_schema.COLUMNS.
-/// The old query pinned `TABLE_SCHEMA = DATABASE()` and dropped any `db.`
-/// qualifier, so a CROSS-DATABASE capture — a table in a database OTHER than the
-/// connection's default (`rivet`) — enriched NOTHING and every ENUM exported as
-/// its raw integer index (a SET as its bitmask), silently. Capture a qualified
-/// `otherdb.orders` and assert the ENUM lands as its LABEL, from the table's own
-/// schema. RED before the fix: the wire index ('3') leaked through instead of 'off'.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_cross_database_enum_enriches_from_the_tables_own_schema() {
@@ -6023,14 +5167,11 @@ fn cdc_cross_database_enum_enriches_from_the_tables_own_schema() {
     let dbname = unique_name("rivet_xdb").to_lowercase();
     let qualified = format!("{dbname}.orders");
 
-    // A SECOND database (NOT the connection's default `rivet`) created via root,
-    // with a SELECT grant so the rivet user can read the table + its catalog.
     let root_url = MYSQL_CDC_URL.replace("rivet:rivet@", "root:rivet@");
     let mut admin = mysql::Conn::new(mysql::Opts::from_url(&root_url).unwrap()).unwrap();
     admin
         .query_drop(format!("CREATE DATABASE {dbname}"))
         .expect("create cross db");
-    // Drop guard: tear the whole database down even if the test panics.
     struct DbGuard(String, String);
     impl Drop for DbGuard {
         fn drop(&mut self) {
@@ -6056,16 +5197,12 @@ fn cdc_cross_database_enum_enriches_from_the_tables_own_schema() {
     std::fs::create_dir_all(&out).unwrap();
     let cfg = cdc_config(&d, &qualified, &ckpt, &out);
 
-    run_rivet_ok(&cfg); // anchor at the current binlog position
+    run_rivet_ok(&cfg);
     admin
         .query_drop(format!("INSERT INTO {dbname}.orders VALUES (1, 'off')"))
         .expect("insert enum row");
-    run_rivet_ok(&cfg); // capture the change
+    run_rivet_ok(&cfg);
 
-    // 'off' is the 3rd ENUM label; the binlog delivers the INDEX (3). Only the
-    // information_schema enrichment — from the table's OWN schema — turns it back
-    // into the label. Pre-fix, cross-db enrichment silently failed and the index
-    // leaked through as text.
     assert_eq!(
         parquet_one_string(&out, "status"),
         "off",
@@ -6074,18 +5211,7 @@ fn cdc_cross_database_enum_enriches_from_the_tables_own_schema() {
     );
 }
 
-/// Closes the CDC/incremental → warehouse LOAD quadrant (the coverage-audit HIGH
-/// blind spot: every load suite sourced `mode: full` parquet, so no test ever
-/// LOADED rivet's CDC `__changes` output). DuckDB is the independent-reader proxy
-/// for the warehouse load: `read_parquet(union_by_name=true)` over BOTH the
-/// `initial: snapshot` leg AND the CDC change leg mimics the loader's
-/// declared-schema LOAD-by-name into one `<table>__changes` table (snapshot rows
-/// get `__op` = NULL; since round-10 a checkpointed snapshot leg STAMPS
-/// constant `__pos`/`__seq=-1`, legacy legs stay NULL). It is the exact `fda1653` class: a
-/// snapshot leg that KEPT its batch `meta_columns` would leak a column the CDC
-/// stream lacks — silent under count/sum checks, breaks the warehouse load one
-/// layer up. The current-state dedup is then verified against the SOURCE's actual
-/// rows (an independent oracle, not rivet's own output).
+/// Closes the CDC/incremental → warehouse LOAD quadrant.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc + duckdb"]
 fn cdc_changes_parquet_loads_into_a_warehouse_and_dedups_to_current_state() {
@@ -6097,48 +5223,31 @@ fn cdc_changes_parquet_loads_into_a_warehouse_and_dedups_to_current_state() {
     c.query_drop(format!("CREATE TABLE {tbl} (id INT PRIMARY KEY, v INT)"))
         .unwrap();
     let _guard = Table(tbl.clone());
-    // Pre-snapshot rows — the initial:snapshot backfill leg.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"))
         .unwrap();
 
     let ckpt = d.path().join("cdc.ckpt");
-    // meta_columns are REQUESTED: the fda1653 trap. They must be dropped from the
-    // snapshot leg so both legs' data columns match in the shared __changes append.
     let rig = Rig::mysql_cdc(&tbl)
         .cdc_line("initial: snapshot")
         .export_line("meta_columns: { exported_at: true, row_hash: true }")
         .checkpoint_path(ckpt.clone())
         .dest_path(host_dir.clone());
     let cfg = rig.config_path();
-    run_rivet_ok(&cfg); // snapshot leg → host_dir/snapshot/*.parquet
+    run_rivet_ok(&cfg);
 
-    // Post-snapshot changes: an UPDATE (dedup must pick the new value over the
-    // snapshot baseline) and an INSERT (a PK present ONLY in the change leg).
     c.query_drop(format!("UPDATE {tbl} SET v = 100 WHERE id = 1"))
         .unwrap();
     c.query_drop(format!("INSERT INTO {tbl} VALUES (3,30)"))
         .unwrap();
-    run_rivet_ok(&cfg); // CDC leg → host_dir/cdc-*.parquet
+    run_rivet_ok(&cfg);
 
-    // DuckDB = the independent warehouse-load proxy. union_by_name mimics the
-    // loader's declared-schema LOAD-by-name (snapshot's missing __op/__pos/__seq
-    // become NULL). A LIST of globs unions the two legs into one __changes table.
     let changes = format!(
         "read_parquet(['{c}/snapshot/*.parquet','{c}/cdc-*.parquet'], union_by_name=true)",
         c = container_dir,
     );
 
-    // (1) LOADABILITY / fda1653: the unioned __changes carries EXACTLY the three
-    //     meta columns + the source data columns — NO leaked batch meta_column
-    //     from the snapshot leg (which would break a real warehouse load).
     let desc = duckdb_run_sql_json(&format!("DESCRIBE SELECT * FROM {changes}"));
     let cols = duckdb_parse_describe(&desc);
-    // The unioned __changes must be EXACTLY {__op, __pos, __seq} + the source data
-    // columns — any other column is a leaked snapshot-leg meta_column. The meta
-    // columns are `_rivet_exported_at` / `_rivet_row_hash` (SINGLE underscore, see
-    // src/enrich.rs) — a `__rivet` (double) check silently never matches and is
-    // vacuous (which is exactly how the sibling snapshot-parity test's assertion
-    // reads today). Assert the whole set instead of a prefix so any leak is caught.
     let mut got_cols: Vec<String> = cols.keys().cloned().collect();
     got_cols.sort();
     assert_eq!(
@@ -6147,11 +5256,6 @@ fn cdc_changes_parquet_loads_into_a_warehouse_and_dedups_to_current_state() {
             "__op".to_string(),
             "__pos".to_string(),
             "__seq".to_string(),
-            // Written by BOTH legs since §5h, so it belongs in the union — and it
-            // must be here, not merely tolerated: were only one leg producing it,
-            // `union_by_name` would still succeed and leave that leg's rows NULL,
-            // which is the silent half-empty column the two-leg contract exists to
-            // rule out. `_rivet_exported_at` is deliberately absent (batch-only).
             "_rivet_row_hash".to_string(),
             "id".to_string(),
             "v".to_string(),
@@ -6162,9 +5266,6 @@ fn cdc_changes_parquet_loads_into_a_warehouse_and_dedups_to_current_state() {
          silent under count/sum checks)"
     );
 
-    // (2) CURRENT-STATE: an INDEPENDENT dedup (latest change per PK wins; the
-    //     snapshot baseline has __pos NULL = oldest) reconstructs current state.
-    //     The oracle is the SOURCE's actual rows {1:100, 2:20, 3:30}.
     let sql = format!(
         "SELECT id, v FROM (
            SELECT id, v, ROW_NUMBER() OVER (
@@ -6197,21 +5298,6 @@ fn cdc_changes_parquet_loads_into_a_warehouse_and_dedups_to_current_state() {
     );
 }
 
-// The two legs of ONE `initial: snapshot` export must claim ONE source identity.
-//
-// `identity_source` is what `ensure_single_source` compares when a load reads a
-// prefix, and the two legs derived it differently: the CDC drain records the
-// capture output's table, while the snapshot leg is a batch run whose manifest
-// source used to be split off the EXPORT NAME — and the leg's synthesized name
-// (`orders__snapshot_orders`) has no dot, so it recorded `table: null`. Measured
-// on a real run into one prefix before the fix: drain
-// `{engine: postgres, table: "idsrc_orders"}` and leg `{engine: postgres,
-// table: null}`, which read as `postgres:idsrc_orders` and `postgres` — two
-// sources under one export name, so `rivet load` refuses the flow the docs
-// describe.
-//
-// A name is a label; the config is the catalog. The manifest's source table now
-// comes from the export's declared `table:`, carried on the plan.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn both_legs_of_an_initial_snapshot_export_claim_one_source_identity() {
@@ -6233,11 +5319,6 @@ fn both_legs_of_an_initial_snapshot_export_claim_one_source_identity() {
         .cdc_line("initial: snapshot")
         .checkpoint_path(ckpt.clone())
         .dest_path(out.clone());
-    // The config resolves its source through `url_env:` ON PURPOSE — this test is
-    // about SOURCE IDENTITY, and the env form is the one a deployment uses when a
-    // plaintext URL would be redacted out of the artifact. But nothing ever SET
-    // the variable, so every run of this test died at config load with "env var
-    // 'MYSQL_CDC_URL' is not set" before reaching a single assertion. Pass it.
     let out_run = rig.run_args_env(&[], &[("MYSQL_CDC_URL", MYSQL_CDC_URL)]);
     assert!(
         out_run.status.success(),
@@ -6245,8 +5326,6 @@ fn both_legs_of_an_initial_snapshot_export_claim_one_source_identity() {
         String::from_utf8_lossy(&out_run.stderr)
     );
 
-    // Read what each leg actually WROTE, and compare with the product's own
-    // identity rule rather than a copy of it.
     let source_of = |p: &std::path::Path| -> (String, Option<String>) {
         let body =
             std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
@@ -6262,7 +5341,6 @@ fn both_legs_of_an_initial_snapshot_export_claim_one_source_identity() {
     let drain = source_of(&out.join("manifest.json"));
     let leg = source_of(&out.join("snapshot").join("manifest.json"));
 
-    // Not inert: both legs must have written a manifest with an engine at all.
     assert!(
         !drain.0.is_empty() && !leg.0.is_empty(),
         "fixture is inert — one leg wrote no manifest: drain={drain:?} leg={leg:?}"
@@ -6280,22 +5358,6 @@ fn both_legs_of_an_initial_snapshot_export_claim_one_source_identity() {
     );
 }
 
-// A CDC destination carrying a `{date}` template must be resolved at WRITE time
-// the same way `rivet validate` resolves it at READ time.
-//
-// The batch path never had this bug and that is precisely why it hid: every
-// batch runner writes to `plan.destination`, which `plan::build` expands while
-// building the plan. `job.rs` returns into `cdc_job::run_cdc_export` BEFORE
-// `build_plan`, so CDC had no plan and no expansion — `create_destination` got
-// the RAW config and made a directory named, literally, `{date}`, while
-// validate/load resolved the template to today's date and reported an empty
-// destination over a perfectly captured stream.
-//
-// The assertion is deliberately two-sided. "Rows landed somewhere" is not the
-// property (they always did); the property is that they landed where the reader
-// looks AND that the literal-template directory does not exist. A one-sided
-// check passes against the bug — the pre-fix run also produces readable parquet,
-// just at an address nothing else in rivet ever visits.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_destination_placeholders_resolve_like_the_batch_path() {
@@ -6315,13 +5377,6 @@ fn roast_pg_cdc_destination_placeholders_resolve_like_the_batch_path() {
         &[&slot],
     )
     .unwrap();
-    // Drop the slot even if an assertion below panics. The file's other tests
-    // use a TRAILING `pg_drop_replication_slot`, which leaks whenever the test
-    // fails before reaching it — and a leaked logical slot is not inert: it
-    // pins WAL and counts against `max_replication_slots` (32 here). Measured
-    // 2026-08-05: this test alone left 25 of 32 slots held after a day of runs,
-    // and the PG CDC tests then began failing in the parallel suite with
-    // symptoms that looked like anything but slot exhaustion.
     struct SlotGuard(String);
     impl Drop for SlotGuard {
         fn drop(&mut self) {
@@ -6341,7 +5396,6 @@ fn roast_pg_cdc_destination_placeholders_resolve_like_the_batch_path() {
 
     let base = d.path().join("out");
     std::fs::create_dir_all(&base).unwrap();
-    // The config carries the TEMPLATE, exactly as an operator would write it.
     Rig::pg_cdc(&tbl, &slot)
         .dest_path(base.join("{date}"))
         .run_ok();
@@ -6349,12 +5403,6 @@ fn roast_pg_cdc_destination_placeholders_resolve_like_the_batch_path() {
     let literal = base.join("{date}");
     let resolved = base.join(chrono::Utc::now().format("%Y-%m-%d").to_string());
 
-    // The oracle is WHERE THE PARQUET IS, never whether a directory exists: the
-    // rig itself `create_dir_all`s the configured destination before launching
-    // (`rig.rs`), so the literal `{date}` directory is present either way and an
-    // existence check would grade the harness instead of the product. This cost
-    // one RED run to learn — the first draft asserted `!literal.exists()` and
-    // failed against the FIXED binary.
     let parquet_in = |p: &std::path::Path| -> usize {
         std::fs::read_dir(p)
             .map(|rd| {
@@ -6381,68 +5429,20 @@ fn roast_pg_cdc_destination_placeholders_resolve_like_the_batch_path() {
     );
 }
 
-// The two :3306 binlog-compression tests both flip
-// `SET GLOBAL binlog_transaction_compression` on the shared batch server, so
-// running them in parallel races (one turns it OFF mid-way through the other's
-// ON window). They serialize via `quiet_window_guard()` — the single shared-
-// — a static Mutex sat here first, and it serialized NOTHING under the
-// canonical nextest runner (per-test processes; r3 bughunt find).
-
 /// The binlog-compression guard, live.
-///
-/// `binlog_transaction_compression` (MySQL 8.0.20+) packs a transaction's
-/// `TableMap`/`Rows`/`Xid` into one `Transaction_payload_event`. This reader
-/// matches those event types individually and ignores everything else, so with
-/// compression ON it captures NOTHING and says nothing — measured on 8.0.46:
-/// anchor, insert two rows, resume ⇒ 0 of 2 events, empty stderr. That is the
-/// worst shape a CDC bug can take, and the operator's own instinct (shrink the
-/// binlog) is what triggers it.
-///
-/// Until the payload is expanded, the run must REFUSE.
-///
-/// RUNS AGAINST THE BATCH MYSQL (:3306), NOT THE CDC ONE, and that is the point
-/// rather than an accident. The setting is a server GLOBAL, so while this test
-/// holds it ON every concurrent reader of that server's binlog is refused too —
-/// and `cargo test` runs the file's 30-odd CDC tests in parallel against :3307.
-/// The first CI run proved it: `cdc_update_and_delete_carry_full_types` failed
-/// with THIS guard's message, 553 passed / 1 failed, and nothing was wrong with
-/// either test. The Drop guard restores the setting but cannot help a test that
-/// is already mid-run.
-///
-/// :3306 has `log_bin=ON` and `binlog_format=ROW` (MySQL 8 defaults) — so the
-/// guard's subject exists — while nothing in the suite reads its binlog
-/// (`Rig::mysql_cdc` is wired to `MYSQL_CDC_URL`; only `mysql_batch` uses this
-/// one, and a batch SELECT does not care how the binlog is packed). Isolating
-/// the fixture removes the shared mutable state; serialising 60 call sites
-/// behind a lock would only coordinate it, and slow every CDC test to do so.
-///
-/// It connects as ROOT, unlike every other test here, because the batch stand
-/// grants `rivet` only `ALL ON rivet.*` — `dev/mysql/init.sql` hands out no
-/// REPLICATION SLAVE / REPLICATION CLIENT, so a CDC open as `rivet` dies with
-/// ERROR 1227 BEFORE it can reach the compression guard, and the test would
-/// assert on the wrong refusal. (A locally-hand-granted container hides this:
-/// the first CI run after the move failed on exactly that gap. Widening the
-/// stand's grants would be the other fix, and the wrong one — it hands every
-/// batch test a privilege it must not need.) Root is what the compose file
-/// declares, so it exists everywhere the suite runs.
-///
-/// The restore guard stays anyway: a panic here must not leave a server global
-/// flipped for whatever runs next.
 #[test]
 #[ignore = "live+exclusive: flips a :3306 GLOBAL every new session inherits — set RIVET_TEST_EXCLUSIVE=1"]
 fn mysql_cdc_refuses_a_compressed_binlog_instead_of_capturing_nothing() {
     if binlog_compression_needs_the_stand() {
         return;
     }
-    let _serial = quiet_window_guard(); // :3306 GLOBAL flip — same lock as governor
+    let _serial = quiet_window_guard();
     let root_url = MYSQL_URL.replace("rivet:rivet@", "root:rivet@");
-    let _meta = RowMetadata::set(&root_url, "FULL"); // :3306 runs MySQL's MINIMAL default
+    let _meta = RowMetadata::set(&root_url, "FULL");
     let mut admin = match mysql::Conn::new(mysql::Opts::from_url(&root_url).unwrap()) {
         Ok(c) => c,
         Err(e) => panic!("cdc-profile MySQL admin connection: {e}"),
     };
-    // Pre-8.0.20 servers have no such variable — the guard is a no-op there and
-    // so is this test. Skip rather than fail: the engine cannot have the bug.
     let supported: Option<String> = admin
         .query_first("SELECT @@global.binlog_transaction_compression")
         .ok()
@@ -6466,7 +5466,6 @@ fn mysql_cdc_refuses_a_compressed_binlog_instead_of_capturing_nothing() {
     let _restore = CompressionGuard(root_url.clone());
 
     let tbl = unique_name("cdc_compressed");
-    // Everything in this test talks to :3306 — the isolated server, see above.
     let batch_conn =
         || mysql::Conn::new(mysql::Opts::from_url(MYSQL_URL).unwrap()).expect("batch mysql");
     let mut c = batch_conn();
@@ -6488,8 +5487,6 @@ fn mysql_cdc_refuses_a_compressed_binlog_instead_of_capturing_nothing() {
     let ckpt = d.path().join("cdc.ckpt");
     std::fs::create_dir_all(&out).unwrap();
 
-    // `cdc_config` (the file's shared helper) points at :3307; every run here
-    // must go to the isolated :3306 instead, so the config is built locally.
     let cfg_into = |dest: &std::path::Path| {
         Rig::mysql_cdc(&tbl)
             .source_url(&root_url)
@@ -6497,8 +5494,6 @@ fn mysql_cdc_refuses_a_compressed_binlog_instead_of_capturing_nothing() {
             .dest_path(dest.to_path_buf())
             .config_in(d.path())
     };
-    // The refusal must come from the OPEN, before any capture claim — so it
-    // fires on the anchoring run, not only once changes exist.
     let cfg = cfg_into(&out);
     let out_text = {
         let o = run_rivet(&["run", "--config", cfg.to_str().unwrap()]);
@@ -6518,10 +5513,6 @@ fn mysql_cdc_refuses_a_compressed_binlog_instead_of_capturing_nothing() {
         "the refusal must name the setting so it is actionable:\n{out_text}"
     );
 
-    // And with the setting off again the SAME table captures normally —
-    // proving the guard is the only thing that blocked it, not the fixture.
-    // A dir per run, like every other CDC test here: two runs into one prefix
-    // is the clobber scenario, not the capture assertion.
     drop(_restore);
     admin
         .query_drop("SET GLOBAL binlog_transaction_compression = OFF")
@@ -6530,14 +5521,7 @@ fn mysql_cdc_refuses_a_compressed_binlog_instead_of_capturing_nothing() {
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out1).unwrap();
     std::fs::create_dir_all(&out2).unwrap();
-    run_rivet_ok(&cfg_into(&out1)); // anchors
-    // A FRESH connection for the write. `binlog_transaction_compression` is
-    // captured into the SESSION at connect time, so `c` — opened while the
-    // global was ON — still writes compressed transactions no matter what the
-    // global says now. (The first version of this test used `c` here and
-    // captured 0 rows: an accidental second demonstration of the very bug the
-    // guard exists for, and the same session-state trap the timezone test
-    // above documents.)
+    run_rivet_ok(&cfg_into(&out1));
     let mut fresh = batch_conn();
     fresh
         .query_drop(format!("INSERT INTO {tbl} VALUES (1, 10), (2, 20)"))
@@ -6550,7 +5534,7 @@ fn mysql_cdc_refuses_a_compressed_binlog_instead_of_capturing_nothing() {
     );
 }
 
-/// True (and a skip is recorded) unless the stand is ours alone: a session opened while the global is ON keeps writing compressed transactions.
+/// True (and a skip is recorded) unless the stand is ours alone.
 fn binlog_compression_needs_the_stand() -> bool {
     let shared = std::env::var("RIVET_TEST_EXCLUSIVE").is_err();
     if shared {
@@ -6562,27 +5546,16 @@ fn binlog_compression_needs_the_stand() -> bool {
     shared
 }
 
-/// #200-2: the STREAM-time sibling of the open-time guard above. Compression can
-/// be turned on AFTER a run has opened (the open-time `refuse_compressed_binlog`
-/// saw it OFF and passed), leaving a `Transaction_payload_event` in the binlog
-/// AHEAD of the checkpoint. The reader cannot expand it, and before the fix the
-/// `_ => {}` arm in `fill()` SILENTLY skipped it — the resume captured NOTHING for
-/// that transaction while the checkpoint advanced past it, an at-least-once break
-/// that every count/manifest check would call success.
-///
-/// The sequence forces exactly that: anchor with compression OFF (open-time guard
-/// passes), write a compressed transaction, then RESUME with compression still
-/// OFF at open (guard passes again) so the compressed span reaches `fill()`. The
-/// resume must FAIL loudly, not report a clean zero-capture.
+/// #200-2: the STREAM-time sibling of the open-time guard above.
 #[test]
 #[ignore = "live+exclusive: flips a :3306 GLOBAL every new session inherits — set RIVET_TEST_EXCLUSIVE=1"]
 fn mysql_cdc_compressed_payload_in_stream_refuses_not_skips() {
     if binlog_compression_needs_the_stand() {
         return;
     }
-    let _serial = quiet_window_guard(); // :3306 GLOBAL flip — same lock as governor
+    let _serial = quiet_window_guard();
     let root_url = MYSQL_URL.replace("rivet:rivet@", "root:rivet@");
-    let _meta = RowMetadata::set(&root_url, "FULL"); // :3306 runs MySQL's MINIMAL default
+    let _meta = RowMetadata::set(&root_url, "FULL");
     let mut admin = match mysql::Conn::new(mysql::Opts::from_url(&root_url).unwrap()) {
         Ok(c) => c,
         Err(e) => panic!("cdc-profile MySQL admin connection: {e}"),
@@ -6605,7 +5578,6 @@ fn mysql_cdc_compressed_payload_in_stream_refuses_not_skips() {
         }
     }
     let _restore = CompressionGuard(root_url.clone());
-    // Start from OFF so the anchor run's OPEN-time guard passes.
     admin
         .query_drop("SET GLOBAL binlog_transaction_compression = OFF")
         .unwrap();
@@ -6635,16 +5607,10 @@ fn mysql_cdc_compressed_payload_in_stream_refuses_not_skips() {
             .config_in(d.path())
     };
 
-    // 1) Anchor with compression OFF — pins the checkpoint at the current coords,
-    //    open-time guard passes cleanly.
     let out1 = d.path().join("out1");
     std::fs::create_dir_all(&out1).unwrap();
     run_rivet_ok(&cfg_into(&out1));
 
-    // 2) Turn compression ON, then write a sizeable, highly-compressible
-    //    transaction from a FRESH session (the session captures the global at
-    //    connect) so MySQL packs it into a Transaction_payload_event in the binlog
-    //    AHEAD of the checkpoint.
     admin
         .query_drop("SET GLOBAL binlog_transaction_compression = ON")
         .unwrap();
@@ -6659,8 +5625,6 @@ fn mysql_cdc_compressed_payload_in_stream_refuses_not_skips() {
     }
     writer.query_drop("COMMIT").unwrap();
 
-    // 3) Turn compression OFF so the RESUME's open-time guard passes too — the
-    //    only thing that can catch the compressed span now is the stream-time arm.
     admin
         .query_drop("SET GLOBAL binlog_transaction_compression = OFF")
         .unwrap();
@@ -6682,33 +5646,13 @@ fn mysql_cdc_compressed_payload_in_stream_refuses_not_skips() {
             && text.contains("binlog_transaction_compression"),
         "the stream-time refusal must name the event + the setting so it is actionable:\n{text}"
     );
-    // The compressed rows were NOT captured (correct — refused, not skipped): the
-    // checkpoint did not advance past them, so once compression is truly off they
-    // re-read. The point of #200-2 is that rivet said so loudly instead of
-    // shipping a _SUCCESS over a hole.
     assert!(
         !out2.join("_SUCCESS").exists(),
         "a refused resume must not write _SUCCESS"
     );
 }
 
-/// `rivet cdc --output --rollover N`: two invariants that had ZERO coverage on
-/// this path, and both are the shapes that have already lost data here.
-///
-/// 1. A part NEVER splits a transaction. `rollover` is a soft target — the sink
-///    rolls at a commit boundary — so a 3-row transaction under `--rollover 2`
-///    must land as ONE part, not two. Splitting it is what makes a crash between
-///    the two parts leave half a transaction durable.
-/// 2. Two consecutive runs into the SAME `--output` directory must not clobber
-///    each other. This is the class that cost real rows: run N+1's first part
-///    overwrote run N's `cdc-000000.parquet` AFTER the position had advanced past
-///    those changes, so the data was gone from the source log and the destination
-///    both. The config path was fixed and regression-tested; the CLI path — which
-///    takes `--output` as a bare directory and is the most natural way to point
-///    two scheduled runs at one place — was never tested at all.
-///
-/// The oracle is DuckDB over the directory, never rivet's own manifest: the
-/// manifest is exactly what a clobber leaves looking consistent.
+/// `rivet cdc --output --rollover N`.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn roast_mysql_cdc_cli_rollover_keeps_transactions_whole_and_two_runs_do_not_clobber() {
@@ -6727,7 +5671,7 @@ fn roast_mysql_cdc_cli_rollover_keeps_transactions_whole_and_two_runs_do_not_clo
     std::fs::create_dir_all(&out).unwrap();
     Rig::mysql_cdc(&tbl)
         .checkpoint_path(ckpt.clone())
-        .pin_binlog_here(); // anchor at NOW
+        .pin_binlog_here();
 
     let ckpt_s = ckpt.to_str().unwrap().to_string();
     let out_s = out.to_str().unwrap().to_string();
@@ -6754,7 +5698,6 @@ fn roast_mysql_cdc_cli_rollover_keeps_transactions_whole_and_two_runs_do_not_clo
         )
     };
 
-    // Run 1: ONE transaction of three rows, under a rollover of two.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,1),(2,2),(3,3)"))
         .expect("tx1");
     let r1 = cdc_run();
@@ -6776,7 +5719,6 @@ fn roast_mysql_cdc_cli_rollover_keeps_transactions_whole_and_two_runs_do_not_clo
          half a transaction durable"
     );
 
-    // Run 2: a second transaction into the SAME --output directory.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (4,4),(5,5),(6,6)"))
         .expect("tx2");
     let r2 = cdc_run();
@@ -6786,10 +5728,6 @@ fn roast_mysql_cdc_cli_rollover_keeps_transactions_whole_and_two_runs_do_not_clo
         String::from_utf8_lossy(&r2.stderr)
     );
 
-    // The id SET separates the two failures a file COUNT conflates. An inert
-    // fixture (run 2 captured nothing) leaves {1,2,3}; a clobber leaves {4,5,6},
-    // because run 2 really did capture and then wrote over run 1's part. Counting
-    // files reports both as "no new part" and blames the fixture for the product.
     let ids = duckdb_dir_parquet_id_set(&out);
     let _ = parts_after_1;
     assert!(
@@ -6807,19 +5745,6 @@ fn roast_mysql_cdc_cli_rollover_keeps_transactions_whole_and_two_runs_do_not_clo
 }
 
 /// `rivet cdc --output --format csv` — the WIRING, not the fidelity.
-///
-/// Scope, stated because it decides what this test is worth: CSV value rendering
-/// and RFC-4180 escaping are NOT re-tested here. Both sinks call the same
-/// `fmt.create_writer` (`pipeline/sink/mod.rs` and `source/cdc/sink.rs`), so the
-/// text-writer class is a shared seam the `csv-fidelity-matrix` already pins on
-/// the batch path; asserting it again here would grade the same code twice and
-/// read like new coverage.
-///
-/// What is NOT shared is whether this combination runs at all. The CDC sink hands
-/// the writer a schema the batch path never produces — the source columns PLUS
-/// `__op`/`__pos`/`__seq` — and CSV cannot serialize every Arrow type (rivet has
-/// `csv_serializable` in preflight for exactly that reason). `rivet cdc --output
-/// --format csv` is documented, and had zero tests: nobody had ever run it.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn mysql_cdc_cli_csv_output_is_wired_and_readable() {
@@ -6842,10 +5767,6 @@ fn mysql_cdc_cli_csv_output_is_wired_and_readable() {
 
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,1),(2,2),(3,3)"))
         .expect("seed");
-    // Explicit unique replica id: two parallel `rivet cdc` on the shared :3307
-    // with the DEFAULT server-id collide (COM_REGISTER_SLAVE) — a pre-existing
-    // CLI-path flake the r5 parallel run surfaced (the rig config path already
-    // routes through server_id_for; the CLI path had no id at all).
     let sid = server_id_for(&tbl).to_string();
     let r = run_rivet_env(
         &[
@@ -6872,15 +5793,11 @@ fn mysql_cdc_cli_csv_output_is_wired_and_readable() {
         String::from_utf8_lossy(&r.stderr)
     );
 
-    // The format really is CSV, not parquet under a different name: a wiring that
-    // maps "csv" to the wrong FormatType writes parquet and every row-count check
-    // still passes.
     assert!(
         !files_with_extension(&out, "csv").is_empty(),
         "no .csv part written; directory holds {} parquet file(s)",
         files_with_extension(&out, "parquet").len()
     );
-    // And it is readable by a reader that is not rivet.
     assert_eq!(
         duckdb_dir_csv_id_set(&out),
         (1..=3).collect::<std::collections::BTreeSet<i64>>(),
@@ -6888,27 +5805,7 @@ fn mysql_cdc_cli_csv_output_is_wired_and_readable() {
     );
 }
 
-/// `rivet cdc --stream` and `--server-id`: the last two CLI flags with zero test
-/// references anywhere in the tree.
-///
-/// `--stream` is not cosmetic — it flips `until_current` OFF, i.e. selects
-/// `DrainMode::Continuous`, the one mode with no open-time bound to stop it. The
-/// risk it carries is the opposite of the bounded run's: a continuous drain that
-/// never terminates wedges a scheduler slot forever. Bounding it with
-/// `--max-events` is the only way to assert on it at all, and that pairing is
-/// itself the documented way to run a capped stream.
-///
-/// `--server-id` is MySQL's replica identity on the binlog connection. HONEST
-/// LIMIT, stated because the test name would otherwise over-promise: this pins
-/// only that a NON-DEFAULT value (919191, which no default produces) is accepted
-/// and the run works with it — a parse/validation regression. It does NOT prove
-/// the value reaches the dump request, and that is a measured conclusion rather
-/// than an untried one: with a live `--stream` connected, MySQL showed the id
-/// NOWHERE — `SHOW REPLICAS` is empty and `information_schema.PROCESSLIST` has no
-/// `Binlog Dump` row, because the client sends the id in COM_BINLOG_DUMP without
-/// registering via COM_REGISTER_SLAVE. There is no server-side view to assert
-/// against; proving it would take a protocol-level capture, which is a different
-/// test than this one.
+/// `rivet cdc --stream` and `--server-id`.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn mysql_cdc_cli_stream_with_a_cap_terminates_and_accepts_a_server_id() {
@@ -6925,16 +5822,11 @@ fn mysql_cdc_cli_stream_with_a_cap_terminates_and_accepts_a_server_id() {
     Rig::mysql_cdc(&tbl)
         .checkpoint_path(ckpt.clone())
         .pin_binlog_here();
-    // Two transactions, so the soft cap has a boundary to stop at that is NOT the
-    // end of the stream — the same activation threshold the bounded-cap test needs.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,1),(2,2),(3,3)"))
         .expect("tx1");
     c.query_drop(format!("INSERT INTO {tbl} VALUES (4,4),(5,5),(6,6)"))
         .expect("tx2");
 
-    // A NON-DEFAULT server id (the default is 4271): if the flag were dropped on
-    // the floor this run would still pass, so the value is deliberately one no
-    // default would produce, and the run must succeed WITH it.
     let out = run_rivet_args_bounded(
         &[
             "cdc",
@@ -6952,24 +5844,18 @@ fn mysql_cdc_cli_stream_with_a_cap_terminates_and_accepts_a_server_id() {
         ],
         std::time::Duration::from_secs(60),
     );
-    // `None` == the watchdog had to kill it. THAT is the assertion: a continuous
-    // drain with a cap must end itself, not be ended.
     let stdout = out.expect(
         "`--stream --max-events` must TERMINATE on its own — a continuous drain that only \
          stops when the watchdog kills it wedges every scheduler slot it runs in",
     );
 
     let ids = ndjson_after_ids(&stdout, &tbl);
-    // The cap is SOFT: it stops at the first commit boundary past N, so tx1 lands
-    // whole and tx2 does not. Asserting the exact set pins both halves — that it
-    // did not cut tx1 at 2, and that it did not run the stream to its end.
     assert_eq!(
         ids,
         (1..=3).collect::<std::collections::BTreeSet<i64>>(),
         "a cap of 2 must stop at tx1's boundary: {{1,2}} means it cut the transaction, \
          {{1..=6}} means the cap stopped nothing"
     );
-    // The capped run deferred tx2: a bounded run of the same stream owes it, and the rig oracle grades the pair.
     run_rivet_args_bounded(
         &[
             "cdc",
@@ -6986,15 +5872,6 @@ fn mysql_cdc_cli_stream_with_a_cap_terminates_and_accepts_a_server_id() {
     )
     .expect("the follow-up bounded run terminates");
 
-    // And the half that actually proves `--stream` was HONOURED. Everything above
-    // holds for a bounded run too — with a cap of 2 both modes stop at the same
-    // boundary — so on its own it would pass with the flag dropped on the floor.
-    //
-    // The distinguishing property is termination: `--stream` selects
-    // `DrainMode::Continuous`, which on MySQL is a BLOCKING binlog dump with no
-    // open-time bound, so with no cap it must NOT end by itself. The default
-    // bounded run does (its twin: roast_pg_cdc_ndjson_until_current_terminates).
-    // `None` here means the watchdog had to kill it — which is the pass.
     let ckpt2 = d.path().join("ck2");
     Rig::mysql_cdc(&tbl)
         .checkpoint_path(ckpt2.clone())
@@ -7009,13 +5886,6 @@ fn mysql_cdc_cli_stream_with_a_cap_terminates_and_accepts_a_server_id() {
             "--checkpoint",
             ckpt2.to_str().unwrap(),
             "--stream",
-            // A DISTINCT non-default id here too. Omitting it took the default
-            // (4271), which every other concurrent `rivet cdc` also takes, and
-            // MySQL kicks the older connection off when two replicas claim one
-            // server_id — the run then exits non-zero and this reads as a
-            // termination bug. Caught by the full suite at --test-threads=4;
-            // green in isolation, which is exactly how a shared-identity fixture
-            // hides.
             "--server-id",
             "919192",
         ],
@@ -7029,7 +5899,7 @@ fn mysql_cdc_cli_stream_with_a_cap_terminates_and_accepts_a_server_id() {
     );
 }
 
-/// The PostgreSQL `--output` leg of the capped-run cell below: run 2 owes what run 1's cap left behind.
+/// The PostgreSQL `--output` leg of the capped-run cell below.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run() {
@@ -7064,7 +5934,7 @@ fn pg_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run() {
     run(&[]);
 }
 
-/// A `--max-events` run that stops at its cap owes the rest to the stream's next run: the rig oracle grades run 2 on everything since run 1's base.
+/// A `--max-events` run that stops at its cap owes the rest to the stream's next run.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn mysql_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run() {
@@ -7095,19 +5965,7 @@ fn mysql_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run() {
     assert_eq!(rest, (4..=6).collect(), "the next run delivers tx2");
 }
 
-/// `rivet cdc --source-env` / `--source-file`, and the ArgGroup that keeps them
-/// mutually exclusive.
-///
-/// These are the CREDENTIAL-SAFETY path: `--source` puts the URL (password and
-/// all) in `ps` output, and rivet warns about the same shape in a config file.
-/// The only reference to `--source-env` anywhere in the tree was for `rivet
-/// init`, so the CDC subcommand's own resolution had never been exercised — and a
-/// user whose `--source-env` silently failed would go straight back to the inline
-/// form the warning exists to discourage.
-///
-/// The oracle is the SAME capture through all three forms: whatever the flag
-/// does, it must resolve to one URL. Asserting only "exit 0" would pass on a
-/// resolver that connected to something else entirely.
+/// `rivet cdc --source-env` / `--source-file`, and the ArgGroup that keeps them mutually exclusive.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn mysql_cdc_cli_resolves_the_source_from_env_and_file_alike() {
@@ -7130,7 +5988,6 @@ fn mysql_cdc_cli_resolves_the_source_from_env_and_file_alike() {
         Rig::mysql_cdc(&tbl)
             .checkpoint_path(ckpt.clone())
             .pin_binlog_here();
-        // Each form captures the SAME change, written after its own anchor.
         conn()
             .query_drop(format!("INSERT INTO {tbl} VALUES (7,7)"))
             .expect("seed");
@@ -7166,8 +6023,6 @@ fn mysql_cdc_cli_resolves_the_source_from_env_and_file_alike() {
         "`--source-file` must resolve to the same source as `--source`"
     );
 
-    // The ArgGroup: exactly one form, never two. Without it a config that sets
-    // both silently picks a winner, and which one is invisible to the operator.
     let both = run_rivet_env(
         &[
             "cdc",
@@ -7187,37 +6042,11 @@ fn mysql_cdc_cli_resolves_the_source_from_env_and_file_alike() {
 }
 
 /// A PARTIAL_JSON binlog must be REFUSED, not silently skipped.
-///
-/// `binlog_row_value_options=PARTIAL_JSON` is a legal MySQL 8 setting that logs a JSON
-/// diff instead of the row image. The reader cannot decode that, and the arm that met
-/// it was `_ => return Ok(true)` — the rows vanished while the surrounding transaction
-/// committed and the checkpoint advanced past them. Unrecoverable, and reported as
-/// `status: success`.
-///
-/// The loss is a SUBSET, which is what makes it the dangerous half: transactions that
-/// touch no JSON column are captured normally, so counts and sums keep reconciling.
-///
-/// Non-default-state test (the process rules): the default is exactly where the bug hides, so
-/// the setting is flipped and restored by a guard rather than assumed.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn mysql_cdc_refuses_a_partial_json_binlog_instead_of_dropping_the_update() {
-    // PARTIAL_JSON is set on the WRITING SESSION, never the server global — the
-    // binlog record's shape is decided by whoever wrote it. An earlier version of
-    // this test flipped `SET GLOBAL` and took `quiet_window_guard()` to serialize;
-    // that was the wrong shape twice over. The guard only excludes tests that TAKE
-    // it, and `mysql_cdc_cli_stream_with_a_cap_terminates_and_accepts_a_server_id`
-    // does not — so the global window was still visible to it and rivet, correctly,
-    // refused its run too (measured on #281: it failed while 633 others passed,
-    // both before and after the guard was added). Session scope removes the shared
-    // state entirely: nothing to serialize, nothing to restore, no window for a
-    // parallel test to fall into. Verified on the stand — the UPDATE below reaches
-    // the partial arm while `@@GLOBAL.binlog_row_value_options` stays empty.
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("cdc_pj");
-    // `SET SESSION binlog_row_value_options` needs SESSION_VARIABLES_ADMIN, which
-    // the `rivet` test user does not hold — hence root for the WRITER only. The
-    // capture itself still runs as `rivet`, exactly like every other test here.
     let root_url = MYSQL_CDC_URL.replace("rivet:rivet@", "root:rivet@");
     let mut writer = mysql::Conn::new(mysql::Opts::from_url(&root_url).unwrap()).unwrap();
     use mysql::prelude::Queryable as _;
@@ -7232,9 +6061,6 @@ fn mysql_cdc_refuses_a_partial_json_binlog_instead_of_dropping_the_update() {
         .query_drop(format!("CREATE TABLE {tbl} (id INT PRIMARY KEY, doc JSON)"))
         .unwrap();
     let _guard = Table(tbl.clone());
-    // The document must be big enough that MySQL logs a DIFF rather than falling back
-    // to a full image — a short JSON value is rewritten whole and never reaches the
-    // partial arm, which would make this test pass for the wrong reason.
     writer
         .query_drop(format!(
             "INSERT INTO {tbl} VALUES (1, JSON_OBJECT('a', 1, 'pad', REPEAT('x', 400)))"
@@ -7247,10 +6073,8 @@ fn mysql_cdc_refuses_a_partial_json_binlog_instead_of_dropping_the_update() {
             .checkpoint_path(ck.to_path_buf())
             .dest_path(d.path().join("out"))
     };
-    // Anchor the stream before provoking the diff, so the update is inside the window.
     rig().run_ok();
 
-    // The diff-logging session writes the UPDATE — this is the whole fixture.
     writer
         .query_drop(format!(
             "UPDATE {tbl} SET doc = JSON_SET(doc, '$.a', 2) WHERE id = 1"
@@ -7275,19 +6099,6 @@ fn mysql_cdc_refuses_a_partial_json_binlog_instead_of_dropping_the_update() {
          the data is already gone has no reason to fix the source and re-run: {msg}"
     );
 
-    // ── and the refusal must be TABLE-ADDRESSED ────────────────────────────────
-    //
-    // The binlog is ONE stream per server, so the undecodable event above sits in
-    // the log every OTHER export reads too. Refusing without asking whose event it
-    // is turns one PARTIAL_JSON table into a server-wide outage — measured on #281,
-    // where this fixture failed `mysql_cdc_cli_stream_with_a_cap_terminates_and_
-    // accepts_a_server_id` with this exact error, on a table it does not capture.
-    //
-    // That failure was a RACE (the neighbour only sees it when its window covers
-    // the event), which is why it is pinned HERE instead: this export is anchored
-    // BEFORE the partial update, so the event is inside its window by construction
-    // and the assertion cannot pass by timing. RED against `if true` in place of
-    // the `undecodable_event_is_ours` call.
     let other = unique_name("cdc_pj_other");
     writer
         .query_drop(format!("DROP TABLE IF EXISTS {other}"))
@@ -7302,7 +6113,7 @@ fn mysql_cdc_refuses_a_partial_json_binlog_instead_of_dropping_the_update() {
             .checkpoint_path(other_ck.to_path_buf())
             .dest_path(d.path().join("out_other"))
     };
-    other_rig().run_ok(); // anchor BEFORE the partial update lands
+    other_rig().run_ok();
 
     writer
         .query_drop(format!(
@@ -7327,9 +6138,6 @@ fn mysql_cdc_refuses_a_partial_json_binlog_instead_of_dropping_the_update() {
 }
 
 /// Sets `binlog_row_metadata` on the server at `root_url` and restores the prior value on drop.
-///
-/// Used only on the isolated :3306 server under `quiet_window_guard`: on :3307 a
-/// MINIMAL window would refuse every concurrent MySQL CDC test.
 pub(crate) struct RowMetadata(String, String);
 
 impl RowMetadata {
@@ -7397,9 +6205,7 @@ fn assert_nothing_delivered(rig: &Rig) {
     );
 }
 
-/// docs/reference/compatibility.md: a `mode: cdc` run sends no session-level `SET` either. Through the
-/// transaction-mode pooler the capture is refused (the server behind it runs `wal_level = replica`), twice,
-/// and each refused run leaves every setting of the pooled connection, and where it was set, as it found it.
+/// docs/reference/compatibility.md: a `mode: cdc` run sends no session-level `SET` either.
 #[test]
 #[ignore = "live: requires docker compose --profile pool up -d pgbouncer (transaction mode, pool_size=1)"]
 fn a_cdc_run_refused_through_a_transaction_pooler_leaves_its_session_as_it_was_postgres() {
@@ -7438,7 +6244,7 @@ fn a_cdc_run_refused_through_a_transaction_pooler_leaves_its_session_as_it_was_p
 #[test]
 #[ignore = "live: requires docker compose up -d mysql (:3306, log_bin=ON)"]
 fn mysql_cdc_refuses_minimal_row_metadata_at_open() {
-    let _serial = quiet_window_guard(); // :3306 GLOBAL flip — same lock as governor
+    let _serial = quiet_window_guard();
     let (root_url, mut c, t) = row_metadata_fixture("rivet_cdc_min");
     let _meta = RowMetadata::set(&root_url, "MINIMAL");
     let d = tempfile::tempdir().unwrap();
@@ -7480,7 +6286,6 @@ fn mysql_cdc_refuses_minimal_row_metadata_at_open() {
     );
     assert_nothing_delivered(&rig);
 
-    // `rivet doctor` reads the same server and must FAIL the same setting.
     let doc = run_rivet(&[
         "doctor",
         "--config",
@@ -7507,7 +6312,7 @@ fn mysql_cdc_refuses_minimal_row_metadata_at_open() {
 #[test]
 #[ignore = "live: requires docker compose up -d mysql (:3306, log_bin=ON)"]
 fn mysql_cdc_initial_snapshot_is_refused_before_any_write() {
-    let _serial = quiet_window_guard(); // :3306 GLOBAL flip — same lock as governor
+    let _serial = quiet_window_guard();
     let (root_url, mut c, t) = row_metadata_fixture("rivet_cdc_minsnap");
     let _meta = RowMetadata::set(&root_url, "MINIMAL");
     c.query_drop(format!("INSERT INTO {} VALUES (1,'AAA','BBB')", t.1))
@@ -7524,7 +6329,7 @@ fn mysql_cdc_initial_snapshot_is_refused_before_any_write() {
     assert_refused_before_any_write(&out, &ckpt);
 }
 
-/// A PostgreSQL routing refusal under `initial: snapshot` comes before the slot and the snapshot leg.
+/// A PostgreSQL routing refusal.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_initial_snapshot_is_refused_before_any_write() {
@@ -7598,42 +6403,7 @@ fn mysql_cdc_full_row_metadata_maps_a_reorder_by_name_and_stays_quiet() {
     assert!(!said.contains("binlog_row_metadata"), "{said}");
 }
 
-/// PostgreSQL crash between the checkpoint write and the slot ack — DOCUMENTED,
-/// not guarded, and the difference is the point.
-///
-/// This is the one CDC fault point with no PostgreSQL test, and the reason it had
-/// none turns out to be structural rather than an oversight. Three mutants were
-/// applied and this test stayed GREEN against all three:
-///
-///   1. `stream.ack` moved BEFORE the checkpoint write  — green
-///   2. `stream.ack` moved BEFORE the parts are flushed — green
-///   3. `ack` advancing the slot to `pg_current_wal_lsn()` instead of the last
-///      commit                                          — green
-///
-/// Why: the crash fires BEFORE run 1's first ack, so every ack-side mutant is
-/// unreachable in this fixture; and PostgreSQL's resume authority is the SLOT,
-/// which run 1 therefore never moved. The checkpoint file is consulted only as a
-/// boolean ("a prior run happened", `resume_expected` in cdc/mod.rs) and never as
-/// a position, so the file racing ahead of the slot has nothing to act on.
-/// Contrast SQL Server, where the checkpoint IS the only position and its ack is a
-/// no-op — which is why that engine's test of this hook is load-bearing and this
-/// one is not.
-///
-/// So the DELIVERY half of this test documents rather than guards — no reordering
-/// of the sink's steps can make it red, and that is a fact about PostgreSQL's
-/// design, not a weakness to paper over.
-///
-/// The RETENTION half is a real guard, and it is the half an operator cares about.
-/// A crash here PINS WAL on the slot — it must, or the un-acked span is lost — and
-/// the question is whether that is a transient or a leak. MEASURED: 2304 B pinned
-/// by the crash, 0 after the resume. Neutering `ack` (`advance_slot` -> `Ok(())`)
-/// leaves 2480 B pinned and this test goes RED, which is the mutant it grades.
-///
-/// That closes the crash-side of the slot-pinning class from the direction
-/// `roast_pg_cdc_empty_transaction_churn_must_not_pin_the_slot` does not cover:
-/// that one is about row-less spans starving the ack, this one is about a crash
-/// leaving the ack unrun. Both end at the same place — `confirmed_flush_lsn`
-/// frozen while WAL accumulates on an idle database.
+/// PostgreSQL crash between the checkpoint write and the slot ack.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
 fn roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot() {
@@ -7653,8 +6423,6 @@ fn roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot(
         &[&slot],
     )
     .unwrap();
-    // Separate transactions so several parts roll: the crash must land in the
-    // window, and a single transaction would give it only one chance.
     for g in 0..12 {
         c.execute(&format!("INSERT INTO {tbl} VALUES ({g}, {g})"), &[])
             .unwrap();
@@ -7677,13 +6445,6 @@ fn roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot(
          test asserting an ordinary two-run export"
     );
 
-    // The slot's OWN anchor, not its distance from `pg_current_wal_lsn()`. The first
-    // version measured that distance and failed in CI at 13 243 536 B where it read
-    // 0 locally: the E2E runner drives the whole live suite against one PostgreSQL,
-    // so unrelated WAL moves the reference point between the two reads and the
-    // "distance" grows for reasons that have nothing to do with this slot. Comparing
-    // the anchor to ITSELF is immune to that — the same unscoped-measurement class
-    // as counting rows without scoping to the run.
     let confirmed = |c: &mut postgres::Client| -> String {
         c.query_one(
             "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1",
@@ -7694,9 +6455,6 @@ fn roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot(
     };
     let after_crash = confirmed(&mut c);
 
-    // Run 2 into a FRESH destination, so what it delivers is its own doing: a
-    // shared dir would let run 1's durable parts satisfy the oracle even if the
-    // resume captured nothing (the CDC audit's headline finding).
     let out2 = d.path().join("out2");
     std::fs::create_dir_all(&out2).unwrap();
     let rig2 = Rig::pg_cdc(&tbl, &slot)
@@ -7704,8 +6462,6 @@ fn roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot(
         .dest_path(out2.clone());
     run_rivet_ok(&rig2.config_path());
 
-    // The union is what at-least-once promises. Overlap between the legs is fine
-    // and expected — the un-acked span is re-read by construction.
     let mut got: std::collections::BTreeSet<i64> =
         duckdb_dir_parquet_i64(&out, "id").into_iter().collect();
     got.extend(duckdb_dir_parquet_i64(&out2, "id"));
@@ -7727,11 +6483,6 @@ fn roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot(
         .map(|r| r.get(0))
         .expect("compare the two anchor positions");
 
-    // A crash here PINS WAL — it must, or the un-acked span is lost — so the
-    // question is transient or leak. What proves it is the slot MOVING, measured
-    // against where the crash left it: MEASURED 2304 B of WAL pinned by the crash
-    // and released on resume, and neutering `advance_slot` to `Ok(())` leaves the
-    // anchor exactly where it was (advanced = 0) and this goes RED.
     assert!(
         advanced > 0,
         "the resume must ADVANCE the slot past what it re-read: confirmed_flush_lsn \
@@ -7739,8 +6490,6 @@ fn roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot(
          the WAL the crash pinned is pinned for good, and an operator who \
          crash-loops fills the disk"
     );
-    // And the second leg must really have done work — otherwise the assertion above
-    // is satisfied by leg 1 alone and would pass against a resume that captured zero.
     assert!(
         !duckdb_dir_parquet_i64(&out2, "id").is_empty(),
         "the resume leg delivered NOTHING: the un-acked span was not re-read, so this \
@@ -7749,21 +6498,6 @@ fn roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot(
 }
 
 /// A slot nobody is draining pins WAL forever, and `run` used to say nothing.
-///
-/// `rivet doctor` has caught this since it was written — it FAILS past 1 GiB and
-/// names every offender. But doctor is a thing an operator runs when they already
-/// suspect something; the scheduler runs `rivet run` every cycle and it was silent.
-/// Measured on a dev stand: nine abandoned slots holding 1.5 GiB each, 1552 MiB of
-/// WAL on disk, and every CDC run over that instance exited 0 without a word.
-///
-/// Two warnings, and the split is the point. Our OWN slot being far behind is worth
-/// saying but the run does fix it — so the message says so, or an operator drops a
-/// slot that was about to be drained. A FOREIGN inactive slot is pinned until a
-/// human acts, which is the one that fills disks.
-///
-/// The threshold and the wording live in `preflight::cdc_health` and are shared with
-/// doctor, so the two cannot drift; this test is about the WIRING — that a run
-/// reaches them at all, and stays quiet when there is nothing to say.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
 fn roast_pg_cdc_run_warns_about_an_abandoned_slot_pinning_wal() {
@@ -7789,14 +6523,8 @@ fn roast_pg_cdc_run_warns_about_an_abandoned_slot_pinning_wal() {
     c.execute(&format!("INSERT INTO {tbl} VALUES (1)"), &[])
         .unwrap();
 
-    // Healthy first: two small slots, nothing to report. Asserted BEFORE the noisy
-    // case because a warning that fires unconditionally would satisfy the positive
-    // assertion below while being useless — and this is the half that catches it.
     let rig = Rig::pg_cdc(&tbl, &slot);
     let quiet = rig.run_ok_capture();
-    // The capture itself must have worked. A diagnostic test that never checks its
-    // run delivered anything would pass over a 0-row success — the conformance gate
-    // asks this of every live CDC test, and it caught this one.
     assert_eq!(
         duckdb_dir_parquet_i64(&rig.out_dir(), "id"),
         vec![1],
@@ -7809,10 +6537,6 @@ fn roast_pg_cdc_run_warns_about_an_abandoned_slot_pinning_wal() {
          scheduler cycle and stops being read. Got:\n{quiet}"
     );
 
-    // Now the loud case. Crossing a real GiB takes minutes of writes, so the bar
-    // moves instead (`RIVET_TEST_SLOT_WAL_BAR`, a test seam beside the threshold —
-    // deliberately not a config knob, since an operator lowering it would get a
-    // warning on every ordinary backlog and learn to ignore it).
     let loud = Rig::pg_cdc(&tbl, &slot).run_with_env("RIVET_TEST_SLOT_WAL_BAR", "1");
     let said = format!(
         "{}{}",
@@ -7841,23 +6565,6 @@ fn roast_pg_cdc_run_warns_about_an_abandoned_slot_pinning_wal() {
 }
 
 /// The TRUNCATE refusal must not throw away what it has already read.
-///
-/// The bail used to fire the instant the truncate line was scanned — before the
-/// window's earlier, fully-committed transactions reached the sink. The run failed
-/// with `rows: 0`, so nothing flushed and nothing acked, and the slot had not moved.
-/// The refusal's own remedy then finished the job: `pg_replication_slot_advance`
-/// past the truncate discards every one of them.
-///
-/// MEASURED before the fix: a two-table export where `public.tb` committed an
-/// insert BEFORE `public.ta` was truncated lost that insert for good when the
-/// remedy was followed verbatim — on a table that was never truncated, and which
-/// the message does not mention.
-///
-/// So the truncate now ENDS the window (`exhausted`) and the refusal is raised on
-/// the next fill, after the sink has flushed, checkpointed and acked. What this
-/// asserts is the property that makes the remedy honest: the run still FAILS, the
-/// preceding rows are DELIVERED, and the slot is left holding nothing but the
-/// truncate itself.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
 fn roast_pg_cdc_truncate_refusal_delivers_the_rows_it_already_read() {
@@ -7881,7 +6588,6 @@ fn roast_pg_cdc_truncate_refusal_delivers_the_rows_it_already_read() {
     )
     .unwrap();
 
-    // The bystander commits FIRST, in its own transaction, and is never truncated.
     c.execute(
         &format!("INSERT INTO {tb} VALUES (1,'B_MUST_SURVIVE')"),
         &[],
@@ -7904,11 +6610,6 @@ fn roast_pg_cdc_truncate_refusal_delivers_the_rows_it_already_read() {
          silent success. Got:\n{said}"
     );
 
-    // ...and the rows it had already read must be AT the destination, not discarded
-    // with the error.
-    // A multi-table export writes one sub-directory PER TABLE, so the bystander's
-    // rows are under `public.<tb>/` — reading the top level finds nothing and would
-    // make this assertion fail for a harness reason rather than a product one.
     let got: std::collections::BTreeSet<String> =
         duckdb_dir_parquet_distinct_strings(&rig.out_dir().join(format!("public.{tb}")), "v");
     assert!(
@@ -7918,7 +6619,6 @@ fn roast_pg_cdc_truncate_refusal_delivers_the_rows_it_already_read() {
          here is lost for good. Got: {got:?}"
     );
 
-    // The property that makes the remedy honest: nothing but the truncate is left.
     let remaining: Vec<String> = c
         .query(
             "SELECT data FROM pg_logical_slot_peek_changes($1, NULL, NULL)",
@@ -7928,13 +6628,6 @@ fn roast_pg_cdc_truncate_refusal_delivers_the_rows_it_already_read() {
         .iter()
         .map(|r| r.get::<_, String>(0))
         .filter(|d| !d.starts_with("BEGIN") && !d.starts_with("COMMIT"))
-        // A logical slot decodes the WHOLE DATABASE, not this test's tables, so a
-        // concurrent test's INSERTs land in it too. The first version asserted on
-        // the unfiltered list and went RED in a parallel suite while passing alone
-        // — 172 passed / 1 failed, its slot holding two other tests' tables — which
-        // is the alternating-test shape, not a product signal. Scope to the two
-        // relations this test owns; the PROPERTY under test (the remedy leaves
-        // nothing but the truncate of OUR tables behind) is unchanged.
         .filter(|d| d.contains(&ta) || d.contains(&tb))
         .collect();
     assert_eq!(
@@ -7950,12 +6643,10 @@ fn roast_pg_cdc_truncate_refusal_delivers_the_rows_it_already_read() {
 }
 
 /// A backlog written under MINIMAL is refused at its rows event once the server is FULL again.
-///
-/// The open-time probe sees FULL; only the TABLE_MAP on the wire says the event is nameless.
 #[test]
 #[ignore = "live: requires docker compose up -d mysql (:3306, log_bin=ON)"]
 fn mysql_cdc_refuses_a_minimal_backlog_after_the_server_is_switched_to_full() {
-    let _serial = quiet_window_guard(); // :3306 GLOBAL flip — same lock as governor
+    let _serial = quiet_window_guard();
     let (root_url, mut c, t) = row_metadata_fixture("rivet_cdc_wire");
     let table = t.1.clone();
     let _meta = RowMetadata::set(&root_url, "FULL");
@@ -8024,17 +6715,6 @@ fn mysql_cdc_refuses_a_minimal_backlog_after_the_server_is_switched_to_full() {
 }
 
 /// A folded-twin refusal must name BOTH relations — resolution-first.
-///
-/// Today the twin case (`table: MixedCase` with both `mixedcase` and `"MixedCase"`
-/// present) is refused by `classify_routing`'s fold arm, whose message names only
-/// the relation the probe resolved (`public.mixedcase`) and explains byte-exact
-/// routing. Correct, but the operator learns about ONE of the two relations — the
-/// other, the one the router would actually capture, is the surprise they need.
-///
-/// With resolution-first the case becomes an AMBIGUITY: the catalog query returns
-/// both the fold-resolved relation and the byte-exact one, `resolve_captured_table`
-/// refuses, and the message lists both plus the fix. This test is the contract for
-/// that wiring, written before it.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn roast_pg_cdc_folded_twin_refusal_names_both_relations() {
@@ -8067,7 +6747,7 @@ fn roast_pg_cdc_folded_twin_refusal_names_both_relations() {
     );
 }
 
-/// A second database `db` on the CDC server, readable by `rivet`, holding `table` as `(id INT PRIMARY KEY, v VARCHAR(20))` with `ids`; dropped on drop.
+/// A second database `db` on the CDC server, readable by `rivet`.
 struct OtherDb(String);
 
 impl OtherDb {
@@ -8138,10 +6818,7 @@ fn ids_read_all(dir: &std::path::Path) -> Vec<i64> {
     ids
 }
 
-/// #675: a bare name means the connection's own database when that database holds it. A
-/// second database holding a table of the same name, with other rows, neither stops the
-/// stream nor reaches it: the baseline and the changes are the connection database's rows.
-/// RED on 0.32.1: refused `RIVET_SOURCE_CDC_TABLE_UNRESOLVED` at the catalog check.
+/// #675: a bare name means the connection's own database when that database holds it.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn mysql_cdc_a_bare_name_captures_its_own_database_beside_a_same_named_table() {
@@ -8178,8 +6855,7 @@ fn mysql_cdc_a_bare_name_captures_its_own_database_beside_a_same_named_table() {
     );
 }
 
-/// #675, as `rivet init --mode cdc` writes it: the generated config, run as written beside a
-/// second database holding a same-named table with other rows, delivers its own database's rows.
+/// #675, as `rivet init --mode cdc` writes it.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn mysql_cdc_an_init_config_runs_as_written_beside_a_same_named_table() {
@@ -8242,9 +6918,7 @@ fn mysql_cdc_an_init_config_runs_as_written_beside_a_same_named_table() {
     assert_eq!(ids_read_all(&d.path().join("output")), vec![1, 2, 3]);
 }
 
-/// #675 across the upgrade: a stream the previous release anchored and drained with a bare name
-/// continues with this binary after a second database gains a same-named table: the same
-/// destination, no gap, no duplicate, no re-baseline, and none of the other database's rows.
+/// #675 across the upgrade.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc + RIVET_PREV_RELEASE_BIN"]
 fn mysql_cdc_a_previous_release_stream_continues_beside_a_same_named_table() {
@@ -8286,8 +6960,7 @@ fn mysql_cdc_a_previous_release_stream_continues_beside_a_same_named_table() {
     );
 }
 
-/// #675, kept: a bare name the connection's database does not hold, held by exactly ONE other
-/// database, is captured from that one, as before the fix.
+/// #675, kept: a bare name the connection's database does not hold.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn mysql_cdc_a_bare_name_only_another_database_holds_is_still_captured() {
@@ -8306,8 +6979,7 @@ fn mysql_cdc_a_bare_name_only_another_database_holds_is_still_captured() {
     assert_eq!(ids_read_all(&rig.out_dir()), vec![7, 8]);
 }
 
-/// #675: a bare name and the other database's qualified twin in ONE stream would hand one event
-/// to two tables: refused by code at config load, before anything is captured.
+/// #675: a bare name and its qualified twin in ONE stream are refused by code at config load.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn mysql_cdc_a_bare_name_beside_its_qualified_twin_is_refused() {
@@ -8336,22 +7008,6 @@ fn mysql_cdc_a_bare_name_beside_its_qualified_twin_is_refused() {
 }
 
 /// A TRUNCATE in the SAME transaction as a row change must still refuse.
-///
-/// The deferred-refusal fix shipped hours ago carried `if !yielded_any &&
-/// tx.is_empty()`, and the second clause wedged the capture permanently. Events sit
-/// in `tx` until their COMMIT line moves them to `pending`, and the `break` at the
-/// truncate means that COMMIT is never reached — so `BEGIN; INSERT; TRUNCATE;
-/// COMMIT` deferred the refusal with `pending` empty, the drain ended clean, `fill`
-/// was never called again, and the refusal never fired.
-///
-/// MEASURED before the fix: `status: success, rows: 0`, exit 0, `_SUCCESS` written,
-/// zero warnings — and no recovery. The slot never advances, so that transaction
-/// heads EVERY later window: two rows inserted afterwards stayed invisible across
-/// three more runs, all green, with WAL accumulating.
-///
-/// The sibling test (`..._delivers_the_rows_it_already_read`) covers the other
-/// direction — a truncate AFTER committed work must deliver that work first. Both
-/// arms of one condition, which is why they are two tests.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
 fn roast_pg_cdc_truncate_inside_a_transaction_with_rows_still_refuses() {
@@ -8371,8 +7027,6 @@ fn roast_pg_cdc_truncate_inside_a_transaction_with_rows_still_refuses() {
     )
     .unwrap();
 
-    // The row change and the truncate in ONE transaction — the shape that left `tx`
-    // non-empty and `pending` empty at the break.
     c.batch_execute(&format!(
         "BEGIN; INSERT INTO {tbl} VALUES (1,'a'); TRUNCATE {tbl}; COMMIT"
     ))
@@ -8387,8 +7041,6 @@ fn roast_pg_cdc_truncate_inside_a_transaction_with_rows_still_refuses() {
          that would flush the buffer is never reached. Got:\n{said}"
     );
 
-    // ...and the capture is not wedged: changes made afterwards are still reachable
-    // once the operator acts on the refusal.
     c.execute(&format!("INSERT INTO {tbl} VALUES (2,'after')"), &[])
         .unwrap();
     let again = Rig::pg_cdc(&format!("public.{tbl}"), &slot);
@@ -8400,23 +7052,7 @@ fn roast_pg_cdc_truncate_inside_a_transaction_with_rows_still_refuses() {
     );
 }
 
-/// Classification must ask about the relation RESOLUTION elected — not re-read the
-/// configured string through `search_path` and answer about a different one.
-///
-/// Round-3 bughunt. `62a7876` fixed exactly this on MySQL ("classification asked
-/// the foreign table for a type … sending the operator to fix a relation resolution
-/// had already ruled out") and PostgreSQL never got the same half: after
-/// `resolve_captured_table` elects a relation, the very next query is
-/// `WHERE c.oid = to_regclass($1)` over the CONFIGURED string, which `search_path`
-/// can fold to something else entirely.
-///
-/// The fixture is an ordinary shape — a reporting VIEW in the search path over a
-/// base table that lives in another schema, both spelled the same. One run then
-/// emitted two contradictory sentences: a WARN saying the name resolves to the base
-/// table, and an Error saying it is a VIEW and to "capture the BASE table(s) it
-/// reads instead" — which is the relation the warning had just named. The
-/// remediation names no config an operator can type, and the refused config is one
-/// the router would have captured.
+/// Classification must ask about the relation RESOLUTION elected.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_classification_asks_about_the_resolved_relation_not_the_search_path_one() {
@@ -8442,9 +7078,6 @@ fn pg_cdc_classification_asks_about_the_resolved_relation_not_the_search_path_on
     )
     .unwrap();
 
-    // The BARE name: `search_path` reads it as the view, rivet's router reads it as
-    // any schema's relation of that name, and resolution has already ruled the view
-    // out because it can carry no event.
     let rig = Rig::pg_cdc(&name, &slot).source_url(cdc_db.url());
     let out = run_rivet(&["run", "--config", rig.config_path().to_str().unwrap()]);
     let said = format!(
@@ -8474,28 +7107,7 @@ fn pg_cdc_classification_asks_about_the_resolved_relation_not_the_search_path_on
     );
 }
 
-/// A MATERIALIZED VIEW is not a guaranteed zero — refuse it and you refuse a
-/// capture that works.
-///
-/// Round-3 bughunt, and the two halves of this file disagreed with each other:
-/// `62a7876` made `'m'` CAPTURABLE in the candidate query on the measured ground
-/// that `test_decoding` decodes a matview, while `classify_routing` 130 lines above
-/// still hard-refused it as writing "no WAL under its own name — no change event
-/// can ever carry it". The false one is the one that reaches the operator.
-///
-/// MEASURED on the pg16 CDC stand, three refresh forms, one slot:
-///   `CREATE MATERIALIZED VIEW … WITH DATA`     → `table v3.mv: INSERT: id[integer]:1 …`
-///   `REFRESH MATERIALIZED VIEW …`              → nothing under its own name
-///   `REFRESH MATERIALIZED VIEW CONCURRENTLY …` → `table v3.mv: INSERT: id[integer]:3 …`
-///
-/// The original comment measured only the middle form and generalised from it.
-/// CONCURRENTLY is the standard production refresh — it does not lock readers — so
-/// the refused config is the common one.
-///
-/// The honest verdict is PARTIAL, not Routable and not Never: what a matview emits
-/// are REFRESH deltas, not the source table's changes, and a plain refresh emits
-/// nothing at all. An operator who points CDC at a matview expecting source changes
-/// needs to hear that, and needs the run to work.
+/// A MATERIALIZED VIEW is not a guaranteed zero — refuse it and you refuse a capture that works.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_matview_is_a_loud_partial_not_a_refusal() {
@@ -8517,7 +7129,6 @@ fn pg_cdc_matview_is_a_loud_partial_not_a_refusal() {
         &[&slot],
     )
     .unwrap();
-    // The refresh form that DOES decode, and the one a production job runs.
     c.batch_execute(&format!(
         "INSERT INTO {base} VALUES (2,20); REFRESH MATERIALIZED VIEW CONCURRENTLY {mv}"
     ))
@@ -8554,17 +7165,6 @@ fn pg_cdc_matview_is_a_loud_partial_not_a_refusal() {
 }
 
 /// The routing WARNING must print once per run, like the note beside it.
-///
-/// Round-3 bughunt. `62a7876` gated the inert-twin note behind `say_note` because
-/// "the note then printed twice per run, forever, on every scheduler cycle. A
-/// reporting view named after a table is not a condition that resolves." The
-/// `RoutingVerdict::Partial` warning four lines away is in the SAME loop, in the
-/// SAME function called twice, and was left ungated — and it is the better example
-/// of the class, because a `Partial` config SUCCEEDS. A note usually precedes a
-/// bail, so it is seen once anyway; this one repeats on every cycle forever.
-///
-/// The oracle is the COUNT, not the presence: a warning that fires is correct here,
-/// and only its multiplicity is the defect.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_says_the_inheritance_gap_once_per_run_not_twice() {
@@ -8604,10 +7204,6 @@ fn pg_cdc_says_the_inheritance_gap_once_per_run_not_twice() {
         "the fixture is not inert — the inheritance gap must be reported at all, \
          naming the child whose direct writes would be dropped:\n{said}"
     );
-    // The OUTCOME, not just the warning: a `Partial` config still captures the
-    // parent's own rows, and a 0-row success would satisfy every assertion about
-    // the message while proving the capture broken (the conformance gate refuses a
-    // capture test that never says what was delivered).
     let delivered: usize = read_all_parts(&rig.out_dir())
         .iter()
         .map(|b| b.num_rows())
@@ -8627,24 +7223,7 @@ fn pg_cdc_says_the_inheritance_gap_once_per_run_not_twice() {
     );
 }
 
-/// A relative `cdc.checkpoint:` must resolve against the CONFIG's directory, not
-/// the process working directory.
-///
-/// Round-9 bughunt, MEASURED as data loss before the fix: `rivet init` scaffolds
-/// `checkpoint: ./cdc/<table>.ckpt`, and the path was taken verbatim — so the same
-/// config invoked from a cron entry, a systemd unit with its own `WorkingDirectory`,
-/// a container entrypoint or by hand looked in a different place, found nothing, and
-/// re-anchored at the CURRENT log position. Run 1 from directory A anchored; ids 1
-/// and 2 were written; run 2 from directory B captured 0 and re-anchored past them;
-/// run 3 captured id 3. Delivered `[3]` against a source holding `[1,2,3]` — three
-/// green runs, two rows gone.
-///
-/// rivet already resolves every other relative path against the config's directory
-/// (the state DB, type-report paths); the CDC checkpoint was the one that did not.
-///
-/// The oracle is the DELIVERED SET across both runs, not the second run's count: a
-/// resume that merely returns a plausible number proves nothing about what was
-/// skipped before it.
+/// A relative `cdc.checkpoint:` must resolve against the CONFIG's directory.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn a_relative_cdc_checkpoint_follows_the_config_not_the_working_directory() {
@@ -8660,7 +7239,6 @@ fn a_relative_cdc_checkpoint_follows_the_config_not_the_working_directory() {
     let rig = Rig::mysql_cdc(&tbl)
         .relative_checkpoint("./relative.ckpt")
         .dest_path(out.path().to_path_buf());
-    // Two DIFFERENT working directories, neither of them the config's.
     let cwd_a = tempfile::tempdir().expect("cwd A");
     let cwd_b = tempfile::tempdir().expect("cwd B");
     let run_from = |dir: &std::path::Path| {
@@ -8673,10 +7251,10 @@ fn a_relative_cdc_checkpoint_follows_the_config_not_the_working_directory() {
         );
     };
 
-    run_from(cwd_a.path()); // anchors
+    run_from(cwd_a.path());
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"))
         .expect("seed between runs");
-    run_from(cwd_b.path()); // must RESUME from A's checkpoint, not re-anchor
+    run_from(cwd_b.path());
     c.query_drop(format!("INSERT INTO {tbl} VALUES (3,30)"))
         .expect("seed after");
     run_from(cwd_b.path());
@@ -8699,18 +7277,6 @@ fn a_relative_cdc_checkpoint_follows_the_config_not_the_working_directory() {
 }
 
 /// The re-anchor warning must name the place rivet actually looked.
-///
-/// Round 15. MySQL has no server-side anchor, so a run that finds no checkpoint
-/// pins at the CURRENT binlog position and everything written before now is gone
-/// from the stream. The `warn` that says so also tells the operator WHY the file
-/// might be missing, and it went stale: it still said a relative `cdc.checkpoint:`
-/// is resolved against the process working directory, which round 9 changed to the
-/// config's directory. So the one line an operator reads while deciding whether to
-/// re-snapshot sent them to look somewhere the file was never going to be.
-///
-/// Nothing graded either engine's message — which is how it drifted for as long as
-/// it did. A `warn` is a product surface: if it is worth emitting at a level the
-/// default log shows, it is worth one assertion.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn the_reanchor_warning_names_the_config_relative_path_it_looked_at() {
@@ -8727,7 +7293,6 @@ fn the_reanchor_warning_names_the_config_relative_path_it_looked_at() {
         .relative_checkpoint("./anchorwarn.ckpt")
         .dest_path(out.path().to_path_buf());
 
-    // A FIRST run: no checkpoint anywhere, so this is the re-anchor branch.
     let o = rig.run_args(&[]);
     let said = format!(
         "{}{}",
@@ -8753,8 +7318,6 @@ fn the_reanchor_warning_names_the_config_relative_path_it_looked_at() {
          Got:\n{said}",
         expected.display()
     );
-    // The anchor the warning DESCRIBES must be a real one: a change written after it
-    // has to arrive. A message about a position nothing resumes from grades nothing.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (5,50)"))
         .expect("seed after the anchor");
     rig.run_ok();
@@ -8778,47 +7341,11 @@ fn the_reanchor_warning_names_the_config_relative_path_it_looked_at() {
 }
 
 /// A bounded run EMITS its barrier, and each cycle's is distinct.
-///
-/// `until_current` bounds a drain. The ceiling is a snapshot of
-/// `pg_current_wal_lsn()` — "everything whose commit LSN is at or below a number we
-/// read" — which is approximate at the edges: a commit racing the snapshot lands
-/// ambiguously. A barrier makes it exact, because reaching a marker rivet itself
-/// placed proves everything before it committed BEFORE rivet asked.
-///
-/// The oracle is a SECOND slot, created before the run and never read by rivet: it
-/// sees the same WAL, so rivet's barrier appears in it verbatim. That is an
-/// independent reader rather than rivet's own report of what it did — the rule this
-/// repo applies to every other outcome.
-///
-/// Two cycles, deliberately. The nonce is the only thing separating one cycle's
-/// barrier from the next, and they all carry the same prefix, so a one-cycle
-/// fixture cannot tell "a fresh nonce per run" from "a constant". Cycle N+1
-/// stopping at cycle N's leftover would report a clean drain over an unread
-/// backlog — silent, and exactly what the nonce exists to prevent.
 #[test]
 #[ignore = "live+exclusive: holds an observer slot — set RIVET_TEST_EXCLUSIVE=1"]
 fn a_bounded_run_emits_a_distinct_barrier_per_cycle() {
     use postgres::NoTls;
 
-    // EXCLUSIVE, and gated rather than serialized — the second test this session to
-    // need it, for the same reason and with the same cost stated.
-    //
-    // The oracle here is a PASSIVE observer slot, and an inactive slot is a foreign
-    // ABANDONED slot to every other export. Two neighbours assert precisely that
-    // rivet stays silent about those (`roast_pg_cdc_run_warns_about_an_abandoned_
-    // slot_pinning_wal` and `doctor_reports_cdc_slot_health_and_flags_foreign_
-    // inactive_slots`), so this test breaks them whenever it runs alongside —
-    // MEASURED, and narrowing the observer's lifetime to a single cycle was not
-    // enough. Other PG CDC tests do not trip it because their slots are ACTIVE for
-    // the run and dropped after; a passive observer is the one shape that lingers.
-    //
-    // There is no second oracle available: a barrier lives in WAL and only a slot
-    // can read it, and rivet's own log saying it emitted one is rivet reporting on
-    // itself — the weaker thing this repo declines everywhere else.
-    //
-    // The cost, stated plainly: this does NOT run in the normal pass. What runs is
-    // the pure half — `is_barrier_line` and `is_our_barrier`, both with their own
-    // matrices — and those grade the recognition. This grades the EMISSION.
     if std::env::var("RIVET_TEST_EXCLUSIVE").is_err() {
         skip_live(
             "holds a passive observer slot, which two neighbours correctly report as \
@@ -8838,22 +7365,6 @@ fn a_bounded_run_emits_a_distinct_barrier_per_cycle() {
     .expect("create table");
     let _t = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
 
-    // The independent watcher, created FIRST so it sees everything the run emits.
-    // The watcher is created and dropped INSIDE each cycle, not held across the
-    // test. An inactive slot is a foreign abandoned slot to every other export, and
-    // `roast_pg_cdc_run_warns_about_an_abandoned_slot_pinning_wal` asserts a healthy
-    // instance stays SILENT about exactly that — MEASURED: holding the watcher for
-    // the whole test broke that neighbour reproducibly. Other PG CDC tests do not
-    // trip it because their slots are ACTIVE for the run and dropped after; a
-    // passive observer is the one shape that lingers.
-    //
-    // rivet's OWN slot, created up front — so both cycles below are ordinary
-    // bounded runs. A genuine FIRST run is a different path: it opens once as an
-    // anchor (`DrainMode::Continuous`, which correctly emits no barrier), creates
-    // the slot and drops it, then opens for capture. Measured: a first run over an
-    // empty source produced no barrier in the watcher at all, which is why this
-    // test pins the steady state and says so rather than quietly covering one case
-    // while looking like it covers both.
     c.execute(
         "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
         &[&slot],
@@ -8861,10 +7372,6 @@ fn a_bounded_run_emits_a_distinct_barrier_per_cycle() {
     .expect("rivet's slot");
 
     let out = tempfile::tempdir().expect("out dir");
-    // WITH a checkpoint, which is what a real bounded deployment has — the
-    // scheduler model this barrier exists for. Measured: without one the second
-    // cycle took a different open path and emitted nothing, so a checkpoint-less
-    // fixture would have graded one cycle while claiming to grade two.
     let rig = Rig::pg_cdc(&tbl, &slot)
         .relative_checkpoint("./barrier.ckpt")
         .dest_path(out.path().to_path_buf());
@@ -8873,10 +7380,6 @@ fn a_bounded_run_emits_a_distinct_barrier_per_cycle() {
     let mut nonces: Vec<String> = Vec::new();
     for cycle in 0..2 {
         let watcher = unique_name("rivet_barrier_watch_slot").to_lowercase();
-        // The guard, so a panic mid-cycle cannot leak an inactive slot onto the
-        // stand. Two slots leaked from a HAND probe earlier and broke the same two
-        // neighbours this test is gated for — the leak, not the test, was the
-        // cause, and only a `pg_replication_slots` read told them apart.
         let _w = Slot::new(watcher.clone());
         c.execute(
             "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
@@ -8896,13 +7399,6 @@ fn a_bounded_run_emits_a_distinct_barrier_per_cycle() {
         let found: Vec<String> = rows
             .iter()
             .map(|r| r.get::<_, String>(0))
-            // Filtered by THIS export's slot, not merely by the rivet prefix. The
-            // watcher sees every barrier on the database, and a concurrent test
-            // running its own bounded export emits one too — MEASURED: counting by
-            // prefix alone failed reproducibly when a neighbouring PG CDC test ran
-            // alongside. That is the same fact the nonce design encodes (a barrier
-            // is visible to every slot, so it has to name its own), and the test
-            // had been written as if rivet were the only writer.
             .filter(|l| l.starts_with("message:") && l.contains(&format!("content:{slot}-")))
             .collect();
         assert_eq!(
@@ -8935,10 +7431,6 @@ fn a_bounded_run_emits_a_distinct_barrier_per_cycle() {
          written since — and reports a clean drain over an unread backlog"
     );
 
-    // The DELIVERED outcome, not just the barrier. A run that emitted a perfectly
-    // good barrier and captured nothing would satisfy every assertion above, and
-    // the conformance gate is right to insist — it caught exactly this omission
-    // here, for the fourth time this session.
     let got: std::collections::BTreeSet<i64> = read_cdc_changes(out.path())
         .iter()
         .map(|ch| ch.id)
@@ -8954,22 +7446,6 @@ fn a_bounded_run_emits_a_distinct_barrier_per_cycle() {
 }
 
 /// A MySQL checkpoint from ANOTHER server must be refused, not resumed from.
-///
-/// A MySQL checkpoint is binlog COORDINATES, and coordinates mean nothing outside
-/// the server that wrote them. Point the same config at a different host — a
-/// failover, a restored dump, a copied `url:`, a rebuilt stand — and
-/// `binlog.000042:12345` still parses, still looks plausible, and lands at an
-/// arbitrary point in a DIFFERENT binlog. Whatever is there is captured; whatever
-/// was between is skipped. Silent in both directions.
-///
-/// PostgreSQL cannot have this: its anchor is a slot, which is server-side, so a
-/// foreign one does not exist. MySQL's anchor is a client-side file, which is why
-/// the check has to be explicit — the same asymmetry the anchor-model rule already
-/// records for the idle-first-run case.
-///
-/// The forged uuid is the honest way to test it: standing up a SECOND MySQL to
-/// produce a genuinely foreign checkpoint would test docker, and the thing under
-/// test is what rivet does when the identity does not match.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn a_mysql_checkpoint_from_another_server_is_refused() {
@@ -8985,7 +7461,7 @@ fn a_mysql_checkpoint_from_another_server_is_refused() {
     let rig = Rig::mysql_cdc(&tbl)
         .relative_checkpoint("./srvid.ckpt")
         .dest_path(out.path().to_path_buf());
-    rig.run_ok(); // anchors, and records the server's identity
+    rig.run_ok();
 
     let ckpt = rig
         .config_path()
@@ -9005,7 +7481,6 @@ fn a_mysql_checkpoint_from_another_server_is_refused() {
          would pass over an unverifiable checkpoint and prove nothing"
     );
 
-    // The SAME checkpoint, relabelled as another server's.
     doc["server_uuid"] = serde_json::json!("00000000-1111-2222-3333-444444444444");
     std::fs::write(&ckpt, doc.to_string()).expect("forge the identity");
 
@@ -9023,8 +7498,6 @@ fn a_mysql_checkpoint_from_another_server_is_refused() {
          all, so a re-snapshot is the only path. Got:\n{said}"
     );
 
-    // The delivered outcome, not the exit status: nothing may have been captured
-    // from the wrong position.
     assert!(
         read_cdc_changes(out.path()).is_empty(),
         "a refused resume must deliver nothing — reading from a foreign server's \
@@ -9033,12 +7506,6 @@ fn a_mysql_checkpoint_from_another_server_is_refused() {
 }
 
 /// The identity the anchor records must SURVIVE the first captured transaction.
-///
-/// The anchor wrote `{file, pos, server_uuid, gtid_executed}`; the commit-position
-/// save wrote `{file, pos}` — so one committed change silently disarmed the
-/// foreign-server refusal the test above proves, and every stream that had ever
-/// captured anything resumed unverified. The sibling test cannot see it: it forges
-/// the identity right after the anchor, before any commit rewrote the file.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn a_mysql_checkpoint_keeps_the_server_identity_after_a_captured_transaction() {
@@ -9054,7 +7521,7 @@ fn a_mysql_checkpoint_keeps_the_server_identity_after_a_captured_transaction() {
     let rig = Rig::mysql_cdc(&tbl)
         .relative_checkpoint("./keep.ckpt")
         .dest_path(out.path().to_path_buf());
-    rig.run_ok(); // anchors, and records the server's identity
+    rig.run_ok();
     let ckpt = rig
         .config_path()
         .parent()
@@ -9099,34 +7566,11 @@ fn a_mysql_checkpoint_keeps_the_server_identity_after_a_captured_transaction() {
 }
 
 /// REGENERATE `tests/fixtures/pgoutput/*.hex` from the rig's own scenarios.
-///
-/// The unit tests in `src/source/postgres/pgoutput.rs` grade the decoder against
-/// real wire bytes, and those bytes have to come from somewhere. They came from a
-/// scratch Python script first, which is exactly the bespoke-harness shape the rig
-/// exists to refuse: the scenario then has TWO definitions and the one in the
-/// script is the one nobody maintains.
-///
-/// So the scenario lives in `tests/common/pg.rs` — `pg_hard_types_ddl`,
-/// `pg_all_null_row`, `in_one_transaction`, `incompressible_text_sql` — with each
-/// THRESHOLD written beside it, and this test is the one thing that renders it to
-/// bytes. Run it to refresh the fixture after a scenario change:
-///
-///   cargo test --test live_suite regenerate_the_pgoutput_fixture -- --ignored
-///
-/// It is `#[ignore]`d like every live test and it WRITES to the tree, which is why
-/// it says `regenerate` rather than pretending to be a check.
 #[test]
 #[ignore = "live+writes: regenerates tests/fixtures/pgoutput from the pg-cdc stand"]
 fn regenerate_the_pgoutput_fixture_from_the_rig_scenarios() {
     use postgres::NoTls;
 
-    // EXPLICIT opt-in, because this test WRITES checked-in goldens and its name
-    // contains `cdc` by way of the module it lives in — so `--run-ignored all -E
-    // test(/cdc/)`, the ordinary way to run the CDC suite, selected it and silently
-    // rewrote both fixtures. The offline decoder tests then graded a fresh capture
-    // instead of the committed bytes, which is the compatibility guarantee those
-    // fixtures exist to hold. A golden that any broad filter can regenerate is not
-    // a golden.
     if std::env::var("RIVET_REGENERATE_FIXTURES").is_err() {
         skip_live(
             "regenerate_the_pgoutput_fixture: set RIVET_REGENERATE_FIXTURES=1 to \
@@ -9155,23 +7599,16 @@ fn regenerate_the_pgoutput_fixture_from_the_rig_scenarios() {
     )
     .expect("pgoutput slot");
 
-    // THREE rows in ONE transaction: see `in_one_transaction`'s note — with one,
-    // three different `committed` mutants are the same answer.
     c.batch_execute(&in_one_transaction(&[
         pg_hard_types_row(tbl, 42),
         pg_all_null_row(tbl, 43),
         pg_hard_types_row(tbl, 44),
     ]))
     .expect("a multi-row transaction");
-    // A second transaction, under DEFAULT identity: the UPDATE leaves `big`
-    // untouched so the unchanged-TOAST tag appears and the pre-image is ABSENT.
     c.batch_execute(&format!(
         "BEGIN; UPDATE {tbl} SET txt='u1' WHERE id=42; DELETE FROM {tbl} WHERE id=43; COMMIT;"
     ))
     .expect("update + delete under DEFAULT identity");
-    // …then the SAME shape under FULL, which is what makes an absent pre-image
-    // distinguishable from an empty one, plus a TRUNCATE so the typed message is
-    // in the capture rather than only in a hand-built test.
     c.batch_execute(&format!("ALTER TABLE {tbl} REPLICA IDENTITY FULL"))
         .expect("full identity");
     c.batch_execute(&format!(
@@ -9184,7 +7621,6 @@ fn regenerate_the_pgoutput_fixture_from_the_rig_scenarios() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pgoutput");
     std::fs::create_dir_all(&dir).expect("fixture dir");
     for (file, binary) in [("messages.hex", false), ("binary_values.hex", true)] {
-        // Each read CONSUMES the slot, so re-seed between them.
         if binary {
             c.batch_execute(&in_one_transaction(&[
                 pg_hard_types_row(tbl, 52),
@@ -9207,11 +7643,6 @@ fn regenerate_the_pgoutput_fixture_from_the_rig_scenarios() {
             c.batch_execute(&format!("TRUNCATE {tbl}"))
                 .expect("re-seed truncate");
         }
-        // A BARRIER, emitted before the read so the capture carries one: rivet uses
-        // a nonce message to bound a drain exactly, and `messages=true` is what
-        // makes it arrive at all — without the option the tag is simply absent
-        // (measured), so a reader that emits a barrier and omits the option waits
-        // forever.
         c.batch_execute("SELECT pg_logical_emit_message(false, 'rivet', 'fixture-barrier-nonce')")
             .expect("emit a barrier");
         let sql = format!(
@@ -9238,36 +7669,12 @@ fn regenerate_the_pgoutput_fixture_from_the_rig_scenarios() {
     let _ = c.batch_execute(&format!("DROP PUBLICATION IF EXISTS {pubn}"));
 }
 
-/// The SYMPTOM half of the two-phase probe — now affordable, because the harness
-/// owns the server setting.
-///
-/// I measured this by hand and declined to make it a test: reproducing it needs
-/// `max_prepared_transactions > 0`, which is a `PGC_POSTMASTER` setting and so a
-/// container restart, and a revert that a panicking test would skip. `PgSetting::
-/// set_with_restart` puts the revert in `Drop`, where a panic cannot reach it — so
-/// the whole STATE axis stops being something only a human runs by hand.
-///
-/// This is also the guard's own self-test: it asserts the flip LANDED before
-/// drawing any conclusion, because a probe that silently ran at the default and
-/// found nothing is indistinguishable from a probe that found nothing.
+/// The SYMPTOM half of the two-phase probe.
 #[test]
 #[ignore = "live+exclusive: RESTARTS postgres-cdc — set RIVET_TEST_EXCLUSIVE=1"]
 fn a_rolled_back_prepared_transaction_is_never_published_postgres() {
     use postgres::NoTls;
 
-    // EXCLUSIVE, and GATED rather than serialized. `max_prepared_transactions` is
-    // PGC_POSTMASTER, so proving the symptom needs the container restarted — and
-    // `cargo test` runs tests in PARALLEL, so that restart kills every concurrent
-    // connection to the same stand. MEASURED: this passes alone and takes
-    // `a_bounded_run_reaches_its_bound_across_an_empty_transaction_span` down with
-    // it when both run — a fixture breaking its neighbours, which reads from the
-    // outside exactly like a product failure.
-    //
-    // Serializing would put a lock in all ~40 postgres-cdc tests; a second
-    // container would change the declared stand. Gating is the honest third option
-    // and its cost is stated plainly: this does NOT run in the normal pass. The
-    // mechanism guard (`the_pg_slot_is_not_two_phase_...`) does, needs no restart,
-    // and is what protects the property day to day.
     if std::env::var("RIVET_TEST_EXCLUSIVE").is_err() {
         skip_live(
             "restarts postgres-cdc, which breaks concurrent tests — run with \
@@ -9297,11 +7704,8 @@ fn a_rolled_back_prepared_transaction_is_never_published_postgres() {
 
     let out = tempfile::tempdir().expect("out dir");
     let rig = Rig::pg_cdc(&tbl, &slot).dest_path(out.path().to_path_buf());
-    rig.run_ok(); // anchor
+    rig.run_ok();
 
-    // A PREPARED transaction, an unrelated commit while it is outstanding, then a
-    // ROLLBACK. This is the exact shape that made MySQL publish a row that never
-    // existed (measured round 14: source held one row, rivet delivered two).
     c.batch_execute(&format!(
         "BEGIN; INSERT INTO {tbl} VALUES (1, 100); PREPARE TRANSACTION 'rivet_p1'"
     ))
@@ -9343,31 +7747,7 @@ fn a_rolled_back_prepared_transaction_is_never_published_postgres() {
     );
 }
 
-/// PostgreSQL's slot must stay NON-two-phase — the mechanism that makes it immune
-/// to the class round 14 measured on MySQL.
-///
-/// The ENGINE axis, applied to a class already proven to exist somewhere. MySQL
-/// binlogs an XA transaction's ROWS at `XA PREPARE`, so a rolled-back branch was
-/// published by the next transaction's commit — measured, source `{2}`, delivered
-/// `{1, 2}`. One engine proves nothing about another, so PostgreSQL's two-phase
-/// sibling (`PREPARE TRANSACTION` / `ROLLBACK PREPARED`) was probed rather than
-/// assumed.
-///
-/// MEASURED 2026-08-27 on the pg-cdc stand with `max_prepared_transactions = 10`
-/// (a server restart, reverted after): prepare, an unrelated commit, then
-/// `ROLLBACK PREPARED` — the source held `{2}` and rivet delivered `{2}`. IMMUNE,
-/// and by construction rather than by luck: with a non-two-phase slot PostgreSQL
-/// decodes a prepared transaction only at `COMMIT PREPARED`, and a rollback emits
-/// no change records at all, so the reader never sees the rows.
-///
-/// This test guards the MECHANISM, not the symptom. Reproducing the symptom needs
-/// `max_prepared_transactions > 0`, which is a server restart no test should own —
-/// and it would only re-measure what the flag already decides. `two_phase = false`
-/// is the whole of the immunity: `pg_create_logical_replication_slot(name,
-/// 'test_decoding')` is the two-argument form, which defaults it off. Add
-/// `two_phase => true` for lower commit latency and PostgreSQL starts decoding at
-/// PREPARE — at which point rivet has MySQL's bug on a second engine, with no
-/// framing for prepared transactions anywhere in the sink.
+/// PostgreSQL's slot must stay NON-two-phase.
 #[test]
 #[ignore = "live: requires docker compose postgres-cdc (wal_level=logical)"]
 fn the_pg_slot_is_not_two_phase_so_a_prepared_transaction_cannot_be_published_early() {
@@ -9383,17 +7763,10 @@ fn the_pg_slot_is_not_two_phase_so_a_prepared_transaction_cannot_be_published_ea
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
     let _slot = Slot::new(slot.clone());
 
-    // RIVET creates the slot, not this test. Pre-creating it here would grade the
-    // test's own `pg_create_logical_replication_slot` call — the fixture-against-
-    // itself shape — and say nothing about the product's.
     let out = tempfile::tempdir().expect("out dir");
     let rig = Rig::pg_cdc(&tbl, &slot).dest_path(out.path().to_path_buf());
     rig.run_ok();
 
-    // The slot must be a WORKING one, not just a catalog row: a change written after
-    // the anchor has to come back. Without this the test would pass over a slot that
-    // captures nothing — and the conformance gate is right to insist, having caught
-    // exactly this omission here on the first draft.
     c.batch_execute(&format!("INSERT INTO {tbl} VALUES (1, 10)"))
         .expect("seed after the anchor");
     rig.run_ok();
@@ -9434,31 +7807,6 @@ fn the_pg_slot_is_not_two_phase_so_a_prepared_transaction_cannot_be_published_ea
 }
 
 /// A PREPARED XA branch must never be published by another transaction's commit.
-///
-/// Round 14, and the worst shape a CDC reader can have: not loss, FABRICATION.
-///
-/// MySQL binlogs an XA transaction's ROWS at `XA PREPARE`, and the outcome
-/// (`XA COMMIT` / `XA ROLLBACK`) as a much later Query event. rivet holds one
-/// transaction buffer per stream and drains ALL of it at a commit marker, so the
-/// prepared rows sat in that buffer until the next unrelated transaction's `Xid`
-/// swept them out — published as committed, stamped with that transaction's
-/// position, fused into its group.
-///
-/// MEASURED on mysql 8.0.46 before the fix: the source held `{2}` and rivet
-/// delivered `{1, 2}`, both at `binlog.000011:55090448` with `__seq` 0 and 1. Row 1
-/// was rolled back and never existed — and no later event retracts it, because a
-/// rollback of a prepared branch writes no row events at all. Every count, sum and
-/// null-profile check downstream agrees with itself.
-///
-/// The interleave is not exotic: `XA PREPARE` writes to the binlog immediately, so
-/// any other session committing before the branch resolves produces it. That is the
-/// normal case for an XA transaction manager, not a race.
-///
-/// Why the reader could not simply skip the string: on 5.7.7+ `XA PREPARE` arrives
-/// as a BINARY `XaPrepareLogEvent`, never as a QueryEvent — so
-/// `is_commit_statement`'s "deliberately NOT XA PREPARE" unit case grades an input
-/// this reader cannot receive. Correct logic, correct test, an input the product
-/// never produces.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn a_prepared_xa_branch_is_never_published_by_another_transactions_commit() {
@@ -9472,7 +7820,7 @@ fn a_prepared_xa_branch_is_never_published_by_another_transactions_commit() {
 
     let out = tempfile::tempdir().expect("out dir");
     let rig = Rig::mysql_cdc(&tbl).dest_path(out.path().to_path_buf());
-    rig.run_ok(); // anchor
+    rig.run_ok();
 
     let xid = format!("x{}", std::process::id());
     c.query_drop(format!(
@@ -9480,8 +7828,6 @@ fn a_prepared_xa_branch_is_never_published_by_another_transactions_commit() {
          XA PREPARE '{xid}'"
     ))
     .expect("prepare an XA branch");
-    // An ordinary transaction commits while the branch is prepared — the event that
-    // used to drain the prepared rows along with its own.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (2,200)"))
         .expect("an unrelated commit");
     c.query_drop(format!("XA ROLLBACK '{xid}'"))
@@ -9497,11 +7843,6 @@ fn a_prepared_xa_branch_is_never_published_by_another_transactions_commit() {
          is no fabrication to detect"
     );
 
-    // The raw invoke, so the DELIVERED set is graded before the exit status. A
-    // `run_expect_fail` here would panic on the status first, and the status is the
-    // weaker oracle: it cannot tell rivet's guard from an unrelated failure, and a
-    // regression that re-published row 1 would be reported as "expected to fail"
-    // rather than as the fabrication it is.
     let o = rig.run_args(&[]);
     let said = format!(
         "{}{}",
@@ -9526,26 +7867,7 @@ fn a_prepared_xa_branch_is_never_published_by_another_transactions_commit() {
     );
 }
 
-/// `rivet doctor` must grade the checkpoint the RUN will open, not one named
-/// relative to whatever shell it was started from.
-///
-/// Round 14. The run resolves a relative `cdc.checkpoint:` against the config's
-/// directory; the preflight read the raw string against the process working
-/// directory. The two answers only differ when doctor is invoked from somewhere
-/// else — a cron entry, a systemd unit, a CI step, an operator in `$HOME` — which
-/// is the normal way a diagnostic is run and the exact case nothing exercised.
-///
-/// What makes it worse than a mislabelled path: ABSENT is this check's GREEN
-/// answer. A checkpoint doctor cannot find is reported as "no checkpoint yet —
-/// the first run pins the open position", `[OK]`, exit 0. So the one check whose
-/// job is to catch a position about to fall off binlog retention — the ERROR 1236
-/// that ends a stream — is confidently describing a file that is not there.
-///
-/// The oracle is the DISAGREEMENT, not the text: the same config, the same
-/// checkpoint, two working directories, and doctor must say the same thing.
-/// RED-proven by restoring the raw `Path::new(raw)` read — from another directory
-/// it printed `[OK] … no checkpoint yet` while the file held
-/// `binlog.000011:54840425`.
+/// `rivet doctor` must grade the checkpoint the RUN will open.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn doctor_grades_the_checkpoint_the_run_opens_not_one_relative_to_the_shell() {
@@ -9562,10 +7884,6 @@ fn doctor_grades_the_checkpoint_the_run_opens_not_one_relative_to_the_shell() {
         .relative_checkpoint("./doctor.ckpt")
         .dest_path(out.path().to_path_buf());
 
-    // A REAL checkpoint, written by a real run — not a hand-made file. The bug is
-    // in the seam between what the run writes and what the preflight reads, so a
-    // fabricated fixture would grade the reader against an input the product does
-    // not produce.
     rig.run_ok();
     let ckpt = rig
         .config_path()
@@ -9591,9 +7909,6 @@ fn doctor_grades_the_checkpoint_the_run_opens_not_one_relative_to_the_shell() {
             .to_string()
     };
 
-    // The delivered outcome, not just the file: a checkpoint doctor grades must be
-    // one a RESUME actually uses. Without this the anchor run could deliver nothing
-    // forever and both doctor halves would agree about an inert file.
     c.query_drop(format!("INSERT INTO {tbl} VALUES (7,70)"))
         .expect("seed after the anchor");
     rig.run_ok();
@@ -9616,15 +7931,6 @@ fn doctor_grades_the_checkpoint_the_run_opens_not_one_relative_to_the_shell() {
         "the control half is broken — doctor run from the config's own directory \
          must read the position the run just wrote, got:\n{from_config}"
     );
-    // Compare the CHECKPOINT IDENTITY, not the whole line.
-    //
-    // The two doctor invocations are seconds apart against a SHARED server, and
-    // the line carries a live-moving estimate: CI caught `backlog ≈ 0.0 MiB`
-    // against `≈ 0.1 MiB` for the same `binlog.000003:2944814` and failed a test
-    // whose subject is WHICH checkpoint was read. A byte-for-byte compare of a
-    // string containing a quantity the server keeps changing grades the
-    // server's traffic, not the product — and it fails INTERMITTENTLY, which is
-    // how a flake teaches people to re-run instead of read.
     let identity =
         |line: &str| -> String { line.split(", backlog").next().unwrap_or(line).to_string() };
     assert_eq!(
@@ -9637,19 +7943,7 @@ fn doctor_grades_the_checkpoint_the_run_opens_not_one_relative_to_the_shell() {
     );
 }
 
-/// An existing CWD-relative checkpoint must keep working — the fix must not cause,
-/// once on upgrade, the very loss it prevents.
-///
-/// Round-9 follow-up. Resolving a relative `cdc.checkpoint:` against the config's
-/// directory is correct, and it MOVES the lookup for every deployment already
-/// running. One whose working directory happens to be where its checkpoint lives
-/// would, on the first run after upgrading, find nothing at the new location and
-/// re-anchor at the current log position — skipping everything since, silently,
-/// which is exactly the failure the change exists to remove.
-///
-/// So the old location still wins when it holds a file and the new one does not,
-/// and the run says where the checkpoint should move to. The oracle is again the
-/// DELIVERED SET, not the second run's count.
+/// An existing CWD-relative checkpoint must keep working.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn an_existing_working_directory_checkpoint_is_not_stranded_by_the_new_resolution() {
@@ -9666,7 +7960,6 @@ fn an_existing_working_directory_checkpoint_is_not_stranded_by_the_new_resolutio
         .relative_checkpoint("./legacy.ckpt")
         .dest_path(out.path().to_path_buf());
     let cfg = rig.config_path();
-    // ONE stable working directory, as a pre-upgrade deployment would have.
     let cwd = tempfile::tempdir().expect("cwd");
 
     let run = || {
@@ -9683,9 +7976,7 @@ fn an_existing_working_directory_checkpoint_is_not_stranded_by_the_new_resolutio
         )
     };
 
-    run(); // anchors — writes ./legacy.ckpt under the CONFIG's dir now
-    // Simulate the pre-upgrade world: the checkpoint lives beside the CWD, and the
-    // config-relative location has none.
+    run();
     let by_config = cfg.parent().expect("config dir").join("legacy.ckpt");
     assert!(by_config.is_file(), "run 1 must have written a checkpoint");
     rig.move_checkpoint(&by_config, &cwd.path().join("legacy.ckpt"), cwd.path());
@@ -9718,23 +8009,7 @@ fn an_existing_working_directory_checkpoint_is_not_stranded_by_the_new_resolutio
     );
 }
 
-/// One opaque leaf must not discard the whole JSON document — and must not be
-/// written as a placeholder either.
-///
-/// Round-9 bughunt. A JSON tree MySQL materialises server-side carries OPAQUE
-/// leaves: a DECIMAL, DATE, TIME or DATETIME written to the binlog as a type tag
-/// plus raw bytes rather than as JSON text. `serde_json::Value::try_from` errors on
-/// the first one and the object/array arms propagate it, so ONE such leaf nulled
-/// the ENTIRE document. MEASURED before the fix: `JSON_OBJECT('amt', CAST(1.50 AS
-/// DECIMAL(10,2)), 'sku','A1')` and `JSON_OBJECT('created', CAST('2024-01-02' AS
-/// DATE))` both came back `doc: null` under `status: success, rows: 3`, while the
-/// plain text literal beside them was correct — and a `mode: full` export of the
-/// SAME table wrote all three. A snapshot-plus-CDC pipeline therefore shows the
-/// column populated by the snapshot leg and NULL for every change row touching it.
-///
-/// The refusal is DEFERRED, and the second half of this test is the reason: the
-/// binlog dump is server-wide, so an opaque leaf in a table nobody captures must
-/// not wedge the run.
+/// One opaque leaf must not discard the whole JSON document.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn a_json_opaque_leaf_is_refused_loudly_and_only_for_the_captured_table() {
@@ -9752,11 +8027,8 @@ fn a_json_opaque_leaf_is_refused_loudly_and_only_for_the_captured_table() {
 
     let out = tempfile::tempdir().expect("out dir");
     let rig = Rig::mysql_cdc(&tbl).dest_path(out.path().to_path_buf());
-    rig.run_ok(); // anchor
+    rig.run_ok();
 
-    // The bystander's opaque leaf must be ignored, and the captured table's plain
-    // document must arrive — proving the run is not wedged by traffic it does not
-    // capture.
     c.query_drop(format!(
         "INSERT INTO {bystander} VALUES (1, JSON_OBJECT('amt', CAST(1.50 AS DECIMAL(10,2)))); \
          INSERT INTO {tbl} VALUES (1, '{{\"sku\": \"A1\"}}')"
@@ -9774,7 +8046,6 @@ fn a_json_opaque_leaf_is_refused_loudly_and_only_for_the_captured_table() {
          that merely shares the stream"
     );
 
-    // Now the captured table itself.
     c.query_drop(format!(
         "INSERT INTO {tbl} VALUES (2, JSON_OBJECT('amt', CAST(9.99 AS DECIMAL(10,2))))"
     ))
@@ -9794,21 +8065,6 @@ fn a_json_opaque_leaf_is_refused_loudly_and_only_for_the_captured_table() {
 }
 
 /// An idle cycle must not blind `validate --depth full`.
-///
-/// Round-9 bughunt, and the harm is that the ORACLE goes quiet, not the data. An
-/// `until_current` cycle that finds no changes writes a `Success` manifest with
-/// `parts: []` over the canonical pointer — the steady state for a scheduled
-/// capture, and for most tables of a `tables:` multiplex most cycles. `validate`
-/// read the canonical alone, so it answered "what did the LAST run deliver" while
-/// every field it printed said "the prefix".
-///
-/// MEASURED before the fix: a run captured 3 changes and `--depth full` verified 1
-/// part; ONE idle cycle later the same command reported `PASSED, 0 parts verified`
-/// — and still PASSED after the parquet was DELETED, with the run-unique copy
-/// declaring it sitting unread beside it.
-///
-/// The test asserts the FAILURE, because a validate that cannot fail is the defect:
-/// asserting PASSED on an intact prefix would have passed before the fix too.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog)"]
 fn an_idle_cycle_does_not_blind_validate_to_a_missing_part() {
@@ -9822,14 +8078,14 @@ fn an_idle_cycle_does_not_blind_validate_to_a_missing_part() {
 
     let out = tempfile::tempdir().expect("out dir");
     let rig = Rig::mysql_cdc(&tbl).dest_path(out.path().to_path_buf());
-    rig.run_ok(); // anchor
+    rig.run_ok();
     c.query_drop(format!("INSERT INTO {tbl} VALUES (1,10),(2,20),(3,30)"))
         .expect("seed");
-    rig.run_ok(); // captures 3
+    rig.run_ok();
     let parts = files_with_extension(out.path(), "parquet");
     assert_eq!(parts.len(), 1, "fixture: one part must have been written");
 
-    rig.run_ok(); // the IDLE cycle — rewrites the canonical to `parts: []`
+    rig.run_ok();
     let canonical: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(out.path().join("manifest.json")).expect("read canonical"),
     )
@@ -9841,7 +8097,6 @@ fn an_idle_cycle_does_not_blind_validate_to_a_missing_part() {
          without that this test grades nothing"
     );
 
-    // Now take the part away. validate must notice.
     std::fs::remove_file(&parts[0]).expect("delete the part");
     let v = rig.cli(&["validate", "--depth", "full"]);
     let said = format!(
@@ -9862,30 +8117,7 @@ fn an_idle_cycle_does_not_blind_validate_to_a_missing_part() {
     );
 }
 
-/// A bounded run must reach its OPEN-TIME bound across an empty-transaction span,
-/// not stop at the first one it meets after its first data.
-///
-/// Round-10 bughunt. `release_empty_frontier` is what lets a run slide the slot past
-/// WAL that decodes to nothing, and it was gated on `yielded_data` — a RUN-SCOPED
-/// latch set by the first data event and never cleared. So the guard answered "did
-/// this run ever yield?" instead of "is anything still owed downstream", and a run
-/// that yielded data first then exhausted at the next all-empty peek window.
-///
-/// MEASURED before the fix, everything committed BEFORE run 1 opened, `until_current:
-/// true`, `rollover: 5`, WAL laid out `1 row | 6 empty DDL transactions | 3 rows`:
-/// run 1 delivered 1, run 2 the other 3, run 3 nothing. Three `status: success` runs
-/// to drain four rows, no warning, `_SUCCESS` claiming the prefix complete while
-/// in-bound committed data sat unread and the slot stayed pinned behind it. On a
-/// workload that recurs this shape — temp tables per request, autovacuum ANALYZE,
-/// partition maintenance — the drain rate collapses to one transaction per scheduler
-/// cycle and WAL grows without bound.
-///
-/// The empty span is not exotic: `CREATE TEMP TABLE … DROP` decodes as a row-less
-/// BEGIN/COMMIT, and EVERY wire row counts against the peek budget, so roughly
-/// `rollover/2` of them fill a window.
-///
-/// The ack discharges the latch now: everything yielded up to the acked position is
-/// durable, so a data-free span past it has nothing to lose.
+/// A bounded run must reach its OPEN-TIME bound across an empty-transaction span.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn a_bounded_run_reaches_its_bound_across_an_empty_transaction_span() {
@@ -9904,9 +8136,6 @@ fn a_bounded_run_reaches_its_bound_across_an_empty_transaction_span() {
     )
     .unwrap();
 
-    // Everything below is committed BEFORE the run opens, so `until_current`'s
-    // open-time snapshot covers all of it — a run that stops early is not "caught
-    // up", it gave up.
     c.execute(&format!("INSERT INTO {tbl} VALUES (1,10)"), &[])
         .unwrap();
     for i in 0..6 {
@@ -9942,7 +8171,7 @@ fn a_bounded_run_reaches_its_bound_across_an_empty_transaction_span() {
     );
 }
 
-/// After a mid-window roll, a failed final part must leave the slot at the last WRITTEN commit, and the next run must deliver the rest.
+/// After a mid-window roll, a failed final part must leave the slot at the last WRITTEN commit.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
 fn pg_cdc_a_failed_final_part_after_a_mid_window_roll_leaves_the_slot_behind_it() {
@@ -9964,8 +8193,6 @@ fn pg_cdc_a_failed_final_part_after_a_mid_window_roll_leaves_the_slot_behind_it(
         &[&slot],
     )
     .unwrap();
-    // T1 alone crosses the 1 MiB byte cap, so its part rolls and acks while T2 and
-    // T3 (same peek window: `rollover: 1000`) are already read but not yet written.
     c.execute(
         &format!(
             "INSERT INTO {ta} VALUES (1, 10, repeat('x', 700000)), (2, 20, repeat('y', 700000))"
@@ -9985,8 +8212,6 @@ fn pg_cdc_a_failed_final_part_after_a_mid_window_roll_leaves_the_slot_behind_it(
     let d = tempfile::tempdir().unwrap();
     let out = d.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
-    // The ONE cause of run 1's failure: table B's sub-prefix is a regular file, so
-    // the final part (T2, T3) cannot be written. Table A's part is unaffected.
     std::fs::write(out.join(&tb), b"in the way").unwrap();
     let rig = Rig::pg_cdc(&ta, &slot)
         .source_url(cdc_db.url())
@@ -10035,7 +8260,6 @@ fn pg_cdc_a_failed_final_part_after_a_mid_window_roll_leaves_the_slot_behind_it(
          transaction whose part was written"
     );
 
-    // The remedy an operator would apply: make the destination writable, re-run.
     std::fs::remove_file(out.join(&tb)).unwrap();
     rig.run_ok();
     assert_eq!(
@@ -10047,32 +8271,14 @@ fn pg_cdc_a_failed_final_part_after_a_mid_window_roll_leaves_the_slot_behind_it(
     );
 }
 
-// ─── PostgreSQL: a transaction larger than the in-memory cap ─────────────────
-
-/// A transaction past the memory cap SPILLS to disk and delivers exactly the rows a
-/// transaction under the cap delivers.
-///
-/// Before this, crossing the cap FAILED the run: a transaction is buffered whole (it
-/// is never split across parts, which is what makes a crash resume
-/// transaction-atomic), so an oversized one had nowhere to go and capture stopped
-/// until someone split the source transaction or raised a cap. That is a memory
-/// ceiling wearing a refusal.
-///
-/// TWO slots created before the seed, so both legs decode the SAME transaction from
-/// the same WAL: the comparison is then about the spill and nothing else. Leg A runs
-/// under a cap the transaction crosses, leg B under the default it does not.
-///
-/// The oracle is leg B, not a hand-written list: an assertion that the spilled leg
-/// holds 400 rows would pass just as well if BOTH legs were broken the same way,
-/// while "the two legs agree" cannot be satisfied by a bug in the shared path.
+/// A transaction past the memory cap SPILLS to disk and delivers exactly the rows a transaction under the cap delivers.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
     use postgres::NoTls;
     const ROWS: usize = 400;
     const CAP: usize = 50;
-    /// Rows in the SECOND transaction, which follows the spilled one in the same
-    /// peek window.
+    /// Rows in the SECOND transaction, which follows the spilled one in the same peek window.
     const TAIL_TX: usize = 3;
 
     let d = tempfile::tempdir().unwrap();
@@ -10094,29 +8300,15 @@ fn pg_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
         )
         .unwrap();
     }
-    // The big transaction, seeded AFTER both slots exist so both decode it…
     c.batch_execute(&one_transaction_of(&tbl, ROWS)).unwrap();
-    // …and a SECOND one behind it, in the same read window. Handing out a spilled
-    // tail ends the window early to keep commit order, and that early end must not
-    // read as "the window is drained" — with only one transaction the two are
-    // indistinguishable (measured: the guard could be inverted and the test stayed
-    // green). This is the row that goes missing if it does.
     c.batch_execute(&transaction_over(&tbl, ROWS + 1..=ROWS + TAIL_TX))
         .unwrap();
 
     let out_plain = d.path().join("out_plain");
     std::fs::create_dir_all(&out_plain).unwrap();
 
-    // Leg A — the cap is crossed at row CAP, so rows CAP..ROWS go to disk.
-    //
-    // `census_oracle()` owns the workdir, the destination AND the config placement:
-    // the state DB lives beside the config and the DuckDB reader works from inside a
-    // container, so hand-building those paths is the smell the rig removes.
     let spill_rig = Rig::pg_cdc(&tbl, &slot_spill).census_oracle();
     let out_spill = spill_rig.out_dir();
-    // Spilling is OPT-IN (`spill_dir_for`): with no directory named, the cap keeps
-    // its original meaning and REFUSES the transaction. Without this the test would
-    // exercise the refusal path and read it as a spill that produced no rows.
     let a = spill_rig.run_with_envs(&[
         ("RIVET_CDC_MAX_TX_ROWS", &CAP.to_string()),
         ("RIVET_CDC_SPILL_DIR", "1"),
@@ -10126,9 +8318,6 @@ fn pg_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
         "a transaction past the cap must SPILL, not fail the run: {}",
         String::from_utf8_lossy(&a.stderr)
     );
-    // The fixture is not inert: prove it really spilled rather than passing because
-    // the cap was never reached. Without this the test would stay green if the cap
-    // env var were ignored entirely.
     let log_a = String::from_utf8_lossy(&a.stderr).to_string();
     assert!(
         log_a.contains("passed the in-memory cap"),
@@ -10136,26 +8325,11 @@ fn pg_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
          reached are indistinguishable, and this test would then prove nothing \
          about spilling at all. stderr: {log_a}"
     );
-    // …and that rows genuinely went to DISK, with memory held at the cap.
-    //
-    // Rows and order alone cannot see this: a spill that quietly keeps buffering
-    // delivers the SAME rows (measured — dropping the `continue` that skips the
-    // in-memory push recreates the tail on every row, so it is empty at commit and
-    // every row arrives from memory, byte-identical output and no memory bound at
-    // all). The split itself is the only externally visible measure, so both halves
-    // are asserted: the ceiling held, and nothing fell between the two segments.
-    // The slot decodes the whole database, so the split graded is this test's own.
     assert_spill_evidence(&log_a, CAP, OwnSpill::Transaction(ROWS));
 
-    // Leg B — the same transaction under the default cap: no spill.
     let plain_rig = Rig::pg_cdc(&tbl, &slot_plain).dest_path(out_plain.clone());
     plain_rig.run_ok();
 
-    // THE INDEPENDENT ORACLE — four numbers from one DuckDB session, sharing no
-    // code with rivet: the SOURCE table, the delivered parquet, and rivet's two
-    // ledgers. The fixture is insert-only, so every source row is exactly one
-    // change and the four are comparable. Reading rivet's parquet with rivet's own
-    // reader (below) says the run is self-consistent; only this says it is RIGHT.
     let census = spill_rig.row_census();
     assert_eq!(
         census.source,
@@ -10184,8 +8358,6 @@ fn pg_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
          same rows, same order, same ops"
     );
 
-    // Exactly once: the head is handed out from memory and the tail from disk, and
-    // a row delivered by both paths would be a duplicate no count check would see.
     let mut ids: Vec<i64> = spilled.iter().map(|(id, _)| *id).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -10203,7 +8375,6 @@ fn pg_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
          that early end as `drained` silently leaves it for the next cycle"
     );
 
-    // The spill file does not outlive the run.
     fn spill_leaks(dir: &std::path::Path, found: &mut Vec<String>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return;
@@ -10223,8 +8394,6 @@ fn pg_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
     }
     let mut leaked = Vec::new();
     spill_leaks(d.path(), &mut leaked);
-    // …and the run-state fallback, which is where a checkpoint-less PG config
-    // (the common slot-anchored shape, and this rig's) actually spills.
     spill_leaks(std::path::Path::new(".rivet/spill"), &mut leaked);
     assert!(
         leaked.is_empty(),
@@ -10233,28 +8402,13 @@ fn pg_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
     );
 }
 
-// ─── MySQL: a transaction larger than the in-memory cap ──────────────────────
-
-/// A MySQL transaction past the memory cap spills through the GENERAL frame and
-/// delivers everything — confirmed by an oracle that shares no code with rivet.
-///
-/// MySQL's crate hands over PARSED events, so unlike PostgreSQL there is no wire to
-/// keep: the tail goes to disk through the tagged frame. That is a second encoding,
-/// and a second encoding is a second thing that can lose a value silently — which
-/// is why the oracle here is not rivet reading its own parquet back.
-///
-/// Four numbers from one DuckDB session: the SOURCE table, the delivered parquet,
-/// `export_metrics.total_rows`, and `file_log.row_count`. An insert-only fixture
-/// makes them comparable — every source row is exactly one change — so all four
-/// agreeing means the spilled tail reached the destination and rivet's own ledgers
-/// know it. Counting rivet's parquet with rivet's reader could not say that.
+/// A MySQL transaction past the memory cap spills through the GENERAL frame and delivers all of it.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
 fn mysql_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
     const ROWS: usize = 400;
     const CAP: usize = 50;
-    /// The transaction that FOLLOWS the spilled one — with only one transaction,
-    /// draining a tail and ending the stream are indistinguishable.
+    /// The transaction that FOLLOWS the spilled one.
     const TAIL_TX: usize = 3;
 
     let tbl = unique_name("cdc_spill_my");
@@ -10264,18 +8418,11 @@ fn mysql_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
         .unwrap();
     let _t = Table(tbl.clone());
 
-    // `census_oracle()` owns the workdir, the destination AND the config placement:
-    // the state DB lives beside the config and the oracle reads from inside a
-    // container, so hand-building those paths is the smell the rig removes.
     let rig = Rig::mysql_cdc(&tbl).census_oracle();
-    // Anchor FIRST, so the stream starts here and drains only what follows.
     rig.pin_binlog_here();
     mysql_seed_one_transaction(&mut c, &tbl, 1..=ROWS);
     mysql_seed_one_transaction(&mut c, &tbl, ROWS + 1..=ROWS + TAIL_TX);
 
-    // Spilling is OPT-IN (`spill_dir_for`): with no directory named, the cap keeps
-    // its original meaning and REFUSES the transaction. Without this the test would
-    // exercise the refusal path and read it as a spill that produced no rows.
     let out = rig.run_with_envs(&[
         ("RIVET_CDC_MAX_TX_ROWS", &CAP.to_string()),
         ("RIVET_CDC_SPILL_DIR", "1"),
@@ -10287,12 +8434,8 @@ fn mysql_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
     );
     let log = String::from_utf8_lossy(&out.stderr).to_string();
 
-    // The fixture is not inert, and memory really was bounded. Rows alone cannot
-    // see this: a spill that quietly keeps buffering delivers identical rows.
-    // The binlog is server-wide, so the split graded is this test's own.
     assert_spill_evidence(&log, CAP, OwnSpill::Transaction(ROWS));
 
-    // THE INDEPENDENT ORACLE. Not rivet's verdict, not rivet's reader.
     let census = rig.row_census();
     assert_eq!(
         census.source,
@@ -10307,8 +8450,6 @@ fn mysql_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
          being counted, shows up here and nowhere else: {census:?}"
     );
 
-    // Exactly once, and in order: the head comes from memory and the tail from
-    // disk, and a row delivered by both paths is a duplicate no count check sees.
     let changes = cdc_id_ops(&rig.out_dir());
     let mut ids: Vec<i64> = changes.iter().map(|(id, _)| *id).collect();
     ids.sort_unstable();
@@ -10325,15 +8466,7 @@ fn mysql_cdc_a_transaction_past_the_memory_cap_spills_rather_than_failing() {
     );
 }
 
-/// An anchor whose identity query FAILS must refuse to write the checkpoint —
-/// never quietly write an UNVERIFIABLE one.
-///
-/// `unwrap_or_default` here shipped an empty `server_uuid` on any transient blip
-/// of the second query (measured on a loaded CI runner, where the sibling test's
-/// inertness guard caught the empty uuid) — an anchor the foreign-server refusal
-/// can never check. The healthy stand cannot produce the failure, so the fault
-/// hook is the only honest fixture; without it the swallowing mutant is
-/// equivalent on every test environment.
+/// An anchor whose identity query FAILS must refuse to write the checkpoint.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
 fn mysql_anchor_refuses_to_write_an_unverifiable_checkpoint() {
@@ -10364,28 +8497,7 @@ fn mysql_anchor_refuses_to_write_an_unverifiable_checkpoint() {
     );
 }
 
-/// A rolled-back MyISAM statement is framed as its OWN transaction — it must not be
-/// fused into the next one's commit.
-///
-/// This test exists because an investigation claimed the opposite defect and TWO
-/// `SHOW BINLOG EVENTS` probes refuted it. Recorded here so the next reader inherits
-/// the measurement rather than the guess:
-///
-/// * a mixed InnoDB+MyISAM transaction rolled back logs ONLY the MyISAM rows — the
-///   InnoDB ones never reach the binlog, so a captured InnoDB table has nothing
-///   buffered when the rollback arrives;
-/// * a pure MyISAM transaction rolled back logs `BEGIN … Write_rows … COMMIT` —
-///   those rows are PERMANENT (MyISAM cannot roll back), so the server frames them
-///   as their own committed transaction and rivet is right to deliver them.
-///
-/// The proposed fix — discard the buffer on a `ROLLBACK` marker — was written and
-/// then removed: no shape reaches rivet with rows buffered AND a rollback marker,
-/// and if one ever did, discarding would DELETE rows still present in the source.
-///
-/// What IS worth pinning is the framing, which no count can see: the surviving rows
-/// and the later transaction's rows must carry DIFFERENT commit positions. Fusing
-/// two transactions delivers exactly the same rows and corrupts `(__pos, __seq)`,
-/// the total order the load dedup sorts by.
+/// A rolled-back MyISAM statement is framed as its OWN transaction.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
 fn roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_transaction() {
@@ -10396,9 +8508,6 @@ fn roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_transacti
     let tbl = unique_name("cdc_rollback_my");
     let mut c = conn();
     c.query_drop(format!("DROP TABLE IF EXISTS {tbl}")).unwrap();
-    // MyISAM ON PURPOSE — it is the mechanism, not a detail. An InnoDB table's
-    // rolled-back rows never reach the binlog at all, so the scenario would be
-    // unexpressible and the test would pass on any code.
     c.query_drop(format!(
         "CREATE TABLE {tbl} {ONE_TRANSACTION_DDL} ENGINE=MyISAM"
     ))
@@ -10406,8 +8515,6 @@ fn roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_transacti
     let _t = MysqlCdcTable(tbl.clone());
 
     let rig = Rig::mysql_cdc(&tbl).census_oracle();
-    // Anchor BEFORE the churn: MySQL's checkpoint is client-side coordinates, so a
-    // run without one re-anchors to "now" and would see neither transaction.
     rig.pin_binlog_here();
 
     mysql_seed_rolled_back_transaction(&mut c, &tbl, 1..=KEPT_BY_MYISAM);
@@ -10415,8 +8522,6 @@ fn roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_transacti
 
     rig.run_ok();
 
-    // BOTH groups arrive: the MyISAM rows are permanent, so dropping them would be
-    // the data loss, not the fix.
     let changes = read_cdc_changes(&rig.out_dir());
     let mut ids: Vec<i64> = changes.iter().map(|c| c.id).collect();
     ids.sort_unstable();
@@ -10428,9 +8533,6 @@ fn roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_transacti
          source, so rivet must deliver them. Dropping them would be the loss."
     );
 
-    // …under DIFFERENT commit positions. This is the half a count cannot see: two
-    // transactions fused into one deliver exactly these rows and corrupt the order
-    // the load dedup sorts by.
     let pos_of = |want: i64| {
         changes
             .iter()
@@ -10448,17 +8550,7 @@ fn roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_transacti
     );
 }
 
-/// Round-5 completeness critic: the DRAIN leg's `_rivet_row_hash` graded by the
-/// INDEPENDENT implementation (`dev/release_oracle/rowhash.py`: DuckDB's own
-/// JSON rendering of the parquet + python xxhash — neither rivet's reader nor
-/// rivet's hasher). Until now every CDC row-hash assertion checked PRESENCE and
-/// schema parity only, while the sink's comment claimed "the same Rust render
-/// as the snapshot" untested — and rounds 2-4 edited the drain's value path.
-/// The corpus carries the injectivity ghosts (NULL, empty string, an embedded
-/// unit separator, a comma-joined value): a render divergence on the drain leg
-/// hashes the same logical row differently, silently defeating the one
-/// cross-leg integrity column. RED against un-framing the canonical image in
-/// `src/enrich.rs` (the v1 bare-separator bug shape).
+/// Round-5 completeness critic.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc + uv"]
 fn cdc_drain_row_hash_matches_the_independent_implementation() {
@@ -10480,10 +8572,8 @@ fn cdc_drain_row_hash_matches_the_independent_implementation() {
         .checkpoint_path(ckpt.clone())
         .dest_path(out.clone());
     let cfg = rig.config_path();
-    run_rivet_ok(&cfg); // anchor run (captures nothing)
+    run_rivet_ok(&cfg);
 
-    // The injectivity-ghost corpus: NULL vs empty, an embedded \x1f (the v1
-    // separator), a comma-joined value (the container-display ghost).
     c.exec_drop(
         format!("INSERT INTO {tbl} (id, a, b) VALUES (?,?,?),(?,?,?),(?,?,?),(?,?,?)"),
         (
@@ -10502,9 +8592,8 @@ fn cdc_drain_row_hash_matches_the_independent_implementation() {
         ),
     )
     .unwrap();
-    run_rivet_ok(&cfg); // drain leg -> out/cdc-*.parquet
+    run_rivet_ok(&cfg);
 
-    // Leg 1 of the oracle: DuckDB (the uv-pinned package, through dev/pytools/duckcli.py) renders the drain parquet.
     let q = format!(
         "SELECT id, a, b, _rivet_row_hash AS h FROM read_parquet('{}/cdc-*.parquet') ORDER BY id",
         out.display()
@@ -10527,9 +8616,6 @@ fn cdc_drain_row_hash_matches_the_independent_implementation() {
         "fixture: all four corpus rows must be captured"
     );
 
-    // Leg 2: python + xxhash recompute the canonical image per
-    // dev/release_oracle/rowhash.py — a different hasher AND a different
-    // framing implementation than src/enrich.rs.
     let py_script = d.path().join("check.py");
     std::fs::write(
         &py_script,
@@ -10570,7 +8656,7 @@ fn uv_python() -> std::process::Command {
     c
 }
 
-/// A MySQL TIME outside one day fails the CDC run with the batch export's code and sentence and the stream's own remedies (no query to cast in), and the checkpoint stays put.
+/// A MySQL TIME outside one day fails the CDC run with the batch export's code and sentence.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
 fn mysql_cdc_time_outside_one_day_is_refused_like_batch_and_never_checkpointed() {
@@ -10592,7 +8678,6 @@ fn mysql_cdc_time_outside_one_day_is_refused_like_batch_and_never_checkpointed()
     ))
     .unwrap();
 
-    // The oracle for the sentence is the batch export of the same rows; its remedy is the batch's own.
     let batch = Rig::mysql_batch(&tbl)
         .source_url(MYSQL_CDC_URL)
         .run_expect_fail();

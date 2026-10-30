@@ -1,9 +1,8 @@
 diff --git a/src/pipeline/job.rs b/src/pipeline/job.rs
-index e53ab6c7..3828b9b5 100644
 --- a/src/pipeline/job.rs
 +++ b/src/pipeline/job.rs
-@@ -1013,7 +1013,7 @@ fn refused_by_a_gate(o: &RunOutcome<'_>) -> bool {
- /// unless its cursor ran ahead and a re-read would skip them.
+@@ -805,7 +805,7 @@
+ /// Whether the keyset resume anchor outlives the run.
  pub(super) fn keyset_anchor_survives(o: &RunOutcome<'_>, cursor_ran_ahead: bool) -> bool {
      if refused_by_a_gate(o) {
 -        return cursor_ran_ahead;
