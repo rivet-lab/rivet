@@ -220,7 +220,7 @@ pub fn apply_rebaseline_remedy(rig: &mut Rig, has_baseline: bool) {
     }
 }
 
-/// The refusal a lost checkpoint gets, by code, with the re-baseline remedy and the phrases `says`.
+/// Assert the lost-checkpoint refusal by code with the re-baseline remedy and `says`.
 fn assert_lost_checkpoint_refusal(rig: &Rig, says: &[&str]) {
     let out = rig.run_args(&[]);
     assert_refused(
@@ -238,7 +238,7 @@ fn assert_lost_checkpoint_refusal(rig: &Rig, says: &[&str]) {
     );
 }
 
-/// The phrases of the refusal a lost checkpoint gets when only the state DB's record of the stream's anchor proves the file existed.
+/// Phrases of the refusal proven by the state DB's anchor record.
 fn lost_anchor_phrases(rig: &Rig) -> Vec<String> {
     vec![
         "is missing, but the state DB records that export".to_string(),
@@ -246,7 +246,7 @@ fn lost_anchor_phrases(rig: &Rig) -> Vec<String> {
     ]
 }
 
-/// A stream whose checkpoint file is lost after a delivered run is refused by code on every later run, writes nothing and leaves no checkpoint, whatever was written at the source meanwhile; `baseline` is true when a completed snapshot (not the state DB's record) is what proves the file existed.
+/// A checkpoint lost after a delivered run is refused on every later run with nothing written; `baseline` when a snapshot proves it.
 pub fn assert_a_lost_checkpoint_is_refused_not_reanchored(s: &mut CdcScenario, baseline: bool) {
     let phrases = match baseline {
         true => vec!["is missing but prior-run evidence exists".to_string()],
@@ -276,7 +276,7 @@ pub fn assert_a_lost_checkpoint_is_refused_not_reanchored(s: &mut CdcScenario, b
     );
 }
 
-/// The refusal's `rivet state reset` remedy accepts the loss: the next run anchors at the current position and the stream delivers from there.
+/// `rivet state reset` accepts the loss and the stream delivers from the current position.
 pub fn assert_state_reset_lifts_a_lost_checkpoint_refusal(s: &mut CdcScenario) {
     let phrases = lost_anchor_phrases(&s.rig);
     let says: Vec<&str> = phrases.iter().map(String::as_str).collect();

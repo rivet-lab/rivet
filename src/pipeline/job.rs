@@ -1900,8 +1900,6 @@ fn run_export_job_inner(
             return (Err(e), summary);
         }
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
-            // The batch pool `--parallel-exports` runs on: every leg runs, each on its
-            // own state connection, and a finished snapshot is recorded as it lands.
             let _flags = super::run::RenderFlags::set(super::run::multi_export_mode(), Some(true));
             let (harm, _) = super::run::RunHarmBracket::open(&config.source);
             let legs: Vec<&ExportConfig> = pending.iter().collect();
@@ -1939,10 +1937,9 @@ fn run_export_job_inner(
                 opts.strict,
                 grants,
             );
-            super::cdc_job::record_file_anchor(config, export, state, config_path);
+            super::cdc_job::record_file_anchor(config, export, state, config_path, &outcome.0);
             outcome
         });
-        // The parent of a child process knows the export's run only by the id reported here.
         outcome.1.emit_finished();
         return outcome;
     }

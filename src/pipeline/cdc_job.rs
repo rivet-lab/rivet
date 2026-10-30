@@ -368,7 +368,7 @@ pub(super) fn claim_checkpoint(config_path: &str, export: &ExportConfig) -> Resu
     crate::source::cdc::checkpoint_identity::claim_checkpoint(&ckpt, config, &export.name)
 }
 
-/// The checkpoint file, state key and destination key of a file-anchored stream; `None` on Postgres, whose anchor is the slot, and without `cdc.checkpoint`.
+/// The checkpoint path and state keys of a file-anchored stream, or `None`.
 fn file_anchor_of(
     config: &Config,
     export: &ExportConfig,
@@ -393,7 +393,7 @@ fn file_anchor_of(
     ))
 }
 
-/// Refuse a file-anchored stream whose checkpoint is gone while the state DB records an earlier run wrote it; record the anchor while the file is there.
+/// Refuse a run whose recorded checkpoint file is gone; writes nothing.
 pub(super) fn refuse_lost_file_anchor(
     config: &Config,
     export: &ExportConfig,
@@ -404,7 +404,6 @@ pub(super) fn refuse_lost_file_anchor(
         return Ok(());
     };
     match crate::source::cdc::Position::load(&ckpt) {
-        Ok(Some(_)) => state.record_captured_tables(&key, &dest),
         Ok(None) if state.captured_tables(&key, &dest)?.is_some() => {
             Err(crate::source::cdc::checkpoint_identity::lost_file_anchor(
                 CdcEngine::from(config.source.source_type).label(),
@@ -417,14 +416,17 @@ pub(super) fn refuse_lost_file_anchor(
     }
 }
 
-/// Record, after a run, that the stream's checkpoint file exists; a failed write is warned, and the next run records it before it reads.
+/// Record after a successful run that the stream's checkpoint file exists.
 pub(super) fn record_file_anchor(
     config: &Config,
     export: &ExportConfig,
     state: &StateStore,
     config_path: &str,
+    outcome: &Result<()>,
 ) {
-    let Some((ckpt, key, dest)) = file_anchor_of(config, export, config_path) else {
+    let Some((ckpt, key, dest)) =
+        file_anchor_of(config, export, config_path).filter(|_| outcome.is_ok())
+    else {
         return;
     };
     if matches!(crate::source::cdc::Position::load(&ckpt), Ok(Some(_)))
@@ -1198,13 +1200,7 @@ fn record_metric(state: &StateStore, config: &Config, export: &ExportConfig, sum
 #[cfg(test)]
 mod tests {
 
-    /// `resolve_checkpoint`'s three cases, each named by a mutant that survived.
-    ///
-    /// The function is pure apart from two `exists()` probes, and it had only LIVE
-    /// coverage — so `replace -> PathBuf with Default::default()`, `delete !` and
-    /// `&& -> ||` all sailed through the offline gate. It decides where a resume
-    /// looks for its position, so a wrong answer re-anchors the stream at NOW.
-    /// A config in `dir` for a `mode: cdc` export `o` of a `source_type` source writing to `out` with checkpoint `./cdc/o.ckpt`; its path, config and export.
+    /// A `mode: cdc` config in `dir` with checkpoint `./cdc/o.ckpt`; its path, config and export.
     fn anchored(
         dir: &std::path::Path,
         source_type: &str,
@@ -1223,22 +1219,24 @@ mod tests {
         (path, config, export)
     }
 
+    /// Write a checkpoint at `cdc/o.ckpt`.
     fn write_checkpoint(dir: &std::path::Path) {
         crate::source::cdc::Position::new(serde_json::json!({"file": "bin.000001", "pos": 4}))
             .save(&dir.join("cdc/o.ckpt"))
             .unwrap();
     }
 
-    /// The first run anchors as it always did; a run that left a checkpoint is recorded, and then the file's loss is refused by code and again on the next run.
+    /// A first run anchors; the loss of a recorded checkpoint is refused on every later run.
     #[test]
     fn a_recorded_file_anchor_that_is_gone_is_refused_and_a_first_run_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let (path, config, export) = anchored(dir.path(), "mysql", "./out");
         let state = StateStore::open_in_memory().unwrap();
         super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
-        super::record_file_anchor(&config, &export, &state, &path);
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
         super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
         write_checkpoint(dir.path());
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
         super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
         std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
         for _ in 0..2 {
@@ -1256,17 +1254,17 @@ mod tests {
         super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
     }
 
-    /// A checkpoint written by the run itself is recorded after it, and only when the file is there.
+    /// A run records its checkpoint only when the file exists.
     #[test]
     fn a_run_records_its_anchor_only_when_the_checkpoint_exists() {
         let dir = tempfile::tempdir().unwrap();
         let (path, config, export) = anchored(dir.path(), "mongo", "./out");
         let state = StateStore::open_in_memory().unwrap();
-        super::record_file_anchor(&config, &export, &state, &path);
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
         std::fs::create_dir_all(dir.path().join("cdc")).unwrap();
         super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
         write_checkpoint(dir.path());
-        super::record_file_anchor(&config, &export, &state, &path);
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
         std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
         let err = super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap_err();
         assert!(
@@ -1275,14 +1273,14 @@ mod tests {
         );
     }
 
-    /// The record is the stream's per destination: the same export writing elsewhere, and a checkpoint that does not parse, are the run's own to judge.
+    /// The record is keyed per destination; an unparsable checkpoint is left to the run.
     #[test]
     fn the_record_binds_to_the_destination_and_leaves_a_corrupt_file_to_the_run() {
         let dir = tempfile::tempdir().unwrap();
         let (path, config, export) = anchored(dir.path(), "mysql", "./out");
         let state = StateStore::open_in_memory().unwrap();
         write_checkpoint(dir.path());
-        super::record_file_anchor(&config, &export, &state, &path);
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
         let mut moved = export.clone();
         moved.destination = anchored(dir.path(), "mysql", "./elsewhere").2.destination;
         std::fs::write(dir.path().join("cdc/o.ckpt"), "{not json").unwrap();
@@ -1292,20 +1290,32 @@ mod tests {
         assert!(super::refuse_lost_file_anchor(&config, &export, &state, &path).is_err());
     }
 
-    /// PostgreSQL anchors at the slot, so a missing file there is the slot's business and nothing is recorded.
+    /// Postgres records nothing: its anchor is the slot.
     #[test]
     fn postgres_has_no_file_anchor_to_lose() {
         let dir = tempfile::tempdir().unwrap();
         let (path, config, export) = anchored(dir.path(), "postgres", "./out");
         let state = StateStore::open_in_memory().unwrap();
         write_checkpoint(dir.path());
-        super::record_file_anchor(&config, &export, &state, &path);
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
         std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
         super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
     }
 
-    /// The run's claim reads the export's `cdc.checkpoint` against its config's directory: a second
-    /// config of the directory naming the same file is refused by code.
+    /// Only a successful run, and never the check itself, records the anchor.
+    #[test]
+    fn a_failed_run_and_the_check_record_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = anchored(dir.path(), "mysql", "./out");
+        let state = StateStore::open_in_memory().unwrap();
+        write_checkpoint(dir.path());
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+        super::record_file_anchor(&config, &export, &state, &path, &Err(anyhow::anyhow!("x")));
+        std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+    }
+
+    /// A second config naming the same checkpoint file is refused by code.
     #[test]
     fn a_run_claims_the_checkpoint_its_export_names() {
         let dir = tempfile::tempdir().unwrap();
@@ -1332,6 +1342,7 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CHECKPOINT_SHARED", 5);
     }
 
+    /// `resolve_checkpoint` prefers the config dir and keeps an existing cwd file.
     #[test]
     fn resolve_checkpoint_prefers_the_config_dir_and_keeps_an_existing_cwd_file() {
         let cfg_dir = tempfile::tempdir().expect("config dir");

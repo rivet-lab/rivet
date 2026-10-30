@@ -24,7 +24,7 @@ pub(crate) fn checkpoint_invalid(why: String) -> anyhow::Error {
     refusal(crate::error::codes::SOURCE_CDC_CHECKPOINT_INVALID, why)
 }
 
-/// Refuse a run whose checkpoint file is gone while the state DB records that export `export` wrote it: `SOURCE_CDC_CHECKPOINT_INVALID`, exit 5.
+/// Refuse a lost checkpoint file the state DB recorded: `SOURCE_CDC_CHECKPOINT_INVALID`, exit 5.
 pub(crate) fn lost_file_anchor(
     engine: &str,
     checkpoint: &std::path::Path,

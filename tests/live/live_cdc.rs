@@ -2160,7 +2160,7 @@ fn pg_cdc_rollover_1_delivers_the_commits_behind_an_idle_runs_barrier() {
     );
 }
 
-/// A lost checkpoint on a changes-only stream: the refusal's re-baseline remedy, followed as printed, re-reads the row written while it was gone.
+/// The printed re-baseline remedy for a lost changes-only checkpoint re-reads the missed row.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc + the rivet-duckdb oracle"]
 fn mysql_missing_checkpoint_refusal_on_a_changes_only_stream_remedy_recovers_the_row_written_while_it_was_gone()
