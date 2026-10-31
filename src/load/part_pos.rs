@@ -141,6 +141,20 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_is_served_at_its_file_offset_and_refuses_what_it_does_not_hold() {
+        let chunk = Chunk {
+            offset: 10,
+            bytes: Bytes::from_static(b"abcde"),
+        };
+        assert_eq!(chunk.len(), 15);
+        assert_eq!(chunk.get_bytes(11, 3).unwrap().as_ref(), b"bcd");
+        assert_eq!(chunk.slice(12, None).unwrap().as_ref(), b"cde");
+        assert!(chunk.slice(9, None).is_err());
+        assert!(chunk.slice(16, None).is_err());
+        assert!(chunk.slice(11, Some(5)).is_err());
+    }
+
+    #[test]
     fn a_part_without_the_column_or_rows_has_no_head() {
         assert!(heads(&part(&[Some("a")], false), "n.parquet").is_empty());
         assert!(heads(&part(&[], true), "e.parquet").is_empty());
