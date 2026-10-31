@@ -1377,6 +1377,7 @@ mod tests {
         assert!(!bound_unmet(Some(past), Some("81"), at(100, 10)));
         assert!(!bound_unmet(Some(past), Some("81"), None));
         assert!(!bound_unmet(Some("81"), Some(past), never));
+        assert!(!bound_unmet(Some(past), Some(past), never));
         assert!(!bound_unmet(None, Some(past), never));
         assert!(!bound_unmet(Some(past), None, never));
     }
