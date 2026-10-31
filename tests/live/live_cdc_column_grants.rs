@@ -3426,6 +3426,11 @@ fn a_database_dropped_with_a_captured_table_is_met_as_before_by_the_unreadable_c
                 .unwrap();
         },
         |rig| {
+            let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+                .iter()
+                .flat_map(|d| read_all_parts(d))
+                .collect();
+            assert!(!parts.is_empty(), "the re-baselined stream delivers parts");
             let (names, cells) = delivered(rig);
             assert!(
                 cells.iter().any(|v| v == "ann") && names.iter().all(|n| n == "id" || n == "name"),
