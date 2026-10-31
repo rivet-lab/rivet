@@ -203,8 +203,7 @@ load:
   rivet. For a server certificate signed by a private CA, set `ca_file:` in the `load:`
   block to a PEM file of its root certificate(s) (an absolute path; a relative one is
   read from the directory rivet runs in); a file that is missing or holds no PEM
-  certificate fails the load before any statement. Not yet tested against a live
-  `https://` server: the stand's ClickHouse serves only HTTP.
+  certificate fails the load before any statement.
 
 ## Not supported
 
