@@ -1536,6 +1536,8 @@ def grade_load(spec: dict) -> dict:
         if target == "clickhouse":
             db = str(load.get("database") or "default")
             password = spec.get("password") or ""
+            if load.get("ca_file"):
+                ora.db.sql(f"SET ca_cert_file = {_lit(str(load['ca_file']))}")
             cols = ora.rows(f"SELECT * FROM {_clickhouse(load, password, f'SELECT name, type FROM system.columns WHERE database = {_lit(db)} AND table = {_lit(leaf)}')}")
             wh_types = {n: t for n, t in cols}
             # ClickHouse ships a binary String as invalid UTF-8; read it as the hex the source canon uses.

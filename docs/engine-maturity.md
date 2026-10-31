@@ -88,9 +88,9 @@ code does not count.
   - M7 (the loader's HTTP methods are excluded in `.cargo/mutants.toml`, each exclusion naming the live test that kills it, all of which the gate runs);
   - `partition:` by column and granularity in every mode, the change log's view pinned to a cross-partition `FINAL` (CH8; live cells for full, CDC with a moving partition value, incremental, and a changed partition refused);
   - version order across a MySQL binlog renumbering: a checkpoint into a binlog `RESET MASTER` renumbered, or on another server, is refused with a remedy that empties the change log (#729); a changes-only stream whose checkpoint file is gone is refused (#730);
+  - `load.ca_file`: a load over `https://` to a server whose certificate a private CA signed is refused by its TLS cause without `ca_file` and lands with it (the stand serves HTTPS on 8443);
   - M8 (the reference page, [recipes/clickhouse-load.md](recipes/clickhouse-load.md), with its known limits).
 - **Open for GA:**
-  - `load.ca_file` (a private CA) is unit-tested only: no live `https://` run, the stand's ClickHouse serves HTTP;
   - a real-GCS run of the named-collection pull;
   - M8's driven run;
   - M9.
