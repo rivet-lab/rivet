@@ -169,7 +169,7 @@ engines:
       - {native_type: "TEXT", sample: ["'üñíçødé ''q'''", "'hello'"], delivery: "Utf8", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "NUMERIC(18,2)", sample: ["999999999999.99"], delivery: "Decimal128(18, 2)", clickhouse: {type: "Nullable(Decimal(18, 2))"}}
       - {native_type: "NUMERIC(18,4)", sample: ["12345.6789"], delivery: "Decimal128(18, 4)", clickhouse: {type: "Nullable(Decimal(18, 4))"}}
-      - {native_type: "TIMESTAMP", sample: ["'2035-08-07 09:08:07.987654'"], delivery: "Timestamp(µs)", clickhouse: {type: "Nullable(DateTime64(6))"}}
+      - {native_type: "TIMESTAMP", sample: ["'2035-08-07 09:08:07.987654'"], delivery: "Timestamp(µs)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "TIMESTAMPTZ", sample: ["'2019-02-03 08:07:06.554433+05'"], delivery: "Timestamp(µs, \"UTC\")", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "BYTEA", sample: ["'\\x00ff01'::bytea", "'\\xDEADBEEF'"], delivery: "Binary", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "UUID", sample: ["'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380011'", "'12345678-1234-1234-1234-123456789012'"], delivery: "arrow.uuid", clickhouse: {type: "Nullable(UUID)", today: "Nullable(FixedString(16))", defect: "loads as FixedString(16) bytes where ClickHouse has a native UUID (ADR-0038 CP1, ClickHouse load step)"}}
@@ -211,7 +211,7 @@ engines:
       - {native_type: "VARCHAR(20)", sample: ["'hello'"], delivery: "Utf8", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "DECIMAL(18,2)", sample: ["999999999999.99"], delivery: "Decimal128(18, 2)", clickhouse: {type: "Nullable(Decimal(18, 2))"}}
       - {native_type: "DECIMAL(18,4)", sample: ["12345.6789"], delivery: "Decimal128(18, 4)", clickhouse: {type: "Nullable(Decimal(18, 4))"}}
-      - {native_type: "DATETIME(6)", sample: ["'2035-08-07 09:08:07.987654'"], delivery: "Timestamp(µs)", clickhouse: {type: "Nullable(DateTime64(6))"}}
+      - {native_type: "DATETIME(6)", sample: ["'2035-08-07 09:08:07.987654'"], delivery: "Timestamp(µs)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "TIMESTAMP(6) NULL", sample: ["'2035-08-07 09:08:07.987654'"], delivery: "Timestamp(µs, \"UTC\")", render: {duck: "strftime({c}, '%Y-%m-%d %H:%M:%S.%f')"}, clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "BINARY(4)", sample: ["UNHEX('00000000')"], delivery: "Binary", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "JSON", sample: ["JSON_OBJECT('tier','gold','n',1)", "'{\"k\": \"v\", \"n\": 42}'"], delivery: "arrow.json", clickhouse: {type: "Nullable(String)"}}
@@ -249,7 +249,7 @@ engines:
       - {native_type: "BIT", sample: ["1"], delivery: "Boolean", clickhouse: {type: "Nullable(Bool)"}}
       - {native_type: "VARCHAR(50)", sample: ["'hello'"], delivery: "Utf8", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "NVARCHAR(50)", sample: ["N'cafe-unicode'"], delivery: "Utf8", clickhouse: {type: "Nullable(String)"}}
-      - {native_type: "DATETIME2", sample: ["'2026-06-23 10:00:00.1234567'"], delivery: "Timestamp(ns)", today_delivery: "Timestamp(µs)", today_render: {server: "LEFT(CONVERT(varchar(max), {c}, 121), 26)", canon: "timestamp"}, known_defect: "delivered at microseconds, the 100 ns digit dropped; exact native is Timestamp(ns) (ADR-0038 CP1, SQL Server engine step)", clickhouse: {type: "Nullable(DateTime64(7))", today: "Nullable(DateTime64(6))"}}
+      - {native_type: "DATETIME2", sample: ["'2026-06-23 10:00:00.1234567'"], delivery: "Timestamp(ns)", today_delivery: "Timestamp(µs)", today_render: {server: "LEFT(CONVERT(varchar(max), {c}, 121), 26)", canon: "timestamp"}, known_defect: "delivered at microseconds, the 100 ns digit dropped; exact native is Timestamp(ns) (ADR-0038 CP1, SQL Server engine step)", clickhouse: {type: "Nullable(DateTime64(7, 'UTC'))", today: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "DATETIMEOFFSET", sample: ["'2026-06-23 10:00:00 +05:30'"], delivery: "Timestamp(ns, \"UTC\")", today_delivery: "Timestamp(µs, \"UTC\")", render: {server: "CONVERT(varchar(max), CAST(SWITCHOFFSET({c}, '+00:00') AS DATETIME2(7)), 121)", canon: "timestamp"}, today_render: {server: "LEFT(CONVERT(varchar(max), CAST(SWITCHOFFSET({c}, '+00:00') AS DATETIME2(7)), 121), 26)", canon: "timestamp"}, known_defect: "delivered at microseconds; exact native is Timestamp(ns, UTC) (ADR-0038 CP1, SQL Server engine step)", clickhouse: {type: "Nullable(DateTime64(7, 'UTC'))", today: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "DATE", sample: ["'2026-06-23'"], delivery: "Date32", clickhouse: {type: "Nullable(Date32)"}}
       - {native_type: "TIME", sample: ["'13:45:30.123456'"], delivery: "Time64(ns)", today_delivery: "Time64(µs)", render: {server: "CONVERT(varchar(max), {c}, 114)", canon: "timestamp"}, known_defect: "delivered at microseconds; exact native is Time64(ns) (ADR-0038 CP1, SQL Server engine step)", clickhouse: {type: "Nullable(Decimal(18, 7))", today: "Nullable(Decimal(18, 6))"}}
@@ -257,8 +257,8 @@ engines:
       - {native_type: "VARBINARY(16)", sample: ["0xDEADBEEF"], delivery: "Binary", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "CHAR(8)", sample: ["'pad'"], delivery: "Utf8", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "NCHAR(8)", sample: ["N'ñpad'"], delivery: "Utf8", render: {server: "CAST({c} AS NVARCHAR(8))"}, clickhouse: {type: "Nullable(String)"}}
-      - {native_type: "DATETIME", sample: ["'2026-01-15T13:45:30.127'"], delivery: "Timestamp(µs)", render: {server: "CONVERT(varchar(max), CAST({c} AS DATETIME2(7)), 121)", canon: "round_micros"}, clickhouse: {type: "Nullable(DateTime64(6))"}}
-      - {native_type: "SMALLDATETIME", sample: ["'2026-01-15T13:45:00'"], delivery: "Timestamp(µs)", clickhouse: {type: "Nullable(DateTime64(6))"}}
+      - {native_type: "DATETIME", sample: ["'2026-01-15T13:45:30.127'"], delivery: "Timestamp(µs)", render: {server: "CONVERT(varchar(max), CAST({c} AS DATETIME2(7)), 121)", canon: "round_micros"}, clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
+      - {native_type: "SMALLDATETIME", sample: ["'2026-01-15T13:45:00'"], delivery: "Timestamp(µs)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "BINARY(8)", sample: ["0xAB"], delivery: "Binary", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "NUMERIC(10,3)", sample: ["12.345"], delivery: "Decimal128(10, 3)", clickhouse: {type: "Nullable(Decimal(10, 3))"}}
       - {native_type: "MONEY", sample: ["123.4567"], delivery: "Decimal128(19, 4)", clickhouse: {type: "Nullable(Decimal(19, 4))"}}

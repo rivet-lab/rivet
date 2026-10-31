@@ -869,6 +869,30 @@ services:
       retries: 30
       start_period: 15s
 
+  clickhouse-tz:
+    image: clickhouse/clickhouse-server:24.8
+    profiles: ["tz"]
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      TZ: Asia/Tokyo
+      CLICKHOUSE_USER: rivet
+      CLICKHOUSE_PASSWORD: rivet
+      CLICKHOUSE_DB: rivet
+    ports:
+      - "8125:8123"
+    volumes:
+      - ./dev/clickhouse/rivet_user.xml:/etc/clickhouse-server/users.d/rivet_user.xml:ro
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider",
+             "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
   # MongoDB source engine (batch JSON-blob export). Standalone is enough for the
   # batch read path; change-stream CDC needs the replica set below.
   mongo:

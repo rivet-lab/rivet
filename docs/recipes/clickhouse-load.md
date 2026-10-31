@@ -164,6 +164,12 @@ load:
   value outside that range or has no min/max statistics
   (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`). A `Date32` outside the same range fails the
   insert: ClickHouse refuses it itself (measured on a part rivet sends).
+- **Naive timestamps are declared in UTC.** A timestamp without a zone lands as
+  `DateTime64(p, 'UTC')`, so it reads back as the source wrote it whatever the server's
+  or the session's time zone. A table created by 0.32.2 or earlier declares it
+  `DateTime64(p)`, which ClickHouse shows in the server's time zone; rivet keeps loading
+  such a table and warns with the `ALTER TABLE ... MODIFY COLUMN` that declares it in UTC
+  (the stored instants do not change; a key column cannot be altered).
 - **Types that land as something else.** `uuid` lands as `FixedString(16)` (the 16 raw
   bytes; the type report carries the `toUUID` expression to recover it), `json`/`jsonb`
   as `String` holding the JSON text, `time` as `Decimal64` seconds since midnight, and a
