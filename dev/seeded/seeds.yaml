@@ -4323,3 +4323,22 @@ seeds:
         na: "SourceEngine, which orders a change log for a warehouse, has no Oracle variant, so no Oracle change log is ranked by this path"
       lib:
         cells: ["lib:a_mongo_position_orders_by_cluster_time_then_ordinal_then_token", "lib:mongo_orders_by_cluster_time_ordinal_then_token_and_partitions_by_id"]
+  - name: clickhouse-paren-sorting-key
+    class: "an existing ClickHouse change log's key is read from `system.tables.sorting_key` text without its tuple parentheses taken off, so ClickHouse 26's `(id)` reads as another key than `load.pk` and every CDC load into an existing log is refused RIVET_LOAD_TARGET_OBJECT_CONFLICT"
+    history: "found 2026-10-31 by the ClickHouse version matrix (dev/clickhouse/version_matrix.py): every change-log cell red on 26.8 and 26.10, green on 24.8-26.3"
+    scope: source
+    patch: clickhouse-paren-sorting-key/shared.patch
+    engines:
+      postgres:
+        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
+      mysql:
+        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
+      mssql:
+        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
+      mongo:
+        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
+      oracle:
+        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
+      lib:
+        cells:
+          - "lib:an_existing_change_log_that_this_load_would_corrupt_is_refused"

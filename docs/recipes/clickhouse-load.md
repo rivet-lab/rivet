@@ -1,7 +1,8 @@
 # Loading rivet Parquet into ClickHouse (preview)
 
-> **Status: Preview.** Live-tested against ClickHouse 24.8 (the stand's `clickhouse`
-> compose service). See [Known limits](#known-limits) and
+> **Status: Preview.** Live-tested against ClickHouse 24.8, 25.8, 26.3, 26.8 and 26.10
+> (the stand's `clickhouse` compose service, 24.8 by default; `dev/clickhouse/version_matrix.py`
+> runs every gate cell on each). See [Known limits](#known-limits) and
 > [engine maturity](../engine-maturity.md) for what is still open before GA.
 
 `rivet load` writes an export's Parquet into ClickHouse over the HTTP interface

@@ -88,6 +88,7 @@ code does not count.
   - M7 (the loader's HTTP methods are excluded in `.cargo/mutants.toml`, each exclusion naming the live test that kills it, all of which the gate runs);
   - `partition:` by column and granularity in every mode, the change log's view pinned to a cross-partition `FINAL` (CH8; live cells for full, CDC with a moving partition value, incremental, and a changed partition refused);
   - version order across a MySQL binlog renumbering: a checkpoint into a binlog `RESET MASTER` renumbered, or on another server, is refused with a remedy that empties the change log (#729); a changes-only stream whose checkpoint file is gone is refused (#730);
+  - server versions: every `clickhouse_load` gate cell is green on 24.8, 25.8, 26.3, 26.8 and 26.10 (`dev/clickhouse/version_matrix.py`, 2026-10-31); the gate runs the stand's 24.8;
   - M8 (the reference page, [recipes/clickhouse-load.md](recipes/clickhouse-load.md), with its known limits).
 - **Open for GA:**
   - `load.ca_file` (a private CA) is unit-tested only: no live `https://` run, the stand's ClickHouse serves HTTP;
