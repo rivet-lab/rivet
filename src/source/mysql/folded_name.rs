@@ -188,10 +188,34 @@ mod tests {
         assert_eq!(char::from_u32(304), Some('\u{0130}'));
     }
 
-    /// Every shape of four megabytes is read in one pass against ten names, inside the budget.
+    /// A shape of `bytes` bytes for the hostile-text test, with the number of the ten names it holds.
+    fn hostile_shapes(bytes: usize) -> [(&'static str, Vec<u8>, usize); 4] {
+        [
+            ("non-ASCII", "中文".repeat(bytes / 6).into_bytes(), 5),
+            (
+                "non-ASCII runs",
+                "中文中文, ".repeat(bytes / 14).into_bytes(),
+                0,
+            ),
+            ("mixed", "ab中c".repeat(bytes / 6).into_bytes(), 0),
+            ("ASCII", b"a".repeat(bytes), 0),
+        ]
+    }
+
+    /// Time spent and names found by `mentions_name` over `text` for every name.
+    fn timed_search(names: &[String], text: &[u8]) -> (std::time::Duration, usize) {
+        let started = std::time::Instant::now();
+        let hits = names
+            .iter()
+            .filter(|n| mentions_name(true, n, text))
+            .count();
+        (started.elapsed(), hits)
+    }
+
+    /// Four times the text costs under eight times the time, whatever else the machine is doing.
     #[test]
     fn a_hostile_four_megabytes_is_read_in_one_pass() {
-        const MB4: usize = 4 << 20;
+        const MB: usize = 1 << 20;
         let names: Vec<String> = [
             "kikikikikikikikiki",
             "ikikikikikikikikik",
@@ -207,33 +231,25 @@ mod tests {
         .iter()
         .map(|n| n.to_string())
         .collect();
-        let shapes: [(&str, Vec<u8>, usize); 4] = [
-            ("non-ASCII", "中文".repeat(MB4 / 6).into_bytes(), 5),
-            (
-                "non-ASCII runs",
-                "中文中文, ".repeat(MB4 / 14).into_bytes(),
-                0,
-            ),
-            ("mixed", "ab中c".repeat(MB4 / 6).into_bytes(), 0),
-            ("ASCII", b"a".repeat(MB4), 0),
-        ];
-        for (label, text, owed) in shapes {
+        let small = hostile_shapes(MB);
+        let large = hostile_shapes(4 * MB);
+        for ((label, small, _), (_, large, owed)) in small.into_iter().zip(large) {
             let names = names.clone();
             let (done, result) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let hits: Vec<bool> = names
-                    .iter()
-                    .map(|n| mentions_name(true, n, &text))
-                    .collect();
-                let _ = done.send(hits);
+                let _ = done.send((timed_search(&names, &small), timed_search(&names, &large)));
             });
-            let hits = result
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap_or_else(|why| panic!("NAME SEARCH NOT LINEAR: {label}: {why}"));
-            assert_eq!(
-                hits.iter().filter(|h| **h).count(),
-                owed,
-                "{label}: {hits:?}"
+            let ((t_small, hits_small), (t_large, hits_large)) = result
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .unwrap_or_else(|why| {
+                    panic!("NAME SEARCH NOT LINEAR: {label}: no answer in 120 s: {why}")
+                });
+            assert_eq!((hits_small, hits_large), (owed, owed), "{label}");
+            let floor = std::time::Duration::from_millis(50);
+            let ratio = t_large.as_secs_f64() / t_small.max(floor).as_secs_f64();
+            assert!(
+                ratio < 8.0,
+                "NAME SEARCH NOT LINEAR: {label}: 1 MB {t_small:?}, 4 MB {t_large:?}, x{ratio:.1}"
             );
         }
     }
