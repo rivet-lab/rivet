@@ -87,9 +87,9 @@ code does not count.
   - M6 (`clickhouse_load` gate cells for CDC per engine, full, incremental, the crash re-runs, the range refusal pushed and pulled, the retries, and the loader's three live lib tests);
   - M7 (the loader's HTTP methods are excluded in `.cargo/mutants.toml`, each exclusion naming the live test that kills it, all of which the gate runs);
   - `partition:` by column and granularity in every mode, the change log's view pinned to a cross-partition `FINAL` (CH8; live cells for full, CDC with a moving partition value, incremental, and a changed partition refused);
+  - version order across a MySQL binlog renumbering: a checkpoint into a binlog `RESET MASTER` renumbered, or on another server, is refused with a remedy that empties the change log (#729); a changes-only stream whose checkpoint file is gone is refused (#730);
   - M8 (the reference page, [recipes/clickhouse-load.md](recipes/clickhouse-load.md), with its known limits).
 - **Open for GA:**
-  - version order across a binlog renumbering (failover, `RESET MASTER`);
   - `load.ca_file` (a private CA) is unit-tested only: no live `https://` run, the stand's ClickHouse serves HTTP;
   - a real-GCS run of the named-collection pull;
   - M8's driven run;
