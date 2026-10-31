@@ -22,6 +22,7 @@ mod arrow_convert;
 pub(crate) use arrow_convert::time_outside_day;
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
+mod folded_name;
 mod proxy;
 mod statement;
 #[cfg(test)]

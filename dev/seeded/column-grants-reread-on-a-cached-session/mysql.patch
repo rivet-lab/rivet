@@ -1,16 +1,16 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 53638066..df934d64 100644
+index 5896acd8..5ca507b8 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -104,6 +104,7 @@ pub(crate) struct MysqlChangeStream {
-     grants_source: Option<(String, Option<TlsConfig>)>,
-     /// `(file, position)` of the first privilege statement not yet answered by a re-read: consecutive statements share one.
-     grants_pending: Option<(String, u64)>,
+@@ -111,6 +111,7 @@ pub(crate) struct MysqlChangeStream {
+     in_transaction: bool,
+     /// Whether the server folds identifier case (`lower_case_table_names` other than 0), read only when the run projects.
+     fold_names: bool,
 +    grants_conn: Option<mysql::Conn>,
  }
  
  impl MysqlChangeStream {
-@@ -742,8 +743,12 @@ impl MysqlChangeStream {
+@@ -778,8 +779,12 @@ impl MysqlChangeStream {
          let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
              return Ok(());
          };
@@ -24,10 +24,10 @@ index 53638066..df934d64 100644
          let now = read.unwrap_or_default();
          let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
              r.get(t).map(|c| c.columns.clone())
-@@ -894,6 +899,7 @@ impl MysqlChangeStream {
-             readable: None,
-             grants_source: None,
+@@ -932,6 +937,7 @@ impl MysqlChangeStream {
              grants_pending: None,
+             in_transaction: false,
+             fold_names: false,
 +            grants_conn: None,
          })
      }

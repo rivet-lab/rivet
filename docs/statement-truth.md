@@ -89,9 +89,14 @@ whether `sql` is the logged event or, when the server logged nothing, the bytes 
 
 `src/source/statement_truth.rs` loads every fixture of an engine, replays each row through the adapter's
 reader and sorts each disagreement: `missed` (the server changed what the reader captures and the
-reader passed it), `over` (the reader refused a statement that touched nothing it captures, or
-that failed) and `wrong` (both refused, differently). An adapter is a function from a row to a
-class; the MySQL one is `src/source/mysql/statement_truth.rs`.
+reader passed it), `over` (the reader refused a statement that touched nothing it captures) and `wrong`
+(both refused, differently). An adapter is a function from a row to a class; the MySQL one is
+`src/source/mysql/statement_truth.rs`. A row the server did not log never reaches a reader and is not graded.
+
+The MySQL adapter calls the binlog reader's own `query_refusal` and `statement_frame`, the way the event loop does, twice:
+
+- Without `columns_from: grants`: the TRUNCATE, DROP and statement-format write readers decide. A rename or a privilege change is not read without the policy, so it is not owed a stop.
+- Under the policy: a statement is caught when `query_refusal` refuses it, or, for a privilege row, when `statement_frame` marks a grants re-read. A refusal of a statement that changes nothing is an over-stop. A separate test fails on any ASCII statement owed a stop that passes.
 
 Every disagreement must be in the adapter's ledger with a ceiling and a dated reason; an entry that
 no longer covers a row fails the test, so the ledger shrinks when the reader is fixed. A missing

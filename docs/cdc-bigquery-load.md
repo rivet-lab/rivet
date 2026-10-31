@@ -64,6 +64,8 @@ dedup cost.
    WHERE __rn = 1;
    -- PostgreSQL / SQL Server: ORDER BY JSON_VALUE(__pos,'$.lsn') …
    -- Snowflake: PARSE_JSON(__pos):file … and SELECT * EXCLUDE (…)
+   -- MongoDB: ORDER BY the numeric clusterTime `ct`, then the numeric ordinal `ord`, then the
+   -- resume token `_data`; a row without `ct` (staged by an older rivet) ranks below every stamped one
    ```
 
    One expression does the dedup work: **at-least-once dedup** (a re-emitted

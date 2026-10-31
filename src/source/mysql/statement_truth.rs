@@ -1,175 +1,331 @@
-//! Replays the MySQL statement-truth corpus through the QUERY-event readers of the binlog reader.
+//! Replays the MySQL statement-truth corpus through the QUERY-event readers of the binlog reader, with and without the grants policy.
 
-use super::cdc::{
-    drop_table_targets, is_privilege_statement, refused_column_rename, refused_table_rename,
-    statement_dml_target, truncate_target, undecodable_event_is_ours,
-};
+use super::cdc::{QueryRefusal, query_refusal, statement_frame};
 use super::statement::SqlMode;
 use crate::source::statement_truth::{Class, Direction, Known, Row, assert_ledgers, corpora};
 
-/// The class of refusal the reader gives one logged statement, in the order its event loop tries them.
-fn read(row: &Row, configured: &[String]) -> Class {
-    let sql = String::from_utf8_lossy(&row.bytes()).into_owned();
+/// The refusal the event loop gives one logged statement.
+fn refusal(row: &Row, policy: bool, fold: bool, configured: &[String]) -> Option<QueryRefusal> {
+    let raw = row.bytes();
+    let sql = String::from_utf8_lossy(&raw).into_owned();
     let mode = SqlMode::from_bits(row.mode);
-    let db = row.db.as_str();
-    let ours = |t: &Option<(String, String)>| {
-        undecodable_event_is_ours(
-            t.as_ref().map(|(s, t)| (s.as_str(), t.as_str())),
-            configured,
-        )
-    };
-    if truncate_target(&sql, db, mode).is_some_and(|(s, t)| ours(&Some((s, t)))) {
-        Class::Truncate
-    } else if refused_column_rename(true, &sql, db, mode, configured).is_some() {
-        Class::RenameColumn
-    } else if refused_table_rename(true, &sql, db, mode, configured).is_some() {
-        Class::RenameTable
-    } else if drop_table_targets(&sql, db, mode).is_some_and(|ts| ts.iter().any(ours)) {
-        Class::Drop
-    } else if statement_dml_target(&sql, db, mode).is_some_and(|t| ours(&t)) {
-        Class::StatementWrite
-    } else if is_privilege_statement(&sql, mode) {
-        Class::Privilege
-    } else {
-        Class::None
+    query_refusal(policy, fold, &sql, &raw, &row.db, mode, configured)
+}
+
+/// The class of a refusal.
+fn class_of(refusal: &QueryRefusal) -> Class {
+    match refusal {
+        QueryRefusal::Truncate(_) => Class::Truncate,
+        QueryRefusal::ColumnRename(_) => Class::RenameColumn,
+        QueryRefusal::TableRename(_) => Class::RenameTable,
+        QueryRefusal::Drop(_) => Class::Drop,
+        QueryRefusal::StatementWrite(_) | QueryRefusal::Mention(_) => Class::StatementWrite,
     }
 }
 
-/// The disagreements with the server accepted on 2026-10-30, each with a ceiling and what closes it.
-const LEDGER: &[Known] = &[
+/// Whether the reader ever sees the statement: the server logged it; one it acted on is always logged.
+fn reaches_reader(row: &Row) -> bool {
+    assert!(
+        row.src == "event" || row.owed() == Class::None,
+        "{}: the server acted on a statement it did not log",
+        row.describe()
+    );
+    row.src == "event"
+}
+
+/// The class a run without `columns_from: grants` gives a statement; renames and privilege changes are not read without the policy.
+fn read_without_policy(row: &Row, fold: bool, configured: &[String]) -> Class {
+    if !reaches_reader(row) {
+        return Class::None;
+    }
+    match refusal(row, false, fold, configured).as_ref().map(class_of) {
+        Some(class) => class,
+        None if matches!(
+            row.owed(),
+            Class::RenameTable | Class::RenameColumn | Class::Privilege
+        ) =>
+        {
+            row.owed()
+        }
+        None => Class::None,
+    }
+}
+
+/// Whether a run under `columns_from: grants` stops on the statement or marks a grants re-read for a privilege change.
+fn caught_with_policy(row: &Row, fold: bool, configured: &[String]) -> bool {
+    refusal(row, true, fold, configured).is_some()
+        || (row.owed() == Class::Privilege && statement_frame(false, &row.bytes()).1)
+}
+
+/// The class a run under `columns_from: grants` gives a statement: the class owed when it is caught, a write when it is stopped without cause.
+fn read_with_policy(row: &Row, fold: bool, configured: &[String]) -> Class {
+    if !reaches_reader(row) {
+        return Class::None;
+    }
+    match (caught_with_policy(row, fold, configured), row.owed()) {
+        (false, _) => Class::None,
+        (true, Class::None) => Class::StatementWrite,
+        (true, owed) => owed,
+    }
+}
+
+macro_rules! follow_up {
+    () => {
+        "no-policy TRUNCATE/DROP/STATEMENT-write fold on lctn!=0 (.claude/handoff/2026-10-30/issue-no-policy-truncate-fold.md)"
+    };
+}
+
+macro_rules! benign {
+    () => {
+        "accepted: the policy stops on any statement that names a captured table, a benign one continues after .claude/handoff/2026-10-30/issue-grants-benign-ddl-continues.md"
+    };
+}
+
+const fn missed(
+    server: Option<&'static str>,
+    case: &'static str,
+    rows: usize,
+    reason: &'static str,
+) -> Known {
     Known {
         direction: Direction::Missed,
-        server: None,
-        case: "coll.",
-        rows: 657,
-        reason: "2026-10-30: lossy UTF-8 read; a name sent in a non-UTF-8 client charset is not found; closed by PR #728 (client_text by charset id)",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "op.col_change_case",
-        rows: 4,
-        reason: "2026-10-30: CHANGE amount AMOUNT reads as the same column; open, PR #728 keeps it",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "otherdb.col_change_case",
-        rows: 4,
-        reason: "2026-10-30: CHANGE amount AMOUNT reads as the same column; open, PR #728 keeps it",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: Some("8.4-lctn0"),
-        case: "pos.",
-        rows: 36,
-        reason: "2026-10-30: the 6-digit version comment /*!080000 */ runs on 8.4 and reads as a plain comment; closed by PR #728",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: Some("8.4-lctn1"),
-        case: "pos.",
-        rows: 36,
-        reason: "2026-10-30: the 6-digit version comment /*!080000 */ runs on 8.4 and reads as a plain comment; closed by PR #728",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: Some("8.4-lctn1"),
-        case: "spell.",
-        rows: 72,
-        reason: "2026-10-30: names are compared unfolded under lower_case_table_names=1; closed by PR #728 (fold)",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "sweep.after_name",
-        rows: 971,
-        reason: "2026-10-30: a NUL or a lone lead byte after the name breaks the lossy text read; closed by PR #728",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "sweep.between",
-        rows: 13,
-        reason: "2026-10-30: 0xA0 or 0xFF between keywords is a space to the server in some charsets only; closed by PR #728",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "sweep.pair_backslash",
-        rows: 461,
-        reason: "2026-10-30: a lead byte pairs with the backslash in sjis, big5 and gbk, the reader sees an escaped quote; closed by PR #728",
-    },
+        server,
+        case,
+        rows,
+        reason,
+    }
+}
+
+const fn over(
+    server: Option<&'static str>,
+    case: &'static str,
+    rows: usize,
+    reason: &'static str,
+) -> Known {
     Known {
         direction: Direction::Over,
-        server: None,
-        case: "op.",
-        rows: 12,
-        reason: "2026-10-30: a zero-row UPDATE and a rejected statement are never logged; the reader refuses by text; accepted, no event exists",
-    },
-    Known {
-        direction: Direction::Over,
-        server: None,
-        case: "otherdb.",
-        rows: 12,
-        reason: "2026-10-30: a zero-row UPDATE and a rejected statement are never logged; the reader refuses by text; accepted, no event exists",
-    },
-    Known {
-        direction: Direction::Over,
-        server: None,
-        case: "otherdb_bare.",
-        rows: 12,
-        reason: "2026-10-30: a GRANT or REVOKE the server rejects (1146, 1147) is never logged; refused by kind; accepted, no event exists",
-    },
-    Known {
-        direction: Direction::Over,
-        server: None,
-        case: "pos.",
-        rows: 60,
-        reason: "2026-10-30: a zero-row UPDATE is never logged; the reader refuses by text; accepted, no event exists",
-    },
-    Known {
-        direction: Direction::Over,
-        server: None,
-        case: "spell.",
-        rows: 88,
-        reason: "2026-10-30: a statement rejected under the session sql_mode, or run on no row, is never logged; accepted, no event exists",
-    },
-    Known {
-        direction: Direction::Over,
-        server: None,
-        case: "uncaptured.",
-        rows: 4,
-        reason: "2026-10-30: a REVOKE the server rejects (1147) is never logged; refused by kind; accepted, no event exists",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: Some("8.4-lctn1"),
-        case: "gadget.fold_",
-        rows: 225,
-        reason: "2026-10-30: U+0130 and U+212A fold to i and k under lower_case_table_names=1 and the reader compares names unfolded, so a near-name resolves to the captured table unseen; open, PR #728 keeps it (its fold is ASCII only)",
-    },
-    Known {
-        direction: Direction::Missed,
-        server: None,
-        case: "gadget.blank_between",
-        rows: 45,
-        reason: "2026-10-30: a non-ASCII blank byte of a client collation (0xA0, 0xFF, 0x88-0x8C) is not read as a blank, so the CHANGE after it is not seen; open, round 4 of PR #728 (its head 1236ff11 misses it too)",
-    },
-    Known {
-        direction: Direction::Over,
-        server: None,
-        case: "gadget.",
-        rows: 16,
-        reason: "2026-10-30: a NUL byte in a statement is rejected by the server (1064) and never logged; the reader refuses by text; accepted, no event exists",
-    },
+        server,
+        case,
+        rows,
+        reason,
+    }
+}
+
+const LEDGER_WITHOUT_POLICY: &[Known] = &[
+    missed(
+        None,
+        "coll.",
+        365,
+        concat!(
+            "2026-10-31: a statement is read as lossy UTF-8, so a captured name sent in a non-UTF-8 client charset is not found; open, follow-up ",
+            follow_up!()
+        ),
+    ),
+    missed(
+        None,
+        "sweep.after_name",
+        971,
+        concat!(
+            "2026-10-31: a NUL or a lone lead byte after the name breaks the lossy text read; open, follow-up ",
+            follow_up!()
+        ),
+    ),
+    missed(
+        None,
+        "sweep.between",
+        13,
+        concat!(
+            "2026-10-31: 0xA0 or 0xFF between keywords is a space to the server in some charsets only; open, follow-up ",
+            follow_up!()
+        ),
+    ),
+    missed(
+        Some("8.4-lctn0"),
+        "pos.",
+        12,
+        concat!(
+            "2026-10-31: the 6-digit version comment /*!080000 */ runs on 8.4 and reads as a plain comment; open, follow-up ",
+            follow_up!()
+        ),
+    ),
+    missed(
+        Some("8.4-lctn1"),
+        "pos.",
+        12,
+        concat!(
+            "2026-10-31: the 6-digit version comment /*!080000 */ runs on 8.4 and reads as a plain comment; open, follow-up ",
+            follow_up!()
+        ),
+    ),
+    missed(
+        Some("8.4-lctn1"),
+        "spell.",
+        24,
+        concat!(
+            "2026-10-31: names are compared unfolded under lower_case_table_names=1; open, follow-up ",
+            follow_up!()
+        ),
+    ),
+    missed(
+        Some("8.4-lctn1"),
+        "gadget.fold_",
+        135,
+        concat!(
+            "2026-10-31: U+0130 and U+212A fold to i and k under lower_case_table_names=1 and a near-name resolves to the captured table unseen; open, follow-up ",
+            follow_up!()
+        ),
+    ),
+];
+
+const LEDGER_WITH_POLICY: &[Known] = &[
+    missed(
+        None,
+        "coll.",
+        657,
+        "2026-10-31: the mention search compares the UTF-8 spelling of a captured non-ASCII name with the statement bytes, so a statement in a non-UTF-8 client charset passes; open, PR #728 does not close it",
+    ),
+    over(
+        None,
+        "coll.",
+        236,
+        concat!(
+            "2026-10-31: a literal that holds a captured native name; ",
+            benign!()
+        ),
+    ),
+    over(
+        None,
+        "gadget.",
+        40,
+        concat!(
+            "2026-10-31: a near-name or a no-op column swap whose bytes hold the captured name; ",
+            benign!()
+        ),
+    ),
+    over(
+        None,
+        "op.",
+        49,
+        concat!(
+            "2026-10-31: a no-op change, a read or a literal that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        None,
+        "otherdb.",
+        49,
+        concat!(
+            "2026-10-31: a no-op change, a read or a literal that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        None,
+        "otherdb_bare.",
+        16,
+        concat!(
+            "2026-10-31: a no-op change or a drop of a missing table whose bare name is captured; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.0-lctn0"),
+        "pos.",
+        180,
+        concat!(
+            "2026-10-31: a no-op change or a literal at 18 positions that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn0"),
+        "pos.",
+        192,
+        concat!(
+            "2026-10-31: a no-op change or a literal at 18 positions that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn1"),
+        "pos.",
+        192,
+        concat!(
+            "2026-10-31: a no-op change or a literal at 18 positions that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.0-lctn0"),
+        "spell.",
+        84,
+        concat!(
+            "2026-10-31: a no-op change or a literal in a spelling that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn0"),
+        "spell.",
+        84,
+        concat!(
+            "2026-10-31: a no-op change or a literal in a spelling that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn1"),
+        "spell.",
+        108,
+        concat!(
+            "2026-10-31: a no-op change or a literal in a spelling that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        None,
+        "uncaptured.",
+        10,
+        concat!(
+            "2026-10-31: a literal that names a captured table; ",
+            benign!()
+        ),
+    ),
 ];
 
 #[test]
-fn every_server_fixture_agrees_with_the_binlog_reader() {
+fn every_server_fixture_agrees_with_the_reader_without_the_policy() {
     assert_ledgers(
         &corpora("mysql"),
-        |c, row| read(row, &c.header.captured),
-        LEDGER,
+        |c, row| read_without_policy(row, c.header.fold, &c.header.captured),
+        LEDGER_WITHOUT_POLICY,
     );
+}
+
+#[test]
+fn every_server_fixture_agrees_with_the_reader_under_the_policy() {
+    assert_ledgers(
+        &corpora("mysql"),
+        |c, row| read_with_policy(row, c.header.fold, &c.header.captured),
+        LEDGER_WITH_POLICY,
+    );
+}
+
+#[test]
+fn every_server_fixture_has_no_ascii_statement_that_passes_under_the_policy() {
+    for c in corpora("mysql") {
+        let passed: Vec<String> = c
+            .rows
+            .iter()
+            .filter(|r| r.owed() != Class::None && r.bytes().is_ascii())
+            .filter(|r| read_with_policy(r, c.header.fold, &c.header.captured) == Class::None)
+            .map(Row::describe)
+            .collect();
+        assert!(
+            passed.is_empty(),
+            "{}: ASCII statements owed a stop that pass under the policy: {passed:#?}",
+            c.header.server
+        );
+    }
 }

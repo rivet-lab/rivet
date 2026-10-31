@@ -539,9 +539,8 @@ impl Config {
         Ok(())
     }
 
-    /// A CDC export whose stream the `load:` target cannot take (MongoDB into ClickHouse, Oracle
-    /// anywhere) is refused when the config is read, before a run extracts a stream the load would
-    /// then refuse.
+    /// A CDC export whose stream the `load:` target cannot take (Oracle anywhere) is refused when the
+    /// config is read, before a run extracts a stream the load would then refuse.
     fn validate_cdc_has_a_loadable_target(&self) -> crate::error::Result<()> {
         let refusal = self
             .load
@@ -1805,9 +1804,9 @@ mod audit_csv_compression {
         )
     }
 
-    /// A MongoDB `mode: cdc` export under a ClickHouse `load:` is refused; a batch one is not.
+    /// A MongoDB `mode: cdc` export under a ClickHouse `load:` is accepted, as a batch one is (ADR-0035 CH7).
     #[test]
-    fn a_mongo_cdc_export_under_a_clickhouse_load_is_refused_and_batch_is_not() {
+    fn a_mongo_cdc_export_under_a_clickhouse_load_is_accepted_as_a_batch_one_is() {
         let cfg = |mode: &str, extra: &str| {
             format!(
                 "source:\n  type: mongo\n  url: \"mongodb://localhost:27018/db\"\n\
@@ -1817,11 +1816,9 @@ mod audit_csv_compression {
                  \x20   format: parquet\n    destination: {{ type: gcs, bucket: b, prefix: \"p/\" }}\n"
             )
         };
-        let err =
-            Config::from_yaml(&cfg("cdc", "    cdc: { checkpoint: ./c.ckpt }\n")).unwrap_err();
         assert!(
-            format!("{err:#}").contains("a MongoDB CDC stream cannot load into ClickHouse"),
-            "{err:#}"
+            Config::from_yaml(&cfg("cdc", "    cdc: { checkpoint: ./c.ckpt }\n")).is_ok(),
+            "a CDC export loads"
         );
         assert!(
             Config::from_yaml(&cfg("full", "")).is_ok(),

@@ -150,6 +150,11 @@ impl SfLive {
         gcs_list(&self.bucket, &self.prefix)
     }
 
+    /// Delete every object under this cell's GCS prefix.
+    pub fn delete_objects(&self) {
+        gcs_delete_prefix(&self.bucket, &self.prefix);
+    }
+
     /// Overwrite the object `name` with bytes no Parquet reader accepts.
     pub fn corrupt(&self, name: &str) {
         gcs_put(&self.bucket, name, b"not a parquet file");
