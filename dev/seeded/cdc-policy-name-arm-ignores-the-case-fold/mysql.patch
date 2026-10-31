@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 67a4a6e9..8a5783ed 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2621,7 +2621,7 @@ fn mention_under_policy<'a>(
+     configured: &'a [String],
+ ) -> Option<&'a str> {
+     policy
+-        .then(|| statement_mentions(fold, raw, configured))
++        .then(|| statement_mentions(false && fold, raw, configured))
+         .flatten()
+ }
+ 
