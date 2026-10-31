@@ -4252,7 +4252,7 @@ seeds:
         na: "the drain is bounded at open by the SCN the miner reads from the database; there is no merged resume token whose position can pass the bound early"
       mongo:
         patch: mongo-cdc-stops-before-the-open-time-bound/mongo.patch
-        cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_into_clickhouse_as_the_source, "lib:idle_poll_stops_both_directions"]
+        cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, "lib:idle_poll_stops_both_directions"]
 
   - name: clickhouse-load-legacy-mongo-position-reaches-the-insert
     class: a ClickHouse change-log load lets a MongoDB part whose position carries no clusterTime reach the insert, where the server throws Code 395 after an empty change table was created, instead of a coded refusal before any write
