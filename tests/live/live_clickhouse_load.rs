@@ -980,6 +980,57 @@ fn a_cdc_stream_staged_on_azure_is_pulled_by_clickhouse() {
     );
 }
 
+/// A named collection removed on drop, and the GCS prefix it read cleared.
+struct GcsPull {
+    collection: String,
+    bucket: String,
+    prefix: String,
+}
+
+impl Drop for GcsPull {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(|| {
+            ch(&format!(
+                "DROP NAMED COLLECTION IF EXISTS {}",
+                self.collection
+            ))
+        });
+        gcs_delete_prefix(&self.bucket, &self.prefix);
+    }
+}
+
+/// …and ClickHouse reads parts staged on real GCS itself, through an HMAC-key named collection.
+#[test]
+#[ignore = "live: requires clickhouse + mysql-cdc + Google creds + RIVET_TEST_GCS_HMAC_ID/SECRET"]
+fn a_cdc_stream_staged_on_real_gcs_is_pulled_by_clickhouse() {
+    let Some((_, bucket)) = warehouse_or_skip("clickhouse_gcs_pull") else {
+        return;
+    };
+    let (Ok(id), Ok(secret)) = (
+        std::env::var("RIVET_TEST_GCS_HMAC_ID"),
+        std::env::var("RIVET_TEST_GCS_HMAC_SECRET"),
+    ) else {
+        skip_live("clickhouse_gcs_pull: RIVET_TEST_GCS_HMAC_ID / RIVET_TEST_GCS_HMAC_SECRET unset");
+        return;
+    };
+    let pull = GcsPull {
+        collection: unique_name("rivet_gcs_hmac"),
+        bucket,
+        prefix: format!("rivet-live/{}", unique_name("chload")),
+    };
+    ch(&format!(
+        "CREATE NAMED COLLECTION {} AS url = 'https://storage.googleapis.com/', \
+         access_key_id = '{id}', secret_access_key = '{secret}'",
+        pull.collection
+    ));
+    staged_cdc_cycle(
+        "rivet_ch_gcsp",
+        |rig| rig.dest_gcs_live(&pull.bucket, &pull.prefix),
+        &[],
+        Some(&pull.collection),
+    );
+}
+
 /// A second load into a change log with a tz timestamp and a time column must pass the
 /// change-log check: the catalog spells those types its own way (quotes, Decimal(18, p)).
 #[test]
