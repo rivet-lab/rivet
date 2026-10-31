@@ -252,6 +252,17 @@ fn idle_poll_stops(
     }
 }
 
+/// Whether the token is past the open-time target while still below the open-time clusterTime bound, the one state `BOUND_WAIT_CEILING` limits.
+fn bound_unmet(
+    advanced: Option<&str>,
+    target: Option<&str>,
+    bound: Option<mongodb::bson::Timestamp>,
+) -> bool {
+    advanced
+        .zip(target)
+        .is_some_and(|(cur, tgt)| cur > tgt && !token_reached_bound(cur, bound))
+}
+
 /// Whether the clusterTime a resume token's `_data` opens with (`82` + seconds + increment, big-endian hex) is at or past `bound`; an unreadable token or no bound counts as reached.
 fn token_reached_bound(data: &str, bound: Option<mongodb::bson::Timestamp>) -> bool {
     let Some(b) = bound else { return true };
@@ -989,13 +1000,7 @@ impl ChangeStream for MongoChangeStream {
                             .and_then(|t| serde_json::to_value(&t).ok())
                             .as_ref()
                             .and_then(token_data);
-                        let unmet =
-                            advanced
-                                .as_deref()
-                                .zip(target.as_deref())
-                                .is_some_and(|(cur, tgt)| {
-                                    cur > tgt && !token_reached_bound(cur, bound_ts)
-                                });
+                        let unmet = bound_unmet(advanced.as_deref(), target.as_deref(), bound_ts);
                         if unmet {
                             bound_wait.get_or_insert_with(std::time::Instant::now);
                         }
@@ -1368,6 +1373,12 @@ mod tests {
         assert!(!idle_poll_stops(Some("81"), Some(past), never, secs(3600)));
         assert!(!idle_poll_stops(None, Some(past), never, secs(3600)));
         assert_eq!(BOUND_WAIT_CEILING, secs(120));
+        assert!(bound_unmet(Some(past), Some("81"), never));
+        assert!(!bound_unmet(Some(past), Some("81"), at(100, 10)));
+        assert!(!bound_unmet(Some(past), Some("81"), None));
+        assert!(!bound_unmet(Some("81"), Some(past), never));
+        assert!(!bound_unmet(None, Some(past), never));
+        assert!(!bound_unmet(Some(past), None, never));
     }
 
     /// A token whose clusterTime is below the open-time bound has not drained the backlog, whatever it compares to the target.
