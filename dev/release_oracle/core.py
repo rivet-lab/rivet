@@ -43,7 +43,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from ..pytools.shell import have, wait_until
+try:
+    from ..pytools.shell import have, wait_until
+except ImportError:  # loaded as a top-level module by rowhash.py
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pytools"))
+    from shell import have, wait_until  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
