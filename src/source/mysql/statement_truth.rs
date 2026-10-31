@@ -2,7 +2,7 @@
 
 use super::cdc::{QueryRefusal, query_refusal, statement_frame};
 use super::statement::SqlMode;
-use crate::source::statement_truth::{Class, Direction, Known, Row, assert_ledgers, corpora};
+use crate::source::statement_truth::{Class, Direction, Known, Row, corpora, ledger_failures};
 
 /// The refusal the event loop gives one logged statement.
 fn refusal(row: &Row, policy: bool, fold: bool, configured: &[String]) -> Option<QueryRefusal> {
@@ -296,20 +296,22 @@ const LEDGER_WITH_POLICY: &[Known] = &[
 
 #[test]
 fn every_server_fixture_agrees_with_the_reader_without_the_policy() {
-    assert_ledgers(
+    let failures = ledger_failures(
         &corpora("mysql"),
         |c, row| read_without_policy(row, c.header.fold, &c.header.captured),
         LEDGER_WITHOUT_POLICY,
     );
+    assert_eq!(failures, Vec::<String>::new(), "{}", failures.join("\n"));
 }
 
 #[test]
 fn every_server_fixture_agrees_with_the_reader_under_the_policy() {
-    assert_ledgers(
+    let failures = ledger_failures(
         &corpora("mysql"),
         |c, row| read_with_policy(row, c.header.fold, &c.header.captured),
         LEDGER_WITH_POLICY,
     );
+    assert_eq!(failures, Vec::<String>::new(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -322,9 +324,10 @@ fn every_server_fixture_has_no_ascii_statement_that_passes_under_the_policy() {
             .filter(|r| read_with_policy(r, c.header.fold, &c.header.captured) == Class::None)
             .map(Row::describe)
             .collect();
-        assert!(
-            passed.is_empty(),
-            "{}: ASCII statements owed a stop that pass under the policy: {passed:#?}",
+        assert_eq!(
+            passed,
+            Vec::<String>::new(),
+            "{}: ASCII statements owed a stop that pass under the policy",
             c.header.server
         );
     }

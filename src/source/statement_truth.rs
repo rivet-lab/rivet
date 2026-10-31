@@ -339,12 +339,12 @@ pub(crate) fn grade_ledger(corpus: &Corpus, t: &Tally, ledger: &[Known]) -> Resu
     Ok(())
 }
 
-/// Grades every corpus against the ledger and fails once with every server that disagrees.
-pub(crate) fn assert_ledgers(
+/// Grades every corpus against the ledger and returns what each server that disagrees reports.
+pub(crate) fn ledger_failures(
     corpora: &[Corpus],
     read: impl Fn(&Corpus, &Row) -> Class,
     ledger: &[Known],
-) {
+) -> Vec<String> {
     let mut failures = Vec::new();
     for corpus in corpora {
         let t = replay(corpus, |row| read(corpus, row));
@@ -353,5 +353,5 @@ pub(crate) fn assert_ledgers(
             failures.push(e);
         }
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    failures
 }
