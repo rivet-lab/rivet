@@ -1,0 +1,12 @@
+diff --git a/src/source/mongo/cdc.rs b/src/source/mongo/cdc.rs
+--- a/src/source/mongo/cdc.rs
++++ b/src/source/mongo/cdc.rs
+@@ -240,7 +240,7 @@
+     bound: Option<mongodb::bson::Timestamp>,
+ ) -> bool {
+     match (advanced, target) {
+-        (Some(cur), Some(tgt)) => cur > tgt && token_reached_bound(cur, bound),
++        (Some(cur), Some(tgt)) => cur > tgt && token_reached_bound(cur, None),
+         (_, None) => true,
+         _ => false,
+     }
