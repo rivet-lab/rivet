@@ -109,7 +109,7 @@ pub(crate) struct MysqlChangeStream {
     grants_pending: Option<(String, u64)>,
     /// Whether the binlog is between a `BEGIN` and the commit that closes it: no privilege statement can sit inside.
     in_transaction: bool,
-    /// Whether the server folds identifier case (`lower_case_table_names` other than 0).
+    /// Whether the server folds identifier case (`lower_case_table_names` other than 0), read only when the run projects.
     fold_names: bool,
 }
 
@@ -897,7 +897,6 @@ impl MysqlChangeStream {
                 format!("mysql cdc: raising net_write_timeout on the binlog connection: {e}"),
             )
         })?;
-        let fold_names = Self::folds_names_on(&mut conn)?;
         let mut req = BinlogRequest::new(server_id)
             .with_filename(file.clone().into_bytes())
             .with_pos(pos);
@@ -932,7 +931,7 @@ impl MysqlChangeStream {
             grants_source: None,
             grants_pending: None,
             in_transaction: false,
-            fold_names,
+            fold_names: false,
         })
     }
 
@@ -1132,6 +1131,7 @@ impl MysqlChangeStream {
         }
         let grants_source = readable.is_some().then(|| (url.to_string(), tls.cloned()));
         let projecting = readable.is_some();
+        let fold_names = projecting && Self::folds_names_on(&mut conn)?;
         let with_dir = |mut s: Self| {
             s.tx = crate::source::cdc::tx_buffer::TxBuffer::new(
                 crate::source::cdc::CdcEngine::Mysql,
@@ -1139,6 +1139,7 @@ impl MysqlChangeStream {
             );
             s.readable = readable;
             s.grants_source = grants_source;
+            s.fold_names = fold_names;
             s
         };
         if let Some(path) = ckpt
@@ -4930,6 +4931,19 @@ mod tests {
             b"GRANT SELECT ON shop.other TO u",
         ] {
             assert_eq!(refusal(true, true, other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_statement_whose_target_cannot_be_read_is_refused_without_the_policy_and_met_under_it_when_no_captured_name_is_in_it()
+     {
+        for (stmt, refused) in [
+            (&b"DROP TABLE `a"[..], QueryRefusal::Drop(None)),
+            (b"DELETE FROM `a", QueryRefusal::StatementWrite(None)),
+        ] {
+            assert_eq!(refusal(true, false, stmt), None, "{stmt:?}");
+            assert_eq!(refusal(true, true, stmt), None, "{stmt:?}");
+            assert_eq!(refusal(false, false, stmt), Some(refused), "{stmt:?}");
         }
     }
 

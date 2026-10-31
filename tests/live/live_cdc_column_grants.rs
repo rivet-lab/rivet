@@ -2667,6 +2667,23 @@ fn an_alter_of_an_uncaptured_table_is_met_as_before_under_the_policy_mysql() {
     assert_eq!(run.line(), BOTH_DELIVERED, "{}", run.said);
 }
 
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_non_ascii_comment_on_an_uncaptured_table_is_met_as_before_under_the_policy_mysql() {
+    let cjk = "\u{4e00}".repeat(64);
+    let cyrillic = "\u{0446}".repeat(64);
+    let created = format!(
+        "CREATE TABLE rivet.{{u}} (id INT PRIMARY KEY, name VARCHAR(20)) COMMENT = '{cjk}'"
+    );
+    let altered = format!("ALTER TABLE rivet.{{u}} COMMENT = '{cyrillic}'");
+    let run = statements_in_the_backlog(
+        "cg_cjk",
+        true,
+        &[UPDATED_BEFORE, &created, &altered, UPDATED_AFTER],
+    );
+    assert_eq!(run.line(), BOTH_DELIVERED, "{}", run.said);
+}
+
 /// Every case `(policy, steps, verdict line)` run on its own seeded table, the verdicts compared in one assertion.
 fn backlogs_end_as(label: &str, cases: &[(bool, &[&str], &str)]) {
     backlogs_end_as_saying(label, cases, "");

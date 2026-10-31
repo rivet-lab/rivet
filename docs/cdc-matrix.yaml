@@ -266,6 +266,14 @@ scenarios:
     mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
     oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
+  - id: cdc_mysql_grants_non_ascii_comment_on_an_uncaptured_table_is_not_refused
+    what: "under columns_from: grants on a server that folds case a CREATE TABLE and an ALTER TABLE of a table the run does not capture, whose comment is Chinese or Cyrillic text, are delivered as before and not refused as naming a captured table: a non-ASCII character stands only for the letters the server folds (k and i)"
+    postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
+    mysql:    { test: a_non_ascii_comment_on_an_uncaptured_table_is_met_as_before_under_the_policy_mysql }
+    mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
+    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
+
   - id: cdc_mysql_grants_uncaptured_rename_under_a_gbk_client_is_not_refused
     what: "under columns_from: grants a RENAME TABLE between tables the run does not capture whose name holds a GBK character with a backtick trail byte (0x81 0x60) is delivered as before, not refused as a table this reader could not identify"
     postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }

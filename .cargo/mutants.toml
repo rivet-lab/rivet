@@ -604,7 +604,7 @@ exclude_re = [
     # ack -> Ok(())               ⇒ roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot FAILS
     "replace PgChangeStream::release_empty_frontier with \\(\\)$",
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
-    # 2026-10-31 #728: `note_statement` only feeds the statement log of the live-only reader; the live_cdc_column_grants:: cells kill its stub.
+    # 2026-10-31 #728: `note_statement` sets the transaction frame (`in_transaction`) and the grants re-read mark as well as the statement log, all live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
 
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
