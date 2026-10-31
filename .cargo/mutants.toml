@@ -631,6 +631,10 @@ exclude_re = [
     # -> true fails a_grant_on_an_uncaptured_table_does_not_stop_the_stream_mysql.
     "replace MysqlChangeStream::note_statement with \\(\\)",
     "replace match guard mention_under_policy.*MysqlChangeStream::fill",
+    # `defers_the_grants_re_read` reads a QueryEvent no offline test can build; deleting the arm or its `!` fails
+    # privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql (by hand, 2026-10-31).
+    "delete match arm Some\\(EventData::QueryEvent\\(qe\\)\\) in defers_the_grants_re_read",
+    "delete ! in defers_the_grants_re_read",
 
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
     # `in_quotes && next == '"'` guard on the escaped-quote arm cannot change what
