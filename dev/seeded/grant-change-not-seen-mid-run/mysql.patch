@@ -1,13 +1,13 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 6aad4a3e..e186dcc0 100644
+index 291b75e3..6268648c 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
 @@ -754,7 +754,7 @@ impl MysqlChangeStream {
      fn note_statement(&mut self, raw: &[u8], log_pos: u64) {
          let (in_transaction, marks) = statement_frame(self.in_transaction, raw);
          self.in_transaction = in_transaction;
--        if marks && self.readable.is_some() {
-+        if false && marks && self.readable.is_some() {
+-        if re_read_marked(self.readable.is_some(), marks) {
++        if false && re_read_marked(self.readable.is_some(), marks) {
              self.grants_pending
                  .get_or_insert_with(|| (self.file.clone(), log_pos));
          }
