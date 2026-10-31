@@ -194,7 +194,7 @@ fn classify_op(op: &OperationType) -> OpClass {
 
 /// The `_data` keystring of a resume token, whose lexical order is oplog order.
 fn token_data(v: &serde_json::Value) -> Option<String> {
-    crate::source::cdc::order::MONGO.first_text(v)
+    crate::source::cdc::order::MONGO.text(v, "_data")
 }
 
 /// `token_data` is the resume token's identity — the string every bound and resume

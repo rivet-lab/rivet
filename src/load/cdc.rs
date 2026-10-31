@@ -40,10 +40,9 @@ pub enum SourceEngine {
     Postgres,
     /// `{"lsn":"0000002d000000d80194"}` — fixed-width hex; lexical == numeric.
     SqlServer,
-    /// `{"_data":"826A4E0001..."}` — the change-stream resume token. `_data` is
-    /// an order-preserving hex keystring (compared lexically, like SQL Server's
-    /// lsn); the primary key is the document's `_id` column. See
-    /// `source::cdc::order`, which keys Mongo `__pos` on `_data`.
+    /// `{"_data":"826A4E0001...","ct":N,"ord":N}` — the change-stream resume token
+    /// with its clusterTime stamp; the order is `(ct, ord)` then `_data`, and the
+    /// primary key is the document's `_id` column. See `source::cdc::order`.
     Mongo,
 }
 
@@ -1099,11 +1098,14 @@ mod tests {
     }
 
     #[test]
-    fn mongo_orders_by_resume_token_data_and_partitions_by_id() {
-        // Mongo's `_id` is the dedup PK; `__pos` orders on the `_data` resume
-        // token (single string key + `__seq` tiebreak, like SQL Server's lsn).
+    fn mongo_orders_by_cluster_time_ordinal_then_token_and_partitions_by_id() {
         let bq = dedup_view_sql(Warehouse::BigQuery, "v", "c", &["_id"], SourceEngine::Mongo);
-        assert!(bq.contains("JSON_VALUE(__pos,'$._data') DESC, __seq DESC"));
+        assert!(bq.contains(
+            "ORDER BY __pos IS NOT NULL DESC, \
+COALESCE(CAST(JSON_VALUE(__pos,'$.ct') AS NUMERIC), -1) DESC, \
+COALESCE(CAST(JSON_VALUE(__pos,'$.ord') AS NUMERIC), -1) DESC, \
+JSON_VALUE(__pos,'$._data') DESC, __seq DESC"
+        ));
         assert!(bq.contains("PARTITION BY `_id`"));
         let sf = dedup_view_sql(
             Warehouse::Snowflake,
@@ -1112,9 +1114,32 @@ mod tests {
             &["_id"],
             SourceEngine::Mongo,
         );
-        assert!(sf.contains("PARSE_JSON(__pos):_data::string DESC, __seq DESC"));
+        assert!(sf.contains(
+            "ORDER BY __pos IS NOT NULL DESC, \
+COALESCE(PARSE_JSON(__pos):ct::NUMBER(38,0), -1) DESC, \
+COALESCE(PARSE_JSON(__pos):ord::NUMBER(38,0), -1) DESC, \
+PARSE_JSON(__pos):_data::string DESC, __seq DESC"
+        ));
         // Soft-delete parity holds for Mongo too.
         assert!(sf.contains("COALESCE(__op = 'delete', FALSE) AS __is_deleted"));
+    }
+
+    #[test]
+    fn mongo_compact_ranks_by_the_same_order_as_the_view() {
+        let order = |w| CompactOrder::Cdc(SourceEngine::Mongo).order_by(w);
+        assert_eq!(
+            order(Warehouse::BigQuery),
+            "COALESCE(CAST(JSON_VALUE(__pos,'$.ct') AS NUMERIC), -1) DESC, \
+COALESCE(CAST(JSON_VALUE(__pos,'$.ord') AS NUMERIC), -1) DESC, \
+JSON_VALUE(__pos,'$._data') DESC, __seq DESC"
+        );
+        assert_eq!(
+            order(Warehouse::Snowflake),
+            "__pos IS NOT NULL DESC, \
+COALESCE(PARSE_JSON(__pos):ct::NUMBER(38,0), -1) DESC, \
+COALESCE(PARSE_JSON(__pos):ord::NUMBER(38,0), -1) DESC, \
+PARSE_JSON(__pos):_data::string DESC, __seq DESC"
+        );
     }
 
     #[test]
