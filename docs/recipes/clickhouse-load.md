@@ -71,8 +71,9 @@ set, so live state is `WHERE NOT __is_deleted`.
 For a CDC table the engine keeps one version per key: the highest version, computed
 from the change's source position (PostgreSQL LSN, MySQL binlog file number + offset,
 SQL Server LSN) and its order within the transaction. Insert order does not matter as
-long as the source's positions only grow; a MySQL binlog renumbered by `RESET MASTER`
-or a failover breaks that (see [Known limits](#known-limits)). The view reads the log
+long as the source's positions only grow. A MySQL checkpoint that would resume into a
+binlog renumbered by `RESET MASTER` or on another server is refused, and its remedy
+empties the change log first (see [Known limits](#known-limits)). The view reads the log
 with `FINAL` and flags deletes:
 
 ```sql
@@ -177,11 +178,16 @@ load:
   starts that table over (a full load keeps serving the old table until its swap).
   ADR-0035 CH13 lists every statement.
 - **MySQL binlog renumbering.** The version orders MySQL changes by binlog file number,
-  then offset. A checkpoint is refused on another server and after a `RESET MASTER`
-  (`RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT`), and its remedy empties `<table>__changes`.
-  A stream without `cdc.initial: snapshot` whose checkpoint was deleted after a
-  `RESET MASTER` still starts over at the new, lower positions, and its changes lose to
-  older versions of the same keys.
+  then offset, so it only holds while positions grow. A checkpoint is refused on another
+  server and in a binlog that `RESET MASTER` renumbered back to its file name
+  (`RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT`); a changes-only stream whose checkpoint file is
+  gone is refused too (`RIVET_SOURCE_CDC_CHECKPOINT_INVALID`). Both remedies that
+  re-baseline the stream truncate `<table>__changes` first. The one path left to the
+  operator: after the lost-checkpoint refusal, `rivet state reset` anchors at the current
+  position without touching the change log. If the binlog was renumbered in between,
+  truncate `<table>__changes` before that run, or its changes lose to older versions of
+  the same keys. A checkpoint written before rivet recorded its commit resumes with a
+  warning and is not checked against a renumbering.
 - **Grants.** The load's user needs, on the target database (measured on 24.8):
 
   ```sql
