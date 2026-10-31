@@ -4271,6 +4271,23 @@ seeds:
         patch: mongo-cdc-bound-wait-has-no-ceiling/mongo.patch
         cells: ["lib:a_token_that_never_reaches_the_bound_stops_the_drain_at_the_ceiling"]
 
+  - name: mongo-cdc-sharded-drain-stops-at-the-bound-tick
+    class: a MongoDB CDC run with until_current on a sharded cluster ends its drain on a resume token equal to the clusterTime the server reported at open, where a shard's noop token at that tick sorts before another shard's write of the same tick, so the last write committed before the run started is left for the next run
+    history: MongoDB CDC two-shard each-run cell on 8.0.13 2026-10-31, the last delete of a round missing from the run's output in 9 of 12 runs (2 of 7 on a build without trace lines) with the token compared at or past the open-time bound, 0 of 12 compared past it
+    scope: source
+    engines:
+      postgres:
+        na: "the drain ends at a commit past the bound read at open (tx_disposition); no token comparison stands in for the bound"
+      mysql:
+        na: "the drain ends at a commit past the bound read at open (commit_past_bound); no token comparison stands in for the bound"
+      mssql:
+        na: "the drain ends at an LSN fill the server reports (fill_sql); no token comparison stands in for the bound"
+      oracle:
+        na: "the drain is bounded at open by the SCN the miner reads from the database; there is no merged resume token whose tick can tie with another shard's write"
+      mongo:
+        patch: mongo-cdc-sharded-drain-stops-at-the-bound-tick/mongo.patch
+        cells: ["lib:a_sharded_drain_needs_a_token_past_the_bound_tick"]
+
   - name: clickhouse-load-legacy-mongo-position-reaches-the-insert
     class: a ClickHouse change-log load lets a MongoDB part whose position carries no clusterTime reach the insert, where the server throws Code 395 after an empty change table was created, instead of a coded refusal before any write
     history: MongoDB CDC into ClickHouse verifier probe 2026-10-31, an old binary run without load then the new binary, load exit 1 wrapping Code 395 with t__changes already created
