@@ -42,7 +42,7 @@ combination) runs a slice of the corpus and prints its size and speed without to
 `--dump PATH` writes the slice for inspection. `check` prints the removed, added and changed rows;
 a server patch release that changes only its version string is reported, not failed.
 
-A fixture holds about 38,000 rows (310 KB gzipped) per server. The stand is up in about ten seconds
+A fixture holds 38,516 rows (319 KB gzipped) per server. The stand is up in about ten seconds
 with the images present; the three servers regenerate side by side in 9 to 14 minutes, which `check`
 repeats. The password hash a `CREATE USER` or `ALTER USER` event logs is replaced by `<hash>` because it
 carries a random salt; nothing else in a regeneration varies.
@@ -65,6 +65,20 @@ What is sent, per server:
   and the column, for every collation. Tables whose names only differ from a captured one by a
   non-ASCII suffix (`client` captured, `client` plus an accented letter not), renamed, altered,
   dropped, truncated and written, in utf8mb4, latin1, cp1250 and cp1251.
+  Fold near-names: under `lower_case_table_names=1` the server lowers a table name through the utf8mb3
+  general_ci table, so a character outside ASCII can resolve to a captured table (`U+212A` KELVIN SIGN
+  to `k`, `U+0130` to `i`). The set is read off the server at generation (every BMP code point whose
+  `LOWER(CONVERT(CHAR(i USING ucs2) USING utf8mb3))` is one of `[a-z0-9_]`) and recorded in the header
+  as `folds`; seed `26_st_fold.sql` holds the captured `st_fold.kinds` and an uncaptured `st_fold.tmp`.
+  For every client charset that can encode the character, each fold spelling of `kinds` is sent as
+  TRUNCATE, DROP, RENAME TABLE, ALTER RENAME, RENAME COLUMN, CHANGE, a column swap, a swap-in of
+  `tmp` over the captured name, and INSERT, UPDATE and DELETE in statement format; a write after a
+  swap-in is sent on the same connection as the `RENAME TABLE kinds TO kinds_old, tmp TO kinds` that
+  precedes it. The row says which table the server touched, so a spelling that does not fold (lctn0)
+  is owed no refusal and one that does (lctn1) is. The client charsets that can encode a fold character
+  are utf8mb3, utf8mb4, binary, gb18030, ujis, eucjpms and latin5 (`U+0130` only in the last three).
+  The server logs a `DROP TABLE` already spelled with the stored name, so a near-name DROP reaches the
+  log as the captured name; the other operations are logged as sent.
 
 The verdict of a row is read off the server: the `Com_*` counters of the statement, the table
 fingerprints before and after, and the bytes the binlog logged. A row is

@@ -144,6 +144,13 @@ const LEDGER: &[Known] = &[
     },
     Known {
         direction: Direction::Missed,
+        server: Some("8.4-lctn1"),
+        case: "gadget.fold_",
+        rows: 225,
+        reason: "2026-10-30: U+0130 and U+212A fold to i and k under lower_case_table_names=1 and the reader compares names unfolded, so a near-name resolves to the captured table unseen; open, PR #728 keeps it (its fold is ASCII only)",
+    },
+    Known {
+        direction: Direction::Missed,
         server: None,
         case: "gadget.blank_between",
         rows: 45,

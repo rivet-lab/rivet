@@ -375,6 +375,11 @@ class Delta:
     emptied: tuple = ()
 
 
+def slots(table: tuple) -> list[str]:
+    """The column definitions of a snapshot entry by position, without the names."""
+    return [line.split("|", 1)[1] for line in table[1].split("\n") if not line.startswith(("ix:", "tb:"))]
+
+
 def delta(base: Snap, now: Snap) -> Delta:
     """The difference between the seed snapshot and a later one."""
     gone, new, columns, data, emptied = [], [], [], [], []
@@ -383,7 +388,7 @@ def delta(base: Snap, now: Snap) -> Delta:
         gone += [(db, t) for t in sorted(set(b) - set(a))]
         new += [(db, t) for t in sorted(set(a) - set(b))]
         for t in sorted(set(a) & set(b)):
-            if b[t][0] != a[t][0] and len(b[t][0]) == len(a[t][0]) and set(b[t][0]) != set(a[t][0]):
+            if b[t][0] != a[t][0] and len(b[t][0]) == len(a[t][0]) and (set(b[t][0]) != set(a[t][0]) or slots(b[t]) == slots(a[t])):
                 columns.append((db, t))
             if b[t][2] != a[t][2]:
                 data.append((db, t))
@@ -399,7 +404,7 @@ def classify(d: Delta, com: dict[str, int], errno: int) -> tuple[str, list[str]]
     if ok and any(com[v] for v in PRIV_VARS):
         return "privilege", []
     if d.gone and d.new:
-        return "rename_table", full(d.gone + d.new)
+        return "rename_table", full(d.gone + d.new + (d.data if com["Com_rename_table"] else ()))
     if d.gone:
         return "drop", full(d.gone)
     if ok and com["Com_rename_table"] and d.data:
@@ -433,6 +438,7 @@ class Case:
     db: str
     sql: bytes
     dbs: tuple[str, ...]
+    pre: tuple[bytes, ...] = ()
 
 
 def encode(text: str, charset: str) -> bytes | None:
@@ -701,6 +707,49 @@ NEAR_OPS = {
 }
 
 
+FOLD_DB = "st_fold"
+FOLD_TABLE = "kinds"
+FOLD_PRE = (b"RENAME TABLE kinds TO kinds_old, tmp TO kinds",)
+FOLD_OPS = {
+    "trunc": "TRUNCATE TABLE {n}",
+    "trunc_q": "TRUNCATE TABLE st_fold.{n}",
+    "drop": "DROP TABLE {n}",
+    "drop_q": "DROP TABLE st_fold.{n}",
+    "rename": "RENAME TABLE {n} TO gone_old",
+    "alter_rename_to": "ALTER TABLE {n} RENAME TO gone_old",
+    "rename_col": "ALTER TABLE {n} RENAME COLUMN amount TO amount2",
+    "change": "ALTER TABLE {n} CHANGE amount amount2 INT NOT NULL",
+    "col_swap": "ALTER TABLE {n} RENAME COLUMN amount TO note, RENAME COLUMN note TO amount",
+    "swap_in": "RENAME TABLE {n} TO gone_old, tmp TO {n}",
+    "insert": "INSERT INTO {n} VALUES (100, 1, 'x')",
+    "update": "UPDATE {n} SET amount = amount + 1 WHERE id = 1",
+    "delete": "DELETE FROM {n} WHERE id = 1",
+}
+FOLD_AFTER_SWAP = {
+    "insert_after_swap": FOLD_OPS["insert"],
+    "update_after_swap": FOLD_OPS["update"],
+    "delete_after_swap": FOLD_OPS["delete"],
+    "trunc_after_swap": FOLD_OPS["trunc"],
+}
+
+
+def fold_set(conn: Conn) -> list[list]:
+    """The non-ASCII BMP code points the server's name lowercasing (utf8mb3 general_ci) turns into one of a-z, 0-9, _."""
+    conn.must("SET SESSION cte_max_recursion_depth = 70000")
+    rows = conn.must(
+        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 65535) "
+        "SELECT i, HEX(CONVERT(LOWER(CONVERT(CHAR(i USING ucs2) USING utf8mb3)) USING utf8mb4)) FROM n WHERE i >= 128"
+    )
+    out = []
+    for r in rows:
+        if r[1] is None:
+            continue
+        low = bytes.fromhex(r[1].decode()).decode()
+        if len(low) == 1 and low.isascii() and (low.isalnum() or low == "_"):
+            out.append([int(r[0]), low])
+    return out
+
+
 def blank_bytes(conn: Conn, ids: list[int]) -> dict[int, list[int]]:
     """Per client collation id, the bytes the server's lexer reads as a blank: SELECT<byte>1000 answers 1000."""
     out: dict[int, list[int]] = {}
@@ -715,13 +764,27 @@ def blank_bytes(conn: Conn, ids: list[int]) -> dict[int, list[int]]:
     return out
 
 
-def cases_gadgets(names: dict[int, tuple[str, str]], blanks: dict[int, list[int]]) -> list[Case]:
-    """Round-4 gadgets: control bytes closing a comment inside multi-table DML and mixed CHANGE specs, a blank byte between specs, near-name tables."""
+def fold_spellings(folds: list[list]) -> dict[str, str]:
+    """The captured fold table's name spelled with each fold character in place of the letter it folds to, and with all of them."""
+    out = {}
+    for cp, letter in folds:
+        if letter in FOLD_TABLE:
+            out[f"{cp:04x}"] = FOLD_TABLE.replace(letter, chr(cp), 1)
+    every = FOLD_TABLE
+    for cp, letter in folds:
+        every = every.replace(letter, chr(cp), 1)
+    if every != FOLD_TABLE:
+        out["all"] = every
+    return out
+
+
+def cases_gadgets(names: dict[int, tuple[str, str]], blanks: dict[int, list[int]], defaults: list[tuple[int, str, str]], folds: list[list]) -> list[Case]:
+    """Round-4 gadgets: control bytes closing a comment inside multi-table DML and mixed CHANGE specs, a blank byte between specs, near-name tables, fold-to-ASCII spellings."""
     out: list[Case] = []
 
-    def add(cid: str, tag: str, coll: int, mode: str, db: str, raw: bytes | None) -> None:
+    def add(cid: str, tag: str, coll: int, mode: str, db: str, raw: bytes | None, pre: tuple[bytes, ...] = ()) -> None:
         if raw is not None:
-            out.append(Case(cid, f"gadget.{tag}", coll, mode, db, raw, (db,)))
+            out.append(Case(cid, f"gadget.{tag}", coll, mode, db, raw, (db,), pre))
 
     for coll in (UTF8MB4, 8):
         for b in CTL_BYTES:
@@ -738,6 +801,12 @@ def cases_gadgets(names: dict[int, tuple[str, str]], blanks: dict[int, list[int]
         for op, tpl in NEAR_OPS.items():
             add(f"D.{coll}.near.{op}", f"near_{op}", coll, "default", NEAR_DB, encode(tpl.format(n=q(name), o=q(name + "_old")), charset))
         add(f"D.{coll}.near.rename_into", "near_rename_into", coll, "default", NEAR_TO_DB, encode(f"RENAME TABLE tmp TO {q(name)}", charset))
+    for coll, charset, _ in defaults:
+        for key, spelled in fold_spellings(folds).items():
+            for op, tpl in FOLD_OPS.items():
+                add(f"D.{coll}.fold.{op}.{key}", f"fold_{op}", coll, "default", FOLD_DB, encode(tpl.format(n=q(spelled)), charset))
+            for op, tpl in FOLD_AFTER_SWAP.items():
+                add(f"D.{coll}.fold.{op}.{key}", f"fold_{op}", coll, "default", FOLD_DB, encode(tpl.format(n=q(spelled)), charset), FOLD_PRE)
     return out
 
 
@@ -847,16 +916,23 @@ def run_cases(server: str, cases: list[Case], adm: Conn, base: Snap, tables: dic
             conn = sess.ready(case)
         if conn is None:
             continue
+        ref = base
         try:
+            if case.pre:
+                for line in case.pre:
+                    conn.must(line)
+                sess.spent()
+                ref = snapshot(adm, case.dbs)
+                start = adm.position()
             res = conn.query(case.sql)
             com = sess.spent()
         except (ConnectionError, OSError):
             sess.open()
             res, com = Result(2013, "connection lost"), {k: 0 for k in COM_VARS}
         end = adm.position()
-        if res.errno == 0 or com["Com_drop_table"]:
+        if res.errno == 0 or com["Com_drop_table"] or case.pre:
             snap = snapshot(adm, case.dbs)
-            eff = delta(base, snap)
+            eff = delta(ref, snap)
         else:
             snap, eff = None, Delta()
         outcomes.append(Outcome(case, res.errno, start, end, eff, com))
@@ -939,6 +1015,7 @@ def generate(server: str, subset: str | None = None) -> tuple[dict, list[dict]]:
     pairs = [(cid, cs, name) for cid, cs, name, _ in colls]
     defaults = [(cid, cs, name) for cid, cs, name, d in colls if d]
     which = subset or "ABCD"
+    folds: list[list] = []
     cases: list[Case] = []
     if "A" in which:
         cases += cases_collations(pairs, families(base, cap))
@@ -948,7 +1025,8 @@ def generate(server: str, subset: str | None = None) -> tuple[dict, list[dict]]:
         cases += cases_matrix()
     if "D" in which:
         probe = Conn(cfg.port)
-        cases += cases_gadgets(names, blank_bytes(probe, sorted(names)))
+        folds = fold_set(probe)
+        cases += cases_gadgets(names, blank_bytes(probe, sorted(names)), defaults, folds)
         probe.close()
     if len({c.id for c in cases}) != len(cases):
         raise RuntimeError("case ids must be unique")
@@ -969,7 +1047,7 @@ def generate(server: str, subset: str | None = None) -> tuple[dict, list[dict]]:
     header = {
         "engine": ENGINE, "schema": SCHEMA, "server": server, "version": version, "lctn": lctn, "fold": lctn != 0,
         "captured": sorted(f"{d}.{t}" for d, t in cap), "collations": len(colls), "refused": refused,
-        "subset": which, "rows": len(rows), "stand": len(SERVERS),
+        "subset": which, "rows": len(rows), "stand": len(SERVERS), "folds": folds,
     }
     rows.sort(key=lambda r: r["id"])
     return header, rows
