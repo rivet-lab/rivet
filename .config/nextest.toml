@@ -84,3 +84,7 @@ slow-timeout = { period = "300s", terminate-after = 4 }
 [[profile.default.overrides]]
 filter = 'test(/_three_cycles_/) and (test(/bigquery/) or test(/snowflake/))'
 slow-timeout = { period = "300s", terminate-after = 2 }
+
+[[profile.default.overrides]]
+filter = 'test(=live_state_backend::a_run_on_a_hundred_thousand_run_ledger_is_not_slowed_by_the_history)'
+threads-required = 'num-test-threads'
