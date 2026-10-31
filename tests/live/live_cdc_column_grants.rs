@@ -2561,25 +2561,44 @@ fn an_alter_of_an_uncaptured_table_is_met_as_before_under_the_policy_mysql() {
 
 /// Every case `(policy, steps, verdict line)` run on its own seeded table, the verdicts compared in one assertion.
 fn backlogs_end_as(label: &str, cases: &[(bool, &[&str], &str)]) {
-    let got: Vec<String> = cases
+    backlogs_end_as_saying(label, cases, "");
+}
+
+/// As `backlogs_end_as`, and every run's message holds `said_part`.
+fn backlogs_end_as_saying(label: &str, cases: &[(bool, &[&str], &str)], said_part: &str) {
+    let runs: Vec<_> = cases
         .iter()
         .enumerate()
         .map(|(i, (policy, steps, _))| {
-            let run = statements_in_the_backlog(&format!("{label}{i}"), *policy, steps);
-            format!("{}: {}", steps.join(" ; "), run.line())
+            (
+                steps,
+                statements_in_the_backlog(&format!("{label}{i}"), *policy, steps),
+            )
         })
+        .collect();
+    let got: Vec<String> = runs
+        .iter()
+        .map(|(steps, run)| format!("{}: {}", steps.join(" ; "), run.line()))
         .collect();
     let want: Vec<String> = cases
         .iter()
         .map(|(_, steps, want)| format!("{}: {want}", steps.join(" ; ")))
         .collect();
     assert_eq!(got, want);
+    for (steps, run) in &runs {
+        assert!(
+            run.said.contains(said_part),
+            "{}: the message lacks {said_part:?}: {}",
+            steps.join(" ; "),
+            run.said
+        );
+    }
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_rename_of_a_captured_table_is_refused_in_every_form_under_the_policy_mysql() {
-    let forms: [&[&str]; 10] = [
+    let forms: [&[&str]; 9] = [
         &["ALTER TABLE rivet.{t} RENAME TO rivet.{t}_old", RECREATED],
         &["ALTER TABLE rivet.{t} RENAME AS rivet.{t}_old", RECREATED],
         &[
@@ -2599,23 +2618,30 @@ fn a_rename_of_a_captured_table_is_refused_in_every_form_under_the_policy_mysql(
             "RENAME TABLE \"rivet\".\"{t}\" TO \"rivet\".\"{t}_old\"",
             RECREATED,
         ],
-        &[
-            "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY)",
-            "RENAME TABLE rivet.{t}_new TO rivet.{t}_old, rivet.{t} TO rivet.{t}_new",
-            "CREATE TABLE rivet.{t} LIKE rivet.{t}_old",
-        ],
     ];
     let cases: Vec<_> = forms
         .iter()
         .map(|f| (true, *f, REFUSED_UNDECODABLE))
         .collect();
-    backlogs_end_as("cg_rnf", &cases);
+    backlogs_end_as_saying("cg_rnf", &cases, "was renamed (RENAME TABLE");
+    backlogs_end_as(
+        "cg_rns",
+        &[(
+            true,
+            &[
+                "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY)",
+                "RENAME TABLE rivet.{t}_new TO rivet.{t}_old, rivet.{t} TO rivet.{t}_new",
+                "CREATE TABLE rivet.{t} LIKE rivet.{t}_old",
+            ],
+            REFUSED_UNDECODABLE,
+        )],
+    );
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_column_renamed_after_a_backslash_literal_under_no_backslash_escapes_is_refused_mysql() {
-    backlogs_end_as(
+    backlogs_end_as_saying(
         "cg_nbe",
         &[(
             true,
@@ -2627,13 +2653,14 @@ fn a_column_renamed_after_a_backslash_literal_under_no_backslash_escapes_is_refu
             ],
             REFUSED_UNDECODABLE,
         )],
+        "had a column renamed",
     );
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_column_renamed_after_a_backslash_name_under_ansi_quotes_is_refused_mysql() {
-    backlogs_end_as(
+    backlogs_end_as_saying(
         "cg_ans",
         &[(
             true,
@@ -2645,6 +2672,7 @@ fn a_column_renamed_after_a_backslash_name_under_ansi_quotes_is_refused_mysql() 
             ],
             REFUSED_UNDECODABLE,
         )],
+        "had a column renamed",
     );
 }
 
