@@ -1,12 +1,13 @@
 diff --git a/src/source/mongo/cdc.rs b/src/source/mongo/cdc.rs
+index 9732540..15bb41c 100644
 --- a/src/source/mongo/cdc.rs
 +++ b/src/source/mongo/cdc.rs
-@@ -240,7 +240,7 @@
-     bound: Option<mongodb::bson::Timestamp>,
+@@ -245,7 +245,7 @@ fn idle_poll_stops(
  ) -> bool {
      match (advanced, target) {
--        (Some(cur), Some(tgt)) => cur > tgt && token_reached_bound(cur, bound),
-+        (Some(cur), Some(tgt)) => cur > tgt && token_reached_bound(cur, None),
+         (Some(cur), Some(tgt)) => {
+-            cur > tgt && (token_reached_bound(cur, bound) || waited >= BOUND_WAIT_CEILING)
++            cur > tgt && (token_reached_bound(cur, None) || waited >= BOUND_WAIT_CEILING)
+         }
          (_, None) => true,
          _ => false,
-     }

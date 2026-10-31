@@ -233,14 +233,20 @@ mod token_data_tests {
     }
 }
 
-/// An empty poll ends the drain once the token is past the open-time target and has reached the open-time clusterTime bound, or when there is no target.
+/// How long a drain waits, once its token is past the open-time target, for the token to reach the open-time clusterTime bound.
+const BOUND_WAIT_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// An empty poll ends the drain once the token is past the open-time target and has reached the open-time clusterTime bound, or has waited `BOUND_WAIT_CEILING` for it, or when there is no target.
 fn idle_poll_stops(
     advanced: Option<&str>,
     target: Option<&str>,
     bound: Option<mongodb::bson::Timestamp>,
+    waited: std::time::Duration,
 ) -> bool {
     match (advanced, target) {
-        (Some(cur), Some(tgt)) => cur > tgt && token_reached_bound(cur, bound),
+        (Some(cur), Some(tgt)) => {
+            cur > tgt && (token_reached_bound(cur, bound) || waited >= BOUND_WAIT_CEILING)
+        }
         (_, None) => true,
         _ => false,
     }
@@ -968,6 +974,7 @@ impl ChangeStream for MongoChangeStream {
         let hetero_warned = &mut self.hetero_warned;
         let configured_tables = &self.configured_tables;
         let clock = &mut self.clock;
+        let mut bound_wait: Option<std::time::Instant> = None;
         loop {
             // Pull one raw event (or terminate). Bounded run: drain up to the
             // open-time target; `next_if_any` returns `None` on an empty poll, but a
@@ -982,7 +989,28 @@ impl ChangeStream for MongoChangeStream {
                             .and_then(|t| serde_json::to_value(&t).ok())
                             .as_ref()
                             .and_then(token_data);
-                        if idle_poll_stops(advanced.as_deref(), target.as_deref(), bound_ts) {
+                        let unmet =
+                            advanced
+                                .as_deref()
+                                .zip(target.as_deref())
+                                .is_some_and(|(cur, tgt)| {
+                                    cur > tgt && !token_reached_bound(cur, bound_ts)
+                                });
+                        if unmet {
+                            bound_wait.get_or_insert_with(std::time::Instant::now);
+                        }
+                        let waited = bound_wait.map_or(std::time::Duration::ZERO, |t| t.elapsed());
+                        if idle_poll_stops(advanced.as_deref(), target.as_deref(), bound_ts, waited)
+                        {
+                            if unmet {
+                                log::warn!(
+                                    "mongodb cdc: the change stream did not reach the cluster time \
+                                     the run opened at within {}s (a shard is not advancing its \
+                                     resume token); the run stops here and the writes still \
+                                     pending arrive on the next run from the checkpoint",
+                                    BOUND_WAIT_CEILING.as_secs()
+                                );
+                            }
                             return None;
                         }
                         continue; // backlog still coming — poll again
@@ -1306,18 +1334,40 @@ mod tests {
     #[test]
     fn idle_poll_stops_both_directions() {
         let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
+        let now = std::time::Duration::ZERO;
         let past = "82000000640000000A";
         let bound_met = at(100, 10);
-        assert!(idle_poll_stops(Some(past), Some("81"), bound_met));
-        assert!(idle_poll_stops(Some(past), Some("81"), at(100, 9)));
-        assert!(idle_poll_stops(Some(past), Some("81"), None));
-        assert!(idle_poll_stops(None, None, bound_met));
-        assert!(idle_poll_stops(Some(past), None, bound_met));
-        assert!(!idle_poll_stops(Some(past), Some("81"), at(100, 11)));
-        assert!(!idle_poll_stops(Some(past), Some("81"), at(101, 0)));
-        assert!(!idle_poll_stops(Some("81"), Some(past), bound_met));
-        assert!(!idle_poll_stops(Some(past), Some(past), bound_met));
-        assert!(!idle_poll_stops(None, Some(past), bound_met));
+        assert!(idle_poll_stops(Some(past), Some("81"), bound_met, now));
+        assert!(idle_poll_stops(Some(past), Some("81"), at(100, 9), now));
+        assert!(idle_poll_stops(Some(past), Some("81"), None, now));
+        assert!(idle_poll_stops(None, None, bound_met, now));
+        assert!(idle_poll_stops(Some(past), None, bound_met, now));
+        assert!(!idle_poll_stops(Some(past), Some("81"), at(100, 11), now));
+        assert!(!idle_poll_stops(Some(past), Some("81"), at(101, 0), now));
+        assert!(!idle_poll_stops(Some("81"), Some(past), bound_met, now));
+        assert!(!idle_poll_stops(Some(past), Some(past), bound_met, now));
+        assert!(!idle_poll_stops(None, Some(past), bound_met, now));
+    }
+
+    /// A token that never reaches the bound ends the drain once the ceiling has passed, and never before; a token not past the target does not stop at any wait.
+    #[test]
+    fn a_token_that_never_reaches_the_bound_stops_the_drain_at_the_ceiling() {
+        let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
+        let secs = std::time::Duration::from_secs;
+        let past = "82000000640000000A";
+        let never = at(101, 0);
+        assert!(!idle_poll_stops(Some(past), Some("81"), never, secs(0)));
+        assert!(!idle_poll_stops(Some(past), Some("81"), never, secs(119)));
+        assert!(idle_poll_stops(
+            Some(past),
+            Some("81"),
+            never,
+            BOUND_WAIT_CEILING
+        ));
+        assert!(idle_poll_stops(Some(past), Some("81"), never, secs(3600)));
+        assert!(!idle_poll_stops(Some("81"), Some(past), never, secs(3600)));
+        assert!(!idle_poll_stops(None, Some(past), never, secs(3600)));
+        assert_eq!(BOUND_WAIT_CEILING, secs(120));
     }
 
     /// A token whose clusterTime is below the open-time bound has not drained the backlog, whatever it compares to the target.

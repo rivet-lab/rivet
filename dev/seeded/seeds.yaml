@@ -4254,6 +4254,23 @@ seeds:
         patch: mongo-cdc-stops-before-the-open-time-bound/mongo.patch
         cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, "lib:idle_poll_stops_both_directions"]
 
+  - name: mongo-cdc-bound-wait-has-no-ceiling
+    class: a MongoDB CDC run with until_current waits without limit for the resume token to reach the clusterTime recorded at open, so a cluster whose shards never advance leaves the run hanging instead of stopping with a warning and leaving the tail to the next run
+    history: 2026-10-31 - the open-time bound fix for sharded drains made the wait unbounded where it had been one empty poll; the ceiling is the coordinator's decision on that residual risk
+    scope: source
+    engines:
+      postgres:
+        na: "the drain ends at a commit past the bound read at open (tx_disposition); there is no wait for a token to catch up"
+      mysql:
+        na: "the drain ends at a commit past the bound read at open (commit_past_bound); there is no wait for a token to catch up"
+      mssql:
+        na: "the drain ends at an LSN fill the server reports (fill_sql); there is no wait for a token to catch up"
+      oracle:
+        na: "the drain is bounded at open by the SCN the miner reads from the database; there is no wait for a token to catch up"
+      mongo:
+        patch: mongo-cdc-bound-wait-has-no-ceiling/mongo.patch
+        cells: ["lib:a_token_that_never_reaches_the_bound_stops_the_drain_at_the_ceiling"]
+
   - name: clickhouse-load-legacy-mongo-position-reaches-the-insert
     class: a ClickHouse change-log load lets a MongoDB part whose position carries no clusterTime reach the insert, where the server throws Code 395 after an empty change table was created, instead of a coded refusal before any write
     history: MongoDB CDC into ClickHouse verifier probe 2026-10-31, an old binary run without load then the new binary, load exit 1 wrapping Code 395 with t__changes already created

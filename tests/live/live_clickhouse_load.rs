@@ -2151,6 +2151,7 @@ fn a_mongo_resume_export_into_clickhouse_accumulates_every_run() {
     ensure_gcs_bucket(BUCKET);
     let mdb = unique_name("chmresume");
     let m = MongoTest::connect(MONGO_PORT, &mdb);
+    println!("mongo-server: {}", m.server_version());
     m.seed_objectid("t", 2000);
     let db = Db::new("rivet_chtest");
     let rig = mongo_resume_into_clickhouse(&mdb, &db);
