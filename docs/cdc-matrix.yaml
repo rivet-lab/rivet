@@ -1,16 +1,3 @@
-# CDC (change-data-capture) coverage matrix — the most engine-divergent, correctness-
-# critical surface. Each engine captures by a different mechanism: PostgreSQL logical
-# replication SLOT, MySQL BINLOG, SQL Server fn_cdc_get_all_changes (from-LSN), MongoDB
-# change streams (db.watch + resume token). Same shape + drift-guard as the other
-# matrices. Cell = { test } | { gap } | { na }.
-#
-# COMPLEMENTS tests/cdc_conformance_gate.rs — that offline gate is the authoritative
-# per-(engine × conformance-case) ledger with its own drift-guard; this file is the
-# human-readable per-scenario view, and it surfaces holes the gate's "anchored once on
-# MySQL" NA rows can obscure (schema-drift PG/MSSQL, until_current-under-load on SQL).
-#
-# CDC live tests need the `cdc` docker profile (postgres-cdc:5434 / mysql-cdc:3307 /
-# mssql-cdc:1434 / mongo-rs): `docker compose --profile cdc up -d`.
 
 engines: [postgres, mysql, mssql, mongo, oracle]
 
@@ -255,7 +242,6 @@ scenarios:
     mongo:    { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
     oracle:   { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
-  # ── Harm / operational-cost contracts (the price CDC charges the source) ──────
   - id: cdc_drain_releases_pinned_wal
     what: "the disk-fill harm: an un-consumed logical slot pins WAL (and holds catalog_xmin, blocking vacuum); a bounded drain must advance confirmed_flush past the drained span so pg_wal_lsn_diff(current, confirmed_flush_lsn) collapses (restart_lsn / catalog_xmin follow at the next checkpoint). Oracle: the server's pg_replication_slots, not rivet's counters"
     postgres: { test: roast_pg_cdc_drain_releases_pinned_wal_and_advances_xmin }

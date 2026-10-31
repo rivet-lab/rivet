@@ -1,30 +1,8 @@
 //! Shrink-only ceilings for the rig's default oracle.
-//!
-//! Every successful `run|load|compact --config` and `apply <config.yaml>` started
-//! through the `Rig` or a shared runner helper is graded by
-//! `dev/release_oracle/rig_oracle.py` (tests/common/verify.rs, facts from the
-//! config file), and so is a `Rig::spawn_args_env` child its caller reaps with
-//! exit 0; a hand-built spawn is not. An invocation that does not exit 0 is graded
-//! against its pre-run snapshot (tests/common/refusal.rs). These counts may only go down:
-//!
-//! * typed declarations of what a failed run may leave (`.a_failed_run_may_leave(`,
-//!   `FAILED_RUN_LEAVES_ENV`) and the product defects every failed run may show
-//!   (`KNOWN_PRODUCT_DEFECTS`) — each one is a leftover the refusal grade lets through;
-//! * oracle opt-outs (`.no_oracle("<reason>")`, `run_rivet_ok_no_oracle`,
-//!   `RIVET_TEST_NO_ORACLE`) — each one is a live run no independent reader checks;
-//! * call sites of the Rust-side DuckDB helpers (`tests/common/duckdb.rs`, the
-//!   `duckdb_*` readers in `tests/common/parquet.rs`, the rig's container
-//!   census) — the one DuckDB session belongs to the Python oracle, and these
-//!   are the calls still to migrate onto it;
-//! * hand-built `Command::new` spawns of the rivet binary in tests/live — runs
-//!   no oracle grades.
-//!
-//! A count below its ceiling fails too, so every migration lowers the ceiling
-//! in the same diff and cannot be spent later as silent slack.
 
 use std::path::{Path, PathBuf};
 
-/// Oracle opt-outs in tests/live: `.no_oracle(`, `run_rivet_ok_no_oracle(`, the `RIVET_TEST_NO_ORACLE` env by literal or by its `NO_ORACLE_ENV` constant.
+/// Oracle opt-outs in tests/live.
 // 17 -> 21 (2026-10-02): live_cdc_source_connections counts source connections, which the oracle's own read would add to.
 // 21 -> 22 (2026-10-03): the PG truncate refusal's resumed run keeps the pre-truncate rows the refusal says only a re-snapshot removes.
 // 22 -> 23 (2026-10-03): pg_cdc_a_declared_key_absent_from_the_old_key_does_not_split merges by a declared `load.pk: [code]`; the oracle dedups by the source primary key `id`.
@@ -36,7 +14,7 @@ use std::path::{Path, PathBuf};
 // 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
 const NO_ORACLE_CEILING: usize = 28; // ratchet-pin: no-oracle-opt-outs
 
-/// Typed declarations in tests/live of what a run that does not exit 0 may leave: `.a_failed_run_may_leave(` and a raw run's `FAILED_RUN_LEAVES_ENV`.
+/// Typed declarations in tests/live of what a run that does not exit 0 may leave.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
 // 19 -> 34 (2026-10-07): the full-stand sweep: 9 CDC streams that commit what they read before the refusal, 3 runs cut mid-way that keep the parts they wrote, 2 ClickHouse loads whose answer is lost after the write, 1 --reconcile verdict exit.
 // 34 -> 35 (2026-10-07): the refused-run-keeps-refusing cells (one shared rig): parts, their file_log rows, the observed schema and the kept anchor.
@@ -56,14 +34,15 @@ const NO_ORACLE_CEILING: usize = 28; // ratchet-pin: no-oracle-opt-outs
 // 52 -> 53 (2026-10-31, #728): the one helper behind the cells of a statement naming a captured table; a refused run leaves its observed schema for the re-baseline by design.
 const FAILED_RUN_LEFTOVER_CEILING: usize = 53; // ratchet-pin: failed-run-leftover-declarations
 
-/// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs): product defects every failed run may show.
+/// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).
 // 2 -> 1 (2026-10-08): a run that fails before its first write leaves the prefix alone, so a failed manifest before a write is a failure, no longer an excuse.
 const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-product-defects
 
 /// Rust DuckDB-helper call sites across tests/ (see [`duckdb_helper_names`]).
 // 626 -> 630 (2026-10-01): #378 merged first and added 4 calls in its Mongo null-_id tests.
 // 630 -> 632 (2026-10-03): the PG/MySQL crash-mid-spilled-tail cells; on PG the rig oracle grades only the keys a stream's first run touched and passed 5 of 12 rows under the loss mutant.
-const DUCKDB_HELPER_CEILING: usize = 632; // ratchet-pin: duckdb-helper-sites
+// 632 -> 628 (2026-10-30): four helper-call mentions left the prose comments of the reduced files; no call site moved.
+const DUCKDB_HELPER_CEILING: usize = 628; // ratchet-pin: duckdb-helper-sites
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];
@@ -96,7 +75,7 @@ fn sources() -> Vec<(String, String)> {
         .collect()
 }
 
-/// The Rust DuckDB helpers, derived from the source: every `pub fn` in tests/common/duckdb.rs, every `fn duckdb_*` anywhere under tests/, and the rig's container-census methods.
+/// The Rust DuckDB helpers, derived from the source.
 fn duckdb_helper_names(srcs: &[(String, String)]) -> Vec<String> {
     let mut names: Vec<String> = [
         "census_oracle",
@@ -154,7 +133,6 @@ fn no_oracle_opt_outs_never_grow() {
             t.matches(".no_oracle(").count()
                 + t.matches("run_rivet_ok_no_oracle(").count()
                 + t.matches("\"RIVET_TEST_NO_ORACLE\"").count()
-                // The same env through its exported constant (tests/common/verify.rs::NO_ORACLE_ENV).
                 + t.matches("NO_ORACLE_ENV").count()
         })
         .sum();
@@ -182,7 +160,7 @@ fn failed_run_leftover_declarations_never_grow() {
     );
 }
 
-/// Refusals the live cells accept with no `RIVET_*` code (`Refused::uncoded_known_defect(`): each is a code the registry owes.
+/// Refusals the live cells accept with no `RIVET_*` code.
 // 5 -> 4 (2026-10-08): `--resume` over a complete prefix is refused as RIVET_DEST_ALREADY_COMPLETE.
 // 5 -> 4 (2026-10-08): the corrupt CDC checkpoint is refused by code (#497).
 // 4 -> 3 (2026-10-08): the bounded-drain refusal on a PostgreSQL standby carries RIVET_SOURCE_CDC_PREREQUISITE.
@@ -245,7 +223,7 @@ fn rust_duckdb_helper_call_sites_never_grow() {
     );
 }
 
-/// `(test fn, failure class, reason prefix)` of every `.oracle_known_defect(` site: a product defect the oracle must keep catching, excused only for its class. Removing one is allowed; adding one is a reviewed diff here.
+/// `(test fn, failure class, reason prefix)` of every `.oracle_known_defect(` site.
 const KNOWN_DEFECTS: &[(&str, &str, &str)] = &[
     // ratchet-pin: oracle-known-defects strings
     (
@@ -275,7 +253,7 @@ const KNOWN_DEFECTS: &[(&str, &str, &str)] = &[
     ),
 ]; // ratchet-pin: end
 
-/// `(enclosing fn, class, reason)` of every `.oracle_known_defect(` / `.run_ok_capture_known_defect(` call in `text`.
+/// `(enclosing fn, class, reason)` of every known-defect call site in `text`.
 fn known_defect_sites(text: &str) -> Vec<(String, String, String)> {
     text.match_indices(".oracle_known_defect(")
         .chain(text.match_indices(".run_ok_capture_known_defect("))
@@ -326,7 +304,7 @@ fn oracle_known_defects_are_a_named_set_that_only_shrinks() {
     );
 }
 
-/// Hand-built spawns of the rivet binary in tests/live: runs the default oracle never sees (the `Rig` and the `run_rivet*` helpers are graded).
+/// Hand-built spawns of the rivet binary in tests/live.
 const RAW_RIVET_CEILING: usize = 16; // ratchet-pin: raw-rivet-invocations
 
 /// `Command::new` of the rivet binary in `text`, in each spelling the suite uses.
