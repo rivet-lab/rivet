@@ -624,6 +624,14 @@ exclude_re = [
     # 2026-08-24, mutant applied and reverted each time.
     "replace match guard truncate_target.*MysqlChangeStream::fill",
 
+    # 2026-10-31 #728: the name arm and the re-read mark of the live-only MySQL reader. The decisions are named
+    # predicates (`mention_under_policy`, `re_read_marked`, `statement_frame`), unit-tested; the glue is graded
+    # live, mutant applied by hand: `note_statement` -> () fails a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql,
+    # the guard -> false fails an_add_index_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql,
+    # -> true fails a_grant_on_an_uncaptured_table_does_not_stop_the_stream_mysql.
+    "replace MysqlChangeStream::note_statement with \\(\\)",
+    "replace match guard mention_under_policy.*MysqlChangeStream::fill",
+
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
     # `in_quotes && next == '"'` guard on the escaped-quote arm cannot change what
     # the function RETURNS, and the reason is arithmetic rather than aesthetic.

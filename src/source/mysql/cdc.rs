@@ -754,7 +754,7 @@ impl MysqlChangeStream {
     fn note_statement(&mut self, raw: &[u8], log_pos: u64) {
         let (in_transaction, marks) = statement_frame(self.in_transaction, raw);
         self.in_transaction = in_transaction;
-        if marks && self.readable.is_some() {
+        if re_read_marked(self.readable.is_some(), marks) {
             self.grants_pending
                 .get_or_insert_with(|| (self.file.clone(), log_pos));
         }
@@ -1660,10 +1660,14 @@ impl MysqlChangeStream {
                 ));
             }
             Some(EventData::QueryEvent(qe))
-                if self.readable.is_some()
-                    && statement_mentions(qe.query_raw(), &self.configured_tables).is_some() =>
+                if mention_under_policy(
+                    self.readable.is_some(),
+                    qe.query_raw(),
+                    &self.configured_tables,
+                )
+                .is_some() =>
             {
-                let table = statement_mentions(qe.query_raw(), &self.configured_tables)
+                let table = mention_under_policy(true, qe.query_raw(), &self.configured_tables)
                     .expect("just matched");
                 return Err(crate::source::cdc::checkpoint_identity::undecodable(
                     statement_mention_refusal_message(table),
@@ -2604,6 +2608,18 @@ pub(crate) fn statement_frame(in_transaction: bool, raw: &[u8]) -> (bool, bool) 
             !in_transaction && !is_transaction_control(raw),
         ),
     }
+}
+
+/// Whether a statement that marks a re-read does so in this run: only under the grants policy.
+fn re_read_marked(policy: bool, marks: bool) -> bool {
+    policy && marks
+}
+
+/// The captured table a statement names, only under the grants policy.
+fn mention_under_policy<'a>(policy: bool, raw: &[u8], configured: &'a [String]) -> Option<&'a str> {
+    policy
+        .then(|| statement_mentions(raw, configured))
+        .flatten()
 }
 
 /// A statement the server writes to frame a transaction, in the exact form it writes it.
@@ -4735,6 +4751,20 @@ mod tests {
             (true, false)
         );
         assert_eq!(statement_frame(false, b""), (false, true));
+        assert!(re_read_marked(true, true));
+        assert!(!re_read_marked(true, false));
+        assert!(!re_read_marked(false, true));
+        assert!(!re_read_marked(false, false));
+        let configured = vec!["shop.orders".to_string()];
+        assert_eq!(
+            mention_under_policy(true, b"ALTER TABLE ORDERS ADD INDEX i (id)", &configured),
+            Some("shop.orders")
+        );
+        assert_eq!(
+            mention_under_policy(false, b"ALTER TABLE ORDERS ADD INDEX i (id)", &configured),
+            None
+        );
+        assert_eq!(mention_under_policy(true, b"SELECT 1", &configured), None);
     }
 
     #[test]
