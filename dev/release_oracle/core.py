@@ -33,7 +33,6 @@ import functools
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -43,6 +42,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Sequence
+
+from ..pytools.shell import have, wait_until
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -672,13 +673,9 @@ def docker_exec(container: str, *args: str, stdin: str | None = None, **kw) -> P
     return docker("exec", *flags, container, *args, stdin=stdin, **kw)
 
 
-def have(tool: str) -> bool:
-    """Is `tool` usable — for `duckdb`, the uv-pinned package the harness runs (dev/pytools/duckcli.py), never a binary on PATH."""
-    if tool == "duckdb":
-        import importlib.util
-
-        return importlib.util.find_spec("duckdb") is not None
-    return shutil.which(tool) is not None
+def strategy_lines(p: Proc) -> list[str]:
+    """The `Strategy:` lines a `rivet check` printed."""
+    return [ln.strip() for ln in p.out.splitlines() if ln.strip().startswith("Strategy:")]
 
 
 # ── matrix cell concurrency ──────────────────────────────────────────────────────
@@ -744,16 +741,6 @@ def run_lanes(led: "Ledger", cells: Sequence[tuple[object, Callable[["Ledger"], 
         sub.flush_into(led)
     if raised:
         raise raised[0]
-
-
-def wait_until(check, *, tries: int = 45, delay: float = 2.0) -> bool:
-    """Poll `check()` until true. Returns False on exhaustion — never raises, so
-    a caller records a SKIP instead of aborting the whole gate."""
-    for _ in range(tries):
-        if check():
-            return True
-        time.sleep(delay)
-    return False
 
 
 # ── the release binary under test ──────────────────────────────────────────────

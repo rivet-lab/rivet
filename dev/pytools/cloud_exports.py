@@ -66,12 +66,7 @@ else:  # executed as a plain script: `python3 dev/pytools/cloud_exports.py`
 ROOT = shell.ROOT
 
 
-def _say(msg: str = "") -> None:
-    """stdout, FLUSHED. These lines interleave with CHILD output on the same fd,
-    and a block-buffered `print` lands after it whenever stdout is a pipe or a
-    file — the bash `echo` was unbuffered, so its ordering was always right.
-    (Seen for real: "Ensuring bucket …" printed *after* the whole cargo run.)"""
-    print(msg, flush=True)
+_say = shell.say
 
 
 USAGE = (

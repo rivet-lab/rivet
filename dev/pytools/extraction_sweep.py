@@ -25,10 +25,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+if __package__:
+    from . import shell
+else:  # run as a plain script: its own directory is on sys.path
+    import shell  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parents[2]
 DUCKDB = [sys.executable, str(ROOT / "dev" / "pytools" / "duckcli.py")]
@@ -78,9 +82,7 @@ class Result:
     note: str = ""
 
 
-def sh(argv: list[str], env: dict | None = None, timeout: int = 900) -> subprocess.CompletedProcess:
-    e = {**os.environ, **(env or {})}
-    return subprocess.run(argv, capture_output=True, text=True, env=e, timeout=timeout)
+sh = shell.capture
 
 
 def psql_src(sql: str) -> str:
@@ -89,15 +91,13 @@ def psql_src(sql: str) -> str:
 
 
 def psql_state(sql: str) -> str:
-    p = sh(
-        ["docker", "exec", STATE_CONTAINER, "psql", "-U", "rivet", "-d", "rivet_state", "-tAc", sql]
-    )
-    return p.stdout.strip()
+    """Trimmed `psql -tAc` output from the sweep's state database."""
+    return shell.psql_state(STATE_CONTAINER, sql, timeout=900)
 
 
 def duckdb(sql: str) -> str:
-    p = sh([*DUCKDB, "-noheader", "-list", "-c", sql])
-    return p.stdout.strip()
+    """Trimmed DuckDB `-list` output of `sql`."""
+    return shell.duckdb_list(DUCKDB, sql, timeout=900)
 
 
 def as_int(s: str) -> int | None:

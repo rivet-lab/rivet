@@ -73,7 +73,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .core import (ROOT, Ledger, Proc, container_for_port, docker_exec, first_error, isolate_state_db, rivet_bin, run,
-                   run_lanes, server_of)
+                   run_lanes, server_of, strategy_lines)
 from .engines import sql as _sql
 from .fix_cells import prev_tag
 from .regression import _require_prev_binary
@@ -189,11 +189,6 @@ def _part_stats(out: Path) -> dict[str, tuple[int, int]]:
             for f in glob.glob(str(out / "**" / "*.parquet"), recursive=True)}
 
 
-def _strategy(p: Proc) -> list[str]:
-    """The `Strategy:` lines a `rivet check` printed."""
-    return [ln.strip() for ln in p.out.splitlines() if ln.strip().startswith("Strategy:")]
-
-
 class _Env:
     """One config dir: the previous `init` wrote its config; runs go through either binary."""
 
@@ -247,10 +242,10 @@ def _cursor_leg(led: Ledger, prev: Path, root: Path, engine: str, url: str, stat
             return
         # The upgrade order: the previous release ran first, THEN this binary arrives (its
         # `check` may migrate the state, which the previous one could no longer open).
-        ps = _strategy(e.rivet(prev, "check", "-c", "c.yaml"))
+        ps = strategy_lines(e.rivet(prev, "check", "-c", "c.yaml"))
         r1 = e.rivet(prev, "run", "-c", "c.yaml")
         if state_url == "":
-            cs = _strategy(e.rivet(rivet_bin(), "check", "-c", "c.yaml"))
+            cs = strategy_lines(e.rivet(rivet_bin(), "check", "-c", "c.yaml"))
             if cs and cs == ps:
                 led.passed(engine, "-", SCEN, "config", f"upgrade[{engine}/config]: this binary checks the previous init's config the same way ({cs[0]})")
             else:

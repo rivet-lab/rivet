@@ -34,10 +34,11 @@ import time
 from pathlib import Path
 
 if __package__:
-    from . import registry
+    from . import registry, shell
     from .duckcli import ARGV as DUCKDB
 else:  # run as a plain script: its own directory is on sys.path
     import registry  # type: ignore[no-redef]
+    import shell  # type: ignore[no-redef]
     from duckcli import ARGV as DUCKDB  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -59,14 +60,12 @@ SOURCES = [
 ]
 
 
-def sh(argv, env=None, timeout=900):
-    return subprocess.run(
-        argv, capture_output=True, text=True, env={**os.environ, **(env or {})}, timeout=timeout
-    )
+sh = shell.capture
 
 
 def duckdb(sql: str) -> str:
-    return sh([*DUCKDB, "-noheader", "-list", "-c", sql], timeout=600).stdout.strip()
+    """Trimmed DuckDB `-list` output of `sql`."""
+    return shell.duckdb_list(DUCKDB, sql, timeout=600)
 
 
 def seed() -> bool:
