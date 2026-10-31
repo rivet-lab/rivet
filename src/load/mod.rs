@@ -1787,7 +1787,7 @@ pub(crate) mod tests {
         }
         let foreign = format!("{:#}", stops[0].1);
         assert!(
-            foreign.contains("no record of rivet loading it"),
+            foreign.contains("no record of a successful rivet load"),
             "{foreign}"
         );
 
@@ -1927,7 +1927,10 @@ pub(crate) mod tests {
             "{:#}",
             load_incremental_as(&f, Ownership::Foreign).unwrap_err()
         );
-        assert!(err.contains("no record of rivet loading it"), "{err}");
+        assert!(
+            err.contains("no record of a successful rivet load"),
+            "{err}"
+        );
         assert!(calls(&f).is_empty(), "nothing renamed or appended");
     }
 
@@ -2012,7 +2015,10 @@ pub(crate) mod tests {
 
         let foreign = full_load_left(5);
         let err = format!("{:#}", full_load(&foreign, Ownership::Foreign).unwrap_err());
-        assert!(err.contains("no record of rivet loading it"), "{err}");
+        assert!(
+            err.contains("no record of a successful rivet load"),
+            "{err}"
+        );
         assert!(foreign.materialized.borrow().is_empty());
 
         let viewed = FakeLoader {
@@ -2396,8 +2402,10 @@ pub(crate) mod tests {
                 5,
                 format!(
                     "refusing to {verb} `db.{name}`: it exists, and this state DB's load ledger \
-                     has no record of rivet loading it — it may hold someone else's data. Drop \
-                     or rename it, or load into another table"
+                     has no record of a successful rivet load into it — it may hold someone else's \
+                     data, or what a first rivet load that never completed left behind (such a \
+                     load consumed no run, so the next load delivers its rows again). Drop or \
+                     rename it, or load into another table"
                 ),
             ))
         };

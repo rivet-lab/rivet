@@ -3831,7 +3831,7 @@ mod load_ledger_tests {
                     let first = cycle(&dir, &state, &plan, "L1", fake());
                     let second = cycle(&dir, &state, &plan, "L2", fake());
                     let refused = |c: &Cycle| {
-                        c.stopped_saying("no record of rivet loading it")
+                        c.stopped_saying("no record of a successful rivet load")
                             && c.next == load::Ownership::Foreign
                             && c.exit == Some((5, Some("RIVET_LOAD_TARGET_NOT_RIVETS")))
                     };
@@ -3899,7 +3899,7 @@ mod load_ledger_tests {
                 let first = incremental_cycle(&dir, &state, &plan, "L1", fake());
                 let second = incremental_cycle(&dir, &state, &plan, "L2", fake());
                 let refused = |c: &Cycle| {
-                    c.stopped_saying("no record of rivet loading it")
+                    c.stopped_saying("no record of a successful rivet load")
                         && c.next == load::Ownership::Foreign
                         && c.exit == Some((5, Some("RIVET_LOAD_TARGET_NOT_RIVETS")))
                 };
@@ -3950,8 +3950,10 @@ mod load_ledger_tests {
             (
                 Some(
                     "refusing to overwrite `db.full_foreign`: it exists, and this state DB's \
-                     load ledger has no record of rivet loading it — it may hold someone else's \
-                     data. Drop or rename it, or load into another table"
+                     load ledger has no record of a successful rivet load into it — it may hold \
+                     someone else's data, or what a first rivet load that never completed left \
+                     behind (such a load consumed no run, so the next load delivers its rows \
+                     again). Drop or rename it, or load into another table"
                 ),
                 Some((5, Some("RIVET_LOAD_TARGET_NOT_RIVETS"))),
                 vec![]
@@ -4234,7 +4236,7 @@ mod load_ledger_tests {
         let (_, writes, journaled, next) = run("L1", buffered);
         let dropped = load::tests::fake_loader(1).with_kind(table, Table);
         let (said, rewrites, _, after) = run("L2", dropped);
-        let second = match said.contains("no record of rivet loading it") {
+        let second = match said.contains("no record of a successful rivet load") {
             true => "refused as foreign".to_string(),
             false => format!("not refused as foreign: {said:?}, wrote {rewrites:?}"),
         };
@@ -4329,7 +4331,7 @@ mod load_ledger_tests {
         );
         let refused_again = second
             .refusal
-            .is_some_and(|m| m.contains("no record of rivet loading it"));
+            .is_some_and(|m| m.contains("no record of a successful rivet load"));
         assert_eq!(
             (left, refused_again, second.writes, second.next),
             (
@@ -4370,7 +4372,7 @@ mod load_ledger_tests {
             );
             let refused = c
                 .refusal
-                .is_some_and(|m| m.contains("no record of rivet loading it"));
+                .is_some_and(|m| m.contains("no record of a successful rivet load"));
             seen.push((refused, c.writes, c.ledger, c.next));
         }
         let stop = (

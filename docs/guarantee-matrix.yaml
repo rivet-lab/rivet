@@ -751,11 +751,11 @@ guarantees:
   - id: load_never_takes_a_table_it_did_not_load
     stated:
       - file: docs/reference/errors.md
-        sentence: "the warehouse object exists and this state DB has no record of rivet loading it: drop or rename it, or load into another table"
+        sentence: "the warehouse object exists and this state DB has no record of a successful rivet load: drop or rename it, or load into another table"
     held_by:
-      bigquery: { test: bigquery_load_refuses_a_table_it_did_not_load_on_every_attempt, asserts: "no record of rivet loading it" }
-      snowflake: { test: snowflake_load_refuses_a_table_it_did_not_load_on_every_attempt_postgres, asserts: "no record of rivet loading it" }
-      clickhouse: { test: a_range_refusal_claims_nothing_so_a_table_made_after_it_stays_foreign, asserts: "no record of rivet loading it" }
+      bigquery: { test: bigquery_load_refuses_a_table_it_did_not_load_on_every_attempt, asserts: "no record of a successful rivet load" }
+      snowflake: { test: snowflake_load_refuses_a_table_it_did_not_load_on_every_attempt_postgres, asserts: "no record of a successful rivet load" }
+      clickhouse: { test: a_range_refusal_claims_nothing_so_a_table_made_after_it_stays_foreign, asserts: "no record of a successful rivet load" }
 
   - id: compact_merges_the_buffer_and_drops_it
     stated:

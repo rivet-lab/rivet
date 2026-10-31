@@ -88,7 +88,7 @@ pub(crate) fn compact_gate(
             crate::error::codes::LOAD_TARGET_NOT_RIVETS,
             format!(
                 "refusing to compact `{buffer_fqtn}` into `{base_fqtn}`: it exists, and this state \
-             DB's load ledger has no record of rivet loading it — a MERGE would rewrite someone \
+             DB's load ledger has no record of a successful rivet load — a MERGE would rewrite someone \
              else's rows. Drop or rename it, or point the export at another table"
             ),
         ),
@@ -760,7 +760,7 @@ mod compact_gate_tests {
             (
                 ObjectKind::Table,
                 Ownership::Foreign,
-                "no record of rivet loading it",
+                "no record of a successful rivet load",
             ),
             (
                 ObjectKind::Table,

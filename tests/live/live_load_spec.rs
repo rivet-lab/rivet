@@ -512,7 +512,7 @@ fn bigquery_full_load_refuses_a_table_it_did_not_load() {
     rig.run_ok();
     let said = load_fails(&rig);
     assert!(
-        said.contains("no record of rivet loading it"),
+        said.contains("no record of a successful rivet load"),
         "the refusal says why:\n{said}"
     );
 
@@ -546,7 +546,7 @@ fn bigquery_load_refuses_a_table_it_did_not_load_on_every_attempt() {
     for attempt in 1..=2 {
         let said = load_fails(&rig);
         assert!(
-            said.contains("no record of rivet loading it"),
+            said.contains("no record of a successful rivet load"),
             "attempt {attempt} refuses for the same reason:\n{said}"
         );
         assert_eq!(
@@ -1099,7 +1099,7 @@ fn bigquery_incremental_onto_a_table_already_in_the_dataset_is_refused_every_tim
     for attempt in 1..=2 {
         let said = load_fails(&rig);
         assert!(
-            said.contains("no record of rivet loading it"),
+            said.contains("no record of a successful rivet load"),
             "attempt {attempt} refuses for the same reason:\n{said}"
         );
         assert_eq!(
@@ -1190,7 +1190,7 @@ fn bigquery_incremental_onto_a_view_or_a_log_it_did_not_load_is_refused_every_ti
             assert!(
                 said.contains("[RIVET_LOAD_TARGET_NOT_RIVETS]")
                     && said.contains(&format!("{theirs}`: it exists"))
-                    && said.contains("no record of rivet loading it"),
+                    && said.contains("no record of a successful rivet load"),
                 "{kind} attempt {attempt} names the object and why:\n{said}"
             );
             assert_eq!(

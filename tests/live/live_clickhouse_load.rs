@@ -732,7 +732,7 @@ fn a_load_from_another_state_db_is_refused_every_cycle(
     );
     assert!(
         said.contains(&format!("refusing to replace `{view}`: it exists"))
-            && said.contains("no record of rivet loading it"),
+            && said.contains("no record of a successful rivet load"),
         "the refusal names the object and why:\n{said}"
     );
     assert_eq!(stand(), before, "the view and the log are what they were");
@@ -2234,7 +2234,7 @@ fn a_range_refusal_claims_nothing_so_a_table_made_after_it_stays_foreign() {
     let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !out.status.success() && err.contains("no record of rivet loading it"),
+        !out.status.success() && err.contains("no record of a successful rivet load"),
         "the second load must refuse a table rivet never loaded:\n{err}"
     );
     assert_eq!(
