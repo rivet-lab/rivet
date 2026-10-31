@@ -22,7 +22,8 @@ Two run modes:
   **Requires a replica set** (a single-node replica set is fine); a standalone
   `mongod` cannot open a change stream.
   A sharded cluster is read through `mongos`: a bounded run (`until_current: true`) stops only
-  once the stream has caught up with the cluster time it recorded when it opened, so a write
+  once the stream's token is past the cluster time it recorded when it opened (a token at that
+  very tick can come from one shard while another shard still holds a write of the same tick), so a write
   committed before the run started is in that run's output even when one shard was idle. On a
   cluster without traffic that costs the wait for the shards' periodic no-op advance. That wait
   is capped at 120 s: if the stream has not reached the recorded cluster time by then (a shard
