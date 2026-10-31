@@ -1,5 +1,5 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 7bfd8603..9421f6c8 100644
+index 67a4a6e9..98321070 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
 @@ -111,6 +111,7 @@ pub(crate) struct MysqlChangeStream {
@@ -10,7 +10,7 @@ index 7bfd8603..9421f6c8 100644
  }
  
  impl MysqlChangeStream {
-@@ -778,10 +779,14 @@ impl MysqlChangeStream {
+@@ -778,8 +779,12 @@ impl MysqlChangeStream {
          let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
              return Ok(());
          };
@@ -19,14 +19,12 @@ index 7bfd8603..9421f6c8 100644
 +            Some(c) => c,
 +            None => connect_conn(url, tls.as_ref())?,
 +        };
-         let read = Self::readable_on(&mut conn, &self.configured_tables, true).map_err(|e| {
-             captured_table_gone(e, &format!("the grants re-read at {file}:{log_pos}"))
-         })?;
+         let read = Self::readable_on(&mut conn, &self.configured_tables, true)?;
 +        self.grants_conn = Some(conn);
          let now = read.unwrap_or_default();
          let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
              r.get(t).map(|c| c.columns.clone())
-@@ -935,6 +940,7 @@ impl MysqlChangeStream {
+@@ -933,6 +938,7 @@ impl MysqlChangeStream {
              grants_pending: None,
              in_transaction: false,
              fold_names,

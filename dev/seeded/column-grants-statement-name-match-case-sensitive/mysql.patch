@@ -1,9 +1,9 @@
 diff --git a/src/source/mysql/folded_name.rs b/src/source/mysql/folded_name.rs
-index 7958699c..45e4382a 100644
+index 74f2f0a2..932d6202 100644
 --- a/src/source/mysql/folded_name.rs
 +++ b/src/source/mysql/folded_name.rs
-@@ -75,7 +75,7 @@ pub(crate) fn mentions_name(fold: bool, name: &str, raw: &[u8]) -> bool {
-         folds_to(name, raw, true)
+@@ -61,7 +61,7 @@ pub(crate) fn mentions_name(fold: bool, name: &str, raw: &[u8]) -> bool {
+         folds_inside(name, raw)
      } else {
          raw.windows(name.len())
 -            .any(|w| w.eq_ignore_ascii_case(name.as_bytes()))

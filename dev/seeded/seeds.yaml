@@ -3979,14 +3979,14 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
-  - name: cdc-statement-target-ignores-the-case-fold
-    class: "the table a binlog statement targets is compared to the configured table exactly although the server folds identifier case (`lower_case_table_names` 1 or 2): a TRUNCATE spelled in capitals or with a character the server folds (the Kelvin sign for k) is not the captured table, so the run exits 0 and the destination keeps rows the source lost"
-    history: "#728 verifier round 5 (2026-10-31, F1 and F2); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_TRUNCATED (exit 5)"
+  - name: cdc-policy-name-arm-ignores-the-case-fold
+    class: "under `columns_from: grants` the name of a captured table is looked for in a statement without the lower_case_table_names fold: a TRUNCATE spelled with a character the server folds (the Kelvin sign for k, a multibyte character in gb18030 or ujis) is not seen as the captured table, so the run exits 0 and the destination keeps rows the source lost"
+    history: "#728 verifier rounds 5 and 6 (2026-10-31); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
     scope: source
     engines:
       mysql:
-        patch: cdc-statement-target-ignores-the-case-fold/mysql.patch
-        cells: [a_truncate_in_capitals_is_refused_on_a_server_that_folds_case_with_and_without_the_policy_mysql, a_truncate_spelled_with_a_character_the_server_folds_is_refused_mysql, "lib:a_server_that_folds_case_resolves_a_statement_target_by_the_fold", "lib:a_truncate_drop_or_write_is_refused_by_its_table_under_the_fold_and_only_when_armed"]
+        patch: cdc-policy-name-arm-ignores-the-case-fold/mysql.patch
+        cells: ["lib:a_mention_follows_the_fold_of_the_server", "lib:under_the_policy_a_statement_text_is_refused_only_when_it_names_a_captured_table", a_truncate_spelled_with_a_character_the_server_folds_is_refused_under_the_policy_mysql, a_truncate_spelled_with_a_multibyte_character_the_server_folds_is_refused_under_the_policy_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:

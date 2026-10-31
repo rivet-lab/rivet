@@ -1257,6 +1257,30 @@ fn a_refused_backlog_is_got_past_by_the_remedy(
     mend: impl FnOnce(),
     reads: impl FnOnce(&Rig),
 ) {
+    let said_parts: Vec<String> = said_parts
+        .iter()
+        .cloned()
+        .chain(["Re-baseline the stream".to_string()])
+        .collect();
+    a_stopped_backlog_is_got_past_by_the_remedy(
+        rig,
+        steps,
+        Refused::by_code(code, 5),
+        &said_parts,
+        mend,
+        reads,
+    );
+}
+
+/// As `a_refused_backlog_is_got_past_by_the_remedy` for a stop `refused` names, whose message holds exactly `said_parts`.
+fn a_stopped_backlog_is_got_past_by_the_remedy(
+    rig: Rig,
+    steps: Vec<String>,
+    refused: Refused,
+    said_parts: &[String],
+    mend: impl FnOnce(),
+    reads: impl FnOnce(&Rig),
+) {
     let mut rig = rig.a_failed_run_may_leave(
         &[Leftover::ResumePoint],
         "the run observes the readable columns at its start: that observed schema is stored before the refusal at the statement (known: src/state/schema.rs stores the baseline of a failed run)",
@@ -1268,12 +1292,8 @@ fn a_refused_backlog_is_got_past_by_the_remedy(
     let before = checkpoint_at(&rig);
     let out = rig.run();
     let said = said_by(&out);
-    assert_refused(&out, Refused::by_code(code, 5));
-    for part in said_parts
-        .iter()
-        .map(String::as_str)
-        .chain(["Re-baseline the stream"])
-    {
+    assert_refused(&out, refused);
+    for part in said_parts {
         assert!(said.contains(part), "the refusal lacks {part:?}:\n{said}");
     }
     assert_eq!(
@@ -3376,49 +3396,41 @@ fn a_database_dropped_with_a_captured_table_is_met_as_before_by_the_unreadable_c
             user.0
         ))
         .unwrap();
-    let mut rig = Rig::mysql_cdc(&format!("{}.{table}", db.0))
+    let rig = Rig::mysql_cdc(&format!("{}.{table}", db.0))
         .source_url(&user.url())
         .cdc("initial: snapshot")
-        .source_line("columns_from: grants")
-        .a_failed_run_may_leave(
-            &[Leftover::ResumePoint],
-            "the run observes the readable columns at its start: that observed schema is stored before the stop (known: src/state/schema.rs stores the baseline of a failed run)",
-        );
+        .source_line("columns_from: grants");
     rig.run_ok();
-    let before = checkpoint_at(&rig);
-    let mut c = root();
-    c.query_drop(format!(
-        "UPDATE {}.{table} SET name = 'ann-before' WHERE id = 1",
-        db.0
-    ))
-    .unwrap();
-    c.query_drop(format!("DROP DATABASE `{}`", db.0)).unwrap();
-    let out = rig.run();
-    assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
-    assert_eq!(
-        checkpoint_at(&rig),
-        before,
-        "a stopped run does not move the checkpoint"
-    );
-    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
-        .iter()
-        .flat_map(|d| read_all_parts(d))
-        .collect();
-    assert_eq!(changes(&parts), vec![], "a stopped run delivers no change");
-    root()
-        .query_drop(format!("CREATE DATABASE `{}`", db.0))
-        .unwrap();
-    seed_rows(&db.0, &table);
-    root()
-        .query_drop(format!(
-            "GRANT SELECT (id, name) ON {}.{table} TO '{}'@'%'",
-            db.0, user.0
-        ))
-        .unwrap();
-    follow_rebaseline_remedy(&mut rig, true);
-    let (names, cells) = delivered(&rig);
-    assert!(
-        cells.iter().any(|v| v == "ann") && names.iter().all(|n| n == "id" || n == "name"),
-        "the re-baselined stream reads the re-created table: {names:?} {cells:?}"
+    let steps = vec![
+        format!(
+            "UPDATE {}.{table} SET name = 'ann-before' WHERE id = 1",
+            db.0
+        ),
+        format!("DROP DATABASE `{}`", db.0),
+    ];
+    a_stopped_backlog_is_got_past_by_the_remedy(
+        rig,
+        steps,
+        Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1),
+        &[],
+        || {
+            root()
+                .query_drop(format!("CREATE DATABASE `{}`", db.0))
+                .unwrap();
+            seed_rows(&db.0, &table);
+            root()
+                .query_drop(format!(
+                    "GRANT SELECT (id, name) ON {}.{table} TO '{}'@'%'",
+                    db.0, user.0
+                ))
+                .unwrap();
+        },
+        |rig| {
+            let (names, cells) = delivered(rig);
+            assert!(
+                cells.iter().any(|v| v == "ann") && names.iter().all(|n| n == "id" || n == "name"),
+                "the re-baselined stream reads the re-created table: {names:?} {cells:?}"
+            );
+        },
     );
 }
