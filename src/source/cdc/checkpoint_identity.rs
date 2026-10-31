@@ -1,5 +1,4 @@
-//! One verdict for "does this checkpoint belong to this source", shared by every
-//! engine whose resume position is only meaningful on the server that wrote it.
+//! One verdict for "does this checkpoint belong to this source".
 
 use crate::error::Result;
 
@@ -19,7 +18,7 @@ fn refusal(code: crate::error::Code, why: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(crate::error::CodedError::new(code, why))
 }
 
-/// Refuse a checkpoint that cannot be resumed from (unreadable, of another shape, or gone under a baseline): `SOURCE_CDC_CHECKPOINT_INVALID`, exit 5.
+/// Refuse a checkpoint that cannot be resumed.
 pub(crate) fn checkpoint_invalid(why: String) -> anyhow::Error {
     refusal(crate::error::codes::SOURCE_CDC_CHECKPOINT_INVALID, why)
 }
@@ -41,17 +40,17 @@ pub(crate) fn lost_file_anchor(
     ))
 }
 
-/// Refuse a resume position the source's log no longer reaches (dropped slot, purged binlog, rolled oplog): `SOURCE_CDC_LOG_GAP`, exit 5.
+/// Refuse a resume position the source's log no longer reaches.
 pub(crate) fn log_gap(why: String) -> anyhow::Error {
     refusal(crate::error::codes::SOURCE_CDC_LOG_GAP, why)
 }
 
-/// Refuse a captured table whose rows left the source without change events (TRUNCATE, DROP): `SOURCE_CDC_TRUNCATED`, exit 5.
+/// Refuse a captured table whose rows left the source without change events (TRUNCATE, DROP).
 pub(crate) fn truncated(why: impl Into<String>) -> anyhow::Error {
     refusal(crate::error::codes::SOURCE_CDC_TRUNCATED, why)
 }
 
-/// Refuse a log span this reader cannot decode into events, so the stream re-baselines past it: `SOURCE_CDC_UNDECODABLE`, exit 5.
+/// Refuse a log span this reader cannot decode into events, so the stream re-baselines past it.
 pub(crate) fn undecodable(why: String) -> anyhow::Error {
     refusal(crate::error::codes::SOURCE_CDC_UNDECODABLE, why)
 }
@@ -70,8 +69,7 @@ pub(crate) fn owner_path(ckpt: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-/// `p` spelled one way whatever exists of it: its longest existing ancestor canonical (so
-/// `/var` and `/private/var` agree), the rest lexical without `.` or a trailing `/`.
+/// `p` spelled one way whatever exists of it.
 pub(crate) fn canonical_place(p: &std::path::Path) -> std::path::PathBuf {
     let lexical: std::path::PathBuf = p.components().collect();
     let mut head = lexical.as_path();
@@ -96,8 +94,7 @@ pub(crate) fn owner_of(ckpt: &std::path::Path) -> Option<CheckpointOwner> {
     serde_json::from_str(&text).ok()
 }
 
-/// Whether export `export` of the config at `config` names the checkpoint `ckpt` (a config that
-/// cannot be read is taken to name it: refusing is the safe answer).
+/// Whether export `export` of the config at `config` names the checkpoint `ckpt`.
 fn still_names(config: &std::path::Path, export: &str, ckpt: &std::path::Path) -> bool {
     if !config.exists() {
         return false;
@@ -116,11 +113,7 @@ fn still_names(config: &std::path::Path, export: &str, ckpt: &std::path::Path) -
     })
 }
 
-/// Claim the checkpoint `ckpt` for export `export` of the config at `config`, refusing one that
-/// another config's export still reads (`SOURCE_CDC_CHECKPOINT_SHARED`, exit 5): two streams on
-/// one checkpoint each continue from where the other stopped, and skip what the other read. A
-/// checkpoint without an owner record (written before 0.32.2), or whose owner no longer names it
-/// (a config moved or edited), is claimed.
+/// Claim the checkpoint `ckpt` for export `export` of the config at `config`.
 pub(crate) fn claim_checkpoint(
     ckpt: &std::path::Path,
     config: &std::path::Path,
@@ -175,7 +168,7 @@ pub(crate) enum IdentityVerdict {
 }
 
 impl IdentityVerdict {
-    /// Refuse a foreign checkpoint as `SOURCE_CDC_FOREIGN_CHECKPOINT` (exit 5); warn on an unverifiable one.
+    /// Refuse a foreign checkpoint as `SOURCE_CDC_FOREIGN_CHECKPOINT` (exit 5).
     pub(crate) fn enforce(self) -> Result<()> {
         match self {
             Self::Ok => Ok(()),
@@ -270,10 +263,7 @@ mod owner_tests {
         path
     }
 
-    /// A checkpoint is claimed by its first reader and refused to a second config's export on
-    /// every attempt while the first still names it; written before 0.32.2 (no owner record), or
-    /// left by a config that moved, it is claimed.
-    /// The owner record is written beside a checkpoint whose directory does not exist yet.
+    /// A checkpoint is claimed by its first reader; a second config's export is refused by code.
     #[test]
     fn a_first_claim_makes_the_checkpoint_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -312,7 +302,6 @@ mod owner_tests {
             crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CHECKPOINT_SHARED", 5);
             assert!(format!("{err:#}").contains("a.yaml"), "{err:#}");
         }
-        // The first config moves its stream to a checkpoint of its own: the second may claim it.
         config(dir.path(), "a.yaml", "orders_cdc", "./cdc/a.ckpt");
         claim_checkpoint(&ckpt, &b, "orders_cdc").expect("a checkpoint its owner no longer names");
         std::fs::remove_file(&b).unwrap();
