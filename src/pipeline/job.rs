@@ -13,12 +13,7 @@ use super::single::{
 use super::summary::RunSummary;
 use crate::journal::RunEvent;
 
-/// Classify a raw error message into a STABLE `error_class` so failures group and
-/// trend without `LIKE '%…%'` string-matching (the 0.21.2 field post-mortem grouped
-/// 43 failures into 3 classes by hand). Ordered MOST-SPECIFIC first — the
-/// parallel-checkpoint wrapper embeds the inner `ERROR 3024` text, so it must match
-/// before `statement_timeout`. Returns `None` when nothing matches: an unclassified
-/// error is honest, not force-fit into a bucket.
+/// Classify a raw error message into a stable `error_class` for failure grouping.
 pub(crate) fn classify_error_message(msg: &str) -> Option<&'static str> {
     let m = msg.to_ascii_lowercase();
     if m.contains("keyset could not read") || m.contains("could not read the key value") {
@@ -28,7 +23,6 @@ pub(crate) fn classify_error_message(msg: &str) -> Option<&'static str> {
     } else if m.contains("deadlock") {
         Some("deadlock")
     } else if m.contains("lock wait timeout") || m.contains("could not obtain lock") {
-        // A lock-wait embeds "timeout" — match it before statement_timeout.
         Some("lock_timeout")
     } else if m.contains("3024")
         || m.contains("maximum statement execution time")
@@ -79,8 +73,6 @@ pub(crate) fn classify_error_message(msg: &str) -> Option<&'static str> {
 }
 
 /// The resolved strategy's `(label, key column)` — the column the run pages by.
-/// `None` for full/snapshot (no key). Shared by `key_descriptor_json` and the open
-/// probe, which resolves the key's native type against this name.
 fn strategy_key_column(plan: &ResolvedRunPlan) -> Option<(&'static str, &str)> {
     match &plan.strategy {
         ExtractionStrategy::Keyset(k) => Some(("keyset", &k.key_column)),
@@ -90,11 +82,7 @@ fn strategy_key_column(plan: &ResolvedRunPlan) -> Option<(&'static str, &str)> {
     }
 }
 
-/// A compact JSON descriptor of the resolved strategy's KEY: `{strategy, key}` plus
-/// `db_type` + an `unsigned` flag when the open probe resolved the key's SOURCE
-/// native type (the "was it unsigned" answer inline, which the Arrow repr elides).
-/// `is_primary_key` is implicit for keyset — the planner requires a unique index —
-/// so it is not restated.
+/// A compact JSON descriptor of the resolved strategy's KEY.
 fn key_descriptor_json(plan: &ResolvedRunPlan, key_native_type: Option<&str>) -> Option<String> {
     let (strategy, key) = strategy_key_column(plan)?;
     let mut obj = serde_json::json!({ "strategy": strategy, "key": key });
@@ -107,17 +95,7 @@ fn key_descriptor_json(plan: &ResolvedRunPlan, key_native_type: Option<&str>) ->
     Some(obj.to_string())
 }
 
-/// Capture failure-forensics context at run OPEN, best-effort. `export_schema` is
-/// otherwise SUCCESS-only, so a run that fails before finalize leaves no schema —
-/// the exact case a post-mortem needs (the 0.21.2 field DB had no schema for its 43
-/// failures). From one short-lived open probe this records:
-///  * the source SCHEMA (via `type_mappings`, LIMIT-0 so even a page-0 failure
-///    captures the columns/types) → `store_schema`, keyed by export like the
-///    success path (which OVERWRITES it, so a successful run is unaffected), and
-///  * the source SERVER context (version + limits) → `summary.server_context_json`.
-///
-/// Never fails the run: any probe error is logged at debug and dropped. One extra
-/// lightweight connection per export — cheap relative to the run it forensicates.
+/// Capture failure-forensics context at run OPEN, best-effort.
 fn capture_open_forensics(
     plan: &ResolvedRunPlan,
     state: &StateStore,
@@ -133,8 +111,6 @@ fn capture_open_forensics(
         return;
     };
     summary.server_context_json = src.server_context();
-    // The same resolution the type report and the load spec use, so what this run
-    // records for `rivet load` is what it resolved, not a second reading.
     match crate::preflight::type_report::probe_mappings(
         src,
         &plan.base_query,
@@ -150,10 +126,6 @@ fn capture_open_forensics(
                     None
                 });
             }
-            // Arrow repr matches the success path's `arrow_schema_to_columns` format
-            // (so a later successful overwrite is consistent), and still names
-            // unsignedness (`UInt64`). Fall back to the source native type only when
-            // Arrow is None (an Unsupported type).
             let cols: Vec<crate::state::SchemaColumn> = mappings
                 .iter()
                 .map(|m| crate::state::SchemaColumn {
@@ -165,20 +137,12 @@ fn capture_open_forensics(
                         .unwrap_or_else(|| m.source_native_type.clone()),
                 })
                 .collect();
-            // Resolve the KEY column's source native type for key_descriptor_json —
-            // it names signedness ("bigint unsigned") that the Arrow repr elides.
             if let Some((_, key)) = strategy_key_column(plan) {
                 summary.key_native_type = mappings
                     .iter()
                     .find(|m| m.column_name == key)
                     .map(|m| m.source_native_type.clone());
             }
-            // store_schema_if_absent, NOT store_schema: a stored baseline is the
-            // drift detector's comparison anchor, read by `detect_schema_change`
-            // DURING the export (after this open probe). Overwriting it here would
-            // blind schema-drift detection — a changed column would compare equal to
-            // the just-stored current schema. A first-run failure (no baseline) is
-            // exactly what this forensics exists for and still captures its schema.
             if let Err(e) = state.store_schema_if_absent(&summary.export_name, &cols) {
                 log::debug!(
                     "open-forensics: store_schema_if_absent failed for '{}': {e}",
@@ -194,7 +158,7 @@ fn capture_open_forensics(
     }
 }
 
-/// The run's column plan: the open probe's mappings under the run's type policy, before any runner reads data.
+/// The run's column plan.
 fn plan_open_columns(
     export_name: &str,
     open: &mut Option<Vec<crate::types::TypeMapping>>,
@@ -220,9 +184,7 @@ fn plan_open_columns(
     Ok(())
 }
 
-/// A settle column must be a date/timestamp: the window compares it with the source
-/// clock. Checked from the open probe so a wrong column fails before the query runs;
-/// the sink repeats the check on the schema it writes, for a run whose probe failed.
+/// A settle column must be a date/timestamp: the window compares it with the source clock.
 fn settle_columns_are_temporal(
     plan: &ResolvedRunPlan,
     mappings: Option<&[crate::types::TypeMapping]>,
@@ -251,12 +213,7 @@ fn settle_columns_are_temporal(
     Ok(())
 }
 
-/// Assemble the full `export_metrics` row (v9) from the finished run summary +
-/// plan. One builder so the run and apply paths persist an identical shape
-/// rather than each inlining the metric fields. The richer signals
-/// (`pg_temp_bytes_delta`, `reconciled`/`source_count`, effective `batch_size`,
-/// config dims, `rivet_version`) are what `record_metric`'s old 15-arg shim
-/// dropped on the floor — they exist on the summary/plan here, so persist them.
+/// Assemble the full `export_metrics` row (v9) from the finished run summary + plan.
 pub(super) fn build_metric_row(
     summary: &RunSummary,
     plan: &ResolvedRunPlan,
@@ -266,8 +223,6 @@ pub(super) fn build_metric_row(
         crate::plan::ExtractionStrategy::Chunked(cp) => {
             (Some(cp.chunk_size as i64), Some(cp.parallel as i64))
         }
-        // #151: keyset runs demonstrably fanned N workers while the metric
-        // stayed NULL — the runner-bypass class, in a metrics field.
         crate::plan::ExtractionStrategy::Keyset(kp) => {
             (Some(kp.chunk_size as i64), Some(kp.parallel.max(1) as i64))
         }
@@ -305,12 +260,7 @@ pub(super) fn build_metric_row(
         destination_type: Some(plan.destination.destination_type.label().to_string()),
         rivet_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         longest_chunk_ms: summary.journal.longest_chunk_ms(),
-        // v12 chunking diagnostics: which key was chunked. (The resolved strategy
-        // is already `mode` = strategy.mode_label.) A sparse-key post-mortem is now
-        // one SELECT: mode + chunk_key (+ chunk_task for span/windows).
         chunk_key: plan.strategy.chunk_key().map(str::to_string),
-        // ── v18 failure forensics — write-point map ──
-        // WIRED (data already on the summary/plan at this point):
         error_class: summary
             .error_message
             .as_deref()
@@ -319,9 +269,6 @@ pub(super) fn build_metric_row(
         cursor_min: summary.cursor_low.clone(),
         cursor_max: summary.cursor_high.clone(),
         key_descriptor_json: key_descriptor_json(plan, summary.key_native_type.as_deref()),
-        // Producers now wired: offending_value is stamped at the keyset throw
-        // (`pipeline/keyset.rs`); server_context_json is captured at open by
-        // `capture_open_forensics` (source `server_context()`).
         offending_value: summary.offending_value.clone(),
         server_context_json: summary.server_context_json.clone(),
     }
@@ -391,7 +338,7 @@ impl<'a> MetaConn<'a> {
     }
 }
 
-/// Whether to reopen the run's connection to close the harm bracket: it opened, and the held connection no longer answers.
+/// Whether to reopen the run's connection to close the harm bracket.
 fn reopen_to_close_the_bracket(opened: bool, answered: bool) -> bool {
     opened && !answered
 }
@@ -409,7 +356,7 @@ impl HarmBracket {
         }
     }
 
-    /// Close on the run's metadata connection, reopening it once if it died while the run held it idle.
+    /// Close on the run's metadata connection.
     pub(super) fn close_on_meta(
         self,
         meta: &mut MetaConn<'_>,
@@ -423,7 +370,7 @@ impl HarmBracket {
         self.close_with(after, state, summary)
     }
 
-    /// Close on the same window: set the temp delta (warning on a spill), persist and return the harm deltas.
+    /// Close on the same window.
     pub(super) fn close_on(
         self,
         src: Option<&mut (dyn crate::source::Source + '_)>,
@@ -470,28 +417,7 @@ impl HarmBracket {
     }
 }
 
-/// The temp-spill the run gets CREDITED with, from the two snapshots bracketing
-/// its window.
-///
-/// Pure and split out from its two call sites — `run_export_job` and
-/// `run_export_job_with_chunk_source` — because BOTH of those need a live
-/// PostgreSQL source to reach, so the arithmetic that decides the stored
-/// `pg_temp_bytes_delta` AND whether [`pg_temp_bytes_warning`] fires was graded
-/// by nothing offline. The first non-vacuous mutation run (2026-08-16) scored
-/// `-` → `+` and `-` → `/` as survivors at the apply call site, and the live
-/// oracle cannot see them either — the ONE live assertion on this field,
-/// `pg_chunked_run_persists_extended_metric_columns`
-/// (`tests/live/live_metrics_persist.rs`), asserts
-/// `pg_temp_bytes_delta.is_some()`, which is equally true of a SUM (and the
-/// apply-path metric test asserts nothing about the field at all). A `+`
-/// reports the absolute counter (a database that has ever
-/// spilled 200 MB warns "+200 MB spill" on every export that spills nothing) —
-/// the false-alarm harm class, not a crash.
-///
-/// Floored at 0 because `pg_stat_database.temp_bytes` restarts at `pg_stat_reset()`
-/// and at a server restart: `after < before` means the counter reset mid-window,
-/// not that the run RECLAIMED spill, and a negative "credit" would offset a
-/// sibling's real spill in any consumer that sums.
+/// The temp-spill the run gets CREDITED with, from the two snapshots bracketing its window.
 fn pg_temp_bytes_delta(before: i64, after: i64) -> i64 {
     (after - before).max(0)
 }
@@ -500,17 +426,6 @@ fn pg_temp_bytes_delta(before: i64, after: i64) -> i64 {
 const PG_TEMP_BYTES_WARN_MIN: i64 = 100 * 1024 * 1024;
 
 /// The per-export PG temp-spill warning, pure so its wording is unit-tested.
-///
-/// `pg_stat_database.temp_bytes` is DATABASE-wide, exactly like the tmp-disk
-/// counter `run_diagnosis` flags: with concurrent sibling exports (--pool,
-/// --parallel-exports, --parallel-export-processes, apply --parallel) the
-/// window overlaps every sibling's work, so attributing the whole delta to THIS
-/// export is a measurement lie. The warning stays LOUD either way — it IS real
-/// source pressure — but under concurrency it says the attribution is unknown
-/// instead of naming one export as the cause (the same hedge the spill flag
-/// carries; leaving it off this sibling was the last unhedged copy).
-///
-/// `None` below [`PG_TEMP_BYTES_WARN_MIN`] — a small spill is noise.
 fn pg_temp_bytes_warning(
     export_name: &str,
     delta: i64,
@@ -537,25 +452,12 @@ fn pg_temp_bytes_warning(
     })
 }
 
-/// Snapshot the broader source-harm counters for the run's source engine, as
-/// `(metric, cumulative_value)` pairs, dispatched by source type to the
-/// per-engine probe. `None` for any connect/query failure or a source whose
-/// probe is unavailable (e.g. MSSQL without `VIEW SERVER STATE`) — harm metrics
-/// are observability, never a gate, so a missing snapshot just yields no
-/// `export_harm` rows.
+/// Snapshot the broader source-harm counters for the run's source engine.
 pub(super) fn harm_snapshot(source: &crate::config::SourceConfig) -> Option<Vec<(String, i64)>> {
-    // One dispatch for "which engine": `create_source`. The former per-engine
-    // free-fn switch here duplicated it (walk find, 2026-08-13); the harm
-    // probe is now the trait's third telemetry axis
-    // (`Source::harm_counters`), so any caller with a Source instance — or a
-    // test with a fake — reaches it without a URL round-trip.
     crate::source::create_source(source).ok()?.harm_counters()
 }
 
-/// Per-metric delta (`after - before`, floored at 0) for counters present in
-/// both snapshots, matched by name. Floored because these are monotonic
-/// cumulative counters within a run; a negative would only arise from a counter
-/// reset (server restart mid-run) and is not meaningful harm.
+/// Per-metric delta (`after - before`, floored at 0) for counters present in both snapshots.
 pub(super) fn harm_deltas(before: &[(String, i64)], after: &[(String, i64)]) -> Vec<(String, i64)> {
     let bmap: std::collections::HashMap<&str, i64> =
         before.iter().map(|(k, v)| (k.as_str(), *v)).collect();
@@ -568,46 +470,18 @@ pub(super) fn harm_deltas(before: &[(String, i64)], after: &[(String, i64)]) -> 
         .collect()
 }
 
-/// A one-line run-health DIAGNOSIS for the operator's log — the flaky-link /
-/// messy-DB signals a field log must carry so a log the team sends back
-/// self-diagnoses. Returns `Some(line)` only when there is something worth
-/// flagging (a reconnect the run survived, a resume-hit meaning the prior run
-/// crashed, or a source-side tmp-disk spill that `export_harm` records but never
-/// LOGGED before); a clean run returns `None` — its stats already live in the run
-/// card. Emitted at WARN so it is visible at the default log level (INFO is not).
-/// Pure so the wording is unit-tested without a run. PG temp-byte spills are warned
-/// separately (`pg_temp_bytes_delta`), so they are not duplicated here.
-/// Spill count below which a run is not worth flagging — shared by the
-/// per-export DIAGNOSIS and the pool-window harm verdict so the two rules
-/// cannot drift (the pool copy used to inline its own `100`).
+/// A one-line run-health DIAGNOSIS for the operator's log.
 pub(super) const SPILL_FLAG_MIN: i64 = 100;
 
 /// What a [`spill_total`] fold counted, so the message can name it truthfully.
 pub(super) struct Spill {
     /// Summed delta across every spill counter the engine reported.
     pub total: i64,
-    /// The NOUN for what `total` counts — the units differ in MEANING between
-    /// engines (MySQL counts tmp-disk TABLES, PostgreSQL counts temp FILES), so
-    /// the caller interpolates this rather than hard-coding one engine's word.
+    /// The NOUN for what `total` counts.
     pub unit: &'static str,
 }
 
-/// Sum the source-harm deltas that mean "the source had to spill to disk",
-/// across EVERY engine that has such a counter — one fold, shared by the
-/// per-export DIAGNOSIS (`run_diagnosis`) and the run-level verdict
-/// (`run::run_harm_verdict`) for the same reason [`SPILL_FLAG_MIN`] is shared:
-/// two copies of the filter drift, and the first drift already happened —
-/// both sites matched `tmp_disk` only, so PostgreSQL's `pg_temp_files` (the
-/// direct spill analogue, `src/source/postgres/mod.rs::harm_counters`) tripped
-/// NEITHER rule and the spill signal was silently absent on PG.
-///
-/// Engines without a spill counter stay silent, and that is correct, not a gap:
-/// MSSQL reports `mssql_lock_waits`/`mssql_lock_wait_ms` (contention, not
-/// spill) and Mongo reports scan/cache counters.
-///
-/// PG's `temp_bytes` VOLUME is warned separately per export
-/// (`pg_temp_bytes_warning`); `pg_temp_files` is the file COUNT, a different
-/// counter, so flagging it here is not a duplicate of that warning.
+/// Sum the source-harm deltas that mean "the source had to spill to disk".
 pub(super) fn spill_total(deltas: &[(String, i64)]) -> Spill {
     let sum = |needle: &str| -> i64 {
         deltas
@@ -616,13 +490,9 @@ pub(super) fn spill_total(deltas: &[(String, i64)]) -> Spill {
             .map(|(_, v)| *v)
             .sum()
     };
-    // MySQL: `Created_tmp_disk_tables` (raw, or `mysql_`-prefixed by the probe).
     let tmp_disk = sum("tmp_disk");
-    // PostgreSQL: `pg_temp_files`.
     let temp_files = sum("temp_files");
     let unit = match (tmp_disk > 0, temp_files > 0) {
-        // One source engine per run, so the mixed arm is defensive only; it must
-        // still not claim either engine's unit for the other's count.
         (true, true) => "disk spills (tmp-disk tables + temp files)",
         (false, true) => "temp-file spills",
         _ => "tmp-disk spills",
@@ -653,24 +523,10 @@ pub(super) fn run_diagnosis(
         unit: spill_unit,
     } = spill_total(harm_deltas);
     if spills >= SPILL_FLAG_MIN {
-        // The remedy must not suggest what the export ALREADY runs (a keyset
-        // export told to "try chunk_by_key" reads as a broken diagnostic and
-        // hides the real lever): on chunked/keyset the paging is already on,
-        // so the remaining levers are the page/batch sizes.
         let remedy = match summary.mode.as_str() {
             "chunked" | "keyset" => "lower `chunk_size` (smaller pages) or `tuning.batch_size`",
             _ => "try `mode: chunked`/`chunk_by_key` or a smaller `tuning.batch_size`",
         };
-        // The spill counters come from `SHOW GLOBAL STATUS` / `pg_stat_database`
-        // — SERVER-wide, not per-connection. Solo they are a fair attribution
-        // (rivet is the only query stream it knows of); with concurrent sibling
-        // exports (--pool / --parallel-exports / --parallel-export-processes)
-        // the window overlaps every sibling's work, so blaming THIS export would
-        // be a measurement lie (field find, 2026-08-13: a pool run attributed a
-        // 5-slot window's spills to the one export whose card they printed
-        // beside). The run-level line this points at is emitted by every
-        // concurrent-sibling parent via `run::RunHarmBracket`, so the pointer is
-        // true on the pool AND the parallel paths, not just the pool.
         if concurrent_siblings {
             flags.push(format!(
                 "{spills} {spill_unit} server-wide during this export's window — real \
@@ -680,11 +536,6 @@ pub(super) fn run_diagnosis(
                  if it tracks this export, {remedy}"
             ));
         } else {
-            // Solo too the counter is server-global: a partner's production
-            // source logged ~1 tmp-disk table per SECOND of its own traffic on
-            // two baselines of very different size (45 in 42 s, 995 in 17 min),
-            // while ten keyset pages on a quiet stand log none
-            // (`mysql_keyset_pages_create_no_tmp_disk_tables`). Say so.
             flags.push(format!(
                 "{spills} {spill_unit} server-wide during this export's window — the counter \
                  is server-global, so other sessions' work counts too; if the source is \
@@ -708,20 +559,6 @@ pub(super) fn run_diagnosis(
 }
 
 /// Run `SELECT COUNT(*) FROM ({query})` against the source and compare with exported rows.
-/// Skips reconciliation for incremental exports that used a cursor (moving target).
-/// Exit gate for `run --reconcile`: a row-count mismatch is a data-integrity
-/// failure (exit 3), mirroring the `rivet reconcile` subcommand
-/// (`enforce_reconcile_exit`) and `--validate`. Returns `Err(DataIntegrityError)`
-/// when a reconcile pass ran and disagreed with the source, so
-/// `rivet run --reconcile && <next>` does not proceed past a mismatch;
-/// a match or a skipped reconcile (`reconciled == None`) returns `Ok`. The
-/// exported data is already durable — only the gate fails.
-/// Fold the run's outcome into the process result: an export/quality failure
-/// wins; otherwise a `run --reconcile` mismatch (`reconcile_gate`) surfaces so
-/// the run exits non-zero (exit 3). Extracted as a pure fn so the WIRING — not
-/// just the gate logic — is unit-tested: without this seam, un-hooking the gate
-/// from `final_result` would silently reopen the "run --reconcile exits 0" bug
-/// (#102) with every existing test still green.
 fn resolve_final_result(
     failed: bool,
     run_result: crate::error::Result<()>,
@@ -731,10 +568,6 @@ fn resolve_final_result(
     if failed {
         return run_result;
     }
-    // The manifest gap outranks the gates. They answer "is the data right, and
-    // will the next run continue from it?"; this answers "is the data REACHABLE?"
-    // — and an unreachable prefix makes those questions moot. Ordered before so
-    // the exit code names the condition an operator must act on first.
     if let Some(why) = manifest_gap {
         return Err(crate::error::coded(
             crate::error::codes::DEST_MANIFEST_NOT_WRITTEN,
@@ -744,7 +577,7 @@ fn resolve_final_result(
     gates.into_iter().collect()
 }
 
-/// Exit gate for `run --validate`: the class `rivet validate` gives the same prefix (verified-wrong exit 3, could-not-verify exit 1).
+/// Exit gate for `run --validate`.
 fn validate_run_gate(summary: &RunSummary) -> crate::error::Result<()> {
     use crate::error::codes::{VALIDATE_FAILED, VALIDATE_UNVERIFIED};
     if summary.validated != Some(false) {
@@ -790,7 +623,6 @@ fn reconcile_run_gate(
     summary: &RunSummary,
     could_not_verify: Option<&str>,
 ) -> crate::error::Result<()> {
-    // VERIFIED-WRONG: the count ran and DISAGREED → data-integrity, exit 3.
     if summary.reconciled == Some(false) {
         return Err(crate::error::DataIntegrityError::new(format!(
             "reconcile MISMATCH for '{}': the exported dataset disagrees with the source \
@@ -800,12 +632,6 @@ fn reconcile_run_gate(
         ))
         .into());
     }
-    // COULD-NOT-VERIFY: reconcile was requested but could not run (source
-    // unreachable, count NULL / non-integer / query error). The export itself
-    // succeeded and is durable, but the assurance the operator asked for was not
-    // obtained — an OPERATIONAL failure (exit 1, retry), NOT verified-OK (exit 0)
-    // and NOT corruption (exit 3). Diverged from the `reconcile` subcommand before,
-    // which propagated the same connect error (#10 bughunt).
     if let Some(reason) = could_not_verify {
         crate::rivet_bail!(
             crate::error::codes::RUN_RECONCILE_UNVERIFIED,
@@ -817,25 +643,12 @@ fn reconcile_run_gate(
     Ok(())
 }
 
-/// Run the reconcile COUNT(*) and record `source_count` / `reconciled` on the
-/// summary. Returns `Some(reason)` when reconcile COULD NOT run (the source was
-/// unreachable, the count query failed, or its result was NULL / non-integer) —
-/// a COULD-NOT-VERIFY condition the caller turns into an operational exit 1,
-/// distinct from a genuine MISMATCH (`reconciled == Some(false)` → exit 3) and
-/// from a legitimate SUBSET-strategy skip (`None`, exit 0). Before this a
-/// could-not-verify left `reconciled = None`, indistinguishable from the skip, so
-/// `run --reconcile` exited 0 as if verified-OK (#10 bughunt).
+/// Run the reconcile COUNT(*) and record `source_count` / `reconciled` on the summary.
 fn reconcile_source_count(
     plan: &ResolvedRunPlan,
     summary: &mut RunSummary,
     meta: &mut MetaConn<'_>,
 ) -> Option<String> {
-    // Skip the full-source COUNT(*) for any SUBSET/DELTA strategy — its exported
-    // count legitimately differs from the table total, and the #102 exit gate
-    // must not turn that STRUCTURAL mismatch into a false exit-3 (which would
-    // break every healthy scheduled keyset_incremental / time_window / incremental
-    // `run --reconcile`). Previously only the Incremental cursor was skipped. This
-    // is a SKIP, not a could-not-verify — return None (exit 0).
     if let Some(reason) = plan.strategy.reconcile_subset_skip() {
         log::info!(
             "reconcile: skipping full-count for '{}' ({reason})",
@@ -854,7 +667,6 @@ fn reconcile_source_count(
         plan.export_name
     );
 
-    // The run's metadata connection, reopened once if it went away while the run held it idle.
     let counted = match meta.get().map(|s| s.query_scalar(&count_sql)) {
         Some(Ok(v)) => Ok(v),
         _ => match meta.reopen() {
@@ -871,23 +683,10 @@ fn reconcile_source_count(
     match counted {
         Ok(Some(val)) => {
             let Ok(count) = val.parse::<i64>() else {
-                // A non-integer COUNT is COULD-NOT-VERIFY (we cannot compare), NOT
-                // a mismatch (#10): operational exit 1, not the exit-3 corruption class.
                 log::warn!("reconcile: could not parse count result '{val}' as integer");
                 return Some(format!("source reconcile count '{val}' is not an integer"));
             };
             summary.source_count = Some(count);
-            // ADR-0012 manifest-aware reconcile: compare source COUNT(*)
-            // against the manifest's *cumulative* row total (sum of
-            // committed parts), not just this run's writes.  In a
-            // resume scenario, `summary.total_rows` reflects only the
-            // chunks that re-ran in this invocation (e.g. 500 for one
-            // chunk), while the on-disk dataset is everything that
-            // ever committed (e.g. 2500 across resume attempts).
-            // Comparing total_rows would falsely report MISMATCH on
-            // every resume.  The manifest_parts accumulator already
-            // holds the cumulative count (Phase C-γ hydration); use
-            // its sum for the comparison.
             let committed_rows: i64 = summary.manifest_parts.iter().map(|p| p.rows).sum();
             let exported_total = if committed_rows > 0 {
                 committed_rows
@@ -910,8 +709,6 @@ fn reconcile_source_count(
                     count
                 );
             }
-            // Reconcile RAN — match or mismatch is read off summary.reconciled by
-            // the gate; this is NOT could-not-verify.
             None
         }
         Ok(None) => {
@@ -932,10 +729,7 @@ fn reconcile_source_count(
     }
 }
 
-/// Synthesize a stand-in `RunSummary` for failures that occur **before** a
-/// real summary can be created (plan-build errors, plan-validation rejection).
-/// Aggregation needs every export accounted for, even those that never reached
-/// `RunSummary::new`.
+/// Synthesize a stand-in `RunSummary` for failures that occur **before** a real summary can be created (plan-build errors, plan-validation rejection).
 pub(crate) fn synthetic_failed_summary(export_name: &str, err: &anyhow::Error) -> RunSummary {
     let run_id = super::summary::fresh_run_id(export_name);
     let journal = crate::journal::RunJournal::new(&run_id, export_name);
@@ -975,7 +769,6 @@ pub(crate) fn synthetic_failed_summary(export_name: &str, err: &anyhow::Error) -
         format: String::new(),
         mode: String::new(),
         compression: String::new(),
-        // Pre-plan failure: we don't know (and never wrote to) a destination.
         destination_uri: None,
         source_count: None,
         pg_temp_bytes_delta: None,
@@ -994,39 +787,9 @@ pub(crate) fn synthetic_failed_summary(export_name: &str, err: &anyhow::Error) -
     }
 }
 
-/// Clear the keyset in-progress resume anchor after a SUCCESSFUL finalize, so the
-/// next run isn't misread as a resume of this finished one.
-///
-/// This is the TWO-ADAPTER seam for the post-finalize clear: BOTH job wrappers
-/// (`run_export_job` and `run_export_job_with_chunk_source`) must call it. An
-/// INCREMENTAL keyset run no longer clears the anchor in `run_keyset` (that clear
-/// must be post-finalize, or a crash between data-complete and the manifest write
-/// orphans the pages), so the responsibility moved up to the wrappers — and a
-/// wrapper that inlined its own copy and forgot it was the round-3 wrapper-bypass
-/// regression. A shared seam makes the wiring structural, not a per-wrapper
-/// checklist. No-op for a non-keyset strategy, and for a FAILED run (the anchor
-/// must survive a failure so the next run rehydrates rather than orphans).
-/// Did this run end in a state where its keyset resume anchor must be KEPT?
-///
-/// The anchor (`resume_run_id` + the per-range recovery rows) is what lets the
-/// next run adopt pages this one already made durable. Clearing it on a run that
-/// did not actually complete strands them: the parts are on the prefix, and the
-/// only mechanism that would pick them up is gone.
-///
-/// `failed` alone is not that question. It is `result.is_err()`, computed before
-/// the manifest is written — so a run whose PARTS landed but whose MANIFEST did
-/// not has `failed == false` while being, by then, a failed run: the status is
-/// corrected to "failed", the cursor is held back, and the process exits
-/// non-zero. Clearing the anchor there discarded the resume path for pages that
-/// no manifest names, which is the strand-the-durable-rows shape this repo has
-/// already paid for once.
-///
-/// Deliberately NOT folded into `failed` itself: `resolve_final_result` returns
-/// `run_result` when `failed`, so widening that variable would make a
-/// manifest-gap run exit 0 with an Ok result. Two questions, two names.
+/// Clear the keyset in-progress resume anchor after a SUCCESSFUL finalize.
 pub(super) struct RunOutcome<'a> {
-    /// `result.is_err()` — the export/quality verdict, computed BEFORE the
-    /// manifest is written.
+    /// `result.is_err()` — the export/quality verdict, computed BEFORE the manifest is written.
     pub failed: bool,
     /// The runner returned `Ok`: every row was read before any post-data gate ran.
     pub data_complete: bool,
@@ -1039,9 +802,7 @@ fn refused_by_a_gate(o: &RunOutcome<'_>) -> bool {
     o.data_complete && o.failed
 }
 
-/// Whether the keyset resume anchor outlives the run. A run that broke off keeps it; a refused
-/// one releases it, so the next run reads and grades the rows again instead of adopting them,
-/// unless its cursor ran ahead and a re-read would skip them.
+/// Whether the keyset resume anchor outlives the run.
 pub(super) fn keyset_anchor_survives(o: &RunOutcome<'_>, cursor_ran_ahead: bool) -> bool {
     if refused_by_a_gate(o) {
         return cursor_ran_ahead;
@@ -1049,8 +810,7 @@ pub(super) fn keyset_anchor_survives(o: &RunOutcome<'_>, cursor_ran_ahead: bool)
     o.failed || o.manifest_gap.is_some()
 }
 
-/// Whether the stored cursor sits on one of `run_id`'s own pages: rivet <= 0.31 advanced a
-/// sequential `keyset_incremental` cursor page by page, so releasing that anchor would skip them.
+/// Whether the stored cursor sits on one of `run_id`'s own pages.
 fn cursor_ran_ahead(progress: &ProgressClaim<'_>, plan: &ResolvedRunPlan, run_id: &str) -> bool {
     let ExtractionStrategy::Keyset(kp) = &plan.strategy else {
         return false;
@@ -1091,14 +851,12 @@ fn finalize_keyset_anchor(
     let ran_ahead = refused_by_a_gate(o) && cursor_ran_ahead(progress, plan, run_id);
     if !keyset_anchor_survives(o, ran_ahead) || !anchor_holds_a_part(state, progress) {
         let _ = state.clear_resume_run_id(&plan.export_name, &plan.source.state_key());
-        // Parallel keyset persists its per-range recovery rows under the same
-        // anchor; clear them too (a no-op for sequential keyset, which writes none).
         let _ = state.clear_keyset_ranges(&plan.export_name, &plan.source.state_key());
     }
     ran_ahead.then(|| ran_ahead_warning(&plan.export_name, run_id))
 }
 
-/// Whether the stored keyset anchor names a run that recorded a part; an anchor with none has nothing to resume.
+/// Whether the stored keyset anchor names a run that recorded a part.
 fn anchor_holds_a_part(state: &StateStore, progress: &ProgressClaim<'_>) -> bool {
     match progress.resume_run_id() {
         Ok(Some(anchor)) => !state
@@ -1109,15 +867,7 @@ fn anchor_holds_a_part(state: &StateStore, progress: &ProgressClaim<'_>) -> bool
     }
 }
 
-/// Mark a run `running` at its START — in the central run-status ledger AND (for
-/// a cloud destination) as a `running` marker manifest projected into the bucket.
-/// The ledger is authoritative for a co-located / shared-Postgres load; the bucket
-/// marker lets a cross-boundary reader (Airflow, a foreign-host `rivet load`) see
-/// the live run too. The `prefix` recorded in the ledger is the run's write URI,
-/// which `gc_orphans` matches at-or-under its load prefix. The ledger row is the
-/// run's first state write: a state that does not take it refuses the run here,
-/// before a row is exported or anything is written to the destination. Called under
-/// the export's run lease, so it first closes the `running` rows of runs that died.
+/// Mark a run `running` at its START.
 fn ledger_begin_run(
     state: &StateStore,
     plan: &ResolvedRunPlan,
@@ -1174,20 +924,6 @@ fn state_not_writable(export_name: &str, cause: &anyhow::Error) -> anyhow::Error
 }
 
 /// Transition a run to its terminal status in the run-status ledger at finalize.
-/// Best-effort — mirrors the manifest status written alongside.
-/// Close the run-status row(s) this run owns — BOTH of them when a resume
-/// adopted a different id than the one the ledger was opened under.
-///
-/// A chunk-checkpoint resume replaces `summary.run_id` with the crashed run's id
-/// (`chunked::ensure_chunk_checkpoint_plan`), so the row opened at the start is
-/// no longer named by the summary. Closing only the summary's id leaves the
-/// opening row `running` forever, and `has_active_run_on_prefix` then reports a
-/// live writer on that prefix for good — `gc_orphans` defers cleanup
-/// indefinitely, with no later run to supersede it.
-///
-/// One function because the two job wrappers had drifted: `run_export_job`
-/// closed both, `run_export_job_with_chunk_source` — which dispatches to the very
-/// checkpoint runners that DO the adopting — closed one.
 fn ledger_finish_owned_runs(
     state: &StateStore,
     export_name: &str,
@@ -1207,27 +943,15 @@ fn ledger_finish_run(state: &StateStore, export_name: &str, run_id: &str, status
     }
 }
 
-/// ADR-0028 follow-up (arch roast 2026-08-21, Strong #1): the policy divergences
-/// between the TWO orchestrator entry points — `run_export_job` (config-driven
-/// `rivet run`) and `run_export_job_with_chunk_source` (artifact-driven
-/// `rivet apply`). Everything else about the post-plan execution script is ONE
-/// sequence, and it used to be written twice (~250 lines each): this session
-/// alone paid that two-sites tax twice (the finalize seam call, then its
-/// records-on-failure fix — each wired at both bodies). The policy is data;
-/// the script lives once in [`execute_resolved_plan`].
+/// ADR-0028 follow-up (arch roast 2026-08-21, Strong #1).
 struct TailPolicy<'a> {
     /// "export" | "apply" — log prefixes, manifest kind, report kind.
     kind: &'static str,
-    /// Ledger/manifest family: `export.family()` on the run path (the CDC
-    /// snapshot leg differs from the export name), the export name on apply
-    /// (a sealed artifact has no ExportConfig — correctly, see the manifest
-    /// call's comment in git history).
+    /// Ledger/manifest family.
     family: &'a str,
     /// Where the run report lands.
     config_path: &'a str,
-    /// What the runners receive as their config-path argument: the real path
-    /// on the run path (chunk-checkpoint resume reads it), "" on apply (which
-    /// does not support checkpoint-parallel resume).
+    /// What the runners receive as their config-path argument.
     runner_config_path: &'a str,
     chunk_source: chunked::ChunkSource,
     /// Apply-only provenance recorded on the summary.
@@ -1236,41 +960,24 @@ struct TailPolicy<'a> {
     allow_reconcile: bool,
     /// Run-path notifications; apply sends none.
     notifications: Option<&'a crate::config::NotificationsConfig>,
-    /// Whether the config has a `load:` block, so the open probe also reads the
-    /// source primary key the load spec records.
+    /// Whether the config has a `load:` block.
     record_load_spec: bool,
-    /// Plan (rule, message) warnings the run path journals as `PlanWarning`
-    /// events; apply logs them at validate time and journals none (existing
-    /// behavior, preserved).
+    /// Plan (rule, message) warnings the run path journals as `PlanWarning` events.
     plan_warnings: Vec<(String, String)>,
     /// `--strict`: a lossy or unsupported column refuses the run; apply warns.
     strict: bool,
-    /// The run path's `--force`: a `--resume` with no chunk run to continue runs as a plain run. Apply's `--force` is another gate.
+    /// The run path's `--force`: a `--resume` with no chunk run to continue runs as a plain run.
     force: bool,
-    /// The snapshot leg of a change-stream export: a column denial in it is a grant change, not a stale plan.
+    /// The snapshot leg of a change-stream export.
     cdc_leg: bool,
 }
 
-/// Does this run's reconcile leg run? Pure, because the three-input condition
-/// is the ONE piece of NEW logic the two-entry-point unification introduced
-/// (`allow_reconcile` is the policy bit; the other two already gated the leg on
-/// both sides), and a live-only script body cannot be graded by the in-diff
-/// mutation gate — its `&&`s and its `!` all survived on the first run.
-///
-/// All three must hold: the entry point ALLOWS a reconcile at all (apply does
-/// not — a sealed artifact has no reconcile flag), the plan ASKED for one, and
-/// the export did not already fail (reconciling a failed export compares a
-/// partial write against the source and reports a mismatch that is not one).
+/// Does this run's reconcile leg run?
 fn should_reconcile(allow_reconcile: bool, plan_reconcile: bool, failed: bool) -> bool {
     allow_reconcile && plan_reconcile && !failed
 }
 
-/// The plan-validation verdict, pure: `Some(err)` when the plan carries
-/// REJECTED diagnostics, `None` when it may run. Extracted because the
-/// `!rejected.is_empty()` gate sits in the live-only `run_export_job` body and
-/// its `!` survived the in-diff mutation gate — dropping it inverts the verdict,
-/// so a clean plan would be refused and a rejected one would RUN.
-/// Log every plan diagnostic and return the refusal naming ALL rejections, if any.
+/// The plan-validation verdict, pure.
 fn log_plan_diagnostics(
     export_name: &str,
     diags: &[crate::plan::validate::Diagnostic],
@@ -1307,51 +1014,27 @@ fn plan_rejection_error(export_name: &str, rejected: &[String]) -> Option<anyhow
     ))
 }
 
-/// The two `--resume` / `--force` gates, pure. Both live inside `run_export_job`
-/// — a live-only body the in-diff mutation gate cannot reach, which is why its
-/// `&&` and both its `!`s survived (2026-08-21 run: 6 of the 16 misses were
-/// these three operators). The conditions are opposite halves of one policy, so
-/// they are stated together and unit-tested as one truth table.
-///
-/// `resume` asks to continue into a prefix; `force` is the audited override.
-/// A `--resume` into a COMPLETE prefix is refused unless forced (re-exporting a
-/// verified dataset is almost never meant); a FRESH run into a complete prefix
-/// is only warned about, because refusing or auto-deleting would destroy
-/// operator data.
+/// The two `--resume` / `--force` gates, pure.
 fn resume_success_gate_applies(resume: bool, force: bool) -> bool {
     resume && !force
 }
 
-/// Sibling of [`resume_success_gate_applies`] — the fresh-run rerun-accumulation
-/// warning (audit findings #5/#19/#30).
+/// Sibling of [`resume_success_gate_applies`].
 fn rerun_warning_applies(resume: bool, force: bool) -> bool {
     !resume && !force
 }
 
 /// May a successful run promote its status to `success`?
-///
-/// Only from the transient `running` the summary is BUILT with. A deeper layer
-/// may already have decided a terminal status, and overwriting it would
-/// misreport the run. `skipped` is decided here, by [`ok_status`]. Pure, because the `==` it
-/// replaces was the one decision left ungraded in `execute_resolved_plan`
-/// after that body's whole-function mutation exclusion was lifted: measured
-/// 2026-08-29, `==`→`!=` MISSED the whole offline battery, and it inverts BOTH
-/// directions (a finished run stays `running` forever; a `skipped` run is
-/// relabelled `success`).
 fn promotes_to_success(current_status: &str) -> bool {
     current_status == "running"
 }
 
-/// Does the `running` marker written under `opened` survive this run with nothing
-/// replacing it? A run that left the prefix alone writes no terminal manifest, and a resume
-/// that adopted an earlier id (`finished` ≠ `opened`) writes its terminal manifest under that id.
+/// Does the `running` marker written under `opened` survive this run with nothing replacing it?
 fn marker_outlived_its_run(prefix_left_alone: bool, opened: &str, finished: &str) -> bool {
     prefix_left_alone || opened != finished
 }
 
-/// Terminal status of a run whose runner returned Ok: `skipped` when `skip_empty`
-/// is set and it delivered nothing — no rows and no parts (a resume that only
-/// re-adopted earlier parts still delivered them), else `success`.
+/// Terminal status of a run whose runner returned Ok.
 fn ok_status(skip_empty: bool, total_rows: i64, parts: usize) -> &'static str {
     if skip_empty && total_rows == 0 && parts == 0 {
         "skipped"
@@ -1372,8 +1055,7 @@ fn ok_outcome(
     (status, reason)
 }
 
-/// The column a run with nothing new was waiting on: an incremental cursor, or the
-/// key a `keyset_incremental` run continues past.
+/// The column a run with nothing new was waiting on.
 fn awaited_column(strategy: &ExtractionStrategy) -> Option<&str> {
     match strategy {
         ExtractionStrategy::Keyset(k) if k.incremental => Some(k.key_column.as_str()),
@@ -1389,23 +1071,12 @@ fn skip_reason(cursor_column: Option<&str>) -> String {
     }
 }
 
-/// Does this export bypass the batch plan/strategy machinery for the dedicated
-/// CDC runner? Pure so the dispatch condition is graded offline — the `==`
-/// survived as a live-only mutant (flipping it to `!=` sends every BATCH export
-/// through the CDC runner and every CDC export through the batch planner).
+/// Does this export bypass the batch plan/strategy machinery for the dedicated CDC runner?
 fn dispatches_to_cdc_runner(mode: crate::config::ExportMode) -> bool {
     mode == crate::config::ExportMode::Cdc
 }
 
-/// THE post-plan execution script, written once: rss/forensics/harm bracket →
-/// dispatch → ADR-0028 seam (incl. the quality gate) → bracket close → status → diagnosis
-/// → [reconcile] → journal → ledger close → manifest → cursor → keyset anchor →
-/// validate → metrics → report → [notify] → final fold. Ordering comments are
-/// load-bearing and live HERE only. LIVE-ONLY BY CONSTRUCTION (real source +
-/// destination + StateStore) — the pure decisions are extracted and unit-tested
-/// next door ([`pg_temp_bytes_delta`], [`pg_temp_bytes_warning`],
-/// `run_diagnosis`, `resolve_final_result`, `keyset_anchor_survives`); the live
-/// oracles are the plan/apply round-trips and the whole live suite.
+/// THE post-plan execution script, written once.
 fn execute_resolved_plan(
     plan: &ResolvedRunPlan,
     state: &StateStore,
@@ -1416,7 +1087,6 @@ fn execute_resolved_plan(
         let summary = synthetic_failed_summary(&plan.export_name, &e);
         return (Err(e), summary);
     }
-    // The lease first: a run refused beside a live one claims nothing of the export's progress.
     let lease = chunked::claim_run(state, plan).map_err(|e| match crate::error::error_code(&e) {
         Some(_) => e,
         None => state_not_writable(&plan.export_name, &e),
@@ -1440,37 +1110,16 @@ fn execute_resolved_plan(
     let rss_sampler = crate::resource::RssPeakSampler::start(rss_before, 100);
     let mut summary = RunSummary::new(plan);
     summary.apply_context = tail.apply_context;
-    // Record this run `running` BEFORE any part lands — in the ledger + a bucket
-    // marker manifest — the authority `gc_orphans` reads to spare a live extract's
-    // committed-but-not-yet-manifested parts. (finish_run transitions it below.)
     if let Err(e) = ledger_begin_run(state, plan, tail.family, &summary.run_id) {
         rss_sampler.stop();
         let summary = synthetic_failed_summary(&plan.export_name, &e);
         return (Err(e), summary);
     }
-    // The id the LEDGER row was opened under. A chunk-checkpoint RESUME adopts the
-    // prior run's id (chunked/mod.rs) — `summary.run_id` changes AFTER this point —
-    // and `finish_run` is a bare UPDATE, so closing the run under the adopted id
-    // matched no row and left this one `running` forever.
-    //
-    // That leak is not cosmetic: `has_active_run_on_prefix` keeps answering true,
-    // so `gc_orphans` defers cleanup, and since the load now excludes active runs
-    // from the consumed set (dispatch.rs), every later load on that prefix
-    // re-appends instead of recording progress — until an unrelated newer run of
-    // the same export happens to supersede it.
     let ledger_run_id = summary.run_id.clone();
-    // Failure forensics at open: source schema + server limits, so a run that fails
-    // before finalize still explains itself (export_schema is otherwise success-only).
-    // ONE metadata connection (`meta`, from the caller) for the run's own probes —
-    // the chunk planner's catalog probe, forensics, both harm snapshots, the
-    // reconcile count — instead of one each.
     capture_open_forensics(plan, state, &mut summary, tail.record_load_spec, &mut meta);
 
-    // PG temp-spill + the broader source-harm counters, bracketed around the run
-    // window; the deltas land in export_harm. Best-effort — see `harm_snapshot`.
     let harm = HarmBracket::open_on(meta.get());
 
-    // Record plan diagnostics the caller already logged at validate time.
     for (rule, message) in &tail.plan_warnings {
         summary.journal.record(RunEvent::PlanWarning {
             rule: rule.clone(),
@@ -1513,13 +1162,6 @@ fn execute_resolved_plan(
             tail.chunk_source,
         ),
     };
-    // ADR-0028: THE export tail — apply the ledger the runner fed exactly once,
-    // here, before anything downstream reads the summary. On runner success the
-    // full seam runs (records + gates; a drift `fail` folds into `result` and
-    // flows the same failed-status path a runner error does). On runner FAILURE
-    // the records half still applies — the Failed manifest must describe the
-    // durable debris with the OBSERVED fingerprint + Form-B, never the stale
-    // baseline (seam bughunt 2026-08-21).
     let data_complete = result.is_ok();
     let result = match result {
         Ok(()) => super::finalize::finalize_export(plan, Some(state), &mut summary),
@@ -1542,15 +1184,10 @@ fn execute_resolved_plan(
 
     let rss_peak = rss_sampler.stop();
     let rss_after = crate::resource::get_rss_mb();
-    // Harvest the run's bytes-read counter ONCE — every sink (per chunk, per
-    // worker) incremented plan.bytes_read, so this single read covers every
-    // runner by construction (#175).
     summary.bytes_read = plan.bytes_read.load(std::sync::atomic::Ordering::Relaxed);
     summary.duration_ms = start.elapsed().as_millis() as i64;
     summary.peak_rss_mb = rss_peak.max(rss_after).max(rss_before) as i64;
 
-    // Close the harm bracket on the SAME window the run occupied, before the
-    // status resolution below — the deltas are what the DIAGNOSIS reads.
     let harm_delta_vec = harm.close_on_meta(&mut meta, state, &mut summary);
     let tuning_class = plan.tuning.profile_name().to_string();
     let failed = result.is_err();
@@ -1581,11 +1218,6 @@ fn execute_resolved_plan(
         }
     }
 
-    // Self-diagnosing run-health line — makes a log the field team sends back
-    // readable at a glance (reconnects survived, a resume-hit, a source spill).
-    // Emitted AFTER the success/failed resolution above so the line reports the
-    // real terminal status, not the transient "running" it was built with (#18
-    // bughunt: it ran before the status was resolved, so it always said running).
     if let Some(line) = run_diagnosis(
         &summary,
         &harm_delta_vec,
@@ -1604,14 +1236,6 @@ fn execute_resolved_plan(
                 matched,
             });
         }
-        // The reconcile verdict drives the EXIT CODE (folded into `final_result`):
-        // exit 3 on a mismatch, exit 1 on a could-not-verify. It does NOT flip
-        // `summary.status` to "failed" — that would make `finalize_manifest` write
-        // a Failed manifest with no _SUCCESS, so `rivet load` would REFUSE a
-        // COMPLETE, durable export because a post-hoc COUNT(*) raced a concurrent
-        // write on a live source (#2 bughunt). The export succeeded and stays
-        // loadable; the mismatch surfaces via `summary.reconciled` (report +
-        // metrics + the ReconciliationResult journal event) and the non-zero exit.
         reconcile_gate = reconcile_run_gate(&summary, could_not_verify.as_deref());
     }
 
@@ -1642,15 +1266,6 @@ fn execute_resolved_plan(
     if marker_outlived_its_run(finalized.left_alone, &ledger_run_id, &summary.run_id) {
         super::finalize::retire_running_marker(plan, &ledger_run_id);
     }
-    // Round-2 audit #12: advance the incremental cursor now that the destination
-    // manifest is durable — never before. A failure here loses nothing (the data +
-    // manifest are durable; the next run re-exports from the prior cursor), but the
-    // next run delivers the window twice, so it fails the run's exit (`cursor_gate`)
-    // without withdrawing the manifest.
-    //
-    // "now that the manifest is durable" was a PREMISE, not a check: the cursor
-    // advanced even when the manifest write had just failed, so the next run
-    // started past data nothing described. Guarded now.
     let mut cursor_gate: crate::error::Result<()> = Ok(());
     if !cursor_may_advance(&summary.status, &manifest_gap) {
         if summary.cursor_high.is_some() {
@@ -1664,14 +1279,6 @@ fn execute_resolved_plan(
     } else if let Err(e) = commit_incremental_cursor(state, plan, &summary) {
         cursor_gate = Err(cursor_not_stored(tail.kind, &summary.export_name, &e));
     }
-    // Round-5: a keyset checkpoint run has now finalized its COMPLETE destination
-    // manifest — clear the in-progress run_id (persisted for crash rehydration) so a
-    // later run isn't treated as a resume of this finished one. Clearing AFTER the
-    // manifest write is the same ordering as the cursor advance: a crash before here
-    // leaves resume_run_id set, so the next run rehydrates rather than orphans.
-    // EVERY entry point must clear it — a wrapper that skips it strands
-    // resume_run_id forever (round-3 wrapper-bypass regression), which is exactly
-    // why this script now exists once.
     let outcome = RunOutcome {
         failed,
         data_complete,
@@ -1684,8 +1291,6 @@ fn execute_resolved_plan(
     if plan.validate {
         finalize_validate_manifest(plan, &mut summary, tail.kind);
     }
-    // After finalize_validate_manifest: it can downgrade summary.validated, and
-    // the metrics row must carry the final verdict.
     if let Err(e) = state.record_metric_full(&build_metric_row(&summary, plan, &tuning_class)) {
         log::warn!(
             "{} '{}': metrics write failed (run outcome not stored): {:#}",
@@ -1697,9 +1302,6 @@ fn execute_resolved_plan(
     finalize_run_report(tail.config_path, &summary, tail.kind);
     crate::notify::maybe_send(tail.notifications, &summary);
 
-    // An export failure wins, otherwise an unwritten manifest fails the run, then
-    // the first gate that did: `--validate`, `--reconcile` (`Ok(())` where the
-    // policy disables it), the cursor.
     let gates = [validate_run_gate(&summary), reconcile_gate, cursor_gate];
     let final_result = resolve_final_result(failed, result, manifest_gap, gates);
     (final_result, summary)
@@ -1729,12 +1331,12 @@ pub(super) fn run_export_job(
     (result, summary)
 }
 
-/// Whether a CDC export's pending snapshot legs run on the pool: allowed for this run and more than one to run.
+/// Whether a CDC export's pending snapshot legs run on the pool.
 fn snapshot_legs_fan_out(allowed: bool, legs: usize) -> bool {
     allowed && legs > 1
 }
 
-/// A CDC export's outcome under its own name: a failed leg stops it, else the stream runs; the legs ride along for its aggregate entry.
+/// A CDC export's outcome under its own name: a failed leg stops it, else the stream runs.
 fn cdc_outcome_with_legs(
     export_name: &str,
     legs: Vec<(Result<()>, RunSummary)>,
@@ -1767,23 +1369,6 @@ fn record_snapshot_done(
     synth: &ExportConfig,
     summary: &RunSummary,
 ) {
-    // Snapshot done → record it in the state DB, the cleanup-proof twin of
-    // the GCS `snapshot/_SUCCESS` marker: once here, `cleanup_source`
-    // wiping the bucket no longer re-snapshots. Best-effort — a state
-    // write failure must not fail an otherwise-successful snapshot.
-    //
-    // Degradation on that rare failure: the durable signal is lost, so if
-    // `cleanup_source` later wipes the GCS `snapshot/_SUCCESS` too, the
-    // NEXT run finds no evidence and re-snapshots the whole table —
-    // wasteful (a fresh full re-read + re-load), NOT data loss: the
-    // checkpoint survived, so `snapshot_plan`'s `PriorRun` keeps the
-    // anchor and no changes are skipped.
-    // The LABEL, never the relation read. `snapshot_plan` asks this store
-    // with the configured string, and on SQL Server `synth.table` is the
-    // catalog's pair — so writing that made the key unable to match itself
-    // and every cycle re-snapshotted the whole table under a green run
-    // (round-4, DEMONSTRATED). Falls back to `table` for every engine where
-    // the two are the same string anyway.
     if let Some(table) = synth.snapshot_label.as_deref().or(synth.table.as_deref())
         && let Err(e) = state.mark_snapshot_done(
             export_name,
@@ -1809,9 +1394,6 @@ fn run_export_job_inner(
     config_dir: &Path,
     opts: &RunOptions<'_>,
 ) -> (Result<()>, RunSummary) {
-    // CDC exports read the transaction log, not a query — they bypass the batch
-    // plan/strategy machinery entirely and run through the dedicated CDC runner,
-    // which produces the same (Result, RunSummary) contract + metric row.
     if dispatches_to_cdc_runner(export.mode) {
         if let Some(msg) = super::cdc_job::cdc_ignored_run_flags_warning(
             &export.name,
@@ -1820,8 +1402,6 @@ fn run_export_job_inner(
         ) {
             log::warn!("{msg}");
         }
-        // The export's run lease for the whole stream, as a batch run holds it: a second
-        // run beside a live one is refused before it opens the source or writes anything.
         let _run_lease = match cdc_run_lease(state, &export.name, &config.source.state_key()) {
             Ok(lease) => lease,
             Err(e) => {
@@ -1829,16 +1409,10 @@ fn run_export_job_inner(
                 return (Err(e), summary);
             }
         };
-        // The checkpoint is this config's, before anything reads it: a second config on the
-        // same file would continue from where the first stopped.
         if let Err(e) = super::cdc_job::claim_checkpoint(config_path, export) {
             let summary = synthetic_failed_summary(&export.name, &e);
             return (Err(e), summary);
         }
-        // `initial: snapshot`: anchor first, then each pending table's full
-        // snapshot (a recursive `mode: full` run into `…/snapshot/`, with its
-        // own metric + journal), then the drain below. A failed snapshot fails
-        // the export — the anchor stays, so the retry resumes gap-free.
         let cdc_config_dir = std::path::Path::new(config_path)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
@@ -1864,9 +1438,13 @@ fn run_export_job_inner(
                 return (Err(e), summary);
             }
         };
+        if let Err(e) = super::cdc_job::refuse_lost_file_anchor(config, export, state, config_path)
+        {
+            let summary = synthetic_failed_summary(&export.name, &e);
+            crate::notify::maybe_send(config.notifications.as_ref(), &summary);
+            return (Err(e), summary);
+        }
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
-            // The batch pool `--parallel-exports` runs on: every leg runs, each on its
-            // own state connection, and a finished snapshot is recorded as it lands.
             let _flags = super::run::RenderFlags::set(super::run::multi_export_mode(), Some(true));
             let (harm, _) = super::run::RunHarmBracket::open(&config.source);
             let legs: Vec<&ExportConfig> = pending.iter().collect();
@@ -1896,20 +1474,20 @@ fn run_export_job_inner(
             done
         };
         let outcome = cdc_outcome_with_legs(&export.name, outcomes, || {
-            super::cdc_job::run_cdc_export(config_path, config, export, state, opts.strict, grants)
+            let outcome = super::cdc_job::run_cdc_export(
+                config_path,
+                config,
+                export,
+                state,
+                opts.strict,
+                grants,
+            );
+            super::cdc_job::record_file_anchor(config, export, state, config_path, &outcome.0);
+            outcome
         });
-        // The parent of a child process knows the export's run only by the id reported here.
         outcome.1.emit_finished();
         return outcome;
     }
-    // A base-and-buffer table's rows carry the delete flag as DATA. `LOAD DATA`
-    // fills a column the FILE lacks with NULL — never with the column's DEFAULT,
-    // measured twice on a live BigQuery — so a first pass that did not write it
-    // left every row's `__is_deleted` NULL and `WHERE NOT __is_deleted` returned
-    // nothing at all (found by dogfooding the batch cycle). The CDC baseline leg
-    // sets the same flag from `cdc_job`; this is the batch half of one rule.
-    // `None` for the captured table: a multiplex `tables:` export is CDC, and CDC returned
-    // above — the batch half never has one to answer for.
     let owned_export;
     let export = if crate::load::plan::resolved_layout(config, export, None).log_is_disposable()
         && crate::load::plan::resolved_deleted_flag(config, export, None)
@@ -1962,11 +1540,6 @@ fn run_export_job_inner(
         return (Err(err), summary);
     }
 
-    // ADR-0012 M8 / ADR-0013: refuse `--resume` against a destination whose
-    // `_SUCCESS` marker is already present unless the operator explicitly
-    // overrode the gate with `--force`.  Re-exporting over a verified
-    // dataset is almost never what the operator meant; the gate makes the
-    // override an audited decision.
     if resume_success_gate_applies(opts.resume, opts.force)
         && let Err(e) = check_success_gate_for_resume(&plan, state)
     {
@@ -1974,14 +1547,6 @@ fn run_export_job_inner(
         return (Err(e), summary);
     }
 
-    // rerun-accumulation footgun (audit findings #5/#19/#30): a *fresh* run
-    // (no `--resume`) into a prefix that already carries a completed export
-    // does NOT overwrite — it appends a new timestamp-/nonce-named part set
-    // alongside the old one and rewrites manifest.json to describe only this
-    // run, so a glob reader over the prefix double-counts / sees orphaned
-    // parts.  Refusing or auto-deleting would destroy operator data, so this
-    // is a loud, non-fatal WARN instead (the `--resume` path above keeps its
-    // refuse-without-`--force` gate).  `--force` is the explicit opt-out.
     if rerun_warning_applies(opts.resume, opts.force) {
         warn_if_prefix_has_completed_run(&plan);
     }
@@ -1992,8 +1557,6 @@ fn run_export_job_inner(
         plan.tuning
     );
 
-    // The post-plan execution script lives ONCE in `execute_resolved_plan`;
-    // this entry point only supplies the run-path policy.
     let plan_warnings: Vec<(String, String)> = diags
         .iter()
         .filter(|d| {
@@ -2027,41 +1590,12 @@ fn run_export_job_inner(
     )
 }
 
-// `finalize_*` and the M8 success-gate live in `pipeline::finalize` so this
-// file stays focused on orchestration (build plan → dispatch → record
-// metric → call finalize hooks).  Imports below give us local names.
 use super::finalize::{
     check_success_gate_for_resume, finalize_manifest, finalize_run_report,
     finalize_validate_manifest, warn_if_prefix_has_completed_run,
 };
 
 /// Execute a pre-resolved plan with a caller-supplied `ChunkSource`.
-///
-/// Used by `rivet apply`: the plan comes from a deserialized `PlanArtifact` so
-/// `build_plan` is skipped. Everything after validation routes through the ONE
-/// post-plan script (`execute_resolved_plan`) — open forensics, the source-harm
-/// bracket, the finalize seam, metrics, state persistence — so this entry point
-/// can no longer diverge from `run_export_job` by omission; its policy is the
-/// `TailPolicy` it passes.
-///
-/// LIVE-ONLY BY CONSTRUCTION, and deliberately not unit-tested: it needs a real
-/// source, a real destination and a `StateStore`, so a body stub
-/// (`-> Ok(())` — a survivor of the 2026-08-16 mutation run, which ran the
-/// OFFLINE suite only) is unkillable here. Its oracles are live and they do
-/// bite: `plan_and_apply_full_export_round_trip` and
-/// `plan_and_apply_chunked_export_round_trip_uses_precomputed_ranges`
-/// (`tests/live/live_plan_apply.rs`) read the destination back through DuckDB
-/// and assert the exact row count, which a no-op apply cannot produce, and
-/// `pg_apply_persists_metric_row` (`tests/live/live_metrics_persist.rs`) asserts
-/// the metric row this function writes. The pure DECISIONS it makes are
-/// extracted and unit-tested next door — [`pg_temp_bytes_delta`],
-/// [`pg_temp_bytes_warning`], `run_diagnosis`, `resolve_final_result`.
-///
-/// Returns the `RunSummary` alongside the result, exactly as [`run_export_job`]
-/// does, because the ORCHESTRATOR owns the run's tail: `run_apply_command` needs
-/// this run's rows/duration to route them through `run::self_check_throughput`.
-/// Discarding the summary here is what made the plan-artifact path the fifth
-/// orchestrator tail with no run-over-run self-check (round-7 bughunt).
 pub(crate) fn run_export_job_with_chunk_source(
     plan: &ResolvedRunPlan,
     state: &StateStore,
@@ -2070,7 +1604,6 @@ pub(crate) fn run_export_job_with_chunk_source(
     apply_context: Option<crate::pipeline::summary::ApplyContext>,
     record_load_spec: bool,
 ) -> (Result<()>, RunSummary) {
-    // Re-validate the plan from the artifact (fast, no DB queries).
     if let Some(err) = log_plan_diagnostics(&plan.export_name, &validate_plan(plan)) {
         let summary = synthetic_failed_summary(&plan.export_name, &err);
         return (Err(err), summary);
@@ -2082,10 +1615,6 @@ pub(crate) fn run_export_job_with_chunk_source(
         plan.tuning
     );
 
-    // Same script, apply-path policy: artifact family = export name, no
-    // checkpoint-parallel resume path (runner_config_path ""), no reconcile
-    // leg, no notifications, plan warnings logged above but not journaled
-    // (existing behavior, preserved).
     execute_resolved_plan(
         plan,
         state,
@@ -2098,9 +1627,6 @@ pub(crate) fn run_export_job_with_chunk_source(
             apply_context,
             allow_reconcile: false,
             notifications: None,
-            // The caller's config decides, exactly as on the run path: apply
-            // records the load spec afterwards, and a spec recorded WITHOUT the
-            // key it never asked for wiped the key `rivet run` had recorded.
             record_load_spec,
             plan_warnings: Vec::new(),
             strict: false,
@@ -2111,7 +1637,7 @@ pub(crate) fn run_export_job_with_chunk_source(
     )
 }
 
-/// Why `plan` cannot be executed when its destination still holds the `{partition}` token, else `None`.
+/// Why `plan` cannot be executed when its destination still holds the `{partition}` token.
 fn unexpanded_partition_error(plan: &ResolvedRunPlan) -> Option<anyhow::Error> {
     let dest = &plan.destination;
     [dest.path.as_deref(), dest.prefix.as_deref()]
@@ -2197,7 +1723,7 @@ mod snapshot_leg_tests {
         }
     }
 
-    /// A run whose source cannot be reached ends FAILED — the post-plan script never reports success it did not earn.
+    /// A run whose source cannot be reached ends FAILED.
     #[test]
     fn an_unreachable_source_fails_the_run_and_its_summary() {
         let dir = tempfile::tempdir().unwrap();
@@ -2276,7 +1802,7 @@ mod snapshot_leg_tests {
         (result, summary)
     }
 
-    /// The CDC export's entry counts its legs and its stream, while its own summary (the metric row's source) keeps the stream's counts.
+    /// The CDC export's entry counts its legs and its stream.
     #[test]
     fn a_cdc_entry_counts_its_snapshot_legs_and_its_stream() {
         let legs = vec![
@@ -2301,7 +1827,7 @@ mod snapshot_leg_tests {
         );
     }
 
-    /// A failed leg fails the CDC export under its own name, with every leg's rows, and never opens the stream.
+    /// A failed leg fails the CDC export under its own name, with every leg's rows.
     #[test]
     fn a_failed_snapshot_leg_fails_the_cdc_entry_under_its_own_name() {
         let legs = vec![
@@ -2343,8 +1869,7 @@ mod snapshot_leg_tests {
         assert_eq!((e.rows, e.files, e.bytes, e.bytes_read), (7, 2, 70, 140));
     }
 
-    /// A finished leg is recorded under the key the next run's snapshot plan asks for,
-    /// so a rerun after a part-way failure does not redo it.
+    /// A finished leg is recorded under the key the next run's snapshot plan asks for.
     #[test]
     fn a_finished_snapshot_leg_is_recorded_under_the_key_the_plan_reads() {
         let export = cdc_export();
@@ -2374,17 +1899,7 @@ mod snapshot_leg_tests {
 mod tests {
     use crate::plan::test_support::test_plan;
 
-    /// A resume that ADOPTS a prior run's id must still close the row the ledger
-    /// was opened under — both wrappers, through one seam.
-    ///
-    /// The row is opened with the new run's id; a chunk-checkpoint resume then
-    /// replaces `summary.run_id` with the crashed run's. Closing only the
-    /// summary's id leaves the opening row `running` with nothing to supersede
-    /// it, and `has_active_run_on_prefix` reports a live writer on that prefix
-    /// forever — so `gc_orphans` defers cleanup indefinitely.
-    ///
-    /// Asserted on the STATE the run leaves behind, read back from the store,
-    /// rather than on a count of calls.
+    /// A resume that ADOPTS a prior run's id must still close the row the ledger was opened under — both wrappers, through one seam.
     #[test]
     fn an_adopted_run_id_does_not_strand_the_row_the_ledger_opened() {
         let state = crate::state::StateStore::open_in_memory().expect("in-memory state");
@@ -2392,9 +1907,6 @@ mod tests {
         let opened_as = "run_new";
         let adopted = "run_crashed";
 
-        // Both rows exist and are `running`: the crashed one from its own earlier
-        // run, the new one from this run's start. Two rows is the whole point —
-        // with one there is nothing to strand.
         let prefix = "file:///out";
         for rid in [adopted, opened_as] {
             state
@@ -2424,16 +1936,7 @@ mod tests {
         );
     }
 
-    /// The keyset resume anchor must outlive a run that did not finish — and
-    /// "did not finish" includes a run whose PARTS landed but whose MANIFEST did
-    /// not, which `failed` (computed from `result.is_err()` before the manifest
-    /// is written) reports as a success.
-    ///
-    /// Clearing the anchor there wipes `resume_run_id` and the per-range recovery
-    /// rows, so the next run cannot adopt pages already on the prefix that no
-    /// manifest names — they are unreachable from both ends. Found by an
-    /// adversarial pass over this branch; the manifest-gap handling that made the
-    /// status "failed" did not widen the flag this decision reads.
+    /// The keyset resume anchor must outlive a run that did not finish.
     #[test]
     fn a_failed_run_holds_the_incremental_cursor_even_when_its_manifest_landed() {
         let gap = Some("the manifest write FAILED".to_string());
@@ -2447,7 +1950,7 @@ mod tests {
         assert!(!cursor_may_advance("failed", &gap));
     }
 
-    /// A run that broke off mid-data (`data_complete: false`) or passed its gates, with or without its manifest.
+    /// A run that broke off mid-data.
     fn outcome(failed: bool, manifest_gap: &Option<String>) -> RunOutcome<'_> {
         RunOutcome {
             failed,
@@ -2492,8 +1995,7 @@ mod tests {
         }
     }
 
-    /// A refusal must not become the evidence that lifts it: a kept anchor lets the next run
-    /// adopt the refused pages, read nothing, and pass the gate over nothing.
+    /// A refusal must not become the evidence that lifts it.
     #[test]
     fn a_refused_run_releases_its_keyset_anchor_so_the_next_run_is_graded_again() {
         let gap = Some("the manifest write FAILED".to_string());
@@ -2782,12 +2284,6 @@ mod tests {
 
     #[test]
     fn run_reconcile_gate_fails_on_mismatch_matches_subcommand() {
-        // `run --reconcile` must exit non-zero (data-integrity, exit 3) on a
-        // row-count mismatch — the same gate the `rivet reconcile` subcommand
-        // enforces via `enforce_reconcile_exit`. Before this, the flag path
-        // logged "reconcile MISMATCH" but returned Ok, so
-        // `rivet run --reconcile && <next>` silently proceeded past a data-loss
-        // mismatch (dogfood issue #102).
         let mut s = RunSummary {
             export_name: "orders".into(),
             source_count: Some(1033),
@@ -2806,16 +2302,11 @@ mod tests {
             "a reconcile mismatch must classify as exit 3"
         );
 
-        // A match, and a skipped reconcile (reconciled == None, no could-not-verify
-        // reason), must NOT gate.
         s.reconciled = Some(true);
         assert!(reconcile_run_gate(&s, None).is_ok());
         s.reconciled = None;
         assert!(reconcile_run_gate(&s, None).is_ok());
 
-        // #10: a COULD-NOT-VERIFY reconcile (reconciled == None BUT a reason is
-        // present) is OPERATIONAL — exit 1, NOT verified-OK (exit 0) and NOT the
-        // data-integrity class (exit 3).
         let err = reconcile_run_gate(&s, Some("could not connect to the source"))
             .expect_err("a could-not-verify reconcile must gate non-zero");
         assert!(
@@ -2828,19 +2319,12 @@ mod tests {
             1,
             "a could-not-verify reconcile must classify as operational exit 1"
         );
-        // A genuine MISMATCH wins over a could-not-verify reason (data-integrity).
         s.reconciled = Some(false);
         let err = reconcile_run_gate(&s, Some("noise")).unwrap_err();
         assert_eq!(crate::error::classify_exit(&err), 3);
     }
 
-    /// The reconcile gate's full truth table — three booleans, eight cases, so
-    /// no `&&`→`||` and no dropped `!` survives (the in-diff mutation gate found
-    /// all three of those alive in the live-only script body; extracting the
-    /// decision is what makes them killable offline).
-    /// The plan-validation verdict: a clean plan RUNS, a rejected one is
-    /// refused with every reason named. Kills the `delete !` mutant, which
-    /// inverts both halves — refusing valid plans and running rejected ones.
+    /// The reconcile gate's full truth table.
     #[test]
     fn plan_rejection_error_refuses_only_a_rejected_plan_and_names_every_reason() {
         use super::plan_rejection_error;
@@ -2892,15 +2376,6 @@ mod tests {
     }
 
     /// A successful run promotes ONLY the transient status it was built with.
-    ///
-    /// Both directions matter and the `==`→`!=` mutant inverts both: with `!=`
-    /// a finished run keeps reporting `running` forever, and a run a deeper
-    /// layer already marked `skipped` (an incremental pass with nothing new)
-    /// gets relabelled `success` — an export that moved no rows, reported as
-    /// one that did. This decision lived inside `execute_resolved_plan`, whose
-    /// whole-function mutation exclusion was lifted on 2026-08-29 after a
-    /// critic measured 66% of that body running offline; the mutant then
-    /// MISSED the entire battery, which is what this unit closes.
     #[test]
     fn only_a_still_running_status_is_promoted_to_success() {
         use super::promotes_to_success;
@@ -2908,8 +2383,6 @@ mod tests {
             promotes_to_success("running"),
             "the transient status promotes"
         );
-        // Every terminal status a deeper layer can already have decided must
-        // survive: overwriting them is the harm, not merely a mislabel.
         for terminal in ["skipped", "failed", "success", "interrupted", ""] {
             assert!(
                 !promotes_to_success(terminal),
@@ -3013,22 +2486,14 @@ mod tests {
         assert_eq!(awaited_column(&ExtractionStrategy::Snapshot), None);
     }
 
-    /// The resume/force policy as ONE truth table: the refuse-gate and the
-    /// warn-gate are opposite halves, and `--force` disables both. Kills the
-    /// `&&`→`||` and both `delete !` mutants the in-diff gate found alive in
-    /// `run_export_job`.
+    /// The resume/force policy as ONE truth table.
     #[test]
     fn resume_and_rerun_gates_are_opposite_halves_disabled_by_force() {
         use super::{rerun_warning_applies, resume_success_gate_applies};
-        // --resume, no --force: refuse a complete prefix; do NOT warn (the
-        // resume path owns this case).
         assert!(resume_success_gate_applies(true, false));
         assert!(!rerun_warning_applies(true, false));
-        // fresh run, no --force: warn about accumulation; the refuse-gate is
-        // not this path's.
         assert!(!resume_success_gate_applies(false, false));
         assert!(rerun_warning_applies(false, false));
-        // --force is the audited override: BOTH gates go quiet, resumed or not.
         for resume in [true, false] {
             assert!(
                 !resume_success_gate_applies(resume, true),
@@ -3041,9 +2506,7 @@ mod tests {
         }
     }
 
-    /// The CDC dispatch fork: exactly one mode takes the CDC runner, every other
-    /// mode takes the batch planner. Kills the `==`→`!=` mutant (which would
-    /// invert the whole fork).
+    /// The CDC dispatch fork.
     #[test]
     fn only_cdc_mode_dispatches_to_the_cdc_runner() {
         use super::dispatches_to_cdc_runner;
@@ -3060,10 +2523,8 @@ mod tests {
     #[test]
     fn should_reconcile_requires_permission_request_and_success() {
         use super::should_reconcile;
-        // The ONLY true case: allowed, asked for, and the export succeeded.
         assert!(should_reconcile(true, true, false));
 
-        // Each input alone is decisive.
         assert!(
             !should_reconcile(false, true, false),
             "apply does not allow a reconcile leg — a sealed artifact has no flag"
@@ -3078,7 +2539,6 @@ mod tests {
              the source reports a mismatch that is not one"
         );
 
-        // …and no combination of the remaining four is true.
         for (a, r, f) in [
             (false, false, false),
             (false, false, true),
@@ -3100,11 +2560,6 @@ mod tests {
     #[test]
     fn resolve_final_result_surfaces_reconcile_mismatch_when_export_succeeded() {
         use crate::error::DataIntegrityError;
-        // The WIRING guard for #102: when the export itself succeeded
-        // (failed=false), a reconcile-gate error MUST become the run's result
-        // (exit 3). This is the half the gate-logic test cannot cover — that
-        // `run --reconcile` actually RETURNS the gate rather than Ok. Un-hooking
-        // the fold reopens the bug; this test then goes red.
         let gate: crate::error::Result<()> = Err(DataIntegrityError::new("mismatch").into());
         let out = resolve_final_result(false, Ok(()), None, [Ok(()), gate, Ok(())]);
         assert!(
@@ -3113,17 +2568,12 @@ mod tests {
         );
         assert_eq!(crate::error::classify_exit(&out.unwrap_err()), 3);
 
-        // An export/quality failure takes precedence over the gates.
         let qfail: crate::error::Result<()> = Err(DataIntegrityError::new("quality").into());
         let gate: crate::error::Result<()> = Err(anyhow::anyhow!("a gate"));
         let out = resolve_final_result(true, qfail, None, [gate, Ok(()), Ok(())]).unwrap_err();
         assert_eq!(out.to_string(), "quality");
 
-        // Clean run: no export failure and every gate green → Ok.
         assert!(resolve_final_result(false, Ok(()), None, green()).is_ok());
-        // A run whose manifest never landed is not a success, even with the
-        // export and the gates all green: the parts are durable and no
-        // manifest names them, so the loader cannot reach them.
         let gap = resolve_final_result(false, Ok(()), Some("no manifest".into()), green());
         assert!(
             gap.is_err(),
@@ -3332,23 +2782,17 @@ mod tests {
             status: "success".into(),
             ..Default::default()
         };
-        // A clean run has nothing to diagnose — its stats are in the run card.
         assert!(run_diagnosis(&base(), &[], false).is_none());
-        // Reconnects survived (the flaky-link signal) → flagged, with the count.
         let mut s = base();
         s.reconnects = 2;
         s.retries = 3;
         let line = run_diagnosis(&s, &[], false).expect("reconnects must diagnose");
         assert!(line.contains("2 reconnect"), "got: {line}");
         assert!(line.contains("retries=3"), "got: {line}");
-        // #18 bughunt: the line interpolates the run STATUS — the caller must emit
-        // it AFTER the success/failed resolution so this reads `[success]`, not the
-        // transient `[running]` it was previously built with.
         assert!(
             line.contains("[success]"),
             "status must be the resolved one: {line}"
         );
-        // A resume-hit means the prior run crashed → flagged.
         let mut s = base();
         s.resumed = true;
         assert!(
@@ -3356,22 +2800,14 @@ mod tests {
                 .unwrap()
                 .contains("resumed a prior CRASHED")
         );
-        // A source tmp-disk spill (recorded in export_harm but never LOGGED before)
-        // → flagged with the escape hatch.
         let line = run_diagnosis(&base(), &[("Created_tmp_disk_tables".into(), 2782)], false)
             .expect("spills must diagnose");
         assert!(line.contains("2782 tmp-disk spills"), "got: {line}");
-        // A negligible spill is noise, not a diagnosis on its own.
         assert!(run_diagnosis(&base(), &[("Created_tmp_disk_tables".into(), 5)], false).is_none());
     }
 
     #[test]
     fn run_diagnosis_spill_remedy_never_suggests_the_strategy_already_running() {
-        // Field find (2026-08-13 pool dogfood): a keyset export with source
-        // tmp-disk spills was told to "try `mode: chunked`/`chunk_by_key`" —
-        // the strategy it was ALREADY running. The remedy must be picked from
-        // the summary's mode: paged modes get the page/batch levers, only the
-        // unpaged modes are told to switch strategy.
         let with_mode = |mode: &str| RunSummary {
             export_name: "items".into(),
             total_rows: 1000,
@@ -3404,11 +2840,7 @@ mod tests {
         }
     }
 
-    /// Field find (2026-08-13, --pool 5): the spill counter is `SHOW GLOBAL
-    /// STATUS` — server-wide — and a pool window overlaps every concurrent
-    /// sibling's work. Solo runs keep the confident attribution; concurrent
-    /// runs must say the counter is server-global instead of blaming the one
-    /// export the line prints beside.
+    /// Field find (2026-08-13, --pool 5): the spill counter is `SHOW GLOBAL STATUS`.
     #[test]
     fn run_diagnosis_spill_attribution_hedges_under_concurrent_siblings() {
         let s = || RunSummary {
@@ -3439,20 +2871,9 @@ mod tests {
         );
     }
 
-    /// The spill fold must cover EVERY engine that has a spill counter, and
-    /// name what it counted. The shipped filter matched `tmp_disk` only —
-    /// MySQL's counter — so PostgreSQL's `pg_temp_files` (the direct spill
-    /// analogue in `postgres::harm_counters`) summed to zero and the spill
-    /// signal was silently absent on PG, on BOTH the per-export and the
-    /// run-level surface. Engines with no spill counter (MSSQL lock waits,
-    /// Mongo scan counters) must stay at zero — that silence is correct.
-    /// Fixtures are ≥2 counters per engine because this is a FOLD: one element
-    /// makes any sum look right.
-    /// RED against restoring the `tmp_disk`-only filter (the PG case reads 0)
-    /// and against a fold that hard-codes MySQL's noun for a temp_files count.
+    /// The spill fold must cover EVERY engine that has a spill counter, and name what it counted.
     #[test]
     fn spill_total_counts_every_engines_spill_counter_and_names_the_unit() {
-        // MySQL — raw `SHOW GLOBAL STATUS` key and the `mysql_`-prefixed form.
         let mysql = [
             ("Created_tmp_disk_tables".to_string(), 40_i64),
             ("mysql_created_tmp_disk_tables".to_string(), 60_i64),
@@ -3461,7 +2882,6 @@ mod tests {
         assert_eq!(s.total, 100, "both tmp-disk keys must fold in");
         assert_eq!(s.unit, "tmp-disk spills");
 
-        // PostgreSQL — the whole harm set, only `pg_temp_files` is a spill.
         let pg = [
             ("pg_blks_read".to_string(), 900_000_i64),
             ("pg_blks_hit".to_string(), 5_000_000_i64),
@@ -3478,7 +2898,6 @@ mod tests {
              misdescribe what was measured"
         );
 
-        // MSSQL and Mongo have no spill counter: silence, not a gap.
         let mssql = [
             ("mssql_lock_waits".to_string(), 4_000_i64),
             ("mssql_lock_wait_ms".to_string(), 900_000_i64),
@@ -3491,10 +2910,7 @@ mod tests {
         assert_eq!(spill_total(&mongo).total, 0);
     }
 
-    /// The per-export DIAGNOSIS is the first surface that must see the PG
-    /// spill: with the `tmp_disk`-only filter a PG run could spill thousands of
-    /// temp files and the line never appeared. RED against that filter
-    /// (`expect` fails: no line at all).
+    /// The per-export DIAGNOSIS is the first surface that must see the PG spill.
     #[test]
     fn run_diagnosis_flags_a_postgres_temp_file_spill_in_its_own_words() {
         let s = RunSummary {
@@ -3518,18 +2934,11 @@ mod tests {
             !line.contains("tmp-disk"),
             "must not print MySQL's unit for a PG temp_files count: {line}"
         );
-        // Below the shared threshold it stays quiet, same as MySQL's counter.
         let quiet = [("pg_temp_files".to_string(), 99_i64)];
         assert!(run_diagnosis(&s, &quiet, false).is_none());
     }
 
-    /// `pg_stat_database.temp_bytes` is DATABASE-wide, so under any
-    /// concurrent-sibling mode the whole delta cannot be blamed on the one
-    /// export whose name the line carries — the same measurement lie the
-    /// tmp-disk flag was fixed for, left on its PG sibling. The warning must
-    /// stay LOUD (it is real source pressure) and hedge the attribution.
-    /// RED against the unhedged single-format warning (the concurrent line
-    /// then still says "during run" and never says the scope is database-wide).
+    /// `pg_stat_database.temp_bytes` is DATABASE-wide.
     #[test]
     fn pg_temp_bytes_warning_hedges_attribution_under_concurrent_siblings() {
         let big = 250 * 1024 * 1024;
@@ -3552,20 +2961,11 @@ mod tests {
             !concurrent.contains("during run —"),
             "concurrent line must not carry the solo phrasing: {concurrent}"
         );
-        // Threshold is exclusive at 100 MB in both modes — a small spill is noise.
         assert!(pg_temp_bytes_warning("orders", 100 * 1024 * 1024, false).is_none());
         assert!(pg_temp_bytes_warning("orders", 100 * 1024 * 1024, true).is_none());
     }
 
     /// The bracket arithmetic itself — what the run is CREDITED with spilling.
-    ///
-    /// Both call sites need a live PostgreSQL source, so until
-    /// [`pg_temp_bytes_delta`] was split out nothing offline graded it and the
-    /// live oracle could not either (it asserts `is_some()`, which a sum
-    /// satisfies). The fixture is engineered so no operator agrees with the
-    /// difference: over `3 MB → 7 MB` the difference is 4 MB, the sum 10 MB, the
-    /// quotient 2 — three distinct values, all positive, so `.max(0)` cannot mask
-    /// the disagreement.
     #[test]
     fn the_bracket_reopens_only_when_it_opened_and_the_held_connection_went_quiet() {
         assert!(
@@ -3609,9 +3009,6 @@ mod tests {
             4 * MB,
             "the credited spill is what the window ADDED, not the counter's absolute value"
         );
-        // The operator-facing consequence, at the boundary the warning reads: a
-        // 30 MB window on a database that has already spilled 120 MB is noise —
-        // reporting the absolute counter instead turns it into a false alarm.
         assert!(
             pg_temp_bytes_warning("orders", pg_temp_bytes_delta(120 * MB, 150 * MB), false)
                 .is_none(),
@@ -3622,9 +3019,6 @@ mod tests {
             "activation guard: the same 150 MB counter DOES warn when the window really \
              produced it — otherwise the assertion above passes on an inert threshold"
         );
-        // `pg_stat_reset()` / a server restart mid-window: the counter went
-        // BACKWARDS. That is a lost measurement, never a reclaim — a negative
-        // credit would offset a sibling's real spill wherever these are summed.
         assert_eq!(
             pg_temp_bytes_delta(9 * MB, MB),
             0,
@@ -3676,8 +3070,6 @@ mod tests {
         assert!(summary.reconciled.is_none());
         assert!(summary.validated.is_none());
     }
-
-    // ── plan fixtures ───────────────────────────────────────────────────────
 
     use crate::config::QualityConfig;
     use crate::config::SourceConfig;
@@ -3765,17 +3157,6 @@ mod tests {
         }
     }
 
-    // ── build_metric_row ────────────────────────────────────────────────────
-    //
-    // The builder is what actually decides *what* lands in every `export_metrics`
-    // row, so a single field wired to the wrong summary/plan member silently
-    // persists a wrong metric for the entire pilot. The metrics-store test
-    // (`record_metric_full_persists_v9_columns_in_order`) only guards the
-    // MetricRow→SQL column mapping; this pins the summary/plan→MetricRow mapping
-    // upstream of it. Every look-alike pair (files_committed vs files_produced,
-    // source_count vs total_rows, chunk_size vs parallel) gets a *distinct* value
-    // so a field swap surfaces as a wrong-value read, not a passing tie.
-
     #[test]
     fn a_finished_keyset_run_releases_its_anchor_and_the_ranges_of_its_own_source_only() {
         use crate::plan::{ExtractionStrategy, KeysetPlan};
@@ -3846,11 +3227,11 @@ mod tests {
         summary.status = "success".into();
         summary.error_message = Some("export 'x': keyset could not read the 'id' value".into());
         summary.cursor_low = Some("1".into());
-        summary.cursor_high = Some("18446744073709551615".into()); // u64 past i64::MAX
-        summary.offending_value = Some("9223372036854775800".into()); // last-good before overflow
+        summary.cursor_high = Some("18446744073709551615".into());
+        summary.offending_value = Some("9223372036854775800".into());
         summary.server_context_json =
             Some(r#"{"engine":"mysql","max_execution_time_ms":"30000"}"#.into());
-        summary.key_native_type = Some("bigint unsigned".into()); // folds into key_descriptor
+        summary.key_native_type = Some("bigint unsigned".into());
         summary.format = "parquet".into();
         summary.mode = "chunked".into();
         summary.files_produced = 7;
@@ -3859,10 +3240,9 @@ mod tests {
         summary.retries = 2;
         summary.validated = Some(true);
         summary.schema_changed = Some(false);
-        // v9 signals — each distinct from its look-alike sibling.
-        summary.files_committed = 6; // ≠ files_produced (7)
+        summary.files_committed = 6;
         summary.reconciled = Some(true);
-        summary.source_count = Some(49_999); // ≠ total_rows (50_000)
+        summary.source_count = Some(49_999);
         summary.quality_passed = Some(true);
         summary.pg_temp_bytes_delta = Some(1_048_576);
         summary.batch_size = 32_000;
@@ -3870,13 +3250,8 @@ mod tests {
         summary.skip_reason = Some("manual".into());
         summary.schema_fingerprint = Some("fp-abc".into());
 
-        // v10: longest_chunk_ms is delegated to the journal. Inject one paired
-        // 640ms chunk span (via the journal's own test helper, not a reach into
-        // `entries`) so the field is a known Some — proving the builder reads
-        // the journal rather than hardcoding None.
         summary.journal.push_test_chunk_span(0, 640);
 
-        // Chunked plan with distinct chunk_size/parallel so a swap can't pass.
         let mut plan = chunked_plan_with_quality(None);
         plan.strategy = ExtractionStrategy::Chunked(ChunkedPlan {
             column: "id".into(),
@@ -3888,10 +3263,6 @@ mod tests {
             max_attempts: 3,
         });
 
-        // Destructure WITHOUT `..` so a new `MetricRow` field is a COMPILE error
-        // here until it's bound and asserted — "every field" becomes a
-        // compiler-enforced invariant, not a hopeful test name. (The earlier
-        // `row.field` form silently ignored any field added to the struct.)
         let crate::state::MetricRow {
             export_name,
             run_id,
@@ -3933,7 +3304,6 @@ mod tests {
             server_context_json,
         } = build_metric_row(&summary, &plan, "safe");
 
-        // ── core (v1) ──
         assert_eq!(export_name, "orders");
         assert_eq!(run_id, "run-bmr");
         assert_eq!(duration_ms, 1234);
@@ -3944,7 +3314,7 @@ mod tests {
             error_message.as_deref(),
             Some("export 'x': keyset could not read the 'id' value")
         );
-        assert_eq!(tuning_profile.as_deref(), Some("safe")); // builder arg
+        assert_eq!(tuning_profile.as_deref(), Some("safe"));
         assert_eq!(format.as_deref(), Some("parquet"));
         assert_eq!(mode.as_deref(), Some("chunked"));
         assert_eq!(files_produced, 7);
@@ -3953,7 +3323,6 @@ mod tests {
         assert_eq!(retries, 2);
         assert_eq!(validated, Some(true));
         assert_eq!(schema_changed, Some(false));
-        // ── v9 ──
         assert_eq!(files_committed, 6);
         assert_eq!(reconciled, Some(true));
         assert_eq!(source_count, Some(49_999));
@@ -3963,19 +3332,14 @@ mod tests {
         assert_eq!(batch_size_memory_mb, Some(256));
         assert_eq!(skip_reason.as_deref(), Some("manual"));
         assert_eq!(schema_fingerprint.as_deref(), Some("fp-abc"));
-        // ── plan-derived ──
         assert_eq!(chunk_size, Some(100_000));
         assert_eq!(parallel, Some(4));
         assert_eq!(source_type.as_deref(), Some("postgres"));
         assert_eq!(destination_type.as_deref(), Some("local"));
         assert_eq!(rivet_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
-        // ── v10: delegated to the journal (pinned to the injected span) ──
         assert_eq!(longest_chunk_ms, Some(640));
         assert_eq!(longest_chunk_ms, summary.journal.longest_chunk_ms());
-        // ── v12: chunking diagnostics — the chunk key column. The plan is a range
-        // Chunked on "id"; the resolved strategy is the `mode` column ("chunked").
         assert_eq!(chunk_key.as_deref(), Some("id"));
-        // ── v18: failure forensics ──
         assert_eq!(
             error_class.as_deref(),
             Some("keyset_unreadable_key"),
@@ -3986,10 +3350,8 @@ mod tests {
         let kd = key_descriptor_json.expect("chunked strategy carries a key descriptor");
         assert!(kd.contains("\"strategy\":\"chunked\""), "{kd}");
         assert!(kd.contains("\"key\":\"id\""), "{kd}");
-        // enriched from summary.key_native_type — the "was it unsigned" answer inline
         assert!(kd.contains("\"db_type\":\"bigint unsigned\""), "{kd}");
         assert!(kd.contains("\"unsigned\":true"), "{kd}");
-        // producers wired: both pass through from the summary
         assert_eq!(offending_value.as_deref(), Some("9223372036854775800"));
         assert!(
             server_context_json
@@ -4001,9 +3363,6 @@ mod tests {
 
     #[test]
     fn build_metric_row_non_chunked_has_no_chunk_dims() {
-        // The chunk-config dimensions only exist for the Chunked strategy; every
-        // other strategy must leave chunk_size/parallel NULL (the `_ => (None,
-        // None)` arm) rather than persist a stale or zero value.
         let mut plan = chunked_plan_with_quality(None);
         plan.strategy = ExtractionStrategy::Snapshot;
         let summary = RunSummary::stub_for_testing("run-snap", "orders");
@@ -4012,14 +3371,12 @@ mod tests {
 
         assert!(row.chunk_size.is_none(), "snapshot has no chunk_size");
         assert!(row.parallel.is_none(), "snapshot has no parallel");
-        // The non-chunk dimensions are still populated.
         assert_eq!(row.source_type.as_deref(), Some("postgres"));
         assert_eq!(row.destination_type.as_deref(), Some("local"));
     }
 
     #[test]
     fn classify_error_message_maps_the_field_run_failure_classes() {
-        // The exact three classes the 0.21.2 field post-mortem grouped BY HAND.
         assert_eq!(
             classify_error_message(
                 "export 'aa_import_advcake': keyset could not read the 'id' value from the last row of page 0"
@@ -4032,9 +3389,6 @@ mod tests {
             ),
             Some("statement_timeout")
         );
-        // The parallel-checkpoint wrapper EMBEDS the inner 3024 text — most-specific-
-        // first ordering must bucket it as parallel_checkpoint, NOT statement_timeout.
-        // (RED if the two arms are reordered.)
         assert_eq!(
             classify_error_message(
                 "export 'aa_payouts_version': parallel checkpoint worker errors:\nchunk 3: MySqlError { ERROR 3024 (HY000): maximum statement execution time exceeded }"
@@ -4042,8 +3396,6 @@ mod tests {
             Some("parallel_checkpoint"),
             "the 3024-embedding wrapper must not be mis-bucketed as a bare statement_timeout"
         );
-        // Extended taxonomy: the field's ERROR 1146 (was None before) + the classes
-        // that group the common infra failures.
         assert_eq!(
             classify_error_message(
                 "MySqlError { ERROR 1146 (42S02): Table 'rivet.ext_x' doesn't exist }"
@@ -4071,19 +3423,11 @@ mod tests {
             classify_error_message("No space left on device"),
             Some("disk_full")
         );
-        // An unrecognized error stays honest (None), not force-fit into a bucket.
         assert_eq!(
             classify_error_message("some entirely novel failure with no known signature"),
             None
         );
     }
-
-    // ── harm_deltas ─────────────────────────────────────────────────────────
-    //
-    // The per-counter delta feeding `export_harm`. Three semantics to pin:
-    // matched counters subtract, a counter reset floors at 0 (never a negative
-    // "harm"), and the result is the *name intersection* of the two snapshots
-    // (a counter present in only one snapshot is dropped, not treated as 0).
 
     #[test]
     fn harm_deltas_subtracts_matched_counters() {
@@ -4108,8 +3452,6 @@ mod tests {
 
     #[test]
     fn harm_deltas_floors_counter_reset_at_zero() {
-        // A mid-run server restart resets the cumulative counter; after < before
-        // must not surface as negative harm.
         let before = vec![("pg_tup_returned".to_string(), 1_000)];
         let after = vec![("pg_tup_returned".to_string(), 40)];
         assert_eq!(
@@ -4120,9 +3462,6 @@ mod tests {
 
     #[test]
     fn harm_deltas_intersects_counter_names() {
-        // Only counters present in BOTH snapshots are emitted: a metric in only
-        // `before` (probe stopped exposing it) or only `after` (newly appeared)
-        // has no honest delta and is dropped.
         let before = vec![("shared".to_string(), 10), ("only_before".to_string(), 1)];
         let after = vec![("shared".to_string(), 25), ("only_after".to_string(), 7)];
         assert_eq!(
@@ -4131,7 +3470,7 @@ mod tests {
         );
     }
 
-    /// The run's plan refuses a Lossy column only under --strict, and a missing plan only under --strict.
+    /// The run's plan refuses a Lossy column only under --strict.
     #[test]
     fn plan_open_columns_refuses_only_under_strict() {
         use crate::types::{RivetType, SourceColumn, TypeFidelity, TypeMapping};
@@ -4155,8 +3494,6 @@ mod tests {
             "{err:#}"
         );
     }
-
-    // ── guards a live mutation sweep left unpinned ──────────────────────────
 
     /// A source that answers the run's metadata probes from a script.
     struct ScriptedSource {
@@ -4205,7 +3542,7 @@ mod tests {
         }
     }
 
-    /// Every signature phrase names its class on its own, in any letter case; the bare error number 3024 is left out on purpose.
+    /// Every signature phrase names its class on its own, in any letter case.
     #[test]
     fn each_error_signature_alone_names_its_class() {
         for (phrase, class) in [
@@ -4252,7 +3589,7 @@ mod tests {
         }
     }
 
-    /// Each keyed strategy is named with the column it pages by; a strategy without a key has no descriptor.
+    /// Each keyed strategy is named with the column it pages by.
     #[test]
     fn the_key_descriptor_names_the_column_each_strategy_pages_by() {
         use crate::config::IncrementalCursorMode;
@@ -4288,7 +3625,7 @@ mod tests {
         assert_eq!(key_descriptor_json(&plan, Some("bigint")), None);
     }
 
-    /// A keyset run's metric row carries its page size and its fan-out, which is never below one worker.
+    /// A keyset run's metric row carries its page size and its fan-out.
     #[test]
     fn a_keyset_runs_metric_row_carries_its_page_size_and_its_fan_out() {
         let keyset = |parallel| {
@@ -4360,7 +3697,7 @@ mod tests {
         }
     }
 
-    /// The run-level snapshot is the engine's counters under their own names, and nothing when the source refuses the connection.
+    /// The run-level snapshot is the engine's counters under their own names.
     #[test]
     fn the_harm_snapshot_is_the_sources_named_counters_and_nothing_when_it_cannot_connect() {
         use crate::connect::postgres::wire_recorder::{Answer, answering_server};
@@ -4386,7 +3723,7 @@ mod tests {
         assert_eq!(harm_snapshot(&source), Some(counters));
     }
 
-    /// The open probe records the key column's own native type, the server context, the mappings, the schema and, only when asked, the primary key.
+    /// The open probe records the key column's own native type, the server context, the mappings.
     #[test]
     fn the_open_probe_records_the_key_columns_own_native_type() {
         use crate::types::{RivetType, SourceColumn, TypeMapping};
@@ -4432,7 +3769,7 @@ mod tests {
         assert_eq!(probed(false).0.open_primary_key, None);
     }
 
-    /// The count is read on the held connection and compared with the committed parts' rows, or with the run's rows when no part is recorded; a count that cannot be read is a reason, never a verdict.
+    /// The count is read on the held connection and compared with the committed parts' rows.
     #[test]
     fn the_reconcile_count_is_read_on_the_held_connection_and_compared_with_what_was_committed() {
         use crate::pipeline::run::run_tail_tests::{

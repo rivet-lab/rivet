@@ -212,8 +212,11 @@ did not grow); live state still equals the source.
   baseline row to supersede its older changes; the load refuses without the
   truncate); then re-run. The full list:
   [re-baseline](reference/cdc-failure-modes.md#the-shape-of-every-recovery). Deleting the checkpoint alone is refused once a baseline completed
-  (prior-run evidence exists); on an export without a baseline it re-anchors
-  with a warning and accepts the gap.
+  (prior-run evidence exists), and on an export without a baseline once the state
+  DB records that the export wrote the checkpoint on an earlier run
+  (`RIVET_SOURCE_CDC_CHECKPOINT_INVALID`, exit 5): restore the file, or accept the gap with
+  `rivet state reset -c <config> -e <export>`. Only an export the state DB has never seen
+  anchors at the current position, with a warning.
 - **MySQL checkpoint used against another server**: refused on purpose; same
   order on the new host.
 - **`rivet validate --config cfg.yaml`** certifies both legs — the baseline under

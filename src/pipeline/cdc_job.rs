@@ -1,11 +1,4 @@
 //! CDC export runner — the `mode: cdc` arm of `rivet run`.
-//!
-//! Runs a change stream configured from the YAML (not the `rivet cdc` CLI),
-//! writes typed Parquet/CSV through the commit-seam sink, and records a
-//! `RunSummary` + metric row so a CDC export appears in `rivet metrics` and the
-//! run aggregate exactly like a batch export. Mirrors `run_export_job`'s contract
-//! — `(Result<()>, RunSummary)`, metric recorded internally — so the orchestrator
-//! treats a CDC export like any other.
 
 use super::cdc::{CdcCapture, run_capture};
 use super::finalize::finalize_run_report;
@@ -16,54 +9,17 @@ use crate::error::Result;
 use crate::source::cdc::{CdcConfig, CdcEngine, CdcEngineOpts, DrainMode};
 use crate::state::StateStore;
 
-/// The byte-rollover budget one export runs under — the NAMED supplier of the
-/// sink's `rollover_memory_bytes`, extracted so the offline gate can grade it.
-///
-/// Inline, this decision was ungraded BY CONSTRUCTION: the default is chosen to
-/// be inert on narrow rows (no live fixture trips it), the sink's byte-cap test
-/// sets the field directly (bypassing this supplier — the fabricated-input
-/// seam), and the expression sat inside live-only glue. A regression to
-/// `.map(..)` alone would ship green everywhere and silently remove the memory
-/// ceiling for wide-row streams.
-///
-/// `.or(..)`, never an unconditional assign: an ABSENT `rollover_memory_mb`
-/// gets the protective default rather than reading as "no budget" — the
-/// config-clobber shape. The multiply cannot overflow here: validation refuses
-/// any `mb` whose byte count would (`validate_cdc_resource_conflicts`).
+/// The byte-rollover budget one export runs under.
 pub(crate) fn cdc_rollover_memory_bytes(mb: Option<usize>) -> Option<usize> {
     mb.map(|mb| mb * 1024 * 1024)
         .or(Some(DEFAULT_CDC_ROLLOVER_MEMORY_BYTES))
 }
 
 /// Default memory budget for one CDC part — the byte half of `rollover`.
-///
-/// 256 MiB is chosen to be INERT on the common shape and binding on the pathological
-/// one: the default `rollover: 100_000` narrow events costs ~77 MB (measured 772
-/// B/event), so this never fires there, while a wide-row table that would otherwise
-/// buffer gigabytes now rolls a part instead. Raising it is a config line; the
-/// absence of any default was a memory ceiling that only existed for narrow rows.
-///
-/// It bounds the ORDINARY path. A single transaction larger than the budget still
-/// buffers whole — the sink may not roll mid-transaction — which is the separate
-/// problem `RIVET_CDC_MAX_TX_BYTES` refuses and the soak stand measures.
 pub(crate) const DEFAULT_CDC_ROLLOVER_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 
-/// Run one `mode: cdc` export end to end, then record + report it like a batch
-/// export. The metric row is written here (as `run_export_job` does); the
-/// `RunSummary` is returned for the run aggregate.
-/// The run-start warning for a CDC export that requested batch-only
-/// `meta_columns` (`exported_at` / `row_hash`). CDC has its own sink and schema
-/// (`__op`/`__pos`/`__seq` + the typed after-image), so those columns are NOT
-/// injected — silently, before this. `None` when no meta column was requested.
-/// Pure so it can be unit-tested without a live stream (mirrors
-/// `detect::sparse_chunk_warning`).
+/// Run one `mode: cdc` export end to end, then record + report it like a batch export.
 fn cdc_ignored_meta_warning(export: &ExportConfig) -> Option<String> {
-    // Narrowed to `exported_at`. `row_hash` USED to be listed here and is not
-    // any more: the CDC sink now emits it over the same data columns the
-    // snapshot leg hashes (§5h), because both legs write one `__changes` log
-    // and a column only one of them produces leaves half the table NULL.
-    // `exported_at` stays ignored — it is a per-RUN stamp, and a changelog row
-    // belongs to the run that captured it, not to the one that backfilled it.
     export.meta_columns.exported_at.then(|| {
         format!(
             "export '{}': mode: cdc ignores meta_columns.exported_at — the CDC output carries \
@@ -106,7 +62,7 @@ fn cdc_ignored_knobs_warning(export: &ExportConfig) -> Option<String> {
     })
 }
 
-/// The run-start warning for `run --validate` / `--reconcile` on a CDC export: the drain skips both.
+/// The run-start warning for `run --validate` / `--reconcile` on a CDC export.
 pub(super) fn cdc_ignored_run_flags_warning(
     export: &str,
     validate: bool,
@@ -135,8 +91,6 @@ pub(super) fn run_cdc_export(
     strict: bool,
     grants: Option<RunGrants>,
 ) -> (Result<()>, RunSummary) {
-    // No-silent-config-drop: warn (don't hard-fail — a shared default may set
-    // meta_columns for a mixed batch+CDC config) that the request has no effect.
     for msg in [
         cdc_ignored_meta_warning(export),
         cdc_ignored_knobs_warning(export),
@@ -149,23 +103,6 @@ pub(super) fn run_cdc_export(
     let started = std::time::Instant::now();
     let run_id = super::summary::fresh_run_id(&export.name);
 
-    // Resolve `{date}`/`{export}`/… ONCE, here, before anything reads a prefix.
-    //
-    // The batch path gets this for free and that is exactly why the gap was
-    // invisible: every batch runner writes to `plan.destination`, and
-    // `plan::build` expands the templates while building it
-    // (`expand_destination_templates`). CDC returns from `job.rs` BEFORE
-    // `build_plan` ever runs, so it had no plan and no expansion — the drain
-    // called `create_destination` on the RAW config and created a directory
-    // named, literally, `{date}`. Meanwhile `rivet validate` resolves the same
-    // template to today's date (`validate_cmd.rs`, whose comment asserts this
-    // is "the same shape `rivet run` resolves at write time" — true for batch,
-    // false here) and reported an empty destination over a stream that had
-    // captured everything correctly.
-    //
-    // `for_today` is deliberately the SAME constructor the reader uses. The
-    // load-bearing property is not which date lands in the path — it is that
-    // the writer and the reader compute it the same way.
     let expanded_export = {
         let ctx = crate::destination::placeholder::PlaceholderContext::for_today(&export.name);
         let mut e = export.clone();
@@ -174,12 +111,6 @@ pub(super) fn run_cdc_export(
     };
     let export = &expanded_export;
 
-    // Mark the CDC run `running` in the central ledger so `gc_orphans` never
-    // deletes the live stream's in-flight `__changes` parts. The prefix is the
-    // export's BASE (a multi-table stream writes `<base>/<table>/`); the load
-    // gc's a per-table child, which the ledger's OVERLAP match still sees. A
-    // daemon stream stays `running` for its lifetime (correct — it is live);
-    // `until_current` finishes below. Best-effort.
     let started_at = chrono::Utc::now().to_rfc3339();
     let run_prefix = super::finalize::destination_uri_for_manifest(&export.destination);
     if let Err(e) = state.begin_run_under_lease(
@@ -191,39 +122,13 @@ pub(super) fn run_cdc_export(
     ) {
         log::warn!("cdc: run-status begin failed for '{}': {e:#}", export.name);
     }
-    // NO bucket-side running marker here — deliberately, and the gap is REAL:
-    // a cross-host `gc_orphans` (whose `StateStore::open` creates a fresh empty
-    // DB beside the load config) still sees a live stream's unmanifested parts
-    // as crash debris. A marker was written here and REVERTED: the sink names
-    // its per-roll durability manifest with the SAME
-    // `run_unique_manifest_name(run_id)` at the SAME prefix, so the first
-    // commit-boundary roll physically overwrote the marker — the protection
-    // lasted exactly one rollover (proven live: after a `rollover: 1` run the
-    // prefix held only the sink's `success` manifest under the marker's own
-    // name). Multi-table is worse: the marker sits at the base prefix while the
-    // terminal manifests land in per-table sub-prefixes, so it is superseded by
-    // its OWN run and swept, and the sub-prefixes never get a marker at all.
-    //
-    // Closing this needs a marker key the sink cannot collide with, a
-    // supersession rule that exempts a run from retiring its own marker, and a
-    // marker per destination prefix. That is a design change, not a call site —
-    // tracked as an open finding rather than shipped half-working, because a
-    // marker that self-destructs is worse than none: it retires the known issue
-    // while leaving the hole open.
 
     let read_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let config_dir = std::path::Path::new(config_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    // The same peak-RSS bracket the batch tail keeps (`job.rs`): a stream's
-    // memory is the rollover buffer + the spill, and the ledger recorded 0.
     let rss_before = crate::resource::get_rss_mb();
     let rss_sampler = crate::resource::RssPeakSampler::start(rss_before, 100);
-    // Open forensics + the source-harm bracket, as the batch tail takes them: a
-    // failed drain still records the server it ran against and what it cost it.
-    // ONE metadata connection for the whole run: forensics, both harm snapshots and the
-    // schema resolver share it (it idles through the drain). Measured before this: 10-13
-    // new source connections per bounded run, each paying the server's session setup.
     let mut meta = crate::source::create_source(&config.source).ok();
     let server_context = meta.as_mut().and_then(|s| s.server_context());
     let harm = super::job::HarmBracket::open_on(meta.as_deref_mut());
@@ -244,19 +149,6 @@ pub(super) fn run_cdc_export(
         .max(crate::resource::get_rss_mb())
         .max(rss_before) as i64;
 
-    // The manifests describe what was made DURABLE; `outcome` says whether the
-    // run finished. They are independent, and the totals come from the
-    // manifests on BOTH paths.
-    //
-    // This used to hard-code 0 / 0 / 0 on the error path. The CDC drain rolls
-    // (flush → per-roll manifest → checkpoint → ack) many times per run, so a
-    // run that captured and ACKED N rows and then failed reported "failed,
-    // 0 rows, 0 files" while the object store held the parts and the source was
-    // advanced past them. Nothing was lost — but an operator reading that
-    // concludes nothing was captured, and re-runs expecting to recapture
-    // changes the log no longer has. Any tool summing metric rows under-counted
-    // by the same amount. Known over-count: parts of the failing roll are in
-    // these manifests though never acked, so the next run re-captures their rows.
     let (manifests, outcome) = result;
     let bytes_read = read_bytes.load(std::sync::atomic::Ordering::Relaxed);
     let bytes: u64 = manifests
@@ -286,19 +178,10 @@ pub(super) fn run_cdc_export(
         log::warn!("{line}");
     }
 
-    // Transition the ledger to the CDC run's terminal status (mirrors the batch
-    // path). A crash before here leaves the row `running`; the next CDC run
-    // supersedes it. Best-effort.
     if let Err(e) = state.finish_run(&run_id, &summary.status, &chrono::Utc::now().to_rfc3339()) {
         log::warn!("cdc: run-status finish failed for '{}': {e:#}", export.name);
     }
 
-    // Record the run in the journal (so `rivet journal` shows a CDC run like a
-    // batch one): one FileWritten per committed part, then the RunCompleted outcome.
-    // Unconditionally: a part that is durable happened, whatever the run's
-    // verdict. Gating this on `Ok` left a failed run with no FileWritten events
-    // at all, so `rivet journal` showed nothing to recover from — the record of
-    // the debris is exactly what makes it discoverable.
     for (i, part) in manifests.iter().flat_map(|m| &m.parts).enumerate() {
         summary
             .journal
@@ -330,14 +213,7 @@ pub(super) fn run_cdc_export(
     (outcome, summary)
 }
 
-/// The anchor half of a first CDC run, run by the orchestrator BEFORE the
-/// drain. Returns the synthesized `mode: full` exports still pending (their
-/// `snapshot/_SUCCESS` marker absent), after ensuring the anchor exists.
-///
-/// `snapshot` anchors, then snapshots every table. Anchor-BEFORE-snapshot is the
-/// whole point: a change landing mid-snapshot is then also in the change stream,
-/// an overlap the PK+`__op` dedupe absorbs, never a gap.
-/// The refusal of a SQL Server CDC export whose `table: t` and capture instance `ci` (emitting `schema.table`) name different relations.
+/// The anchor half of a first CDC run, run by the orchestrator BEFORE the drain.
 fn capture_instance_mismatch(
     export: &str,
     t: &str,
@@ -368,11 +244,82 @@ pub(super) fn claim_checkpoint(config_path: &str, export: &ExportConfig) -> Resu
     crate::source::cdc::checkpoint_identity::claim_checkpoint(&ckpt, config, &export.name)
 }
 
+/// The checkpoint path and state keys of a file-anchored stream, or `None`.
+fn file_anchor_of(
+    config: &Config,
+    export: &ExportConfig,
+    config_path: &str,
+) -> Option<(std::path::PathBuf, crate::state::ProgressKey, String)> {
+    if CdcEngine::from(config.source.source_type) == CdcEngine::Postgres {
+        return None;
+    }
+    let raw = export.cdc.as_ref()?.checkpoint.as_deref()?;
+    let dir = std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let key = crate::state::ProgressKey::cdc(
+        &export.name,
+        &config.source.state_key(),
+        &crate::config::cdc_captured_tables(export),
+    );
+    Some((
+        crate::source::cdc::resolve_checkpoint(raw, dir),
+        key,
+        export.destination.state_key(),
+    ))
+}
+
+/// Refuse a run whose recorded checkpoint file is gone; writes nothing.
+pub(super) fn refuse_lost_file_anchor(
+    config: &Config,
+    export: &ExportConfig,
+    state: &StateStore,
+    config_path: &str,
+) -> Result<()> {
+    let Some((ckpt, key, dest)) = file_anchor_of(config, export, config_path) else {
+        return Ok(());
+    };
+    match crate::source::cdc::Position::load(&ckpt) {
+        Ok(None) if state.captured_tables(&key, &dest)?.is_some() => {
+            Err(crate::source::cdc::checkpoint_identity::lost_file_anchor(
+                CdcEngine::from(config.source.source_type).label(),
+                &ckpt,
+                config_path,
+                &export.name,
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Record after a successful run that the stream's checkpoint file exists.
+pub(super) fn record_file_anchor(
+    config: &Config,
+    export: &ExportConfig,
+    state: &StateStore,
+    config_path: &str,
+    outcome: &Result<()>,
+) {
+    let Some((ckpt, key, dest)) =
+        file_anchor_of(config, export, config_path).filter(|_| outcome.is_ok())
+    else {
+        return;
+    };
+    if matches!(crate::source::cdc::Position::load(&ckpt), Ok(Some(_)))
+        && let Err(e) = state.record_captured_tables(&key, &dest)
+    {
+        log::warn!(
+            "cdc: could not record the anchor of export '{}' in the state DB: {e:#}",
+            export.name
+        );
+    }
+}
+
 /// The grants every part of a `columns_from: grants` run takes, read once before the anchor.
 pub(super) type RunGrants =
     std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
 
-/// Read the account's grants once for a `columns_from: grants` MySQL CDC run; `None` without the policy.
+/// Read the account's grants once for a `columns_from: grants` MySQL CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);
@@ -408,10 +355,6 @@ pub(super) fn initial_snapshot_pending(
     grants: Option<&RunGrants>,
 ) -> Result<Vec<ExportConfig>> {
     let cdc = export.cdc.clone().unwrap_or_default();
-    // Two ways to ask for a baseline, one step: `initial: snapshot` synthesizes the
-    // read, `backfill:` borrows it from an export that already describes the table.
-    // Neither ⇒ "capture changes only", which needs no anchor step and no legs.
-    // (Config load refuses both together — one baseline per anchor.)
     if cdc.captures_changes_only() {
         return Ok(Vec::new());
     }
@@ -423,11 +366,6 @@ pub(super) fn initial_snapshot_pending(
         .clone()
         .unwrap_or_else(|| crate::config::DEFAULT_PG_SLOT.to_string());
 
-    // Each table's snapshot destination + whether its snapshot is already done.
-    // Scanned BEFORE the anchor step, because a completed snapshot is resume
-    // EVIDENCE: a missing server-side anchor after one must fail loud, never
-    // silently re-anchor at "current" (which would skip every change since the
-    // drop while reporting success — finding #28).
     let (tables, multi) = match (&export.tables, &export.table) {
         (Some(ts), _) => (ts.clone(), true),
         (None, Some(t)) => (vec![t.clone()], false),
@@ -437,28 +375,12 @@ pub(super) fn initial_snapshot_pending(
             export.name
         ),
     };
-    // The relation the SNAPSHOT must read, when the engine can name it from a
-    // catalog rather than from the configured string. On SQL Server the capture
-    // instance settles it outright, and the two readings disagreed in silence: the
-    // baseline was `SELECT … FROM <configured>` resolved in the connection's DEFAULT
-    // schema, so a same-named decoy's rows were deposited in the captured table's
-    // own prefix (MEASURED: `{"id":900,"amount":42,"dbo_only":7}` for a relation
-    // holding neither that id nor those columns, `status: success`). The LABEL stays
-    // the configured string — both legs share one prefix and the snapshot marker is
-    // keyed by it — while the READ follows the catalog.
     let engine = CdcEngine::from(config.source.source_type);
     let catalog_read: Option<String> = match (engine, &cdc.capture_instance) {
         (CdcEngine::Mssql, Some(ci)) => {
             let Some((schema, table)) =
                 crate::source::mssql::cdc::source_object_of_capture_instance(&url, ci, tls)?
             else {
-                // The catalog has no such capture instance. `open` bails on this
-                // too — but the SNAPSHOT leg runs, writes, and MARKS ITSELF DONE
-                // before `open` is ever called, so deferring to it means a typo'd
-                // instance deposits a baseline read from whatever the configured
-                // name resolves to and then never re-reads (round-4, DEMONSTRATED:
-                // correcting the typo left the fabricated row in place and the real
-                // rows never backfilled). Refuse where it is still cheap.
                 crate::rivet_bail!(
                     crate::error::codes::SOURCE_CDC_PREREQUISITE,
                     "sqlserver cdc: export '{}' names capture instance '{ci}', which \
@@ -470,11 +392,6 @@ pub(super) fn initial_snapshot_pending(
                     tables.first().map(String::as_str).unwrap_or("the table"),
                 );
             };
-            // And the configured name must AGREE with the catalog, by the same
-            // predicate the sink routes by. `open` checks this; the snapshot leg had
-            // no routing check at all, so a `table:` contradicting its capture
-            // instance backfilled one relation into the other's prefix and only then
-            // failed the drain.
             for t in &tables {
                 if crate::source::cdc::sink::table_matches(CdcEngine::Mssql, t, &schema, &table) {
                     continue;
@@ -491,7 +408,6 @@ pub(super) fn initial_snapshot_pending(
         }
         _ => None,
     };
-    // MySQL: a bare name's baseline reads the database the stream routes it to (one rule).
     let mysql_reads = match engine {
         CdcEngine::Mysql => {
             crate::source::mysql::cdc::MysqlChangeStream::baseline_reads(&url, tls, &tables)?
@@ -508,9 +424,6 @@ pub(super) fn initial_snapshot_pending(
         };
         let snap_dcfg = dest_for_table(&table_dcfg, "snapshot");
         let dest = crate::destination::create_destination(&snap_dcfg)?;
-        // The state DB is authoritative (survives `cleanup_source` wiping the
-        // bucket); the GCS `snapshot/_SUCCESS` marker stays a legacy co-signal so
-        // pre-v14 runs and setups without state still skip correctly.
         let done = state.snapshot_done(&export.name, t, &snap_dcfg.state_key())?
             || dest.head("_SUCCESS")?.is_some();
         table_dests.push((
@@ -551,12 +464,6 @@ pub(super) fn initial_snapshot_pending(
         );
     }
 
-    // The pure decision: which tables still need a snapshot, and whether prior
-    // evidence forces the fail-loud anchor guard.
-    // A corrupt/truncated checkpoint must FAIL LOUD here (#99), not be swallowed
-    // by `.ok()` into "no checkpoint" — that let PG CDC treat a run as a fresh
-    // first anchor and re-create a dropped slot at 'current', permanently skipping
-    // every change since the loss (the anti-gap guard never fired).
     let ckpt_path = cdc
         .checkpoint
         .as_deref()
@@ -566,8 +473,6 @@ pub(super) fn initial_snapshot_pending(
         None => false,
     };
     let (pending_idx, prior) = snapshot_plan(&done_flags, ckpt_resume);
-    // A source the drain's open would refuse is refused here, before the anchor and the
-    // snapshot legs write anything (a MySQL 5.7 run left a part and a checkpoint behind).
     if writes_before_the_drain(&pending_idx) {
         engine.refuse_unmet_prerequisites(
             &url,
@@ -578,15 +483,9 @@ pub(super) fn initial_snapshot_pending(
         )?;
     }
 
-    // The pairing, resolved by the same function config load already admitted — so
-    // a reference the run would reject cannot have reached this point, and the
-    // recipe-vs-stream type conflict was refused there too (`Config::validate`).
     let recipes = crate::config::resolve_backfill(export, &config.exports)
         .map_err(|why| crate::error::coded(crate::error::codes::CONFIG_CDC_SHAPE_INVALID, why))?;
 
-    // The anchor — one entry point; `ensure_anchor` picks the engine's
-    // mechanism (idempotent: a present anchor is never moved). After the refusal
-    // above, so a refused config leaves no slot or checkpoint behind.
     engine.ensure_anchor(
         &url,
         &slot,
@@ -597,18 +496,6 @@ pub(super) fn initial_snapshot_pending(
     )?;
     state.record_captured_tables(&capture, &capture_dest)?;
 
-    // The anchor STRING for the snapshot stamp (round-10 STRUCT): rendered by
-    // the same `Position.0.to_string()` the drain writes into `__pos`, read
-    // from the checkpoint ensure_anchor just persisted. Engines whose anchor
-    // is server-side-only yield None and keep the legacy NULL-`__pos` shape.
-    // HONESTY (round-10 refuter): on PostgreSQL the RECOVERY flow is exactly
-    // that case — the prescribed recovery deletes the checkpoint file and PG's
-    // ensure_anchor never rewrites one (the slot is the anchor; the sink
-    // recreates the file only at first ack, AFTER the snapshots run) — so a
-    // PG re-baseline is never stamped and stays behind the refusal+truncate
-    // guard. The stamp covers checkpointed non-recovery snapshots (a table
-    // added mid-stream) and the MySQL/MSSQL/Mongo/Oracle recovery flows, whose
-    // ensure_anchor persists the pin before the snapshots.
     let anchor_pos = ckpt_path
         .as_deref()
         .and_then(|p| crate::source::cdc::Position::load(p).ok().flatten())
@@ -621,13 +508,6 @@ pub(super) fn initial_snapshot_pending(
         if let Some(recipe) = crate::config::backfill_recipe_for(&recipes, label) {
             apply_backfill_recipe(&mut synth, recipe, export, label)?;
         }
-        // Base-and-buffer layout: the leg's rows become the BASE table, so they carry
-        // the delete flag as data and no `__pos` stamp — the stamp orders rows inside
-        // a changelog the base never joins. Asked of the SAME resolver the load uses
-        // (`load.layout:` written, or derived from `backfill:`), for THIS captured
-        // table: deriving it here from `backfill.is_some()` alone wrote an
-        // `initial: snapshot` baseline under a written `layout: base_buffer` without
-        // the flag column, and `LOAD DATA` filled every row's `__is_deleted` with NULL.
         let base_layout =
             crate::load::plan::resolved_layout(config, export, Some(label)).compacts();
         synth.meta_columns.deleted_flag = crate::load::plan::base_carries_delete_flag(
@@ -644,26 +524,13 @@ pub(super) fn initial_snapshot_pending(
     Ok(pending)
 }
 
-/// Borrow one table's READ from the export that already describes it, keeping the
-/// leg's own identity.
-///
-/// The split is the whole design: the recipe says HOW to read (mode, key, page
-/// size, workers, resume, tuning, column types), the leg keeps WHERE it writes and
-/// WHO it is (name, snapshot prefix, parent, label, format, meta columns). So the
-/// referenced export contributes a strategy, never a second load target — every
-/// load invariant that holds for a synthesized leg holds unchanged for this one.
-///
-/// Types MERGE rather than replace: the recipe's bare keys describe its one table,
-/// and a qualified `"table.column"` key on the CDC export still wins at resolution
-/// (`types::overrides_for_table`). A column both sides declare DIFFERENTLY was
-/// refused at config load (`config::refuse_backfill_type_conflict`).
+/// Borrow one table's READ from the export that already describes it.
 fn apply_backfill_recipe(
     leg: &mut ExportConfig,
     recipe: &ExportConfig,
     cdc_export: &ExportConfig,
     label: &str,
 ) -> Result<()> {
-    // HOW to read — every field the batch planner consults.
     leg.mode = recipe.mode;
     leg.chunk_column = recipe.chunk_column.clone();
     leg.chunk_by_key = recipe.chunk_by_key.clone();
@@ -674,13 +541,9 @@ fn apply_backfill_recipe(
     leg.chunk_checkpoint = recipe.chunk_checkpoint;
     leg.chunk_max_attempts = recipe.chunk_max_attempts;
     leg.parallel = recipe.parallel;
-    // The read's own budget where the recipe declares one; a recipe without a
-    // `tuning:` must not erase the CDC export's (the config-clobber class).
     if recipe.tuning.is_some() {
         leg.tuning = recipe.tuning.clone();
     }
-    // Types: both sides narrowed by the LABEL to bare keys, because the leg reads
-    // by the catalog spelling and would drop a label-cased qualified key.
     let mut columns = crate::types::overrides_for_unit(&recipe.columns, Some(label));
     columns.extend(crate::types::overrides_for_unit(
         &cdc_export.columns,
@@ -690,21 +553,9 @@ fn apply_backfill_recipe(
     Ok(())
 }
 
-/// Synthesize the `mode: full` snapshot export for one CDC table — the batch
-/// leg run BEFORE the CDC drain. Pure (no I/O) so the schema-consistency
-/// invariants below are unit-testable.
-/// Test-only door onto [`synth_snapshot_export`], so the load guard's family
-/// tests can derive the leg's identity from the code that BUILDS it rather than
-/// hand-typing the expected family — the fixture bypass that made the earlier
-/// version of that test green against a product which still mis-folded.
+/// Synthesize the `mode: full` snapshot export for one CDC table.
 #[cfg(test)]
 /// Test door onto [`synth_snapshot_export`], taking BOTH strings.
-///
-/// It took only the one until round-4, and passed it twice — so no unit test could
-/// express LABEL ≠ READ, which is the entire distinction the SQL Server catalog
-/// resolution introduced. That is how a broken snapshot-done key shipped: the
-/// mechanism's activation threshold is two DIFFERENT strings, and every fixture had
-/// one.
 pub(crate) fn synth_snapshot_export_for_test(
     export: &ExportConfig,
     table: &str,
@@ -720,71 +571,26 @@ fn synth_snapshot_export(
     snap_dcfg: &crate::config::DestinationConfig,
 ) -> ExportConfig {
     let mut synth = export.clone();
-    // The leg's family is the PARENT export, recorded here — the one place that
-    // knows, because it is building the name from it.
     synth.snapshot_parent = Some(export.name.clone());
-    // The label travels WITH the leg, so every consumer that must agree with the
-    // configured string can ask for it instead of re-deriving it.
     synth.snapshot_label = Some(table.to_string());
     synth.name = crate::manifest::snapshot_leg_name(&export.name, table);
     synth.mode = crate::config::ExportMode::Full;
-    // The LABEL names the leg (and through it the prefix and the snapshot marker);
-    // the READ names the relation. They differ only where a catalog knows better
-    // than the configured string.
     synth.table = Some(read.to_string());
     synth.tables = None;
     synth.cdc = None;
     synth.destination = snap_dcfg.clone();
-    // NEVER inherit skip_empty: an EMPTY table with skip_empty=true would
-    // write no snapshot/_SUCCESS, so the marker check re-snapshots on
-    // every run forever. An empty snapshot must still complete (manifest +
-    // _SUCCESS with 0 rows) for the handoff to converge.
     synth.skip_empty = false;
-    // NEVER inherit batch meta_columns into the snapshot leg. The snapshot AND
-    // the CDC stream BOTH load into the SAME `<table>__changes` log (the snapshot
-    // rows with __op/__pos/__seq NULL — see load/cdc.rs::dedup_view_sql), and the
-    // current-state view is `SELECT * EXCEPT(__op,__pos,__seq,__rn)` over it. The
-    // CDC sink cannot carry exported_at/row_hash, so injecting them on the
-    // snapshot ONLY gives the snapshot parquet extra columns the CDC parquet
-    // lacks — appending both into one `__changes` table then mismatches, and any
-    // meta column that survived would leak into the current-state view (populated
-    // for backfill rows, NULL for every CDC-updated row). Clearing here keeps both
-    // legs' columns identical; the run-start warn tells the operator the meta
-    // columns are dropped for the whole CDC export.
-    // Only `exported_at` is cleared.
     synth.meta_columns.exported_at = false;
-    // `row_hash` is the EXACT OPPOSITE and is inherited on purpose (it rides
-    // along in the clone above — this line is here to say so, because the
-    // obvious next edit is to clear it alongside `exported_at`). The same
-    // argument that clears the stamp *requires* keeping the hash: both legs
-    // write the same `__changes` log, so a column only one leg produces breaks
-    // them. `exported_at` is producible by the batch leg ALONE, so inheriting it
-    // would desynchronize the two; `_rivet_row_hash` is produced by BOTH (the
-    // CDC sink applies the identical Rust render), so inheriting it is what
-    // keeps them synchronized. Dropping it here would leave every backfilled
-    // row NULL and make the audit's cheap path unusable on exactly the tables
-    // it matters most for.
     debug_assert_eq!(synth.meta_columns.row_hash, export.meta_columns.row_hash);
     synth
 }
 
-/// Whether this run writes (a pending snapshot leg) before the drain opens, so the open's refusals must run first.
+/// Whether this run writes (a pending snapshot leg) before the drain opens.
 fn writes_before_the_drain(pending_idx: &[usize]) -> bool {
     !pending_idx.is_empty()
 }
 
-/// The pure `initial: snapshot` decision, split out of the I/O in
-/// [`initial_snapshot_pending`] so it can be unit-tested. Given, per table in
-/// order, whether its snapshot is already `done` (state DB OR the legacy GCS
-/// marker) and whether a checkpoint position survives (`ckpt_resume`), returns
-/// the indices still PENDING a snapshot and the prior-run evidence the anchor step
-/// must treat a missing server-side anchor against.
-///
-/// A `done` snapshot is never re-run — the state DB remembers it even after
-/// `cleanup_source` wiped the bucket marker. The evidence is set when ANY of it
-/// exists — a live checkpoint OR any done snapshot — so a
-/// lost server-side anchor fails LOUD instead of silently re-anchoring at
-/// "current" (finding #28).
+/// The pure `initial: snapshot` decision.
 fn snapshot_plan(
     done_flags: &[bool],
     ckpt_resume: bool,
@@ -808,14 +614,9 @@ fn rejoins_over_a_baseline(captured: &[String], tables: &[String], done: &[bool]
 
 pub(crate) use crate::destination::dest_for_table;
 
-/// Build the capture from the config + export and drive it through the shared
-/// [`crate::source::cdc::run_capture`] (the same assembler the `rivet cdc` CLI
-/// uses). Returns the manifests (one per captured table) so the caller records
-/// the metric + journal.
-/// Returns what the drain made DURABLE paired with its outcome — never one
-/// without the other. See `sink::run_to_files`.
+/// Build the capture from the config and export; drive it through [`crate::source::cdc::run_capture`].
 #[allow(clippy::too_many_arguments)]
-/// The schema-baseline key of one captured table: the export alone, or `export/table` when one stream captures several.
+/// The schema-baseline key of one captured table.
 fn cdc_drift_key(export: &str, table: &str, multi: bool) -> String {
     if multi {
         format!("{export}/{table}")
@@ -841,8 +642,6 @@ fn run_cdc_inner(
         Err(e) => return (Vec::new(), Err(e)),
     };
     let cdc = export.cdc.clone().unwrap_or_default();
-    // `tables:` (multi-table, one stream) or the single `table:` — validation
-    // guarantees exactly one of them is set.
     let (tables, multi) = match (&export.tables, &export.table) {
         (Some(ts), _) => (ts.clone(), true),
         (None, Some(t)) => (vec![t.clone()], false),
@@ -856,7 +655,6 @@ fn run_cdc_inner(
             );
         }
     };
-    // Per-table destinations must outlive the borrowed CaptureOutputs.
     let mut wired: Vec<(String, Box<dyn crate::destination::Destination>, String)> =
         Vec::with_capacity(tables.len());
     for t in &tables {
@@ -876,9 +674,6 @@ fn run_cdc_inner(
             .unwrap_or_default();
         wired.push((t.clone(), dest, uri));
     }
-    // Finding #44, early check: refuse BEFORE the first part lands if a prefix
-    // belongs to the other pipeline shape (config error, fail the run cleanly —
-    // the write-seam guard stays as the backstop). One read per table, fanned out.
     if let Err(e) = crate::workers::run_each(&wired, |(_, dest, _)| {
         crate::manifest::guard_manifest_mode(dest.as_ref(), "cdc")
     })
@@ -887,12 +682,6 @@ fn run_cdc_inner(
     {
         return (Vec::new(), Err(e));
     }
-    // `columns:` type overrides, narrowed per table: bare keys apply to every
-    // captured table; qualified keys ("table.column") only to theirs, winning
-    // over bare — so one table's override can never bleed into a same-named
-    // column elsewhere. The recipes' declarations ride along, qualified to their
-    // tables: the baseline leg wrote its Parquet with them, and the stream writes
-    // into the same `<table>__changes`.
     let columns = crate::config::effective_columns(export, &config.exports);
     let all_overrides = match crate::plan::build::parse_column_overrides_pub(&columns, &export.name)
     {
@@ -919,16 +708,7 @@ fn run_cdc_inner(
         .collect();
     let now = chrono::Utc::now().to_rfc3339();
 
-    // `until_current` defaults to `true` (bounded, scheduler-friendly). An explicit
-    // `false` opts into a long-lived continuous stream — surface it so it is a
-    // deliberate choice, never a silent never-terminating run.
     if cdc.runs_until_stopped() {
-        // Engine-specific, because the promise is: MySQL blocks on the binlog and
-        // genuinely stays up, while the POLL adapters (PostgreSQL, SQL Server)
-        // only lose their open-time ceiling and still exit on catch-up — the
-        // `DrainMode` doc's "an outer loop re-wraps them" describes a loop that
-        // does not exist. Telling a PG operator the run "never exits on its own"
-        // sent them away from the supervisor they actually need.
         let shape = match config.source.source_type {
             crate::config::SourceType::Mysql => "blocks on the binlog and stays up until stopped",
             crate::config::SourceType::Mongo => {
@@ -975,7 +755,6 @@ fn run_cdc_inner(
                         server_id: cdc
                             .server_id
                             .unwrap_or(crate::config::DEFAULT_MYSQL_SERVER_ID),
-                        // The same strings the sink will route by — see the field's doc.
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
                         resolved_grants: grants,
                     },
@@ -984,12 +763,10 @@ fn run_cdc_inner(
                             .slot
                             .clone()
                             .unwrap_or_else(|| crate::config::DEFAULT_PG_SLOT.to_string()),
-                        // The same strings the sink will route by — see the field's doc.
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
                     },
                     crate::config::SourceType::Mssql => CdcEngineOpts::Mssql {
                         capture_instance: cdc.capture_instance.clone(),
-                        // The same strings the sink will route by — see the field's doc.
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
                     },
                     crate::config::SourceType::Oracle => CdcEngineOpts::Oracle {
@@ -1007,15 +784,6 @@ fn run_cdc_inner(
             format: export.format,
             max_events: cdc.max_events,
             rollover: cdc.rollover.unwrap_or(100_000),
-            // `.or(...)`, never an unconditional assign: an ABSENT `rollover_memory_mb`
-            // must get the protective default, not be read as "no budget" — the
-            // config-clobber shape that once turned a profile's memory cap into
-            // `None` and tripled RSS.
-            //
-            // A DEFAULT at all, because `rollover` alone bounds ROWS and memory is
-            // what runs out: 100_000 narrow events is ~77 MB and 100_000 wide ones is
-            // unbounded, so the row count is a budget only for one row width. Whichever
-            // limit is reached first rolls the part.
             rollover_memory_bytes: cdc_rollover_memory_bytes(cdc.rollover_memory_mb),
             run_id: run_id.to_string(),
             started_at: now,
@@ -1028,8 +796,7 @@ fn run_cdc_inner(
     )
 }
 
-/// Build the per-run summary (mirrors `synthetic_failed_summary`'s shape, for a
-/// CDC run). CDC has no plan/tuning/cursor, so those fields default.
+/// Build the per-run summary (mirrors `synthetic_failed_summary`'s shape, for a CDC run).
 #[allow(clippy::too_many_arguments)]
 fn cdc_summary(
     run_id: &str,
@@ -1042,8 +809,6 @@ fn cdc_summary(
     duration_ms: i64,
     error_message: Option<String>,
 ) -> RunSummary {
-    // Only the fields a CDC run has; the batch-specific rest (cursor, quality,
-    // chunk, reconcile, …) stay at RunSummary::default() (None / 0 / empty).
     RunSummary {
         cursor_column: None,
         cursor_low: None,
@@ -1067,17 +832,12 @@ fn cdc_summary(
     }
 }
 
-/// Write the `export_metrics` row (built directly — no plan coupling, unlike the
-/// batch `build_metric_row`) so a CDC run is queryable like a batch run.
-/// The CDC `export_metrics` row, extracted PURE so its field mapping (notably
-/// bytes_read — #196) is unit-tested without a live state store / Config.
+/// Write the `export_metrics` row.
 fn cdc_metric_row(
     summary: &RunSummary,
     source_type: Option<String>,
     destination_type: Option<String>,
 ) -> crate::state::MetricRow {
-    // Only the fields a CDC run actually has; the batch-specific rest (chunk_size,
-    // cursor, quality, …) stay at their MetricRow::default() (None / 0).
     crate::state::MetricRow {
         export_name: summary.export_name.clone(),
         run_id: summary.run_id.clone(),
@@ -1097,12 +857,6 @@ fn cdc_metric_row(
         destination_type,
         rivet_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         longest_chunk_ms: summary.journal.longest_chunk_ms(),
-        // NOT batch-specific, unlike the chunk/cursor/quality fields above it:
-        // `classify_error_message` is pure, and `cdc_summary` already fills
-        // `error_message`, so a CDC failure can be grouped exactly like a batch
-        // one. Without this every CDC row's `error_class` was NULL and CDC
-        // failures grouped into nothing — the hand-grouping this column exists
-        // to replace (see job.rs, the 0.21.2 field post-mortem classes).
         error_class: summary
             .error_message
             .as_deref()
@@ -1129,14 +883,122 @@ fn record_metric(state: &StateStore, config: &Config, export: &ExportConfig, sum
 #[cfg(test)]
 mod tests {
 
-    /// `resolve_checkpoint`'s three cases, each named by a mutant that survived.
-    ///
-    /// The function is pure apart from two `exists()` probes, and it had only LIVE
-    /// coverage — so `replace -> PathBuf with Default::default()`, `delete !` and
-    /// `&& -> ||` all sailed through the offline gate. It decides where a resume
-    /// looks for its position, so a wrong answer re-anchors the stream at NOW.
-    /// The run's claim reads the export's `cdc.checkpoint` against its config's directory: a second
-    /// config of the directory naming the same file is refused by code.
+    /// A `mode: cdc` config in `dir` with checkpoint `./cdc/o.ckpt`; its path, config and export.
+    fn anchored(
+        dir: &std::path::Path,
+        source_type: &str,
+        out: &str,
+    ) -> (String, crate::config::Config, crate::config::ExportConfig) {
+        let yaml = format!(
+            "source:\n  type: {source_type}\n  url: \"{source_type}://u:p@localhost/app\"\nexports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./cdc/o.ckpt\n    \
+             destination: {{ type: local, path: {out} }}\n"
+        );
+        let path = dir.join("rivet.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let path = path.display().to_string();
+        let mut config = crate::config::Config::load(&path).unwrap();
+        let export = config.exports.remove(0);
+        (path, config, export)
+    }
+
+    /// Write a checkpoint at `cdc/o.ckpt`.
+    fn write_checkpoint(dir: &std::path::Path) {
+        crate::source::cdc::Position::new(serde_json::json!({"file": "bin.000001", "pos": 4}))
+            .save(&dir.join("cdc/o.ckpt"))
+            .unwrap();
+    }
+
+    /// A first run anchors; the loss of a recorded checkpoint is refused on every later run.
+    #[test]
+    fn a_recorded_file_anchor_that_is_gone_is_refused_and_a_first_run_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = anchored(dir.path(), "mysql", "./out");
+        let state = StateStore::open_in_memory().unwrap();
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+        write_checkpoint(dir.path());
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+        std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
+        for _ in 0..2 {
+            let err = super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CHECKPOINT_INVALID", 5);
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("is missing, but the state DB records that export 'o'")
+                    && text.contains(&format!("`rivet state reset -c {path} -e o`"))
+                    && text.contains(crate::source::cdc::checkpoint_identity::RECOVER),
+                "{text}"
+            );
+        }
+        state.reset("o", &config.source.state_key()).unwrap();
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+    }
+
+    /// A run records its checkpoint only when the file exists.
+    #[test]
+    fn a_run_records_its_anchor_only_when_the_checkpoint_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = anchored(dir.path(), "mongo", "./out");
+        let state = StateStore::open_in_memory().unwrap();
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
+        std::fs::create_dir_all(dir.path().join("cdc")).unwrap();
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+        write_checkpoint(dir.path());
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
+        std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
+        let err = super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap_err();
+        assert!(
+            format!("{err:#}").starts_with("mongo cdc: checkpoint"),
+            "{err:#}"
+        );
+    }
+
+    /// The record is keyed per destination; an unparsable checkpoint is left to the run.
+    #[test]
+    fn the_record_binds_to_the_destination_and_leaves_a_corrupt_file_to_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = anchored(dir.path(), "mysql", "./out");
+        let state = StateStore::open_in_memory().unwrap();
+        write_checkpoint(dir.path());
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
+        let mut moved = export.clone();
+        moved.destination = anchored(dir.path(), "mysql", "./elsewhere").2.destination;
+        std::fs::write(dir.path().join("cdc/o.ckpt"), "{not json").unwrap();
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+        std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
+        super::refuse_lost_file_anchor(&config, &moved, &state, &path).unwrap();
+        assert!(super::refuse_lost_file_anchor(&config, &export, &state, &path).is_err());
+    }
+
+    /// Postgres records nothing: its anchor is the slot.
+    #[test]
+    fn postgres_has_no_file_anchor_to_lose() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = anchored(dir.path(), "postgres", "./out");
+        let state = StateStore::open_in_memory().unwrap();
+        write_checkpoint(dir.path());
+        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
+        std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+    }
+
+    /// Only a successful run, and never the check itself, records the anchor.
+    #[test]
+    fn a_failed_run_and_the_check_record_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = anchored(dir.path(), "mysql", "./out");
+        let state = StateStore::open_in_memory().unwrap();
+        write_checkpoint(dir.path());
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+        super::record_file_anchor(&config, &export, &state, &path, &Err(anyhow::anyhow!("x")));
+        std::fs::remove_file(dir.path().join("cdc/o.ckpt")).unwrap();
+        super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
+    }
+
+    /// A second config naming the same checkpoint file is refused by code.
     #[test]
     fn a_run_claims_the_checkpoint_its_export_names() {
         let dir = tempfile::tempdir().unwrap();
@@ -1163,15 +1025,11 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CHECKPOINT_SHARED", 5);
     }
 
+    /// `resolve_checkpoint` prefers the config dir and keeps an existing cwd file.
     #[test]
     fn resolve_checkpoint_prefers_the_config_dir_and_keeps_an_existing_cwd_file() {
         let cfg_dir = tempfile::tempdir().expect("config dir");
         let cwd_dir = tempfile::tempdir().expect("cwd");
-        // A REAL guard. The first version bound `set_current_dir`'s io::Result to
-        // `_guard`, which restores nothing — the whole lib-test process then
-        // finished its life inside a DELETED tempdir, and every concurrently
-        // scheduled test shared the hijacked cwd. Process-global state needs a
-        // restore in Drop, like the repo's EnvGuard.
         struct CwdGuard(std::path::PathBuf);
         impl Drop for CwdGuard {
             fn drop(&mut self) {
@@ -1181,26 +1039,18 @@ mod tests {
         let _guard = CwdGuard(std::env::current_dir().expect("cwd"));
         std::env::set_current_dir(cwd_dir.path()).expect("enter the temp cwd");
 
-        // ABSOLUTE: used verbatim, and never empty — the `-> Default::default()`
-        // mutant returns an empty path, which `Position::load` reads as "no
-        // checkpoint" and re-anchors.
         let abs = cfg_dir.path().join("abs.ckpt");
         assert_eq!(
             crate::source::cdc::resolve_checkpoint(abs.to_str().unwrap(), cfg_dir.path()),
             abs
         );
 
-        // A scaffolded `./x` renders WITHOUT the dot component: `rivet init` writes
-        // `./cdc/<table>.ckpt` into every config, so `/etc/rivet/./cdc/t.ckpt` is what
-        // the re-anchor warning would name — the same file, and unreadable next to an
-        // `ls`. Same components, so this is rendering and not resolution.
         assert_eq!(
             crate::source::cdc::resolve_checkpoint("./cdc/t.ckpt", cfg_dir.path()),
             cfg_dir.path().join("cdc").join("t.ckpt"),
             "a `.` component must not survive into the path rivet reports"
         );
 
-        // RELATIVE with nothing anywhere: the CONFIG's directory, not the CWD.
         assert_eq!(
             crate::source::cdc::resolve_checkpoint("rel.ckpt", cfg_dir.path()),
             cfg_dir.path().join("rel.ckpt"),
@@ -1208,9 +1058,6 @@ mod tests {
              working directory is what made one config look in two places"
         );
 
-        // RELATIVE with a file ALREADY at the CWD-relative location and none at the
-        // config one: the existing file wins, or upgrading strands it and the next
-        // run re-anchors past everything since.
         std::fs::write(cwd_dir.path().join("legacy.ckpt"), b"{}").expect("seed legacy");
         assert_eq!(
             crate::source::cdc::resolve_checkpoint("legacy.ckpt", cfg_dir.path()),
@@ -1219,8 +1066,6 @@ mod tests {
              `!` disappearing, both break this compatibility arm"
         );
 
-        // ...but once the config-relative one exists, it wins even though the CWD
-        // one still does — that is the pair the `&&` guards.
         std::fs::write(cfg_dir.path().join("legacy.ckpt"), b"{}").expect("seed config-side");
         assert_eq!(
             crate::source::cdc::resolve_checkpoint("legacy.ckpt", cfg_dir.path()),
@@ -1231,11 +1076,7 @@ mod tests {
     use super::*;
     use crate::config::{DestinationConfig, DestinationType};
 
-    // A CDC export that requests batch-only meta_columns must WARN (the CDC sink
-    // never injects them), not silently drop the request. Pure fn so this needs
-    // no live stream.
-    /// #196: cdc_summary must carry bytes_read into the RunSummary (the CDC read
-    /// leg). RED against deleting the field (defaults to 0).
+    /// #196: cdc_summary must carry bytes_read into the RunSummary (the CDC read leg).
     #[test]
     fn a_cdc_run_is_recorded_in_the_metrics_ledger() {
         let d = tempfile::tempdir().unwrap();
@@ -1264,22 +1105,10 @@ mod tests {
         assert_eq!(s.bytes_written, 5_000);
     }
 
-    /// A CDC failure must GROUP like a batch one. `error_class` is not
-    /// batch-specific — `classify_error_message` is pure and `cdc_summary`
-    /// already fills `error_message` — yet every CDC row shipped it NULL, so CDC
-    /// failures grouped into nothing and had to be sorted by hand (the exact
-    /// cost this column was added to remove). RED against deleting the
-    /// `error_class` line in cdc_metric_row (defaults to None).
-    ///
-    /// Both directions, because "always None" and "always Some" are equally
-    /// wrong: a classifiable failure must classify, and a success must not
-    /// invent a class.
+    /// A CDC failure must GROUP like a batch one.
     #[test]
     fn cdc_metric_row_classifies_a_failure_the_way_the_batch_path_does() {
         let export = crate::config::sample_export("t");
-        // The literal is one `classify_error_message` actually maps (its own
-        // tests pin this string), so the assertion grades the WIRING, not a
-        // guess about the classifier.
         let failed = super::cdc_summary(
             "r1",
             &export,
@@ -1306,8 +1135,7 @@ mod tests {
         );
     }
 
-    /// #196: the CDC metrics row must carry bytes_read from the summary. RED
-    /// against deleting the field in cdc_metric_row (defaults to 0).
+    /// #196: the CDC metrics row must carry bytes_read from the summary.
     #[test]
     fn cdc_metric_row_carries_bytes_read() {
         let export = crate::config::sample_export("t");
@@ -1318,9 +1146,6 @@ mod tests {
             "read leg must reach the export_metrics row"
         );
         assert_eq!(row.bytes_written, 5_000);
-        // The engine labels are threaded straight through — pin them so the
-        // metric row is attributable (source/dest engine per CDC run), not just
-        // the byte counts. RED against deleting either field in cdc_metric_row.
         assert_eq!(
             row.source_type.as_deref(),
             Some("mysql"),
@@ -1346,16 +1171,71 @@ mod tests {
         );
     }
 
+    /// The documented default: a CDC part rolls at 256 MiB of buffered changes.
+    #[test]
+    fn the_default_rollover_budget_is_256_mib() {
+        assert_eq!(super::cdc_rollover_memory_bytes(None), Some(268_435_456));
+        assert_eq!(
+            super::cdc_rollover_memory_bytes(Some(256)),
+            Some(268_435_456)
+        );
+    }
+
+    /// The metrics row carries the longest chunk the run journaled.
+    #[test]
+    fn cdc_metric_row_carries_the_longest_chunk() {
+        use crate::journal::RunEvent;
+        let export = crate::config::sample_export("t");
+        let mut summary =
+            super::cdc_summary("r1", &export, "success", 100, 2, 5_000, 12_345, 50, None);
+        summary.journal.record(RunEvent::ChunkStarted {
+            chunk_index: 0,
+            start_key: String::new(),
+            end_key: String::new(),
+        });
+        summary.journal.record(RunEvent::ChunkCompleted {
+            chunk_index: 0,
+            rows: 1,
+            file_name: None,
+        });
+        let expected = summary.journal.longest_chunk_ms();
+        assert!(expected.is_some(), "a paired start and completion is timed");
+        let row = super::cdc_metric_row(&summary, None, None);
+        assert_eq!(row.longest_chunk_ms, expected);
+    }
+
+    /// A capture-instance export resolves its source object before the baseline.
+    #[test]
+    fn a_capture_instance_is_resolved_before_the_snapshot_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "source:\n  type: mssql\n  url: \"mssql://u:p@127.0.0.1:1/app\"\nexports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./cdc/o.ckpt\n      \
+             initial: snapshot\n      capture_instance: dbo_orders\n    destination: { type: local, path: ./out }\n";
+        let path = dir.path().join("rivet.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        std::fs::create_dir_all(dir.path().join("cdc")).unwrap();
+        std::fs::write(dir.path().join("cdc/o.ckpt"), "{}").unwrap();
+        let config = crate::config::Config::load(&path.display().to_string()).unwrap();
+        let export = config.exports[0].clone();
+        let state = StateStore::open_in_memory().unwrap();
+        let table_dest = super::dest_for_table(&export.destination, "orders");
+        let snap_prefix = super::dest_for_table(&table_dest, "snapshot").state_key();
+        state
+            .mark_snapshot_done("o", "orders", &snap_prefix, "run-1")
+            .unwrap();
+        let err = super::initial_snapshot_pending(&config, &export, &state, dir.path(), None)
+            .expect_err("the capture-instance lookup dials the server before the baseline");
+        assert!(format!("{err:#}").contains("TCP connect failed"), "{err:#}");
+    }
+
     #[test]
     fn cdc_warns_when_meta_columns_are_requested_on_a_cdc_export() {
         let mut e = crate::config::sample_export("orders");
-        // No meta columns → no warning.
         e.meta_columns = Default::default();
         assert!(
             cdc_ignored_meta_warning(&e).is_none(),
             "no warning without meta_columns"
         );
-        // exported_at requested → warns, naming the export + the CDC-native cols.
         e.meta_columns.exported_at = true;
         let msg = cdc_ignored_meta_warning(&e).expect("must warn on exported_at");
         assert!(msg.contains("orders"), "names the export: {msg}");
@@ -1367,9 +1247,6 @@ mod tests {
             msg.contains("__op"),
             "points at the CDC-native columns: {msg}"
         );
-        // row_hash alone must NOT warn any more (§5h): the CDC sink emits it.
-        // Warning here would tell the operator their hash was dropped when it
-        // was not — and the whole point of §5h is that both legs carry it.
         e.meta_columns.exported_at = false;
         e.meta_columns.row_hash = crate::config::RowHash::All(true);
         assert!(
@@ -1415,22 +1292,7 @@ mod tests {
         assert!(msg.contains("'orders': --reconcile checks only"), "{msg}");
     }
 
-    // The snapshot (batch) leg and the CDC stream are two legs of ONE dataset the
-    // load view merges by PK, so their columns must MATCH. That one rule cuts
-    // both ways, and this test pins both halves:
-    //
-    //   exported_at is CLEARED — only the batch leg can produce it, and it is a
-    //   per-run stamp, so inheriting it would give the two legs different
-    //   columns (and the same row a different value depending on which leg
-    //   captured it);
-    //   row_hash is KEPT — since §5h both legs produce it, so dropping it on
-    //   the snapshot is what would diverge them, leaving every backfilled row's
-    //   hash NULL.
-    /// The split `cdc.backfill` rests on: the recipe says HOW to read, the leg
-    /// keeps WHO it is and WHERE it writes. RED against copying the recipe whole
-    /// (the leg would write to the recipe's own prefix, becoming a second load
-    /// target) and against copying nothing (the leg stays a single-stream full
-    /// scan while the config says four workers — the shape that timed out live).
+    /// The split `cdc.backfill` rests on.
     #[test]
     fn backfill_leg_borrows_the_recipe_read_and_keeps_its_own_identity() {
         let dcfg = DestinationConfig {
@@ -1456,15 +1318,12 @@ mod tests {
         recipe.chunk_checkpoint = true;
         recipe.columns =
             std::collections::HashMap::from([("price".into(), "decimal(10,2)".into())]);
-        // The CDC export declares a budget, the recipe none: the leg must KEEP
-        // the stream's (a recipe without `tuning:` erased it — config-clobber).
         stream.tuning = Some(crate::tuning::TuningConfig::default());
         recipe.tuning = None;
 
         let mut leg = synth_snapshot_export(&stream, "orders", "orders", &dcfg);
         apply_backfill_recipe(&mut leg, &recipe, &stream, "orders").expect("no type conflict");
 
-        // HOW to read — borrowed.
         assert_eq!(leg.mode, crate::config::ExportMode::Chunked);
         assert!(
             leg.tuning.is_some(),
@@ -1479,7 +1338,6 @@ mod tests {
             Some("decimal(10,2)")
         );
 
-        // The RANGE read fields too — a recipe chunked by column, not by key.
         let mut range = recipe.clone();
         range.chunk_by_key = None;
         range.chunk_column = Some("ref_id".into());
@@ -1496,7 +1354,6 @@ mod tests {
         assert_eq!(range_leg.chunk_size_memory_mb, Some(64));
         assert_eq!(range_leg.chunk_max_attempts, Some(9));
 
-        // WHO it is and WHERE it writes — its own.
         assert_eq!(leg.snapshot_parent.as_deref(), Some("stand_cdc"));
         assert_eq!(leg.snapshot_label.as_deref(), Some("orders"));
         assert!(
@@ -1514,9 +1371,6 @@ mod tests {
             "an empty table must still publish its marker"
         );
 
-        // Two types for one column is two truths: refused, naming the column —
-        // by the check that runs for EVERY pair on EVERY run, not the leg builder
-        // (which runs only for tables still pending a baseline).
         let mut conflicting = stream.clone();
         conflicting.columns =
             std::collections::HashMap::from([("orders.price".into(), "decimal(12,4)".into())]);
@@ -1527,7 +1381,6 @@ mod tests {
         );
         assert!(err.contains("price") && err.contains("two types"), "{err}");
 
-        // The same column declared the SAME way on both sides is not a conflict.
         let mut agreeing = stream.clone();
         agreeing.columns =
             std::collections::HashMap::from([("orders.price".into(), "decimal(10,2)".into())]);
@@ -1535,9 +1388,7 @@ mod tests {
             .expect("agreement is not a conflict");
     }
 
-    /// SQL Server: the stream narrows `columns:` by the configured LABEL, the leg by
-    /// the catalog READ — a label-cased key (`Orders.price`, table `dbo.orders`) was
-    /// typed on the stream and DROPPED on the leg, two schemas into one changelog.
+    /// SQL Server: the stream narrows `columns:` by the configured LABEL.
     #[test]
     fn backfill_leg_keeps_a_label_cased_column_type_when_the_catalog_read_differs() {
         let dcfg = DestinationConfig {
@@ -1560,7 +1411,6 @@ mod tests {
         let mut leg = synth_snapshot_export(&stream, "Orders", "dbo.orders", &dcfg);
         apply_backfill_recipe(&mut leg, &recipe, &stream, "Orders").expect("no type conflict");
 
-        // What the batch planner will keep for a `table: dbo.orders` export.
         let parsed = crate::plan::build::parse_column_overrides_pub(&leg.columns, &leg.name)
             .expect("valid types");
         let kept = crate::types::overrides_for_unit(&parsed, leg.table.as_deref());
@@ -1574,9 +1424,7 @@ mod tests {
         assert_eq!(kept.get("qty"), Some(&crate::types::RivetType::Int32));
     }
 
-    /// A qualified recipe key and a bare CDC key name ONE column; compared raw
-    /// they never met, and the leg took the CDC type while the stream took the
-    /// recipe's — the exact two-types-in-one-changelog the refusal exists for.
+    /// A qualified recipe key and a bare CDC key name ONE column.
     #[test]
     fn backfill_type_conflict_is_refused_when_the_recipe_key_is_qualified_and_the_cdc_key_bare() {
         let mut stream = crate::config::sample_export("stand_cdc");
@@ -1597,7 +1445,6 @@ mod tests {
                 .expect_err("one column, two types")
         );
         assert!(err.contains("price") && err.contains("two types"), "{err}");
-        // The same type both ways is not a conflict.
         recipe.columns =
             std::collections::HashMap::from([("orders.price".into(), "decimal(14,6)".into())]);
         crate::config::refuse_backfill_type_conflict(&stream, "orders", &recipe)
@@ -1624,7 +1471,6 @@ mod tests {
             synth.meta_columns.row_hash, e.meta_columns.row_hash,
             "both legs write one __changes log, so both must hash the same columns"
         );
-        // The other snapshot invariants stay intact.
         assert_eq!(synth.mode, crate::config::ExportMode::Full);
         assert!(
             synth.cdc.is_none(),
@@ -1634,15 +1480,7 @@ mod tests {
         assert_eq!(synth.table.as_deref(), Some("orders"));
     }
 
-    /// `adopt` (anchor an already-loaded table, move no rows) is a paid-tier
-    /// mode (the one-way seam, ADR-0026 — docs may name the crate, this tree may
-    /// not), so the OSS config must REJECT it rather than quietly accept a value
-    /// this binary cannot honour. 0.24.0 shipped it in the OSS enum, which put it
-    /// in the published JSON schema and the generated reference — irreversible
-    /// once the crate is published, and indistinguishable to a user from a
-    /// supported feature. Omitted `initial:` stays its own third state (capture
-    /// changes only, no anchor step), which is what an OSS operator uses for an
-    /// already-loaded table.
+    /// `adopt` is a paid-tier mode that the OSS config must refuse.
     #[test]
     fn oss_rejects_the_pro_only_initial_adopt() {
         let parse = |line: &str| {
@@ -1676,25 +1514,7 @@ mod tests {
         );
     }
 
-    // The mirror image of the test above, and the reason the two must be read
-    // together: the SAME argument (both legs write one `__changes` log, so their
-    // columns must match) clears `exported_at` and REQUIRES keeping `row_hash`.
-    // The batch leg alone can produce the stamp, so inheriting it desynchronizes
-    // the legs; BOTH legs produce `_rivet_row_hash`, so dropping it on the
-    // snapshot is what would desynchronize them — leaving every backfilled
-    // row's hash NULL and the audit's cheap path unusable.
-    /// LABEL and READ are different strings, and each consumer must get the right
-    /// one.
-    ///
-    /// Round-4: once the snapshot leg learned to READ the relation SQL Server's
-    /// capture instance names, `synth.table` stopped being the configured string —
-    /// and `mark_snapshot_done` kept writing `synth.table` while `snapshot_plan`
-    /// asked with the configured one. The key is byte-exact, so the row could never
-    /// answer its own question and every scheduled cycle re-snapshotted the whole
-    /// table under a green run.
-    ///
-    /// The fixture needs TWO DIFFERENT strings; the test door passed one twice
-    /// until now, which is why nothing here could see it.
+    /// LABEL and READ are different strings, and each consumer must get the right one.
     #[test]
     fn the_snapshot_leg_carries_the_label_and_reads_the_catalog_relation() {
         let e = crate::config::sample_export("orders");
@@ -1749,8 +1569,6 @@ mod tests {
         assert!(writes_before_the_drain(&[1, 2]));
     }
 
-    // ── snapshot_plan: the pure `initial: snapshot` decision ─────────────────
-
     use crate::source::cdc::PriorRun;
 
     const SNAPSHOT_ONLY: PriorRun = PriorRun {
@@ -1758,7 +1576,7 @@ mod tests {
         snapshot: true,
     };
 
-    /// Refused: a table the last run did not capture whose baseline is done. Never: a captured table, or a new one.
+    /// Refused: a table the last run did not capture whose baseline is done.
     #[test]
     fn only_a_table_outside_the_last_capture_with_a_done_baseline_rejoins() {
         let t = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
@@ -1775,8 +1593,6 @@ mod tests {
 
     #[test]
     fn snapshot_plan_first_run_snapshots_all_with_no_resume_evidence() {
-        // Nothing done, no checkpoint → snapshot every table, and this is a
-        // genuine first anchor (no prior-run evidence).
         assert_eq!(
             snapshot_plan(&[false, false], false),
             (vec![0, 1], PriorRun::default())
@@ -1785,9 +1601,6 @@ mod tests {
 
     #[test]
     fn snapshot_plan_all_done_snapshots_nothing_but_keeps_resume_evidence() {
-        // Every snapshot already done — the state DB remembers even after
-        // `cleanup_source` wiped the bucket marker → re-snapshot NOTHING; and
-        // that prior evidence forces the fail-loud anchor guard (#28).
         assert_eq!(
             snapshot_plan(&[true, true], false),
             (Vec::<usize>::new(), SNAPSHOT_ONLY)
@@ -1796,8 +1609,6 @@ mod tests {
 
     #[test]
     fn snapshot_plan_partial_snapshots_only_the_undone() {
-        // One table done, one not → snapshot only the undone; a done sibling is
-        // still resume evidence.
         assert_eq!(
             snapshot_plan(&[true, false], false),
             (vec![1], SNAPSHOT_ONLY)
@@ -1806,8 +1617,6 @@ mod tests {
 
     #[test]
     fn snapshot_plan_checkpoint_alone_is_resume_evidence() {
-        // No snapshot done but a live checkpoint survives → still snapshot (the
-        // marker is gone), yet the checkpoint alone makes a lost anchor fail loud.
         assert_eq!(
             snapshot_plan(&[false], true),
             (
@@ -1822,16 +1631,13 @@ mod tests {
 
     #[test]
     fn snapshot_plan_no_evidence_is_a_legitimate_first_anchor() {
-        // Nothing done, no checkpoint → snapshot, and no evidence means the
-        // anchor is a legitimate first anchor, not a loud failure.
         assert_eq!(
             snapshot_plan(&[false], false),
             (vec![0], PriorRun::default())
         );
     }
 
-    /// Both arms of the byte-budget supplier — the decision the sink's own test
-    /// bypasses by setting the field directly.
+    /// Both arms of the byte-budget supplier.
     #[test]
     fn the_byte_budget_defaults_on_absence_and_converts_on_presence() {
         assert_eq!(

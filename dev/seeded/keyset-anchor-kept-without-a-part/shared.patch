@@ -1,7 +1,8 @@
+diff --git a/src/pipeline/job.rs b/src/pipeline/job.rs
 --- a/src/pipeline/job.rs
 +++ b/src/pipeline/job.rs
-@@ -1098,9 +1098,7 @@
- /// Whether the stored keyset anchor names a run that recorded a part; an anchor with none has nothing to resume.
+@@ -859,9 +859,7 @@
+ /// Whether the stored keyset anchor names a run that recorded a part.
  fn anchor_holds_a_part(state: &StateStore, progress: &ProgressClaim<'_>) -> bool {
      match progress.resume_run_id() {
 -        Ok(Some(anchor)) => !state
