@@ -1419,13 +1419,6 @@ fn run_export_job_inner(
         let grants = match super::cdc_job::resolve_grants(config, export) {
             Ok(g) => g,
             Err(e) => {
-                let e = super::cdc_job::grants_unreadable_at_start(
-                    e,
-                    config,
-                    export,
-                    state,
-                    config_path,
-                );
                 let summary = synthetic_failed_summary(&export.name, &e);
                 crate::notify::maybe_send(config.notifications.as_ref(), &summary);
                 return (Err(e), summary);

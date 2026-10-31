@@ -347,33 +347,6 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
     .map(Some)
 }
 
-/// Whether every configured table is among those the last run of the stream recorded as captured.
-fn every_table_was_captured_before(configured: &[String], recorded: Option<&[String]>) -> bool {
-    recorded.is_some_and(|r| !configured.is_empty() && configured.iter().all(|t| r.contains(t)))
-}
-
-/// The error of the grants read at the start of a run: a table of a stream that captured them all before and has no readable column now is refused as a drop, any other failure as it came.
-pub(super) fn grants_unreadable_at_start(
-    err: anyhow::Error,
-    config: &Config,
-    export: &ExportConfig,
-    state: &StateStore,
-    config_path: &str,
-) -> anyhow::Error {
-    let Some((_, key, dest)) = file_anchor_of(config, export, config_path) else {
-        return err;
-    };
-    let recorded = state.captured_tables(&key, &dest).ok().flatten();
-    let configured = crate::config::cdc_captured_tables(export);
-    match every_table_was_captured_before(&configured, recorded.as_deref()) {
-        true => crate::source::mysql::cdc::captured_table_gone(
-            err,
-            "the grants read at the start of this run",
-        ),
-        false => err,
-    }
-}
-
 pub(super) fn initial_snapshot_pending(
     config: &Config,
     export: &ExportConfig,
@@ -962,62 +935,6 @@ mod tests {
         }
         state.reset("o", &config.source.state_key()).unwrap();
         super::refuse_lost_file_anchor(&config, &export, &state, &path).unwrap();
-    }
-
-    /// Every configured table must be among those the last run recorded.
-    #[test]
-    fn a_table_is_captured_before_only_when_the_last_run_recorded_every_configured_one() {
-        let t = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-        assert!(super::every_table_was_captured_before(
-            &t(&["a.x", "a.y"]),
-            Some(&t(&["a.y", "a.x", "a.z"]))
-        ));
-        assert!(!super::every_table_was_captured_before(
-            &t(&["a.x", "a.new"]),
-            Some(&t(&["a.x"]))
-        ));
-        assert!(!super::every_table_was_captured_before(&t(&["a.x"]), None));
-        assert!(!super::every_table_was_captured_before(
-            &t(&[]),
-            Some(&t(&["a.x"]))
-        ));
-    }
-
-    /// A table with no readable column is a drop only for a stream that recorded it as captured; any other error is as it came.
-    #[test]
-    fn a_table_unreadable_at_the_start_is_a_drop_only_for_a_stream_that_captured_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let (path, config, export) = anchored(dir.path(), "mysql", "./out");
-        let state = StateStore::open_in_memory().unwrap();
-        let unreadable = || {
-            crate::error::coded(
-                crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
-                "mysql: `app.orders`: found no column".to_string(),
-            )
-        };
-        let first =
-            super::grants_unreadable_at_start(unreadable(), &config, &export, &state, &path);
-        crate::error::assert_coded(&first, "RIVET_SOURCE_COLUMNS_UNREADABLE", 1);
-        write_checkpoint(dir.path());
-        super::record_file_anchor(&config, &export, &state, &path, &Ok(()));
-        let later =
-            super::grants_unreadable_at_start(unreadable(), &config, &export, &state, &path);
-        crate::error::assert_coded(&later, "RIVET_SOURCE_CDC_TRUNCATED", 5);
-        let text = format!("{later:#}");
-        assert!(
-            text.contains("the grants read at the start of this run")
-                && text.contains("app.orders")
-                && text.contains(crate::source::cdc::checkpoint_identity::RECOVER),
-            "{text}"
-        );
-        let other = super::grants_unreadable_at_start(
-            anyhow::anyhow!("connection lost"),
-            &config,
-            &export,
-            &state,
-            &path,
-        );
-        assert_eq!(crate::error::code_of(&other), None);
     }
 
     /// A run records its checkpoint only when the file exists.

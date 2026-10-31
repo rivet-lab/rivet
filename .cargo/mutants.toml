@@ -604,35 +604,8 @@ exclude_re = [
     # ack -> Ok(())               ⇒ roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot FAILS
     "replace PgChangeStream::release_empty_frontier with \\(\\)$",
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
-    # The match GUARD on the MySQL TRUNCATE arm sits inside that same live-only body.
-    # Flipping it to `true`/`false` is the addressed/un-addressed pair that the live
-    # test grades directly (`if true` fails the bystander half; disabling fails the
-    # refusal half) — both run by hand on the same date. Excluded here rather than
-    # left MISSED, because an operator-shaped entry that IS graded live is the
-    # honest form; what would be wrong is an ungraded decision hiding in glue.
-    # The mutant NAME embeds the guard EXPRESSION between "match guard" and
-    # "with true/false", so a pattern written as `replace match guard with true in
-    # …` matches nothing. The gate caught that as a DEAD exclusion — which is the
-    # right verdict and exactly the failure mode a hand-written regex has here
-    # (an over-escaped one earlier in this session matched nothing too, and would
-    # have left the gate red while looking handled).
-    #
-    # Anchored on the guard's own call instead. Both directions are graded LIVE by
-    # roast_mysql_cdc_refuses_a_truncate_instead_of_silently_diverging: `true`
-    # fails its bystander half (an export that does not capture the truncated
-    # table must still complete), `false` fails the refusal half. Run by hand
-    # 2026-08-24, mutant applied and reverted each time.
-    "replace match guard refused_truncate.*MysqlChangeStream::fill",
-
-    # 2026-10-31 #728: the QueryEvent arm guards of the live-only MySQL reader, each mutant (true and false) applied by hand
-    # and killed by the live_cdc_column_grants:: cells (e.g. the truncate guard by a_truncate_drop_or_statement_write_is_met_as_before_without_double_quoted_names_mysql).
+    # 2026-10-31 #728: `note_statement` only feeds the statement log of the live-only reader; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
-    "replace match guard mention\\.is_some\\(\\) with (true|false) in MysqlChangeStream::fill",
-    "replace match guard refused_(column_rename|table_rename|drop|dml).*MysqlChangeStream::fill",
-    # `defers_the_grants_re_read` reads a QueryEvent no offline test can build; deleting the arm or its `!` fails
-    # privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql (by hand, 2026-10-31).
-    "delete match arm Some\\(EventData::QueryEvent\\(qe\\)\\) in defers_the_grants_re_read",
-    "delete ! in defers_the_grants_re_read",
 
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
     # `in_quotes && next == '"'` guard on the escaped-quote arm cannot change what

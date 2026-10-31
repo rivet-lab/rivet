@@ -1064,7 +1064,7 @@ fn columns_from_grants_is_refused_by_every_command_mongo() {
 /// The binlog `(file, position)` at the end of the last commit after `start` that wrote `table`.
 fn commit_end_after(start: &(String, u64), table: &str) -> (String, u64) {
     let mut c = root();
-    let events: Vec<(u64, String, u64, String)> = c
+    let events: Vec<(u64, String, u64, Vec<u8>)> = c
         .query_map(
             format!("SHOW BINLOG EVENTS IN '{}' FROM {}", start.0, start.1),
             |r: mysql::Row| {
@@ -1072,14 +1072,15 @@ fn commit_end_after(start: &(String, u64), table: &str) -> (String, u64) {
                     r.get::<u64, _>(1).unwrap_or(0),
                     r.get::<String, _>(2).unwrap_or_default(),
                     r.get::<u64, _>(4).unwrap_or(0),
-                    r.get::<String, _>(5).unwrap_or_default(),
+                    r.get::<Vec<u8>, _>(5).unwrap_or_default(),
                 )
             },
         )
         .unwrap();
     let (mut wrote, mut last) = (false, None);
     for (_, kind, end, info) in events {
-        wrote |= kind == "Table_map" && info.contains(&format!("(rivet.{table})"));
+        wrote |= kind == "Table_map"
+            && String::from_utf8_lossy(&info).contains(&format!("(rivet.{table})"));
         if kind == "Xid" {
             if wrote {
                 last = Some((start.0.clone(), end));
@@ -3249,52 +3250,22 @@ const TRUNCATE_SPELLED: [&str; 3] = [UPDATED_BEFORE, "TRUNCATE TABLE rivet.`{S}`
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_truncate_spelled_with_a_character_the_server_folds_is_refused_mysql() {
-    let case = |policy, how| Spelled {
-        policy,
+fn a_truncate_spelled_with_a_character_the_server_folds_is_refused_under_the_policy_mysql() {
+    let case = |how, keeps| Spelled {
+        policy: true,
         how,
         steps: &TRUNCATE_SPELLED,
-        folds: REFUSED_TRUNCATED,
-        keeps: BOTH_DELIVERED,
+        folds: REFUSED_UNDECODABLE,
+        keeps,
         rows_when_folded: 0,
-        says: "was TRUNCATEd",
+        says: "names the captured table",
     };
     spellings_end_as(
         "cg_kin",
         &[
-            case(true, Spelling::Kelvin),
-            case(false, Spelling::Kelvin),
-            case(true, Spelling::DottedI),
-            case(false, Spelling::DottedI),
-        ],
-    );
-}
-
-#[test]
-#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_truncate_in_capitals_is_refused_on_a_server_that_folds_case_with_and_without_the_policy_mysql()
-{
-    spellings_end_as(
-        "cg_kup",
-        &[
-            Spelled {
-                policy: false,
-                how: Spelling::Upper,
-                steps: &TRUNCATE_SPELLED,
-                folds: REFUSED_TRUNCATED,
-                keeps: BOTH_DELIVERED,
-                rows_when_folded: 0,
-                says: "was TRUNCATEd",
-            },
-            Spelled {
-                policy: true,
-                how: Spelling::Upper,
-                steps: &TRUNCATE_SPELLED,
-                folds: REFUSED_TRUNCATED,
-                keeps: REFUSED_UNDECODABLE,
-                rows_when_folded: 0,
-                says: "was TRUNCATEd",
-            },
+            case(Spelling::Kelvin, BOTH_DELIVERED),
+            case(Spelling::DottedI, BOTH_DELIVERED),
+            case(Spelling::Upper, REFUSED_UNDECODABLE),
         ],
     );
 }
@@ -3309,7 +3280,7 @@ fn a_column_renamed_or_swapped_under_a_folded_spelling_is_refused_mysql() {
         folds: REFUSED_UNDECODABLE,
         keeps: BOTH_DELIVERED,
         rows_when_folded: 3,
-        says: "RENAME",
+        says: "names the captured table",
     };
     spellings_end_as(
         "cg_kre",
@@ -3328,6 +3299,45 @@ fn a_column_renamed_or_swapped_under_a_folded_spelling_is_refused_mysql() {
             ]),
         ],
     );
+}
+
+/// A TRUNCATE of `{t}` with each `letter` written as `bytes` in the client character set `set`, on a table of its own when the server keeps case.
+fn multibyte_truncate_case(set: &str, letter: char, bytes: &str, folds: bool) -> Case {
+    let name = format!("REPLACE('{{t}}', '{letter}', 0x{bytes})");
+    let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+    if !folds {
+        steps.push(leak(raw(&format!(
+            "'CREATE TABLE rivet.', {name}, ' (id INT PRIMARY KEY)'"
+        ))));
+        steps.extend_from_slice(&RUN_RAW);
+    }
+    steps.push(leak(raw(&format!("'TRUNCATE TABLE rivet.', {name}"))));
+    steps.extend_from_slice(&RUN_RAW);
+    if !folds {
+        steps.push(leak(raw(&format!("'DROP TABLE rivet.', {name}"))));
+        steps.extend_from_slice(&RUN_RAW);
+    }
+    steps.push(UPDATED_AFTER);
+    let want = if folds {
+        REFUSED_UNDECODABLE
+    } else {
+        BOTH_DELIVERED
+    };
+    (true, steps, want)
+}
+
+/// Leaves a statement no run can identify in the binlog: the nextest override `threads-required = "num-test-threads"` runs it alone.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_truncate_spelled_with_a_multibyte_character_the_server_folds_is_refused_under_the_policy_mysql()
+ {
+    let folds = the_server_folds_names();
+    let cases = [
+        multibyte_truncate_case("SET NAMES gb18030", 'k', "8136BF32", folds),
+        multibyte_truncate_case("SET NAMES gb18030", 'i', "81309032", folds),
+        multibyte_truncate_case("SET NAMES ujis", 'i', "8FAAC4", folds),
+    ];
+    end_as("cg_mbki", &cases);
 }
 
 /// Leaves a statement no run can identify in the binlog: the nextest override `threads-required = "num-test-threads"` runs it alone.
@@ -3350,7 +3360,8 @@ fn an_uncaptured_table_renamed_under_a_two_byte_name_whose_trail_is_a_backtick_i
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_database_dropped_with_a_captured_table_is_refused_by_code_and_the_remedy_gets_past_it_mysql() {
+fn a_database_dropped_with_a_captured_table_is_met_as_before_by_the_unreadable_columns_stop_mysql()
+{
     let db = OtherDb(unique_name("cg_dbd"));
     let table = unique_name("cg_dbt");
     root()
@@ -3365,50 +3376,49 @@ fn a_database_dropped_with_a_captured_table_is_refused_by_code_and_the_remedy_ge
             user.0
         ))
         .unwrap();
-    let rig = Rig::mysql_cdc(&format!("{}.{table}", db.0))
+    let mut rig = Rig::mysql_cdc(&format!("{}.{table}", db.0))
         .source_url(&user.url())
         .cdc("initial: snapshot")
-        .source_line("columns_from: grants");
+        .source_line("columns_from: grants")
+        .a_failed_run_may_leave(
+            &[Leftover::ResumePoint],
+            "the run observes the readable columns at its start: that observed schema is stored before the stop (known: src/state/schema.rs stores the baseline of a failed run)",
+        );
     rig.run_ok();
-    let steps = vec![
-        format!(
-            "UPDATE {}.{table} SET name = 'ann-before' WHERE id = 1",
-            db.0
-        ),
-        format!("DROP DATABASE `{}`", db.0),
-    ];
-    a_refused_backlog_is_got_past_by_the_remedy(
-        rig,
-        steps,
-        "RIVET_SOURCE_CDC_TRUNCATED",
-        &["no longer read".to_string(), "It was dropped".to_string()],
-        || {
-            root()
-                .query_drop(format!("CREATE DATABASE `{}`", db.0))
-                .unwrap();
-            seed_rows(&db.0, &table);
-            root()
-                .query_drop(format!(
-                    "GRANT SELECT (id, name) ON {}.{table} TO '{}'@'%'",
-                    db.0, user.0
-                ))
-                .unwrap();
-        },
-        |rig| {
-            let (names, cells) = delivered(rig);
-            let rows: usize = parquet_dirs(&rig.out_dir())
-                .iter()
-                .flat_map(|d| read_all_parts(d))
-                .map(|b| b.num_rows())
-                .sum();
-            assert!(
-                rows >= 1,
-                "the re-baselined stream delivers the re-created table"
-            );
-            assert!(
-                cells.iter().any(|v| v == "ann") && names.iter().all(|n| n == "id" || n == "name"),
-                "the re-baselined stream reads the re-created table: {names:?} {cells:?}"
-            );
-        },
+    let before = checkpoint_at(&rig);
+    let mut c = root();
+    c.query_drop(format!(
+        "UPDATE {}.{table} SET name = 'ann-before' WHERE id = 1",
+        db.0
+    ))
+    .unwrap();
+    c.query_drop(format!("DROP DATABASE `{}`", db.0)).unwrap();
+    let out = rig.run();
+    assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
+    assert_eq!(
+        checkpoint_at(&rig),
+        before,
+        "a stopped run does not move the checkpoint"
+    );
+    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    assert_eq!(changes(&parts), vec![], "a stopped run delivers no change");
+    root()
+        .query_drop(format!("CREATE DATABASE `{}`", db.0))
+        .unwrap();
+    seed_rows(&db.0, &table);
+    root()
+        .query_drop(format!(
+            "GRANT SELECT (id, name) ON {}.{table} TO '{}'@'%'",
+            db.0, user.0
+        ))
+        .unwrap();
+    follow_rebaseline_remedy(&mut rig, true);
+    let (names, cells) = delivered(&rig);
+    assert!(
+        cells.iter().any(|v| v == "ann") && names.iter().all(|n| n == "id" || n == "name"),
+        "the re-baselined stream reads the re-created table: {names:?} {cells:?}"
     );
 }

@@ -935,7 +935,7 @@ const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
 // with arrow (`read_all_parts`); the rig oracle grades every run against the source, and the BigQuery / ClickHouse
 // cells read the warehouse back through `bq` / its HTTP client.
 // 119 -> 132 (2026-10-29, #719): the column-grants cells read the delivered parts with arrow; the rig oracle grades the runs it can.
-// 132 -> 133 (2026-10-31, #728): the dropped-database cell reads the re-baselined parts with arrow; the refusal itself is graded by its code.
+// 132 -> 133 (2026-10-31, #728): the dropped-database cell reads the parts of its stopped run and of the re-baseline with arrow; the stop itself is graded by its code.
 const PIN_SHARED_CODEC: usize = 133; // ratchet-pin: cdc-census-shared-codec
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
