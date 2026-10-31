@@ -11,6 +11,7 @@ use serde_json::Value as Json;
 /// One comparable component of a position.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Val {
+    Absent,
     Num(u64),
     Text(String),
 }
@@ -26,6 +27,8 @@ pub(crate) enum PartKind {
     BinlogOrdinal,
     /// A JSON unsigned integer.
     Number,
+    /// A JSON unsigned integer that an older position may lack; absent ranks below every number.
+    Stamp,
     /// A decimal integer written as a JSON string.
     DecimalText,
     /// A PostgreSQL `hi/lo` LSN, two hex halves.
@@ -112,6 +115,18 @@ const MONGO_ORD: Part = Part {
     field: "ord",
     kind: PartKind::Number,
 };
+const MONGO_STAMP_CT: Part = Part {
+    field: "ct",
+    kind: PartKind::Stamp,
+};
+const MONGO_STAMP_ORD: Part = Part {
+    field: "ord",
+    kind: PartKind::Stamp,
+};
+const MONGO_DATA: Part = Part {
+    field: "_data",
+    kind: PartKind::KeyString,
+};
 const PG_LSN: Part = Part {
     field: "lsn",
     kind: PartKind::PgLsn,
@@ -142,13 +157,10 @@ pub(crate) const ORACLE: Row = Row {
     clickhouse: None,
 };
 
-/// Mongo `{_data, rt, ct, ord}`: the warehouse views order by the resume token keystring, ClickHouse by `(ct, ord)`.
+/// Mongo `{_data, rt, ct, ord}`: every consumer orders by `(ct, ord)`, the warehouse views then by the resume token keystring.
 pub(crate) const MONGO: Row = Row {
     sniff: Sniff::Str("_data"),
-    parts: &[Part {
-        field: "_data",
-        kind: PartKind::KeyString,
-    }],
+    parts: &[MONGO_STAMP_CT, MONGO_STAMP_ORD, MONGO_DATA],
     clickhouse: Some(ChArm {
         when: ChWhen::HasField("ct"),
         pack: ChPack::Pair(MONGO_CT, MONGO_ORD),
@@ -224,15 +236,15 @@ impl Row {
     pub(crate) fn key(&self, v: &Json) -> Option<Key> {
         self.parts
             .iter()
-            .map(|p| p.kind.value(v.get(p.field)?))
+            .map(|p| p.kind.value(v.get(p.field)))
             .collect::<Option<Vec<_>>>()
             .map(Key)
     }
 
-    /// The first part's raw text, as the bounded drains compare it.
-    pub(crate) fn first_text(&self, v: &Json) -> Option<String> {
-        let first = self.parts.first()?;
-        v.get(first.field)?.as_str().map(String::from)
+    /// The raw text of one of this row's text parts, as the bounded drains compare it.
+    pub(crate) fn text(&self, v: &Json, field: &str) -> Option<String> {
+        let part = self.parts.iter().find(|p| p.field == field)?;
+        v.get(part.field)?.as_str().map(String::from)
     }
 
     /// The `ORDER BY` expressions for the dedup view, most significant first.
@@ -246,8 +258,16 @@ impl Row {
 
 impl PartKind {
     /// The comparable value of a field.
-    fn value(self, v: &Json) -> Option<Val> {
+    fn value(self, v: Option<&Json>) -> Option<Val> {
+        if self == PartKind::Stamp {
+            return match v {
+                None => Some(Val::Absent),
+                Some(v) => v.as_u64().map(Val::Num),
+            };
+        }
+        let v = v?;
         match self {
+            PartKind::Stamp => None,
             PartKind::BinlogOrdinal => {
                 let name = v.as_str()?;
                 Some(match binlog_ordinal(name) {
@@ -278,6 +298,12 @@ impl PartKind {
             (Snowflake, PartKind::Number | PartKind::DecimalText) => {
                 vec![format!("PARSE_JSON(__pos):{f}::integer")]
             }
+            (BigQuery, PartKind::Stamp) => vec![format!(
+                "COALESCE(CAST(JSON_VALUE(__pos,'$.{f}') AS NUMERIC), -1)"
+            )],
+            (Snowflake, PartKind::Stamp) => {
+                vec![format!("COALESCE(PARSE_JSON(__pos):{f}::NUMBER(38,0), -1)")]
+            }
             (BigQuery, PartKind::PgLsn) => (0..2)
                 .map(|i| format!("LPAD(SPLIT(JSON_VALUE(__pos,'$.{f}'),'/')[OFFSET({i})],8,'0')"))
                 .collect(),
@@ -300,7 +326,7 @@ impl PartKind {
             PartKind::BinlogOrdinal => Some(format!(
                 "toUInt128(toUInt64OrZero(extract({text}, '[0-9]+$')))"
             )),
-            PartKind::Number => Some(format!(
+            PartKind::Number | PartKind::Stamp => Some(format!(
                 "toUInt128(JSONExtractUInt(ifNull(__pos, ''), '{f}'))"
             )),
             PartKind::PgLsn => Some(format!(
@@ -499,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mongo_clickhouse_arm_orders_by_cluster_time_then_ordinal_and_the_key_stays_on_data() {
+    fn the_mongo_clickhouse_arm_orders_by_cluster_time_then_ordinal_like_the_key() {
         let arm = MONGO.clickhouse.unwrap();
         assert!(matches!(arm.when, ChWhen::HasField("ct")));
         assert!(matches!(
@@ -518,7 +544,11 @@ mod tests {
         assert_eq!(arm.legacy.map(|l| l.field), Some("_data"));
         assert_eq!(
             k(r#"{"_data":"826A","rt":"0e","ct":7,"ord":3}"#),
-            k(r#"{"_data":"826A","rt":"0e"}"#)
+            Some(Key(vec![
+                Val::Num(7),
+                Val::Num(3),
+                Val::Text("826A".into())
+            ]))
         );
     }
 
@@ -563,11 +593,19 @@ mod tests {
         );
         assert_eq!(
             sql(&MONGO, Dialect::BigQuery),
-            ["JSON_VALUE(__pos,'$._data')"]
+            [
+                "COALESCE(CAST(JSON_VALUE(__pos,'$.ct') AS NUMERIC), -1)",
+                "COALESCE(CAST(JSON_VALUE(__pos,'$.ord') AS NUMERIC), -1)",
+                "JSON_VALUE(__pos,'$._data')"
+            ]
         );
         assert_eq!(
             sql(&MONGO, Dialect::Snowflake),
-            ["PARSE_JSON(__pos):_data::string"]
+            [
+                "COALESCE(PARSE_JSON(__pos):ct::NUMBER(38,0), -1)",
+                "COALESCE(PARSE_JSON(__pos):ord::NUMBER(38,0), -1)",
+                "PARSE_JSON(__pos):_data::string"
+            ]
         );
         assert_eq!(
             sql(&ORACLE, Dialect::BigQuery),
@@ -589,7 +627,11 @@ mod tests {
         );
         assert_eq!(
             k(r#"{"_data":"826A","rt":"0e"}"#),
-            Some(Key(vec![Val::Text("826A".into())]))
+            Some(Key(vec![
+                Val::Absent,
+                Val::Absent,
+                Val::Text("826A".into())
+            ]))
         );
         assert_eq!(
             k(r#"{"lsn":"3C/1A"}"#),
@@ -613,7 +655,7 @@ mod tests {
         assert_eq!(k(r#"{"commit_scn":"x","_data":"82"}"#), None);
         assert_eq!(
             k(r#"{"commit_scn":9,"_data":"82"}"#),
-            Some(Key(vec![Val::Text("82".into())]))
+            Some(Key(vec![Val::Absent, Val::Absent, Val::Text("82".into())]))
         );
         assert_eq!(k(r#"{"lsn":"1/1FFFFFFFFF"}"#), None);
         assert_eq!(k(r#"{"lsn":"zz/1"}"#), None);
@@ -645,10 +687,74 @@ mod tests {
     }
 
     #[test]
-    fn the_first_text_is_the_raw_first_part() {
-        let v = serde_json::json!({"_data": "82AB", "rt": "0e"});
-        assert_eq!(MONGO.first_text(&v), Some("82AB".to_string()));
-        assert_eq!(MONGO.first_text(&serde_json::json!({"_data": 5})), None);
-        assert_eq!(MONGO.first_text(&serde_json::json!({})), None);
+    fn a_text_part_is_read_raw_by_its_field_and_other_fields_are_not_text_parts() {
+        let v = serde_json::json!({"_data": "82AB", "rt": "0e", "ct": 7});
+        assert_eq!(MONGO.text(&v, "_data"), Some("82AB".to_string()));
+        assert_eq!(MONGO.text(&v, "rt"), None);
+        assert_eq!(MONGO.text(&v, "ct"), None);
+        assert_eq!(MONGO.text(&serde_json::json!({"_data": 5}), "_data"), None);
+        assert_eq!(MONGO.text(&serde_json::json!({}), "_data"), None);
+    }
+
+    fn mongo(ct: Option<&str>, ord: Option<&str>, data: &str) -> Option<Key> {
+        let mut o = format!(r#"{{"_data":"{data}","rt":"{data}""#);
+        if let Some(c) = ct {
+            o += &format!(r#","ct":{c}"#);
+        }
+        if let Some(c) = ord {
+            o += &format!(r#","ord":{c}"#);
+        }
+        k(&(o + "}"))
+    }
+
+    #[test]
+    fn a_mongo_position_orders_by_cluster_time_then_ordinal_then_token() {
+        let max = u64::MAX.to_string();
+        assert!(mongo(Some("7"), Some("0"), "FF") < mongo(Some("8"), Some("0"), "00"));
+        assert!(mongo(Some("7"), Some("9"), "FF") < mongo(Some("7"), Some("10"), "00"));
+        assert!(mongo(Some("7"), Some("1"), "00") < mongo(Some("7"), Some("1"), "01"));
+        assert!(mongo(Some("9"), Some("0"), "FF") < mongo(Some(&max), Some("0"), "00"));
+        assert!(mongo(Some(&max), Some("0"), "00") < mongo(Some(&max), Some("1"), "00"));
+        assert_eq!(
+            mongo(Some(&max), Some("3"), "A"),
+            Some(Key(vec![
+                Val::Num(u64::MAX),
+                Val::Num(3),
+                Val::Text("A".into())
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_mongo_position_without_a_stamp_ranks_below_every_stamped_one_and_among_its_kind_by_token()
+    {
+        let old = |d| mongo(None, None, d);
+        assert!(old("FF") < mongo(Some("0"), Some("0"), "00"));
+        assert!(old("8264") < old("8265"));
+        assert!(old("FF") < mongo(Some("1"), Some("0"), "00"));
+        assert!(mongo(Some("0"), Some("0"), "FF") < mongo(Some("1"), Some("0"), "00"));
+    }
+
+    #[test]
+    fn a_mongo_stamp_that_is_present_but_not_an_unsigned_integer_is_unparseable() {
+        for bad in [r#""7""#, "-1", "1.5", "null", "18446744073709551616"] {
+            assert_eq!(mongo(Some(bad), Some("0"), "82"), None, "{bad}");
+            assert_eq!(mongo(Some("0"), Some(bad), "82"), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_re_snapshot_row_ranks_below_older_stream_rows_of_its_key() {
+        let stream = mongo(Some("100"), Some("0"), "82FF");
+        let re_snapshot = mongo(Some("0"), Some("0"), "83AA");
+        assert!(re_snapshot < stream);
+    }
+
+    #[test]
+    fn the_clickhouse_arm_of_a_stamp_renders_as_a_number() {
+        assert_eq!(
+            PartKind::Stamp.clickhouse("ct"),
+            PartKind::Number.clickhouse("ct")
+        );
     }
 }

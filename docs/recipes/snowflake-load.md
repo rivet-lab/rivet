@@ -56,7 +56,7 @@ PostgreSQL and MySQL sources):
 
 A CDC export (`mode: cdc`) additionally appends a `<table>__changes` log and
 rebuilds a `(__pos, __seq)`-ordered current-state view (`PARSE_JSON(__pos)` on
-Snowflake). The count gate (manifest rows == warehouse `COUNT(*)`) runs before
+Snowflake). A MongoDB log is ordered by its numeric clusterTime `ct`, then its numeric ordinal `ord`, then the resume token `_data`; a row staged by a rivet older than the `ct` stamp ranks below every stamped row and among its own kind by `_data`. The count gate (manifest rows == warehouse `COUNT(*)`) runs before
 `cleanup_source` wipes the staging prefix.
 
 ---

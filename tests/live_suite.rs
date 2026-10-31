@@ -176,6 +176,8 @@ mod live_mongo;
 mod live_mongo_crash_recovery;
 #[path = "live/live_mongo_harm_permission.rs"]
 mod live_mongo_harm_permission;
+#[path = "live/live_mongo_order_warehouses.rs"]
+mod live_mongo_order_warehouses;
 #[path = "live/live_mongo_retry_and_faults.rs"]
 mod live_mongo_retry_and_faults;
 #[path = "live/live_mssql_chunked.rs"]

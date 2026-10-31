@@ -4253,3 +4253,22 @@ seeds:
       mongo:
         patch: clickhouse-load-legacy-mongo-position-reaches-the-insert/mongo.patch
         cells: [a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_remedy_loads_it]
+
+  - name: mongo-warehouse-order-by-token
+    class: a BigQuery or Snowflake view or compaction ranks a MongoDB change by its resume token alone instead of by clusterTime then ordinal, so a log whose token order runs against its stamps keeps the older image of a key and a deleted key comes back
+    history: 2026-10-31 - the Mongo order moved from the resume token (an internal MongoDB format) to the numeric clusterTime and ordinal ClickHouse already used; a token-only order is the one the view and the compaction had before
+    scope: source
+    patch: mongo-warehouse-order-by-token/shared.patch
+    engines:
+      postgres:
+        na: "the Mongo row of the order table is the only one patched; a Postgres position keeps its own row, pinned by each_row_renders_its_order_for_both_dialects"
+      mysql:
+        na: "the Mongo row of the order table is the only one patched; a MySQL position keeps its own row, pinned by each_row_renders_its_order_for_both_dialects"
+      mssql:
+        na: "the Mongo row of the order table is the only one patched; a SQL Server position keeps its own row, pinned by each_row_renders_its_order_for_both_dialects"
+      mongo:
+        cells: [a_mongo_log_whose_tokens_run_against_its_stamps_ranks_by_the_stamps_in_the_view_bigquery, a_mongo_log_whose_tokens_run_against_its_stamps_ranks_by_the_stamps_in_the_view_snowflake, a_mongo_log_whose_tokens_run_against_its_stamps_ranks_by_the_stamps_in_the_compact_bigquery, a_mongo_log_whose_tokens_run_against_its_stamps_ranks_by_the_stamps_in_the_compact_snowflake]
+      oracle:
+        na: "SourceEngine, which orders a change log for a warehouse, has no Oracle variant, so no Oracle change log is ranked by this path"
+      lib:
+        cells: ["lib:a_mongo_position_orders_by_cluster_time_then_ordinal_then_token", "lib:mongo_orders_by_cluster_time_ordinal_then_token_and_partitions_by_id"]

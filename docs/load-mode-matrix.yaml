@@ -74,6 +74,18 @@ scenarios:
     incremental: { test: inc_dedup_view_quotes_identifiers_per_dialect }
     cdc:         { test: every_warehouse_and_engine_orders_by_seq_last_and_drops_meta_columns }
 
+  - id: a_mongo_change_is_ranked_by_its_stamp_not_its_token
+    what: "a MongoDB change log is ranked by the numeric clusterTime `ct`, then the numeric ordinal `ord`, then the resume token `_data`, in the current-state view and in the compaction (BigQuery MERGE, Snowflake DELETE+INSERT); a row without `ct` ranks below every stamped one. Graded against a log whose tokens run against its stamps (reversed tokens, ordinal 9 vs 10, clusterTime 2^64-2 vs 2^64-1, a legacy unstamped row, an insert then a delete), read back through a second client. The `cdc` cell is the BigQuery view; the Snowflake view and both compactions are the sibling cells a_mongo_log_whose_tokens_run_against_its_stamps_ranks_by_the_stamps_in_the_{view_snowflake,compact_bigquery,compact_snowflake}."
+    full:        { na: "no change log" }
+    incremental: { na: "an incremental log has no Mongo position" }
+    cdc:         { test: a_mongo_log_whose_tokens_run_against_its_stamps_ranks_by_the_stamps_in_the_view_bigquery }
+
+  - id: a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused
+    what: "a MongoDB re-baseline whose snapshot parquet would land in a `<table>__changes` that already holds change rows is refused with RIVET_LOAD_REBASELINE_OVER_CHANGES (exit 5) and writes nothing, so a snapshot row at ct = 0 never ranks below older changes of its key in a served view; after the printed TRUNCATE the view equals the source. Graded against the source through a second client. The `cdc` cell is the BigQuery one; the Snowflake and ClickHouse cells are a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_snowflake (live_mongo_order_warehouses.rs) and a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated (live_clickhouse_load.rs)."
+    full:        { na: "no change log" }
+    incremental: { na: "an incremental log has no snapshot leg" }
+    cdc:         { test: a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_bigquery }
+
   - id: soft_delete_tombstone
     what: "a delete: cdc keeps a flagged tombstone (__is_deleted=true); incremental cannot observe deletes and never tombstones"
     full:        { na: "a full snapshot mirrors the source — a deleted row is simply absent next run" }
