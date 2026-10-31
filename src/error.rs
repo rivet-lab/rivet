@@ -1177,6 +1177,11 @@ pub mod codes {
         "RIVET_LOAD_REBASELINE_OVER_CHANGES",
         "TRUNCATE the change log the message names, then re-run the same `rivet load`",
     );
+    /// A staged CDC part whose positions an older rivet wrote without the order the warehouse versions rows by.
+    pub const LOAD_CDC_POSITION_UNORDERABLE: Code = refusal(
+        "RIVET_LOAD_CDC_POSITION_UNORDERABLE",
+        "re-baseline the stream as the message names (it starts with deleting the checkpoint), then run and load again; nothing was written",
+    );
     /// Another `rivet load` or `rivet compact` holds the table's lease.
     pub const LOAD_TABLE_BUSY: Code = busy(
         "RIVET_LOAD_TABLE_BUSY",
@@ -1813,6 +1818,7 @@ pub mod codes {
         LOAD_CHANGELOG_PARTITION_CHANGED,
         LOAD_BUFFER_NOT_COMPACTED,
         LOAD_REBASELINE_OVER_CHANGES,
+        LOAD_CDC_POSITION_UNORDERABLE,
         LOAD_TABLE_BUSY,
         LOAD_MANIFEST_INCONSISTENT,
         LOAD_SOURCE_FILE_MISMATCH,

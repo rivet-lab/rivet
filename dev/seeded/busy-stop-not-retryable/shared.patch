@@ -1,8 +1,8 @@
 diff --git a/src/error.rs b/src/error.rs
-index 0e65d244..55633238 100644
+index 88908d3..2c30648 100644
 --- a/src/error.rs
 +++ b/src/error.rs
-@@ -890,7 +890,7 @@ pub mod codes {
+@@ -923,7 +923,7 @@ pub mod codes {
          "the other process still holds it: retry once it ends, or give `--lock-wait` more seconds",
      );
      /// A command that rewrites an export's stored progress met a live run of that export.
@@ -11,7 +11,7 @@ index 0e65d244..55633238 100644
          "RIVET_STATE_RUN_IN_PROGRESS",
          "wait for the run to finish, or stop its process, then repeat the command",
      );
-@@ -969,7 +969,7 @@ pub mod codes {
+@@ -1012,7 +1012,7 @@ pub mod codes {
          "free a connection on the state database (rivet holds one per worker plus one for the lease keeper), raise the open-file limit, or lower `--pool`, then run again; nothing ran under the lease",
      );
      /// A PostgreSQL-state lease stopped being this process's while the work it guards was under way.
@@ -20,8 +20,8 @@ index 0e65d244..55633238 100644
          "RIVET_STATE_LEASE_LOST",
          "wait for the other `rivet load` or `rivet compact` of that table to end, then run again; nothing was written to the warehouse",
      );
-@@ -1135,7 +1135,7 @@ pub mod codes {
-         "TRUNCATE the change log the message names, then re-run the same `rivet load`",
+@@ -1183,7 +1183,7 @@ pub mod codes {
+         "re-baseline the stream as the message names (it starts with deleting the checkpoint), then run and load again; nothing was written",
      );
      /// Another `rivet load` or `rivet compact` holds the table's lease.
 -    pub const LOAD_TABLE_BUSY: Code = busy(

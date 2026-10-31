@@ -202,8 +202,6 @@ load:
 
 ## Not supported
 
-- **MongoDB CDC** into ClickHouse: the resume token has no integer order the
-  change log can version by. Load it into BigQuery or Snowflake.
 - **`rivet compact`** and **`layout: base_buffer`**: the engine collapses the log
   itself, so there is nothing to merge.
 - **A CDC stream over a table from an earlier full load**: refused; drop or

@@ -4219,3 +4219,37 @@ seeds:
           - apply_journals_a_run_whose_manifest_never_landed_as_failed_mongo
           - a_sequential_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mongo
           - a_parallel_run_cards_a_manifest_gap_as_failed_beside_a_good_export_mongo
+
+  - name: mongo-cdc-ordinal-restarts-on-resume
+    class: a MongoDB CDC run opened from a checkpoint restarts its ordinal among events sharing a clusterTime at 0 instead of restoring it, so the continuation of a transaction cut between two events ranks below the events already delivered and a ClickHouse view keeps the older image of a key
+    history: ClickHouse ordering probe 2026-10-30 (shuffled insertion, 2 shards on 7.0), clusterTime alone 3 wrong keys, an ordinal reset on resume 57 inversions, an ordinal restored from the checkpoint 0 wrong keys
+    scope: source
+    engines:
+      postgres:
+        na: "the position is an LSN, unique per commit; there is no ordinal to restore (pg_cdc_* and a_postgres_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source)"
+      mysql:
+        na: "the position is a binlog file and offset, unique per event; there is no ordinal to restore"
+      mssql:
+        na: "the position is an LSN with a sequence value, unique per change; there is no ordinal to restore"
+      oracle:
+        na: "the position is an SCN with a row sequence the log supplies; there is no ordinal to restore"
+      mongo:
+        patch: mongo-cdc-ordinal-restarts-on-resume/mongo.patch
+        cells: [a_mongo_transaction_cut_mid_tie_loads_in_source_order, a_mongo_run_killed_mid_tie_resumes_in_source_order]
+
+  - name: clickhouse-load-legacy-mongo-position-reaches-the-insert
+    class: a ClickHouse change-log load lets a MongoDB part whose position carries no clusterTime reach the insert, where the server throws Code 395 after an empty change table was created, instead of a coded refusal before any write
+    history: MongoDB CDC into ClickHouse verifier probe 2026-10-31, an old binary run without load then the new binary, load exit 1 wrapping Code 395 with t__changes already created
+    scope: source
+    engines:
+      postgres:
+        na: "a Postgres position is an LSN; no stamp is missing from a part an older rivet wrote"
+      mysql:
+        na: "a MySQL position is a binlog file and offset; no stamp is missing from a part an older rivet wrote"
+      mssql:
+        na: "a SQL Server position is an LSN; no stamp is missing from a part an older rivet wrote"
+      oracle:
+        na: "an Oracle position is an SCN; no stamp is missing from a part an older rivet wrote"
+      mongo:
+        patch: clickhouse-load-legacy-mongo-position-reaches-the-insert/mongo.patch
+        cells: [a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_remedy_loads_it]
