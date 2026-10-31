@@ -2,12 +2,10 @@
 
 use crate::common::*;
 
-const PORT: u16 = 27018;
-
 /// A `mode: cdc` Rig (until_current + checkpoint) over `table` in a fresh db.
 fn cdc(db: &str, table: &str) -> Rig {
     Rig::mongo_cdc(table)
-        .source_url(&MongoTest::url(PORT, db))
+        .source_url(&MongoTest::url(mongo_rs_port(), db))
         .duckdb_oracle()
 }
 
@@ -17,7 +15,7 @@ fn mongo_cdc_capture_resume_and_until_current_drain() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_cap");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = cdc(&db, "t");
@@ -53,7 +51,7 @@ fn mongo_cdc_crash_after_flush_before_ack_re_reads_on_resume() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_crash");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let mut rig = cdc(&db, "t");
@@ -86,7 +84,7 @@ fn mongo_cdc_soak_dedup_matches_source_current_state() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_soak");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("s");
 
     let rig = cdc(&db, "s");
@@ -119,7 +117,7 @@ fn mongo_cdc_idle_first_run_then_change_is_captured() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_idle");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = cdc(&db, "t");
@@ -143,7 +141,7 @@ fn mongo_cdc_update_and_delete_carry_document() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_ud");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = cdc(&db, "t");
@@ -176,7 +174,7 @@ fn mongo_cdc_initial_snapshot_covers_preexisting_rows() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_snap");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.seed_int_id("t", 500);
 
     let rig = cdc(&db, "t").cdc("initial: snapshot").cdc("max_events: 1");
@@ -268,7 +266,7 @@ fn mongo_cdc_mixed_transaction_ending_on_uncaptured_table() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_mix");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("orders");
     m.drop_collection("audit");
 
@@ -318,7 +316,7 @@ fn roast_corrupt_checkpoint_fails_loudly_not_silent_reanchor() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_corrupt");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = cdc(&db, "t");
@@ -372,7 +370,7 @@ fn roast_pos_column_leads_with_data_for_downstream_sort() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_posdata");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = cdc(&db, "t");
@@ -399,7 +397,7 @@ fn roast_until_current_terminates_under_sustained_writes_and_keeps_backlog() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_hbound");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = cdc(&db, "t");
@@ -410,7 +408,7 @@ fn roast_until_current_terminates_under_sustained_writes_and_keeps_backlog() {
 
     let bg_db = db.clone();
     let mut bg = BgWriter::spawn(move |stop_bg| {
-        let w = MongoTest::connect(PORT, &bg_db);
+        let w = MongoTest::connect(mongo_rs_port(), &bg_db);
         let mut i = 10_000;
         while !stop_bg.load(std::sync::atomic::Ordering::Relaxed) {
             w.upsert_set("t", i, "v", "live");
@@ -445,7 +443,7 @@ fn roast_mongo_cdc_until_current_open_bound_two_runs_lose_nothing() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_mongoob");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = cdc(&db, "t");
@@ -457,7 +455,7 @@ fn roast_mongo_cdc_until_current_open_bound_two_runs_lose_nothing() {
 
     let bg_db = db.clone();
     let mut bg = BgWriter::spawn(move |stop_bg| {
-        let w = MongoTest::connect(PORT, &bg_db);
+        let w = MongoTest::connect(mongo_rs_port(), &bg_db);
         let mut i = 10_000i64;
         while !stop_bg.load(std::sync::atomic::Ordering::Relaxed) {
             w.upsert_set("t", i, "v", "live");
@@ -499,7 +497,7 @@ fn roast_uncaptured_collection_drop_does_not_wedge_capture() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_ddl");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("orders");
     m.drop_collection("scratch");
     m.upsert_set("scratch", 1, "v", "x");
@@ -525,7 +523,7 @@ fn roast_checkpoint_advances_on_uncaptured_only_traffic() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_kstall");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("orders");
     m.drop_collection("audit");
 
@@ -554,7 +552,7 @@ fn mongo_cdc_change_stream_renders_tricky_bson_verbatim_like_batch() {
     require_alive(LiveService::DuckDb);
     use mongodb::bson::{Bson, doc};
     let db = unique_name("cdc_types");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = cdc(&db, "t");
@@ -617,7 +615,7 @@ fn mongo_cdc_per_field_presence_matches_the_source() {
     require_alive(LiveService::DuckDb);
     use mongodb::bson::doc;
     let db = unique_name("cdc_fields");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("f");
 
     let rig = cdc(&db, "f");
@@ -683,7 +681,7 @@ fn mongo_cdc_delete_carries_the_pre_image_when_the_collection_has_one() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_preimg");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
     m.upsert_set("t", 9, "v", "seed");
     if !m.enable_pre_images("t") {
@@ -734,7 +732,7 @@ fn mongo_cdc_crash_after_the_checkpoint_still_delivers_every_change() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_ckcrash");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let mut rig = cdc(&db, "t").cdc("rollover: 2");
@@ -783,7 +781,7 @@ fn mongo_cdc_crash_after_the_checkpoint_still_delivers_every_change() {
 fn mongo_cdc_warns_when_a_configured_collection_does_not_exist() {
     require_alive(LiveService::MongoRs);
     let db = unique_name("cdc_ghost");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.upsert_set("real", 1, "v", "here");
 
     let rig = cdc(&db, "no_such_collection");
@@ -822,13 +820,13 @@ fn mongo_cdc_cli_writes_a_faithful_csv_of_the_document_column() {
     require_alive(LiveService::DuckDb);
     use mongodb::bson::doc;
     let db = unique_name("cdc_cli_csv");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("docs");
     m.drop_collection("other");
 
     let d = tempfile::tempdir().expect("tempdir");
     let ckpt = d.path().join("cli.ckpt");
-    let url = MongoTest::url(PORT, &db);
+    let url = MongoTest::url(mongo_rs_port(), &db);
     let (host, container) = live_shared_workdir(&unique_name("mongo_cli_csv"));
 
     let anchor = run_rivet_args_bounded_env(
@@ -927,7 +925,7 @@ fn mongo_cdc_captures_a_dotted_collection_without_swallowing_its_sibling() {
     use mongodb::bson::doc;
     let db = unique_name("dotted").to_lowercase();
     let dotted = format!("{db}.orders");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.create_empty_collection(&dotted);
     m.drop_collection("orders");
 
@@ -1112,9 +1110,9 @@ fn null_and_string_null_ids(pre_images: bool) -> Option<(MongoTest, MongoDbGuard
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("cdc_nullid");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     let g = MongoDbGuard {
-        port: PORT,
+        port: mongo_rs_port(),
         db: db.clone(),
     };
     m.drop_collection("t");
@@ -1195,11 +1193,11 @@ fn mongo_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run() {
     require_alive(LiveService::MongoRs);
     use mongodb::bson::doc;
     let db = unique_name("cdc_cli_defer");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("docs");
     let d = tempfile::tempdir().expect("tempdir");
     let ckpt = d.path().join("cli.ckpt").to_str().unwrap().to_string();
-    let url = MongoTest::url(PORT, &db);
+    let url = MongoTest::url(mongo_rs_port(), &db);
     let run = |cap: &[&str]| {
         let mut args = vec![
             "cdc",
@@ -1242,13 +1240,13 @@ fn mongo_churn(m: &MongoTest, coll: &str, op: Churn) {
 #[ignore = "live: requires docker compose up -d mongo-rs"]
 fn mongo_cdc_collection_removed_from_tables_and_put_back_is_refused_until_rebaselined() {
     let db = unique_name("cdc_rejoin");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     let _g = MongoDbGuard {
-        port: PORT,
+        port: mongo_rs_port(),
         db: db.clone(),
     };
     a_table_put_back_is_refused_until_rebaselined(
-        Rig::mongo_cdc("a").source_url(&MongoTest::url(PORT, &db)),
+        Rig::mongo_cdc("a").source_url(&MongoTest::url(mongo_rs_port(), &db)),
         ["a", "b", "c"],
         &mut |t, op| mongo_churn(&m, t, op),
     );
@@ -1259,13 +1257,13 @@ fn mongo_cdc_collection_removed_from_tables_and_put_back_is_refused_until_rebase
 fn mongo_cdc_collection_switched_to_another_over_its_baseline_is_refused_and_switched_back_continues()
  {
     let db = unique_name("cdc_switch");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     let _g = MongoDbGuard {
-        port: PORT,
+        port: mongo_rs_port(),
         db: db.clone(),
     };
     a_table_switched_over_a_baseline_is_refused_and_switched_back_continues(
-        Rig::mongo_cdc("a").source_url(&MongoTest::url(PORT, &db)),
+        Rig::mongo_cdc("a").source_url(&MongoTest::url(mongo_rs_port(), &db)),
         ["a", "b"],
         &|r, t| r.repoint(t),
         &mut |t, op| mongo_churn(&m, t, op),

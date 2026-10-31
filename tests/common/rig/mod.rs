@@ -286,7 +286,7 @@ impl Rig {
     /// checkpoint, like the SQL CDC constructors. Override the db with
     /// `.source_url(&MongoTest::url(PORT, &db))`.
     pub fn mongo_cdc(table: &str) -> Self {
-        let mut r = Self::new("mongo", super::env::MONGO_RS_URL, table);
+        let mut r = Self::new("mongo", &super::env::mongo_rs_url(), table);
         r.mode = "cdc".to_string();
         r.cdc_lines.push("until_current: true".into());
         r.cdc_lines.push("__CKPT__".into()); // resolved at render time

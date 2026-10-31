@@ -1157,15 +1157,15 @@ fn a_generated_cdc_config_drives_run_load_compact_mongo() {
     };
     let db = unique_name("init_cdc_mg");
     let _db = MongoDbGuard {
-        port: 27018,
+        port: mongo_rs_port(),
         db: db.clone(),
     };
-    let m = MongoTest::connect(27018, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     let coll = unique_name("events");
     m.create_empty_collection(&coll);
     cdc_warehouse_chain(
         CdcSource {
-            url: MongoTest::url(27018, &db),
+            url: MongoTest::url(mongo_rs_port(), &db),
             init_args: vec!["--table".into(), coll.clone()],
             apply: Box::new(move |ops| {
                 for op in ops {

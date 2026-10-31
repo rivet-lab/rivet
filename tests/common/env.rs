@@ -135,6 +135,13 @@ pub fn oracle_latin1_url() -> String {
 pub const ORACLE_CDC_URL: &str = "oracle://c%23%23rivetcdc:rivet@127.0.0.1:1521/FREEPDB1";
 pub const MONGO_URL: &str = "mongodb://127.0.0.1:27017";
 pub const MONGO_RS_URL: &str = "mongodb://127.0.0.1:27018/?directConnection=true";
+/// The `mongo-rs` stand's URL on the port the stand chose.
+pub fn mongo_rs_url() -> String {
+    format!(
+        "mongodb://127.0.0.1:{}/?directConnection=true",
+        mongo_rs_port()
+    )
+}
 pub const MONGO_SHARD_PORT: u16 = 27991;
 pub const MONGO_SHARD_URL: &str = "mongodb://127.0.0.1:27991/?directConnection=true";
 /// Host port of the `mongo-rs` stand; `RIVET_TEST_MONGO_RS_PORT` names the one a non-default `MONGO_VERSION` stand is published on.
