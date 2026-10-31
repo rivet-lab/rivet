@@ -850,6 +850,7 @@ services:
       # HTTP interface on 8123 anyway.
       - "8123:8123"
       - "9002:9000"
+      - "8443:8443"
     volumes:
       - ./tests/.live-tmp:/work
       # Allow the `file()` table function to read Parquet from /work — by
@@ -857,6 +858,32 @@ services:
       - ./dev/clickhouse/user_files.xml:/etc/clickhouse-server/config.d/user_files.xml:ro
       # The named collection the load's server-side pull reads MinIO through.
       - ./dev/clickhouse/named_collections.xml:/etc/clickhouse-server/config.d/named_collections.xml:ro
+      - ./dev/clickhouse/rivet_user.xml:/etc/clickhouse-server/users.d/rivet_user.xml:ro
+      - ./dev/clickhouse/https.xml:/etc/clickhouse-server/config.d/https.xml:ro
+      - ./dev/clickhouse/tls:/etc/clickhouse-server/tls:ro
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider",
+             "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  clickhouse-tz:
+    image: clickhouse/clickhouse-server:24.8
+    profiles: ["tz"]
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      TZ: Asia/Tokyo
+      CLICKHOUSE_USER: rivet
+      CLICKHOUSE_PASSWORD: rivet
+      CLICKHOUSE_DB: rivet
+    ports:
+      - "8125:8123"
+    volumes:
       - ./dev/clickhouse/rivet_user.xml:/etc/clickhouse-server/users.d/rivet_user.xml:ro
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider",
