@@ -157,6 +157,24 @@ mod tests {
         ));
     }
 
+    /// A name of 127 bytes is searched under the fold, one of 128 bytes only by ASCII case, and neither panics.
+    #[test]
+    fn the_longest_name_the_fold_search_takes_is_127_bytes() {
+        let kelvin = KELVIN.as_bytes();
+        for (len, folded) in [(127, true), (128, false)] {
+            let name = format!("k{}", "a".repeat(len - 1));
+            let text = [kelvin, "a".repeat(len - 1).as_bytes()].concat();
+            assert_eq!(mentions_name(true, &name, &text), folded, "{len}");
+            assert!(mentions_name(
+                true,
+                &name,
+                [b"x".as_slice(), name.as_bytes(), "\u{4e00}".as_bytes()]
+                    .concat()
+                    .as_slice()
+            ));
+        }
+    }
+
     /// The set of folded characters is the `folds` of the statement-truth corpus header.
     #[test]
     fn the_folded_characters_are_the_ones_the_corpus_header_names() {
