@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 7bfd8603..de9d9f6b 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -1845,7 +1845,7 @@ pub(crate) fn undecodable_event_is_ours(
+ 
+ /// Whether a configured `table:` names `(schema, table)` as the server resolves names: exactly, or under the fold when it folds case.
+ fn target_matches(fold: bool, cfg: &str, schema: &str, table: &str) -> bool {
+-    if !fold {
++    if !fold || fold {
+         return crate::source::cdc::sink::table_matches(
+             crate::source::cdc::CdcEngine::Mysql,
+             cfg,
