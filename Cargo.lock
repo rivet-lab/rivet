@@ -3902,6 +3902,7 @@ dependencies = [
  "criterion",
  "csv",
  "env_logger",
+ "flate2",
  "futures-util",
  "indicatif",
  "jsonwebtoken",

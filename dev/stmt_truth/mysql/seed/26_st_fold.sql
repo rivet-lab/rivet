@@ -1,0 +1,12 @@
+SET NAMES utf8mb4;
+CREATE DATABASE IF NOT EXISTS `st_meta`;
+CREATE TABLE IF NOT EXISTS `st_meta`.`targets` (db VARCHAR(64) NOT NULL, tbl VARCHAR(64) NOT NULL, captured TINYINT NOT NULL, native TINYINT NOT NULL, family VARCHAR(16) NOT NULL, PRIMARY KEY (db, tbl)) DEFAULT CHARACTER SET utf8mb4;
+DROP DATABASE IF EXISTS `st_fold`;
+CREATE DATABASE `st_fold` DEFAULT CHARACTER SET utf8mb4;
+DELETE FROM `st_meta`.`targets` WHERE db = 'st_fold';
+CREATE TABLE `st_fold`.`kinds` (`id` INT NOT NULL PRIMARY KEY, `amount` INT NOT NULL, `note` VARCHAR(40)) ENGINE=InnoDB;
+INSERT INTO `st_fold`.`kinds` SELECT n, n * 10, CONCAT('fold ', n) FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 5) SELECT n FROM s) q;
+INSERT INTO `st_meta`.`targets` VALUES ('st_fold', 'kinds', 1, 0, 'fold');
+CREATE TABLE `st_fold`.`tmp` (`id` INT NOT NULL PRIMARY KEY, `amount` INT NOT NULL, `note` VARCHAR(40)) ENGINE=InnoDB;
+INSERT INTO `st_fold`.`tmp` SELECT n, n * 100, CONCAT('swap ', n) FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 5) SELECT n FROM s) q;
+INSERT INTO `st_meta`.`targets` VALUES ('st_fold', 'tmp', 0, 0, 'fold');

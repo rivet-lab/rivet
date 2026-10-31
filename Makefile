@@ -23,6 +23,20 @@ error-sites:  ## Regenerate docs/error-sites.md: the offline battery and the liv
 	python3 dev/pytools/error_sites.py measure
 	python3 dev/pytools/error_sites.py report
 
+STMT_ENGINE ?= mysql
+.PHONY: statement-truth-up statement-truth-down statement-truth-generate statement-truth-check
+statement-truth-up:  ## Start the statement-truth stand of STMT_ENGINE and wait until it is healthy (docs/statement-truth.md).
+	python3 dev/pytools/statement_truth.py $(STMT_ENGINE) up
+
+statement-truth-down:  ## Remove the statement-truth stand containers (the stand services only).
+	python3 dev/pytools/statement_truth.py $(STMT_ENGINE) down
+
+statement-truth-generate:  ## Rewrite dev/fixtures/statement_truth/<engine>/ from what the stand's servers do (about an hour).
+	python3 dev/pytools/statement_truth.py $(STMT_ENGINE) generate
+
+statement-truth-check:  ## Regenerate the corpus from the stand and diff it against the committed fixtures; exit 1 on any difference.
+	python3 dev/pytools/statement_truth.py $(STMT_ENGINE) check
+
 live:  ## Any live command inside a slot: make live CMD="cargo nextest run --run-ignored only -E 'test(x)'"
 	$(LIVE) $(CMD)
 

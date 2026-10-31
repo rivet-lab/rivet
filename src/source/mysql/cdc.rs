@@ -2264,7 +2264,7 @@ fn refused_table_rename(
 
 /// What a Query event is refused for, in the order the reader tries the reasons.
 #[derive(Debug, PartialEq)]
-enum QueryRefusal {
+pub(crate) enum QueryRefusal {
     Truncate((String, String)),
     ColumnRename((String, String)),
     TableRename(Option<(String, String)>),
@@ -2293,7 +2293,7 @@ impl QueryRefusal {
 }
 
 /// The refusal a Query event earns: its text is read only without the grants policy, or under it for a statement that names a captured table.
-fn query_refusal(
+pub(crate) fn query_refusal(
     policy: bool,
     fold: bool,
     sql: &str,

@@ -25,6 +25,8 @@ pub(crate) mod column_grants;
 mod folded_name;
 mod proxy;
 mod statement;
+#[cfg(test)]
+mod statement_truth;
 
 use std::sync::Arc;
 
