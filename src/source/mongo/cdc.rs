@@ -233,21 +233,31 @@ mod token_data_tests {
     }
 }
 
-/// Pure bound verdicts (#161): Mongo was the only engine whose `until_current`
-/// stop rules lived inline in the drain loop instead of a testable transition
-/// (its siblings: MySQL `commit_past_bound`, PG `tx_disposition`, MSSQL
-/// `fill_sql`). Two rules, both unit-tested in both directions:
-///
-/// An EMPTY poll's disposition: the stream's resume token has silently advanced
-/// past the open-time `_data` target → the backlog is drained, STOP; no target
-/// (unbounded shouldn't reach here, and an unparseable boundary fails OPEN) →
-/// STOP; otherwise the backlog is still coming → POLL again.
-fn idle_poll_stops(advanced: Option<&str>, target: Option<&str>) -> bool {
+/// An empty poll ends the drain once the token is past the open-time target and has reached the open-time clusterTime bound, or when there is no target.
+fn idle_poll_stops(
+    advanced: Option<&str>,
+    target: Option<&str>,
+    bound: Option<mongodb::bson::Timestamp>,
+) -> bool {
     match (advanced, target) {
-        (Some(cur), Some(tgt)) => cur > tgt,
+        (Some(cur), Some(tgt)) => cur > tgt && token_reached_bound(cur, bound),
         (_, None) => true,
         _ => false,
     }
+}
+
+/// Whether the clusterTime a resume token's `_data` opens with (`82` + seconds + increment, big-endian hex) is at or past `bound`; an unreadable token or no bound counts as reached.
+fn token_reached_bound(data: &str, bound: Option<mongodb::bson::Timestamp>) -> bool {
+    let Some(b) = bound else { return true };
+    let parsed = data
+        .strip_prefix("82")
+        .filter(|rest| rest.len() >= 16)
+        .and_then(|rest| {
+            let time = u32::from_str_radix(rest.get(..8)?, 16).ok()?;
+            let increment = u32::from_str_radix(rest.get(8..16)?, 16).ok()?;
+            Some((time, increment))
+        });
+    parsed.is_none_or(|ct| ct >= (b.time, b.increment))
 }
 
 /// The TIME bound: an event whose `cluster_time` is past the open-time cluster
@@ -972,7 +982,7 @@ impl ChangeStream for MongoChangeStream {
                             .and_then(|t| serde_json::to_value(&t).ok())
                             .as_ref()
                             .and_then(token_data);
-                        if idle_poll_stops(advanced.as_deref(), target.as_deref()) {
+                        if idle_poll_stops(advanced.as_deref(), target.as_deref(), bound_ts) {
                             return None;
                         }
                         continue; // backlog still coming — poll again
@@ -1295,15 +1305,32 @@ mod tests {
     /// loop (siblings: commit_past_bound / tx_disposition / fill_sql).
     #[test]
     fn idle_poll_stops_both_directions() {
-        // stop: token advanced past the open-time target — backlog drained.
-        assert!(idle_poll_stops(Some("82AB"), Some("8299")));
-        // stop: no target (fail OPEN on an unparseable boundary).
-        assert!(idle_poll_stops(None, None));
-        assert!(idle_poll_stops(Some("82AB"), None));
-        // poll: backlog still coming (at or below the target, or no token yet).
-        assert!(!idle_poll_stops(Some("8299"), Some("82AB")));
-        assert!(!idle_poll_stops(Some("82AB"), Some("82AB")));
-        assert!(!idle_poll_stops(None, Some("82AB")));
+        let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
+        let past = "82000000640000000A";
+        let bound_met = at(100, 10);
+        assert!(idle_poll_stops(Some(past), Some("81"), bound_met));
+        assert!(idle_poll_stops(Some(past), Some("81"), at(100, 9)));
+        assert!(idle_poll_stops(Some(past), Some("81"), None));
+        assert!(idle_poll_stops(None, None, bound_met));
+        assert!(idle_poll_stops(Some(past), None, bound_met));
+        assert!(!idle_poll_stops(Some(past), Some("81"), at(100, 11)));
+        assert!(!idle_poll_stops(Some(past), Some("81"), at(101, 0)));
+        assert!(!idle_poll_stops(Some("81"), Some(past), bound_met));
+        assert!(!idle_poll_stops(Some(past), Some(past), bound_met));
+        assert!(!idle_poll_stops(None, Some(past), bound_met));
+    }
+
+    /// A token whose clusterTime is below the open-time bound has not drained the backlog, whatever it compares to the target.
+    #[test]
+    fn a_token_below_the_open_time_bound_has_not_reached_it() {
+        let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
+        let token = "826AE5B2FD000000EC2B042C01002B026E5A1004";
+        assert!(token_reached_bound(token, at(0x6AE5B2FD, 0xEC)));
+        assert!(!token_reached_bound(token, at(0x6AE5B2FD, 0xED)));
+        assert!(!token_reached_bound(token, at(0x6AE5B2FE, 0)));
+        assert!(token_reached_bound(token, None));
+        assert!(token_reached_bound("not-a-token", at(1, 0)));
+        assert!(token_reached_bound("82", at(1, 0)));
     }
 
     /// `until_current` must REFUSE without its bound, and only then.

@@ -298,7 +298,13 @@ impl Rig {
             "postgres" => E::Postgres,
             "mysql" if self.source_url.contains(":3307") => E::MysqlCdc,
             "mssql" if self.source_url.contains(":1434") => E::MssqlCdc,
-            "mongo" if self.source_url.contains(":27018") => E::MongoRs,
+            "mongo"
+                if self
+                    .source_url
+                    .contains(&format!(":{}", super::super::env::mongo_rs_port())) =>
+            {
+                E::MongoRs
+            }
             // MAIN stand — wired 2026-08-29 so the batch suites can census at
             // all; the ports keep the two instances apart (a shared arm would
             // read the wrong server and an absent table reads as zero rows).

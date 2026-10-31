@@ -42,6 +42,32 @@ impl MongoTest {
         format!("mongodb://127.0.0.1:{port}/{db}?directConnection=true")
     }
 
+    /// Full server version via `buildInfo` (`4.4.30`); empty if unavailable.
+    pub fn server_version(&self) -> String {
+        self.rt.block_on(async {
+            self.client
+                .database("admin")
+                .run_command(doc! { "buildInfo": 1 })
+                .await
+                .ok()
+                .and_then(|d| d.get_str("version").ok().map(str::to_string))
+                .unwrap_or_default()
+        })
+    }
+
+    /// Whether the server is a mongos (`hello.msg == "isdbgrid"`).
+    pub fn is_mongos(&self) -> bool {
+        self.rt.block_on(async {
+            self.client
+                .database("admin")
+                .run_command(doc! { "hello": 1 })
+                .await
+                .ok()
+                .and_then(|d| d.get_str("msg").ok().map(|m| m == "isdbgrid"))
+                .unwrap_or(false)
+        })
+    }
+
     /// Server major version via `buildInfo` (4, 5, 6, 7, 8); `0` if unavailable.
     /// Used to skip version-gated tests — e.g. `read_concern: snapshot` needs 5.0+,
     /// so on 4.4 the snapshot test self-skips rather than failing the matrix.
@@ -434,5 +460,118 @@ impl MongoTest {
             }
             killed
         })
+    }
+}
+
+/// Shard names of the `shard` profile in docker-compose.yaml.
+pub const SHARDS: [&str; 2] = ["sharda", "shardb"];
+
+impl MongoTest {
+    /// Shard `name` on `_id` (ranged), cut at `splits`, and spread the chunks over both shards by turns.
+    pub fn shard_collection(&self, name: &str, splits: &[i64]) {
+        let ns = format!("{}.{name}", self.db);
+        self.rt.block_on(async {
+            let admin = self.client.database("admin");
+            let _ = self.coll(name).drop().await;
+            admin
+                .run_command(doc! { "enableSharding": &self.db })
+                .await
+                .expect("mongo: enableSharding");
+            admin
+                .run_command(doc! { "shardCollection": &ns, "key": { "_id": 1 } })
+                .await
+                .expect("mongo: shardCollection");
+            for at in splits {
+                admin
+                    .run_command(doc! { "split": &ns, "middle": { "_id": *at } })
+                    .await
+                    .expect("mongo: split");
+            }
+        });
+        for (i, at) in std::iter::once(&i64::MIN).chain(splits).enumerate() {
+            let probe = if *at == i64::MIN { splits[0] - 1 } else { *at };
+            self.move_chunk(name, probe, SHARDS[i % 2]);
+        }
+    }
+
+    /// Move the chunk holding `_id` to shard `to` without waiting for the orphan delete; whether the server accepted it.
+    pub fn move_chunk(&self, name: &str, id: i64, to: &str) -> bool {
+        let ns = format!("{}.{name}", self.db);
+        self.rt.block_on(async {
+            self.client
+                .database("admin")
+                .run_command(doc! {
+                    "moveChunk": &ns,
+                    "find": { "_id": id },
+                    "to": to,
+                    "_waitForDelete": false,
+                    "maxTimeMS": 20000,
+                })
+                .await
+                .is_ok()
+        })
+    }
+}
+
+/// Moves chunks of `db.coll` back and forth between the shards on its own connection until stopped.
+pub struct ChunkMover {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<(u32, u32)>>,
+}
+
+impl ChunkMover {
+    pub fn start(port: u16, db: &str, coll: &str, ids: Vec<i64>) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let (db, coll) = (db.to_string(), coll.to_string());
+        let handle = std::thread::spawn(move || {
+            let m = MongoTest::connect(port, &db);
+            let (mut moved, mut refused) = (0u32, 0u32);
+            let mut turn = 0usize;
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                let id = ids[turn % ids.len()];
+                let to = SHARDS[(turn / ids.len() + turn) % 2];
+                if m.move_chunk(&coll, id, to) {
+                    moved += 1;
+                } else {
+                    refused += 1;
+                }
+                turn += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            (moved, refused)
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stop the mover; `(moves accepted, moves refused)`.
+    pub fn stop(mut self) -> (u32, u32) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.handle.take().unwrap().join().expect("chunk mover")
+    }
+}
+
+/// Number of documents the sharded cells seed: `_id` 1..=SHARD_DOCS, cut at a third and two thirds.
+pub const SHARD_DOCS: i64 = 60;
+pub const SHARD_SPLITS: [i64; 2] = [21, 41];
+
+impl MongoTest {
+    /// One round of the sharded workload: single-shard upserts, a transaction over all three ranges that touches one key twice, and a delete; every value is a distinct integer.
+    pub fn shard_round(&self, name: &str, round: i64) {
+        for k in 0..6 {
+            let id = (round * 7 + k * 11) % SHARD_DOCS + 1;
+            self.upsert_set(name, id, "v", &(round * 100 + k).to_string());
+        }
+        let (a, b, c) = (round % 20 + 1, round % 20 + 21, round % 20 + 41);
+        let tag = |t: i64| (round * 100 + 10 + t).to_string();
+        let (t1, t2, t3, t4) = (tag(1), tag(2), tag(3), tag(4));
+        self.txn_updates(
+            name,
+            &[(a, "v", &t1), (b, "v", &t2), (c, "v", &t3), (b, "v", &t4)],
+        );
+        self.delete_one(name, (round * 13) % SHARD_DOCS + 1);
     }
 }

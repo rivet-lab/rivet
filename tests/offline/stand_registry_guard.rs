@@ -36,6 +36,7 @@ fn env_rs_endpoints_are_the_registry_endpoints() {
         ("mssql_cdc", env::MSSQL_CDC_URL),
         ("mongo", env::MONGO_URL),
         ("mongo_rs", env::MONGO_RS_URL),
+        ("mongo_shard", env::MONGO_SHARD_URL),
     ];
     for (source, hard_coded) in pairs {
         assert_eq!(
@@ -44,6 +45,10 @@ fn env_rs_endpoints_are_the_registry_endpoints() {
             "tests/common/env.rs disagrees with dev/stand/registry.yaml for `{source}`"
         );
     }
+    assert!(
+        registry::stand_url("mongo_shard").contains(&format!(":{}/", env::MONGO_SHARD_PORT)),
+        "MONGO_SHARD_PORT disagrees with dev/stand/registry.yaml for `mongo_shard`"
+    );
 }
 
 #[test]

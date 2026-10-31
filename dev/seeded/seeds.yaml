@@ -4237,6 +4237,23 @@ seeds:
         patch: mongo-cdc-ordinal-restarts-on-resume/mongo.patch
         cells: [a_mongo_transaction_cut_mid_tie_loads_in_source_order, a_mongo_run_killed_mid_tie_resumes_in_source_order]
 
+  - name: mongo-cdc-stops-before-the-open-time-bound
+    class: a MongoDB CDC run with until_current ends its drain on the first empty poll whose resume token passes the token read at open, without the token reaching the clusterTime the server reported at open, so on a sharded cluster a write committed before the run started is left for the next run and a source-vs-destination read after one run is short
+    history: MongoDB CDC two-shard cell 2026-10-31, the last delete of a round (committed before the run opened) missing from the run's output in 3 of 3 runs, delivered by the next run
+    scope: source
+    engines:
+      postgres:
+        na: "the drain ends at a commit past the bound read at open (tx_disposition); no token comparison stands in for the bound"
+      mysql:
+        na: "the drain ends at a commit past the bound read at open (commit_past_bound); no token comparison stands in for the bound"
+      mssql:
+        na: "the drain ends at an LSN fill the server reports (fill_sql); no token comparison stands in for the bound"
+      oracle:
+        na: "the drain is bounded at open by the SCN the miner reads from the database; there is no merged resume token whose position can pass the bound early"
+      mongo:
+        patch: mongo-cdc-stops-before-the-open-time-bound/mongo.patch
+        cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, "lib:idle_poll_stops_both_directions"]
+
   - name: clickhouse-load-legacy-mongo-position-reaches-the-insert
     class: a ClickHouse change-log load lets a MongoDB part whose position carries no clusterTime reach the insert, where the server throws Code 395 after an empty change table was created, instead of a coded refusal before any write
     history: MongoDB CDC into ClickHouse verifier probe 2026-10-31, an old binary run without load then the new binary, load exit 1 wrapping Code 395 with t__changes already created
