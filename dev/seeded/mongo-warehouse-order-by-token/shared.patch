@@ -1,0 +1,11 @@
+--- a/src/source/cdc/order.rs
++++ b/src/source/cdc/order.rs
+@@ -160,7 +160,7 @@
+ /// Mongo `{_data, rt, ct, ord}`: every consumer orders by `(ct, ord)`, the warehouse views then by the resume token keystring.
+ pub(crate) const MONGO: Row = Row {
+     sniff: Sniff::Str("_data"),
+-    parts: &[MONGO_STAMP_CT, MONGO_STAMP_ORD, MONGO_DATA],
++    parts: &[MONGO_DATA],
+     clickhouse: Some(ChArm {
+         when: ChWhen::HasField("ct"),
+         pack: ChPack::Pair(MONGO_CT, MONGO_ORD),

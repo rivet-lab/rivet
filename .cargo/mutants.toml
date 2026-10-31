@@ -604,25 +604,12 @@ exclude_re = [
     # ack -> Ok(())               ⇒ roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot FAILS
     "replace PgChangeStream::release_empty_frontier with \\(\\)$",
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
-    # The match GUARD on the MySQL TRUNCATE arm sits inside that same live-only body.
-    # Flipping it to `true`/`false` is the addressed/un-addressed pair that the live
-    # test grades directly (`if true` fails the bystander half; disabling fails the
-    # refusal half) — both run by hand on the same date. Excluded here rather than
-    # left MISSED, because an operator-shaped entry that IS graded live is the
-    # honest form; what would be wrong is an ungraded decision hiding in glue.
-    # The mutant NAME embeds the guard EXPRESSION between "match guard" and
-    # "with true/false", so a pattern written as `replace match guard with true in
-    # …` matches nothing. The gate caught that as a DEAD exclusion — which is the
-    # right verdict and exactly the failure mode a hand-written regex has here
-    # (an over-escaped one earlier in this session matched nothing too, and would
-    # have left the gate red while looking handled).
-    #
-    # Anchored on the guard's own call instead. Both directions are graded LIVE by
-    # roast_mysql_cdc_refuses_a_truncate_instead_of_silently_diverging: `true`
-    # fails its bystander half (an export that does not capture the truncated
-    # table must still complete), `false` fails the refusal half. Run by hand
-    # 2026-08-24, mutant applied and reverted each time.
-    "replace match guard truncate_target.*MysqlChangeStream::fill",
+    # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
+    "replace MysqlChangeStream::note_statement with \\(\\)",
+    # 2026-10-31 #728: pre-existing arm, killed only by live cell a_prepared_xa_branch_is_never_published_by_another_transactions_commit (proven RED 2026-10-31).
+    "^src/source/mysql/cdc\\.rs:1565:13: delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill$",
+    # 2026-10-31 #728: equivalent on policy-off: fold is read only through mention_under_policy, None without the policy; policy-off adds one lower_case_table_names read, stream unchanged (general log 2026-10-31); follow-up: live cell asserts zero reads.
+    "^src/source/mysql/cdc\\.rs:1134:37: replace && with \\|\\| in MysqlChangeStream::open_or_resume$",
 
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
     # `in_quotes && next == '"'` guard on the escaped-quote arm cannot change what

@@ -318,6 +318,30 @@ services:
       timeout: 3s
       retries: 10
 
+  mysql-reset:
+    image: mysql:8.0
+    profiles: ["cdc"]
+    command:
+      - "--default-authentication-plugin=mysql_native_password"
+      - "--server-id=7"
+      - "--log-bin=binlog"
+      - "--binlog-format=ROW"
+      - "--binlog-row-metadata=FULL"
+    environment:
+      MYSQL_ROOT_PASSWORD: rivet
+      MYSQL_USER: rivet
+      MYSQL_PASSWORD: rivet
+      MYSQL_DATABASE: rivet
+    ports:
+      - "3317:3306"
+    volumes:
+      - ./dev/cdc/mysql-grant.sql:/docker-entrypoint-initdb.d/grant.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-privet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   mssql-cdc:
     image: mcr.microsoft.com/mssql/server:2022-latest
     profiles: ["cdc"]
@@ -926,6 +950,39 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
+
+  # ---- MySQL statement-truth stand: dev/pytools/statement_truth.py (docs/statement-truth.md) ----
+  mysql-stmt-80: &mysql-stmt
+    image: mysql:8.0
+    profiles: ["mysql-stmt"]
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_ROOT_HOST: "%"
+    ports:
+      - "127.0.0.1:3331:3306"
+    tmpfs:
+      - /var/lib/mysql
+    volumes:
+      - ./dev/stmt_truth/mysql/seed:/docker-entrypoint-initdb.d:ro
+      - ./dev/stmt_truth/mysql/stmt.cnf:/etc/mysql/conf.d/stmt.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  mysql-stmt-84:
+    <<: *mysql-stmt
+    image: mysql:8.4
+    ports:
+      - "127.0.0.1:3332:3306"
+
+  mysql-stmt-84-lctn1:
+    <<: *mysql-stmt
+    image: mysql:8.4
+    command: ["--lower-case-table-names=1"]
+    ports:
+      - "127.0.0.1:3333:3306"
 
 volumes:
   postgres_state_data:

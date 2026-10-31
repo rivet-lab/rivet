@@ -248,7 +248,8 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::commit::tests::{synthetic_parts, test_plan, test_summary};
+    use crate::pipeline::commit::tests::{synthetic_parts, test_summary};
+    use crate::plan::test_support::test_plan;
     use std::sync::atomic::Ordering;
 
     fn chunk_kind(_: usize, u: UnitId) -> PartKind {

@@ -1,8 +1,8 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 0ff53467..60cfc15e 100644
+index 67a4a6e9..349ac6d0 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2236,7 +2236,7 @@ fn refused_column_rename(
+@@ -2235,7 +2235,7 @@ fn refused_column_rename(
      mode: SqlMode,
      configured: &[String],
  ) -> Option<(String, String)> {

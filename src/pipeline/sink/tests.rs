@@ -1929,7 +1929,7 @@ fn a_column_override_key_spelled_in_another_case_is_refused_at_schema() {
         Field::new("ID", DataType::Int64, false),
         Field::new("CREATED_AT", DataType::Utf8, true),
     ]));
-    let mut plan = crate::pipeline::commit::tests::test_plan();
+    let mut plan = crate::plan::test_support::test_plan();
     plan.column_overrides
         .insert("created_at".into(), crate::types::RivetType::String);
     let err = ExportSink::new(&plan)
@@ -1946,7 +1946,7 @@ fn a_column_override_key_spelled_in_another_case_is_refused_at_schema() {
         "{err:#}"
     );
 
-    let mut exact = crate::pipeline::commit::tests::test_plan();
+    let mut exact = crate::plan::test_support::test_plan();
     for key in ["CREATED_AT", "not_there"] {
         exact
             .column_overrides

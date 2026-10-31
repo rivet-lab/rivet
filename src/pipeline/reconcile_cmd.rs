@@ -380,6 +380,7 @@ fn format_status_note(p: &PartitionResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::test_support::test_plan;
 
     /// The command refuses an export the config does not name, before any source or state is opened.
     #[test]
@@ -404,28 +405,13 @@ mod tests {
         .unwrap_err();
         crate::error::assert_coded(&err, "RIVET_CLI_EXPORT_UNKNOWN", 1);
     }
-    use crate::config::{
-        CompressionType, DestinationConfig, DestinationType, FormatType, MetaColumns, SourceConfig,
-        SourceType,
-    };
+    use crate::config::{CompressionType, DestinationConfig, DestinationType, SourceConfig};
     use crate::plan::{ChunkedPlan, ExtractionStrategy};
     use crate::state::ChunkTaskInfo;
-    use crate::tuning::SourceTuning;
 
     fn chunked_plan() -> ResolvedRunPlan {
         ResolvedRunPlan {
-            split_window: None,
-            bytes_read: Default::default(),
-            parts_landed: Default::default(),
-            single_pass_of: None,
-            export_name: "orders".into(),
-            partition_rollover: None,
-            source_table: None,
             base_query: "SELECT * FROM orders".into(),
-            query_template: None,
-            catalog_query: None,
-            destination_written: None,
-            is_split_unit: false,
             strategy: ExtractionStrategy::Chunked(ChunkedPlan {
                 column: "id".into(),
                 chunk_size: 100,
@@ -435,47 +421,19 @@ mod tests {
                 checkpoint: true,
                 max_attempts: 3,
             }),
-            format: FormatType::Parquet,
             compression: CompressionType::Zstd,
-            compression_level: None,
-            max_file_size_bytes: None,
-            skip_empty: false,
-            meta_columns: MetaColumns::default(),
             destination: DestinationConfig {
                 destination_type: DestinationType::Local,
                 path: Some("./out".into()),
                 ..Default::default()
             },
-            quality: None,
-            tuning: SourceTuning::from_config(None),
             tuning_profile_label: "balanced (default)".into(),
-            validate: false,
-            reconcile: false,
-            resume: false,
             source: SourceConfig {
-                source_type: SourceType::Postgres,
                 url: Some("postgresql://localhost/test".into()),
-                url_env: None,
-                url_file: None,
-                url_secret: None,
-                host: None,
-                port: None,
-                user: None,
-                password: None,
-                password_env: None,
-                password_secret: None,
-                database: None,
-                environment: None,
-                tuning: None,
-                tls: None,
-                mongo: None,
-                columns_from: None,
+                ..test_plan().source
             },
-            column_overrides: Default::default(),
-            verify: crate::config::VerifyMode::Size,
-            schema_drift_policy: Default::default(),
             shape_drift_warn_factor: 2.0,
-            parquet: None,
+            ..test_plan()
         }
     }
 

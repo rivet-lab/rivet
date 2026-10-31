@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 6aad4a3e..e676cec1 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2601,7 +2601,7 @@ pub(crate) fn statement_frame(in_transaction: bool, raw: &[u8]) -> (bool, bool)
+         b"ROLLBACK" => (false, false),
+         _ => (
+             in_transaction,
+-            !in_transaction && !is_transaction_control(raw),
++            !is_transaction_control(raw),
+         ),
+     }
+ }

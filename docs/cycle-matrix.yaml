@@ -165,7 +165,7 @@ scenarios:
     postgres: { test: cdc_into_clickhouse_three_cycles_postgres }
     mysql:   { test: cdc_into_clickhouse_three_cycles_mysql }
     mssql:   { test: cdc_into_clickhouse_three_cycles_mssql }
-    mongo:   { na: "a MongoDB CDC stream cannot load into ClickHouse: its resume token has no integer order for the change log's version (ADR-0035 CH7); the product refuses the config" }
+    mongo:   { test: cdc_into_clickhouse_three_cycles_mongo }
     oracle:  { test: cdc_into_clickhouse_three_cycles_oracle, oracle: fail_loud }
 
   - id: cycle_cdc_bigquery

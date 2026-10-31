@@ -1,0 +1,11 @@
+diff --git a/src/source/cdc/order.rs b/src/source/cdc/order.rs
+--- a/src/source/cdc/order.rs
++++ b/src/source/cdc/order.rs
+@@ -349,6 +349,7 @@
+         .filter_map(|arm| Some((arm.legacy?, arm.marker())))
+         .find(|(l, marker)| object.contains_key(l.field) && !object.contains_key(*marker))
+         .map(|(l, _)| l.refusal)
++        .filter(|_| false)
+ }
+ 
+ /// The ClickHouse change log's version: `(source position << 128) | (__seq + 1)`, the

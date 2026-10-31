@@ -1,56 +1,9 @@
 //! Shared test helpers for live-infrastructure integration tests.
-//!
-//! By Rust convention this file lives at `tests/common/mod.rs` (not
-//! `tests/common.rs`) so cargo does NOT compile it as its own test binary.
-//! Each integration test file that needs these helpers opts in with
-//! `mod common;` and then `use common::*;`.
-//!
-//! ## Module layout
-//!
-//! Helpers are split by *thing they talk to* so each integration test binary's
-//! dependency on the live stack is obvious from its imports:
-//!
-//!   * `env`     — endpoints, `LiveService`, `require_alive` (the live gate)
-//!   * `pg`      — Postgres connection + RAII table guard + seeders
-//!   * `mysql`   — MySQL analogues of the above
-//!   * `runner`  — driving the `rivet` / `rivet-mcp` binaries, output discovery
-//!   * `toxi`    — Toxiproxy admin client + cross-binary `flock` guard
-//!   * `storage` — MinIO / fake-gcs bucket provisioning
-//!
-//! Everything is re-exported here, so `use common::*;` still picks up the full
-//! surface without callers needing to know the submodule layout.
-//!
-//! ## Why live tests are gated with `#[ignore]`
-//!
-//! Live tests require the docker-compose stack (see `docker-compose.yaml`) to
-//! be running.  We do *not* silently skip them when infrastructure is
-//! unreachable — that would let CI pass even when the live-test matrix is
-//! actually broken.  Instead, live tests carry `#[ignore = "live: ..."]` so
-//! the default `cargo test` run stays offline, and `cargo test -- --ignored`
-//! (or `--include-ignored`) opts into live mode.
-//!
-//! When live tests run against a non-healthy stack they fail with an actionable
-//! message (see `env::require_alive`) — not a panic from deep inside the
-//! `postgres`/`mysql` driver.
-//!
-//! ## Isolation
-//!
-//! Every test must allocate its own unique resource names (table, export name,
-//! destination prefix, S3 bucket path) so the suite can run with
-//! `--test-threads=N` without false-sharing.  Use [`unique_name`] for that —
-//! it combines PID and an atomic counter.
 
-// Each integration-test binary uses only a subset of these helpers; the rest
-// would otherwise trip `dead_code` (for the items) and `unused_imports` (for
-// the glob re-exports).
 #![allow(dead_code, unused_imports)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-// Submodules are private — only their public items are re-exported below.
-// Keeping `mod mysql` private avoids shadowing the external `mysql` crate
-// when downstream tests do `use common::*;`.  Same idea for `env` vs
-// `std::env`.
 mod bigquery;
 mod canon;
 mod clickhouse;
@@ -99,28 +52,9 @@ pub use storage::*;
 pub use toxi::*;
 pub use warehouse::*;
 
-// ─── Unique resource naming (races-free suite parallelism) ─────────────────
-
 static NAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Build a globally-unique identifier safe to use as a SQL table name or an
-/// export name.  Combines process id and an atomic counter so parallel
-/// `cargo test --test-threads=N` runs do not collide.
-/// Announce that a live test did NOT run, in a form a release lane can COUNT.
-///
-/// `cargo test` prints `ok` for a test that returned early, so a skip and a pass
-/// are indistinguishable in the output — the same shape that let 20 warehouse
-/// cells report `20 passed` in 0.00s. The harness half of that was fixed by giving
-/// its runners an explicit `Skipped` outcome; the live suite has no such channel,
-/// so the marker IS the channel.
-///
-/// One token, `RIVET-SKIP`, and the test's own name, because the messages it
-/// replaces said `SKIP`, `skip:`, and `skipping` in three different shapes and a
-/// lane cannot grep for all of them. What a lane does with the count is its
-/// business: assert a ceiling, diff against a previous run, or just print it —
-/// none of which is possible while the skips are invisible.
-///
-/// Returns `()` so a call site reads `return skip_live("...")`.
+/// Build a globally-unique identifier safe to use as a SQL table name or an export name.
 pub fn skip_live(why: &str) {
     let who = std::thread::current()
         .name()
@@ -128,15 +62,6 @@ pub fn skip_live(why: &str) {
         .to_string();
     let line = format!("RIVET-SKIP {who} — {why}");
     eprintln!("{line}");
-    // ...and to a FILE, because the eprintln alone is unreadable. libtest CAPTURES
-    // and discards a PASSING test's stderr, and a skip is a pass — so without
-    // `--nocapture`, which no workflow passes, the marker was as invisible as the
-    // four spellings it replaced. MEASURED: 0 occurrences in a normal run, 1 with
-    // --nocapture. A file survives capture, parallelism and the test binary exiting.
-    //
-    // Append-only and best-effort: a test must never fail because its skip could not
-    // be recorded. `RIVET_SKIP_LOG` lets a lane put it somewhere it will look;
-    // otherwise it lands beside the build output.
     let path = std::env::var("RIVET_SKIP_LOG").unwrap_or_else(|_| {
         format!(
             "{}/rivet-skips.log",
@@ -152,7 +77,6 @@ pub fn skip_live(why: &str) {
         .append(true)
         .open(&path)
     {
-        // One write per record: `writeln!` issues two, and parallel tests interleaved them.
         let _ = f.write_all(format!("{line}\n").as_bytes());
     }
 }
@@ -172,7 +96,7 @@ pub fn pg_state_url() -> Option<String> {
     }
 }
 
-/// The re-baseline remedy every CDC data-loss message prints, written out by hand (never read from `src/`).
+/// The re-baseline remedy every CDC data-loss message prints.
 pub const REBASELINE_REMEDY: &str = "Re-baseline the stream in one run: delete the checkpoint \
      file if there is one; move every file out of the export's destination (for a `tables:` \
      export, every table's directory under it): the parts there still hold rows the source may \
@@ -183,7 +107,7 @@ pub const REBASELINE_REMEDY: &str = "Re-baseline the stream in one run: delete t
      re-reads every table after, so nothing falls between the two. A separate `mode: full` \
      export does not re-baseline the stream.";
 
-/// Edit the JSON checkpoint at `ckpt` in place (a stream's identity or position, as a cell sabotages it).
+/// Edit the JSON checkpoint at `ckpt` in place.
 pub fn rewrite_checkpoint(ckpt: &std::path::Path, edit: impl FnOnce(&mut serde_json::Value)) {
     let mut v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(ckpt).expect("a checkpoint to edit"))
@@ -192,7 +116,7 @@ pub fn rewrite_checkpoint(ckpt: &std::path::Path, edit: impl FnOnce(&mut serde_j
     std::fs::write(ckpt, v.to_string()).expect("write the edited checkpoint");
 }
 
-/// Follow [`REBASELINE_REMEDY`] on a rig with a local destination, step by step as printed, then run once.
+/// Follow [`REBASELINE_REMEDY`] on a rig with a local destination, step by step as printed.
 pub fn follow_rebaseline_remedy(rig: &mut Rig, has_baseline: bool) {
     apply_rebaseline_remedy(rig, has_baseline);
     rig.run_ok();
@@ -218,6 +142,86 @@ pub fn apply_rebaseline_remedy(rig: &mut Rig, has_baseline: bool) {
     if !has_baseline {
         rig.amend_cdc_line("initial: snapshot");
     }
+}
+
+/// Assert the lost-checkpoint refusal by code with the re-baseline remedy and `says`.
+fn assert_lost_checkpoint_refusal(rig: &Rig, says: &[&str]) {
+    let out = rig.run_args(&[]);
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_CDC_CHECKPOINT_INVALID", 5),
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        says.iter().all(|p| said.contains(p)) && said.contains(REBASELINE_REMEDY),
+        "the refusal says {says:?} and names the re-baseline remedy:\n{said}"
+    );
+}
+
+/// Phrases of the refusal proven by the state DB's anchor record.
+fn lost_anchor_phrases(rig: &Rig) -> Vec<String> {
+    vec![
+        "is missing, but the state DB records that export".to_string(),
+        format!("`rivet state reset -c {}", rig.config_path().display()),
+    ]
+}
+
+/// A checkpoint lost after a delivered run is refused on every later run with nothing written.
+pub fn assert_a_lost_checkpoint_is_refused_not_reanchored(s: &mut CdcScenario, baseline: bool) {
+    let phrases = match baseline {
+        true => vec!["is missing but prior-run evidence exists".to_string()],
+        false => lost_anchor_phrases(&s.rig),
+    };
+    let says: Vec<&str> = phrases.iter().map(String::as_str).collect();
+    s.rig.run_ok();
+    s.insert(1);
+    s.settle();
+    s.rig.run_ok();
+    let delivered = files_under(&s.rig.out_dir());
+    std::fs::remove_file(s.rig.checkpoint()).expect("the checkpoint the run wrote");
+    s.insert(2);
+    s.settle();
+    assert_lost_checkpoint_refusal(&s.rig, &says);
+    s.insert(3);
+    s.settle();
+    assert_lost_checkpoint_refusal(&s.rig, &says);
+    assert!(
+        !s.rig.checkpoint().exists(),
+        "a refused run leaves no checkpoint behind"
+    );
+    assert_eq!(
+        files_under(&s.rig.out_dir()),
+        delivered,
+        "a refused run writes nothing"
+    );
+}
+
+/// `rivet state reset` accepts the loss and the stream delivers from the current position.
+pub fn assert_state_reset_lifts_a_lost_checkpoint_refusal(s: &mut CdcScenario) {
+    let phrases = lost_anchor_phrases(&s.rig);
+    let says: Vec<&str> = phrases.iter().map(String::as_str).collect();
+    s.rig.run_ok();
+    s.insert(1);
+    s.settle();
+    s.rig.run_ok();
+    std::fs::remove_file(s.rig.checkpoint()).expect("the checkpoint the run wrote");
+    assert_lost_checkpoint_refusal(&s.rig, &says);
+    let reset = s
+        .rig
+        .cli(&["state", "reset", "--export", s.rig.export_name()]);
+    assert!(
+        reset.status.success(),
+        "`rivet state reset` runs from the refused state:\n{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    s.rig.run_ok();
+    s.insert(2);
+    s.settle();
+    s.rig.run_ok();
 }
 
 /// One source write on an `(id, v)` table, engine-neutral.
@@ -264,7 +268,7 @@ pub fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     found
 }
 
-/// `tb` leaves `tables:`, changes, and comes back: refused twice (`RIVET_STATE_CDC_TABLE_REJOINED`), the files-only half of the printed remedy leaves the refusal standing, the remedy as printed re-reads `tb` and capture resumes (every run graded by the rig oracle; a refused run leaves nothing).
+/// `tb` leaves `tables:`, changes, and comes back.
 pub fn a_table_put_back_is_refused_until_rebaselined(
     mut rig: Rig,
     [ta, tb, tc]: [&str; 3],
@@ -342,7 +346,7 @@ pub fn a_table_put_back_is_refused_until_rebaselined(
     rig.run_ok();
 }
 
-/// `table:` pointed at `tb` over `ta`'s baseline is refused twice; pointed back, the stream continues with the row written meanwhile.
+/// `table:` pointed at `tb` over `ta`'s baseline is refused twice.
 pub fn a_table_switched_over_a_baseline_is_refused_and_switched_back_continues(
     mut rig: Rig,
     [ta, tb]: [&str; 2],
@@ -388,37 +392,12 @@ pub fn unique_name(prefix: &str) -> String {
     format!("{prefix}_{pid}_{c}")
 }
 
-/// RAII cross-process lock for the suite's QUIET WINDOW: taken by every test
-/// that measures a wall-clock ratio (the adaptive canaries), generates
-/// deliberate source pressure (the governor backs-off drivers), OR flips a
-/// GLOBAL on the shared :3306 batch server (binlog_transaction_compression,
-/// sql_mode, tmp-storage) — one lock so all of them mutually exclude (r5
-/// bughunt: per-variable locks let a :3306 global flip skew a concurrent
-/// canary and contaminate its sessions). Cargo runs
-/// integration binaries and threads in parallel; a heavy sibling starting
-/// mid-A/B skews a timing bound, and one test's CHECKPOINT spam is another's
-/// false foreign pressure — engine-specific locks cannot cover cross-engine
-/// CPU noise (a PG driver flaked the MSSQL canary, 2026-08-13). Same
-/// advisory `flock(2)` shape as `toxiproxy_guard`; take it FIRST, before any
-/// narrower guard (consistent order, no deadlock).
+/// RAII cross-process lock for the suite's QUIET WINDOW.
 pub struct QuietWindowGuard {
     _file: std::fs::File,
 }
 
-/// Cross-PROCESS serialization keyed by `name` — for shared-server GLOBAL
-/// flips on a server that has NO timing canaries (currently only the MSSQL
-/// CDC instance :1434, key "mssql_cdc"; the name is the SERVER, not the
-/// variable). A `static Mutex` serializes only within one process, and the
-/// canonical runner (nextest) puts every test in its OWN process, so a
-/// per-process lock is a no-op exactly where it matters (r3 bughunt).
-///
-/// The KEY MUST IDENTIFY THE SERVER, not the global being flipped: two tests
-/// flipping DIFFERENT globals on the SAME server still contaminate each
-/// other's fresh sessions, so a per-variable name mutually excludes nothing
-/// (r5 bughunt — binlog_compression, sql_mode and the governor tmp-storage
-/// globals all live on :3306 and were under three disjoint locks). Every
-/// :3306 GLOBAL flip therefore takes `quiet_window_guard` (the single shared
-/// batch-server + timing lock) instead of a per-name key.
+/// Cross-PROCESS serialization keyed by `name`.
 pub fn cross_process_serial(name: &str) -> QuietWindowGuard {
     use std::os::unix::io::AsRawFd;
     let path = std::env::temp_dir().join(format!("rivet_qa_serial_{name}.lock"));
@@ -445,7 +424,7 @@ pub fn pgbouncer_alone() -> QuietWindowGuard {
     cross_process_serial("pgbouncer")
 }
 
-/// Make the pooler's one server connection forget every prepared statement, so a cell's first read is the first to describe its statements.
+/// Make the pooler's one server connection forget every prepared statement.
 pub fn forget_pooled_statements() {
     postgres::Client::connect(PGBOUNCER_URL, postgres::NoTls)
         .expect("pgbouncer")
@@ -496,15 +475,7 @@ pub fn pooled_session_without_set_formats() -> (i32, Vec<(String, String, String
     session
 }
 
-/// RAII background-writer: a thread that loops until its stop flag flips, and
-/// on Drop (INCLUDING a panic unwind) sets the flag and JOINS. The sustained-
-/// writes CDC tests spawned a bare JoinHandle then called a panic-capable
-/// `run_rivet_bounded` BEFORE their manual stop+join — a non-zero exit
-/// unwound past the join, DETACHED the writer, and it kept INSERTing into a
-/// table the slot/table guard was about to drop (metadata-lock race + foreign
-/// write pressure that later CDC tests in the same binary measure). Declared
-/// AFTER the table/slot guards so it drops (and stops the writer) FIRST.
-/// r7 bughunt; same reap-on-Drop shape as governor PressureWriter.
+/// RAII background-writer.
 pub struct BgWriter {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -524,8 +495,7 @@ impl BgWriter {
         }
     }
 
-    /// Stop + join now (idempotent) — for tests that must QUIESCE the writer
-    /// before a post-drain assertion reads stable state. Drop then no-ops.
+    /// Stop + join now (idempotent).
     pub fn stop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
@@ -564,15 +534,6 @@ pub fn quiet_window_guard() -> QuietWindowGuard {
 }
 
 /// Peak resident memory of any child process this test binary has reaped, in bytes.
-///
-/// `getrusage(RUSAGE_CHILDREN)` reports the MAXIMUM over all reaped children rather
-/// than the last one's, so it is monotonic — which is exactly the shape a ceiling
-/// assertion wants: "no rivet this test ever spawned went past X". It cannot
-/// attribute a peak to one child, and does not need to.
-///
-/// `ru_maxrss` is BYTES on macOS and KILOBYTES on Linux — one field with two
-/// meanings, and reading it wrong is a 1024× error in whichever direction hides the
-/// failure. Normalised here so no caller has to remember.
 #[cfg(unix)]
 pub fn peak_child_rss_bytes() -> u64 {
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };

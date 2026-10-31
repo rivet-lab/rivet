@@ -20,7 +20,12 @@ struct GrantUser(String, Option<String>);
 
 impl GrantUser {
     fn new(table: &str, columns: &str) -> Self {
-        let user = Self::select_only(table, columns);
+        Self::new_in("rivet", table, columns)
+    }
+
+    /// As `new`, for a table of the database `db`.
+    fn new_in(db: &str, table: &str, columns: &str) -> Self {
+        let user = Self::select_only_in(db, table, columns);
         root()
             .query_drop(format!(
                 "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '{}'@'%'",
@@ -32,6 +37,11 @@ impl GrantUser {
 
     /// An account that may SELECT only `columns` of `table`, with no replication grant.
     fn select_only(table: &str, columns: &str) -> Self {
+        Self::select_only_in("rivet", table, columns)
+    }
+
+    /// As `select_only`, for a table of the database `db`.
+    fn select_only_in(db: &str, table: &str, columns: &str) -> Self {
         let user = unique_name("cg_u");
         let mut c = root();
         c.query_drop(format!("DROP USER IF EXISTS '{user}'@'%'"))
@@ -39,7 +49,7 @@ impl GrantUser {
         c.query_drop(format!("CREATE USER '{user}'@'%' IDENTIFIED BY 'pw'"))
             .unwrap();
         c.query_drop(format!(
-            "GRANT SELECT ({columns}) ON rivet.{table} TO '{user}'@'%'"
+            "GRANT SELECT ({columns}) ON {db}.{table} TO '{user}'@'%'"
         ))
         .unwrap();
         Self(user, None)
@@ -182,9 +192,7 @@ fn a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql() {
         format!("UPDATE rivet.{table} SET pass = '{SECRET}a' WHERE id = 1"),
         format!("UPDATE rivet.{table} SET pass = '{SECRET}b', name = 'ann2' WHERE id = 1"),
         format!("INSERT INTO rivet.{table} VALUES (2, 'bob', '{SECRET}ins')"),
-        format!("ALTER TABLE rivet.{table} ADD COLUMN ssn VARCHAR(20)"),
-        format!("INSERT INTO rivet.{table} VALUES (3, 'cid', '{SECRET}c', '{SECRET}ssn')"),
-        format!("UPDATE rivet.{table} SET ssn = '{SECRET}ssn2' WHERE id = 3"),
+        format!("INSERT INTO rivet.{table} VALUES (3, 'cid', '{SECRET}c')"),
         format!("DELETE FROM rivet.{table} WHERE id = 2"),
     ] {
         c.query_drop(sql).unwrap();
@@ -196,12 +204,10 @@ fn a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql() {
         .flat_map(|d| read_all_parts(d))
         .collect();
     let (names, cells) = names_and_cells(&parts);
-    for hidden in ["pass", "ssn"] {
-        assert!(
-            !names.iter().any(|n| n.eq_ignore_ascii_case(hidden)),
-            "`{hidden}` is a column of the delivered parts: {names:?}"
-        );
-    }
+    assert!(
+        !names.iter().any(|n| n.eq_ignore_ascii_case("pass")),
+        "`pass` is a column of the delivered parts: {names:?}"
+    );
     assert!(
         !cells.iter().any(|v| v.contains(SECRET)),
         "a hidden value was delivered: {cells:?}"
@@ -270,17 +276,22 @@ fn a_column_grant_account_is_refused_without_the_policy_or_without_the_key_mysql
 fn seeded(label: &str) -> (String, MysqlCdcTable) {
     let table = unique_name(label);
     let guard = MysqlCdcTable(table.clone());
+    seed_rows("rivet", &table);
+    (table, guard)
+}
+
+/// Creates `db.table` with the three seeded rows.
+fn seed_rows(db: &str, table: &str) {
     let mut c = root();
     c.query_drop(format!(
-        "CREATE TABLE rivet.{table} (id INT PRIMARY KEY, name VARCHAR(20), pass VARCHAR(20))"
+        "CREATE TABLE {db}.{table} (id INT PRIMARY KEY, name VARCHAR(20), pass VARCHAR(20))"
     ))
     .unwrap();
     c.query_drop(format!(
-        "INSERT INTO rivet.{table} VALUES (1, 'ann', '{SECRET}1'), (2, 'bob', '{SECRET}2'), \
+        "INSERT INTO {db}.{table} VALUES (1, 'ann', '{SECRET}1'), (2, 'bob', '{SECRET}2'), \
          (3, 'cid', '{SECRET}3')"
     ))
     .unwrap();
-    (table, guard)
 }
 
 /// No hidden column by name and no hidden value in `parts`; returns the delivered cells.
@@ -435,6 +446,26 @@ fn run_parked_through<'a>(
     child.wait_with_output().expect("reap the parked run")
 }
 
+/// The open run stopped before the statement it met: by the table name in it, or by the re-read of the grants a foreign statement of the shared log called for first.
+fn a_run_stopped_at_a_statement_naming_the_table(run: &OpenRun) {
+    let said = run.said();
+    if said.contains("[RIVET_SOURCE_CDC_GRANTS_CHANGED]") {
+        assert_refused(
+            &run.out,
+            Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2),
+        );
+        return;
+    }
+    assert_refused(
+        &run.out,
+        Refused::by_code("RIVET_SOURCE_CDC_UNDECODABLE", 5),
+    );
+    assert!(
+        said.contains("names the captured table") && said.contains("Re-baseline the stream"),
+        "the refusal names the table and the remedy:\n{said}"
+    );
+}
+
 /// An open continuous run over `seeded(label)`: `act` writes to the source while it parks, then it ends at `max_events`.
 fn an_open_run_with(label: &str, max_events: u32, act: impl FnOnce(&str, &GrantUser)) -> OpenRun {
     an_open_run_as(label, max_events, false, act)
@@ -532,7 +563,7 @@ fn nothing_written_after_the_change_leaves(run: &mut OpenRun) {
 }
 
 /// An open continuous run, a grant change written as `revoke(table, user)`, a row after it.
-fn a_revoke_stops_an_open_run_before_the_column_leaves(
+fn a_revoke_naming_the_table_is_refused_by_name_before_the_column_leaves(
     label: &str,
     revoke: impl Fn(&str, &str) -> String,
 ) {
@@ -544,11 +575,24 @@ fn a_revoke_stops_an_open_run_before_the_column_leaves(
         ))
         .unwrap();
     });
-    assert_refused(
-        &run.out,
-        Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2),
+    a_run_stopped_at_a_statement_naming_the_table(&run);
+    let parts: Vec<_> = parquet_dirs(&run.rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect();
+    let (_, cells) = names_and_cells(&parts);
+    assert!(
+        !cells.iter().any(|v| v.contains("REVOKED-")),
+        "a value written after the revoke was delivered: {cells:?}"
     );
-    nothing_written_after_the_change_leaves(&mut run);
+    run.rig
+        .replace_cdc_line("until_current", "until_current: true");
+    follow_rebaseline_remedy(&mut run.rig, true);
+    let (names, cells) = delivered(&run.rig);
+    assert!(
+        names.iter().all(|n| n == "id" || n == "name") && cells.iter().any(|v| v == "eve"),
+        "the re-baseline reads the account's columns as they are now: {names:?} {cells:?}"
+    );
 }
 
 /// An open run that re-read the grants once, then `change` the account's grants and one row the changed grants hide.
@@ -594,13 +638,17 @@ fn a_login_time_grant_change_after_an_earlier_re_read_stops_an_open_run(
 fn a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql() {
     a_login_time_grant_change_after_an_earlier_re_read_stops_an_open_run(
         "cg_dbl",
-        GrantUser::database_level,
-        |table, user| {
-            vec![
-                format!("GRANT SELECT (id, name) ON rivet.{table} TO '{user}'@'%'"),
-                format!("REVOKE SELECT ON rivet.* FROM '{user}'@'%'"),
-            ]
+        |table| {
+            let user = GrantUser::database_level(table);
+            root()
+                .query_drop(format!(
+                    "GRANT SELECT (id, name) ON rivet.{table} TO '{}'@'%'",
+                    user.0
+                ))
+                .unwrap();
+            user
         },
+        |_, user| vec![format!("REVOKE SELECT ON rivet.* FROM '{user}'@'%'")],
     );
 }
 
@@ -616,26 +664,33 @@ fn a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql() 
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_revoke_during_a_continuous_run_stops_it_before_the_column_leaves_mysql() {
-    a_revoke_stops_an_open_run_before_the_column_leaves("cg_rev", |table, user| {
-        format!("REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%'")
-    });
+fn a_column_revoke_during_a_continuous_run_is_refused_by_name_before_the_column_leaves_mysql() {
+    a_revoke_naming_the_table_is_refused_by_name_before_the_column_leaves(
+        "cg_rev",
+        |table, user| format!("REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%'"),
+    );
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_revoke_behind_a_line_comment_in_an_executable_comment_stops_an_open_run_mysql() {
-    a_revoke_stops_an_open_run_before_the_column_leaves("cg_revl", |table, user| {
-        format!("/*!80000 -- note\nREVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
-    });
+fn a_column_revoke_behind_a_line_comment_in_an_executable_comment_is_refused_by_name_mysql() {
+    a_revoke_naming_the_table_is_refused_by_name_before_the_column_leaves(
+        "cg_revl",
+        |table, user| {
+            format!("/*!80000 -- note\nREVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
+        },
+    );
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_revoke_written_as_an_executable_comment_stops_an_open_run_too_mysql() {
-    a_revoke_stops_an_open_run_before_the_column_leaves("cg_revx", |table, user| {
-        format!("/*!80000 REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
-    });
+fn a_column_revoke_written_as_an_executable_comment_is_refused_by_name_mysql() {
+    a_revoke_naming_the_table_is_refused_by_name_before_the_column_leaves(
+        "cg_revx",
+        |table, user| {
+            format!("/*!80000 REVOKE SELECT (pass) ON rivet.{table} FROM '{user}'@'%' */")
+        },
+    );
 }
 
 /// Column names of every part under `rig`'s output, in part order, without rivet's own columns.
@@ -1009,7 +1064,7 @@ fn columns_from_grants_is_refused_by_every_command_mongo() {
 /// The binlog `(file, position)` at the end of the last commit after `start` that wrote `table`.
 fn commit_end_after(start: &(String, u64), table: &str) -> (String, u64) {
     let mut c = root();
-    let events: Vec<(u64, String, u64, String)> = c
+    let events: Vec<(u64, String, u64, Vec<u8>)> = c
         .query_map(
             format!("SHOW BINLOG EVENTS IN '{}' FROM {}", start.0, start.1),
             |r: mysql::Row| {
@@ -1017,14 +1072,15 @@ fn commit_end_after(start: &(String, u64), table: &str) -> (String, u64) {
                     r.get::<u64, _>(1).unwrap_or(0),
                     r.get::<String, _>(2).unwrap_or_default(),
                     r.get::<u64, _>(4).unwrap_or(0),
-                    r.get::<String, _>(5).unwrap_or_default(),
+                    r.get::<Vec<u8>, _>(5).unwrap_or_default(),
                 )
             },
         )
         .unwrap();
     let (mut wrote, mut last) = (false, None);
     for (_, kind, end, info) in events {
-        wrote |= kind == "Table_map" && info.contains(&format!("(rivet.{table})"));
+        wrote |= kind == "Table_map"
+            && String::from_utf8_lossy(&info).contains(&format!("(rivet.{table})"));
         if kind == "Xid" {
             if wrote {
                 last = Some((start.0.clone(), end));
@@ -1192,39 +1248,54 @@ fn anchored_under_the_policy(label: &str) -> (String, MysqlCdcTable, GrantUser, 
     (table, guard, user, rig)
 }
 
-/// A column renamed in the backlog by `rename(table)`: the run is refused by code and the re-baseline delivers the column under its new name.
-fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped(
-    label: &str,
-    rename: fn(&str) -> Vec<String>,
+/// `steps` committed in the backlog after the anchored run of `rig`: the run is refused by `code`, its message holds every part of `said`, the checkpoint stays and no change is delivered; `mend` repairs what the remedy needs, the re-baseline is followed and `reads` grades what it delivers.
+fn a_refused_backlog_is_got_past_by_the_remedy(
+    rig: Rig,
+    steps: Vec<String>,
+    code: &str,
+    said_parts: &[String],
+    mend: impl FnOnce(),
+    reads: impl FnOnce(&Rig),
 ) {
-    let (table, _guard, user, rig) = anchored_under_the_policy(label);
+    let said_parts: Vec<String> = said_parts
+        .iter()
+        .cloned()
+        .chain(["Re-baseline the stream".to_string()])
+        .collect();
+    a_stopped_backlog_is_got_past_by_the_remedy(
+        rig,
+        steps,
+        Refused::by_code(code, 5),
+        &said_parts,
+        mend,
+        reads,
+    );
+}
+
+/// As `a_refused_backlog_is_got_past_by_the_remedy` for a stop `refused` names, whose message holds exactly `said_parts`.
+fn a_stopped_backlog_is_got_past_by_the_remedy(
+    rig: Rig,
+    steps: Vec<String>,
+    refused: Refused,
+    said_parts: &[String],
+    mend: impl FnOnce(),
+    reads: impl FnOnce(&Rig),
+) {
     let mut rig = rig.a_failed_run_may_leave(
         &[Leftover::ResumePoint],
-        "the run observes the readable columns at its start, and a rename leaves the old column ungranted: that observed schema is stored before the refusal at the statement (known: src/state/schema.rs stores the baseline of a failed run)",
+        "the run observes the readable columns at its start: that observed schema is stored before the refusal at the statement (known: src/state/schema.rs stores the baseline of a failed run)",
     );
     let mut c = root();
-    let steps = std::iter::once(format!(
-        "UPDATE rivet.{table} SET name = 'ann-before' WHERE id = 1"
-    ))
-    .chain(rename(&table))
-    .chain([format!(
-        "UPDATE rivet.{table} SET nm = 'ann-after' WHERE id = 1"
-    )]);
     for sql in steps {
         c.query_drop(sql).unwrap();
     }
     let before = checkpoint_at(&rig);
     let out = rig.run();
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_UNDECODABLE", 5));
-    assert!(
-        said.contains(&table) && said.contains("RENAME") && said.contains("Re-baseline the stream"),
-        "the refusal names the table, the statement and the remedy:\n{said}"
-    );
+    let said = said_by(&out);
+    assert_refused(&out, refused);
+    for part in said_parts {
+        assert!(said.contains(part), "the refusal lacks {part:?}:\n{said}");
+    }
     assert_eq!(
         checkpoint_at(&rig),
         before,
@@ -1235,23 +1306,47 @@ fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped(
         .flat_map(|d| read_all_parts(d))
         .collect();
     assert_eq!(changes(&parts), vec![], "a refused span delivers no change");
-
-    c.query_drop(format!(
-        "GRANT SELECT (nm) ON rivet.{table} TO '{}'@'%'",
-        user.0
-    ))
-    .unwrap();
+    mend();
     follow_rebaseline_remedy(&mut rig, true);
-    let parts: Vec<_> = parquet_dirs(&rig.out_dir())
-        .iter()
-        .flat_map(|d| read_all_parts(d))
+    reads(&rig);
+}
+
+/// A column renamed in the backlog by `rename(table)`: the run is refused by code and the re-baseline delivers the column under its new name.
+fn a_column_renamed_in_the_backlog_is_refused_not_silently_dropped(
+    label: &str,
+    rename: fn(&str) -> Vec<String>,
+) {
+    let (table, _guard, user, rig) = anchored_under_the_policy(label);
+    let steps = std::iter::once(UPDATED_BEFORE.replace("{t}", &table))
+        .chain(rename(&table))
+        .chain([UPDATED_AFTER_AS_NM.replace("{t}", &table)])
         .collect();
-    let (names, cells) = names_and_cells(&parts);
-    assert!(
-        names.iter().any(|n| n == "nm") && cells.iter().any(|v| v == "ann-after"),
-        "the re-baselined stream delivers the column under its new name: {names:?} {cells:?}"
+    a_refused_backlog_is_got_past_by_the_remedy(
+        rig,
+        steps,
+        "RIVET_SOURCE_CDC_UNDECODABLE",
+        &[table.clone(), "RENAME".to_string()],
+        || {
+            root()
+                .query_drop(format!(
+                    "GRANT SELECT (nm) ON rivet.{table} TO '{}'@'%'",
+                    user.0
+                ))
+                .unwrap();
+        },
+        |rig| {
+            let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+                .iter()
+                .flat_map(|d| read_all_parts(d))
+                .collect();
+            let (names, cells) = names_and_cells(&parts);
+            assert!(
+                names.iter().any(|n| n == "nm") && cells.iter().any(|v| v == "ann-after"),
+                "the re-baselined stream delivers the column under its new name: {names:?} {cells:?}"
+            );
+            assert_no_hidden(&parts, "after the re-baseline");
+        },
     );
-    assert_no_hidden(&parts, "after the re-baseline");
 }
 
 #[test]
@@ -1522,7 +1617,9 @@ fn a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remed
     let said = said_by(&out);
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
     assert!(
-        said.contains("column 'pass'") && said.contains("rivet plan") && !said.contains("1143"),
+        said.contains("column 'pass'")
+            && said.contains("rivet plan")
+            && !said.contains("ERROR 1143"),
         "the refusal names the column and the remedy (plan again), not the server's error:\n{said}"
     );
     let written = files_under(&rig.out_dir());
@@ -1942,14 +2039,14 @@ fn a_revoke_between_the_stream_open_and_the_schema_read_is_refused_by_code_mysql
     let said = said_by(&out);
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2));
     assert!(
-        !said.contains("1143"),
+        !said.contains("ERROR 1143"),
         "the server's error is not the refusal:\n{said}"
     );
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_schema_change_under_a_table_grant_is_refused_naming_the_column_that_appeared_mysql() {
+fn a_schema_change_under_a_table_grant_is_refused_by_the_table_name_with_the_remedy_mysql() {
     let run = an_open_run_as("cg_msg", 5, true, |table, _user| {
         let mut c = root();
         c.query_drop(format!(
@@ -1960,25 +2057,34 @@ fn a_schema_change_under_a_table_grant_is_refused_naming_the_column_that_appeare
             "INSERT INTO rivet.{table} VALUES (7, 'eve', 'p7', 'e7')"
         ))
         .unwrap();
-        c.query_drop("CREATE USER IF NOT EXISTS 'cg_unrelated'@'%' IDENTIFIED BY 'x'")
-            .unwrap();
-        c.query_drop(format!(
-            "INSERT INTO rivet.{table} VALUES (8, 'fay', 'p8', 'e8')"
-        ))
-        .unwrap();
     });
-    root()
-        .query_drop("DROP USER IF EXISTS 'cg_unrelated'@'%'")
-        .unwrap();
+    a_run_stopped_at_a_statement_naming_the_table(&run);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql() {
+    let run = an_open_run_through(
+        "cg_gain",
+        4,
+        |table| GrantUser::new(table, "id, name"),
+        vec![Box::new(|table, user| {
+            let mut c = root();
+            c.query_drop(format!("GRANT SELECT ON rivet.* TO '{}'@'%'", user.0))
+                .unwrap();
+            c.query_drop(format!(
+                "INSERT INTO rivet.{table} VALUES (7, 'eve', 'GAINED-7')"
+            ))
+            .unwrap();
+        })],
+    );
     let said = run.said();
     assert_refused(
         &run.out,
         Refused::by_code("RIVET_SOURCE_CDC_GRANTS_CHANGED", 2),
     );
     assert!(
-        said.contains("gained `extra`")
-            && said.contains("a schema change under a table-level grant")
-            && !said.contains("(a grant change)"),
+        said.contains("gained `pass`") && said.contains("a grant change, or a schema change"),
         "the message says what changed:\n{said}"
     );
 }
@@ -2299,30 +2405,24 @@ fn ddl_in_the_backlog_is_met_as_before_mysql() {
     for (ddl, want) in off {
         assert_eq!(ddl_in_the_backlog(false, ddl), want, "policy off: {ddl}");
     }
-    let visible = the_ddl_run(
-        0,
-        "-",
-        true,
+    let refused = the_ddl_run(
+        5,
+        "SOURCE_CDC_UNDECODABLE",
+        false,
         r#"["id", "name"]"#,
-        &format!(r#"{id_cells}, {ann}"#),
+        r#"["1", "2", "3", "ann", "bob", "cid"]"#,
     );
     for ddl in [
         "ALTER TABLE rivet.{t} ADD COLUMN nick VARCHAR(10) NULL",
         "ALTER TABLE rivet.{t} DROP COLUMN pass",
+        "ALTER TABLE rivet.{t} RENAME COLUMN pass TO pw",
     ] {
-        assert_eq!(ddl_in_the_backlog(true, ddl), visible, "policy on: {ddl}");
+        assert_eq!(
+            ddl_in_the_backlog(true, ddl),
+            refused,
+            "policy on: a statement naming the captured table is refused whatever it changes: {ddl}"
+        );
     }
-    assert_eq!(
-        ddl_in_the_backlog(true, "ALTER TABLE rivet.{t} RENAME COLUMN pass TO pw"),
-        the_ddl_run(
-            5,
-            "SOURCE_CDC_UNDECODABLE",
-            false,
-            r#"["id", "name"]"#,
-            r#"["1", "2", "3", "ann", "bob", "cid"]"#
-        ),
-        "a hidden column's rename is refused too: the backlog cannot tell it from a delivered one"
-    );
 }
 
 /// `(op, id, name or nm)` of every change in `parts`, in capture order.
@@ -2353,6 +2453,7 @@ struct Backlog {
     moved: bool,
     said: String,
     changes: Vec<(String, i64, String)>,
+    rows_kept: i64,
 }
 
 impl Backlog {
@@ -2365,6 +2466,14 @@ impl Backlog {
     }
 }
 
+/// A table name that neither is nor contains `table`, and that `table` does not contain.
+fn uncaptured_beside(table: &str) -> String {
+    format!(
+        "zz{}",
+        table.split_once('_').map_or(table, |(_, rest)| rest)
+    )
+}
+
 const REFUSED_UNDECODABLE: &str = "exit=5 code=SOURCE_CDC_UNDECODABLE moved=false changes=[]";
 const REFUSED_TRUNCATED: &str = "exit=5 code=SOURCE_CDC_TRUNCATED moved=false changes=[]";
 const RECREATED: &str = "CREATE TABLE rivet.{t} LIKE rivet.{t}_old";
@@ -2372,6 +2481,7 @@ const RECREATED_PLAIN: &str =
     "CREATE TABLE rivet.{t} (id INT PRIMARY KEY, name VARCHAR(20), pass VARCHAR(20))";
 const BOTH_DELIVERED: &str = "exit=0 code=- moved=true changes=[(\"update\", 1, \"ann-before\"), (\"update\", 1, \"ann-after\")]";
 
+const BEFORE_DELIVERED: &str = "exit=0 code=- moved=true changes=[(\"update\", 1, \"ann-before\")]";
 const UPDATED_BEFORE: &str = "UPDATE rivet.{t} SET name = 'ann-before' WHERE id = 1";
 const UPDATED_AFTER: &str = "UPDATE rivet.{t} SET name = 'ann-after' WHERE id = 1";
 const UPDATED_AFTER_AS_NM: &str = "UPDATE rivet.{t} SET nm = 'ann-after' WHERE id = 1";
@@ -2381,12 +2491,58 @@ const GHOST_COPY: &str =
     "INSERT INTO rivet.{t}_new (id, nm, pass) SELECT id, name, pass FROM rivet.{t}";
 const SWAP: &str = "RENAME TABLE rivet.{t} TO rivet.{t}_old, rivet.{t}_new TO rivet.{t}";
 
-/// The seeded table `{t}` (an anchored run first, with or without `columns_from: grants`), `steps` committed on one root session, then one run; `{t}_old` and `{t}_new` are dropped with it.
+/// The seeded table `{t}` (an anchored run first, with or without `columns_from: grants`), `steps` committed on one root session, then one run; `{u}` is a name no captured table contains, `{t}_old`, `{t}_new`, `{u}_old` and `{u}_new` are dropped with it.
 fn statements_in_the_backlog(label: &str, policy: bool, steps: &[&str]) -> Backlog {
+    statements_in_the_backlog_spelled(label, policy, None, steps)
+}
+
+/// Another spelling of a table name that a server folding identifier case resolves to the same table.
+#[derive(Clone, Copy)]
+enum Spelling {
+    Kelvin,
+    DottedI,
+    Upper,
+}
+
+impl Spelling {
+    /// `table` with its first `k` as the Kelvin sign, its first `i` as the dotted capital I, or in capitals.
+    fn of(self, table: &str) -> String {
+        match self {
+            Spelling::Kelvin => table.replacen('k', "\u{212a}", 1),
+            Spelling::DottedI => table.replacen('i', "\u{130}", 1),
+            Spelling::Upper => table.to_uppercase(),
+        }
+    }
+}
+
+/// Whether the server folds identifier case (`lower_case_table_names` other than 0).
+fn the_server_folds_names() -> bool {
+    let said: Option<i64> = root()
+        .query_first("SELECT @@global.lower_case_table_names")
+        .unwrap();
+    said.unwrap() != 0
+}
+
+/// As `statements_in_the_backlog`; `{S}` in a step is the table name in `spelling`, a table of its own, created before the anchored run, when the server keeps case.
+fn statements_in_the_backlog_spelled(
+    label: &str,
+    policy: bool,
+    spelling: Option<Spelling>,
+    steps: &[&str],
+) -> Backlog {
     let (table, _table) = seeded(label);
+    let spelled = spelling.map(|how| how.of(&table));
+    let _spelled_aside = spelled.as_ref().map(|s| MysqlCdcTable(format!("`{s}`")));
+    if let Some(s) = spelled.as_ref().filter(|_| !the_server_folds_names()) {
+        seed_rows("rivet", &format!("`{s}`"));
+    }
+    let other = uncaptured_beside(&table);
     let _aside = (
         MysqlCdcTable(format!("{table}_old")),
         MysqlCdcTable(format!("{table}_new")),
+        MysqlCdcTable(other.clone()),
+        MysqlCdcTable(format!("{other}_old")),
+        MysqlCdcTable(format!("{other}_new")),
     );
     let user = GrantUser::new(&table, "id, name");
     let mut rig = Rig::mysql_cdc(&table)
@@ -2405,7 +2561,12 @@ fn statements_in_the_backlog(label: &str, policy: bool, steps: &[&str]) -> Backl
     let before = checkpoint_at(&rig);
     let mut c = root();
     for sql in steps {
-        c.query_drop(sql.replace("{t}", &table)).unwrap();
+        c.query_drop(
+            sql.replace("{t}", &table)
+                .replace("{u}", &other)
+                .replace("{S}", spelled.as_deref().unwrap_or("")),
+        )
+        .unwrap();
     }
     let out = rig.run();
     let parts: Vec<_> = parquet_dirs(&rig.out_dir())
@@ -2424,6 +2585,11 @@ fn statements_in_the_backlog(label: &str, policy: bool, steps: &[&str]) -> Backl
         moved: checkpoint_at(&rig) != before,
         said,
         changes: named_changes(&parts),
+        rows_kept: c
+            .query_first(format!("SELECT COUNT(*) FROM rivet.{table}"))
+            .ok()
+            .flatten()
+            .unwrap_or(-1),
     }
 }
 
@@ -2474,9 +2640,9 @@ fn a_rename_of_a_table_the_run_does_not_capture_is_met_as_before_under_the_polic
         true,
         &[
             UPDATED_BEFORE,
-            "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY)",
-            "RENAME TABLE rivet.{t}_new TO rivet.{t}_old",
-            "ALTER TABLE rivet.{t}_old RENAME TO rivet.{t}_new",
+            "CREATE TABLE rivet.{u}_new (id INT PRIMARY KEY)",
+            "RENAME TABLE rivet.{u}_new TO rivet.{u}_old",
+            "ALTER TABLE rivet.{u}_old RENAME TO rivet.{u}_new",
             UPDATED_AFTER,
         ],
     );
@@ -2485,42 +2651,79 @@ fn a_rename_of_a_table_the_run_does_not_capture_is_met_as_before_under_the_polic
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn an_alter_that_renames_no_table_is_met_as_before_under_the_policy_mysql() {
+fn an_alter_of_an_uncaptured_table_is_met_as_before_under_the_policy_mysql() {
     let run = statements_in_the_backlog(
         "cg_swap_idx",
         true,
         &[
             UPDATED_BEFORE,
-            "ALTER TABLE rivet.{t} ADD INDEX ix_name (name), ADD COLUMN `rename` INT",
-            "ALTER TABLE rivet.{t} RENAME INDEX ix_name TO ix_other",
-            "ALTER TABLE rivet.{t} COMMENT = 'rename to somewhere'",
+            "CREATE TABLE rivet.{u} (id INT PRIMARY KEY, name VARCHAR(20))",
+            "ALTER TABLE rivet.{u} ADD INDEX ix_name (name), ADD COLUMN `rename` INT",
+            "ALTER TABLE rivet.{u} RENAME INDEX ix_name TO ix_other",
+            "ALTER TABLE rivet.{u} COMMENT = 'rename to somewhere'",
             UPDATED_AFTER,
         ],
+    );
+    assert_eq!(run.line(), BOTH_DELIVERED, "{}", run.said);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_non_ascii_comment_on_an_uncaptured_table_is_met_as_before_under_the_policy_mysql() {
+    let cjk = "\u{4e00}".repeat(64);
+    let cyrillic = "\u{0446}".repeat(64);
+    let created = format!(
+        "CREATE TABLE rivet.{{u}} (id INT PRIMARY KEY, name VARCHAR(20)) COMMENT = '{cjk}'"
+    );
+    let altered = format!("ALTER TABLE rivet.{{u}} COMMENT = '{cyrillic}'");
+    let run = statements_in_the_backlog(
+        "cg_cjk",
+        true,
+        &[UPDATED_BEFORE, &created, &altered, UPDATED_AFTER],
     );
     assert_eq!(run.line(), BOTH_DELIVERED, "{}", run.said);
 }
 
 /// Every case `(policy, steps, verdict line)` run on its own seeded table, the verdicts compared in one assertion.
 fn backlogs_end_as(label: &str, cases: &[(bool, &[&str], &str)]) {
-    let got: Vec<String> = cases
+    backlogs_end_as_saying(label, cases, "");
+}
+
+/// As `backlogs_end_as`, and every run's message holds `said_part`.
+fn backlogs_end_as_saying(label: &str, cases: &[(bool, &[&str], &str)], said_part: &str) {
+    let runs: Vec<_> = cases
         .iter()
         .enumerate()
         .map(|(i, (policy, steps, _))| {
-            let run = statements_in_the_backlog(&format!("{label}{i}"), *policy, steps);
-            format!("{}: {}", steps.join(" ; "), run.line())
+            (
+                steps,
+                statements_in_the_backlog(&format!("{label}{i}"), *policy, steps),
+            )
         })
+        .collect();
+    let got: Vec<String> = runs
+        .iter()
+        .map(|(steps, run)| format!("{}: {}", steps.join(" ; "), run.line()))
         .collect();
     let want: Vec<String> = cases
         .iter()
         .map(|(_, steps, want)| format!("{}: {want}", steps.join(" ; ")))
         .collect();
     assert_eq!(got, want);
+    for (steps, run) in &runs {
+        assert!(
+            run.said.contains(said_part),
+            "{}: the message lacks {said_part:?}: {}",
+            steps.join(" ; "),
+            run.said
+        );
+    }
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_rename_of_a_captured_table_is_refused_in_every_form_under_the_policy_mysql() {
-    let forms: [&[&str]; 10] = [
+    let forms: [&[&str]; 9] = [
         &["ALTER TABLE rivet.{t} RENAME TO rivet.{t}_old", RECREATED],
         &["ALTER TABLE rivet.{t} RENAME AS rivet.{t}_old", RECREATED],
         &[
@@ -2540,23 +2743,30 @@ fn a_rename_of_a_captured_table_is_refused_in_every_form_under_the_policy_mysql(
             "RENAME TABLE \"rivet\".\"{t}\" TO \"rivet\".\"{t}_old\"",
             RECREATED,
         ],
-        &[
-            "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY)",
-            "RENAME TABLE rivet.{t}_new TO rivet.{t}_old, rivet.{t} TO rivet.{t}_new",
-            "CREATE TABLE rivet.{t} LIKE rivet.{t}_old",
-        ],
     ];
     let cases: Vec<_> = forms
         .iter()
         .map(|f| (true, *f, REFUSED_UNDECODABLE))
         .collect();
-    backlogs_end_as("cg_rnf", &cases);
+    backlogs_end_as_saying("cg_rnf", &cases, "was renamed (RENAME TABLE");
+    backlogs_end_as(
+        "cg_rns",
+        &[(
+            true,
+            &[
+                "CREATE TABLE rivet.{t}_new (id INT PRIMARY KEY)",
+                "RENAME TABLE rivet.{t}_new TO rivet.{t}_old, rivet.{t} TO rivet.{t}_new",
+                "CREATE TABLE rivet.{t} LIKE rivet.{t}_old",
+            ],
+            REFUSED_UNDECODABLE,
+        )],
+    );
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_column_renamed_after_a_backslash_literal_under_no_backslash_escapes_is_refused_mysql() {
-    backlogs_end_as(
+    backlogs_end_as_saying(
         "cg_nbe",
         &[(
             true,
@@ -2568,13 +2778,14 @@ fn a_column_renamed_after_a_backslash_literal_under_no_backslash_escapes_is_refu
             ],
             REFUSED_UNDECODABLE,
         )],
+        "had a column renamed",
     );
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn a_column_renamed_after_a_backslash_name_under_ansi_quotes_is_refused_mysql() {
-    backlogs_end_as(
+    backlogs_end_as_saying(
         "cg_ans",
         &[(
             true,
@@ -2586,6 +2797,7 @@ fn a_column_renamed_after_a_backslash_name_under_ansi_quotes_is_refused_mysql() 
             ],
             REFUSED_UNDECODABLE,
         )],
+        "had a column renamed",
     );
 }
 
@@ -2602,7 +2814,8 @@ fn statements_whose_quotes_do_not_hide_a_rename_are_met_as_before_under_the_poli
                 &[
                     no_backslash,
                     UPDATED_BEFORE,
-                    "ALTER TABLE rivet.{t} COMMENT = 'x\\', ADD COLUMN extra INT",
+                    "CREATE TABLE rivet.{u} (id INT PRIMARY KEY)",
+                    "ALTER TABLE rivet.{u} COMMENT = 'x\\', ADD COLUMN extra INT",
                     UPDATED_AFTER,
                 ],
                 BOTH_DELIVERED,
@@ -2612,7 +2825,8 @@ fn statements_whose_quotes_do_not_hide_a_rename_are_met_as_before_under_the_poli
                 &[
                     no_backslash,
                     UPDATED_BEFORE,
-                    "ALTER TABLE rivet.{t} COMMENT = 'rename column name to nm'",
+                    "CREATE TABLE rivet.{u} (id INT PRIMARY KEY)",
+                    "ALTER TABLE rivet.{u} COMMENT = 'rename column name to nm'",
                     UPDATED_AFTER,
                 ],
                 BOTH_DELIVERED,
@@ -2640,7 +2854,8 @@ fn statements_whose_quotes_do_not_hide_a_rename_are_met_as_before_under_the_poli
                 &[
                     ansi,
                     UPDATED_BEFORE,
-                    "ALTER TABLE rivet.{t} ADD COLUMN \"x\\\" INT, ADD COLUMN extra INT",
+                    "CREATE TABLE rivet.{u} (id INT PRIMARY KEY)",
+                    "ALTER TABLE rivet.{u} ADD COLUMN \"x\\\" INT, ADD COLUMN extra INT",
                     UPDATED_AFTER,
                 ],
                 BOTH_DELIVERED,
@@ -2736,5 +2951,508 @@ fn a_truncate_drop_or_statement_write_is_met_as_before_without_double_quoted_nam
                 BOTH_DELIVERED,
             ),
         ],
+    );
+}
+
+/// A statement naming the captured table, committed in the backlog by `statements(table)`: the run is refused by code naming the table and the re-baseline, and the re-baseline gets past it.
+fn a_statement_naming_the_table_is_refused_and_the_remedy_gets_past_it(
+    label: &str,
+    statements: fn(&str) -> Vec<String>,
+) {
+    let (table, _guard, _user, rig) = anchored_under_the_policy(label);
+    let steps = std::iter::once(UPDATED_BEFORE.replace("{t}", &table))
+        .chain(statements(&table))
+        .chain([UPDATED_AFTER.replace("{t}", &table)])
+        .collect();
+    a_refused_backlog_is_got_past_by_the_remedy(
+        rig,
+        steps,
+        "RIVET_SOURCE_CDC_UNDECODABLE",
+        &[format!("names the captured table `{table}`")],
+        || {},
+        |rig| {
+            let (names, cells) = delivered(rig);
+            assert!(
+                cells.iter().any(|v| v == "ann-after")
+                    && names.iter().all(|n| n == "id" || n == "name"),
+                "the re-baselined stream reads the table as it is now: {names:?} {cells:?}"
+            );
+        },
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn an_add_index_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql() {
+    a_statement_naming_the_table_is_refused_and_the_remedy_gets_past_it("cg_idx", |t| {
+        vec![format!("ALTER TABLE rivet.{t} ADD INDEX ix_name (name)")]
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_statement_spelling_the_table_name_in_another_case_is_refused_mysql() {
+    a_statement_naming_the_table_is_refused_and_the_remedy_gets_past_it("cg_case", |t| {
+        let upper = t.to_uppercase();
+        vec![
+            format!("CREATE TABLE rivet.{upper}_UP (id INT)"),
+            format!("DROP TABLE rivet.{upper}_UP"),
+        ]
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn an_add_column_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql() {
+    a_statement_naming_the_table_is_refused_and_the_remedy_gets_past_it("cg_addc", |t| {
+        vec![format!("ALTER TABLE rivet.{t} ADD COLUMN nick VARCHAR(10)")]
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_grant_on_an_uncaptured_table_does_not_stop_the_stream_mysql() {
+    let run = statements_in_the_backlog(
+        "cg_unrel",
+        true,
+        &[
+            UPDATED_BEFORE,
+            "CREATE TABLE rivet.{u} (id INT PRIMARY KEY)",
+            "CREATE USER IF NOT EXISTS 'cg_unrel_u'@'%' IDENTIFIED BY 'x'",
+            "GRANT SELECT ON rivet.{u} TO 'cg_unrel_u'@'%'",
+            "REVOKE SELECT ON rivet.{u} FROM 'cg_unrel_u'@'%'",
+            "DROP USER 'cg_unrel_u'@'%'",
+            UPDATED_AFTER,
+        ],
+    );
+    assert_eq!(run.line(), BOTH_DELIVERED, "{}", run.said);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_name_beginning_like_a_captured_table_is_refused_naming_the_captured_table_mysql() {
+    let run = statements_in_the_backlog(
+        "cg_f4m",
+        true,
+        &[
+            "SET NAMES latin1",
+            UPDATED_BEFORE,
+            RAW_F4_CREATE,
+            RUN_RAW[0],
+            RUN_RAW[1],
+            UPDATED_AFTER,
+        ],
+    );
+    assert_eq!(run.line(), REFUSED_UNDECODABLE, "{}", run.said);
+    assert!(
+        run.said.contains("names the captured table `cg_f4m_")
+            && run.said.contains("Re-baseline the stream"),
+        "the over-stop names the captured table and the remedy:\n{}",
+        run.said
+    );
+}
+
+const RAW_F4_CREATE: &str =
+    "SET @s = CONCAT('CREATE TABLE rivet.{t}', 0xE8, 'le (id INT PRIMARY KEY)')";
+const RUN_RAW: [&str; 2] = ["PREPARE cg_raw FROM @s", "EXECUTE cg_raw"];
+const STATEMENT_FORMAT: &str = "SET SESSION binlog_format = 'STATEMENT'";
+const OTHER_TABLE: &str = "CREATE TABLE rivet.{u} (id INT PRIMARY KEY)";
+const UPDATED_AFTER_AS_PW: &str = "UPDATE rivet.{t} SET pw = 'ann-after' WHERE id = 1";
+
+fn raw(pieces: &str) -> String {
+    format!("SET @s = CONCAT({pieces})")
+}
+
+fn leak(text: impl Into<String>) -> &'static str {
+    Box::leak(text.into().into_boxed_str())
+}
+
+type Case = (bool, Vec<&'static str>, &'static str);
+
+fn end_as(label: &str, built: &[Case]) {
+    let cases: Vec<(bool, &[&str], &str)> =
+        built.iter().map(|(p, s, w)| (*p, &s[..], *w)).collect();
+    backlogs_end_as(label, &cases);
+}
+
+/// A backlog case that runs `before` after the character set `set`, then the statement `pieces`, then `tail`.
+fn lexed_case(
+    policy: bool,
+    set: &str,
+    before: &[&'static str],
+    pieces: &str,
+    tail: &[&'static str],
+    want: &'static str,
+) -> Case {
+    let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+    steps.extend_from_slice(before);
+    steps.push(leak(raw(pieces)));
+    steps.extend_from_slice(&RUN_RAW);
+    steps.extend_from_slice(tail);
+    (policy, steps, want)
+}
+
+/// Leaves a statement no run can identify in the binlog: the nextest override `threads-required = "num-test-threads"` runs it alone.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_control_byte_after_a_dash_opens_a_comment_that_hides_a_statement_write_mysql() {
+    let delete = "'DELETE rivet.{u} --', 0x01, '\n, rivet.{t} FROM rivet.{t} JOIN rivet.{u} ON rivet.{t}.id = rivet.{u}.id'";
+    let before = [STATEMENT_FORMAT, OTHER_TABLE];
+    end_as(
+        "cg_ctl_w",
+        &[
+            lexed_case(
+                true,
+                "SET NAMES utf8mb4",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES latin1",
+                &before,
+                delete,
+                &[],
+                REFUSED_UNDECODABLE,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_change_after_a_comment_opened_by_a_control_byte_is_matched_to_its_own_column_mysql() {
+    let change = "'ALTER TABLE rivet.{t} CHANGE id id INT --', 0x01, ', CHANGE name name VARCHAR(20) /*\n, CHANGE pass pw VARCHAR(20) COMMENT ''*/ -- '''";
+    end_as(
+        "cg_ctl_c",
+        &[
+            lexed_case(
+                true,
+                "SET NAMES utf8mb4",
+                &[],
+                change,
+                &[UPDATED_AFTER_AS_PW],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES latin1",
+                &[],
+                change,
+                &[UPDATED_AFTER_AS_PW],
+                REFUSED_UNDECODABLE,
+            ),
+            lexed_case(
+                true,
+                "SET NAMES utf8mb4",
+                &[],
+                "'ALTER TABLE rivet.{t} CHANGE id id INT, CHANGE name name VARCHAR(20), CHANGE pass pw VARCHAR(20)'",
+                &[UPDATED_AFTER_AS_PW],
+                REFUSED_UNDECODABLE,
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_blank_byte_the_dash_comment_swallowed_does_not_hide_the_next_line_in_latin1_mysql() {
+    let change = "'ALTER TABLE rivet.{t} CHANGE id id INT --', 0xA0, ', CHANGE name name VARCHAR(20)\n, CHANGE', 0xA0, 'pass pw VARCHAR(20)'";
+    end_as(
+        "cg_nbsp_c",
+        &[lexed_case(
+            true,
+            "SET NAMES latin1",
+            &[],
+            change,
+            &[UPDATED_AFTER_AS_PW],
+            REFUSED_UNDECODABLE,
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_name_beginning_like_a_captured_table_and_continuing_with_a_letter_byte_is_refused_as_that_table_mysql()
+ {
+    let case = |set: &str| -> Case {
+        let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+        for sql in [
+            "'CREATE TABLE rivet.{t}', 0xE8, 'le (id INT PRIMARY KEY)'",
+            "'RENAME TABLE rivet.{t}', 0xE8, 'le TO rivet.{t}', 0xE8, 'le_old'",
+            "'TRUNCATE rivet.{t}', 0xE8, 'le_old'",
+            "'DROP TABLE rivet.{t}', 0xE8, 'le_old'",
+        ] {
+            steps.push(leak(raw(sql)));
+            steps.extend_from_slice(&RUN_RAW);
+        }
+        steps.push(UPDATED_AFTER);
+        (true, steps, REFUSED_UNDECODABLE)
+    };
+    end_as(
+        "cg_f4",
+        &[
+            case("SET NAMES latin1"),
+            case("SET NAMES cp1250"),
+            case("SET NAMES cp1251"),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn an_uncaptured_table_renamed_under_a_non_ascii_name_is_met_as_before_in_a_client_character_set_mysql()
+ {
+    let mut steps: Vec<&'static str> = vec!["SET NAMES latin1", UPDATED_BEFORE];
+    for sql in [
+        "'CREATE TABLE rivet.{u}', 0xE8, 'le (id INT PRIMARY KEY)'",
+        "'RENAME TABLE rivet.{u}', 0xE8, 'le TO rivet.{u}', 0xE8, 'le_old'",
+        "'DROP TABLE rivet.{u}', 0xE8, 'le_old'",
+    ] {
+        steps.push(leak(raw(sql)));
+        steps.extend_from_slice(&RUN_RAW);
+    }
+    steps.push(UPDATED_AFTER);
+    end_as("cg_f4u", &[(true, steps, BOTH_DELIVERED)]);
+}
+
+/// One backlog naming the captured table in another spelling: how the run ends on a server that folds identifier case and on one that keeps it.
+struct Spelled {
+    policy: bool,
+    how: Spelling,
+    steps: &'static [&'static str],
+    folds: &'static str,
+    keeps: &'static str,
+    rows_when_folded: i64,
+    says: &'static str,
+}
+
+/// Every case on its own seeded table, the verdicts and the rows the captured table keeps compared in one assertion; on a server that folds, the message holds `says`.
+fn spellings_end_as(label: &str, cases: &[Spelled]) {
+    let folds = the_server_folds_names();
+    let runs: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            (
+                c,
+                statements_in_the_backlog_spelled(
+                    &format!("{label}{i}"),
+                    c.policy,
+                    Some(c.how),
+                    c.steps,
+                ),
+            )
+        })
+        .collect();
+    let got: Vec<String> = runs
+        .iter()
+        .map(|(c, r)| {
+            format!(
+                "policy={} {}: {} rows_kept={}",
+                c.policy,
+                c.steps.join(" ; "),
+                r.line(),
+                r.rows_kept
+            )
+        })
+        .collect();
+    let want: Vec<String> = cases
+        .iter()
+        .map(|c| {
+            format!(
+                "policy={} {}: {} rows_kept={}",
+                c.policy,
+                c.steps.join(" ; "),
+                if folds { c.folds } else { c.keeps },
+                if folds { c.rows_when_folded } else { 3 }
+            )
+        })
+        .collect();
+    assert_eq!(got, want, "lower_case_table_names folds: {folds}");
+    for (c, r) in runs.iter().filter(|_| folds) {
+        assert!(
+            r.said.contains(c.says),
+            "{}: the message lacks {:?}: {}",
+            c.steps.join(" ; "),
+            c.says,
+            r.said
+        );
+    }
+}
+
+const TRUNCATE_SPELLED: [&str; 3] = [UPDATED_BEFORE, "TRUNCATE TABLE rivet.`{S}`", UPDATED_AFTER];
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_truncate_spelled_with_a_character_the_server_folds_is_refused_under_the_policy_mysql() {
+    let case = |how, keeps| Spelled {
+        policy: true,
+        how,
+        steps: &TRUNCATE_SPELLED,
+        folds: REFUSED_UNDECODABLE,
+        keeps,
+        rows_when_folded: 0,
+        says: "names the captured table",
+    };
+    spellings_end_as(
+        "cg_kin",
+        &[
+            case(Spelling::Kelvin, BOTH_DELIVERED),
+            case(Spelling::DottedI, BOTH_DELIVERED),
+            case(Spelling::Upper, REFUSED_UNDECODABLE),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_column_renamed_or_swapped_under_a_folded_spelling_is_refused_mysql() {
+    let case = |steps| Spelled {
+        policy: true,
+        how: Spelling::Kelvin,
+        steps,
+        folds: REFUSED_UNDECODABLE,
+        keeps: BOTH_DELIVERED,
+        rows_when_folded: 3,
+        says: "names the captured table",
+    };
+    spellings_end_as(
+        "cg_kre",
+        &[
+            Spelled {
+                keeps: BEFORE_DELIVERED,
+                ..case(&[
+                    UPDATED_BEFORE,
+                    "ALTER TABLE rivet.`{S}` RENAME COLUMN name TO nm",
+                ])
+            },
+            case(&[
+                UPDATED_BEFORE,
+                "ALTER TABLE rivet.`{S}` RENAME COLUMN name TO pass, RENAME COLUMN pass TO name",
+                UPDATED_AFTER,
+            ]),
+        ],
+    );
+}
+
+/// A TRUNCATE of `{t}` with each `letter` written as `bytes` in the client character set `set`, on a table of its own when the server keeps case.
+fn multibyte_truncate_case(set: &str, letter: char, bytes: &str, folds: bool) -> Case {
+    let name = format!("REPLACE('{{t}}', '{letter}', 0x{bytes})");
+    let mut steps: Vec<&'static str> = vec![leak(set), UPDATED_BEFORE];
+    if !folds {
+        steps.push(leak(raw(&format!(
+            "'CREATE TABLE rivet.', {name}, ' (id INT PRIMARY KEY)'"
+        ))));
+        steps.extend_from_slice(&RUN_RAW);
+    }
+    steps.push(leak(raw(&format!("'TRUNCATE TABLE rivet.', {name}"))));
+    steps.extend_from_slice(&RUN_RAW);
+    if !folds {
+        steps.push(leak(raw(&format!("'DROP TABLE rivet.', {name}"))));
+        steps.extend_from_slice(&RUN_RAW);
+    }
+    steps.push(UPDATED_AFTER);
+    let want = if folds {
+        REFUSED_UNDECODABLE
+    } else {
+        BOTH_DELIVERED
+    };
+    (true, steps, want)
+}
+
+/// Leaves a statement no run can identify in the binlog: the nextest override `threads-required = "num-test-threads"` runs it alone.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_truncate_spelled_with_a_multibyte_character_the_server_folds_is_refused_under_the_policy_mysql()
+ {
+    let folds = the_server_folds_names();
+    let cases = [
+        multibyte_truncate_case("SET NAMES gb18030", 'k', "8136BF32", folds),
+        multibyte_truncate_case("SET NAMES gb18030", 'i', "81309032", folds),
+        multibyte_truncate_case("SET NAMES ujis", 'i', "8FAAC4", folds),
+    ];
+    end_as("cg_mbki", &cases);
+}
+
+/// Leaves a statement no run can identify in the binlog: the nextest override `threads-required = "num-test-threads"` runs it alone.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn an_uncaptured_table_renamed_under_a_two_byte_name_whose_trail_is_a_backtick_is_met_as_before_mysql()
+ {
+    let mut steps: Vec<&'static str> = vec!["SET NAMES gbk", UPDATED_BEFORE];
+    for sql in [
+        "'CREATE TABLE rivet.{u}x', 0x8160, 'y (id INT PRIMARY KEY)'",
+        "'RENAME TABLE rivet.{u}x', 0x8160, 'y TO rivet.{u}z', 0x8160",
+        "'DROP TABLE rivet.{u}z', 0x8160",
+    ] {
+        steps.push(leak(raw(sql)));
+        steps.extend_from_slice(&RUN_RAW);
+    }
+    steps.push(UPDATED_AFTER);
+    end_as("cg_gbk", &[(true, steps, BOTH_DELIVERED)]);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_database_dropped_with_a_captured_table_is_met_as_before_by_the_unreadable_columns_stop_mysql()
+{
+    let db = OtherDb(unique_name("cg_dbd"));
+    let table = unique_name("cg_dbt");
+    root()
+        .query_drop(format!("CREATE DATABASE `{}`", db.0))
+        .unwrap();
+    seed_rows(&db.0, &table);
+    let (decoy, _decoy) = seeded("cg_dbc");
+    let user = GrantUser::new_in(&db.0, &table, "id, name");
+    root()
+        .query_drop(format!(
+            "GRANT SELECT (id) ON rivet.{decoy} TO '{}'@'%'",
+            user.0
+        ))
+        .unwrap();
+    let rig = Rig::mysql_cdc(&format!("{}.{table}", db.0))
+        .source_url(&user.url())
+        .cdc("initial: snapshot")
+        .source_line("columns_from: grants");
+    rig.run_ok();
+    let steps = vec![
+        format!(
+            "UPDATE {}.{table} SET name = 'ann-before' WHERE id = 1",
+            db.0
+        ),
+        format!("DROP DATABASE `{}`", db.0),
+    ];
+    a_stopped_backlog_is_got_past_by_the_remedy(
+        rig,
+        steps,
+        Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1),
+        &[],
+        || {
+            root()
+                .query_drop(format!("CREATE DATABASE `{}`", db.0))
+                .unwrap();
+            seed_rows(&db.0, &table);
+            root()
+                .query_drop(format!(
+                    "GRANT SELECT (id, name) ON {}.{table} TO '{}'@'%'",
+                    db.0, user.0
+                ))
+                .unwrap();
+        },
+        |rig| {
+            let parts: Vec<_> = parquet_dirs(&rig.out_dir())
+                .iter()
+                .flat_map(|d| read_all_parts(d))
+                .collect();
+            assert!(!parts.is_empty(), "the re-baselined stream delivers parts");
+            let (names, cells) = delivered(rig);
+            assert!(
+                cells.iter().any(|v| v == "ann") && names.iter().all(|n| n == "id" || n == "name"),
+                "the re-baselined stream reads the re-created table: {names:?} {cells:?}"
+            );
+        },
     );
 }

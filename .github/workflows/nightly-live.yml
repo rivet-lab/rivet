@@ -95,7 +95,7 @@ jobs:
           # it every test that writes a shared workdir EACCESes — the first
           # nightly after the cdc-oracle suite landed failed exactly there.
           mkdir -p tests/.live-tmp
-          docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz duckdb clickhouse postgres-cdc mysql-cdc mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle
+          docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle
           sudo chmod -R 0777 tests/.live-tmp
 
       - name: Wait for services
@@ -520,3 +520,20 @@ jobs:
       - name: Stop services
         if: always()
         run: docker compose down -v
+
+  mysql-statement-truth:
+    name: MySQL statement truth (corpus vs the stand)
+    timeout-minutes: 150
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start the statement-truth stand
+        run: python3 dev/pytools/statement_truth.py mysql up
+      - name: Regenerate the corpus from the servers and diff it against the fixtures
+        run: python3 dev/pytools/statement_truth.py mysql check
+      - name: Dump stand logs on failure
+        if: failure()
+        run: docker compose --profile mysql-stmt logs --no-color --tail 100
+      - name: Stop the stand
+        if: always()
+        run: python3 dev/pytools/statement_truth.py mysql down

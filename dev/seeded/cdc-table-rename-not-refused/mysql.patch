@@ -1,8 +1,8 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 0ff53467..3f2ba560 100644
+index 67a4a6e9..aa113545 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -2251,7 +2251,7 @@ fn refused_table_rename(
+@@ -2250,7 +2250,7 @@ fn refused_table_rename(
      mode: SqlMode,
      configured: &[String],
  ) -> Option<Option<(String, String)>> {

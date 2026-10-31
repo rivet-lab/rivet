@@ -1,0 +1,12 @@
+diff --git a/src/source/mongo/cdc.rs b/src/source/mongo/cdc.rs
+--- a/src/source/mongo/cdc.rs
++++ b/src/source/mongo/cdc.rs
+@@ -438,7 +438,7 @@
+         };
+         let clock = loaded
+             .as_ref()
+-            .map(|pos| OrdinalClock::from_checkpoint(&pos.0))
++            .map(|_pos| OrdinalClock::default())
+             .unwrap_or_default();
+         let resume = loaded.map(|pos| decode_resume_token(&pos.0)).transpose()?;
+         // A checkpoint path with NO persisted position ⇒ a fresh checkpointed

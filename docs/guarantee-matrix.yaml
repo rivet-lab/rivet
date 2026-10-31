@@ -720,6 +720,13 @@ guarantees:
       mssql: { test: mssql_checkpoint_from_another_database_is_refused, asserts: "mssql cdc: this checkpoint was written against a different database" }
       oracle: { test: oracle_cdc_checkpoint_from_another_database_is_refused, asserts: "written against another database" }
 
+  - id: a_mysql_checkpoint_into_a_renumbered_binlog_is_refused
+    stated:
+      - file: docs/reference/cdc.md
+        sentence: "rivet refuses to resume (`RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT`, exit 5) instead of reading from an offset in another file, with GTID on or off."
+    held_by:
+      mysql: { test: a_checkpoint_whose_binlog_name_returns_after_reset_master_is_refused, asserts: "a resume into a renumbered binlog must stop with exit 5" }
+
   - id: failover_follows_the_shared_log_and_refuses_elsewhere
     stated:
       - file: docs/reference/cdc.md

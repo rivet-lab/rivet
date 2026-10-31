@@ -1,0 +1,19 @@
+diff --git a/src/pipeline/cdc_job.rs b/src/pipeline/cdc_job.rs
+index 153db0d5..ad104120 100644
+--- a/src/pipeline/cdc_job.rs
++++ b/src/pipeline/cdc_job.rs
+@@ -404,14 +404,6 @@ pub(super) fn refuse_lost_file_anchor(
+         return Ok(());
+     };
+     match crate::source::cdc::Position::load(&ckpt) {
+-        Ok(None) if state.captured_tables(&key, &dest)?.is_some() => {
+-            Err(crate::source::cdc::checkpoint_identity::lost_file_anchor(
+-                CdcEngine::from(config.source.source_type).label(),
+-                &ckpt,
+-                config_path,
+-                &export.name,
+-            ))
+-        }
+         _ => Ok(()),
+     }
+ }

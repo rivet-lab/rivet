@@ -1,10 +1,4 @@
 //! Live Oracle CDC (LogMiner, ADR-0037) through the Rig.
-//!
-//! Gated `#[ignore]`: needs the `oracle` service with the LogMiner prerequisites of
-//! `dev/oracle/init/02-logminer.sh` (ARCHIVELOG, minimal supplemental logging, the
-//! common user C##RIVETCDC). The independent oracle is the source itself — the ids
-//! and values each test wrote, or Oracle's own reading of the table — compared with
-//! the parquet the run declared.
 
 use std::path::Path;
 
@@ -82,7 +76,7 @@ fn ops(v: &[(i64, &str)]) -> Vec<(i64, String)> {
     v.iter().map(|(i, o)| (*i, o.to_string())).collect()
 }
 
-/// An `int4` override on a fractional NUMBER fails the CDC run by column, like batch, and never checkpoints.
+/// An `int4` override on a fractional NUMBER fails the CDC run by column, like batch.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_an_int_override_on_a_fractional_number_fails_by_column_not_null() {
@@ -155,6 +149,22 @@ fn oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it() {
 
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_lost_checkpoint_is_refused_not_reanchored() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let mut s = CdcScenario::oracle_with("ora_ckno", |r, _| r);
+    assert_a_lost_checkpoint_is_refused_not_reanchored(&mut s, false);
+}
+
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_state_reset_lifts_a_lost_checkpoint_refusal() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let mut s = CdcScenario::oracle_with("ora_ckrst", |r, _| r);
+    assert_state_reset_lifts_a_lost_checkpoint_refusal(&mut s);
+}
+
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_resume_captures_only_new_changes() {
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
@@ -206,9 +216,6 @@ fn oracle_cdc_idle_first_run_then_change_is_captured() {
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_transaction_open_across_a_run_keeps_its_early_rows() {
-    // ADR-0037 OR9: a transaction that wrote before a run and commits after it must
-    // arrive whole on the next run. Mining from the last commit alone loses the
-    // early row (measured); the checkpoint's low-water mark is what keeps it.
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_cspan", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
@@ -259,9 +266,7 @@ fn oracle_cdc_intra_transaction_updates_get_distinct_seq() {
     assert_intra_transaction_seq(&out, N);
 }
 
-/// A primary-key UPDATE is a delete of the old key then an insert of the new row (ADR-0030), one
-/// position, the insert after; and `id = id + 1`, which Oracle logs as `1 -> 2` before `2 -> 3`,
-/// keeps every moved row. The deduped capture equals the source.
+/// A primary-key UPDATE is a delete of the old key then an insert of the new row (ADR-0030).
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_a_primary_key_update_is_a_delete_then_an_insert() {
@@ -311,8 +316,7 @@ fn oracle_cdc_a_primary_key_update_is_a_delete_then_an_insert() {
     );
 }
 
-/// Rows that differ ONLY in their key, renumbered by one statement: the images cannot tell the
-/// row that held key 2 from the row moved into it, the ROWID can. The deduped capture is the source.
+/// Rows that differ ONLY in their key, renumbered by one statement.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_a_renumber_over_rows_with_equal_images_keeps_every_row() {
@@ -351,8 +355,7 @@ fn oracle_cdc_a_renumber_over_rows_with_equal_images_keeps_every_row() {
     );
 }
 
-/// A heap row of more than 255 columns (stored as chained pieces) whose key moves: its redo still
-/// carries a ROW_ID, the run succeeds, and the deduped capture is the source.
+/// A heap row of more than 255 columns (stored as chained pieces) whose key moves.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_a_key_move_of_a_row_wider_than_255_columns_is_captured_not_refused() {
@@ -464,9 +467,6 @@ fn oracle_cdc_crash_after_flush_before_ack() {
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn roast_oracle_cdc_large_transaction_is_atomic_across_a_mid_flush_crash() {
-    // RED against `committed` on every event: at rollover 5 a 12-row transaction
-    // would roll and checkpoint at its own commit after 5 rows, and a crash there
-    // would let the resume skip the other 7.
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_cbig", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
@@ -548,7 +548,7 @@ fn oracle_cdc_anchor_under_concurrent_commits_never_records_low_water_zero() {
     }
 }
 
-/// A checkpoint whose low-water is 0, as rivet 0.30 could write it, is refused as that defect, never as LOST.
+/// A checkpoint whose low-water is 0, as rivet 0.30 could write it, is refused as that defect.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_a_0_30_low_water_zero_checkpoint_is_refused_precisely_not_as_lost() {
@@ -659,8 +659,6 @@ fn cells_sql(dir: &Path, cdc: bool) -> String {
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_non_utc_session_matches_batch() {
-    // The capture user's own logon sets every rendering knob off its default; the
-    // adapter's session pin must win, or dates, numbers and zones decode wrong.
     let _serial = cross_process_serial("oracle_cdc");
     struct Trigger;
     impl Drop for Trigger {
@@ -700,7 +698,6 @@ fn oracle_cdc_non_utc_session_matches_batch() {
         (&batch["columns"], &batch["rows"]),
         "an odd capture session decodes every value exactly as the batch export"
     );
-    // Independent of the batch reader: the zoned literals `seed_types` wrote, as UTC microseconds.
     assert_eq!(
         (utc_micros(&cdc_out, "TSTZ"), utc_micros(&cdc_out, "TSLTZ")),
         (
@@ -756,7 +753,7 @@ impl Drop for OraView {
     }
 }
 
-/// A VIEW exists and has columns, but no redo ever names it: configured as a CDC table it is refused before any anchor.
+/// A VIEW exists and has columns, but no redo ever names it.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_refuses_a_view_before_the_first_ack() {
@@ -789,7 +786,7 @@ fn oracle_cdc_refuses_a_view_before_the_first_ack() {
     assert_refused_before_any_write(&out, &ckpt);
 }
 
-/// A column added between two runs: the next run reads the table's new shape and delivers the new column's value.
+/// A column added between two runs.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_picks_up_a_column_added_between_runs() {
@@ -824,7 +821,7 @@ fn oracle_cdc_picks_up_a_column_added_between_runs() {
     assert_eq!(added, ["7"], "the added column's value is delivered");
 }
 
-/// A change written before an ALTER and mined after it cannot be decoded by the online dictionary: the run refuses by code and writes nothing.
+/// A change written before an ALTER and mined after it cannot be decoded by the online dictionary.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_a_change_older_than_an_alter_is_refused_by_code() {
@@ -854,7 +851,7 @@ fn oracle_cdc_a_change_older_than_an_alter_is_refused_by_code() {
     );
 }
 
-/// Two tables in one export share one mining window and one checkpoint, and a second run delivers only what changed since.
+/// Two tables in one export share one mining window and one checkpoint.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_two_tables_share_one_window_and_resume() {
@@ -908,7 +905,7 @@ fn oracle_cdc_two_tables_share_one_window_and_resume() {
     );
 }
 
-/// A writer commits through run 1: the run ends at the SCN current at open with the backlog delivered, and run 2 delivers the tail; the union is the source.
+/// A writer commits through run 1.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn roast_oracle_cdc_until_current_open_bound_two_runs_lose_nothing() {
@@ -1059,7 +1056,7 @@ fn oracle_cdc_refuses_a_truncate_of_a_captured_table_on_every_rerun() {
     );
 }
 
-/// A truncate after its rows went out as change parts: the remedy, followed as printed, leaves the prefix holding only the source's rows.
+/// A truncate after its rows went out as change parts.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites + the rivet-duckdb oracle"]
 fn oracle_cdc_truncate_refusal_remedy_leaves_no_removed_row_live_in_the_prefix() {
@@ -1166,7 +1163,6 @@ fn oracle_cdc_a_truncate_of_an_uncaptured_table_does_not_refuse() {
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_schema_qualified_table_config_captures_events() {
-    // A lower-case `rivet.<table>` resolves like Oracle does (upper-case) and routes.
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_cq", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
@@ -1201,8 +1197,6 @@ fn oracle_cdc_corrupt_checkpoint_fails_loud_not_silently_absent() {
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_resume_past_log_retention_fails_loudly() {
-    // A checkpoint whose low-water mark predates every redo log still on disk is
-    // the state an archive purge leaves behind: refuse it as a loss, never re-anchor.
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_cgone", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
@@ -1322,9 +1316,6 @@ fn oracle_cdc_cli_resolves_the_source_from_env_and_file_alike() {
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_cli_writes_csv_parts_and_stops_at_the_cap_on_a_commit() {
-    // `--format csv` is read back by DuckDB's own CSV parser; `--max-events 2` over three
-    // single-row commits must deliver two now and the third on the next run, never lose it;
-    // `--rollover 1` must cut one part per commit; `--stream` is refused, not silently bounded.
     let _serial = cross_process_serial("oracle_cdc");
     let t = cdc_table("ora_cclicsv", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
     let table = format!("RIVET.{}", t.name());
@@ -1390,8 +1381,6 @@ fn oracle_cdc_cli_writes_csv_parts_and_stops_at_the_cap_on_a_commit() {
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_refuses_a_table_it_cannot_resolve_before_the_first_ack() {
-    // A typo beside a real table must fail the run, not deliver the real one and call
-    // the misspelled one an empty success.
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_ctypo", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
@@ -1412,8 +1401,6 @@ fn oracle_cdc_refuses_a_table_it_cannot_resolve_before_the_first_ack() {
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_byte_cap_counts_the_first_row_and_defers_not_drops() {
-    // RED against a group whose first row is left out of the byte count (the old
-    // Oracle-only copy of the cap): a one-row transaction then never reached the check.
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_ccap", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
@@ -1442,8 +1429,6 @@ fn oracle_cdc_byte_cap_counts_the_first_row_and_defers_not_drops() {
 }
 
 /// Runs whose LogMiner session has every online redo group reused under it deliver every row exactly once.
-/// Each run mines a backlog from a fresh log; once the server shows rivet's session reading V$LOGMNR_CONTENTS
-/// the test switches through every group. RED with no re-plan (ORA-01368/01291) and with the switch removed.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_a_redo_log_switch_during_mining_is_re_mined_not_failed() {

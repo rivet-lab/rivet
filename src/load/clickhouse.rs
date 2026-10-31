@@ -394,7 +394,7 @@ impl TargetLoader for ClickhouseLoader {
                 ),
             ));
         }
-        let part_rows = super::before_write(checked_part_rows(|| self.store(), uris))?;
+        let part_rows = super::before_write(checked_part_rows(|| self.store(), uris, false))?;
         let target = self.quoted(table);
         let swap = self.quoted(&format!("{table}__rivet_swap"));
         self.query(&create_table_sql(
@@ -424,7 +424,7 @@ impl TargetLoader for ClickhouseLoader {
         uris: &[String],
         pk: &[String],
     ) -> Result<u64> {
-        let part_rows = super::before_write(checked_part_rows(|| self.store(), uris))?;
+        let part_rows = super::before_write(checked_part_rows(|| self.store(), uris, self.cdc))?;
         let full = changelog_specs(specs);
         let changes = self.quoted(&format!("{table}__changes"));
         let shape = super::before_write(changelog_shape(
@@ -728,7 +728,7 @@ fn changelog_shape<'a>(
         not_null: pk,
         version_column: format!(
             ",\n  `__ver` UInt256 MATERIALIZED {}",
-            cdc::CLICKHOUSE_VERSION_EXPR
+            crate::source::cdc::order::clickhouse_version_expr()
         ),
     })
 }
@@ -983,10 +983,11 @@ fn object_kind_of(engine: &str) -> ObjectKind {
 /// Parts whose footers are read at once before a load.
 const FOOTER_READERS: usize = 8;
 
-/// The row count of every part in `uris`, in order, each footer checked for a timestamp ClickHouse would clamp; the first part that fails is the one reported. The store is opened only when there is a part to read.
+/// The row count of every part in `uris`, in order, each footer checked for a timestamp ClickHouse would clamp and, for a change log, the head of `__pos` for a position it cannot version; the first part that fails is the one reported. The store is opened only when there is a part to read.
 fn checked_part_rows<'s>(
     store: impl FnOnce() -> Result<&'s GcsStore>,
     uris: &[String],
+    change_log: bool,
 ) -> Result<Vec<u64>> {
     if uris.is_empty() {
         return Ok(Vec::new());
@@ -997,6 +998,9 @@ fn checked_part_rows<'s>(
         let meta = super::partition_budget::read_footer(store, key)
             .with_context(|| format!("reading the footer of {uri}"))?;
         refuse_unholdable_timestamps(&meta, uri)?;
+        if change_log {
+            refuse_unorderable_positions(store, key, &meta, uri)?;
+        }
         footer_rows(&meta)
     };
     let mut rows = Vec::with_capacity(uris.len());
@@ -1017,6 +1021,27 @@ fn checked_part_rows<'s>(
 
 const DATETIME64_MIN_SECS: i64 = -2_208_988_800;
 const DATETIME64_MAX_SECS: i64 = 10_413_791_999;
+
+/// Refuse a change-log part whose `__pos` head is of a shape ClickHouse cannot version, before any table is created.
+fn refuse_unorderable_positions(
+    store: &GcsStore,
+    key: &str,
+    meta: &parquet::file::metadata::ParquetMetaData,
+    uri: &str,
+) -> Result<()> {
+    for pos in super::part_pos::head_positions(store, key, meta)? {
+        if let Some(why) = crate::source::cdc::order::clickhouse_legacy_refusal(&pos) {
+            return Err(super::refused(
+                crate::error::codes::LOAD_CDC_POSITION_UNORDERABLE,
+                format!(
+                    "{uri}: {why}. Nothing was written and no table was created. {}",
+                    crate::source::cdc::checkpoint_identity::RECOVER
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Refuse a part holding a timestamp ClickHouse would silently clamp (measured on 24.8:
 /// 9999-12-31 reads back as 2299-12-31 23:00, and `date_time_overflow_behavior` does not
@@ -1387,14 +1412,15 @@ mod tests {
             .map(|i| write(&format!("p{i:02}.parquet"), &vec![0; i + 1]))
             .collect();
         assert_eq!(
-            checked_part_rows(|| Ok(&store), &good).unwrap(),
+            checked_part_rows(|| Ok(&store), &good, false).unwrap(),
             (1..=good.len() as u64).collect::<Vec<_>>(),
             "one count per part, in the order given"
         );
         assert_eq!(
             checked_part_rows(
                 || Err(anyhow::anyhow!("no store is opened for a load of no parts")),
-                &[]
+                &[],
+                false
             )
             .unwrap(),
             Vec::<u64>::new()
@@ -1405,7 +1431,7 @@ mod tests {
         mixed.push(write("early.parquet", &[DATETIME64_MIN_SECS - 1]));
         let err = format!(
             "{:#}",
-            checked_part_rows(|| Ok(&store), &mixed).unwrap_err()
+            checked_part_rows(|| Ok(&store), &mixed, false).unwrap_err()
         );
         assert!(
             err.contains("gs://b/late.parquet")
@@ -1413,10 +1439,78 @@ mod tests {
             "the first bad part in list order is the one named: {err}"
         );
         let gone = vec![good[0].clone(), "gs://b/absent.parquet".to_string()];
-        let err = format!("{:#}", checked_part_rows(|| Ok(&store), &gone).unwrap_err());
+        let err = format!(
+            "{:#}",
+            checked_part_rows(|| Ok(&store), &gone, false).unwrap_err()
+        );
         assert!(
             err.contains("reading the footer of gs://b/absent.parquet"),
             "{err}"
+        );
+    }
+
+    const LEGACY_POS: &str = r#"{"_data":"826A4E","rt":"826A4E"}"#;
+
+    fn part_of_positions(dir: &std::path::Path, name: &str, pos: &[Option<&str>]) -> String {
+        use std::sync::Arc;
+        let ids = arrow::array::Int64Array::from_iter_values(0..pos.len() as i64);
+        let batch = arrow::record_batch::RecordBatch::try_from_iter([
+            ("id", Arc::new(ids) as arrow::array::ArrayRef),
+            (
+                "__pos",
+                Arc::new(arrow::array::StringArray::from(pos.to_vec())) as arrow::array::ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let mut buf = Vec::new();
+        let mut w = parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        std::fs::write(dir.join(name), buf).unwrap();
+        format!("gs://b/{name}")
+    }
+
+    /// A Mongo part without clusterTime is refused before any write with the one re-baseline remedy; every other position loads as on main.
+    #[test]
+    fn a_legacy_mongo_part_is_refused_before_any_write_and_every_other_shape_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+        let ok = [
+            Some(r#"{"_data":"826A4E","rt":"826A4E","ct":7,"ord":1}"#),
+            Some(r#"{"_data":"826A4E","rt":"826A4E","ct":0,"ord":0}"#),
+            Some(r#"{"file":"binlog.000047","pos":10840633}"#),
+            Some(r#"{"lsn":"3D/484A4908"}"#),
+            Some(r#"{"lsn":"0000002d000000d80194"}"#),
+            None,
+        ];
+        let good: Vec<String> = ok
+            .iter()
+            .enumerate()
+            .map(|(i, p)| part_of_positions(dir.path(), &format!("g{i}.parquet"), &[*p, *p]))
+            .collect();
+        assert_eq!(
+            checked_part_rows(|| Ok(&store), &good, true).unwrap(),
+            vec![2; good.len()]
+        );
+        let legacy = part_of_positions(dir.path(), "legacy.parquet", &[None, Some(LEGACY_POS)]);
+        let mixed = vec![good[0].clone(), legacy.clone()];
+        let err = checked_part_rows(|| Ok(&store), &mixed, true).unwrap_err();
+        assert!(err.is::<crate::load::Refused>(), "{err:#}");
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_LOAD_CDC_POSITION_UNORDERABLE")
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{legacy}: rivet: this MongoDB __pos carries no clusterTime (the part was written by a rivet older than the clusterTime stamp), so ClickHouse cannot order it against its neighbours (ADR-0035 CH7). Nothing was written and no table was created. {}",
+                crate::source::cdc::checkpoint_identity::RECOVER
+            )
+        );
+        assert_eq!(
+            checked_part_rows(|| Ok(&store), &mixed, false).unwrap(),
+            vec![2, 2],
+            "a load that is not a change log never reads __pos"
         );
     }
 
@@ -1679,8 +1773,7 @@ mod tests {
         assert_eq!(got, "1\twin\n2\twin\n3\twin\n4\twin\n5\twin");
     }
 
-    /// A `__pos` of no known shape (a Mongo resume token) fails the insert loudly instead
-    /// of versioning the row 0, where insert order would decide the winner.
+    /// A `__pos` of no known shape, or a Mongo one without a clusterTime, fails the insert loudly.
     #[test]
     #[ignore = "live: requires docker compose clickhouse"]
     fn an_unknown_position_shape_fails_the_insert() {
@@ -1713,11 +1806,23 @@ mod tests {
             ))
         };
         let known = insert(r#"{"lsn":"0/1"}"#);
-        let unknown = insert(r#"{"_data":"8263"}"#);
+        let mongo = insert(r#"{"_data":"8263","ct":5,"ord":1}"#);
+        let legacy = insert(r#"{"_data":"8263"}"#);
+        let unknown = insert(r#"{"x":1}"#);
         loader.query(&format!("DROP DATABASE {db}")).unwrap();
         known.expect("a PostgreSQL LSN is versioned");
-        let e = format!("{:#}", unknown.expect_err("a resume token has no version"));
+        mongo.expect("a Mongo position with a clusterTime is versioned");
+        let e = format!(
+            "{:#}",
+            unknown.expect_err("a shape of no engine has no version")
+        );
         assert!(e.contains("unrecognised __pos shape"), "{e}");
+        let e = format!(
+            "{:#}",
+            legacy.expect_err("a Mongo token alone has no version")
+        );
+        assert!(e.contains("carries no clusterTime"), "{e}");
+        assert!(e.contains("older than the clusterTime stamp"), "{e}");
     }
 
     /// Through a named collection ClickHouse reads the part itself: columns match by
