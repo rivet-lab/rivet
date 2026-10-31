@@ -3996,6 +3996,23 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: cdc-policy-non-ascii-unit-stands-for-any-letter
+    class: "under `columns_from: grants` on a server that folds case, a non-ASCII character in a statement stands for any letter of a captured table's name, so Chinese or Cyrillic text in a comment on a table the run does not capture stops the stream as naming a captured table: the run exits 5 for a statement that touches nothing it captures"
+    history: "#728 verifier round 7 (2026-10-31); RED from this patch: the invocation ends with a refusal (exit 5), expected both changes delivered (exit 0)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-policy-non-ascii-unit-stands-for-any-letter/mysql.patch
+        cells: ["lib:a_non_ascii_unit_stands_only_for_the_letters_the_server_folds", "lib:the_one_pass_search_agrees_with_the_reading_by_sets", a_non_ascii_comment_on_an_uncaptured_table_is_met_as_before_under_the_policy_mysql]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
   - name: statement-line-comment-read-as-text
     class: "a `-- ` or `#` line comment in a binlog statement is read as statement text, so a column rename or a privilege statement written behind one is missed: the run exits 0 with the renamed column's later changes lost, or keeps delivering a revoked column"
     history: "PR #719 final verification (2026-10-29); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"
