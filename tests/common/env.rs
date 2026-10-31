@@ -170,6 +170,11 @@ pub const CLICKHOUSE_USER: &str = "rivet";
 pub const CLICKHOUSE_PASSWORD: &str = "rivet";
 pub const CLICKHOUSE_DB: &str = "rivet";
 pub const CLICKHOUSE_HTTP_URL: &str = "http://127.0.0.1:8123";
+/// ClickHouse whose server time zone is Asia/Tokyo (`clickhouse-tz`).
+pub const CLICKHOUSE_TZ_HTTP_URL: &str = "http://127.0.0.1:8125";
+
+/// The stand ClickHouse over HTTPS, its certificate signed by the test CA in `dev/clickhouse/tls/ca.pem`.
+pub const CLICKHOUSE_HTTPS_URL: &str = "https://localhost:8443";
 
 /// Container name of the long-running `python:3.12-slim + duckdb` validator.
 /// Tests reach it via `docker exec`, not TCP, so there is no port constant.
@@ -402,6 +407,8 @@ pub enum LiveService {
     DuckDb,
     /// ADR-0014 Parquet validator: `clickhouse/clickhouse-server`. HTTP :8123.
     ClickHouse,
+    /// ClickHouse at server time zone Asia/Tokyo. HTTP :8125.
+    ClickHouseTz,
 }
 
 impl LiveService {
@@ -491,6 +498,11 @@ impl LiveService {
                 "127.0.0.1",
                 CLICKHOUSE_PORT_HTTP,
                 "service `clickhouse` in docker-compose.yaml (HTTP :8123)",
+            ),
+            LiveService::ClickHouseTz => (
+                "127.0.0.1",
+                8125,
+                "service `clickhouse-tz` — run: docker compose --profile tz up -d clickhouse-tz",
             ),
             // Not used (DuckDb is handled before addr() in require_alive),
             // but kept exhaustive so future TCP-style probes do not panic.
