@@ -111,7 +111,7 @@ diff --git a/src/source/mysql/mod.rs b/src/source/mysql/mod.rs
 index af636b3e..35fde0af 100644
 --- a/src/source/mysql/mod.rs
 +++ b/src/source/mysql/mod.rs
-@@ -19,7 +19,7 @@
+@@ -19,8 +19,8 @@
  //!   is exhaustively unit-tested in isolation (no live MySQL needed).
  
  mod arrow_convert;
@@ -119,4 +119,5 @@ index af636b3e..35fde0af 100644
 +pub(crate) use arrow_convert::time_outside_day_refusal;
  pub(crate) mod cdc;
  pub(crate) mod column_grants;
+ mod folded_name;
  mod proxy;

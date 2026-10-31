@@ -1,15 +1,13 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 3a224652..d45a8295 100644
+index 6aad4a3e..7855bfe0 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -1645,8 +1645,8 @@ impl MysqlChangeStream {
-             Some(EventData::QueryEvent(qe))
-                 if is_privilege_statement(&qe.query(), event_mode(&qe)) =>
-             {
--                self.grants_pending
--                    .get_or_insert_with(|| (self.file.clone(), log_pos));
-+                self.grants_pending = Some((self.file.clone(), log_pos));
-+                self.refuse_changed_grants()?;
-             }
-             Some(EventData::QueryEvent(qe)) if is_commit_statement(&qe.query()) => {
-                 let commit = json!({"at": event_start, "query": qe.query()});
+@@ -2580,7 +2580,7 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
+ /// Whether a pending grants re-read may wait past this event.
+ fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
+     match data {
+-        Some(EventData::QueryEvent(qe)) => !is_transaction_control(qe.query_raw()),
++        Some(EventData::QueryEvent(_)) => false,
+         Some(
+             EventData::GtidEvent(_)
+             | EventData::AnonymousGtidEvent(_)
