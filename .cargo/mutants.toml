@@ -622,15 +622,13 @@ exclude_re = [
     # fails its bystander half (an export that does not capture the truncated
     # table must still complete), `false` fails the refusal half. Run by hand
     # 2026-08-24, mutant applied and reverted each time.
-    "replace match guard truncate_target.*MysqlChangeStream::fill",
+    "replace match guard refused_truncate.*MysqlChangeStream::fill",
 
-    # 2026-10-31 #728: the name arm and the re-read mark of the live-only MySQL reader. The decisions are named
-    # predicates (`mention_under_policy`, `re_read_marked`, `statement_frame`), unit-tested; the glue is graded
-    # live, mutant applied by hand: `note_statement` -> () fails a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql,
-    # the guard -> false fails an_add_index_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql,
-    # -> true fails a_grant_on_an_uncaptured_table_does_not_stop_the_stream_mysql.
+    # 2026-10-31 #728: the QueryEvent arm guards of the live-only MySQL reader, each mutant (true and false) applied by hand
+    # and killed by the live_cdc_column_grants:: cells (e.g. the truncate guard by a_truncate_drop_or_statement_write_is_met_as_before_without_double_quoted_names_mysql).
     "replace MysqlChangeStream::note_statement with \\(\\)",
-    "replace match guard mention_under_policy.*MysqlChangeStream::fill",
+    "replace match guard mention\\.is_some\\(\\) with (true|false) in MysqlChangeStream::fill",
+    "replace match guard refused_(column_rename|table_rename|drop|dml).*MysqlChangeStream::fill",
     # `defers_the_grants_re_read` reads a QueryEvent no offline test can build; deleting the arm or its `!` fails
     # privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql (by hand, 2026-10-31).
     "delete match arm Some\\(EventData::QueryEvent\\(qe\\)\\) in defers_the_grants_re_read",

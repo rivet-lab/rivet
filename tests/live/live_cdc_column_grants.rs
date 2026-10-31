@@ -3396,6 +3396,15 @@ fn a_database_dropped_with_a_captured_table_is_refused_by_code_and_the_remedy_ge
         },
         |rig| {
             let (names, cells) = delivered(rig);
+            let rows: usize = parquet_dirs(&rig.out_dir())
+                .iter()
+                .flat_map(|d| read_all_parts(d))
+                .map(|b| b.num_rows())
+                .sum();
+            assert!(
+                rows >= 1,
+                "the re-baselined stream delivers the re-created table"
+            );
             assert!(
                 cells.iter().any(|v| v == "ann") && names.iter().all(|n| n == "id" || n == "name"),
                 "the re-baselined stream reads the re-created table: {names:?} {cells:?}"
