@@ -1208,17 +1208,24 @@ mod tests {
     #[test]
     fn a_capture_instance_is_resolved_before_the_snapshot_baseline() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = "source:\n  type: mssql\n  url: \"mssql://u:p@db.example.com/app\"\nexports:\n  - name: o\n    \
+        let yaml = "source:\n  type: mssql\n  url: \"mssql://u:p@127.0.0.1:1/app\"\nexports:\n  - name: o\n    \
              table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./cdc/o.ckpt\n      \
              initial: snapshot\n      capture_instance: dbo_orders\n    destination: { type: local, path: ./out }\n";
         let path = dir.path().join("rivet.yaml");
         std::fs::write(&path, yaml).unwrap();
+        std::fs::create_dir_all(dir.path().join("cdc")).unwrap();
+        std::fs::write(dir.path().join("cdc/o.ckpt"), "{}").unwrap();
         let config = crate::config::Config::load(&path.display().to_string()).unwrap();
         let export = config.exports[0].clone();
         let state = StateStore::open_in_memory().unwrap();
+        let table_dest = super::dest_for_table(&export.destination, "orders");
+        let snap_prefix = super::dest_for_table(&table_dest, "snapshot").state_key();
+        state
+            .mark_snapshot_done("o", "orders", &snap_prefix, "run-1")
+            .unwrap();
         let err = super::initial_snapshot_pending(&config, &export, &state, dir.path(), None)
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("TLS"), "{err:#}");
+            .expect_err("the capture-instance lookup dials the server before the baseline");
+        assert!(format!("{err:#}").contains("TCP connect failed"), "{err:#}");
     }
 
     #[test]
