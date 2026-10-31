@@ -38,8 +38,13 @@ fn seeded(prefix: &str, n: i64) -> (String, Table) {
 
 /// One ClickHouse statement over HTTP; the response body, or a panic naming the SQL.
 fn ch(sql: &str) -> String {
+    ch_at(CLICKHOUSE_HTTP_URL, sql)
+}
+
+/// [`ch`] against the server at `url`.
+fn ch_at(url: &str, sql: &str) -> String {
     let resp = reqwest::blocking::Client::new()
-        .post(CLICKHOUSE_HTTP_URL)
+        .post(url)
         .basic_auth(CLICKHOUSE_USER, Some(CLICKHOUSE_PASSWORD))
         .body(sql.to_string())
         .send()
@@ -53,20 +58,27 @@ fn ch(sql: &str) -> String {
     body.trim().to_string()
 }
 
-/// A scratch ClickHouse database dropped on drop.
-struct Db(String);
+/// A scratch ClickHouse database on the server at `.1`, dropped on drop.
+struct Db(String, &'static str);
 
 impl Db {
     fn new(prefix: &str) -> Self {
+        Self::on(CLICKHOUSE_HTTP_URL, prefix)
+    }
+
+    /// A scratch database on the server at `url`.
+    fn on(url: &'static str, prefix: &str) -> Self {
         let name = unique_name(prefix);
-        ch(&format!("CREATE DATABASE {name}"));
-        Db(name)
+        ch_at(url, &format!("CREATE DATABASE {name}"));
+        Db(name, url)
     }
 }
 
 impl Drop for Db {
     fn drop(&mut self) {
-        let _ = std::panic::catch_unwind(|| ch(&format!("DROP DATABASE IF EXISTS {}", self.0)));
+        let _ = std::panic::catch_unwind(|| {
+            ch_at(self.1, &format!("DROP DATABASE IF EXISTS {}", self.0))
+        });
     }
 }
 
@@ -80,6 +92,11 @@ fn source_rows(tbl: &str) -> Vec<(i64, i64)> {
 /// The raw TSV ClickHouse returns for `sql`, for rows that are not `(id, v)` pairs.
 fn clickhouse_rows_tsv(sql: &str) -> String {
     ch(sql)
+}
+
+/// [`clickhouse_rows_tsv`] read from the server at `url`.
+fn clickhouse_rows_tsv_at(url: &str, sql: &str) -> String {
+    ch_at(url, sql)
 }
 
 /// The `(id, v)` rows ClickHouse returns for `sql` (a `FORMAT TSV` query).
@@ -103,9 +120,9 @@ fn into_clickhouse(rig: Rig, db: &Db) -> Rig {
     rig.cdc("initial: snapshot")
         .dest_gcs(BUCKET, &unique_name("chload"), FAKE_GCS_ENDPOINT)
         .top_line(&format!(
-            "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {}, \
+            "load: {{ target: clickhouse, url: \"{}\", database: {}, \
              user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: [id] }}",
-            db.0
+            db.1, db.0
         ))
 }
 
@@ -398,9 +415,9 @@ fn batch_into_clickhouse(rig: Rig, db: &Db) -> Rig {
 fn batch_into_clickhouse_at(rig: Rig, db: &Db, prefix: &str) -> Rig {
     rig.dest_gcs(BUCKET, prefix, FAKE_GCS_ENDPOINT)
         .top_line(&format!(
-            "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {}, \
+            "load: {{ target: clickhouse, url: \"{}\", database: {}, \
              user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: [id] }}",
-            db.0
+            db.1, db.0
         ))
 }
 
@@ -3530,5 +3547,114 @@ fn a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated(
         clickhouse_rows_mongo_state(&db),
         want,
         "the view is the re-snapshot"
+    );
+}
+
+/// A naive MySQL `DATETIME(6)` source with ids 1 and 2 on the CDC stand.
+fn naive_mysql(prefix: &str) -> (String, Table) {
+    let tbl = unique_name(prefix);
+    conn()
+        .query_drop(format!(
+            "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, ts DATETIME(6)); \
+             INSERT INTO {tbl} VALUES (1, '2024-01-01 00:00:00'), (2, '2024-06-30 23:30:15.5')"
+        ))
+        .expect("seed");
+    let guard = Table(tbl.clone());
+    (tbl, guard)
+}
+
+const NAIVE_AS_WRITTEN: &str =
+    "2024-01-01 00:00:00.000000\t2024-01-01\n2024-06-30 23:30:15.500000\t2024-06-30";
+
+/// A naive source timestamp reads back as written on a server in Asia/Tokyo, full and CDC.
+#[test]
+#[ignore = "live: requires clickhouse-tz + fake-gcs + mysql-cdc"]
+fn a_naive_timestamp_reads_back_as_written_on_a_server_in_another_zone() {
+    require_alive(LiveService::ClickHouseTz);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = naive_mysql("rivet_ch_tz");
+    for (leg, rig) in [
+        ("full", Rig::mysql_cdc(&tbl).into_full_batch()),
+        ("cdc", Rig::mysql_cdc(&tbl).cdc("initial: snapshot")),
+    ] {
+        let db = Db::on(CLICKHOUSE_TZ_HTTP_URL, "rivet_chtz");
+        let rig = batch_into_clickhouse(rig, &db);
+        rig.run_ok();
+        load(&rig);
+        let got = clickhouse_rows_tsv_at(
+            CLICKHOUSE_TZ_HTTP_URL,
+            &format!(
+                "SELECT toString(ts), toString(toDate(ts)) FROM {}.{tbl} \
+                 WHERE id IN (1, 2) ORDER BY id FORMAT TSV",
+                db.0
+            ),
+        );
+        assert_eq!(got, NAIVE_AS_WRITTEN, "{leg} load on an Asia/Tokyo server");
+    }
+}
+
+/// A zone-less change log keeps loading with a warning naming the ALTER that fixes it.
+#[test]
+#[ignore = "live: requires clickhouse-tz + fake-gcs + mysql-cdc"]
+fn a_zone_less_change_log_keeps_loading_and_its_warning_names_the_remedy() {
+    require_alive(LiveService::ClickHouseTz);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = naive_mysql("rivet_ch_tzold");
+    let db = Db::on(CLICKHOUSE_TZ_HTTP_URL, "rivet_chtz");
+    let rig = into_clickhouse(Rig::mysql_cdc(&tbl), &db);
+    rig.run_ok();
+    load(&rig);
+    let changes = format!("{}.{tbl}__changes", db.0);
+    ch_at(
+        CLICKHOUSE_TZ_HTTP_URL,
+        &format!("ALTER TABLE {changes} MODIFY COLUMN ts Nullable(DateTime64(6))"),
+    );
+
+    conn()
+        .query_drop(format!(
+            "INSERT INTO {tbl} VALUES (3, '2024-12-31 23:59:59.25')"
+        ))
+        .expect("insert");
+    rig.run_ok();
+    let rig = rig.no_oracle(
+        "the cell altered the log's ts to the zone-less type the ledger no longer declares",
+    );
+    let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a zone-less change log must keep loading:\n{err}"
+    );
+    assert!(
+        err.contains("is Nullable(DateTime64(6))")
+            && err.contains("MODIFY COLUMN `ts` Nullable(DateTime64(6, 'UTC'))"),
+        "the load must warn and name the ALTER:\n{err}"
+    );
+    let view = format!("{}.{tbl}", db.0);
+    assert_eq!(
+        clickhouse_rows_tsv_at(
+            CLICKHOUSE_TZ_HTTP_URL,
+            &format!("SELECT toUnixTimestamp64Micro(ts) FROM {view} ORDER BY id FORMAT TSV"),
+        ),
+        "1704067200000000\n1719790215500000\n1735689599250000",
+        "every row holds the instant of its wall clock read as UTC"
+    );
+
+    ch_at(
+        CLICKHOUSE_TZ_HTTP_URL,
+        &format!("ALTER TABLE {changes} MODIFY COLUMN `ts` Nullable(DateTime64(6, 'UTC'))"),
+    );
+    assert_eq!(
+        clickhouse_rows_tsv_at(
+            CLICKHOUSE_TZ_HTTP_URL,
+            &format!(
+                "SELECT toString(ts), toString(toDate(ts)) FROM {view} WHERE id IN (1, 2) \
+                 ORDER BY id FORMAT TSV"
+            ),
+        ),
+        NAIVE_AS_WRITTEN,
+        "the named ALTER makes the log read as written"
     );
 }

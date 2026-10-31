@@ -82,7 +82,7 @@ code does not count.
   - M1 (the common types: the load matrix and the uuid/json/time/array cell, read back from ClickHouse);
   - M2 (a part holding a timestamp past DateTime64's range, or one whose footer cannot bound it, is refused before insert whether rivet sends it or ClickHouse pulls it, CH12; the rest are divergences in the type report);
   - M3 (a load killed after appending re-runs without changing the view; a load killed after adopting the table resumes into the log; a full load killed at each of its four fault points in `src/test_hook.rs` re-runs to the source; a lost INSERT answer is resent only where a copy collapses, CH13);
-  - M4 (a naive timestamp read in three session zones);
+  - M4 (a naive timestamp, declared `DateTime64(p, 'UTC')`, reads back as written in three session zones and on a server in Asia/Tokyo; a zone-less column of an older table loads with a warning naming the `ALTER`);
   - M5;
   - M6 (`clickhouse_load` gate cells for CDC per engine, full, incremental, the crash re-runs, the range refusal pushed and pulled, the retries, and the loader's three live lib tests);
   - M7 (the loader's HTTP methods are excluded in `.cargo/mutants.toml`, each exclusion naming the live test that kills it, all of which the gate runs);
