@@ -281,7 +281,7 @@ pub(crate) fn summary(corpus: &Corpus, t: &Tally) -> String {
     )
 }
 
-/// Fails unless every disagreement is covered by a ledger entry within its row ceiling, and every entry still covers something.
+/// Fails unless every disagreement is in a ledger entry and every entry covers exactly its row count.
 pub(crate) fn grade_ledger(corpus: &Corpus, t: &Tally, ledger: &[Known]) -> Result<(), String> {
     let server = corpus.header.server.as_str();
     let by_id: BTreeMap<&str, &Row> = corpus.rows.iter().map(|r| (r.id.as_str(), r)).collect();
@@ -322,16 +322,22 @@ pub(crate) fn grade_ledger(corpus: &Corpus, t: &Tally, ledger: &[Known]) -> Resu
     }
     for (k, n) in ledger.iter().zip(&used) {
         if k.server.is_none_or(|s| s == server) {
+            if *n == 0 {
+                return Err(format!(
+                    "{server}: ledger `{}` covers no row any more; remove it: {}",
+                    k.case, k.reason
+                ));
+            }
             if *n > k.rows {
                 return Err(format!(
                     "{server}: ledger `{}` covers {n} rows, ceiling {}: {}",
                     k.case, k.rows, k.reason
                 ));
             }
-            if *n == 0 {
+            if *n < k.rows {
                 return Err(format!(
-                    "{server}: ledger `{}` covers no row any more; remove it: {}",
-                    k.case, k.reason
+                    "{server}: ledger `{}` covers {n} rows, below its {}; lower the ceiling to {n}: {}",
+                    k.case, k.rows, k.reason
                 ));
             }
         }

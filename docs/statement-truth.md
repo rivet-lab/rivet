@@ -98,6 +98,5 @@ The MySQL adapter calls the binlog reader's own `query_refusal` and `statement_f
 - Without `columns_from: grants`: the TRUNCATE, DROP and statement-format write readers decide. A rename or a privilege change is not read without the policy, so it is not owed a stop.
 - Under the policy: a statement is caught when `query_refusal` refuses it, or, for a privilege row, when `statement_frame` marks a grants re-read. A refusal of a statement that changes nothing is an over-stop. A separate test fails on any ASCII statement owed a stop that passes.
 
-Every disagreement must be in the adapter's ledger with a ceiling and a dated reason; an entry that
-no longer covers a row fails the test, so the ledger shrinks when the reader is fixed. A missing
+Every disagreement must be in the adapter's ledger with a row count and a dated reason. The ledger equals the replay exactly: an entry that covers more rows, fewer rows or none fails the test, so the ledger shrinks when the reader is fixed and a partial fix cannot leave room for a later regression. The `coll.*_native` rows touch non-ASCII table names; `validate_table_ident` allows only `[A-Za-z0-9_.]`, so rivet cannot capture such a table and the rows are unreachable today. A missing
 fixture directory, a fixture that lost rows and a stand of another size fail the test; none skips.

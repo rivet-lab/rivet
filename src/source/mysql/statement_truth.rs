@@ -69,6 +69,12 @@ fn read_with_policy(row: &Row, fold: bool, configured: &[String]) -> Class {
     }
 }
 
+macro_rules! unreachable_name {
+    () => {
+        "2026-10-31: touches a non-ASCII table name; validate_table_ident (src/source/cdc/mod.rs) allows only [A-Za-z0-9_.] and refuses it when the stream opens, so rivet cannot capture it and the row is unreachable today"
+    };
+}
+
 macro_rules! follow_up {
     () => {
         "no-policy TRUNCATE/DROP/STATEMENT-write fold on lctn!=0 (.claude/handoff/2026-10-30/issue-no-policy-truncate-fold.md)"
@@ -112,15 +118,11 @@ const fn over(
 }
 
 const LEDGER_WITHOUT_POLICY: &[Known] = &[
-    missed(
-        None,
-        "coll.",
-        365,
-        concat!(
-            "2026-10-31: a statement is read as lossy UTF-8, so a captured name sent in a non-UTF-8 client charset is not found; open, follow-up ",
-            follow_up!()
-        ),
-    ),
+    missed(None, "coll.dml_native", 73, unreachable_name!()),
+    missed(None, "coll.drop_native", 73, unreachable_name!()),
+    missed(None, "coll.trunc_comment_native", 73, unreachable_name!()),
+    missed(None, "coll.trunc_native_bare", 73, unreachable_name!()),
+    missed(None, "coll.trunc_native", 73, unreachable_name!()),
     missed(
         None,
         "sweep.after_name",
@@ -178,21 +180,17 @@ const LEDGER_WITHOUT_POLICY: &[Known] = &[
 ];
 
 const LEDGER_WITH_POLICY: &[Known] = &[
-    missed(
-        None,
-        "coll.",
-        657,
-        "2026-10-31: the mention search compares the UTF-8 spelling of a captured non-ASCII name with the statement bytes, so a statement in a non-UTF-8 client charset passes; open, PR #728 does not close it",
-    ),
-    over(
-        None,
-        "coll.",
-        236,
-        concat!(
-            "2026-10-31: a literal that holds a captured native name; ",
-            benign!()
-        ),
-    ),
+    missed(None, "coll.alter_rename_native", 73, unreachable_name!()),
+    missed(None, "coll.col_change_native", 73, unreachable_name!()),
+    missed(None, "coll.col_native", 73, unreachable_name!()),
+    missed(None, "coll.dml_native", 73, unreachable_name!()),
+    missed(None, "coll.drop_native", 73, unreachable_name!()),
+    missed(None, "coll.rename_native", 73, unreachable_name!()),
+    missed(None, "coll.trunc_comment_native", 73, unreachable_name!()),
+    missed(None, "coll.trunc_native_bare", 73, unreachable_name!()),
+    missed(None, "coll.trunc_native", 73, unreachable_name!()),
+    over(None, "coll.ddl_literal_native", 118, unreachable_name!()),
+    over(None, "coll.dml_literal_native", 118, unreachable_name!()),
     over(
         None,
         "gadget.",
