@@ -55,6 +55,20 @@ impl Wh {
         }
     }
 
+    fn delete_objects(&self) {
+        match self {
+            Wh::Bq(b) => b.delete_objects(""),
+            Wh::Sf(s) => s.delete_objects(),
+        }
+    }
+
+    fn staged_at(&self) -> String {
+        match self {
+            Wh::Bq(b) => format!("{}/{}", b.bucket, b.prefix),
+            Wh::Sf(s) => format!("{}/{}", s.bucket, s.prefix),
+        }
+    }
+
     fn guard(&self, table: &str) -> Box<dyn std::any::Any> {
         match self {
             Wh::Bq(b) => Box::new(b.cleanup(&[table, &format!("{table}__changes")])),
@@ -377,4 +391,81 @@ fn a_mongo_transaction_of_twelve_events_loads_in_source_order_snowflake() {
         return;
     };
     tie_cell(wh, "mgo_tie_sf");
+}
+
+/// A re-snapshot after a stream, loaded over the log that still holds the stream: refused with the log untouched; after the printed TRUNCATE the view is the source.
+fn re_snapshot_cell(wh: Wh, label: &str) {
+    require_alive(LiveService::MongoRs);
+    let coll = unique_name(label);
+    let db = unique_name(label);
+    let _guard = wh.guard(&coll);
+    let _db = MongoDbGuard {
+        port: PORT,
+        db: db.clone(),
+    };
+    let m = MongoTest::connect(PORT, &db);
+    m.drop_collection(&coll);
+    for id in 1..=3 {
+        m.upsert_set(&coll, id, "v", "7");
+    }
+    let rig = wh
+        .shaped(
+            Rig::mongo_cdc(&coll).source_url(&MongoTest::url(PORT, &db)),
+            &coll,
+            false,
+        )
+        .cdc("initial: snapshot");
+    rig.run_ok();
+    run_ok_load(&rig);
+    m.upsert_set(&coll, 1, "v", "8");
+    rig.run_ok();
+    run_ok_load(&rig);
+    let streamed: Vec<(i64, i64)> = vec![(1, 8), (2, 7), (3, 7)];
+    assert_eq!(wh.live_pairs(&coll), streamed);
+    m.upsert_set(&coll, 1, "v", "9");
+    std::fs::remove_file(rig.checkpoint()).expect("the checkpoint the first run wrote");
+    wh.delete_objects();
+    assert!(
+        clear_cdc_snapshot(&rig.config_path(), rig.export_name(), &wh.staged_at()) > 0,
+        "fixture: the export had a `cdc_snapshot` row to clear"
+    );
+    rig.run_ok();
+    let refused = rig.load_args_env(&[], &[]);
+    assert_refused(
+        &refused,
+        Refused::by_code("RIVET_LOAD_REBASELINE_OVER_CHANGES", 5),
+    );
+    assert_eq!(
+        wh.live_pairs(&coll),
+        streamed,
+        "the refused load changed nothing"
+    );
+    let changes = format!("{coll}__changes");
+    wh.exec(&format!("TRUNCATE TABLE {}", wh.fq(&changes)));
+    run_ok_load(&rig);
+    let want: Vec<(i64, i64)> = m
+        .current_state_i64(&coll, "v")
+        .into_iter()
+        .map(|(id, v)| (id, v.parse().expect("v")))
+        .collect();
+    assert_eq!(want, vec![(1, 9), (2, 7), (3, 7)]);
+    assert_eq!(wh.live_pairs(&coll), want, "the view is the re-snapshot");
+}
+
+#[test]
+#[ignore = "live: requires mongo-rs + BigQuery creds"]
+fn a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_bigquery() {
+    let Some(wh) = Wh::bq("mgo_rs_bq") else {
+        return;
+    };
+    re_snapshot_cell(wh, "mgo_rs_bq");
+}
+
+#[test]
+#[ignore = "live: requires mongo-rs + Snowflake creds"]
+fn a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_snowflake() {
+    let Some(wh) = Wh::sf("mgo_rs_sf") else {
+        return;
+    };
+    re_snapshot_cell(wh, "mgo_rs_sf");
 }

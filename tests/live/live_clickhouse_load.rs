@@ -3478,3 +3478,57 @@ fn a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_r
         "every row of the re-baselined stream carries the clusterTime"
     );
 }
+
+/// A re-snapshot after a stream, loaded over the log that still holds the stream: refused with the log untouched; after the printed TRUNCATE the view is the source.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated() {
+    require_mongo_cdc_into_clickhouse();
+    let mdb = unique_name("chmcdc_resnap");
+    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    m.drop_collection("t");
+    for i in 1..=3 {
+        m.upsert_set("t", i, "v", "seed");
+    }
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chmcdc_resnap");
+    let rig = mongo_cdc_into_clickhouse_at(&mdb, &db, &prefix).cdc("initial: snapshot");
+    rig.run_ok();
+    load(&rig);
+    m.upsert_set("t", 1, "v", "stream");
+    rig.run_ok();
+    load(&rig);
+    let streamed = clickhouse_rows_mongo_state(&db);
+    assert_eq!(streamed[&1], "stream");
+    m.upsert_set("t", 1, "v", "resnap");
+    std::fs::remove_file(rig.checkpoint()).expect("the checkpoint the first run wrote");
+    fake_gcs_delete_prefix(BUCKET, &prefix);
+    assert!(
+        clear_cdc_snapshot(
+            &rig.config_path(),
+            rig.export_name(),
+            &format!("{BUCKET}/{prefix}")
+        ) > 0,
+        "fixture: the export had a `cdc_snapshot` row to clear"
+    );
+    rig.run_ok();
+    let refused = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert_refused(
+        &refused,
+        Refused::by_code("RIVET_LOAD_REBASELINE_OVER_CHANGES", 5),
+    );
+    assert_eq!(
+        clickhouse_rows_mongo_state(&db),
+        streamed,
+        "the refused load changed nothing"
+    );
+    ch(&format!("TRUNCATE TABLE {}.t__changes", db.0));
+    load(&rig);
+    let want = m.current_state_i64("t", "v");
+    assert_eq!(want[&1], "resnap");
+    assert_eq!(
+        clickhouse_rows_mongo_state(&db),
+        want,
+        "the view is the re-snapshot"
+    );
+}

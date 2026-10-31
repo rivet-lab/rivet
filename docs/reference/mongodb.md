@@ -257,7 +257,7 @@ Each change row carries three metadata columns:
 | column | meaning |
 | ------ | ------- |
 | `__op` | `insert` \| `update` \| `delete` |
-| `__pos` | a JSON position per event: `_data` (the resume token, a **distinct, order-preserving** key), `rt` (its lossless form), `ct` (the event's clusterTime, `seconds << 32 \| increment`) and `ord` (its ordinal among the events with that clusterTime). Order by `(ct, ord)` as numbers, then `_data` as the last key; every engine's load ranks a Mongo change this way. A row without `ct` (staged by a rivet older than the stamp) ranks below every stamped row and, among its own kind, by `_data`. A snapshot row carries the anchor's `_data` with `ct = 0, ord = 0`, so it ranks below every change, and a stateless re-load that re-snapshots a log already holding changes ranks the new snapshot row below those older changes of its key: truncate `<table>__changes` before re-baselining |
+| `__pos` | a JSON position per event: `_data` (the resume token, a **distinct, order-preserving** key), `rt` (its lossless form), `ct` (the event's clusterTime, `seconds << 32 \| increment`) and `ord` (its ordinal among the events with that clusterTime). Order by `(ct, ord)` as numbers, then `_data` as the last key; every engine's load ranks a Mongo change this way. A row without `ct` (staged by a rivet older than the stamp) ranks below every stamped row and, among its own kind, by `_data`. A snapshot row carries the anchor's `_data` with `ct = 0, ord = 0`, so it ranks below every change; a re-snapshot into a log already holding changes is refused (`RIVET_LOAD_REBASELINE_OVER_CHANGES`) until `<table>__changes` is truncated |
 | `__seq` | always `0` for Mongo (see [Dedup ordering](#dedup-ordering)) |
 
 ### Scheduling
