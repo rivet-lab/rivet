@@ -3979,6 +3979,23 @@ seeds:
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: cdc-statement-target-ignores-the-case-fold
+    class: "the table a binlog statement targets is compared to the configured table exactly although the server folds identifier case (`lower_case_table_names` 1 or 2): a TRUNCATE spelled in capitals or with a character the server folds (the Kelvin sign for k) is not the captured table, so the run exits 0 and the destination keeps rows the source lost"
+    history: "#728 verifier round 5 (2026-10-31, F1 and F2); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_TRUNCATED (exit 5)"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-statement-target-ignores-the-case-fold/mysql.patch
+        cells: [a_truncate_in_capitals_is_refused_on_a_server_that_folds_case_with_and_without_the_policy_mysql, a_truncate_spelled_with_a_character_the_server_folds_is_refused_mysql, "lib:a_server_that_folds_case_resolves_a_statement_target_by_the_fold", "lib:a_truncate_drop_or_write_is_refused_by_its_table_under_the_fold_and_only_when_armed"]
+      postgres:
+        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+      mongo:
+        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
   - name: statement-line-comment-read-as-text
     class: "a `-- ` or `#` line comment in a binlog statement is read as statement text, so a column rename or a privilege statement written behind one is missed: the run exits 0 with the renamed column's later changes lost, or keeps delivering a revoked column"
     history: "PR #719 final verification (2026-10-29); RED from this patch: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_UNDECODABLE (exit 5)"

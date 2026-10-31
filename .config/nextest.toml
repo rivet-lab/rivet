@@ -70,7 +70,7 @@ filter = 'test(=live_pooled_reads::a_second_table_through_one_transaction_pooler
 test-group = 'pgbouncer'
 
 [[profile.default.overrides]]
-filter = 'test(=live_cdc_column_grants::a_control_byte_after_a_dash_opens_a_comment_that_hides_a_statement_write_mysql)'
+filter = 'test(=live_cdc_column_grants::a_control_byte_after_a_dash_opens_a_comment_that_hides_a_statement_write_mysql) or test(=live_cdc_column_grants::an_uncaptured_table_renamed_under_a_two_byte_name_whose_trail_is_a_backtick_is_met_as_before_mysql)'
 threads-required = 'num-test-threads'
 
 [[profile.default.overrides]]

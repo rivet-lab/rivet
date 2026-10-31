@@ -242,6 +242,38 @@ scenarios:
     mongo:    { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
     oracle:   { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
+  - id: cdc_mysql_truncate_spelled_in_another_case_or_folded_character_is_refused
+    what: "on a server with lower_case_table_names other than 0 a TRUNCATE of a captured table spelled in capitals or with a character the server folds (the Kelvin sign for k, U+0130 for i) is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5), with and without columns_from: grants (the capitals case exited 0 and left the destination with rows the source had lost before); with lower_case_table_names=0 the exact rule is unchanged. Graded on 8.0 and 8.4 with lower_case_table_names=0 and 1"
+    postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
+    mysql:    { test: a_truncate_in_capitals_is_refused_on_a_server_that_folds_case_with_and_without_the_policy_mysql }
+    mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
+    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
+
+  - id: cdc_mysql_grants_column_rename_under_a_folded_spelling_is_refused
+    what: "under columns_from: grants on a server that folds case a RENAME COLUMN or a column swap on a captured table spelled with a character the server folds is refused with RIVET_SOURCE_CDC_UNDECODABLE (exit 5) and not delivered as nothing"
+    postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
+    mysql:    { test: a_column_renamed_or_swapped_under_a_folded_spelling_is_refused_mysql }
+    mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
+    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
+
+  - id: cdc_mysql_grants_uncaptured_rename_under_a_gbk_client_is_not_refused
+    what: "under columns_from: grants a RENAME TABLE between tables the run does not capture whose name holds a GBK character with a backtick trail byte (0x81 0x60) is delivered as before, not refused as a table this reader could not identify"
+    postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
+    mysql:    { test: an_uncaptured_table_renamed_under_a_two_byte_name_whose_trail_is_a_backtick_is_met_as_before_mysql }
+    mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
+    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
+
+  - id: cdc_mysql_grants_dropped_database_with_a_captured_table_is_refused_by_code
+    what: "under columns_from: grants a DROP DATABASE of a database that holds a captured table is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5) naming the table and the re-baseline remedy, at the start of the next run, and the re-baseline gets past it"
+    postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
+    mysql:    { test: a_database_dropped_with_a_captured_table_is_refused_by_code_and_the_remedy_gets_past_it_mysql }
+    mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
+    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
+
   - id: cdc_drain_releases_pinned_wal
     what: "the disk-fill harm: an un-consumed logical slot pins WAL (and holds catalog_xmin, blocking vacuum); a bounded drain must advance confirmed_flush past the drained span so pg_wal_lsn_diff(current, confirmed_flush_lsn) collapses (restart_lsn / catalog_xmin follow at the next checkpoint). Oracle: the server's pg_replication_slots, not rivet's counters"
     postgres: { test: roast_pg_cdc_drain_releases_pinned_wal_and_advances_xmin }
