@@ -173,6 +173,9 @@ pub const CLICKHOUSE_HTTP_URL: &str = "http://127.0.0.1:8123";
 /// ClickHouse whose server time zone is Asia/Tokyo (`clickhouse-tz`).
 pub const CLICKHOUSE_TZ_HTTP_URL: &str = "http://127.0.0.1:8125";
 
+/// The stand ClickHouse over HTTPS, its certificate signed by the test CA in `dev/clickhouse/tls/ca.pem`.
+pub const CLICKHOUSE_HTTPS_URL: &str = "https://localhost:8443";
+
 /// Container name of the long-running `python:3.12-slim + duckdb` validator.
 /// Tests reach it via `docker exec`, not TCP, so there is no port constant.
 pub const DUCKDB_CONTAINER: &str = "rivet-duckdb";

@@ -3658,3 +3658,53 @@ fn a_zone_less_change_log_keeps_loading_and_its_warning_names_the_remedy() {
         "the named ALTER makes the log read as written"
     );
 }
+
+/// A ClickHouse load over `https://` to a server whose certificate a private CA signed: refused
+/// with the TLS cause until `load.ca_file` names that CA, then the rows land and read back.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn a_load_over_https_trusts_a_private_ca_only_through_ca_file() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _t, mut c) = pg_batch_seeded("rivet_ch_https", 3);
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chhttps");
+    let ca = concat!(env!("CARGO_MANIFEST_DIR"), "/dev/clickhouse/tls/ca.pem");
+    let over_https = |extra: &str| {
+        Rig::pg_batch(&tbl)
+            .mode("full")
+            .dest_gcs(BUCKET, &prefix, FAKE_GCS_ENDPOINT)
+            .top_line(&format!(
+                "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTPS_URL}\", database: {}, \
+                 user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: [id]{extra} }}",
+                db.0
+            ))
+    };
+    let untrusted = over_https("");
+    untrusted.run_ok();
+    let out = untrusted.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("certificate"),
+        "a server certificate no trusted root signed is refused by its TLS cause: {:?}\n{stderr}",
+        out.status.code()
+    );
+    assert_eq!(
+        ch(&format!("EXISTS TABLE {}.{tbl}", db.0)),
+        "0",
+        "nothing landed over the untrusted connection"
+    );
+
+    let trusted = over_https(&format!(", ca_file: \"{ca}\""));
+    trusted.run_ok();
+    trusted.load_ok(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert_eq!(
+        clickhouse_rows(&format!(
+            "SELECT id, v FROM {}.{tbl} ORDER BY id FORMAT TSV",
+            db.0
+        )),
+        pg_rows(&mut c, &tbl),
+        "the rows read back over HTTP equal the source"
+    );
+}
