@@ -604,8 +604,12 @@ exclude_re = [
     # ack -> Ok(())               ⇒ roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot FAILS
     "replace PgChangeStream::release_empty_frontier with \\(\\)$",
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
-    # 2026-10-31 #728: `note_statement` sets the transaction frame (`in_transaction`) and the grants re-read mark as well as the statement log, all live-only; the live_cdc_column_grants:: cells kill its stub.
+    # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
+    # 2026-10-31 #728: pre-existing arm, killed only by live cell a_prepared_xa_branch_is_never_published_by_another_transactions_commit (proven RED 2026-10-31).
+    "^src/source/mysql/cdc\\.rs:1565:13: delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill$",
+    # 2026-10-31 #728: equivalent on policy-off: fold is read only through mention_under_policy, None without the policy; policy-off adds one lower_case_table_names read, stream unchanged (general log 2026-10-31); follow-up: live cell asserts zero reads.
+    "^src/source/mysql/cdc\\.rs:1134:37: replace && with \\|\\| in MysqlChangeStream::open_or_resume$",
 
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
     # `in_quotes && next == '"'` guard on the escaped-quote arm cannot change what
