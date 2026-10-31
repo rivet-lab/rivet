@@ -538,6 +538,14 @@ scenarios:
     mongo:    { na: "the refusal is the load's and does not depend on the source engine: the postgres column carries the row" }
     oracle:   { na: "the refusal is the load's and does not depend on the source engine: the postgres column carries the row" }
 
+  - id: refusal_load_cdc_position_unorderable
+    what: "RIVET_LOAD_CDC_POSITION_UNORDERABLE: a MongoDB CDC part an older rivet staged carries no clusterTime, so a ClickHouse change log cannot order it"
+    postgres: { na: "the shape exists only in a MongoDB position: the mongo column carries the row" }
+    mysql:    { na: "the shape exists only in a MongoDB position: the mongo column carries the row" }
+    mssql:    { na: "the shape exists only in a MongoDB position: the mongo column carries the row" }
+    mongo:    { test: a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_remedy_loads_it }
+    oracle:   { na: "the shape exists only in a MongoDB position: the mongo column carries the row" }
+
   - id: refusal_load_run_not_loadable
     what: "RIVET_LOAD_RUN_NOT_LOADABLE: the runs to load are not complete under the prefix: no Success manifest, or parts gone"
     postgres: { gap: "asserted by its code offline (reconcile::tests::each_reconcile_refusal_carries_its_code, load::tests::each_whole_table_stop_carries_its_code); the walk needs a load cell over a prefix with a part removed: refuse twice, re-run the export, and one wrong remedy" }

@@ -123,6 +123,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_LOAD_CHANGELOG_PARTITION_CHANGED` | refusal | 5 | keep the change log's partitioning in the config, or rebuild it as the message names (`rivet load --rebuild-changelog`, or by hand where policies must be kept) |
 | `RIVET_LOAD_BUFFER_NOT_COMPACTED` | refusal | 5 | run `rivet compact` first if the buffer belongs to the current base, or drop the buffer, then re-run the load |
 | `RIVET_LOAD_REBASELINE_OVER_CHANGES` | refusal | 5 | TRUNCATE the change log the message names, then re-run the same `rivet load` |
+| `RIVET_LOAD_CDC_POSITION_UNORDERABLE` | refusal | 5 | re-baseline the stream as the message names (it starts with deleting the checkpoint), then run and load again; nothing was written |
 | `RIVET_LOAD_TABLE_BUSY` | busy | 2 | wait for the other `rivet load` or `rivet compact` of that table to end, then run again |
 | `RIVET_LOAD_MANIFEST_INCONSISTENT` | integrity | 3 | investigate the run's manifest and parts before loading; re-run the export to replace them |
 | `RIVET_LOAD_SOURCE_FILE_MISMATCH` | integrity | 3 | investigate the extract before loading; to accept the drift, set `allow_source_drift: true` in the export's `load:` block |

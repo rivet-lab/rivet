@@ -92,6 +92,5 @@ code does not count.
   - version order across a binlog renumbering (failover, `RESET MASTER`);
   - `load.ca_file` (a private CA) is unit-tested only: no live `https://` run, the stand's ClickHouse serves HTTP;
   - a real-GCS run of the named-collection pull;
-  - Mongo CDC (refused, CH7);
   - M8's driven run;
   - M9.
