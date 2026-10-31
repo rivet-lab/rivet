@@ -178,19 +178,7 @@ fn compact_order_of(
     }
 }
 
-/// Compact's PRE-MERGE phase, with every stop marked as one.
-///
-/// A named seam because the WIRING is the thing that was wrong, and wiring is only
-/// gradeable at a boundary a test can stand on: `run_compacts` is live-only, so a
-/// test of `compact_gate_of` alone grades correct logic on an input the real caller
-/// never hands it, while the defect lived in what the caller did with the error.
-///
-/// Everything this covers is metadata — `object_kind` is a warehouse QUERY, so a
-/// 503, a quota error or expired credentials arrive here having written NOTHING.
-/// Unwrapped they reached the ledger as `status='failed'`, and `has_load_attempt`
-/// reads a `failed` row as "rivet wrote this table", which flips the base from
-/// `Foreign` to `Own` and disarms the refusal that stops a later `rivet load`
-/// overwriting a table rivet never wrote.
+/// Compact's pre-merge phase, with every stop marked as one.
 fn compact_preflight(
     loader: &dyn load::TargetLoader,
     table: &str,
@@ -309,21 +297,6 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
                 // their config cannot even contain (it is a config-load error there).
                 // Measured on a 60-table incremental run: two refusals, both mislabelled.
                 let pk = require_pk(&pinned, pinned.mode.ledger_str())?;
-                // The base is checked BEFORE the MERGE, and only when a buffer exists:
-                // an absent base surfaced as BigQuery's own `Not found: Table`, and a
-                // base rivet never loaded was not checked at all. Metadata, no job.
-                // `before_write` on the whole PRE-MERGE prefix, not just on the arm
-                // the gate refuses through. Everything up to `loader.compact` is
-                // metadata: `compact_gate_of`'s first statement is
-                // `loader.object_kind(&buffer)?`, a real warehouse QUERY, so expired
-                // credentials, a 503 or a quota error surface here having touched
-                // nothing — and `ledger_status` maps anything that is not a `Refused`
-                // to "failed". `has_load_attempt` then counts that row, which flips
-                // the base from `Foreign` to `Own` and disarms the refusal that stops
-                // `rivet load` overwriting a table rivet never wrote. The load path
-                // has wrapped its pre-write stops from the start (ten sites); this
-                // path had none, while the comment on the ledger row below claimed
-                // the protection.
                 let report = match compact_preflight(loader.as_ref(), &pinned.table, state.as_ref())
                     .and_then(|()| load::before_write(compact_order_of(&pinned, engine)))
                     .and_then(|order| {
@@ -463,23 +436,7 @@ fn several_failed(n: usize, attempted: usize, failures: &[anyhow::Error]) -> any
 mod tests {
     use super::*;
 
-    /// COMPACT's pre-merge stops are refusals too — the sibling of
-    /// `a_refused_load_does_not_make_a_foreign_table_rivets_own`, and it was missing.
-    ///
-    /// The load path has wrapped its pre-write stops in `before_write` from the start
-    /// (ten sites). `run_compacts` had NONE, so every error that was not already a
-    /// `Refused` journaled `status='failed'` against the BASE — including errors from
-    /// `compact_gate_of`, whose very first statement is `loader.object_kind(&buffer)?`,
-    /// a warehouse QUERY. An expired credential or a 503 there wrote a `failed` row
-    /// having touched nothing, `has_load_attempt` counted it, and the base flipped
-    /// from `Foreign` to `Own` — disarming the guard that stops a later `rivet load`
-    /// overwriting a table rivet never wrote. The comment on that ledger row claimed
-    /// the protection the code did not have.
-    ///
-    /// Graded at the SEAM, not at `compact_gate_of`: the gate was always right, and
-    /// the defect was in what the caller did with its error.
-    ///
-    /// RED against dropping the `before_write` in `compact_preflight`.
+    /// Compact's pre-merge stops are journaled as refusals, never as failures.
     #[test]
     fn a_compact_stopped_before_the_merge_is_refused_not_failed() {
         let probe_failed = load::tests::FakeLoader::probe_fails("503 Service Unavailable");
@@ -488,8 +445,7 @@ mod tests {
         assert_eq!(
             ledger_status(&err),
             "refused",
-            "nothing was merged, so this must NOT journal `failed` — a failed row is \
-             what `has_load_attempt` reads as `rivet wrote this table`: {err:#}"
+            "nothing was merged, so this must not journal `failed`: {err:#}"
         );
         assert!(
             format!("{err:#}").contains("503"),

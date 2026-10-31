@@ -519,8 +519,10 @@ fn ensure_own(fqtn: &str, ownership: Ownership, verb: &str) -> Result<()> {
         Ownership::Foreign => crate::rivet_bail!(
             crate::error::codes::LOAD_TARGET_NOT_RIVETS,
             "refusing to {verb} `{fqtn}`: it exists, and this state DB's load ledger has no \
-             record of rivet loading it — it may hold someone else's data. Drop or rename it, \
-             or load into another table"
+             record of a successful rivet load into it — it may hold someone else's data, or \
+             what a first rivet load that never completed left behind (such a load consumed no \
+             run, so the next load delivers its rows again). Drop or rename it, or load into \
+             another table"
         ),
         Ownership::Unreadable => crate::rivet_bail!(
             crate::error::codes::LOAD_LEDGER_UNREADABLE,
