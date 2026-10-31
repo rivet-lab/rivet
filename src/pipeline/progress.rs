@@ -180,14 +180,6 @@ impl ChunkProgressHandle {
             });
         }
     }
-
-    /// Direct access to the underlying bar.  Some workers want to update the
-    /// message without advancing — kept for parity with the previous
-    /// `Arc<ProgressBar>` API.
-    #[allow(dead_code)]
-    pub(crate) fn set_message(&self, msg: impl Into<std::borrow::Cow<'static, str>>) {
-        self.bar.set_message(msg);
-    }
 }
 
 fn fmt_rows(rows: i64) -> String {

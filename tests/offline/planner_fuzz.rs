@@ -3,8 +3,8 @@
 //! QA backlog Task 4A.2. Adversarial identifiers, base queries, and window
 //! parameters drive the two publicly-reachable shaping surfaces:
 //!
-//!   * `rivet::pipeline::build_time_window_query`
-//!   * `rivet::pipeline::generate_chunks` (correctness grid lives as a unit
+//!   * `rivet::pipeline::for_tests::build_time_window_query`
+//!   * `rivet::pipeline::for_tests::generate_chunks` (correctness grid lives as a unit
 //!     test in `src/pipeline/chunked/math.rs`; this file adds the fuzz-like
 //!     boundary sweep)
 //!
@@ -12,7 +12,7 @@
 //! covered by the property grid in the unit-test module.
 
 use rivet::config::{SourceType, TimeColumnType};
-use rivet::pipeline::{build_time_window_query, generate_chunks};
+use rivet::pipeline::for_tests::{build_time_window_query, generate_chunks};
 
 #[test]
 fn generate_chunks_does_not_panic_on_extreme_boundary_combinations() {

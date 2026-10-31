@@ -872,25 +872,6 @@ pub fn duckdb_minio_prelude() -> String {
         .to_string()
 }
 
-/// Row count of every parquet under an s3 prefix, read by DuckDB from the emulator.
-///
-/// Asserts the glob matched something first: `read_parquet` over an empty match is
-/// an error, but a caller that swallowed it would read zero as "the export delivered
-/// nothing" rather than "the oracle looked in the wrong place".
-pub fn duckdb_s3_parquet_rows(bucket: &str, prefix: &str) -> i64 {
-    let p = prefix.trim_matches('/');
-    let v = duckdb_run_sql_json(&format!(
-        "{} SELECT count(*) FROM read_parquet('s3://{bucket}/{p}/**/*.parquet')",
-        duckdb_minio_prelude()
-    ));
-    v["rows"][0][0]
-        .as_str()
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or_else(|| {
-            panic!("duckdb read nothing under s3://{bucket}/{p}/ — a bucket that reads as empty and an export that wrote nothing look identical, so this is never a valid answer")
-        })
-}
-
 /// Which object store a census reads, and how DuckDB reaches it from INSIDE the
 /// `rivet-duckdb` container (service names, never host ports).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

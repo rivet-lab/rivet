@@ -123,7 +123,8 @@ fn redactor_passes_through_already_redacted_log_lines() {
 mod run_summary_redaction {
     use super::*;
     use rivet::journal::PlanSnapshot;
-    use rivet::pipeline::{RunSummary, write_run_report};
+    use rivet::pipeline::RunSummary;
+    use rivet::pipeline::for_tests::write_run_report;
     use std::path::Path;
 
     fn make_summary_with_error(msg: String) -> RunSummary {

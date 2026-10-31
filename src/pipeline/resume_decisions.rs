@@ -22,14 +22,6 @@
 //! - Future backends (resume against a state snapshot from the journal,
 //!   say) can drive the same matrix without re-implementing it.
 
-// Phase C-β ships the pure decision matrix; the chunked-resume wiring that
-// consumes a `ResumePlan` to actually skip / quarantine / rewrite parts is
-// the next step (C-γ / C-δ).  Until then, the binary doesn't reach these
-// items at runtime — only the lib-side integration tests do.  Allow the
-// dead-code warnings on the bin-target compilation rather than tagging
-// every individual item.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use crate::destination::ObjectMeta;

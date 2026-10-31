@@ -70,15 +70,6 @@ impl SnowflakeLoader {
         }
     }
 
-    /// Fully-qualified `db.schema.table`. Identifiers are passed **unquoted**:
-    /// the warehouse/database/schema are pre-existing objects, and quoting a
-    /// lowercase name would miss an unquoted-created (upper-cased) object. The
-    /// tradeoff is that a reserved-word / special-char column is not handled —
-    /// a hardening TODO once a real source needs it.
-    fn fqtn(&self, table: &str) -> String {
-        format!("{}.{}.{}", self.database, self.schema, table)
-    }
-
     /// `  id NUMBER(38,0),\n  meta VARIANT` — the native column DDL.
     fn build_schema_ddl(specs: &[TargetColumnSpec]) -> String {
         specs
@@ -186,6 +177,7 @@ impl SnowflakeLoader {
 }
 
 impl TargetLoader for SnowflakeLoader {
+    /// `db.schema.table`, every part unquoted.
     fn fqtn(&self, table: &str) -> String {
         format!("{}.{}.{}", self.database, self.schema, table)
     }

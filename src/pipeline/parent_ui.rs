@@ -86,11 +86,6 @@ pub(crate) enum UiMessage {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ChildWaitStatus {
-    /// Used when we synthesize a `ChildClosed` from a worker that lost its
-    /// child handle (we never managed to call `wait()`).  Currently only
-    /// constructed by tests but documented here for completeness.
-    #[allow(dead_code)]
-    Pending,
     Success,
     Failed(String),
 }
@@ -320,10 +315,6 @@ impl Renderer {
                     let (status, err) = match wait_status {
                         ChildWaitStatus::Success => ("success".to_string(), None),
                         ChildWaitStatus::Failed(msg) => ("failed".to_string(), Some(msg)),
-                        ChildWaitStatus::Pending => (
-                            "failed".to_string(),
-                            Some("child exited without a final summary".into()),
-                        ),
                     };
                     card.finalize_synthetic(&status, err.as_deref());
                 }

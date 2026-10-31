@@ -255,7 +255,7 @@ pub struct RunSummary {
     /// after `finalize_manifest` succeeds; `None` when the run targeted a
     /// streaming destination, when `--validate` was not requested, or when
     /// the run failed before any manifest could be written.
-    pub manifest_verification: Option<crate::pipeline::ManifestVerification>,
+    pub manifest_verification: Option<crate::pipeline::validate_manifest::ManifestVerification>,
     /// Apply-time context (plan_id, --force usage, bypassed checks).
     /// `None` when the run came from `rivet run` rather than `rivet apply`.
     /// See [`ApplyContext`] and finding **F5** of the 0.7.5 audit.

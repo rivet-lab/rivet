@@ -3,7 +3,7 @@
 //! See `fixtures/migrations/001_sparse_chunk_column_example.sql` for a PostgreSQL
 //! migration-shaped example (table + view with a dense chunk column).
 
-use rivet::pipeline::generate_chunks;
+use rivet::pipeline::for_tests::generate_chunks;
 
 #[test]
 fn migration_fixture_documents_dense_chunk_surrogate() {

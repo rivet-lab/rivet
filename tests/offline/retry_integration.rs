@@ -1,6 +1,6 @@
-use rivet::pipeline::classify_error;
+use rivet::pipeline::for_tests::classify_error;
 
-fn classify(msg: &str) -> rivet::pipeline::RetryClass {
+fn classify(msg: &str) -> rivet::pipeline::for_tests::RetryClass {
     classify_error(&anyhow::anyhow!("{}", msg))
 }
 

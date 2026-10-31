@@ -179,8 +179,8 @@ fn v0_7_5_summary_top_level_fields_documents_the_wire_spine() {
 /// summary fixture was simply left behind when the plan half was fixed.
 #[test]
 fn legacy_summary_still_deserializes_through_run_report() {
-    let report: rivet::pipeline::RunReport =
-        serde_json::from_str(LEGACY_SUMMARY).unwrap_or_else(|e| {
+    let report: rivet::pipeline::for_tests::RunReport = serde_json::from_str(LEGACY_SUMMARY)
+        .unwrap_or_else(|e| {
             panic!(
                 "a v0.7.5 summary.json no longer loads through the current RunReport: {e}\n\
                  If this change is intentional, it BREAKS every summary.json already on \
