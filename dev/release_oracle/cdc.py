@@ -21,7 +21,7 @@ a silent pass) when they are absent. Set, per engine you want gated:
 and RIVET_CDC_STATE_URL (a Postgres db for the state-parity leg; SKIP that leg if
 unset).
 
-The reference state snapshot (эталонный слепок) is golden/cdc_state_snapshot.json:
+The reference state snapshot is golden/cdc_state_snapshot.json:
 the canonical set of state-DB tables a CDC run populates. Both backends must match
 it — a release that stops populating run_status (or drifts the schema) fails here.
 
@@ -1118,10 +1118,6 @@ def _cdc_pg_starvation_and_churn(led: Ledger, url: str) -> None:
         _psql(url, "-c", f"DROP DATABASE IF EXISTS {db};")
 
 
-# ── SQLite-vs-Postgres state PARITY + reference snapshot (эталонный слепок) ───
-# A canonical PG CDC run against BOTH state backends; the populated table set must
-# match golden/cdc_state_snapshot.json on each. RIVET_CDC_STATE_URL provides the PG
-# state db; SKIP the PG leg (not the SQLite one) when unset.
 def _cdc_state_parity(led: Ledger) -> None:
     url = os.environ.get("RIVET_CDC_POSTGRES_URL", "")
     if not url:
