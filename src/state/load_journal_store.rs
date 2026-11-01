@@ -133,25 +133,12 @@ impl StateStore {
         Ok(out)
     }
 
-    /// Whether a load ever wrote `target_table` — a success that consumed runs, a
-    /// failure after the warehouse write, or a `writing` marker left by a process
-    /// that DIED mid-write — so the table is rivet's own. A load that stopped before
-    /// writing (`refused`) never makes it so.
-    ///
-    /// `writing` counts for the same reason `failed` does: both mean rivet may have
-    /// touched the table. Without it, a load killed after the warehouse write and
-    /// before its closing row left NO row, the table rivet had just created read as
-    /// FOREIGN, and the refusal told the operator to drop their own data. The marker
-    /// is replaced by the closing row on every path that survives, so it can only be
-    /// seen after a crash. A `loaded_source_run` row also counts: it is written only
-    /// on success and never deleted, so a same-`load_id` skip/refused row cannot erase it.
-    pub fn has_load_attempt(&self, target_table: &str) -> Result<bool> {
+    /// Whether a load into `target_table` ever succeeded with runs consumed, the only record that makes the table rivet's own.
+    pub fn has_landed_load(&self, target_table: &str) -> Result<bool> {
         let sql = format!(
             "SELECT COUNT(*) FROM (SELECT 1 AS x FROM load_run WHERE target_table = ?1 \
-             AND (status IN ('{}', '{}') OR (status = '{}' AND source_run_ids <> '[]')) \
+             AND status = '{}' AND source_run_ids <> '[]' \
              UNION ALL SELECT 1 AS x FROM loaded_source_run WHERE target_table = ?1) owned",
-            LoadStatus::Failed.as_str(),
-            LoadStatus::Writing.as_str(),
             LoadStatus::Success.as_str(),
         );
         Ok(self
@@ -241,36 +228,39 @@ impl StateStore {
 mod tests {
     use super::*;
 
+    /// Only a successful load that consumed runs makes a table rivet's own; a skip, a stop, a failure or a crash marker does not.
     #[test]
-    fn a_table_is_rivets_own_once_a_load_wrote_it() {
+    fn a_table_is_rivets_own_only_after_its_first_successful_load() {
         let s = StateStore::open_in_memory().unwrap();
-        assert!(!s.has_load_attempt("p.d.t").unwrap());
+        assert!(!s.has_landed_load("p.d.t").unwrap());
         s.store_load(&rec("skip", "p.d.t", &[], 0, "success"))
             .unwrap();
         assert!(
-            !s.has_load_attempt("p.d.t").unwrap(),
+            !s.has_landed_load("p.d.t").unwrap(),
             "an up-to-date skip wrote nothing"
         );
-        s.store_load(&rec("refused", "p.d.t", &["r1"], 0, "refused"))
-            .unwrap();
-        assert!(
-            !s.has_load_attempt("p.d.t").unwrap(),
-            "a load that stopped before writing does not make the table rivet's own"
-        );
+        for status in ["refused", "failed", "writing"] {
+            s.store_load(&rec(status, "p.d.t", &["r1"], 0, status))
+                .unwrap();
+            assert!(
+                !s.has_landed_load("p.d.t").unwrap(),
+                "a {status} load before any success does not make the table rivet's own"
+            );
+        }
         assert!(
             s.loaded_source_run_ids("p.d.t").unwrap().is_empty(),
             "nor does it consume the run"
         );
-        s.store_load(&rec("fail", "p.d.t", &["r1"], 0, "failed"))
+        s.store_load(&rec("ok", "p.d.t", &["r1"], 5, "success"))
+            .unwrap();
+        assert!(s.has_landed_load("p.d.t").unwrap());
+        s.store_load(&rec("later", "p.d.t", &["r2"], 0, "failed"))
             .unwrap();
         assert!(
-            s.has_load_attempt("p.d.t").unwrap(),
-            "a failed load may have written the table"
+            s.has_landed_load("p.d.t").unwrap(),
+            "a later failure does not disown it"
         );
-        s.store_load(&rec("ok", "p.d.other", &["r2"], 5, "success"))
-            .unwrap();
-        assert!(s.has_load_attempt("p.d.other").unwrap());
-        assert!(!s.has_load_attempt("p.d.none").unwrap());
+        assert!(!s.has_landed_load("p.d.none").unwrap());
     }
 
     /// Only a successful compaction that merged rows counts; a load, a skip, a failure or another table does not.

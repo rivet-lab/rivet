@@ -100,7 +100,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_LOAD_COUNT_MISMATCH` | integrity | 3 | compare the warehouse table with the run's manifest before re-running; the source is kept |
 | `RIVET_LOAD_LEASE_LOST_DURING_WRITE` | integrity | 3 | compare the warehouse table with the source before relying on it: another load or compact may have written it at the same time; the next `rivet load` loads the same runs again |
 | `RIVET_LOAD_ADOPTION_COLUMN_MISMATCH` | refusal | 5 | add the export's new columns to the table (`ALTER TABLE … ADD COLUMN`) and re-run; do not rename it aside |
-| `RIVET_LOAD_TARGET_NOT_RIVETS` | refusal | 5 | the warehouse object exists and this state DB has no record of rivet loading it: drop or rename it, or load into another table |
+| `RIVET_LOAD_TARGET_NOT_RIVETS` | refusal | 5 | the warehouse object exists and this state DB has no record of a successful rivet load: drop or rename it, or load into another table |
 | `RIVET_LOAD_IDENTIFIER_UNSAFE` | usage | 1 | rename the column or table in the source, or alias it in the export's `query:`, to a plain identifier ([A-Za-z_][A-Za-z0-9_]*) |
 | `RIVET_LOAD_KEY_COLUMN_INVALID` | usage | 1 | name only columns the export delivers, in a type and number the target takes, under `pk:` / `cluster_by:` / `partition:` in the export's `load:` block (or add the column to the export's SELECT), as the message names |
 | `RIVET_LOAD_PRIMARY_KEY_MISSING` | usage | 1 | declare the key under the export's `load:` block, e.g. `pk: [id]` |

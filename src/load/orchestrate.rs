@@ -1377,17 +1377,6 @@ fn execute_load<R>(
     })
     .and_then(|()| load::before_write(partition_budget_ok(store, job.plan, &budgeted)))
     .and_then(|()| {
-        // The crash marker, written between the LAST pre-write check and the
-        // write itself. Without it a load killed after the warehouse write and
-        // before its closing row left NO row at all, so `has_load_attempt`
-        // answered false and the table rivet had just created read as FOREIGN —
-        // refused for ever, on a remedy ("drop or rename it") that tells the
-        // operator to destroy their own data. It bites the FIRST-ever load into
-        // a table, since after that some row always exists.
-        //
-        // It is replaced, never accumulated: the closing row shares this
-        // `load_id`, so the ledger still holds exactly one audit row per load and
-        // a `writing` row can only survive a process that died.
         lease_still_held(holds(&lease), &target_fqtn, false)?;
         load::before_write(ctx.record_writing())?;
         let landed = run(&**loader, store, &inputs, &mut legs)?;
@@ -2850,14 +2839,14 @@ mod load_ledger_tests {
         for status in ["skip", "refused"] {
             let s = StateStore::open_in_memory().unwrap();
             ctx(&s, "L1").record_success(&["r1".into()], 5);
-            assert!(s.has_load_attempt(TARGET).unwrap());
+            assert!(s.has_landed_load(TARGET).unwrap());
             if status == "skip" {
                 ctx(&s, "L1").record_skip();
             } else {
                 ctx(&s, "L1").record(&[], 0, "refused");
             }
             assert!(
-                s.has_load_attempt(TARGET).unwrap(),
+                s.has_landed_load(TARGET).unwrap(),
                 "a same-id {status} re-run must not disown the table"
             );
         }
@@ -3053,7 +3042,7 @@ mod load_ledger_tests {
                 "cycle {cycle}: typed as a stop before the write: {err:#}"
             );
             assert!(
-                !state.has_load_attempt(&fqtn).unwrap(),
+                !state.has_landed_load(&fqtn).unwrap(),
                 "cycle {cycle}: a refusal is never rivet's own attempt"
             );
         }
@@ -3167,6 +3156,59 @@ mod load_ledger_tests {
         assert!(
             reached.get(),
             "a run with a part must reach the warehouse write: {out:?}"
+        );
+    }
+
+    /// A first full load that failed owns nothing: a table someone created before the retry is refused, never overwritten.
+    #[test]
+    fn a_retry_after_a_failed_first_load_refuses_a_table_that_appeared_since() {
+        let dir = tempfile::tempdir().expect("a temp prefix");
+        let state = StateStore::open_in_memory().unwrap();
+        let mut plan = cdc_plan(&dir, "orders_retry");
+        plan.mode = load::plan::LoadMode::Full;
+        let m = super::live_only_decisions::success_manifest("r-1", "part-0.parquet");
+        super::live_only_decisions::write_at(
+            &dir,
+            "p/manifest-r-1.json",
+            &serde_json::to_vec(&m).unwrap(),
+        );
+        super::live_only_decisions::write_at(&dir, "p/part-0.parquet", b"PAR1");
+
+        let mut first = cdc_job(&dir, &state, &plan);
+        first.mode = load::plan::LoadMode::Full;
+        let failed = execute_load(
+            first,
+            |_| {},
+            |_, _, _, _| -> Result<(u64, ())> {
+                anyhow::bail!("the insert into the swap table failed")
+            },
+            |_, _| {},
+        );
+        assert!(failed.is_err(), "the first load fails: {failed:?}");
+        assert_eq!(
+            state.recent_loads(Some("db.orders_retry"), 10).unwrap()[0].status,
+            "failed"
+        );
+
+        let mut retry = cdc_job(&dir, &state, &plan);
+        retry.mode = load::plan::LoadMode::Full;
+        retry.load_id = "L2";
+        retry.loader = Box::new(
+            load::tests::fake_loader(0).with_kind("orders_retry", load::ObjectKind::Table),
+        );
+        let err = execute_load(
+            retry,
+            |_| {},
+            |_, _, _, _| -> Result<(u64, ())> {
+                panic!("a table rivet never loaded must be refused before the write")
+            },
+            |_, _| {},
+        )
+        .expect_err("the foreign table is refused");
+        crate::error::assert_coded(&err, "RIVET_LOAD_TARGET_NOT_RIVETS", 5);
+        assert!(
+            format!("{err:#}").contains("consumed no run"),
+            "the refusal says a never-completed first load can be dropped safely: {err:#}"
         );
     }
 
@@ -3798,7 +3840,7 @@ mod load_ledger_tests {
                     let first = cycle(&dir, &state, &plan, "L1", fake());
                     let second = cycle(&dir, &state, &plan, "L2", fake());
                     let refused = |c: &Cycle| {
-                        c.stopped_saying("no record of rivet loading it")
+                        c.stopped_saying("no record of a successful rivet load")
                             && c.next == load::Ownership::Foreign
                             && c.exit == Some((5, Some("RIVET_LOAD_TARGET_NOT_RIVETS")))
                     };
@@ -3866,7 +3908,7 @@ mod load_ledger_tests {
                 let first = incremental_cycle(&dir, &state, &plan, "L1", fake());
                 let second = incremental_cycle(&dir, &state, &plan, "L2", fake());
                 let refused = |c: &Cycle| {
-                    c.stopped_saying("no record of rivet loading it")
+                    c.stopped_saying("no record of a successful rivet load")
                         && c.next == load::Ownership::Foreign
                         && c.exit == Some((5, Some("RIVET_LOAD_TARGET_NOT_RIVETS")))
                 };
@@ -3917,8 +3959,10 @@ mod load_ledger_tests {
             (
                 Some(
                     "refusing to overwrite `db.full_foreign`: it exists, and this state DB's \
-                     load ledger has no record of rivet loading it — it may hold someone else's \
-                     data. Drop or rename it, or load into another table"
+                     load ledger has no record of a successful rivet load into it — it may hold \
+                     someone else's data, or what a first rivet load that never completed left \
+                     behind (such a load consumed no run, so the next load delivers its rows \
+                     again). Drop or rename it, or load into another table"
                 ),
                 Some((5, Some("RIVET_LOAD_TARGET_NOT_RIVETS"))),
                 vec![]
@@ -4201,7 +4245,7 @@ mod load_ledger_tests {
         let (_, writes, journaled, next) = run("L1", buffered);
         let dropped = load::tests::fake_loader(1).with_kind(table, Table);
         let (said, rewrites, _, after) = run("L2", dropped);
-        let second = match said.contains("no record of rivet loading it") {
+        let second = match said.contains("no record of a successful rivet load") {
             true => "refused as foreign".to_string(),
             false => format!("not refused as foreign: {said:?}, wrote {rewrites:?}"),
         };
@@ -4296,7 +4340,7 @@ mod load_ledger_tests {
         );
         let refused_again = second
             .refusal
-            .is_some_and(|m| m.contains("no record of rivet loading it"));
+            .is_some_and(|m| m.contains("no record of a successful rivet load"));
         assert_eq!(
             (left, refused_again, second.writes, second.next),
             (
@@ -4337,7 +4381,7 @@ mod load_ledger_tests {
             );
             let refused = c
                 .refusal
-                .is_some_and(|m| m.contains("no record of rivet loading it"));
+                .is_some_and(|m| m.contains("no record of a successful rivet load"));
             seen.push((refused, c.writes, c.ledger, c.next));
         }
         let stop = (
@@ -4768,18 +4812,7 @@ mod live_only_decisions {
         );
     }
 
-    /// A load that failed AFTER a leg landed is `failed`, never `refused`.
-    ///
-    /// The closing row reuses the leg's `load_id` — one audit row per load, by design
-    /// — so it REPLACES what the leg wrote. `refused` means "stopped before any
-    /// warehouse write", which is exactly why `has_load_attempt` ignores it; once a leg
-    /// has landed that claim is false, and a `refused` replacing the leg's `success`
-    /// made rivet DISOWN the base it had just created, so the next load refused it as
-    /// foreign.
-    ///
-    /// The success path has always guarded its closing row
-    /// (`closing_record_applies`); the error path had no guard, and that asymmetry is
-    /// the whole defect.
+    /// A load that failed after a leg landed is `failed`, never `refused`.
     #[test]
     fn a_stop_after_a_leg_landed_is_recorded_as_a_failure_not_a_refusal() {
         let stop = load::refused(
@@ -4795,10 +4828,8 @@ mod live_only_decisions {
         assert_eq!(
             closing_status(&stop, &["run-a".to_string()]),
             "failed",
-            "a leg LANDED — the warehouse was written, so this row must be one \
-             `has_load_attempt` counts, or rivet disowns the base it just created"
+            "a leg landed, so the warehouse was written"
         );
-        // A plain failure is `failed` either way; the predicate only ever upgrades.
         let boom = anyhow::anyhow!("count validation failed");
         assert_eq!(closing_status(&boom, &[]), "failed");
         assert_eq!(closing_status(&boom, &["run-a".to_string()]), "failed");
@@ -4821,18 +4852,7 @@ mod live_only_decisions {
         }
     }
 
-    /// A load killed mid-write leaves evidence, so its table is not disowned.
-    ///
-    /// The window is between the warehouse write and the closing ledger row. With no
-    /// row at all, `has_load_attempt` answers false, the table rivet JUST CREATED
-    /// reads as `Foreign`, and the refusal tells the operator to "drop or rename it"
-    /// — their own data. It bites the FIRST-ever load into a table; after that some
-    /// row always exists, which is why it hid.
-    ///
-    /// `writing` counts for the same reason `failed` does: both mean rivet may have
-    /// touched the table. It is REPLACED by the closing row on every path that
-    /// survives — same `load_id` — so the ledger still holds exactly one audit row
-    /// per load, and a `writing` row can only be seen after a process died.
+    /// A load whose crash marker the ledger cannot take stops before the write.
     #[test]
     fn an_unrecordable_writing_marker_stops_the_load_before_the_write() {
         let state = StateStore::open_in_memory().unwrap();
@@ -4840,56 +4860,36 @@ mod live_only_decisions {
         state.exec_for_test("DROP TABLE load_run");
         assert!(
             ctx.record_writing().is_err(),
-            "a marker the ledger could not take must stop the load: a table written without \
-             it reads as foreign to the next load, which refuses it for ever"
+            "a marker the ledger could not take must stop the load"
         );
     }
 
+    /// A crash marker is on the record but owns nothing; the first success makes the table rivet's own.
     #[test]
-    fn a_crash_between_the_write_and_the_ledger_row_does_not_disown_the_table() {
+    fn a_crash_before_the_first_success_leaves_the_table_unowned() {
         let state = StateStore::open_in_memory().unwrap();
         let target = "p.d.orders";
         let ctx = ctx_for(&state, "load-crash", target);
 
-        assert!(
-            !state.has_load_attempt(target).unwrap(),
-            "nothing has touched it yet"
-        );
-
-        // …the process dies here, right after the warehouse write.
         ctx.record_writing().unwrap();
         assert!(
-            state.has_load_attempt(target).unwrap(),
-            "a load that reached the warehouse must leave the table rivet's own, or the \
-             retry is refused for ever with no remedy but dropping the data"
+            !state.has_landed_load(target).unwrap(),
+            "a load that never completed consumed no run and owns nothing"
         );
         assert_eq!(
-            state.recent_loads(Some(target), 10).unwrap().len(),
-            1,
-            "one audit row, as always"
+            state.recent_loads(Some(target), 10).unwrap()[0].status,
+            "writing",
+            "the crash is on the record"
         );
 
-        // A survivor REPLACES the marker, so `writing` is never the resting state.
         ctx.record(&["r1".to_string()], 7, "success");
         let loads = state.recent_loads(Some(target), 10).unwrap();
-        assert_eq!(loads.len(), 1, "still one row: the marker was replaced");
+        assert_eq!(loads.len(), 1, "the marker was replaced");
         assert_eq!(loads[0].status, "success");
-
-        // And a stop BEFORE any write still disowns nothing it should not: a fresh
-        // target whose only row is `refused` is not rivet's own.
-        let other = "p.d.untouched";
-        ctx_for(&state, "load-refused", other).record(&[], 0, "refused");
-        assert!(
-            !state.has_load_attempt(other).unwrap(),
-            "a refusal is a stop before the write and must not claim the table"
-        );
+        assert!(state.has_landed_load(target).unwrap());
     }
 
-    /// The ownership guard must hold on EVERY `rivet load`, not just the first: the
-    /// refusal it raises is journaled, and a `failed` row would make the foreign table
-    /// rivet's own on the next cycle (a scheduler retry), which then overwrites it. The
-    /// stop is journaled as `refused`, which `has_load_attempt` never counts. RED against
-    /// recording the stop as `failed` (the pre-fix `record_failed` catch-all).
+    /// Neither a refused nor a failed first load makes a foreign table rivet's own; a success does.
     #[test]
     fn a_refused_load_does_not_make_a_foreign_table_rivets_own() {
         let dir = tempfile::tempdir().unwrap();
@@ -4942,8 +4942,14 @@ mod live_only_decisions {
             "and the stop is on the record"
         );
 
-        // A failure AFTER the write is what makes the table rivet's own.
         ctx.record_failed(&["run-1".to_string()]);
+        assert_eq!(
+            ownership(&state),
+            load::Ownership::Foreign,
+            "a first load that failed owns nothing, so a table that appeared since is refused"
+        );
+
+        ctx.record(&["run-1".to_string()], 1, "success");
         assert_eq!(ownership(&state), load::Ownership::Own);
     }
 

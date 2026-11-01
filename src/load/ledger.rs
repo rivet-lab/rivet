@@ -3,10 +3,10 @@
 use crate::load;
 use crate::state::{LoadStatus, StateStore};
 
-/// Whether the ledger says rivet loaded `fqtn`; `Unreadable` (warned) when the probe fails.
+/// Whether the ledger holds a successful rivet load into `fqtn`; `Unreadable` (warned) when the probe fails.
 pub(crate) fn ownership_of(state: Option<&StateStore>, fqtn: &str, op: &str) -> load::Ownership {
     match state {
-        Some(s) => match s.has_load_attempt(fqtn) {
+        Some(s) => match s.has_landed_load(fqtn) {
             Ok(true) => load::Ownership::Own,
             Ok(false) => load::Ownership::Foreign,
             Err(e) => {
@@ -39,9 +39,7 @@ pub(crate) fn ledger_load_id(run_id: &str, op: &str, table: &str) -> String {
     format!("{run_id}:{op}:{table}")
 }
 
-/// How the ledger records a load that did not complete: `refused` when it stopped before
-/// any warehouse write (the target is not rivet's own for having been refused), `failed`
-/// otherwise.
+/// How the ledger records a load that did not complete: `refused` when it stopped before any warehouse write, `failed` otherwise.
 pub(crate) fn ledger_status(e: &anyhow::Error) -> &'static str {
     match e.downcast_ref::<load::Refused>() {
         Some(_) => LoadStatus::Refused.as_str(),
@@ -49,22 +47,7 @@ pub(crate) fn ledger_status(e: &anyhow::Error) -> &'static str {
     }
 }
 
-/// The status a load's CLOSING ledger row carries after the load failed.
-///
-/// `refused` means "stopped before ANY warehouse write" — that is precisely why
-/// `has_load_attempt` does not count it. Once a LEG has LANDED the claim is false for
-/// this load: the warehouse WAS written, and the target is rivet's own.
-///
-/// It matters because the closing row reuses the leg's `load_id` — one audit row per
-/// load, deliberately — so it REPLACES whatever the leg wrote. A `refused` replacing a
-/// leg's `success` makes `has_load_attempt` return false and rivet DISOWNS the base it
-/// had just created; the next load refuses it as foreign. The success path already
-/// guards its closing row (`closing_record_applies`); the error path had no guard at
-/// all, which is the asymmetry this closes.
-///
-/// `loaded_source_run` is unaffected either way — it is written only on `success` and
-/// never deleted, so the skip set survives the replacement. The damage was always to
-/// the audit row and, through it, to ownership.
+/// The status a load's closing ledger row carries after the load failed: `failed` once a leg landed.
 pub(crate) fn closing_status(e: &anyhow::Error, consumed: &[String]) -> &'static str {
     if consumed.is_empty() {
         ledger_status(e)

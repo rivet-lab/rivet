@@ -1065,7 +1065,7 @@ pub mod codes {
     );
     pub const LOAD_TARGET_NOT_RIVETS: Code = refusal(
         "RIVET_LOAD_TARGET_NOT_RIVETS",
-        "the warehouse object exists and this state DB has no record of rivet loading it: drop or rename it, or load into another table",
+        "the warehouse object exists and this state DB has no record of a successful rivet load: drop or rename it, or load into another table",
     );
     /// A table, column or key name the loader splices into SQL is not a plain identifier.
     pub const LOAD_IDENTIFIER_UNSAFE: Code = usage(

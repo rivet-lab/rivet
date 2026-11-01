@@ -123,7 +123,7 @@ cuts the state DB by a TIMER (1800 ms) mid `rivet load --pool`. Measured 2026-09
 - this branch at 1800 ms: `1`, `4`, `5 of 6` — the faster manifest reads (8ebd2d2d) move
   the cut into the window the test was written for, and it fails every time;
 - main with the cut moved to 2400 ms: `4 of 6`, and the SAME failure — the top-up refuses
-  `…: it exists, and this state DB's load ledger has no record of rivet loading it`.
+  `…: it exists, and this state DB's load ledger has no record of a successful rivet load`.
 So the branch exposed this, it did not cause it: a table rivet itself loaded, whose ledger
 row the crash lost, is treated as foreign on every later run. The test's own comment
 names the recovery signal: rivet labels every job (`managed_by=rivet`, `rivet_table`,

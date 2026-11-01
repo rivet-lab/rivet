@@ -647,11 +647,6 @@ impl TargetLoader for BigQueryLoader {
         let base = self.fqtn(table);
         let changes = format!("{table}__changes");
         let changes_fqtn = self.fqtn(&changes);
-        // Both of these run BEFORE anything is written, so their failures are stops,
-        // not failures: building the client reaches expired ADC and a misconfigured
-        // project, and `tables.get` reaches 503s and quota. Unwrapped they reached
-        // the ledger as `status='failed'`, which `has_load_attempt` counts as "rivet
-        // wrote this table" — forging ownership of a base nothing had touched.
         let api = crate::load::before_write(self.api())?;
 
         // Resolved once, because BOTH the recovery pass and the main script need it.
