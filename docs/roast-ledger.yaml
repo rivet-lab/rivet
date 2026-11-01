@@ -1,0 +1,67 @@
+schema: [id, date, lens, title, copies, status, verdict, closes]
+statuses: [accepted-as-bugfix, deferred-past-gate, rejected, done]
+entries:
+  - id: R1a
+    date: 2026-10-31
+    lens: duplication of functionality and bypassed seams
+    title: value_checksum reads split unit manifests without ManifestCensus and without a Success filter
+    copies: [src/source/value_checksum.rs:783, src/manifest/census.rs:231]
+    status: accepted-as-bugfix
+    verdict: "confirmed: split_unit_manifests counts a failed unit manifest"
+    closes: "the ManifestCensus fix PR; the split_unit_manifests exception in docs/seams.yaml is deleted"
+  - id: R1b
+    date: 2026-10-31
+    lens: duplication of functionality and bypassed seams
+    title: completed_units_tile tiles a range from manifests of any family
+    copies: [src/pipeline/split.rs:358, src/pipeline/split.rs:264, src/manifest/census.rs:231]
+    status: accepted-as-bugfix
+    verdict: "confirmed: no family filter over read_unit_manifests, a foreign family tiles the range"
+    closes: "the ManifestCensus fix PR; the completed_units_tile and try_read_unit_manifests exceptions are deleted"
+  - id: R2
+    date: 2026-10-31
+    lens: duplication of functionality and bypassed seams
+    title: commands pick their exports without RunSet::select
+    copies: [src/pipeline/run_set.rs:29, src/pipeline/validate_cmd.rs:113, src/pipeline/plan_cmd.rs:74, src/preflight/mod.rs:384, src/preflight/mod.rs:736, src/load/plan.rs:196, src/cli/dispatch.rs:603, src/pipeline/reconcile_cmd.rs:48, src/pipeline/repair_cmd.rs:90, src/pipeline/cli.rs:290]
+    status: accepted-as-bugfix
+    verdict: "confirmed on the binary: validate with partition_by reads the literal {partition} prefix and exits 0 legacy_run with a partition deleted"
+    closes: "the RunSet fix PR routes each command through RunSet::select; the run-set exceptions are deleted"
+  - id: R3
+    date: 2026-10-31
+    lens: duplication of functionality and bypassed seams
+    title: two object-store adapters with two RetryLayers, and a head-then-read race in read_capped
+    copies: [src/destination/cloud.rs:330, src/destination/gcs.rs:87, src/pipeline/validate_manifest.rs:135]
+    status: deferred-past-gate
+    verdict: "duplication confirmed; the race needs an object replaced between head and read"
+    closes: "gcs.rs::wrap goes through new_with_retries and read_capped reads once with a size cap; the object-store-retry exception is deleted"
+  - id: R4
+    date: 2026-10-31
+    lens: duplication of functionality and bypassed seams
+    title: eleven readers of URL userinfo and authority, one of them collides state keys
+    copies: [src/config/url.rs:19, src/config/source.rs:686, src/config/source.rs:676, src/redact.rs:76, src/connect/mod.rs:74, src/state/mod.rs:214]
+    status: accepted-as-bugfix
+    verdict: "confirmed: postgresql://h1:5432/a?application_name=svc@corp and the same with h2 both key as postgres://corp:5432"
+    closes: "the URL authority fix PR moves every reader to config::url; the url-authority exceptions are deleted"
+  - id: R5
+    date: 2026-10-31
+    lens: duplication of functionality and bypassed seams
+    title: five copies of the table and tables fold behind cdc_captured_tables
+    copies: [src/config/cdc.rs:218, src/pipeline/cdc_job.rs:327, src/pipeline/cdc_job.rs:369, src/pipeline/cdc_job.rs:645, src/preflight/cdc_health.rs:133, src/preflight/cdc_health.rs:890]
+    status: deferred-past-gate
+    verdict: "partly confirmed: the copies fold the same way today, no input makes them differ"
+    closes: "cdc_captured_tables returns the multi flag and the copies call it; the cdc-captured-tables exceptions are deleted"
+  - id: P742
+    date: 2026-10-31
+    lens: duplication of functionality and bypassed seams
+    title: dead code and small duplicates found by the ponytail audit
+    copies: [src/journal.rs:1, src/manifest.rs:1, src/pipeline/mod.rs:1]
+    status: done
+    verdict: "each item re-checked with git grep before deleting"
+    closes: "merged as #742"
+  - id: P744
+    date: 2026-10-31
+    lens: duplication of functionality and bypassed seams
+    title: orphan harness modules, copied shell helpers and a hand-listed gate self-test step
+    copies: [dev/pytools/shell.py:1, .github/scripts/gate_self_tests.py:1]
+    status: done
+    verdict: "orphans re-checked with git grep; the derived step runs every script that handles --self-test"
+    closes: "merged as #744"

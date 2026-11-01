@@ -1,0 +1,80 @@
+schema: [id, owner, reads, scope, also_in, bypass, exceptions]
+seams:
+  - id: manifest-census
+    owner: src/manifest/census.rs::ManifestCensus
+    reads: "the run manifests under one prefix: which runs live there, their family, split units, supersession and claimed parts"
+    also_in: [src/manifest.rs]
+    bypass:
+      - "is_run_unique_manifest_name ("
+      - "read_unit_manifests ("
+    exceptions:
+      - {at: src/load/reconcile.rs::is_run_unique_manifest, dated: 2026-10-31, reason: "name wrapper feeding is_manifest_key for the GCS lister", closes: "ManifestCensus owns the name test; call it from fetch_manifests_keyed"}
+      - {at: src/pipeline/manifest_reconcile.rs::reconcile_manifest_against_listing, dated: 2026-10-31, reason: "name filter of the untracked-object scan, not a manifest read", closes: "ManifestCensus exposes the run-unique name test"}
+      - {at: src/pipeline/split.rs::completed_units_in_prefix, dated: 2026-10-31, reason: "own status and window filters over read_unit_manifests", closes: "ManifestCensus::split_units census fix"}
+      - {at: src/pipeline/split.rs::completed_units_tile, dated: 2026-10-31, reason: "confirmed defect: no family filter over read_unit_manifests, a foreign family tiles the range", closes: "ManifestCensus::split_units census fix PR"}
+      - {at: src/pipeline/split.rs::try_read_unit_manifests, dated: 2026-10-31, reason: "the shared lister of unit manifests under a prefix", closes: "ManifestCensus takes this listing as its input"}
+      - {at: src/pipeline/validate_manifest.rs::read_sibling_manifests, dated: 2026-10-31, reason: "sanctioned I/O feeder reading sibling manifests for ManifestCensus", closes: "ManifestCensus owns the listing and the parse"}
+      - {at: src/source/cdc/validate.rs::check_positions, dated: 2026-10-31, reason: "own Success-only filter over run manifests", closes: "ManifestCensus exposes a success filter"}
+      - {at: src/source/value_checksum.rs::split_unit_manifests, dated: 2026-10-31, reason: "confirmed defect: no Success filter, a failed unit manifest counts", closes: "ManifestCensus::split_units census fix PR"}
+  - id: run-set
+    owner: src/pipeline/run_set.rs::RunSet
+    reads: "the exports one invocation runs: one named export, or the whole config minus the CDC backfill recipes"
+    scope: [src/pipeline/, src/cli/, src/preflight/, src/load/, src/plan/]
+    bypass:
+      - "backfill_recipe_names ("
+      - "exports . iter ( ) . filter ( | e | e . name == name )"
+      - ". find ( | e | e . name == name )"
+      - ". find ( | e | e . name == export_name )"
+    exceptions:
+      - {at: src/cli/dispatch.rs::batch_plans, dated: 2026-10-31, reason: "filters the config by name instead of RunSet::select", closes: "route batch_plans through RunSet::select"}
+      - {at: src/load/plan.rs::check, dated: 2026-10-31, reason: "Selection::check looks an export up by name", closes: "route the load check through RunSet::select"}
+      - {at: src/pipeline/cli.rs::accept_state, dated: 2026-10-31, reason: "looks the export up by name", closes: "route accept_state through RunSet::select"}
+      - {at: src/pipeline/plan_cmd.rs::plannable_exports, dated: 2026-10-31, reason: "drops backfill recipes by hand", closes: "route plan through RunSet::select"}
+      - {at: src/pipeline/reconcile_cmd.rs::run_reconcile_command, dated: 2026-10-31, reason: "looks the export up by name", closes: "route reconcile through RunSet::select"}
+      - {at: src/pipeline/repair_cmd.rs::run_repair_command, dated: 2026-10-31, reason: "looks the export up by name", closes: "route repair through RunSet::select"}
+      - {at: src/pipeline/validate_cmd.rs::run_validate_command, dated: 2026-10-31, reason: "confirmed defect: partition_by reads the literal {partition} prefix and exits 0 legacy_run", closes: "route validate through RunSet::select"}
+      - {at: src/preflight/mod.rs::check, dated: 2026-10-31, reason: "looks the export up by name", closes: "route preflight check through RunSet::select"}
+      - {at: src/preflight/mod.rs::load_type_reports, dated: 2026-10-31, reason: "drops backfill recipes by hand", closes: "route load type reports through RunSet::select"}
+  - id: url-authority
+    owner: src/config/url.rs::host_port_span
+    reads: "the userinfo and the host span of a connection URL"
+    bypass:
+      - "rsplit_once ( '@' )"
+      - "split_once ( '@' )"
+      - "rfind ( '@' )"
+      - "find ( '@' )"
+      - "split ( '@' )"
+      - "b'@'"
+      - "find_userinfo ("
+      - "userinfo_span ("
+    exceptions:
+      - {at: src/bin/seed/mssql.rs::connect, dated: 2026-10-31, reason: "seed binary splits the userinfo itself", closes: "seed binary calls config::url"}
+      - {at: src/config/source.rs::find_userinfo, dated: 2026-10-31, reason: "a second userinfo finder", closes: "delete it, call config::url"}
+      - {at: src/config/source.rs::redact_for_artifact, dated: 2026-10-31, reason: "splits the userinfo itself", closes: "call config::url"}
+      - {at: src/config/source.rs::resolve_url, dated: 2026-10-31, reason: "splits the userinfo itself", closes: "call config::url"}
+      - {at: src/config/source.rs::source_state_key, dated: 2026-10-31, reason: "confirmed defect: a ? query holding @ makes two hosts collide on one state key", closes: "call config::url, url authority fix PR"}
+      - {at: src/connect/mod.rs::url_host_port, dated: 2026-10-31, reason: "splits the authority itself", closes: "call config::url"}
+      - {at: src/redact.rs::redact_url_passwords, dated: 2026-10-31, reason: "splits the userinfo itself", closes: "call config::url"}
+      - {at: src/redact.rs::userinfo_span, dated: 2026-10-31, reason: "a second userinfo span reader", closes: "delete it, call config::url"}
+      - {at: src/source/mssql/mod.rs::parse_mssql_url, dated: 2026-10-31, reason: "splits the authority itself", closes: "call config::url"}
+      - {at: src/source/oracle/mod.rs::parse_oracle_url, dated: 2026-10-31, reason: "splits the authority itself", closes: "call config::url"}
+      - {at: src/state/mod.rs::redact_pg_url, dated: 2026-10-31, reason: "splits the userinfo itself", closes: "call config::url"}
+  - id: object-store-retry
+    owner: src/destination/cloud.rs::new_with_retries
+    reads: "the retry policy every object-store operator is wrapped in"
+    bypass:
+      - "RetryLayer :: new ("
+    exceptions:
+      - {at: src/destination/gcs.rs::wrap, dated: 2026-10-31, reason: "second RetryLayer with max_times 3, duplication only", closes: "route through new_with_retries after the gate"}
+  - id: cdc-captured-tables
+    owner: src/config/cdc.rs::cdc_captured_tables
+    reads: "the tables one mode cdc export captures, folding table and tables"
+    bypass:
+      - "& export . tables , & export . table )"
+      - ". table . iter ( ) . chain ("
+    exceptions:
+      - {at: src/pipeline/cdc_job.rs::initial_snapshot_pending, dated: 2026-10-31, reason: "copy of the table and tables fold plus a multi flag, not reachable", closes: "cdc_captured_tables returns the multi flag after the gate"}
+      - {at: src/pipeline/cdc_job.rs::resolve_grants, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
+      - {at: src/pipeline/cdc_job.rs::run_cdc_inner, dated: 2026-10-31, reason: "copy of the table and tables fold plus a multi flag, not reachable", closes: "cdc_captured_tables returns the multi flag after the gate"}
+      - {at: src/preflight/cdc_health.rs::oracle_checks, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
+      - {at: src/preflight/cdc_health.rs::run_refusals, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
