@@ -737,34 +737,19 @@ jobs:
         with:
           path: .mutants-cache
           key: mutants-outcomes-v2-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
-      # The job's own conclusion is unreadable (continue-on-error), so the last
-      # thing it does is write down what happened — including the cases where
-      # grading never ran. Without this, "the plan broke" and "there was
-      # nothing to grade" arrive at the blocking job as the same empty value.
       - name: Publish this run's verdict
         id: report
         if: always()
         env:
           GRADE_STATE: ${{ steps.grade.outputs.state }}
+          GRADE_RESULT: ${{ steps.grade.outputs.result }}
+          GRADE_OUTCOME: ${{ steps.grade.outcome }}
           PLAN_SCOPE: ${{ needs.mutants-plan.outputs.scope }}
           PLAN_CODE: ${{ needs.mutants-plan.outputs.code }}
           PLAN_STATE: ${{ needs.mutants-plan.outputs.state }}
           PLAN_RESULT: ${{ needs.mutants-plan.outputs.result }}
-        run: |
-          set -euo pipefail
-          if [ -z "$GRADE_STATE" ]; then
-            if [ "$PLAN_SCOPE" != "success" ]; then
-              echo "state=scope-error" >> "$GITHUB_OUTPUT"
-              echo "result=tool-error" >> "$GITHUB_OUTPUT"
-            elif [ "$PLAN_CODE" != "true" ]; then
-              echo "state=docs-only" >> "$GITHUB_OUTPUT"
-              echo "result=n/a" >> "$GITHUB_OUTPUT"
-            elif [ -n "$PLAN_STATE" ]; then
-              echo "state=$PLAN_STATE" >> "$GITHUB_OUTPUT"
-              echo "result=$PLAN_RESULT" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-          echo "outcome=${{ steps.grade.outcome }}" >> "$GITHUB_OUTPUT"
+          PLAN_COUNT: ${{ needs.mutants-plan.outputs.count }}
+        run: python3 .github/scripts/mutants_report.py
 
   # Is the mutation gate GRADING ANYTHING? Split out of `mutants-in-diff` on
   # purpose: that job is `continue-on-error: true` (a foundational-module PR
