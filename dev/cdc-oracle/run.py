@@ -257,7 +257,7 @@ def _write_cfg(work, a, t, ckpt, out) -> str:
     else:
         src, tbl = f'{{ type: mysql, url: "{MYSQL_URL}" }}', f"rivet.{t}"
         cdc_opts = f"{{ server_id: 9912, until_current: true, checkpoint: {ckpt} }}"
-    cfg = os.path.join(work, f"rivet_{os.path.basename(out)}.yaml")
+    cfg = os.path.join(work, "rivet.yaml")
     with open(cfg, "w") as f:
         f.write(f"""source: {src}
 exports:
@@ -357,7 +357,7 @@ def main() -> int:
             # duplicate — the documented escape hatch was single-use, and the
             # harness littered the very server whose litter it fled.
             mysql(f"DROP TABLE IF EXISTS {t}, {t}_late, {t}_probe")
-        subprocess.run(["rm", "-f", ckpt], check=False)
+        subprocess.run(["rm", "-f", ckpt, ckpt + ".owner"], check=False)
 
     cleanup()
     # AFTER the stale-state cleanup, never before: cleanup() also removes the

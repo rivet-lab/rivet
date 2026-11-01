@@ -84,7 +84,8 @@ ROOT = shell.ROOT
 
 USAGE = (
     "usage: dev/pytools/sweep.py source-parity [rivet-binary]\n"
-    "       dev/pytools/sweep.py test-cruft [--cloud]"
+    "       dev/pytools/sweep.py test-cruft [--cloud]\n"
+    "       dev/pytools/sweep.py self-test"
 )
 
 # The comparison core is the CDC sibling's, on purpose — one `norm`, one `chk`,
@@ -594,6 +595,30 @@ def _sweep_live_tmp(max_age_days: float = 2.0) -> None:
         print(f"  live-tmp: pruned {removed} entries older than {max_age_days:g} days")
 
 
+def _self_test() -> int:
+    """Live: a dead process's MySQL table whose name holds a non-ASCII character is swept, and gone when read back."""
+    container = registry.source("mysql_cdc")["container"]
+    if not _container_up(container):
+        print(f"sweep self-test FAILED: {container} is not up, nothing was graded")
+        return 1
+    name = f"sweep_selftest_\u00e8_{2**22 + 12345}_1"
+    q = lambda sql: shell.docker_exec(container, *cdc_stand.mysql_argv(f"SET NAMES utf8mb4; {sql}", db="rivet"), timeout=300)  # noqa: E731
+    try:
+        made = q(f"CREATE TABLE {_my_quote(name)} (id INT)")
+        if not made.ok:
+            print(f"sweep self-test FAILED: could not create the table: {made.out}")
+            return 1
+        _my_cruft("mysql_cdc", container, "rivet")
+        left = [t for t in _lines(q("SHOW TABLES")) if "sweep_selftest_" in t]
+        if left:
+            print(f"sweep self-test FAILED: the sweep left {left}")
+            return 1
+    finally:
+        q(f"DROP TABLE IF EXISTS {_my_quote(name)}")
+    print("sweep self-test ok: a table named with a non-ASCII character is dropped, not skipped or crashed on")
+    return 0
+
+
 # ══ CLI ════════════════════════════════════════════════════════════════════════
 def main_cli(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
@@ -604,6 +629,9 @@ def main_cli(argv: Sequence[str] | None = None) -> int:
         return source_parity(rest[0] if rest else None)
     if cmd in ("test-cruft", "test_cruft", "cruft"):
         return test_cruft(cloud="--cloud" in rest or "--bigquery" in rest)
+
+    if cmd in ("self-test", "--self-test"):
+        return _self_test()
 
     print(USAGE)
     return 1

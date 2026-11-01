@@ -574,6 +574,7 @@ def _self_test() -> int:
 
     seeded.self_test()
     guarantees.self_test()
+    cdc.self_test()
     import contextlib
     import io
 
