@@ -120,3 +120,11 @@ scenarios:
     mssql:    { test: a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted }
     mongo:    { test: a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted }
     oracle:   { test: a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted }
+
+  - id: at_sign_after_the_authority_live
+    what: "two source URLs that differ before an `@` in their query are two sources: the second, delivered to a destination of its own, holds the table whole."
+    postgres: { test: two_hosts_with_an_at_in_the_query_are_two_sources_postgres }
+    mysql:    { na: "the MySQL driver refuses an unknown URL parameter, so no query tail can carry the `@`" }
+    mssql:    { na: "the SQL Server URL reads everything after the first `/` as the database, so a query tail names a database" }
+    mongo:    { na: "no live cell: the key of a mongodb:// URL with an `@` in its query is graded by the lib cell an_at_sign_after_the_authority_does_not_make_two_hosts_one_source" }
+    oracle:   { na: "parse_oracle_url takes the service name from the path and has no query tail" }
