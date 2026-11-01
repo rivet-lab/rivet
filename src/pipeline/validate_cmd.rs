@@ -35,7 +35,7 @@ use chrono::NaiveDate;
 use crate::config::Config;
 use crate::destination::placeholder::PlaceholderContext;
 use crate::error::Result;
-use crate::pipeline::ManifestVerification;
+use crate::pipeline::validate_manifest::ManifestVerification;
 use crate::pipeline::validate_manifest::{ValidateDepth, verify_at_destination};
 
 /// Output format mirroring the `rivet reconcile` / `rivet repair` pattern.
@@ -591,9 +591,9 @@ fn render_pretty(h: &mut impl std::io::Write, results: &[ExportVerdict], hard_fa
                 "consistent"
             } else if v.failures.iter().any(|f| matches!(
                 f,
-                crate::pipeline::ManifestVerificationFailure::SuccessMarkerStale { .. }
-                    | crate::pipeline::ManifestVerificationFailure::SuccessMarkerMalformed { .. }
-                    | crate::pipeline::ManifestVerificationFailure::SuccessMarkerReadError { .. }
+                crate::pipeline::validate_manifest::Failure::SuccessMarkerStale { .. }
+                    | crate::pipeline::validate_manifest::Failure::SuccessMarkerMalformed { .. }
+                    | crate::pipeline::validate_manifest::Failure::SuccessMarkerReadError { .. }
             )) {
                 "INCONSISTENT (see failures)"
             } else {
@@ -646,7 +646,7 @@ fn render_pretty(h: &mut impl std::io::Write, results: &[ExportVerdict], hard_fa
 /// so a consumer can branch on the code without re-deriving it from `kind`.
 /// Returns the enriched object (or the unmodified serde value if, impossibly,
 /// the failure didn't serialize as a JSON object).
-fn failure_json(f: &crate::pipeline::ManifestVerificationFailure) -> serde_json::Value {
+fn failure_json(f: &crate::pipeline::validate_manifest::Failure) -> serde_json::Value {
     let mut value = serde_json::json!(f);
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
@@ -796,7 +796,7 @@ mod tests {
 
     // ── verdict_fails_exit (exit-code policy) ──────────────────────────────
 
-    use crate::pipeline::ManifestVerificationFailure as VFailure;
+    use crate::pipeline::validate_manifest::Failure as VFailure;
 
     /// Verdict shape `verify_at_destination` returns when `manifest.json`
     /// exists but cannot be read: not legacy, not passed, one explicit
@@ -977,7 +977,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        crate::pipeline::write_manifest(&*dest, m).unwrap();
+        crate::pipeline::manifest_writer::write_manifest(&*dest, m).unwrap();
     }
 
     /// Config with a single export pointing at `prefix`.  Written next to —

@@ -8,7 +8,7 @@ use rivet::config::{CompressionType, FormatType};
 use rivet::format::Format;
 use rivet::format::csv::CsvFormat;
 use rivet::format::parquet::ParquetFormat;
-use rivet::pipeline::validate_output;
+use rivet::pipeline::for_tests::validate_output;
 
 fn write_parquet(batches: &[RecordBatch]) -> tempfile::NamedTempFile {
     let schema = batches[0].schema();

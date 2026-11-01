@@ -18,7 +18,7 @@ use rivet::manifest::{
     MANIFEST_VERSION, ManifestDestination, ManifestPart, ManifestSource, ManifestStatus,
     PartStatus, RunManifest,
 };
-use rivet::pipeline::write_manifest;
+use rivet::pipeline::for_tests::write_manifest;
 
 const RIVET_BIN: &str = env!("CARGO_BIN_EXE_rivet");
 

@@ -129,29 +129,12 @@ pub mod for_tests {
     pub use crate::plan::build_time_window_query;
 }
 
-// Backwards-compat re-exports at the crate root so existing test files
-// keep compiling without a sweeping import-site update.  Each is delegated
-// to `for_tests::*`; new test code should import from `for_tests` directly.
-//
-// `#[allow(unused_imports)]` because the bin target's dead-code analysis
-// doesn't see the integration tests that consume these — same situation
-// as `RunSummary::stub_for_testing`.
-#[doc(hidden)]
-#[allow(unused_imports)]
-pub use for_tests::{
-    ManifestBuilder, ManifestVerification, ManifestVerificationFailure, PartDecision,
-    QuarantineReason, ResumeDecision, ResumePlan, RetryClass, RunReport, UntrackedDecision,
-    WriteOutcome, build_resume_plan, build_time_window_query, classify_error, generate_chunks,
-    report_dir, validate_output, verify_at_destination, write_manifest, write_run_report,
-};
-
 // The orchestrator and its `RunOptions` live in `run.rs`.  Re-exported
 // here so external call sites keep using `pipeline::run(...)` and
 // `pipeline::RunOptions`.  Multi-export render-mode flags ride along
 // because `RunSummary::print` and the in-place card renderer read them.
+pub(crate) use run::multi_export_mode;
 pub use run::{RunOptions, run};
-#[allow(unused_imports)] // `multi_export_concurrent` is wired for future use
-pub(crate) use run::{multi_export_concurrent, multi_export_mode};
 
 pub(crate) use crate::config::resolve::format_bytes;
 

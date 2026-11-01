@@ -23,7 +23,8 @@ use rivet::manifest::{
     MANIFEST_VERSION, ManifestDestination, ManifestPart, ManifestSource, ManifestStatus,
     RunManifest,
 };
-use rivet::pipeline::{ValidateOutputFormat, ValidateTarget, run_validate_command, write_manifest};
+use rivet::pipeline::for_tests::write_manifest;
+use rivet::pipeline::{ValidateOutputFormat, ValidateTarget, run_validate_command};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 

@@ -312,19 +312,10 @@ pub fn make_shared_world_readable() {
 
 /// Attempt a TCP connect with a short timeout.  Returns `true` if reachable.
 fn tcp_alive(host: &str, port: u16, timeout: Duration) -> bool {
-    let addr = format!("{host}:{port}");
-    addr.to_socket_addrs_alive(timeout).is_some()
-}
-
-trait ToSocketAddrsAlive {
-    fn to_socket_addrs_alive(&self, timeout: Duration) -> Option<()>;
-}
-
-impl ToSocketAddrsAlive for String {
-    fn to_socket_addrs_alive(&self, timeout: Duration) -> Option<()> {
-        let addr: std::net::SocketAddr = self.parse().ok()?;
-        TcpStream::connect_timeout(&addr, timeout).ok().map(|_| ())
-    }
+    format!("{host}:{port}")
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .is_some_and(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())
 }
 
 /// Fail fast with an actionable message if the docker-compose stack is not
