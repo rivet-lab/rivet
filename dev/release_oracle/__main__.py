@@ -959,6 +959,8 @@ def _self_test() -> int:
     from . import core as _c
     saved_env, saved_bless = dict(os.environ), dict(_c._BLESSING)
     try:
+        for k in _c.unlisted_env():
+            del os.environ[k]
         os.environ.update(RIVET_BIN="/foreign/rivet", RIVET_BIN_OVERRIDE="/foreign/rivet", BLESS_CDC="1", BLESS_VERDICTS="1", BLESS_DUCKDB="1")
         assert rivet_bin() == target_dir() / "release" / "rivet", "the binary is located from the tree, never from the shell"
         refused = apply_run_policy(parse_args([]))
@@ -968,7 +970,7 @@ def _self_test() -> int:
         assert apply_run_policy(parse_args([])) == []
         assert {k: os.environ[k] for k in release_bin_env()} == release_bin_env(), "the binary is the tree's"
         assert apply_run_policy(parse_args([])) == [], "the gate's own export is not a refusal"
-        assert not any(_c.blessing(k) for k in ("verdicts", "duckdb", "cdc")), "a shell BLESS_* blesses nothing"
+        assert not any(_c.blessing(k) for k in _c._BLESSING), "a shell BLESS_* blesses nothing"
         os.environ["RIVET_PERF_WALL_TOL"] = "10"
         assert apply_run_policy(parse_args([])) == [], "a tolerance knob is recorded by gate_config, not refused"
         assert gate_config(parse_args([]))["knobs"] == {"RIVET_PERF_WALL_TOL": "10"}
@@ -980,9 +982,9 @@ def _self_test() -> int:
         del os.environ["RIVET_BIN_OVERRIDE"]
         del os.environ["RIVET_PERF_WALL_TOL"]
         apply_run_policy(parse_args(["--bless-cdc"]))
-        assert [_c.blessing(k) for k in ("verdicts", "duckdb", "cdc")] == [False, False, True]
+        assert [_c.blessing(k) for k in _c._BLESSING] == [False, False, True]
         apply_run_policy(parse_args(["--bless-local"]))
-        assert [_c.blessing(k) for k in ("verdicts", "duckdb", "cdc")] == [True, True, False]
+        assert [_c.blessing(k) for k in _c._BLESSING] == [True, True, False]
     finally:
         os.environ.clear()
         os.environ.update(saved_env)

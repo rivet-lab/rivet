@@ -167,9 +167,10 @@ fn every_tolerance_the_harness_reads_is_a_recorded_knob() {
         .iter()
         .filter(|n| tolerance.is_match(n) && !knobs.contains(*n))
         .collect();
-    assert!(
-        loose.is_empty(),
-        "a tolerance read by the harness belongs in GRADING_KNOBS (core.py), where gate_config records it: {loose:?}"
+    assert_eq!(
+        loose,
+        Vec::<&String>::new(),
+        "a tolerance read by the harness belongs in GRADING_KNOBS (core.py), where gate_config records it"
     );
     let both: Vec<&String> = plain.intersection(&knobs).collect();
     assert!(both.is_empty(), "listed as plain and as a knob: {both:?}");
