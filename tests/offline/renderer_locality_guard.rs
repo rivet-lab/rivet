@@ -171,11 +171,6 @@ const NOT_A_VALUE: &[(&str, &str, &str)] = &[
         "mongo/mod.rs::bytes_to_hex",
         "keyset cursor and resume-token encoding",
     ),
-    (
-        "hex_bytes",
-        "mssql/cdc.rs::hex",
-        "change-table LSN position",
-    ),
 ];
 
 /// Every `.rs` file under `dir`, sorted.

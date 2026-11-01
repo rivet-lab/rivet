@@ -958,6 +958,9 @@ fn clickhouse_recovery_sql(specs: &[TargetColumnSpec], table: &str) -> String {
     )
 }
 
+/// The zone every ClickHouse timestamp column is declared in, naive or not.
+pub(crate) const CLICKHOUSE_TIMESTAMP_ZONE: &str = "UTC";
+
 mod clickhouse {
     use super::*;
 
@@ -1032,9 +1035,7 @@ mod clickhouse {
                     None,
                 )
             }
-            // DateTime64 holds both naive and tz timestamps natively (verified:
-            // naive -> DateTime64(6), tz -> DateTime64(6, 'UTC')).
-            RivetType::Timestamp { unit, timezone } => {
+            RivetType::Timestamp { unit, .. } => {
                 let p = match unit {
                     TimeUnit::Second => 0,
                     TimeUnit::Millisecond => 3,
@@ -1042,7 +1043,7 @@ mod clickhouse {
                     TimeUnit::Nanosecond => 9,
                 };
                 Resolved::warn(
-                    ChType::DateTime64(p, timezone.clone()),
+                    ChType::DateTime64(p, Some(super::CLICKHOUSE_TIMESTAMP_ZONE.into())),
                     "DateTime64 holds 1900-01-01 to 2299-12-31; rivet load refuses a part holding a \
                      value outside it, but a load pulled through a named collection (or any other \
                      reader) gets the nearest end, silently",
@@ -1741,7 +1742,7 @@ mod tests {
         });
         assert_eq!(
             (ts.target_type.to_string().as_str(), ts.status),
-            ("DateTime64(6)", TargetStatus::Warn)
+            ("DateTime64(6, 'UTC')", TargetStatus::Warn)
         );
         assert!(
             ts.note
@@ -1802,12 +1803,11 @@ mod tests {
 
     #[test]
     fn clickhouse_nanosecond_timestamp_is_datetime64_9() {
-        // DateTime64 holds a nanosecond naive timestamp natively at scale 9.
         let s = ch(&RivetType::Timestamp {
             unit: super::super::TimeUnit::Nanosecond,
             timezone: None,
         });
-        assert_eq!(s.target_type, "DateTime64(9)");
+        assert_eq!(s.target_type, "DateTime64(9, 'UTC')");
         assert_eq!(
             s.status,
             TargetStatus::Warn,

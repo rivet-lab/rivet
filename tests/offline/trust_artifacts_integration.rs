@@ -61,12 +61,12 @@ use rivet::manifest::{
     ManifestStatus, PartStatus, RunManifest, SUCCESS_FILENAME, parse_success_marker,
     success_marker_body,
 };
-use rivet::pipeline::{
-    ManifestBuilder, ManifestVerification, ManifestVerificationFailure, RunReport, RunSummary,
-    ValidateDepth, WriteOutcome, build_resume_plan, report_dir, verify_at_destination,
-    write_manifest, write_run_report,
+use rivet::pipeline::for_tests::{
+    ManifestBuilder, ManifestVerification, ManifestVerificationFailure, QuarantineReason,
+    ResumeDecision, RunReport, UntrackedDecision, WriteOutcome, build_resume_plan, report_dir,
+    verify_at_destination, write_manifest, write_run_report,
 };
-use rivet::pipeline::{QuarantineReason, ResumeDecision, UntrackedDecision};
+use rivet::pipeline::{RunSummary, ValidateDepth};
 use rivet::state::{SchemaColumn, schema_fingerprint};
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────

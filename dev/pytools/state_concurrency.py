@@ -37,6 +37,11 @@ import sys
 import time
 from pathlib import Path
 
+if __package__:
+    from . import shell
+else:  # run as a plain script: its own directory is on sys.path
+    import shell  # type: ignore[no-redef]
+
 ROOT = Path(__file__).resolve().parents[2]
 STATE_CONTAINER = os.environ.get("RIVET_SWEEP_STATE_CONTAINER", "rivet-postgres-state-1")
 CDC_SWEEP = ROOT / "dev" / "pytools" / "cdc_sweep.py"
@@ -51,11 +56,8 @@ ENGINES = {
 
 
 def psql_state(sql: str) -> str:
-    return subprocess.run(
-        ["docker", "exec", STATE_CONTAINER, "psql", "-U", "rivet", "-d", "rivet_state", "-tAc", sql],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    """Trimmed `psql -tAc` output from the sweep's state database."""
+    return shell.psql_state(STATE_CONTAINER, sql, timeout=None)
 
 
 def wipe() -> None:

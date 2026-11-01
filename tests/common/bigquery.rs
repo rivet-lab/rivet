@@ -211,7 +211,7 @@ pub fn recreate_dataset(project: &str, dataset: &str) {
 }
 
 /// Delete every object under `gs://bucket/prefix/` (best effort — a cleanup path).
-pub(super) fn gcs_delete_prefix(bucket: &str, prefix: &str) {
+pub fn gcs_delete_prefix(bucket: &str, prefix: &str) {
     let list = format!("https://storage.googleapis.com/storage/v1/b/{bucket}/o");
     let mut page_token: Option<String> = None;
     loop {
@@ -400,15 +400,28 @@ pub(super) fn gcs_put(bucket: &str, name: &str, body: &'static [u8]) {
     );
 }
 
+/// Everything but the RFC 3986 unreserved set (`A-Z a-z 0-9 - _ . ~`) is percent-encoded.
+const UNRESERVED: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
 fn urlencode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+    percent_encoding::utf8_percent_encode(s, UNRESERVED).to_string()
+}
+
+#[test]
+fn urlencode_escapes_all_but_the_unreserved_set_in_upper_case_hex() {
+    assert_eq!(
+        urlencode("a b/%é~._-+&=?#:@\u{1F600}"),
+        "a%20b%2F%25%C3%A9~._-%2B%26%3D%3F%23%3A%40%F0%9F%98%80"
+    );
+    assert_eq!(urlencode(""), "");
+    assert_eq!(
+        urlencode("exports/rivet/x y/"),
+        "exports%2Frivet%2Fx%20y%2F"
+    );
 }
 
 /// The live warehouse a test loads into, with a run-unique GCS prefix.
@@ -563,19 +576,6 @@ impl BqLive {
     /// `field` is `None` for load-time partitions, the whole thing for no time partitioning.
     pub fn read_bq_time_partitioning(&self, table: &str) -> Option<(String, Option<String>)> {
         time_partitioning(&self.read_bq_meta(table))
-    }
-
-    /// `(column, start, end, interval)` of `table`'s integer-range partitioning.
-    pub fn read_bq_range_partitioning(&self, table: &str) -> Option<(String, i64, i64, i64)> {
-        let meta = self.read_bq_meta(table);
-        let rp = meta.get("rangePartitioning")?;
-        let int = |k: &str| rp["range"][k].as_str()?.parse::<i64>().ok();
-        Some((
-            rp["field"].as_str()?.to_string(),
-            int("start")?,
-            int("end")?,
-            int("interval")?,
-        ))
     }
 
     /// `partition_expiration_days` of `table`, from its `expirationMs`.

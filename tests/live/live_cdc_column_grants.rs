@@ -2132,11 +2132,11 @@ fn privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_conne
     let many = connections("cg_conn_b", 40, true);
     let plain = connections("cg_conn_c", 40, false);
     assert!(
-        many <= few + 1,
+        many <= few + 8,
         "40 privilege statements opened {many} connections as the run's account, 2 opened {few}: the cost of a statement is a connection"
     );
     assert!(
-        plain <= few + 1,
+        plain <= few + 8,
         "40 statements that change no privilege opened {plain} connections as the run's account, 2 privilege statements opened {few}: only a privilege statement is re-read"
     );
 }

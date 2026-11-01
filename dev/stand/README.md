@@ -10,11 +10,11 @@ the canonical `~/rivet` compose project.
 ## Up / down
 
 ```bash
+python3 -m dev.pytools.legacy_stand stand-up           # both tiers + post-seed (MSSQL, Mongo-CDC) — idempotent
+python3 -m dev.pytools.legacy_stand stand-up batch     # batch tier only
+python3 -m dev.pytools.legacy_stand stand-up cdc       # cdc tier only
+python3 -m dev.pytools.legacy_stand stand-verify       # cross-engine checksum: seeds must be identical
 cd dev/stand
-./up.sh            # both tiers + post-seed (MSSQL, Mongo-CDC) — idempotent
-./up.sh batch      # batch tier only
-./up.sh cdc        # cdc tier only
-./verify.sh        # cross-engine checksum: seeds must be identical
 docker compose --profile batch --profile cdc down   # stop (volumes survive)
 ```
 
@@ -63,10 +63,10 @@ Do not stop it with `docker compose down`: that removes every container of the p
 - `common/{postgres,mysql,mssql}.sql` — users **50k**, orders **200k**,
   events **500k**. Every value is a pure function of the row number `n`
   (modulo arithmetic from fixed epochs), so all six SQL instances hold the
-  **same rows**; `verify.sh` asserts identical count/sum tuples (sums in
+  **same rows**; `stand-verify` asserts identical count/sum tuples (sums in
   integer cents to dodge client decimal formatting).
 - `mongo_seed.py` (host python3, stdlib only) — deterministic Extended-JSON
-  generator; `up.sh` pipes it into `mongoimport` inside each mongo container.
+  generator; `stand-up` pipes it into `mongoimport` inside each mongo container.
   Heavy perf collections `orders` 200k + `events` 500k docs on the batch
   instances (same shape/volume class; Mongo is volume-parity, not
   row-parity). `$numberInt`/`$numberLong` wrappers pin identical BSON types
@@ -77,12 +77,12 @@ Do not stop it with `docker compose down`: that removes every container of the p
 
 PG / MySQL seed on FIRST boot of an empty volume
 (`docker-entrypoint-initdb.d`); MSSQL (no initdb hook) and ALL Mongo
-instances (CDC ones have no PRIMARY during initdb) are seeded by `up.sh`,
+instances (CDC ones have no PRIMARY during initdb) are seeded by `stand-up`,
 idempotently.
 
 ## Notes
 
 - Data volumes are named per instance (`stand_pg14_batch_data`, …): restarts
-  and `down` keep data; `down -v` resets everything (next `up.sh` re-seeds).
+  and `down` keep data; `down -v` resets everything (next `stand-up` re-seeds).
 - All containers are `restart: unless-stopped` — the stand survives reboots.
 - amd64-only images (MySQL 5.7, both MSSQL) run under OrbStack Rosetta.

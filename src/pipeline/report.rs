@@ -98,7 +98,7 @@ pub struct ValidationOutcome {
     /// reach the manifest-write step (e.g. failed-before-any-part) or that
     /// targeted streaming destinations where no manifest exists.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub manifest: Option<crate::pipeline::ManifestVerification>,
+    pub manifest: Option<crate::pipeline::validate_manifest::ManifestVerification>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

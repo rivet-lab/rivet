@@ -47,6 +47,7 @@ CELLS = {
     "a_cdc_log_partitioned_by_a_moving_column_serves_one_latest_row_per_key": "partition:cdc",
     "a_changed_partition_is_refused_before_it_touches_the_change_log": "partition:changed",
     "a_partitioned_incremental_export_into_clickhouse_serves_the_latest_rows": "partition:incremental",
+    "a_load_over_https_trusts_a_private_ca_only_through_ca_file": "tls:ca-file",
 }
 
 # The loader's own live tests: `#[ignore]` lib tests in src/load/clickhouse.rs, which

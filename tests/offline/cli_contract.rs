@@ -737,3 +737,43 @@ fn lock_wait_refuses_at_zero_times_out_by_code_and_takes_a_lease_let_go() {
     );
     assert!(started.elapsed() >= std::time::Duration::from_millis(1500));
 }
+
+#[test]
+fn metrics_json_prints_the_aggregate_rows_and_never_the_human_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("rivet.yaml");
+    std::fs::write(
+        &cfg,
+        "source:\n  type: postgres\n  url: \"postgresql://u:p@localhost:5432/db\"\nexports:\n  \
+         - name: orders\n    query: \"SELECT 1\"\n    mode: full\n    format: parquet\n    \
+         destination:\n      type: local\n      path: ./out\n",
+    )
+    .unwrap();
+    let cfg = cfg.to_str().unwrap();
+
+    let (code, out, err) = run(&["metrics", "-c", cfg, "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim(), "[]");
+    assert!(!out.contains("No metrics recorded yet"));
+
+    let state = rusqlite::Connection::open(dir.path().join(".rivet_state.db")).unwrap();
+    state
+        .execute(
+            "INSERT INTO export_metrics (export_name, run_at, duration_ms, total_rows, status, \
+             files_produced, bytes_written, retries, validated, run_id) \
+             VALUES ('orders', '2026-10-30T10:00:00Z', 1500, 42, 'success', 2, 4096, 0, 1, 'r1')",
+            [],
+        )
+        .unwrap();
+    drop(state);
+
+    let (code, out, err) = run(&["metrics", "-c", cfg, "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let row = &rows.as_array().unwrap()[0];
+    assert_eq!(row["export_name"], "orders");
+    assert_eq!(row["total_rows"], 42);
+    assert_eq!(row["files_produced"], 2);
+    assert_eq!(row["validated"], true);
+    assert!(row["error_message"].is_null());
+}

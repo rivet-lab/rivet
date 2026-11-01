@@ -135,8 +135,7 @@ def _red(msg: str) -> None:
     print(_paint("31", msg), flush=True)
 
 
-def _say(msg: str = "") -> None:
-    print(msg, flush=True)
+_say = shell.say
 
 
 def _header(title: str) -> None:

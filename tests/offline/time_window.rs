@@ -9,7 +9,7 @@
 //! domain" cleanup.
 
 use rivet::config::{SourceType, TimeColumnType};
-use rivet::pipeline::build_time_window_query;
+use rivet::pipeline::for_tests::build_time_window_query;
 
 #[test]
 fn timestamp_format_produces_quoted_iso_literal() {

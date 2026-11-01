@@ -143,6 +143,25 @@ fn the_release_oracle_wrapper_passes_its_own_self_test() {
     );
 }
 
+/// The independent row hasher imports from a bare `sys.path` entry, the way the live CDC test loads it.
+#[test]
+fn the_row_hasher_imports_from_a_bare_sys_path_entry() {
+    let code = format!(
+        "import sys\nsys.path.insert(0, '{}/dev/release_oracle')\nimport rowhash\nprint(callable(rowhash.row_hash_of))",
+        root()
+    );
+    let out = Command::new("python3")
+        .args(["-c", &code])
+        .output()
+        .expect("spawn python3");
+    assert!(
+        out.status.success(),
+        "rowhash.py must import without its package parent: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "True");
+}
+
 /// Makefile recipe lines with backslash-continuations JOINED, paired with the
 /// target whose recipe they belong to. A gate invocation is written across
 /// three continued lines in two of the three targets, so a per-physical-line

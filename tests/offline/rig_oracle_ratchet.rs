@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 // 22 -> 26 (2026-10-29, #719): column-grants cells the oracle cannot grade (a bare name another database holds, the generated invisible key, a DDL in the backlog, the grant changed between two reads); closes when the oracle reads the account's columns.
 // 26 -> 27 (2026-10-29): the reserved-source-column cells load a `mode: full` remedy whose table holds a source column called `__is_deleted`; the warehouse oracle filters on that name, so the cell reads the rows through the second client.
 // 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
-const NO_ORACLE_CEILING: usize = 28; // ratchet-pin: no-oracle-opt-outs
+// 28 -> 29 (2026-10-31, H1): the zone-less change-log cell loads into a log it altered off the ledger's DateTime64(6, 'UTC') on purpose; it reads instants and values through the second client; closes when the oracle grades a declared legacy type.
+const NO_ORACLE_CEILING: usize = 29; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
@@ -41,7 +42,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 626 -> 630 (2026-10-01): #378 merged first and added 4 calls in its Mongo null-_id tests.
 // 630 -> 632 (2026-10-03): the PG/MySQL crash-mid-spilled-tail cells; on PG the rig oracle grades only the keys a stream's first run touched and passed 5 of 12 rows under the loss mutant.
 // 632 -> 628 (2026-10-30): four helper-call mentions left the prose comments of the reduced files; no call site moved.
-const DUCKDB_HELPER_CEILING: usize = 628; // ratchet-pin: duckdb-helper-sites
+// 628 -> 626 (2026-10-31): the unused duckdb_s3_parquet_rows helper left tests/common/duckdb.rs; no call site moved.
+const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];

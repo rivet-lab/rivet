@@ -424,14 +424,7 @@ pub fn show_metrics(
     let state = StateStore::open(config_path)?;
     let metrics = scoped_metrics(&state, &config, export_name, limit)?;
     if json {
-        // Reuse the run aggregate's serializable DTO so `metrics --json` and the
-        // run summary's `--json` agree field-for-field. Empty → `[]` (valid JSON),
-        // not the text "no metrics" line, so a CI consumer never special-cases.
-        let rows: Vec<super::aggregate::MetricRowJson> = metrics
-            .iter()
-            .map(super::aggregate::MetricRowJson::from)
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        println!("{}", super::aggregate::metrics_to_json(&metrics)?);
         return Ok(());
     }
     if metrics.is_empty() {

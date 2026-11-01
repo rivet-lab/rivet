@@ -186,6 +186,11 @@ pub const CLICKHOUSE_USER: &str = "rivet";
 pub const CLICKHOUSE_PASSWORD: &str = "rivet";
 pub const CLICKHOUSE_DB: &str = "rivet";
 pub const CLICKHOUSE_HTTP_URL: &str = "http://127.0.0.1:8123";
+/// ClickHouse whose server time zone is Asia/Tokyo (`clickhouse-tz`).
+pub const CLICKHOUSE_TZ_HTTP_URL: &str = "http://127.0.0.1:8125";
+
+/// The stand ClickHouse over HTTPS, its certificate signed by the test CA in `dev/clickhouse/tls/ca.pem`.
+pub const CLICKHOUSE_HTTPS_URL: &str = "https://localhost:8443";
 
 /// Container name of the long-running `python:3.12-slim + duckdb` validator.
 /// Tests reach it via `docker exec`, not TCP, so there is no port constant.
@@ -323,19 +328,10 @@ pub fn make_shared_world_readable() {
 
 /// Attempt a TCP connect with a short timeout.  Returns `true` if reachable.
 fn tcp_alive(host: &str, port: u16, timeout: Duration) -> bool {
-    let addr = format!("{host}:{port}");
-    addr.to_socket_addrs_alive(timeout).is_some()
-}
-
-trait ToSocketAddrsAlive {
-    fn to_socket_addrs_alive(&self, timeout: Duration) -> Option<()>;
-}
-
-impl ToSocketAddrsAlive for String {
-    fn to_socket_addrs_alive(&self, timeout: Duration) -> Option<()> {
-        let addr: std::net::SocketAddr = self.parse().ok()?;
-        TcpStream::connect_timeout(&addr, timeout).ok().map(|_| ())
-    }
+    format!("{host}:{port}")
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .is_some_and(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())
 }
 
 /// Fail fast with an actionable message if the docker-compose stack is not
@@ -420,6 +416,8 @@ pub enum LiveService {
     DuckDb,
     /// ADR-0014 Parquet validator: `clickhouse/clickhouse-server`. HTTP :8123.
     ClickHouse,
+    /// ClickHouse at server time zone Asia/Tokyo. HTTP :8125.
+    ClickHouseTz,
 }
 
 impl LiveService {
@@ -514,6 +512,11 @@ impl LiveService {
                 "127.0.0.1",
                 CLICKHOUSE_PORT_HTTP,
                 "service `clickhouse` in docker-compose.yaml (HTTP :8123)",
+            ),
+            LiveService::ClickHouseTz => (
+                "127.0.0.1",
+                8125,
+                "service `clickhouse-tz` — run: docker compose --profile tz up -d clickhouse-tz",
             ),
             // Not used (DuckDb is handled before addr() in require_alive),
             // but kept exhaustive so future TCP-style probes do not panic.
