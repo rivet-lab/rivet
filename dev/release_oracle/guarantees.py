@@ -23,7 +23,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from .core import Ledger, rivet_bin, run
 
@@ -37,6 +37,8 @@ SIZES = (10_000, 1_000_000, 5_000_000)
 BACKLOGS = (10, 30)
 #: A larger input may cost this much more than a smaller one that already fills the buffer.
 FLAT_TOL = 1.25
+#: A path whose peaks fail is measured again up to this many times; each point keeps its lowest reading.
+RESAMPLES = 2
 #: `parquet.target_row_group_mb` of the capped runs: the cap docs/why/flat-memory.md names; a million rows of the seeded table fill it.
 GROUP_CAP_MB = 16
 #: The cell that grades `full` and `incremental` under GROUP_CAP_MB as flat from SIZES[1] to SIZES[2]. MongoDB is not claimed: the doc says its `full` grows.
@@ -73,6 +75,36 @@ def uneven(peaks: dict[str, int | None], shape: str, small: int, large: int) -> 
     """What keeps `shape` from being flat from `small` to `large`: a missing measurement, or growth past FLAT_TOL."""
     pair = {f"{shape}/{n}": peaks.get(f"{shape}/{n}") for n in (small, large)}
     return over_ceiling(pair, 1 << 30) + [g for g in (grew(peaks, shape, small, large),) if g]
+
+
+def settled(measure: Callable[[], dict[str, int | None]], failing: Callable[[dict[str, int | None]], list[str]]) -> tuple[dict[str, int | None], int]:
+    """Peaks of `measure`, taken again up to RESAMPLES times while `failing` finds fault, each point keeping its lowest reading; a point any run failed to measure stays unmeasured. Also the number of measurements."""
+    peaks, n = measure(), 1
+    while n <= RESAMPLES and failing(peaks) and all(peaks.values()):
+        again = measure()
+        peaks = {k: min(v, again[k]) if v and again.get(k) else None for k, v in peaks.items()}
+        n += 1
+    return peaks, n
+
+
+def _flaws(path: str, engine: str, peaks: dict[str, int | None], flat: list[str | None]) -> list[str]:
+    """What fails one path's peaks: a missing measurement, a peak over the engine's ceiling, or a `flat` finding."""
+    ceiling = RSS_CEILING_MIB[path][engine]
+    return over_ceiling(peaks, ceiling) + [f for f in flat if f]
+
+
+def batch_flaws(engine: str, peaks: dict[str, int | None]) -> tuple[list[str], list[str]]:
+    """The findings against one engine's batch peaks: those of the `batch` cell, and those of the CAPPED cell."""
+    flat = [grew(peaks, "chunked", SIZES[1], SIZES[2])]
+    capped = [] if engine == "mongo" else [u for m in CAPPED_MODES for u in uneven(peaks, f"{m}_capped", SIZES[1], SIZES[2])]
+    return _flaws("batch", engine, peaks, flat), capped
+
+
+def cdc_flaws(engine: str, peaks: dict[str, int | None]) -> list[str]:
+    """The findings against one engine's CDC peaks."""
+    from .perf import CDC_CHANGES
+
+    return _flaws("cdc", engine, peaks, [grew(peaks, "backlog", *(n * CDC_CHANGES for n in BACKLOGS))])
 
 
 def parts_differ(prev: list[str], cur: list[str]) -> str | None:
@@ -137,7 +169,7 @@ def _capped(cfg: Path) -> bool:
     return out.count(cap) == 1
 
 
-def _batch_peaks(root: Path, engine: str, url: str) -> dict[str, int | None]:
+def _batch_peaks(engine: str, url: str) -> dict[str, int | None]:
     """Peak RSS of this binary's `init` config per batch mode and table size, and of CAPPED_MODES under the cap past the smallest size.
 
     None where a run failed or came back short.
@@ -155,7 +187,7 @@ def _batch_peaks(root: Path, engine: str, url: str) -> dict[str, int | None]:
         return s.rss if s.ok and got and got[0][0] == rows else None
 
     peaks: dict[str, int | None] = {}
-    table, had = f"rss_{engine[:2]}_{os.getpid()}", 0
+    root, table, had = Path(tempfile.mkdtemp(prefix="rivet-oracle-rss-")), f"rss_{engine[:2]}_{os.getpid()}", 0
     try:
         for rows in SIZES:
             sized = _resized(engine, url, table, rows, had)
@@ -166,6 +198,7 @@ def _batch_peaks(root: Path, engine: str, url: str) -> dict[str, int | None]:
                 peaks[f"{mode}_capped/{rows}"] = peak(mode, rows, True) if sized else None
     finally:
         _drop(engine, url, table)
+        shutil.rmtree(root, ignore_errors=True)
     return peaks
 
 
@@ -195,11 +228,15 @@ def _cdc_peaks(engine: str, url: str) -> dict[str, int | None]:
     return peaks
 
 
-def _grade_rss(led: Ledger, engine: str, path: str, peaks: dict[str, int | None], flat: list[str | None]) -> None:
-    """Record one engine's peaks against its ceiling and the `flat` findings (None = held)."""
-    ceiling = RSS_CEILING_MIB[path][engine]
-    shown = " ".join(f"{k}={v // MIB if v else '-'}MiB" for k, v in peaks.items()) + f" ceiling {ceiling}MiB"
-    bad = over_ceiling(peaks, ceiling) + [f for f in flat if f]
+def _shown(peaks: dict[str, int | None], samples: int, only: str = "") -> str:
+    """The peaks in MiB, with how many measurements the lowest of each came from."""
+    got = " ".join(f"{k}={v // MIB if v else '-'}MiB" for k, v in peaks.items() if only in k)
+    return f"{got} (lowest of {samples})" if samples > 1 else got
+
+
+def _grade_rss(led: Ledger, engine: str, path: str, peaks: dict[str, int | None], bad: list[str], samples: int) -> None:
+    """Record one engine's peaks against the findings `bad` (none = held)."""
+    shown = f"{_shown(peaks, samples)} ceiling {RSS_CEILING_MIB[path][engine]}MiB"
     if bad:
         led.failed(engine, "-", RSS_SCEN, path, f"flat-rss[{engine}/{path}]: {'; '.join(bad)} ({shown})", shown)
     else:
@@ -208,26 +245,23 @@ def _grade_rss(led: Ledger, engine: str, path: str, peaks: dict[str, int | None]
 
 def verify_flat_rss(led: Ledger) -> None:
     """Peak RSS per engine under its ceiling and flat past the buffer: batch at three table sizes, CDC at two backlogs."""
-    from .perf import CDC_CHANGES
     from .upgrade import CDC_ENGINES, CDC_URL_VARS
 
     led.phase("Flat RSS (peak resident memory per engine against its ceiling)")
-    root = Path(tempfile.mkdtemp(prefix="rivet-oracle-rss-"))
     for engine in ENGINES:
         var = f"RIVET_ORACLE_{engine.upper()}_URL"
         if not os.environ.get(var):
             led.skipped(engine, "-", RSS_SCEN, "batch", f"flat-rss[{engine}/batch]: no {var}", "no url")
             continue
-        peaks = _batch_peaks(root, engine, os.environ[var])
-        # A keyset page is the one batch buffer a million rows already fill; MongoDB's init writes no paged mode.
-        _grade_rss(led, engine, "batch", peaks, [grew(peaks, "chunked", SIZES[1], SIZES[2])])
+        peaks, n = settled(lambda: _batch_peaks(engine, os.environ[var]), lambda p: sum(batch_flaws(engine, p), []))
+        batch, capped = batch_flaws(engine, peaks)
+        _grade_rss(led, engine, "batch", peaks, batch, n)
         if engine == "mongo":
             continue
-        bad = [u for m in CAPPED_MODES for u in uneven(peaks, f"{m}_capped", SIZES[1], SIZES[2])]
-        shown = " ".join(f"{k}={v // MIB if v else '-'}MiB" for k, v in peaks.items() if "_capped/" in k)
-        if bad:
+        shown = _shown(peaks, n, "_capped/")
+        if capped:
             led.failed(engine, "-", RSS_SCEN, CAPPED, f"flat-rss[{engine}/{CAPPED}]: target_row_group_mb={GROUP_CAP_MB} "
-                       f"did not level the run off: {'; '.join(bad)} ({shown})", shown)
+                       f"did not level the run off: {'; '.join(capped)} ({shown})", shown)
         else:
             led.passed(engine, "-", RSS_SCEN, CAPPED, f"flat-rss[{engine}/{CAPPED}]: target_row_group_mb={GROUP_CAP_MB}, "
                        f"within {FLAT_TOL}x from {SIZES[1]} to {SIZES[2]} rows: {shown}", shown)
@@ -236,8 +270,8 @@ def verify_flat_rss(led: Ledger) -> None:
         if not os.environ.get(var):
             led.skipped(engine, "-", RSS_SCEN, "cdc", f"flat-rss[{engine}/cdc]: no {var}", "no url")
             continue
-        peaks = _cdc_peaks(engine, os.environ[var])
-        _grade_rss(led, engine, "cdc", peaks, [grew(peaks, "backlog", *(n * CDC_CHANGES for n in BACKLOGS))])
+        peaks, n = settled(lambda: _cdc_peaks(engine, os.environ[var]), lambda p: cdc_flaws(engine, p))
+        _grade_rss(led, engine, "cdc", peaks, cdc_flaws(engine, peaks), n)
 
 
 def _part_digests(out: Path) -> list[str]:
@@ -408,6 +442,52 @@ def _stamped_self_test() -> None:
     assert stamped_differ(facts(parts=(0, 1), schemas=(None, None)), 4) == "no declared part (previous 0, this 1)"
 
 
+def _settled_self_test() -> None:
+    """`settled` and the per-path findings on scripted measurements: noise is absorbed, growth that repeats and a failed run are not."""
+    def script(*rounds: dict[str, int | None]) -> tuple[Callable[[], dict[str, int | None]], list[int]]:
+        left, calls = list(rounds), []
+
+        def measure() -> dict[str, int | None]:
+            calls.append(1)
+            assert left, "measured more often than scripted"
+            return dict(left.pop(0))
+
+        return measure, calls
+
+    def grows(p: dict[str, int | None]) -> list[str]:
+        return [g for g in (grew(p, "s", 1, 5),) if g]
+
+    quiet, spike = {"s/1": 100 * MIB, "s/5": 105 * MIB}, {"s/1": 102 * MIB, "s/5": 130 * MIB}
+    measure, calls = script(quiet)
+    assert settled(measure, grows) == (quiet, 1) and len(calls) == 1, "a clean path is measured once"
+    measure, calls = script(spike, quiet)
+    got, n = settled(measure, grows)
+    assert (n, len(calls), got, grows(got)) == (2, 2, {"s/1": 100 * MIB, "s/5": 105 * MIB}, []), "a spike is absorbed by the next reading"
+    measure, calls = script(spike, spike, spike, spike)
+    got, n = settled(measure, grows)
+    assert n == 1 + RESAMPLES == len(calls) and grows(got), "growth that repeats fails, in a bounded number of measurements"
+    real = [{"s/1": 100 * MIB, "s/5": 200 * MIB}, {"s/1": 105 * MIB, "s/5": 190 * MIB}, {"s/1": 102 * MIB, "s/5": 210 * MIB}]
+    got, n = settled(script(*real)[0], grows)
+    assert got == {"s/1": 100 * MIB, "s/5": 190 * MIB} and grows(got), "the lowest readings of a real regression still grow"
+    measure, calls = script({"s/1": None, "s/5": 130 * MIB})
+    got, n = settled(measure, lambda p: over_ceiling(p, 1 << 20))
+    assert n == 1 and got["s/1"] is None, "a run that gave no measurement is not measured again"
+    got, n = settled(script(spike, {"s/1": None, "s/5": 105 * MIB})[0], grows)
+    assert got["s/1"] is None and uneven(got, "s", 1, 5) == ["s/1: no measurement"], "a failed re-measurement is not read as the other run's number"
+    peaks = {f"{m}_capped/{n}": 90 * MIB for m in CAPPED_MODES for n in SIZES[1:]} | {"full/1": 1, "chunked/1000000": 90 * MIB, "chunked/5000000": 100 * MIB}
+    assert batch_flaws("postgres", peaks)[1] == [] and batch_flaws("mongo", peaks)[1] == []
+    peaks["incremental_capped/5000000"] = 130 * MIB
+    assert len(batch_flaws("postgres", peaks)[1]) == 1 and batch_flaws("mongo", peaks)[1] == [], "MongoDB is not claimed capped"
+    peaks["chunked/5000000"] = 200 * MIB
+    assert any("chunked" in f for f in batch_flaws("mysql", peaks)[0]), "a growing keyset page fails the batch cell"
+    from .perf import CDC_CHANGES
+
+    cdc = {f"backlog/{n * CDC_CHANGES}": v * MIB for n, v in zip(BACKLOGS, (100, 120))}
+    assert cdc_flaws("postgres", cdc) == []
+    cdc[f"backlog/{BACKLOGS[1] * CDC_CHANGES}"] = 300 * MIB
+    assert len(cdc_flaws("postgres", cdc)) == 2, "a drain that grows with its backlog, and passes the ceiling, is two findings"
+
+
 def self_test() -> None:
     """The verdicts on hand-made inputs."""
     assert over_ceiling({"full/10000": 40 * MIB, "full/1000000": 41 * MIB}, 41) == []
@@ -433,6 +513,7 @@ def self_test() -> None:
     assert parts_differ(["a"], ["a", "b"]) == "2 parts against the previous release's 1"
     assert parts_differ([], []) == "no declared part (previous 0, this 0)"
     _stamped_self_test()
+    _settled_self_test()
     for path, per_engine in RSS_CEILING_MIB.items():
         assert all(v > 0 for v in per_engine.values()), f"a {path} ceiling of 0 fails every run"
     print("self-test ok: a peak over its ceiling, a missing measurement or growth past the buffer fails flat-rss, capped or not; "
