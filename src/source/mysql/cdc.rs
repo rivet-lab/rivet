@@ -5381,6 +5381,68 @@ mod tests {
     }
 
     #[test]
+    fn the_client_collation_is_read_from_the_charset_status_variable() {
+        let flags2 = [0u8, 1, 2, 3, 4];
+        let charset = [4u8, 45, 0, 8, 0, 255, 0];
+        assert_eq!(
+            client_collation(&[flags2.as_slice(), &charset].concat()),
+            Some(45)
+        );
+        assert_eq!(client_collation(&charset), Some(45));
+        assert_eq!(client_collation(&flags2), None);
+        assert_eq!(client_collation(&[]), None);
+    }
+
+    #[test]
+    fn a_database_drop_with_text_after_the_name_is_unreadable_and_refused() {
+        assert_eq!(
+            refusal(false, false, b"DROP DATABASE other extra"),
+            Some(QueryRefusal::DropDatabase(None))
+        );
+        assert_eq!(
+            drop_database_target("DROP DATABASE shop extra", SqlMode::default()),
+            Some(None)
+        );
+        assert_eq!(
+            drop_database_target("DROP DATABASE shop", SqlMode::default()),
+            Some(Some("shop".to_string()))
+        );
+        assert_eq!(
+            drop_database_target("DROP DATABASE IF", SqlMode::default()),
+            Some(Some("IF".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_exchange_names_its_other_table_only_after_with_table() {
+        let t = |sql: &str| partition_rows_targets(sql, "shop", SqlMode::default());
+        assert_eq!(
+            t("ALTER TABLE a EXCHANGE PARTITION p0 WITH TABLE b"),
+            Some(vec![
+                Some(("shop".to_string(), "a".to_string())),
+                Some(("shop".to_string(), "b".to_string()))
+            ])
+        );
+        assert_eq!(
+            t("ALTER TABLE a EXCHANGE PARTITION p0 BOGUS TABLE b"),
+            Some(vec![Some(("shop".to_string(), "a".to_string())), None])
+        );
+        assert_eq!(
+            t("ALTER TABLE a EXCHANGE PARTITION p0 WITH b c"),
+            Some(vec![Some(("shop".to_string(), "a".to_string())), None])
+        );
+    }
+
+    #[test]
+    fn a_partition_refusal_without_a_schema_names_the_bare_table() {
+        let said = partition_rows_refusal_message(Some(&(String::new(), "kinds".to_string())));
+        assert!(
+            said.contains("captured table `kinds` had a partition"),
+            "{said}"
+        );
+    }
+
+    #[test]
     fn a_partition_refusal_names_the_table_the_harm_and_the_recovery() {
         let said = partition_rows_refusal_message(at("kinds").as_ref());
         assert!(
