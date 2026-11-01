@@ -833,7 +833,7 @@ services:
       start_period: 30s
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8
+    image: clickhouse/clickhouse-server:${RIVET_CLICKHOUSE_TAG:-24.8}
     container_name: rivet-clickhouse
     # `ulimits` are required by the official image at runtime.
     ulimits:
