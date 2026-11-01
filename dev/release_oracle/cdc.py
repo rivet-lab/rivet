@@ -52,6 +52,7 @@ from typing import Callable
 try:  # imported as part of the package
     from . import scenarios
     from .core import (
+        blessing,
         state_db_name,
         HERE,
         ROOT,
@@ -69,6 +70,7 @@ try:  # imported as part of the package
 except ImportError:  # run directly out of dev/release_oracle/
     import scenarios  # type: ignore[no-redef]
     from core import (  # type: ignore[no-redef]
+        blessing,
         state_db_name,
         HERE,
         ROOT,
@@ -1171,12 +1173,6 @@ def _cdc_state_parity(led: Ledger) -> None:
     _cdc_postgres_cleanup(url, w1)
 
     golden = _golden_snapshot()
-    want: dict[str, str] | None = None
-    if golden.exists():
-        try:
-            want = json.loads(golden.read_text())
-        except (OSError, ValueError):
-            want = None
 
     surl = os.environ.get("RIVET_CDC_STATE_URL", "")
     snap_pg: dict[str, str] | None = None
@@ -1206,19 +1202,22 @@ def _cdc_state_parity(led: Ledger) -> None:
                 return
         _cdc_postgres_cleanup(url, w2)
 
-    if os.environ.get("BLESS_CDC", "0") == "1":
+    if blessing("cdc"):
         golden.parent.mkdir(parents=True, exist_ok=True)
         golden.write_text(json.dumps(snap_sqlite, indent=2, sort_keys=True) + "\n")
         led.passed("postgres", "cdc", "state-parity", "-", "blessed cdc state snapshot", "blessed")
         return
 
+    try:
+        want = scenarios.read_golden(golden)
+    except scenarios.GoldenUnreadable as e:
+        led.failed("postgres", "cdc", "state-parity", "-", f"cdc state-parity: {e} (bless first)", "golden unreadable")
+        return
     reasons: list[str] = []
-    if want is None:
-        reasons.append("no-golden(bless first)")
     if snap_sqlite != want:
-        reasons.append(f"sqlite!=golden{_snapshot_diff(want or {}, snap_sqlite)}")
+        reasons.append(f"sqlite!=golden{_snapshot_diff(want, snap_sqlite)}")
     if surl and snap_pg != want:
-        reasons.append(f"postgres!=golden{_snapshot_diff(want or {}, snap_pg)}")
+        reasons.append(f"postgres!=golden{_snapshot_diff(want, snap_pg)}")
     if not reasons:
         led.passed(
             "postgres",

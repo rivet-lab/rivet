@@ -81,13 +81,13 @@ fn no_lib_test_sets_the_state_url_for_the_process() {
     );
 }
 
-/// The `RIVET_*` names in `HARNESS_ENV` in core.py.
-fn gate_allow_list(core: &str) -> BTreeSet<String> {
+/// The `RIVET_*` names in the `name: frozenset[str] = frozenset((` block of core.py.
+fn gate_allow_list(core: &str, name: &str) -> BTreeSet<String> {
     let start = core
-        .find("HARNESS_ENV: frozenset[str] = frozenset((")
-        .expect("HARNESS_ENV in core.py");
+        .find(&format!("{name}: frozenset[str] = frozenset(("))
+        .unwrap_or_else(|| panic!("{name} in core.py"));
     let body = &core[start..];
-    let end = body.find("))").expect("HARNESS_ENV closes");
+    let end = body.find("))").expect("the set closes");
     regex::Regex::new(r#""(RIVET_[A-Z0-9_]+)""#)
         .unwrap()
         .captures_iter(&body[..end])
@@ -124,9 +124,10 @@ fn harness_reads() -> BTreeSet<(String, String)> {
 }
 
 #[test]
-fn the_gate_keeps_every_variable_the_harness_reads() {
+fn the_gate_lists_every_variable_the_harness_reads() {
     let core = std::fs::read_to_string(root().join("dev/release_oracle/core.py")).unwrap();
-    let allowed = gate_allow_list(&core);
+    let plain = gate_allow_list(&core, "HARNESS_ENV");
+    let knobs = gate_allow_list(&core, "GRADING_KNOBS");
     let family = regex::Regex::new(r"^RIVET_(CDC|ORACLE)_[A-Z0-9]+_URL$").unwrap();
     assert!(
         core.contains(r#"HARNESS_ENV_FAMILY = re.compile(r"^RIVET_(CDC|ORACLE)_[A-Z0-9]+_URL$")"#)
@@ -139,16 +140,43 @@ fn the_gate_keeps_every_variable_the_harness_reads() {
     );
     let missing: Vec<String> = reads
         .iter()
-        // The gate sets RIVET_STATE_URL itself before any cell reads it; a shell copy is the leak.
         .filter(|(name, _)| name != "RIVET_STATE_URL")
-        .filter(|(name, _)| !allowed.contains(name) && !family.is_match(name))
+        .filter(|(name, _)| {
+            !plain.contains(name) && !knobs.contains(name) && !family.is_match(name)
+        })
         .map(|(name, file)| format!("{name} (read in {file})"))
         .collect();
     assert!(
         missing.is_empty(),
-        "scrub_inherited_rivet_env() would drop a variable the harness reads; add it to \
-         HARNESS_ENV in dev/release_oracle/core.py:\n{}",
+        "the gate refuses a shell variable it does not list, so one the harness reads must be in \
+         HARNESS_ENV (changes no verdict) or GRADING_KNOBS (moves a tolerance) in \
+         dev/release_oracle/core.py:\n{}",
         missing.join("\n")
+    );
+}
+
+/// A tolerance the harness reads is a recorded knob: listed as plain, it would let a shell value loosen the gate unseen.
+#[test]
+fn every_tolerance_the_harness_reads_is_a_recorded_knob() {
+    let core = std::fs::read_to_string(root().join("dev/release_oracle/core.py")).unwrap();
+    let plain = gate_allow_list(&core, "HARNESS_ENV");
+    let knobs = gate_allow_list(&core, "GRADING_KNOBS");
+    let tolerance = regex::Regex::new(r"_(TOL|SLACK|CHUNK)$").unwrap();
+    let reads: BTreeSet<String> = harness_reads().into_iter().map(|(n, _)| n).collect();
+    let loose: Vec<&String> = reads
+        .iter()
+        .filter(|n| tolerance.is_match(n) && !knobs.contains(*n))
+        .collect();
+    assert!(
+        loose.is_empty(),
+        "a tolerance read by the harness belongs in GRADING_KNOBS (core.py), where gate_config records it: {loose:?}"
+    );
+    let both: Vec<&String> = plain.intersection(&knobs).collect();
+    assert!(both.is_empty(), "listed as plain and as a knob: {both:?}");
+    let dead: Vec<&String> = knobs.iter().filter(|n| !reads.contains(*n)).collect();
+    assert!(
+        dead.is_empty(),
+        "GRADING_KNOBS lists a variable nothing reads: {dead:?}"
     );
 }
 

@@ -45,7 +45,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from .core import Ledger, Status, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
+from .core import Ledger, Status, binary_stamp, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
+from ..pytools.release import CANONICAL_CONFIG, binary_is_tree
 from . import (
     bigquery,
     blessed_flow,
@@ -201,12 +202,23 @@ def verify_seeded_recall(led: Ledger, enabled: bool) -> None:
     seeded.recall(led, seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text())))
 
 
-def gate_kind(ns: argparse.Namespace) -> str:
-    """`release-oracle-full` only for a whole-scope run that gave nothing up: seeded recall on, a clean build, no escape, no bless; else `release-oracle`."""
+def gate_config(ns: argparse.Namespace) -> dict:
+    """What this run is graded under, computed once from argv and the shell: the bless modes, every tolerance override and the state backends."""
+    from .core import GRADING_KNOBS
+    state_url = ns.state_url or os.environ.get("RIVET_GATE_STATE_URL", "")
+    return {
+        "bless": sorted(name for name, on in (("cdc", ns.bless_cdc), ("gifs", ns.bless_gifs), ("local", ns.bless_local)) if on),
+        "knobs": {k: os.environ[k] for k in sorted(GRADING_KNOBS) if k in os.environ},
+        "state": ["postgres", "sqlite"] if state_url else ["sqlite"],
+    }
+
+
+def gate_kind(ns: argparse.Namespace, config: dict | None = None) -> str:
+    """`release-oracle-full` only for a whole-scope run that gave nothing up: seeded recall on, a clean build, no escape, the canonical configuration; else `release-oracle`."""
     from .core import FULL_GATE, REDUCED_GATE
     reduced = (ns.engines or ns.versions or ns.no_cloud or ns.latest_only or ns.no_clean or ns.fast_clean
-               or ns.bless_local or ns.bless_cdc or ns.without_prev_release_comparison
-               or ns.without_replica_topologies or not ns.with_seeded_recall)
+               or ns.without_prev_release_comparison or ns.without_replica_topologies or not ns.with_seeded_recall
+               or (config or gate_config(ns)) != CANONICAL_CONFIG)
     return REDUCED_GATE if reduced else FULL_GATE
 
 
@@ -220,20 +232,31 @@ def _gate_kind_self_test() -> None:
     call = re.search(r"-m dev\.release_oracle (.*?)\$\(ARGS\)", recipe.group(0))
     assert call, "release-oracle-full does not run the gate"
     argv = call.group(1).split()
-    saved = {k: os.environ.pop(k, None) for k in ("RIVET_ORACLE_SEEDED_RECALL", "RIVET_ORACLE_LATEST_ONLY",
-                                                   regression._ESCAPE_ENV, scenarios._REPLICA_ESCAPE_ENV)}
+    from .core import GRADING_KNOBS
+    watched = ("RIVET_ORACLE_SEEDED_RECALL", "RIVET_ORACLE_LATEST_ONLY", regression._ESCAPE_ENV, scenarios._REPLICA_ESCAPE_ENV,
+               "RIVET_GATE_STATE_URL", *GRADING_KNOBS)
+    saved = {k: os.environ.pop(k, None) for k in watched}
     try:
+        os.environ["RIVET_GATE_STATE_URL"] = "postgresql://state.invalid/rivet"
         assert gate_kind(parse_args(argv)) == FULL_GATE, f"`make release-oracle-full` runs {argv}: not a full gate"
         assert gate_kind(parse_args([])) == REDUCED_GATE, "a run without seeded recall is a full gate"
         for extra in (["--no-cloud"], ["--no-clean"], ["--fast-clean"], ["--latest-only"], ["--engines", "postgres"],
-                      ["--without-prev-release-comparison"], ["--without-replica-topologies"], ["--bless-cdc"]):
+                      ["--without-prev-release-comparison"], ["--without-replica-topologies"], ["--bless-cdc"],
+                      ["--bless-local"], ["--bless-gifs"]):
             assert gate_kind(parse_args([*argv, *extra])) == REDUCED_GATE, f"{extra} still reads as a full gate"
+        for knob in sorted(GRADING_KNOBS):
+            os.environ[knob] = "10"
+            assert gate_kind(parse_args(argv)) == REDUCED_GATE, f"{knob} still reads as a full gate"
+            del os.environ[knob]
+        os.environ["RIVET_GATE_STATE_URL"] = ""
+        assert gate_kind(parse_args(argv)) == REDUCED_GATE, "an empty state URL grades SQLite only and still reads as a full gate"
+        assert gate_config(parse_args([*argv, "--state-url", "postgresql://state.invalid/rivet"])) == CANONICAL_CONFIG
         bare = re.search(r"^release-oracle:.*?\n\t(.*)", (ROOT / "Makefile").read_text(), re.M)
         assert bare and "--without-prev-release-comparison" in bare.group(1), "the bare gate gives nothing up"
     finally:
-        for k, v in saved.items():
-            if v is not None:
-                os.environ[k] = v
+        for k in watched:
+            os.environ.pop(k, None)
+        os.environ.update({k: v for k, v in saved.items() if v is not None})
     print("self-test ok: only release-oracle-full's arguments (seeded recall on, nothing given up) make a full-gate verdict")
 
 
@@ -906,30 +929,90 @@ def _self_test() -> int:
     kr.KNOWN_RED = (kr.KnownRed("probe-red-a", "self-test", "2099-01-01"),
                     kr.KnownRed("probe-red-b", "self-test", "2099-01-01"))
     k = kr.KNOWN_RED[0]
-    assert kr.match(f"x {k.match} y", _dt.date(2026, 1, 1)) == (k, True)
-    assert kr.match(f"x {k.match} y", _dt.date(2099, 1, 2)) == (k, False)
+    assert kr.match(k.match, _dt.date(2026, 1, 1)) == (k, True)
+    assert kr.match(k.match, _dt.date(2099, 1, 2)) == (k, False)
+    assert kr.match(f"a FAILED \u00b7 {k.match} (see /tmp/x.log)", _dt.date(2026, 1, 1)) == (k, True), "a live-cell frame is unwrapped"
     assert kr.match("an unrelated failure", _dt.date(2026, 1, 1)) == (None, False)
+    for near in (f"x {k.match} y", f"{k.match} and more", k.match[:-1], k.match + "x", k.match.upper()):
+        assert kr.match(near, _dt.date(2026, 1, 1)) == (None, False), f"a known red matches its whole symptom only: {near!r}"
     probe = Ledger(colour=False)
-    probe.failed("-", "-", "s", "-", f"boom {k.match}")
+    probe.failed("-", "-", "s", "-", k.match)
     assert probe.cells[-1].status is Status.KNOWN and not probe.red
     from .scenarios import _failed
     from .scenarios import _passed
     seen = Ledger(colour=False)
-    _passed(seen, "-", "-", "s", "-", f"ok {k.match}")
+    _passed(seen, "-", "-", "s", "-", k.match)
     assert k.match in seen.known_passed, "a scenario PASS must reach the known-red registry"
     via = Ledger(colour=False)
-    _failed(via, "-", "-", "s", "-", f"boom {k.match}", "detail")
+    _failed(via, "-", "-", "s", "-", k.match, "detail")
     assert via.cells[-1].status is Status.KNOWN, "a scenario failure must meet the known-red registry"
     probe.close_known_red()
     assert probe.red, "an entry that matched nothing in a full run must fail"
     other = kr.KNOWN_RED[-1]
     shown = Ledger(colour=False)
-    shown.passed("-", "-", "s", "-", f"ok {other.match}")
+    shown.passed("-", "-", "s", "-", other.match)
     shown.close_known_red()
     said = [c.detail for c in shown.cells if c.scenario == "known_red"]
     assert any(other.match in d and "PASSED" in d for d in said), said
     assert any(k.match in d and "no cell" in d for d in said), said
     kr.KNOWN_RED = real_reds
+    from . import core as _c
+    saved_env, saved_bless = dict(os.environ), dict(_c._BLESSING)
+    try:
+        os.environ.update(RIVET_BIN="/foreign/rivet", RIVET_BIN_OVERRIDE="/foreign/rivet", BLESS_CDC="1", BLESS_VERDICTS="1", BLESS_DUCKDB="1")
+        assert rivet_bin() == target_dir() / "release" / "rivet", "the binary is located from the tree, never from the shell"
+        refused = apply_run_policy(parse_args([]))
+        assert {"RIVET_BIN", "RIVET_BIN_OVERRIDE", "BLESS_CDC", "BLESS_VERDICTS", "BLESS_DUCKDB"} <= set(refused), refused
+        for k in ("RIVET_BIN", "RIVET_BIN_OVERRIDE", "BLESS_CDC", "BLESS_VERDICTS", "BLESS_DUCKDB"):
+            del os.environ[k]
+        assert apply_run_policy(parse_args([])) == []
+        assert {k: os.environ[k] for k in release_bin_env()} == release_bin_env(), "the binary is the tree's"
+        assert apply_run_policy(parse_args([])) == [], "the gate's own export is not a refusal"
+        assert not any(_c.blessing(k) for k in ("verdicts", "duckdb", "cdc")), "a shell BLESS_* blesses nothing"
+        os.environ["RIVET_PERF_WALL_TOL"] = "10"
+        assert apply_run_policy(parse_args([])) == [], "a tolerance knob is recorded by gate_config, not refused"
+        assert gate_config(parse_args([]))["knobs"] == {"RIVET_PERF_WALL_TOL": "10"}
+        os.environ["RIVET_STATE_URL"] = "sqlite://x"
+        assert apply_run_policy(parse_args([])) == ["RIVET_STATE_URL"], "a product variable in the shell refuses the run"
+        del os.environ["RIVET_STATE_URL"]
+        os.environ["RIVET_BIN_OVERRIDE"] = "/foreign/rivet"
+        assert apply_run_policy(parse_args([])) == ["RIVET_BIN_OVERRIDE"]
+        del os.environ["RIVET_BIN_OVERRIDE"]
+        del os.environ["RIVET_PERF_WALL_TOL"]
+        apply_run_policy(parse_args(["--bless-cdc"]))
+        assert [_c.blessing(k) for k in ("verdicts", "duckdb", "cdc")] == [False, False, True]
+        apply_run_policy(parse_args(["--bless-local"]))
+        assert [_c.blessing(k) for k in ("verdicts", "duckdb", "cdc")] == [True, True, False]
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
+        _c._BLESSING.update(saved_bless)
+    assert _c.binary_stamp.__doc__ and binary_is_tree("0123456789", "0123456789abcdef") and not binary_is_tree("", "0123456789abcdef")
+    assert not binary_is_tree("fedcba987", "0123456789abcdef") and not binary_is_tree(None, "0123456789abcdef")
+    with tempfile.TemporaryDirectory() as td:
+        for body in ("", "{", "[]", "{}", '{"postgres": '):
+            g = Path(td, "golden.json")
+            g.write_text(body)
+            try:
+                scenarios.read_golden(g)
+            except scenarios.GoldenUnreadable:
+                pass
+            else:
+                raise AssertionError(f"golden {body!r} must be unreadable")
+        assert scenarios.read_golden(Path(td, "none.json"), bless=True) == {}, "blessing may start from no file"
+        try:
+            scenarios.read_golden(Path(td, "none.json"))
+        except scenarios.GoldenUnreadable:
+            pass
+        else:
+            raise AssertionError("a missing golden must be unreadable outside blessing")
+        g.write_text("{")
+        try:
+            scenarios.read_golden(g, bless=True)
+        except scenarios.GoldenUnreadable:
+            pass
+        else:
+            raise AssertionError("blessing never overwrites a corrupt golden")
     from .core import SKIP_ALLOWED
     from .live_modules import exclusive_tests
     live_src = "\n".join(f.read_text() for f in (ROOT / "tests" / "live").glob("*.rs"))
@@ -948,8 +1031,9 @@ def _self_test() -> int:
     with _tf.TemporaryDirectory() as d:
         hist = Path(d) / "t.jsonl"
         first = record_timings(hist, [("A", 60.0), ("B", 120.0)], [("s", 30.0)], "RELEASE-READY", 3, 0,
-                               {"A — detail": (1.26, 30.04)})
+                               {"A — detail": (1.26, 30.04)}, config=CANONICAL_CONFIG)
         assert first["phases_load1"] == {"A": [1.3, 30.0]} and first["cores"], first
+        assert _json.loads(hist.read_text().splitlines()[0])["config"] == CANONICAL_CONFIG, "the record carries its configuration"
         timed = Ledger(colour=False)
         timed._buf = []
         timed.phase("one")
@@ -1720,6 +1804,20 @@ def _snowflake_env() -> str:
     return warehouse_env.snowflake()
 
 
+def apply_run_policy(ns: argparse.Namespace) -> list[str]:
+    """What the run is decided by, from argv and the tree only: point every child at the tree's binary and set the bless modes; return the inherited names that refuse the run (set, none of them done)."""
+    from .core import set_blessing, unlisted_env
+    own = release_bin_env()
+    refused = [k for k in unlisted_env() if os.environ[k] != own.get(k)]
+    if os.environ.get("RIVET_BIN_OVERRIDE", own["RIVET_BIN_OVERRIDE"]) != own["RIVET_BIN_OVERRIDE"]:
+        refused.append("RIVET_BIN_OVERRIDE")
+    if refused:
+        return sorted(refused)
+    os.environ.update(own)
+    set_blessing(local=ns.bless_local, cdc=ns.bless_cdc)
+    return []
+
+
 def main(argv: list[str] | None = None) -> int:
     if (argv if argv is not None else sys.argv[1:]) == ["--self-test"]:
         from ..pytools import evidence
@@ -1727,10 +1825,13 @@ def main(argv: list[str] | None = None) -> int:
             evidence.LEDGER = Path(d, "last-green.yaml")  # fixture cells never reach the real ledger
             return _self_test()
     ns = parse_args(argv)
-    from .core import scrub_inherited_rivet_env
-    dropped = scrub_inherited_rivet_env()
-    if dropped:
-        print(f"  dropped from the inherited environment (the product's, not the gate's): {' '.join(dropped)}")
+    refused = apply_run_policy(ns)
+    if refused:
+        print(f"RIVET_GATE_ENV_UNLISTED: {' '.join(refused)} in the shell. The gate takes its binary from the tree and its bless modes "
+              "from argv, and reads only the RIVET_* names in core.HARNESS_ENV and core.GRADING_KNOBS; unset them and run again.",
+              file=sys.stderr)
+        return 2
+    config = gate_config(ns)
     from . import stand_disk
     refused = stand_disk.start_refusal(stand_disk.free_gib())
     if refused:
@@ -1749,7 +1850,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # A clean-tree run builds the binary itself; only --no-clean needs one up front.
     if ns.no_clean and (not rivet_bin().is_file() or not os.access(rivet_bin(), os.X_OK)):
-        print(f"rivet binary not found at {rivet_bin()} (build --release or set RIVET_BIN)", file=sys.stderr)
+        print(f"rivet binary not found at {rivet_bin()} (build --release, or point CARGO_TARGET_DIR at the tree's build)", file=sys.stderr)
         return 2
     if not have("duckdb"):
         print("the pinned duckdb package is not importable — run the gate through `uv run` (make does)", file=sys.stderr)
@@ -1768,9 +1869,6 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"  {_warehouse_env()}")
     print(f"  {_snowflake_env()}")
-    os.environ.setdefault("BLESS_VERDICTS", "1" if ns.bless_local else "0")
-    os.environ.setdefault("BLESS_DUCKDB", "1" if ns.bless_local else "0")
-    os.environ.setdefault("BLESS_CDC", "1" if ns.bless_cdc else "0")
 
     record_stage_runs(_gate_modules())
     from .core import tree_identity
@@ -1854,6 +1952,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         version = rivet("--version").stdout.splitlines()
         print(f"  rivet: {rivet_bin()} ({version[0] if version else 'unknown'})")
+        if not binary_is_tree(binary_stamp(), tree[0]):
+            led.failed("-", "-", "binary_identity", "-",
+                       f"binary identity: {rivet_bin()} reports {version[0] if version else 'no version'}, "
+                       f"not the tree's commit {tree[0][:9]} — the gate would grade another binary")
+            return 1
         run_stages(led, gate_stages(ns))
         # Kept outside the work dir the gate deletes: a census row must name a log that still exists.
         kept = ROOT / "target" / "gate-failures" / f"rivet-oracle-{os.getpid()}.log"
@@ -1871,7 +1974,7 @@ def main(argv: list[str] | None = None) -> int:
             if not (ns.bless_local or ns.bless_cdc):
                 led.close_matrix_rows()
         led.stand_invalid = dog.stop()
-        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate_kind(ns), tree=tree)
+        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate_kind(ns, config), tree=tree, config=config)
         # A run that graded nothing against the previous release has to say so
         # AFTER the verdict, where the reader's eye lands: `RELEASE-READY` is
         # derived from the rows and is literally true ("every non-skipped cell is

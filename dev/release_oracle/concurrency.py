@@ -48,11 +48,11 @@ from typing import Callable
 from pathlib import Path
 
 try:
-    from .core import Ledger, have, run, note_invariant_violations, state_db_name
+    from .core import Ledger, have, note_invariant_violations, rivet_bin, run, state_db_name
     from .scenarios import NO_TIMEOUT, _failed, _passed, _skipped, work_dir
     from ..pytools.duckcli import ARGV as DUCKDB
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
-    from core import Ledger, have, run, note_invariant_violations, state_db_name  # type: ignore
+    from core import Ledger, have, note_invariant_violations, rivet_bin, run, state_db_name  # type: ignore
     from scenarios import NO_TIMEOUT, _failed, _passed, _skipped, work_dir  # type: ignore
     DUCKDB = [sys.executable, str(Path(__file__).resolve().parents[1] / "pytools" / "duckcli.py")]
 
@@ -65,13 +65,6 @@ WRITERS = 4
 #: below, so a collision has several files to land on rather than exactly one.
 ROWS = 4000
 CHUNK = 1000
-
-
-def _rivet_bin() -> Path:
-    return Path(
-        os.environ.get("RIVET_BIN")
-        or Path(__file__).resolve().parents[2] / "target" / "release" / "rivet"
-    )
 
 
 def _psql_state(container: str, sql: str) -> str | None:
@@ -155,7 +148,7 @@ def _run_writers(cfgs: list[Path], state_url: str | None) -> tuple[list[int], st
         (
             c,
             subprocess.Popen(
-                [str(_rivet_bin()), "run", "-c", str(c)],
+                [str(rivet_bin()), "run", "-c", str(c)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -305,9 +298,9 @@ def verify_concurrent_writers_share_a_prefix(
 ) -> None:
     """SQLite-shared leg (always), then the Postgres LOCAL + CLOUD legs when a
     state_url is given — the concurrent-writer contract on BOTH backends."""
-    if not _rivet_bin().exists():
-        _skipped(led, "-", "-", "concurrent_writers_share_a_prefix", "-",
-                 "concurrent-writers: no rivet binary", "no binary")
+    if not rivet_bin().exists():
+        _failed(led, "-", "-", "concurrent_writers_share_a_prefix", "-",
+                f"concurrent-writers: no rivet binary at {rivet_bin()}", "no binary")
         return
     if not _seed(src_container):
         _skipped(led, "-", "-", "concurrent_writers_share_a_prefix", "-",

@@ -43,7 +43,7 @@ def grade(log: str, ledger: dict[str, known_red.KnownRed]) -> dict[str, list[str
             kinds["not run"].append(cell)
         elif status in ("PASS", "LEAK"):
             kinds["FIXED"].append(f"{cell}: green; remove its entry from dev/release_oracle/known_red.py")
-        elif entry.match in f"{cell} — {panics.get(cell, '')}":
+        elif entry.match == f"{cell} — {panics.get(cell, '')}":
             kinds["as recorded"].append(cell)
         else:
             want = entry.match.split(" — ", 1)[1]
