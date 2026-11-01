@@ -157,10 +157,14 @@ mod scenario_artifact_matrix_guard;
 mod schema_drift;
 #[path = "offline/schema_evolution.rs"]
 mod schema_evolution;
+#[path = "offline/seam_bypass_guard.rs"]
+mod seam_bypass_guard;
 #[path = "offline/silent_degrade_ratchet.rs"]
 mod silent_degrade_ratchet;
 #[path = "offline/slot_guard_order_guard.rs"]
 mod slot_guard_order_guard;
+#[path = "offline/sprawl_ratchets.rs"]
+mod sprawl_ratchets;
 #[path = "offline/stand_registry_guard.rs"]
 mod stand_registry_guard;
 #[path = "offline/state_compat.rs"]
