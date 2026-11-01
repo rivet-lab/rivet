@@ -1,7 +1,6 @@
 """Server-truth corpus of statement text: one engine module per source, one fixture directory per engine, one check."""
 import argparse
 import gzip
-import importlib
 import io
 import json
 import os
@@ -17,8 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def engine_module(engine: str):
-    """The generator module of one engine: statement_truth_<engine> beside this file."""
-    return importlib.import_module(f"statement_truth_{engine}")
+    """The generator module of one engine, imported by name so a missing module is a static fact."""
+    if engine == "mysql":
+        import statement_truth_mysql
+
+        return statement_truth_mysql
+    raise SystemExit(f"statement_truth: no generator for engine {engine!r}; the engines are: mysql")
 
 
 def fixture_path(engine: str, server: str) -> Path:

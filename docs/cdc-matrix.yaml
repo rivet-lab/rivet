@@ -298,26 +298,82 @@ scenarios:
     mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
     oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
-  - id: cdc_mysql_no_policy_truncate_spelled_in_another_case_or_folded_character_is_refused
-    what: "without columns_from: grants on a server with lower_case_table_names other than 0 a TRUNCATE of a captured table spelled in another case, or with a character the server folds (the Kelvin sign for k, U+0130 for i), is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5) naming the re-baseline, nothing delivered past it; a statement-format write and a DROP TABLE spelled the same way stop too; the destination is not left with a removed row live"
+  - id: cdc_mysql_a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server
+    what: "without columns_from: grants on a server with lower_case_table_names other than 0 a TRUNCATE of a captured table spelled in another case is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5) naming the re-baseline, nothing delivered past it"
+    mysql:    { test: a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql }
     postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
-    mysql:    { test: [a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql, a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql, a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql, a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql] }
     mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
     mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
     oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
 
-  - id: cdc_mysql_database_dropped_with_a_captured_table_is_refused
-    what: "a DROP DATABASE or DROP SCHEMA of a database that holds a captured table, in the log being read, is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5) and the re-baseline, nothing delivered past it; a drop of another database, or of a same-named database spelled in another case on a case-keeping server, leaves the stream running"
+  - id: cdc_mysql_a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream
+    what: "without columns_from: grants on a server with lower_case_table_names other than 0 a TRUNCATE of a captured table spelled with a character the server folds (the Kelvin sign for k, U+0130 for i) is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5) naming the re-baseline"
+    mysql:    { test: a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql }
     postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
-    mysql:    { test: [a_database_dropped_with_a_captured_table_stops_the_stream_mysql, on_a_server_that_keeps_case_a_database_spelled_in_another_case_is_another_database_and_leaves_the_stream_running_mysql] }
     mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
     mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
     oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
 
-  - id: cdc_mysql_partition_rows_removed_from_a_captured_table_are_refused
-    what: "ALTER TABLE ... TRUNCATE PARTITION, DROP PARTITION and EXCHANGE PARTITION on a captured table (or an exchange that swaps one in) are refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5), because the rows they take out have no row events; the same statements on a table the export does not capture leave the stream running; the re-baseline the message prints delivers the rows the source holds"
+  - id: cdc_mysql_a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server
+    what: "without columns_from: grants on a server with lower_case_table_names other than 0 a DROP TABLE of a captured table spelled in another case is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5), the destination is not left with a removed row live"
+    mysql:    { test: a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql }
     postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
-    mysql:    { test: [a_partition_removed_from_a_captured_table_stops_the_stream_mysql, a_partitioned_table_exchanged_with_a_captured_table_stops_the_stream_mysql, the_same_statements_on_tables_the_export_does_not_capture_leave_the_stream_running_mysql, the_rebaseline_a_partition_stop_prints_delivers_the_rows_the_source_holds_mysql] }
+    mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
+    mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
+    oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
+
+  - id: cdc_mysql_a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server
+    what: "without columns_from: grants on a server with lower_case_table_names other than 0 a statement-format write to a captured table spelled in another case stops the stream instead of being delivered as nothing"
+    mysql:    { test: a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql }
+    postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
+    mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
+    mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
+    oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
+
+  - id: cdc_mysql_a_database_dropped_with_a_captured_table_stops_the_stream
+    what: "a DROP DATABASE or DROP SCHEMA of a database that holds a captured table, in the log being read, is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5) and the re-baseline, nothing delivered past it"
+    mysql:    { test: a_database_dropped_with_a_captured_table_stops_the_stream_mysql }
+    postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
+    mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
+    mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
+    oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
+
+  - id: cdc_mysql_on_a_server_that_keeps_case_a_database_spelled_in_another_case_is_another_database_and_leaves_the_stream_running
+    what: "on a case-keeping server a drop of a same-named database spelled in another case is another database and leaves the stream running"
+    mysql:    { test: on_a_server_that_keeps_case_a_database_spelled_in_another_case_is_another_database_and_leaves_the_stream_running_mysql }
+    postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
+    mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
+    mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
+    oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
+
+  - id: cdc_mysql_a_partition_removed_from_a_captured_table_stops_the_stream
+    what: "ALTER TABLE ... TRUNCATE PARTITION and DROP PARTITION on a captured table are refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5), because the rows they take out have no row events"
+    mysql:    { test: a_partition_removed_from_a_captured_table_stops_the_stream_mysql }
+    postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
+    mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
+    mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
+    oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
+
+  - id: cdc_mysql_a_partitioned_table_exchanged_with_a_captured_table_stops_the_stream
+    what: "ALTER TABLE ... EXCHANGE PARTITION on a captured table, or an exchange that swaps one in, is refused with RIVET_SOURCE_CDC_TRUNCATED (exit 5)"
+    mysql:    { test: a_partitioned_table_exchanged_with_a_captured_table_stops_the_stream_mysql }
+    postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
+    mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
+    mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
+    oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
+
+  - id: cdc_mysql_the_same_statements_on_tables_the_export_does_not_capture_leave_the_stream_running
+    what: "the partition statements on a table the export does not capture leave the stream running"
+    mysql:    { test: the_same_statements_on_tables_the_export_does_not_capture_leave_the_stream_running_mysql }
+    postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
+    mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
+    mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
+    oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
+
+  - id: cdc_mysql_the_rebaseline_a_partition_stop_prints_delivers_the_rows_the_source_holds
+    what: "the re-baseline the partition stop message prints delivers the rows the source holds"
+    mysql:    { test: the_rebaseline_a_partition_stop_prints_delivers_the_rows_the_source_holds_mysql }
+    postgres: { na: "no statement text in the logical stream: a TRUNCATE arrives as a decoded change and DROP DATABASE cannot run while the export's slot is active" }
     mssql:    { na: "the log is a change table, not statements; the server refuses TRUNCATE on a table enabled for CDC" }
     mongo:    { na: "no statement text in the change stream; a dropped collection or database is its own event" }
     oracle:   { na: "LogMiner rows are decoded changes, not statement text the reader lexes" }
