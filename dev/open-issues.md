@@ -111,6 +111,9 @@ them. The prefix lease covers load-vs-load only. Unverified: needs a live test t
 an extract between the decision and the delete. Fix direction: re-check activity at the
 delete, not only at the decision — a refreshed census at the decision point does not
 close the window.
+The canonical `manifest.json` and `_SUCCESS` are the exception, closed 2026-11-01: each is
+re-read just before its own delete (`remove_cleanup`, `src/load/staging.rs`), leaving one
+round trip; parts and run copies are still removed from the decision-time list.
 
 ### P5. A load whose statement landed but whose ledger row did not strands the table — pre-existing (on main)
 `live_pool_ledger::a_ledger_cut_mid_load_fails_loudly_and_the_next_run_finishes_the_job`
