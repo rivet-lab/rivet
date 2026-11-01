@@ -82,14 +82,14 @@ const ITEM_WORDS: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Ident(String),
     Sep,
     Punct(char),
-    Lit,
+    Lit(String),
 }
 
-type Toks = Vec<(Tok, usize)>;
+pub(crate) type Toks = Vec<(Tok, usize)>;
 
 /// The index after the char literal opening at `c[i]`, or None when it is a lifetime.
 fn char_literal_end(c: &[char], i: usize) -> Option<usize> {
@@ -120,17 +120,18 @@ fn string_body(
         i += 1;
     }
     let body: String = c[start..i.min(c.len())].iter().collect();
+    let lit = format!("\"{body}\"");
     let path_chars = |x: char| x.is_alphanumeric() || x == '_' || x == ':';
     if body.starts_with("crate::") && body.chars().all(path_chars) {
         out.extend(lex(&body).into_iter().map(|(t, _)| (t, at)));
     } else {
-        out.push((Tok::Lit, at));
+        out.push((Tok::Lit(lit), at));
     }
     i + 1 + hashes
 }
 
 /// Rust source as tokens with 1-based lines: comments dropped, literals blanked, a string that is exactly a `crate::` path kept as that path.
-fn lex(text: &str) -> Toks {
+pub(crate) fn lex(text: &str) -> Toks {
     let c: Vec<char> = text.chars().collect();
     let word = |x: char| x.is_alphanumeric() || x == '_';
     let (mut i, mut line, mut out) = (0, 1, Toks::new());
@@ -169,7 +170,7 @@ fn lex(text: &str) -> Toks {
         } else if ch == '\'' {
             match char_literal_end(&c, i) {
                 Some(end) => {
-                    out.push((Tok::Lit, at));
+                    out.push((Tok::Lit(c[i..end].iter().collect()), at));
                     i = end;
                 }
                 None => {
@@ -195,12 +196,15 @@ fn lex(text: &str) -> Toks {
             } else if matches!(w.as_str(), "b" | "c") && hashes == 0 && quote {
                 i = string_body(&c, i + 1, 0, false, &mut line, &mut out);
             } else if let Some(end) = byte_char {
-                out.push((Tok::Lit, at));
+                out.push((
+                    Tok::Lit(format!("b{}", c[i..end].iter().collect::<String>())),
+                    at,
+                ));
                 i = end;
             } else if w == "r" && hashes == 1 && c.get(i + 1).is_some_and(|x| word(*x)) {
                 i += 1;
             } else if ch.is_ascii_digit() {
-                out.push((Tok::Lit, at));
+                out.push((Tok::Lit(w), at));
             } else {
                 out.push((Tok::Ident(w), at));
             }
@@ -236,12 +240,12 @@ struct FileScan {
 }
 
 /// The token at `i`, when there is one.
-fn tok(t: &[(Tok, usize)], i: usize) -> Option<&Tok> {
+pub(crate) fn tok(t: &[(Tok, usize)], i: usize) -> Option<&Tok> {
     t.get(i).map(|x| &x.0)
 }
 
 /// The identifier at `i`, when the token is one.
-fn ident_at(t: &[(Tok, usize)], i: usize) -> Option<&str> {
+pub(crate) fn ident_at(t: &[(Tok, usize)], i: usize) -> Option<&str> {
     match tok(t, i) {
         Some(Tok::Ident(s)) => Some(s.as_str()),
         _ => None,
@@ -249,7 +253,7 @@ fn ident_at(t: &[(Tok, usize)], i: usize) -> Option<&str> {
 }
 
 /// The index of the delimiter that closes the one at `open`.
-fn closer_of(t: &[(Tok, usize)], open: usize) -> usize {
+pub(crate) fn closer_of(t: &[(Tok, usize)], open: usize) -> usize {
     let mut depth = 0usize;
     for (k, (x, _)) in t.iter().enumerate().skip(open) {
         match x {
@@ -267,7 +271,7 @@ fn closer_of(t: &[(Tok, usize)], open: usize) -> usize {
 }
 
 /// Whether an attribute gates its item on `test`; None for a `cfg` shape this guard does not read.
-fn test_gate(attr: &[(Tok, usize)]) -> Option<bool> {
+pub(crate) fn test_gate(attr: &[(Tok, usize)]) -> Option<bool> {
     let words: Vec<&str> = (0..attr.len()).filter_map(|i| ident_at(attr, i)).collect();
     if words.first() != Some(&"cfg") || !words.contains(&"test") {
         return Some(false);
@@ -282,7 +286,7 @@ fn test_gate(attr: &[(Tok, usize)]) -> Option<bool> {
 }
 
 /// The index after any attributes that start at `i`.
-fn after_attributes(t: &[(Tok, usize)], mut i: usize) -> usize {
+pub(crate) fn after_attributes(t: &[(Tok, usize)], mut i: usize) -> usize {
     while tok(t, i) == Some(&Tok::Punct('#')) && tok(t, i + 1) == Some(&Tok::Punct('[')) {
         i = closer_of(t, i + 1) + 1;
     }
@@ -290,7 +294,7 @@ fn after_attributes(t: &[(Tok, usize)], mut i: usize) -> usize {
 }
 
 /// The name declared by an out-of-line `mod name;` that starts at `i`, attributes and visibility skipped.
-fn mod_declaration(t: &[(Tok, usize)], i: usize) -> Option<String> {
+pub(crate) fn mod_declaration(t: &[(Tok, usize)], i: usize) -> Option<String> {
     let mut i = after_attributes(t, i);
     if ident_at(t, i) == Some("pub") {
         i += 1;
@@ -305,7 +309,7 @@ fn mod_declaration(t: &[(Tok, usize)], i: usize) -> Option<String> {
 }
 
 /// The index after the item, statement, field or arm that starts at `i`.
-fn skip_item(t: &[(Tok, usize)], i: usize) -> usize {
+pub(crate) fn skip_item(t: &[(Tok, usize)], i: usize) -> usize {
     let mut i = after_attributes(t, i);
     let item = ident_at(t, i).is_some_and(|w| ITEM_WORDS.contains(&w));
     let mut depth = 0usize;
@@ -752,7 +756,7 @@ fn layer_verdict(files: &[(String, String)], layers: &[&str], exceptions: &[&str
 }
 
 /// Every `.rs` file under `dir` as (`root`-relative path, text), sorted.
-fn read_rust_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+pub(crate) fn read_rust_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
     for e in std::fs::read_dir(dir).expect("read dir").flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -773,7 +777,7 @@ fn read_rust_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
 }
 
 /// The files of `src/`.
-fn src_files() -> Vec<(String, String)> {
+pub(crate) fn src_files() -> Vec<(String, String)> {
     let root = super::nonvacuity::repo_root().join("src");
     let mut files = Vec::new();
     read_rust_files(&root, &root, &mut files);

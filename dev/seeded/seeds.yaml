@@ -4393,3 +4393,26 @@ seeds:
       lib:
         cells:
           - "lib:an_existing_change_log_that_this_load_would_corrupt_is_refused"
+
+  - name: cleanup-removes-a-pointer-that-changed-hands
+    class: "`cleanup_source` removes a directory's canonical manifest.json and _SUCCESS on the strength of a read taken before the warehouse jobs ran, so an extract that commits during the jobs loses its markers and the dataset reads as not whole, exit 0"
+    history: "found 2026-11-01 by a rivet-verifier probe of cleanup_target_leased (canonical_run_id read once, maybe_cleanup removes unconditionally); RED on main 2026-11-01 (lib cell: r2's canonical manifest.json absent after the load cleaned r1)"
+    scope: source
+    patch: cleanup-removes-a-pointer-that-changed-hands/shared.patch
+    engines:
+      postgres:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      mysql:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      mssql:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      mongo:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      oracle:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      lib:
+        cells:
+          - "lib:a_run_committed_during_the_jobs_keeps_its_canonical_markers_through_cleanup"
+          - "lib:every_driver_leaves_a_canonical_pointer_that_changed_hands_during_the_jobs"
+          - "lib:a_stateless_cleanup_keeps_a_pair_committed_after_the_plan"
+          - "lib:a_canonical_unreadable_at_delete_time_stays_with_its_marker"
