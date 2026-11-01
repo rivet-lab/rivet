@@ -1,0 +1,11 @@
+--- a/src/pipeline/validate_cmd.rs
++++ b/src/pipeline/validate_cmd.rs
+@@ -100,7 +100,7 @@
+ 
+     let config_dir = Path::new(config_path).parent().unwrap_or(Path::new("."));
+     let run_set = RunSet::select(&config, export_name)?;
+-    let exports: Vec<ExportConfig> = if target.prefix_override.is_some() {
++    let exports: Vec<ExportConfig> = if target.prefix_override.is_some() || true {
+         run_set.declared().to_vec()
+     } else {
+         run_set

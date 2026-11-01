@@ -178,6 +178,7 @@ fn make_child(
     child.partition_by = None;
     child.name = format!("{}__{}", parent.name, name_value);
     child.partition_window = Some(crate::config::PartitionSynth {
+        parent: parent.name.clone(),
         column: col.to_string(),
         range,
     });

@@ -62,6 +62,8 @@ pub enum SchemaDriftPolicy {
 /// One `partition_by` child's bucket over the parent's base query, applied by the planner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionSynth {
+    /// The declared export this bucket was expanded from.
+    pub parent: String,
     /// The `partition_by` column.
     pub column: String,
     /// Half-open `[lo, hi)` day bounds; `None` is the NULL bucket.

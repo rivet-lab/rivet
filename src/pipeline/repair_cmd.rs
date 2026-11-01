@@ -84,16 +84,8 @@ pub fn run_repair_command(
         .parent()
         .unwrap_or_else(|| Path::new("."));
 
-    let export = config
-        .exports
-        .iter()
-        .find(|e| e.name == export_name)
-        .ok_or_else(|| {
-            crate::error::coded(
-                crate::error::codes::CLI_EXPORT_UNKNOWN,
-                format!("export '{}' not found in config", export_name),
-            )
-        })?;
+    let run_set = crate::pipeline::run_set::RunSet::select(&config, Some(export_name))?;
+    let export = &run_set.declared()[0];
 
     let mut plan = build_plan(&config, export, config_dir, false, false, false, params)?;
     if !matches!(plan.strategy, ExtractionStrategy::Chunked(_)) {

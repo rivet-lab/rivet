@@ -599,8 +599,11 @@ fn batch_plans(
     let config_dir = std::path::Path::new(config_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let selected: Vec<&crate::config::ExportConfig> = match export_name {
-        Some(name) => config.exports.iter().filter(|e| e.name == name).collect(),
+    let named = export_name
+        .map(|name| crate::pipeline::run_set::RunSet::select(&config, Some(name)))
+        .transpose()?;
+    let selected: Vec<&crate::config::ExportConfig> = match &named {
+        Some(run_set) => run_set.declared().iter().collect(),
         None => config.exports.iter().collect(),
     };
     let mut probe = if config.source.columns_from_grants() {

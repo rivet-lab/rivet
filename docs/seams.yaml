@@ -17,24 +17,16 @@ seams:
       - {at: src/source/cdc/validate.rs::check_positions, dated: 2026-10-31, reason: "own Success-only filter over run manifests", closes: "ManifestCensus exposes a success filter"}
       - {at: src/source/value_checksum.rs::split_unit_manifests, dated: 2026-10-31, reason: "confirmed defect: no Success filter, a failed unit manifest counts", closes: "ManifestCensus::split_units census fix PR"}
   - id: run-set
-    owner: src/pipeline/run_set.rs::RunSet
+    owner: src/config/cdc.rs::declared_exports
     reads: "the exports one invocation runs: one named export, or the whole config minus the CDC backfill recipes"
     scope: [src/pipeline/, src/cli/, src/preflight/, src/load/, src/plan/]
+    also_in: [src/pipeline/run_set.rs]
     bypass:
       - "backfill_recipe_names ("
       - "exports . iter ( ) . filter ( | e | e . name == name )"
       - ". find ( | e | e . name == name )"
       - ". find ( | e | e . name == export_name )"
-    exceptions:
-      - {at: src/cli/dispatch.rs::batch_plans, dated: 2026-10-31, reason: "filters the config by name instead of RunSet::select", closes: "route batch_plans through RunSet::select"}
-      - {at: src/load/plan.rs::check, dated: 2026-10-31, reason: "Selection::check looks an export up by name", closes: "route the load check through RunSet::select"}
-      - {at: src/pipeline/cli.rs::accept_state, dated: 2026-10-31, reason: "looks the export up by name", closes: "route accept_state through RunSet::select"}
-      - {at: src/pipeline/plan_cmd.rs::plannable_exports, dated: 2026-10-31, reason: "drops backfill recipes by hand", closes: "route plan through RunSet::select"}
-      - {at: src/pipeline/reconcile_cmd.rs::run_reconcile_command, dated: 2026-10-31, reason: "looks the export up by name", closes: "route reconcile through RunSet::select"}
-      - {at: src/pipeline/repair_cmd.rs::run_repair_command, dated: 2026-10-31, reason: "looks the export up by name", closes: "route repair through RunSet::select"}
-      - {at: src/pipeline/validate_cmd.rs::run_validate_command, dated: 2026-10-31, reason: "confirmed defect: partition_by reads the literal {partition} prefix and exits 0 legacy_run", closes: "route validate through RunSet::select"}
-      - {at: src/preflight/mod.rs::check, dated: 2026-10-31, reason: "looks the export up by name", closes: "route preflight check through RunSet::select"}
-      - {at: src/preflight/mod.rs::load_type_reports, dated: 2026-10-31, reason: "drops backfill recipes by hand", closes: "route load type reports through RunSet::select"}
+    exceptions: []
   - id: url-authority
     owner: src/url_text.rs::host_port_span
     reads: "the userinfo and the host span of a connection URL"
