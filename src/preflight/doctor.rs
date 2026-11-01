@@ -218,7 +218,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
     }
 
     let mut seen_destinations: Vec<String> = Vec::new();
-    for export in &config.exports {
+    for export in &crate::config::declared_exports(&config, None)? {
         let dest_key = super::destination_identity(&export.destination);
         if seen_destinations.contains(&dest_key) {
             continue;

@@ -20,6 +20,8 @@ seams:
       - "exports . iter ( ) . filter ( | e | e . name == name )"
       - ". find ( | e | e . name == name )"
       - ". find ( | e | e . name == export_name )"
+      - "None => config . exports . iter ( ) . collect ( )"
+      - "for export in & config . exports"
     exceptions: []
   - id: url-authority
     owner: src/url_text.rs::host_port_span
