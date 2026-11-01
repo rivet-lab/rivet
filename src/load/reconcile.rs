@@ -2489,26 +2489,33 @@ mod tests {
             keyed_run("r2", "base/manifest-r2.json", &["b.parquet"]),
         ];
         let writing: std::collections::HashSet<String> = ["r2".to_string()].into();
-        let keys = crate::load::staging::cleanup_keys(&runs, &writing, |_| Some("r1".into()));
+        let cleanup = crate::load::staging::cleanup_keys(&runs, &writing, |_| Some("r1".into()));
         assert_eq!(
-            keys,
+            cleanup.keys,
             vec![
-                "base/_SUCCESS".to_string(),
                 "base/a.parquet".to_string(),
                 "base/manifest-r1.json".to_string(),
-                "base/manifest.json".to_string(),
             ],
-            "r1's manifest, part and the canonical pointer to it go; r2 is still writing"
+            "r1's manifest and part go; r2 is still writing"
+        );
+        assert_eq!(
+            cleanup.canonical_dirs(),
+            ["base".to_string()],
+            "the canonical pointer to r1 is retired with it"
         );
     }
 
     #[test]
     fn a_canonical_manifest_describing_another_run_stays() {
         let runs = [keyed_run("r1", "base/manifest-r1.json", &["a.parquet"])];
-        let keys =
+        let cleanup =
             crate::load::staging::cleanup_keys(&runs, &Default::default(), |_| Some("r9".into()));
+        assert!(
+            cleanup.canonical_dirs().is_empty(),
+            "no canonical pointer is retired"
+        );
         assert_eq!(
-            keys,
+            cleanup.keys,
             vec![
                 "base/a.parquet".to_string(),
                 "base/manifest-r1.json".to_string()
