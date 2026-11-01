@@ -49,7 +49,7 @@ from pathlib import Path
 from tempfile import mkdtemp
 
 try:  # importable both as a package module and as a plain sibling file
-    from .core import (GREEN_CELLS, HERE, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, SKIP_ALLOWED, self_skipped, Ledger, Proc, Status, container_for_port, docker, docker_exec, have,
+    from .core import (GREEN_CELLS, HERE, blessing, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, SKIP_ALLOWED, self_skipped, Ledger, Proc, Status, container_for_port, docker, docker_exec, have,
                        nextest_filter, nextest_outcomes, nextest_panics, nextest_passed, nextest_started, port_of, release_bin_env,
                        rivet, rivet_bin, run, sqlcmd, test_passed)
     from ..pytools.duckcli import ARGV as DUCKDB
@@ -57,6 +57,7 @@ try:  # importable both as a package module and as a plain sibling file
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
     from core import (  # type: ignore
         HERE,
+        blessing,
         RAN_LIVE_MODULES,
         RAN_LIVE_TESTS,
         SKIP_ALLOWED,
@@ -221,10 +222,6 @@ def cfg(*query: str) -> str:
     """Query matrix.yaml through lib/cfg.py — one source of truth, no PyYAML (a
     release gate must run on a bare python3)."""
     return run([PY, str(_asset("lib/cfg.py")), str(MATRIX), *query]).stdout.strip()
-
-
-def _bless(flag: str) -> bool:
-    return os.environ.get(flag, "0") == "1"
 
 
 def _tcp_open(host: str, port: int, timeout: float = 3.0) -> bool:
@@ -447,22 +444,32 @@ def _json_canon(text: str) -> str:
         return ""
 
 
-def _golden_load(path: Path) -> dict:
+class GoldenUnreadable(Exception):
+    """A golden file that cannot be compared against: missing, truncated, empty or not an object of engines."""
+
+
+def read_golden(path: Path, *, bless: bool = False) -> dict:
+    """The golden at `path` as a non-empty JSON object; anything else raises GoldenUnreadable (a missing or empty file is `{}` only when `bless`)."""
     try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as e:
+        raise GoldenUnreadable(f"{path.name} is unreadable ({type(e).__name__}: {str(e)[:80]})") from e
+    if not isinstance(data, dict) or (not data and not bless):
+        raise GoldenUnreadable(f"{path.name} holds no engines")
+    return data
 
 
 def _golden_get(path: Path, engine: str, key: str) -> str:
-    """The blessed value as canonical JSON, or "" when it was never blessed."""
-    val = _golden_load(path).get(engine, {}).get(key)
+    """The blessed value as canonical JSON, or "" when that key was never blessed; an unreadable golden raises."""
+    val = read_golden(path).get(engine, {}).get(key)
     return "" if val is None else json.dumps(val, sort_keys=True)
 
 
 def _golden_put(path: Path, engine: str, key: str, got: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    golden = _golden_load(path)
+    golden = read_golden(path, bless=True)
     golden.setdefault(engine, {})[key] = json.loads(got)
     path.write_text(json.dumps(golden, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
 
@@ -678,7 +685,7 @@ def _fidelity_check(engine: str, key: str, got: str) -> bool:
     blessed value — a missing golden is a failure (bless first), never a pass on
     an absent expectation.
     """
-    if _bless("BLESS_DUCKDB"):
+    if blessing("duckdb"):
         _golden_put(GOLDEN_DUCKDB, engine, key, got)
         return True
     want = _golden_get(GOLDEN_DUCKDB, engine, key)
@@ -837,7 +844,7 @@ def sc_verdicts(led: Ledger, engine: str, tag: str, url: str) -> None:
             [PY, str(_asset("lib/parse_verdicts.py")), verdict_map], stdin=out
         ).stdout.strip()
 
-    if _bless("BLESS_VERDICTS"):
+    if blessing("verdicts"):
         # Never bless an EMPTY map — a failed connect must fail LOUD, not quietly
         # write a 0-table golden that asserts nothing on the next release.
         if verdict_map in ("", "{}"):
@@ -848,7 +855,7 @@ def sc_verdicts(led: Ledger, engine: str, tag: str, url: str) -> None:
             )
             return
         GOLDEN_VERDICTS.parent.mkdir(parents=True, exist_ok=True)
-        golden = _golden_load(GOLDEN_VERDICTS)
+        golden = read_golden(GOLDEN_VERDICTS, bless=True)
         golden[engine] = json.loads(verdict_map)
         GOLDEN_VERDICTS.write_text(json.dumps(golden, indent=2, sort_keys=True) + "\n")
         _passed(led, engine, tag, "verdicts", "-", f"blessed verdicts[{engine}]", "blessed")
@@ -863,10 +870,15 @@ def sc_verdicts(led: Ledger, engine: str, tag: str, url: str) -> None:
             f"phantom-heavy-chunk={phantom}",
         )
         return
-    want = json.dumps(_golden_load(GOLDEN_VERDICTS).get(engine, {}), sort_keys=True)
+    try:
+        golden = read_golden(GOLDEN_VERDICTS)
+    except GoldenUnreadable as e:
+        _failed(led, engine, tag, "verdicts", "-", f"verdicts[{engine}]: {e}", "golden unreadable")
+        return
+    want = json.dumps(golden.get(engine, {}), sort_keys=True)
     got = _json_canon(verdict_map)
     if want in ("", "{}"):
-        _skipped(led, engine, tag, "verdicts", "-", f"no golden for {engine} (bless first)", "no golden")
+        _failed(led, engine, tag, "verdicts", "-", f"verdicts[{engine}]: {GOLDEN_VERDICTS.name} holds no table for {engine} (bless first)", "no golden")
         return
     if want == got:
         _passed(led, engine, tag, "verdicts", "-", "verdicts match golden (0 phantom)")
@@ -982,7 +994,7 @@ def sc_integrity_types(led: Ledger, engine: str, tag: str, url: str) -> None:
                 # (or an empty write) — a bug, not the golden refusal.
                 fails += f"{tmt}-CSV-EXPORT-FAILED[exit={pc.returncode}] "
 
-    if _bless("BLESS_DUCKDB"):
+    if blessing("duckdb"):
         _passed(led, engine, tag, "integrity_types", "-", f"blessed duckdb-types[{engine}]", "blessed")
         return
     if not fails:
@@ -1185,7 +1197,7 @@ def run_scenarios(led: Ledger, engine: str, tag: str, url: str) -> None:
         sc_sentinels(led, engine, tag, url)
     # When blessing the local goldens (verdicts + duckdb-type) the store loads add
     # nothing — skip them.
-    if _bless("BLESS_VERDICTS") or _bless("BLESS_DUCKDB"):
+    if blessing("verdicts") or blessing("duckdb"):
         return
     with led.span(f"{engine}: keyset_parallel"):
         sc_keyset_parallel(led, engine, tag, url)
