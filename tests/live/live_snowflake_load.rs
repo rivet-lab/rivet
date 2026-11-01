@@ -247,7 +247,7 @@ fn a_load_refuses_a_table_it_did_not_load_on_every_attempt(e: SqlEngine) {
         assert_eq!(out.status.code(), Some(5), "attempt {attempt}: {said}");
         assert!(
             said.contains("RIVET_LOAD_TARGET_NOT_RIVETS")
-                && said.contains("no record of rivet loading it"),
+                && said.contains("no record of a successful rivet load"),
             "attempt {attempt}: {said}"
         );
         assert_eq!(sf.kind(&table).as_deref(), Some("BASE TABLE"));
