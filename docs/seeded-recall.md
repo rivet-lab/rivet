@@ -54,6 +54,18 @@ The cells run under nextest in the scratch tree, with `--retries 0` and with
 `RIVET_GATE_STATE_URL`, which is dropped at exit. The shared stand state database
 is never touched.
 
+## The run record and the tag rule
+
+Every recall appends one line to `recall-runs.jsonl` in the seeded state dir
+(`target/seeded`, or `RIVET_SEEDED_DIR`): the scratch tree's `sha`, whether the run was
+`complete` (no `--seeds`, no `--engines`), whether it was `green` (no failed row, the
+NOT-GRADED-HERE ceiling held) and whether the repo tree was `dirty`.
+
+`python3 dev/pytools/release.py` refuses to tag a sha unless that file holds a complete,
+green, clean-tree recall of exactly that sha. When the recall ran on another machine,
+copy the file and pass `--recall-record FILE`. A recall of another commit, a narrowed
+one, a red one, one from a dirty tree and a missing record are each refused.
+
 ## What a row means
 
 | status | meaning | gate row |
