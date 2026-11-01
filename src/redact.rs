@@ -54,7 +54,9 @@
 pub fn redact_url_passwords(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for word in s.split_inclusive(|c: char| c.is_ascii_whitespace()) {
-        match userinfo_span(word).and_then(|(start, at)| word.get(..start).zip(word.get(at..))) {
+        match crate::url_text::credential_span(word, crate::url_text::Mask::Password)
+            .and_then(|(start, at)| word.get(..start).zip(word.get(at..)))
+        {
             Some((scheme, host)) => {
                 out.push_str(scheme);
                 out.push_str("REDACTED");
@@ -64,28 +66,6 @@ pub fn redact_url_passwords(s: &str) -> String {
         }
     }
     out
-}
-
-/// A byte a URL scheme may hold after its first letter.
-fn is_scheme_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-')
-}
-
-/// The userinfo of the first `scheme://user:password@` in a whitespace-free word, as (userinfo start, its `@`): the LAST `@` of the word ends it, since a raw password may itself hold `@ / ? #`, and a `:` must precede that `@`.
-fn userinfo_span(word: &str) -> Option<(usize, usize)> {
-    let at = word.rfind('@')?;
-    let last_colon = word.get(..at)?.rfind(':')?;
-    word.match_indices("://")
-        .map(|(scheme_end, _)| (scheme_end, scheme_end + 3))
-        .take_while(|(_, userinfo)| *userinfo <= last_colon)
-        .find(|(scheme_end, _)| {
-            word.as_bytes()[..*scheme_end]
-                .iter()
-                .rev()
-                .take_while(|b| is_scheme_byte(**b))
-                .any(u8::is_ascii_alphabetic)
-        })
-        .map(|(_, userinfo)| (userinfo, at))
 }
 
 /// Compose every redactor.  Use this at every boundary that turns a
