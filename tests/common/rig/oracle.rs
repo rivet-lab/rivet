@@ -229,6 +229,16 @@ impl Rig {
             .expect("oracle_container_out needs `.census_oracle()`/`.duckdb_oracle()`")
     }
 
+    /// Rewrites delivered part `part` in place through the DuckDB container that reads it; `select` reads the part's current rows as `src`.
+    pub fn rewrite_part(&self, part: &Path, select: &str) {
+        let container = self.oracle_container_out();
+        let name = part.file_name().unwrap().to_string_lossy().into_owned();
+        super::super::duckdb::duckdb_run_sql_json(&format!(
+            "CREATE TEMP TABLE src AS SELECT * FROM read_parquet('{container}/{name}'); \
+             COPY ({select}) TO '{container}/{name}' (FORMAT parquet)"
+        ));
+    }
+
     pub fn row_census(&self) -> super::super::duckdb::RowCensus {
         let container = self.oracle_container_dir.as_ref().expect(
             "row_census needs `.census_oracle()` — the DuckDB container reads \
@@ -298,7 +308,13 @@ impl Rig {
             "postgres" => E::Postgres,
             "mysql" if self.source_url.contains(":3307") => E::MysqlCdc,
             "mssql" if self.source_url.contains(":1434") => E::MssqlCdc,
-            "mongo" if self.source_url.contains(":27018") => E::MongoRs,
+            "mongo"
+                if self
+                    .source_url
+                    .contains(&format!(":{}", super::super::env::mongo_rs_port())) =>
+            {
+                E::MongoRs
+            }
             // MAIN stand — wired 2026-08-29 so the batch suites can census at
             // all; the ports keep the two instances apart (a shared arm would
             // read the wrong server and an absent table reads as zero rows).

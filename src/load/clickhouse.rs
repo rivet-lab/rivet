@@ -352,6 +352,9 @@ impl ClickhouseLoader {
             .map(|s| s.column_name.as_str())
             .zip(canonical.split('\t'))
             .collect();
+        for warning in zone_less_columns(&TargetLoader::fqtn(self, &name), &existing, &wanted) {
+            log::warn!("{warning}");
+        }
         Ok(changelog_conflict(
             &TargetLoader::fqtn(self, &name),
             &TargetLoader::fqtn(self, table),
@@ -761,7 +764,12 @@ fn changelog_conflict(
              (the export's mode changed; ADR-0035). {restart}"
         ));
     }
+    let sorting_key = sorting_key.trim();
     let key: Vec<String> = sorting_key
+        .strip_prefix('(')
+        .and_then(|k| k.strip_suffix(')'))
+        .filter(|k| !k.contains(['(', ')']))
+        .unwrap_or(sorting_key)
         .split(',')
         .map(|c| c.trim().trim_matches('`').to_string())
         .filter(|c| !c.is_empty())
@@ -790,7 +798,7 @@ fn changelog_conflict(
     }
     wanted.iter().find_map(|&(name, want)| {
         let (_, have) = existing.iter().find(|(n, _)| *n == name)?;
-        (*have != want).then(|| {
+        (*have != want && !zone_less_of(have, want)).then(|| {
             format!(
                 "column `{name}` of `{changes}` is {have}, but the export now resolves it to {want}; \
                  inserting would convert every value silently. Widen it with `ALTER TABLE \
@@ -799,6 +807,34 @@ fn changelog_conflict(
             )
         })
     })
+}
+
+/// Whether `have` is `want` without the zone rivet declares timestamps in.
+fn zone_less_of(have: &str, want: &str) -> bool {
+    let zoned = format!(", '{}')", crate::types::target::CLICKHOUSE_TIMESTAMP_ZONE);
+    want.contains(&zoned) && have == want.replace(&zoned, ")")
+}
+
+/// A warning for each existing column declared without the zone rivet now declares.
+fn zone_less_columns(
+    changes: &str,
+    existing: &[(&str, &str)],
+    wanted: &[(&str, &str)],
+) -> Vec<String> {
+    wanted
+        .iter()
+        .filter_map(|&(name, want)| {
+            let (_, have) = existing.iter().find(|(n, _)| *n == name)?;
+            zone_less_of(have, want).then(|| {
+                format!(
+                    "column `{name}` of `{changes}` is {have}: ClickHouse shows its values in the \
+                     server's time zone, not as the source wrote them; rivet declares {want} for \
+                     new tables and keeps loading this one as it is. To read the values as written: \
+                     `ALTER TABLE {changes} MODIFY COLUMN `{name}` {want}` (not possible for a key column)"
+                )
+            })
+        })
+        .collect()
 }
 
 /// One row, tab-separated: how ClickHouse itself spells each of `types`, so a declared
@@ -1295,6 +1331,28 @@ mod tests {
             None,
             "the catalog's spelling of the same key"
         );
+        assert_eq!(
+            conflict(
+                &cdc,
+                &pk,
+                ("ReplacingMergeTree", "(`id`)"),
+                &cols,
+                &cdc_want
+            ),
+            None,
+            "a one-column key as ClickHouse 26 spells it"
+        );
+        assert!(
+            conflict(
+                &cdc,
+                &pk,
+                ("ReplacingMergeTree", "(id, toDate(at))"),
+                &cols,
+                &cdc_want
+            )
+            .is_some(),
+            "a key that is an expression is not this load's key"
+        );
 
         let narrow = [("id", "Int64"), ("at", "Nullable(DateTime64(3, 'UTC'))")];
         let ty = conflict(&cdc, &pk, ("ReplacingMergeTree", "id"), &narrow, &cdc_want)
@@ -1340,6 +1398,62 @@ mod tests {
         );
         let added = conflict(Some(declared), "").expect("partition added to a flat log");
         assert!(added.contains("is partitioned by nothing"), "{added}");
+    }
+
+    /// A timestamp column an earlier release declared without a zone loads on with a warning;
+    /// any other difference in its type is still refused.
+    #[test]
+    fn a_zone_less_timestamp_column_is_kept_with_a_warning() {
+        let pk = ["id".to_string()];
+        let want = "Nullable(DateTime64(6, 'UTC'))";
+        let conflict = |have: &str| {
+            let shape = changelog_shape(true, "t", &pk, None).unwrap();
+            changelog_conflict(
+                "d.t__changes",
+                "d.t",
+                &shape,
+                &pk,
+                ("ReplacingMergeTree", "id", ""),
+                &[("id", "Int64"), ("at", have)],
+                &[("id", "Int64"), ("at", want)],
+            )
+        };
+        assert_eq!(conflict("Nullable(DateTime64(6))"), None);
+        assert_eq!(conflict(want), None);
+        for refused in [
+            "Nullable(DateTime64(3))",
+            "Nullable(DateTime64(6, 'Asia/Tokyo'))",
+            "DateTime64(6)",
+            "Nullable(String)",
+        ] {
+            assert!(
+                conflict(refused).is_some(),
+                "{refused} must stay a conflict"
+            );
+        }
+        let warned = zone_less_columns(
+            "d.t__changes",
+            &[
+                ("id", "Int64"),
+                ("at", "Nullable(DateTime64(6))"),
+                ("tags", "Array(Nullable(DateTime64(3)))"),
+            ],
+            &[
+                ("id", "Int64"),
+                ("at", want),
+                ("tags", "Array(Nullable(DateTime64(3, 'UTC')))"),
+            ],
+        );
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(
+            warned[0].contains("column `at` of `d.t__changes` is Nullable(DateTime64(6))")
+                && warned[0].contains(
+                    "ALTER TABLE d.t__changes MODIFY COLUMN `at` Nullable(DateTime64(6, 'UTC'))"
+                ),
+            "{}",
+            warned[0]
+        );
+        assert!(zone_less_columns("d.t__changes", &[("at", want)], &[("at", want)]).is_empty());
     }
 
     #[test]
@@ -1921,7 +2035,7 @@ mod tests {
             "columns matched by name, the later version won"
         );
         let e = format!("{:#}", refused.expect_err("a NULL key must refuse"));
-        assert!(e.contains("`id`") && e.contains("NULL"), "{e}");
+        assert!(e.contains("id") && e.contains("NULL"), "{e}");
     }
 
     #[test]

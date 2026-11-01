@@ -359,4 +359,24 @@ mod tests {
         assert_eq!(bit_string(&[true, false, true, true]), "1011");
         assert_eq!(bit_string(&[]), "");
     }
+
+    #[test]
+    fn hex_bytes_matches_a_digit_table_for_every_byte_and_the_mssql_lsn_shape() {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let all: Vec<u8> = (0..=255u8).collect();
+        let expected: String = all
+            .iter()
+            .flat_map(|b| {
+                [
+                    DIGITS[(b >> 4) as usize] as char,
+                    DIGITS[(b & 15) as usize] as char,
+                ]
+            })
+            .collect();
+        assert_eq!(hex_bytes(&all), expected);
+        assert_eq!(
+            hex_bytes(&[0, 0, 0, 0x2d, 0, 0, 0, 0xd8, 0x01, 0x94]),
+            "0000002d000000d80194"
+        );
+    }
 }

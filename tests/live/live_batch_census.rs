@@ -106,16 +106,10 @@ fn batch_census_distinct_leg_catches_a_duplicated_key_postgres() {
     // duplicated and every total still agrees.
     let parts = files_with_extension(&rig.out_dir(), "parquet");
     let first = parts.first().expect("the run wrote a part");
-    let name = first.file_name().unwrap().to_string_lossy().into_owned();
-    let container = rig.oracle_container_out();
-    let _ = duckdb_run_sql_json(&format!(
-        "COPY (SELECT * FROM read_parquet('{container}/{name}') WHERE id <> 100 \
-               UNION ALL \
-               SELECT * FROM read_parquet('{container}/{name}') WHERE id = 1) \
-         TO '{container}/{name}.rewritten' (FORMAT parquet)"
-    ));
-    std::fs::rename(first.with_extension("parquet.rewritten"), first)
-        .expect("swap in the rewritten part");
+    rig.rewrite_part(
+        first,
+        "SELECT * FROM src WHERE id <> 100 UNION ALL SELECT * FROM src WHERE id = 1",
+    );
 
     let dup = rig.row_census();
     assert_eq!(
@@ -172,15 +166,10 @@ fn batch_census_value_leg_catches_a_changed_cell_postgres() {
 
     let parts = files_with_extension(&rig.out_dir(), "parquet");
     let first = parts.first().expect("the run wrote a part");
-    let name = first.file_name().unwrap().to_string_lossy().into_owned();
-    let container = rig.oracle_container_out();
-    let _ = duckdb_run_sql_json(&format!(
-        "COPY (SELECT * REPLACE (CASE WHEN id = 7 THEN 'tampered' ELSE v END AS v) \
-               FROM read_parquet('{container}/{name}')) \
-         TO '{container}/{name}.rewritten' (FORMAT parquet)"
-    ));
-    std::fs::rename(first.with_extension("parquet.rewritten"), first)
-        .expect("swap in the rewritten part");
+    rig.rewrite_part(
+        first,
+        "SELECT * REPLACE (CASE WHEN id = 7 THEN 'tampered' ELSE v END AS v) FROM src",
+    );
 
     let bad = rig.row_census();
     assert_eq!(

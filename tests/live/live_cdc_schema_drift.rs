@@ -801,14 +801,14 @@ fn pg_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it(
 fn mongo_cdc_a_field_added_while_a_run_is_open_is_in_the_document() {
     require_alive(LiveService::Mongo);
     let db = unique_name("hot_field");
-    let m = MongoTest::connect(27018, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     let _guard = MongoDbGuard {
-        port: 27018,
+        port: mongo_rs_port(),
         db: db.clone(),
     };
     m.drop_collection("t");
     let mut rig = Rig::mongo_cdc("t")
-        .source_url(&MongoTest::url(27018, &db))
+        .source_url(&MongoTest::url(mongo_rs_port(), &db))
         .cdc("rollover: 1")
         .cdc("max_events: 1000000");
     m.insert_many("t", vec![mongodb::bson::doc! { "_id": 1, "v": 1 }]);

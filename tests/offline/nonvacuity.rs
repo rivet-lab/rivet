@@ -98,3 +98,30 @@ pub fn require_needle(text: &str, subject: &str, needle: &str, floor: usize, hin
          search, not about the code. {hint}"
     );
 }
+
+/// `script` must be one the `gate-scripts` job's derived self-test step runs.
+///
+/// The step lists nothing by hand: `gate_self_tests.py --list` is the set CI runs. A script that
+/// stopped handling `--self-test`, or moved out of the scanned directories, drops off that list,
+/// and the job would stay green without it.
+pub fn require_gate_self_test(gate_shell: &str, script: &str) {
+    require_needle(
+        gate_shell,
+        "ci.yml's `gate-scripts` shell",
+        "gate_self_tests.py",
+        1,
+        "CI must run the derived self-test step.",
+    );
+    let out = std::process::Command::new("python3")
+        .arg(".github/scripts/gate_self_tests.py")
+        .arg("--list")
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("run gate_self_tests.py --list: {e}"));
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        listed.lines().any(|l| l == script),
+        "NON-VACUITY: `{script}` is not among the self-tests CI runs ({}):\n{listed}",
+        out.status
+    );
+}

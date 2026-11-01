@@ -382,9 +382,9 @@ fn mongo_batch_read_concern_snapshot_empty_first_run_then_populated() {
     // 0-doc collection must not wedge), and a second run after the collection is
     // populated must read every doc under snapshot.
     require_alive(LiveService::MongoRs);
-    const RS_PORT: u16 = 27018;
+    let rs_port = mongo_rs_port();
     let db = unique_name("mrc_snap");
-    let m = MongoTest::connect(RS_PORT, &db);
+    let m = MongoTest::connect(rs_port, &db);
     // `read_concern: snapshot` for a find requires MongoDB 5.0+; on 4.4 it is
     // unsupported, so self-skip rather than fail the version matrix.
     if m.server_major() < 5 {
@@ -395,7 +395,7 @@ fn mongo_batch_read_concern_snapshot_empty_first_run_then_populated() {
     m.create_empty_collection("t");
 
     let rig = Rig::mongo_batch("t")
-        .source_url(&MongoTest::url(RS_PORT, &db))
+        .source_url(&MongoTest::url(rs_port, &db))
         .mongo("read_concern: snapshot");
 
     // Empty first run: snapshot read of a 0-doc collection reads nothing, cleanly.

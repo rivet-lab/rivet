@@ -38,8 +38,13 @@ fn seeded(prefix: &str, n: i64) -> (String, Table) {
 
 /// One ClickHouse statement over HTTP; the response body, or a panic naming the SQL.
 fn ch(sql: &str) -> String {
+    ch_at(CLICKHOUSE_HTTP_URL, sql)
+}
+
+/// [`ch`] against the server at `url`.
+fn ch_at(url: &str, sql: &str) -> String {
     let resp = reqwest::blocking::Client::new()
-        .post(CLICKHOUSE_HTTP_URL)
+        .post(url)
         .basic_auth(CLICKHOUSE_USER, Some(CLICKHOUSE_PASSWORD))
         .body(sql.to_string())
         .send()
@@ -53,20 +58,27 @@ fn ch(sql: &str) -> String {
     body.trim().to_string()
 }
 
-/// A scratch ClickHouse database dropped on drop.
-struct Db(String);
+/// A scratch ClickHouse database on the server at `.1`, dropped on drop.
+struct Db(String, &'static str);
 
 impl Db {
     fn new(prefix: &str) -> Self {
+        Self::on(CLICKHOUSE_HTTP_URL, prefix)
+    }
+
+    /// A scratch database on the server at `url`.
+    fn on(url: &'static str, prefix: &str) -> Self {
         let name = unique_name(prefix);
-        ch(&format!("CREATE DATABASE {name}"));
-        Db(name)
+        ch_at(url, &format!("CREATE DATABASE {name}"));
+        Db(name, url)
     }
 }
 
 impl Drop for Db {
     fn drop(&mut self) {
-        let _ = std::panic::catch_unwind(|| ch(&format!("DROP DATABASE IF EXISTS {}", self.0)));
+        let _ = std::panic::catch_unwind(|| {
+            ch_at(self.1, &format!("DROP DATABASE IF EXISTS {}", self.0))
+        });
     }
 }
 
@@ -80,6 +92,11 @@ fn source_rows(tbl: &str) -> Vec<(i64, i64)> {
 /// The raw TSV ClickHouse returns for `sql`, for rows that are not `(id, v)` pairs.
 fn clickhouse_rows_tsv(sql: &str) -> String {
     ch(sql)
+}
+
+/// [`clickhouse_rows_tsv`] read from the server at `url`.
+fn clickhouse_rows_tsv_at(url: &str, sql: &str) -> String {
+    ch_at(url, sql)
 }
 
 /// The `(id, v)` rows ClickHouse returns for `sql` (a `FORMAT TSV` query).
@@ -103,9 +120,9 @@ fn into_clickhouse(rig: Rig, db: &Db) -> Rig {
     rig.cdc("initial: snapshot")
         .dest_gcs(BUCKET, &unique_name("chload"), FAKE_GCS_ENDPOINT)
         .top_line(&format!(
-            "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {}, \
+            "load: {{ target: clickhouse, url: \"{}\", database: {}, \
              user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: [id] }}",
-            db.0
+            db.1, db.0
         ))
 }
 
@@ -398,9 +415,9 @@ fn batch_into_clickhouse(rig: Rig, db: &Db) -> Rig {
 fn batch_into_clickhouse_at(rig: Rig, db: &Db, prefix: &str) -> Rig {
     rig.dest_gcs(BUCKET, prefix, FAKE_GCS_ENDPOINT)
         .top_line(&format!(
-            "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {}, \
+            "load: {{ target: clickhouse, url: \"{}\", database: {}, \
              user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: [id] }}",
-            db.0
+            db.1, db.0
         ))
 }
 
@@ -977,6 +994,57 @@ fn a_cdc_stream_staged_on_azure_is_pulled_by_clickhouse() {
         on_azure,
         &[("RIVET_TEST_AZURITE_KEY", AZURITE_KEY)],
         Some("rivet_stand_azurite"),
+    );
+}
+
+/// A named collection removed on drop, and the GCS prefix it read cleared.
+struct GcsPull {
+    collection: String,
+    bucket: String,
+    prefix: String,
+}
+
+impl Drop for GcsPull {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(|| {
+            ch(&format!(
+                "DROP NAMED COLLECTION IF EXISTS {}",
+                self.collection
+            ))
+        });
+        gcs_delete_prefix(&self.bucket, &self.prefix);
+    }
+}
+
+/// …and ClickHouse reads parts staged on real GCS itself, through an HMAC-key named collection.
+#[test]
+#[ignore = "live: requires clickhouse + mysql-cdc + Google creds + RIVET_TEST_GCS_HMAC_ID/SECRET"]
+fn a_cdc_stream_staged_on_real_gcs_is_pulled_by_clickhouse() {
+    let Some((_, bucket)) = warehouse_or_skip("clickhouse_gcs_pull") else {
+        return;
+    };
+    let (Ok(id), Ok(secret)) = (
+        std::env::var("RIVET_TEST_GCS_HMAC_ID"),
+        std::env::var("RIVET_TEST_GCS_HMAC_SECRET"),
+    ) else {
+        skip_live("clickhouse_gcs_pull: RIVET_TEST_GCS_HMAC_ID / RIVET_TEST_GCS_HMAC_SECRET unset");
+        return;
+    };
+    let pull = GcsPull {
+        collection: unique_name("rivet_gcs_hmac"),
+        bucket,
+        prefix: format!("rivet-live/{}", unique_name("chload")),
+    };
+    ch(&format!(
+        "CREATE NAMED COLLECTION {} AS url = 'https://storage.googleapis.com/', \
+         access_key_id = '{id}', secret_access_key = '{secret}'",
+        pull.collection
+    ));
+    staged_cdc_cycle(
+        "rivet_ch_gcsp",
+        |rig| rig.dest_gcs_live(&pull.bucket, &pull.prefix),
+        &[],
+        Some(&pull.collection),
     );
 }
 
@@ -2151,6 +2219,7 @@ fn a_mongo_resume_export_into_clickhouse_accumulates_every_run() {
     ensure_gcs_bucket(BUCKET);
     let mdb = unique_name("chmresume");
     let m = MongoTest::connect(MONGO_PORT, &mdb);
+    println!("mongo-server: {}", m.server_version());
     m.seed_objectid("t", 2000);
     let db = Db::new("rivet_chtest");
     let rig = mongo_resume_into_clickhouse(&mdb, &db);
@@ -3063,14 +3132,17 @@ fn a_column_added_while_a_mysql_cdc_run_is_open_loads_into_clickhouse_with_every
     );
 }
 
-const MONGO_RS_PORT: u16 = 27018;
-
-/// A Mongo CDC export of collection `t` in `mdb` staged on fake-gcs under `prefix` and loaded into `db`.
-fn mongo_cdc_into_clickhouse_at(mdb: &str, db: &Db, prefix: &str) -> Rig {
+/// A Mongo CDC export of collection `t` in `mdb` on the server at `port`, staged on fake-gcs under `prefix` and loaded into `db`.
+fn mongo_cdc_into_clickhouse_on(port: u16, mdb: &str, db: &Db, prefix: &str) -> Rig {
     Rig::mongo_cdc("t")
-        .source_url(&MongoTest::url(MONGO_RS_PORT, mdb))
+        .source_url(&MongoTest::url(port, mdb))
         .dest_gcs(BUCKET, prefix, FAKE_GCS_ENDPOINT)
         .top_line(&load_line(CLICKHOUSE_HTTP_URL, db, "").replace("pk: [id]", "pk: [_id]"))
+}
+
+/// A Mongo CDC export of collection `t` in `mdb` on the replica set, staged on fake-gcs under `prefix` and loaded into `db`.
+fn mongo_cdc_into_clickhouse_at(mdb: &str, db: &Db, prefix: &str) -> Rig {
+    mongo_cdc_into_clickhouse_on(mongo_rs_port(), mdb, db, prefix)
 }
 
 /// A Mongo CDC export of collection `t` in `mdb` staged on fake-gcs and loaded into `db`.
@@ -3148,6 +3220,8 @@ fn require_mongo_cdc_into_clickhouse() {
     require_alive(LiveService::FakeGcs);
     require_alive(LiveService::MongoRs);
     ensure_gcs_bucket(BUCKET);
+    let server = MongoTest::connect(mongo_rs_port(), "admin");
+    println!("mongo-server: {}", server.server_version());
 }
 
 /// Snapshot, then inserts, updates, a delete and a same-key transaction: ClickHouse equals Mongo.
@@ -3156,7 +3230,7 @@ fn require_mongo_cdc_into_clickhouse() {
 fn a_mongo_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_basic");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     for i in 1..=4 {
         m.upsert_set("t", i, "v", &format!("seed{i}"));
@@ -3191,7 +3265,7 @@ fn a_mongo_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source() {
 fn a_mongo_transaction_cut_mid_tie_loads_in_source_order() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_tie");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     m.upsert_set("t", 1, "v", "seed");
     let db = Db::new("rivet_chtest");
@@ -3233,7 +3307,7 @@ fn a_mongo_transaction_cut_mid_tie_loads_in_source_order() {
 fn a_mongo_run_killed_mid_tie_resumes_in_source_order() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_kill");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     m.upsert_set("t", 1, "v", "seed");
     let db = Db::new("rivet_chtest");
@@ -3273,7 +3347,7 @@ fn a_mongo_run_killed_mid_tie_resumes_in_source_order() {
 fn a_mongo_run_killed_before_its_checkpoint_replays_the_same_tie_in_source_order() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_replay");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     m.upsert_set("t", 1, "v", "seed");
     let db = Db::new("rivet_chtest");
@@ -3312,7 +3386,7 @@ fn a_mongo_run_killed_before_its_checkpoint_replays_the_same_tie_in_source_order
 fn a_mongo_update_looked_up_after_a_delete_loads_as_deleted() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_lookup");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     m.upsert_set("t", 1, "v", "seed");
     m.upsert_set("t", 2, "v", "seed");
@@ -3340,7 +3414,7 @@ fn a_mongo_update_looked_up_after_a_delete_loads_as_deleted() {
 fn a_mongo_transaction_across_collections_loads_the_captured_one_in_source_order() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_multi");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     m.drop_collection("u");
     m.upsert_set("t", 1, "v", "seed");
@@ -3385,7 +3459,7 @@ fn strip_ordinal(v: &mut serde_json::Value) {
 fn a_mongo_checkpoint_from_before_the_ordinal_is_adopted_and_loads_in_source_order() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_old");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     m.upsert_set("t", 1, "v", "seed");
     let db = Db::new("rivet_chtest");
@@ -3417,7 +3491,7 @@ fn a_mongo_checkpoint_from_before_the_ordinal_is_adopted_and_loads_in_source_ord
 fn a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_remedy_loads_it() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_legacy");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     for id in 1..=3 {
         m.upsert_set("t", id, "v", &format!("seed{id}"));
@@ -3485,7 +3559,7 @@ fn a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_r
 fn a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_resnap");
-    let m = MongoTest::connect(MONGO_RS_PORT, &mdb);
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
     m.drop_collection("t");
     for i in 1..=3 {
         m.upsert_set("t", i, "v", "seed");
@@ -3530,6 +3604,230 @@ fn a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated(
         clickhouse_rows_mongo_state(&db),
         want,
         "the view is the re-snapshot"
+    );
+}
+
+fn require_mongo_shard_into_clickhouse() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    require_alive(LiveService::MongoShard);
+    ensure_gcs_bucket(BUCKET);
+    let server = MongoTest::connect(MONGO_SHARD_PORT, "admin");
+    assert!(server.is_mongos(), "the shard stand answers through mongos");
+    println!("mongo-server: {} sharded", server.server_version());
+}
+
+/// A two-shard cluster whose chunks move through the whole run, killed three times at three points: ClickHouse equals Mongo.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo shard cluster"]
+fn a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_into_clickhouse_as_the_source() {
+    require_mongo_shard_into_clickhouse();
+    let mdb = unique_name("chmshard");
+    let _drop = MongoDbGuard {
+        port: MONGO_SHARD_PORT,
+        db: mdb.clone(),
+    };
+    let m = MongoTest::connect(MONGO_SHARD_PORT, &mdb);
+    m.shard_collection("t", &SHARD_SPLITS);
+    for id in 1..=SHARD_DOCS {
+        m.upsert_set("t", id, "v", "seed");
+    }
+    let db = Db::new("rivet_chtest");
+    let rig = mongo_cdc_into_clickhouse_on(MONGO_SHARD_PORT, &mdb, &db, &unique_name("chmshard"))
+        .cdc("initial: snapshot")
+        .cdc("rollover: 2");
+    rig.run_ok();
+
+    let mover = ChunkMover::start(MONGO_SHARD_PORT, &mdb, "t", vec![5, 25, 45]);
+    for round in 0..4 {
+        m.shard_round("t", round);
+    }
+    let killed = rig.run_with_env("RIVET_TEST_PANIC_AT", "cdc_after_checkpoint_before_ack");
+    assert!(!killed.status.success(), "the hook must kill the run");
+    for round in 4..8 {
+        m.shard_round("t", round);
+    }
+    let killed = rig.run_with_env("RIVET_TEST_PANIC_AT", "cdc_after_flush_before_ack");
+    assert!(!killed.status.success(), "the hook must kill the run");
+    for round in 8..12 {
+        m.shard_round("t", round);
+    }
+    kill_after_the_first_ack(&rig);
+    for round in 12..14 {
+        m.shard_round("t", round);
+    }
+    let (moved, refused) = mover.stop();
+    rig.run_ok();
+    load(&rig);
+
+    let want = m.current_state_i64("t", "v");
+    let got = clickhouse_rows_mongo_state(&db);
+    let distinct = ch(&format!(
+        "SELECT uniqExact(_id) FROM {}.t WHERE NOT __is_deleted FORMAT TSV",
+        db.0
+    ));
+    let changes = ch(&format!(
+        "SELECT count(), uniqExact(__ver), uniqExact(JSONExtractUInt(__pos, 'ct')), max(JSONExtractUInt(__pos, 'ord')) \
+         FROM {}.t__changes WHERE __op IS NOT NULL FORMAT TSV",
+        db.0
+    ));
+    println!(
+        "shard-cell: moves accepted {moved} refused {refused}; source rows {}; view rows {}; distinct ids {distinct}; changes/versions/clusterTimes/max-ordinal {changes}",
+        want.len(),
+        got.len()
+    );
+    assert_eq!(
+        got, want,
+        "the view equals the source: count, ids and values"
+    );
+    assert_eq!(distinct, want.len().to_string(), "one live row per id");
+    let cols: Vec<&str> = changes.split('\t').collect();
+    assert_eq!(
+        cols[0], cols[1],
+        "every change carries its own version: {changes}"
+    );
+    assert!(
+        cols[2].parse::<u64>().unwrap() < cols[0].parse::<u64>().unwrap(),
+        "transactions put several changes under one clusterTime: {changes}"
+    );
+}
+
+/// Each run on a sharded cluster delivers every write committed before it started, graded after every run.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo shard cluster"]
+fn a_sharded_mongo_run_delivers_every_write_committed_before_it_started() {
+    require_mongo_shard_into_clickhouse();
+    let mdb = unique_name("chmshard_each");
+    let _drop = MongoDbGuard {
+        port: MONGO_SHARD_PORT,
+        db: mdb.clone(),
+    };
+    let m = MongoTest::connect(MONGO_SHARD_PORT, &mdb);
+    m.shard_collection("t", &SHARD_SPLITS);
+    for id in 1..=SHARD_DOCS {
+        m.upsert_set("t", id, "v", "seed");
+    }
+    let db = Db::new("rivet_chtest");
+    let rig = mongo_cdc_into_clickhouse_on(MONGO_SHARD_PORT, &mdb, &db, &unique_name("chmshard"))
+        .cdc("initial: snapshot");
+    rig.run_ok();
+    for round in 0..4 {
+        m.shard_round("t", round);
+        rig.run_ok();
+    }
+    load(&rig);
+    assert_eq!(
+        clickhouse_rows_mongo_state(&db),
+        m.current_state_i64("t", "v")
+    );
+}
+
+/// A naive MySQL `DATETIME(6)` source with ids 1 and 2 on the CDC stand.
+fn naive_mysql(prefix: &str) -> (String, Table) {
+    let tbl = unique_name(prefix);
+    conn()
+        .query_drop(format!(
+            "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, ts DATETIME(6)); \
+             INSERT INTO {tbl} VALUES (1, '2024-01-01 00:00:00'), (2, '2024-06-30 23:30:15.5')"
+        ))
+        .expect("seed");
+    let guard = Table(tbl.clone());
+    (tbl, guard)
+}
+
+const NAIVE_AS_WRITTEN: &str =
+    "2024-01-01 00:00:00.000000\t2024-01-01\n2024-06-30 23:30:15.500000\t2024-06-30";
+
+/// A naive source timestamp reads back as written on a server in Asia/Tokyo, full and CDC.
+#[test]
+#[ignore = "live: requires clickhouse-tz + fake-gcs + mysql-cdc"]
+fn a_naive_timestamp_reads_back_as_written_on_a_server_in_another_zone() {
+    require_alive(LiveService::ClickHouseTz);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = naive_mysql("rivet_ch_tz");
+    for (leg, rig) in [
+        ("full", Rig::mysql_cdc(&tbl).into_full_batch()),
+        ("cdc", Rig::mysql_cdc(&tbl).cdc("initial: snapshot")),
+    ] {
+        let db = Db::on(CLICKHOUSE_TZ_HTTP_URL, "rivet_chtz");
+        let rig = batch_into_clickhouse(rig, &db);
+        rig.run_ok();
+        load(&rig);
+        let got = clickhouse_rows_tsv_at(
+            CLICKHOUSE_TZ_HTTP_URL,
+            &format!(
+                "SELECT toString(ts), toString(toDate(ts)) FROM {}.{tbl} \
+                 WHERE id IN (1, 2) ORDER BY id FORMAT TSV",
+                db.0
+            ),
+        );
+        assert_eq!(got, NAIVE_AS_WRITTEN, "{leg} load on an Asia/Tokyo server");
+    }
+}
+
+/// A zone-less change log keeps loading with a warning naming the ALTER that fixes it.
+#[test]
+#[ignore = "live: requires clickhouse-tz + fake-gcs + mysql-cdc"]
+fn a_zone_less_change_log_keeps_loading_and_its_warning_names_the_remedy() {
+    require_alive(LiveService::ClickHouseTz);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = naive_mysql("rivet_ch_tzold");
+    let db = Db::on(CLICKHOUSE_TZ_HTTP_URL, "rivet_chtz");
+    let rig = into_clickhouse(Rig::mysql_cdc(&tbl), &db);
+    rig.run_ok();
+    load(&rig);
+    let changes = format!("{}.{tbl}__changes", db.0);
+    ch_at(
+        CLICKHOUSE_TZ_HTTP_URL,
+        &format!("ALTER TABLE {changes} MODIFY COLUMN ts Nullable(DateTime64(6))"),
+    );
+
+    conn()
+        .query_drop(format!(
+            "INSERT INTO {tbl} VALUES (3, '2024-12-31 23:59:59.25')"
+        ))
+        .expect("insert");
+    rig.run_ok();
+    let rig = rig.no_oracle(
+        "the cell altered the log's ts to the zone-less type the ledger no longer declares",
+    );
+    let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a zone-less change log must keep loading:\n{err}"
+    );
+    assert!(
+        err.contains("is Nullable(DateTime64(6))")
+            && err.contains("MODIFY COLUMN `ts` Nullable(DateTime64(6, 'UTC'))"),
+        "the load must warn and name the ALTER:\n{err}"
+    );
+    let view = format!("{}.{tbl}", db.0);
+    assert_eq!(
+        clickhouse_rows_tsv_at(
+            CLICKHOUSE_TZ_HTTP_URL,
+            &format!("SELECT toUnixTimestamp64Micro(ts) FROM {view} ORDER BY id FORMAT TSV"),
+        ),
+        "1704067200000000\n1719790215500000\n1735689599250000",
+        "every row holds the instant of its wall clock read as UTC"
+    );
+
+    ch_at(
+        CLICKHOUSE_TZ_HTTP_URL,
+        &format!("ALTER TABLE {changes} MODIFY COLUMN `ts` Nullable(DateTime64(6, 'UTC'))"),
+    );
+    assert_eq!(
+        clickhouse_rows_tsv_at(
+            CLICKHOUSE_TZ_HTTP_URL,
+            &format!(
+                "SELECT toString(ts), toString(toDate(ts)) FROM {view} WHERE id IN (1, 2) \
+                 ORDER BY id FORMAT TSV"
+            ),
+        ),
+        NAIVE_AS_WRITTEN,
+        "the named ALTER makes the log read as written"
     );
 }
 

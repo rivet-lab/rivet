@@ -1,0 +1,99 @@
+time="2026-10-31T22:18:09+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 24.8: server 24.8.14.39
+   29/30 ok
+   FAILED: a_sql_server_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+time="2026-10-31T22:22:53+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 25.8: server 25.8.33.6
+   29/30 ok
+   FAILED: a_sql_server_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+time="2026-10-31T22:23:30+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 26.3: server 26.3.62.3
+   28/30 ok
+   FAILED: a_sql_server_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+   FAILED: a_pulled_part_lands_by_column_name_and_a_null_key_refuses
+time="2026-10-31T22:24:09+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 26.8: server 26.8.36.3
+   16/30 ok
+   FAILED: a_mysql_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+   FAILED: a_postgres_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+   FAILED: a_sql_server_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+   FAILED: a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view
+   FAILED: a_materialized_view_on_the_change_log_does_not_break_the_count
+   FAILED: a_cdc_stream_staged_on_s3_loads_into_clickhouse
+   FAILED: a_cdc_stream_staged_on_s3_is_pulled_by_clickhouse
+   FAILED: a_cdc_stream_staged_on_azure_loads_into_clickhouse
+   FAILED: a_cdc_stream_staged_on_azure_is_pulled_by_clickhouse
+   FAILED: a_change_log_with_tz_and_time_columns_takes_a_second_load
+   FAILED: a_part_clickhouse_cannot_address_is_sent_by_rivet_instead
+   FAILED: a_cdc_log_partitioned_by_a_moving_column_serves_one_latest_row_per_key
+   FAILED: a_changed_partition_is_refused_before_it_touches_the_change_log
+   FAILED: a_pulled_part_lands_by_column_name_and_a_null_key_refuses
+time="2026-10-31T22:24:46+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 26.10: server 26.10.3.7
+   16/30 ok
+   FAILED: a_mysql_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+   FAILED: a_postgres_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+   FAILED: a_sql_server_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
+   FAILED: a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view
+   FAILED: a_materialized_view_on_the_change_log_does_not_break_the_count
+   FAILED: a_cdc_stream_staged_on_s3_loads_into_clickhouse
+   FAILED: a_cdc_stream_staged_on_s3_is_pulled_by_clickhouse
+   FAILED: a_cdc_stream_staged_on_azure_loads_into_clickhouse
+   FAILED: a_cdc_stream_staged_on_azure_is_pulled_by_clickhouse
+   FAILED: a_change_log_with_tz_and_time_columns_takes_a_second_load
+   FAILED: a_part_clickhouse_cannot_address_is_sent_by_rivet_instead
+   FAILED: a_cdc_log_partitioned_by_a_moving_column_serves_one_latest_row_per_key
+   FAILED: a_changed_partition_is_refused_before_it_touches_the_change_log
+   FAILED: a_pulled_part_lands_by_column_name_and_a_null_key_refuses
+
+cell | 24.8 (24.8.14.39) | 25.8 (25.8.33.6) | 26.3 (26.3.62.3) | 26.8 (26.8.36.3) | 26.10 (26.10.3.7)
+cdc:mysql | ok | ok | ok | FAILED | FAILED
+cdc:postgres | ok | ok | ok | FAILED | FAILED
+cdc:mssql | FAILED | FAILED | FAILED | FAILED | FAILED
+cdc:crash | ok | ok | ok | FAILED | FAILED
+full | ok | ok | ok | ok | ok
+incremental | ok | ok | ok | ok | ok
+init | ok | ok | ok | ok | ok
+rekey-refused | ok | ok | ok | ok | ok
+mv-count | ok | ok | ok | FAILED | FAILED
+types | ok | ok | ok | ok | ok
+s3:push | ok | ok | ok | FAILED | FAILED
+s3:pull | ok | ok | ok | FAILED | FAILED
+azure:push | ok | ok | ok | FAILED | FAILED
+azure:pull | ok | ok | ok | FAILED | FAILED
+reload-tz-time | ok | ok | ok | FAILED | FAILED
+odd-key-pull | ok | ok | ok | FAILED | FAILED
+adopt-resume | ok | ok | ok | ok | ok
+range-refused:push | ok | ok | ok | ok | ok
+range-refused:pull | ok | ok | ok | ok | ok
+retry:cdc | ok | ok | ok | ok | ok
+retry:exhausted | ok | ok | ok | ok | ok
+retry:full-not-resent | ok | ok | ok | ok | ok
+full:crash-hooks | ok | ok | ok | ok | ok
+partition:full | ok | ok | ok | ok | ok
+partition:cdc | ok | ok | ok | FAILED | FAILED
+partition:changed | ok | ok | ok | FAILED | FAILED
+partition:incremental | ok | ok | ok | ok | ok
+lib:version-order | ok | ok | ok | ok | ok
+lib:unknown-pos | ok | ok | ok | ok | ok
+lib:pull-by-name | ok | ok | FAILED | FAILED | FAILED

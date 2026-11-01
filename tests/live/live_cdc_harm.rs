@@ -201,9 +201,9 @@ fn pg_table_reads(c: &mut postgres::Client, table: &str) -> i64 {
 #[test]
 #[ignore = "live: requires docker compose mongo-rs + the rivet-duckdb oracle"]
 fn a_mongo_cdc_drain_reads_the_oplog_not_the_collection() {
-    const PORT: u16 = 27018;
+    let rs_port = mongo_rs_port();
     let db = unique_name("harm_mongo");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(rs_port, &db);
     m.drop_collection("t");
     m.insert_many(
         "t",
@@ -212,7 +212,7 @@ fn a_mongo_cdc_drain_reads_the_oplog_not_the_collection() {
             .collect(),
     );
     let rig = Rig::mongo_cdc("t")
-        .source_url(&MongoTest::url(PORT, &db))
+        .source_url(&MongoTest::url(rs_port, &db))
         .duckdb_oracle()
         .no_oracle("the test counts reads of the source collection; the oracle's own read-back would be counted");
     rig.run_ok(); // anchor

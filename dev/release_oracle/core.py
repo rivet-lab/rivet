@@ -33,7 +33,6 @@ import functools
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -43,6 +42,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Sequence
+
+try:
+    from ..pytools.shell import have, wait_until
+except ImportError:  # loaded as a top-level module by rowhash.py
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pytools"))
+    from shell import have, wait_until  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -608,7 +613,8 @@ HARNESS_ENV: frozenset[str] = frozenset((
     "RIVET_SF_WAREHOUSE", "RIVET_SKIP_LOG", "RIVET_SNOWFLAKE_ACCOUNT", "RIVET_SNOWFLAKE_KEY",
     "RIVET_SNOWFLAKE_ROLE", "RIVET_SNOWFLAKE_USER",
     "RIVET_SOAK_BYTE_CAP", "RIVET_SOAK_ROLLOVER", "RIVET_SOAK_ROLLOVER_MB", "RIVET_SWEEP_STATE_CONTAINER",
-    "RIVET_TEST_BQ_DATASET", "RIVET_TEST_EXCLUSIVE", "RIVET_TEST_GCS_BUCKET", "RIVET_TEST_ORACLE_LATIN1_URL",
+    "RIVET_TEST_BQ_DATASET", "RIVET_TEST_EXCLUSIVE", "RIVET_TEST_GCS_BUCKET", "RIVET_TEST_GCS_HMAC_ID",
+    "RIVET_TEST_GCS_HMAC_SECRET", "RIVET_TEST_MONGO_RS_PORT", "RIVET_TEST_ORACLE_LATIN1_URL",
     "RIVET_TEST_STATE_TOXI_URL", "RIVET_TEST_STATE_URL", "RIVET_TINYFS_DIR",
     "RIVET_UPG_KEEP", "RIVET_UPG_ORACLE_CDC_URL",
 ))
@@ -672,13 +678,9 @@ def docker_exec(container: str, *args: str, stdin: str | None = None, **kw) -> P
     return docker("exec", *flags, container, *args, stdin=stdin, **kw)
 
 
-def have(tool: str) -> bool:
-    """Is `tool` usable — for `duckdb`, the uv-pinned package the harness runs (dev/pytools/duckcli.py), never a binary on PATH."""
-    if tool == "duckdb":
-        import importlib.util
-
-        return importlib.util.find_spec("duckdb") is not None
-    return shutil.which(tool) is not None
+def strategy_lines(p: Proc) -> list[str]:
+    """The `Strategy:` lines a `rivet check` printed."""
+    return [ln.strip() for ln in p.out.splitlines() if ln.strip().startswith("Strategy:")]
 
 
 # ── matrix cell concurrency ──────────────────────────────────────────────────────
@@ -744,16 +746,6 @@ def run_lanes(led: "Ledger", cells: Sequence[tuple[object, Callable[["Ledger"], 
         sub.flush_into(led)
     if raised:
         raise raised[0]
-
-
-def wait_until(check, *, tries: int = 45, delay: float = 2.0) -> bool:
-    """Poll `check()` until true. Returns False on exhaustion — never raises, so
-    a caller records a SKIP instead of aborting the whole gate."""
-    for _ in range(tries):
-        if check():
-            return True
-        time.sleep(delay)
-    return False
 
 
 # ── the release binary under test ──────────────────────────────────────────────

@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .core import Ledger, Proc, isolate_state_db, rivet_bin, run, run_lanes, server_of
+from .core import Ledger, Proc, isolate_state_db, rivet_bin, run, run_lanes, server_of, strategy_lines
 
 __all__ = ["verify_upgrade_from_field_state", "COMPATIBILITY_FLOOR", "ACCEPTED_DIFFERENCES"]
 
@@ -520,21 +520,16 @@ def _tag(olds: list[tuple[str, Path]]) -> str:
     return olds[0][0].replace(".", "") if len(olds) == 1 else "lad"
 
 
-def _strategy(p: Proc) -> list[str]:
-    """The `Strategy:` lines a `rivet check` printed."""
-    return [ln.strip() for ln in p.out.splitlines() if ln.strip().startswith("Strategy:")]
-
-
 def config_row(led: Ledger, row: tuple, name: str, e, ver: str, old: Path) -> None:
     """This build's `check` and `plan` over the config the old release ran, against the old release's own answers."""
     was = {v: e.rivet(old, v, "-c", "c.yaml") for v in ("check", "plan")}
     now = {v: e.rivet(rivet_bin(), v, "-c", "c.yaml") for v in ("check", "plan")}
     why = next((now[v].why for v in ("check", "plan") if not now[v].ok and was[v].ok), "")
-    bad = config_finding({v: (p.ok, _strategy(p)) for v, p in was.items()}, {v: (p.ok, _strategy(p)) for v, p in now.items()}, why)
+    bad = config_finding({v: (p.ok, strategy_lines(p)) for v, p in was.items()}, {v: (p.ok, strategy_lines(p)) for v, p in now.items()}, why)
     if bad:
         return led.failed(*row, f"{name} config: config no longer loads — {bad}", "config no longer loads")
     led.passed(*row, f"{name} config: this build checks and plans the v{ver} config as v{ver} does "
-                     f"(check exit {now['check'].returncode}, {len(_strategy(now['check']))} strategies; plan exit "
+                     f"(check exit {now['check'].returncode}, {len(strategy_lines(now['check']))} strategies; plan exit "
                      f"{was['plan'].returncode} then {now['plan'].returncode})", "config")
 
 

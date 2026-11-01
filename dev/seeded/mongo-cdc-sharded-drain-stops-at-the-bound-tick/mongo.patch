@@ -1,0 +1,13 @@
+diff --git a/src/source/mongo/cdc.rs b/src/source/mongo/cdc.rs
+index 264bf541..e38dd201 100644
+--- a/src/source/mongo/cdc.rs
++++ b/src/source/mongo/cdc.rs
+@@ -275,7 +275,7 @@ fn token_floor(
+     bound: Option<mongodb::bson::Timestamp>,
+     sharded: bool,
+ ) -> Option<mongodb::bson::Timestamp> {
+-    bound.map(|b| match (sharded, b.increment.checked_add(1)) {
++    bound.map(|b| match (false, b.increment.checked_add(1)) {
+         (true, Some(increment)) => mongodb::bson::Timestamp {
+             time: b.time,
+             increment,

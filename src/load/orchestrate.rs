@@ -1529,7 +1529,7 @@ fn load_one_cdc_base(
                     &uris,
                     pk,
                     Some(integrity.file_rows),
-                    cleanup.as_ref().map(|(s, k)| (*s, k.as_slice())),
+                    cleanup.as_ref().map(|(s, c)| (*s, c)),
                     ownership,
                     "CDC",
                 )?;
@@ -2021,7 +2021,7 @@ fn load_one_cdc(
                 pk,
                 engine,
                 Some(inputs.integrity.file_rows),
-                cleanup.as_ref().map(|(s, k)| (*s, k.as_slice())),
+                cleanup.as_ref().map(|(s, c)| (*s, c)),
                 inputs.ownership,
                 rebuild_changelog,
             )?;
@@ -2403,7 +2403,7 @@ fn load_incremental_job(
                     &base_specs,
                     &uris,
                     Some(integrity.file_rows),
-                    cleanup.as_ref().map(|(s, k)| (*s, k.as_slice())),
+                    cleanup.as_ref().map(|(s, c)| (*s, c)),
                     inputs.ownership,
                 )?;
                 eprintln!("{}", full_done_line(&integrity, &r));
@@ -2435,7 +2435,7 @@ fn load_incremental_job(
                         &uris,
                         pk,
                         Some(integrity.file_rows),
-                        cleanup.as_ref().map(|(s, k)| (*s, k.as_slice())),
+                        cleanup.as_ref().map(|(s, c)| (*s, c)),
                         ownership,
                         "incremental",
                     )?
@@ -2448,7 +2448,7 @@ fn load_incremental_job(
                         pk,
                         cursor,
                         Some(integrity.file_rows),
-                        cleanup.as_ref().map(|(s, k)| (*s, k.as_slice())),
+                        cleanup.as_ref().map(|(s, c)| (*s, c)),
                         ownership,
                         rebuild_changelog,
                     )?
@@ -2512,32 +2512,41 @@ fn load_one(
                 inputs.integrity.file_rows,
             );
         },
-        |loader, store, inputs, _legs| {
-            let (cleanup, _prefix_lease) = cleanup_target_leased(
-                plan,
-                store,
-                state,
-                &inputs.cleanable,
-                still_writing(
-                    &inputs.active_at_fetch,
-                    &inputs.marker_active,
-                    state.is_some(),
-                )
-                .as_ref(),
-            );
-            let report = load::run_load(
-                loader,
-                &plan.table,
-                &plan.specs,
-                &inputs.uris,
-                Some(inputs.integrity.file_rows),
-                cleanup.as_ref().map(|(s, k)| (*s, k.as_slice())),
-                inputs.ownership,
-            )?;
-            Ok((report.rows_loaded, report))
-        },
+        |loader, store, inputs, _legs| full_leg(plan, state, loader, store, inputs),
         |inputs, report| eprintln!("{}", full_done_line(&inputs.integrity, report)),
     )
+}
+
+/// The full-mode load leg: land the latest snapshot, then clean the staged prefix under its lease.
+fn full_leg(
+    plan: &load::plan::LoadPlan,
+    state: Option<&StateStore>,
+    loader: &dyn load::TargetLoader,
+    store: &crate::destination::gcs::GcsStore,
+    inputs: &LoadInputs,
+) -> Result<(u64, load::LoadReport)> {
+    let (cleanup, _prefix_lease) = cleanup_target_leased(
+        plan,
+        store,
+        state,
+        &inputs.cleanable,
+        still_writing(
+            &inputs.active_at_fetch,
+            &inputs.marker_active,
+            state.is_some(),
+        )
+        .as_ref(),
+    );
+    let report = load::run_load(
+        loader,
+        &plan.table,
+        &plan.specs,
+        &inputs.uris,
+        Some(inputs.integrity.file_rows),
+        cleanup.as_ref().map(|(s, c)| (*s, c)),
+        inputs.ownership,
+    )?;
+    Ok((report.rows_loaded, report))
 }
 
 /// The correlation run-id for a load: the explicit `--run-id` / `RIVET_RUN_ID`
@@ -4477,6 +4486,241 @@ mod load_ledger_tests {
         c.record_skip();
         c.record_failed(&["r2".into()]);
     }
+
+    /// Commit `run` the way an extract does: its part, then `write_manifest` (run copy, canonical, `_SUCCESS`).
+    fn commit_run(prefix: &std::path::Path, run: &str, part: &str) {
+        let dest =
+            crate::destination::local::LocalDestination::new(&crate::config::DestinationConfig {
+                destination_type: crate::config::DestinationType::Local,
+                path: Some(prefix.display().to_string()),
+                ..Default::default()
+            })
+            .expect("a local destination");
+        std::fs::create_dir_all(prefix).unwrap();
+        std::fs::write(prefix.join(part), b"rows").unwrap();
+        let manifest = super::live_only_decisions::success_manifest(run, part);
+        crate::pipeline::manifest_writer::write_manifest(&dest, &manifest).expect("commit");
+    }
+
+    fn present(prefix: &std::path::Path, name: &str) -> bool {
+        prefix.join(name).exists()
+    }
+
+    fn canonical_run(prefix: &std::path::Path) -> Option<String> {
+        let bytes = std::fs::read(prefix.join("manifest.json")).ok()?;
+        serde_json::from_slice::<crate::manifest::RunManifest>(&bytes)
+            .ok()
+            .map(|m| m.run_id)
+    }
+
+    /// An extract that commits its canonical `manifest.json` and `_SUCCESS` while the warehouse jobs run keeps both through `cleanup_source`.
+    #[test]
+    fn a_run_committed_during_the_jobs_keeps_its_canonical_markers_through_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open_in_memory().unwrap();
+        let mut plan = cdc_plan(&dir, "orders_cleanup_race");
+        plan.mode = load::plan::LoadMode::Full;
+        plan.load.cleanup_source = true;
+        plan.specs = load::tests::spec_ok();
+        let prefix = dir.path().join("p");
+        commit_run(&prefix, "r1", "a.parquet");
+        let racing = prefix.clone();
+        let armed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let fired = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let (gate, seen) = (armed.clone(), fired.clone());
+        let fake = load::tests::fake_loader(1).writing(move |_| {
+            if gate.get() {
+                seen.set(seen.get() + 1);
+                commit_run(&racing, "r2", "b.parquet");
+            }
+        });
+        let mut job = cdc_job(&dir, &state, &plan);
+        job.mode = load::plan::LoadMode::Full;
+        job.loader = Box::new(fake);
+        execute_load(
+            job,
+            |_| {},
+            |loader, store, inputs, _| {
+                armed.set(true);
+                full_leg(&plan, Some(&state), loader, store, inputs)
+            },
+            |_, _| {},
+        )
+        .expect("the load succeeds")
+        .expect("r1 was staged");
+        assert!(
+            fired.get() > 0,
+            "fixture is inert: r2 never committed during the load"
+        );
+        assert!(!present(&prefix, "a.parquet"), "r1's part is cleaned");
+        assert!(
+            !present(&prefix, "manifest-r1.json"),
+            "r1's manifest copy is cleaned"
+        );
+        assert!(
+            present(&prefix, "b.parquet"),
+            "r2's part is not the load's to delete"
+        );
+        assert!(
+            present(&prefix, "manifest-r2.json"),
+            "r2's manifest copy survives"
+        );
+        assert_eq!(
+            canonical_run(&prefix).as_deref(),
+            Some("r2"),
+            "r2's canonical manifest.json survives the cleanup of r1"
+        );
+        assert!(
+            present(&prefix, "_SUCCESS"),
+            "r2's _SUCCESS survives the cleanup of r1"
+        );
+    }
+
+    /// `cleanup_source` over `runs` (each `(id, part)`) with `writing` excluded, the way a load's cleanup runs it.
+    fn clean_prefix(dir: &tempfile::TempDir, runs: &[(&str, &str)], writing: &[&str]) -> bool {
+        let mut plan = cdc_plan(dir, "orders_cleanup_neighbours");
+        plan.load.cleanup_source = true;
+        let store = crate::destination::gcs::GcsStore::open_fs(dir.path().to_str().unwrap())
+            .expect("an fs store");
+        let census: Vec<_> = runs
+            .iter()
+            .map(|(id, part)| {
+                (
+                    format!("p/manifest-{id}.json"),
+                    load::tests::run_manifest(id, part),
+                )
+            })
+            .collect();
+        let writing = writing.iter().map(|w| w.to_string()).collect();
+        let (cleanup, _lease) = cleanup_target_leased(&plan, &store, None, &census, Some(&writing));
+        load::staging::maybe_cleanup(cleanup.as_ref().map(|(s, c)| (*s, c)))
+    }
+
+    fn left_in(prefix: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(prefix)
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// A cleaned run's own canonical pair still goes with it.
+    #[test]
+    fn a_cleaned_runs_own_canonical_markers_still_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("p");
+        commit_run(&prefix, "r1", "a.parquet");
+        assert!(clean_prefix(&dir, &[("r1", "a.parquet")], &[]));
+        assert_eq!(left_in(&prefix), Vec::<String>::new());
+    }
+
+    /// A canonical pointer that already names another run at plan time is not the load's to delete.
+    #[test]
+    fn a_canonical_naming_another_run_stays_with_its_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("p");
+        commit_run(&prefix, "r1", "a.parquet");
+        commit_run(&prefix, "r2", "b.parquet");
+        assert!(clean_prefix(&dir, &[("r1", "a.parquet")], &[]));
+        assert_eq!(
+            left_in(&prefix),
+            ["_SUCCESS", "b.parquet", "manifest-r2.json", "manifest.json"]
+        );
+    }
+
+    /// A canonical manifest that turns unreadable after the plan is not told to name a cleaned run, so it and its marker stay.
+    #[test]
+    fn a_canonical_unreadable_at_delete_time_stays_with_its_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("p");
+        commit_run(&prefix, "r1", "a.parquet");
+        let mut plan = cdc_plan(&dir, "orders_cleanup_unreadable");
+        plan.load.cleanup_source = true;
+        let store = crate::destination::gcs::GcsStore::open_fs(dir.path().to_str().unwrap())
+            .expect("an fs store");
+        let census = vec![(
+            "p/manifest-r1.json".to_string(),
+            load::tests::run_manifest("r1", "a.parquet"),
+        )];
+        let (cleanup, _lease) =
+            cleanup_target_leased(&plan, &store, None, &census, Some(&Default::default()));
+        std::fs::write(prefix.join("manifest.json"), b"not json").unwrap();
+        assert!(load::staging::maybe_cleanup(
+            cleanup.as_ref().map(|(s, c)| (*s, c))
+        ));
+        assert_eq!(left_in(&prefix), ["_SUCCESS", "manifest.json"]);
+    }
+
+    /// A run still writing keeps its parts, its copy and the canonical pair that names it.
+    #[test]
+    fn a_run_still_writing_keeps_everything_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("p");
+        commit_run(&prefix, "r1", "a.parquet");
+        commit_run(&prefix, "r2", "b.parquet");
+        assert!(clean_prefix(
+            &dir,
+            &[("r1", "a.parquet"), ("r2", "b.parquet")],
+            &["r2"]
+        ));
+        assert_eq!(
+            left_in(&prefix),
+            ["_SUCCESS", "b.parquet", "manifest-r2.json", "manifest.json"]
+        );
+    }
+
+    /// A legacy directory whose only record is the canonical manifest is cleaned whole.
+    #[test]
+    fn a_legacy_canonical_only_directory_is_cleaned_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("p");
+        commit_run(&prefix, "r1", "a.parquet");
+        std::fs::remove_file(prefix.join("manifest-r1.json")).unwrap();
+        let mut plan = cdc_plan(&dir, "orders_cleanup_legacy");
+        plan.load.cleanup_source = true;
+        let store = crate::destination::gcs::GcsStore::open_fs(dir.path().to_str().unwrap())
+            .expect("an fs store");
+        let census = vec![(
+            "p/manifest.json".to_string(),
+            load::tests::run_manifest("r1", "a.parquet"),
+        )];
+        let (cleanup, _lease) =
+            cleanup_target_leased(&plan, &store, None, &census, Some(&Default::default()));
+        assert!(load::staging::maybe_cleanup(
+            cleanup.as_ref().map(|(s, c)| (*s, c))
+        ));
+        assert_eq!(left_in(&prefix), Vec::<String>::new());
+    }
+
+    /// The stateless path closes the same window: a run that commits after the keys were planned keeps its pair.
+    #[test]
+    fn a_stateless_cleanup_keeps_a_pair_committed_after_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("p");
+        commit_run(&prefix, "r1", "a.parquet");
+        let mut plan = cdc_plan(&dir, "orders_cleanup_stateless");
+        plan.load.cleanup_source = true;
+        let store = crate::destination::gcs::GcsStore::open_fs(dir.path().to_str().unwrap())
+            .expect("an fs store");
+        let census = vec![(
+            "p/manifest-r1.json".to_string(),
+            load::tests::run_manifest("r1", "a.parquet"),
+        )];
+        let (cleanup, _lease) =
+            cleanup_target_leased(&plan, &store, None, &census, Some(&Default::default()));
+        commit_run(&prefix, "r2", "b.parquet");
+        assert!(load::staging::maybe_cleanup(
+            cleanup.as_ref().map(|(s, c)| (*s, c))
+        ));
+        assert_eq!(
+            left_in(&prefix),
+            ["_SUCCESS", "b.parquet", "manifest-r2.json", "manifest.json"]
+        );
+    }
 }
 
 /// The DECISIONS the live-only load orchestrator makes, graded offline.
@@ -5385,48 +5629,7 @@ mod live_only_decisions {
         );
     }
 
-    pub(super) fn success_manifest(run: &str, part: &str) -> crate::manifest::RunManifest {
-        use crate::manifest::*;
-        RunManifest {
-            manifest_version: MANIFEST_VERSION,
-            run_id: run.into(),
-            export_name: "orders".into(),
-            export_family: "orders".into(),
-            mode: "cdc".into(),
-            started_at: "2026-08-21T00:00:00Z".into(),
-            finished_at: "2026-08-21T00:01:00Z".into(),
-            status: ManifestStatus::Success,
-            source: ManifestSource {
-                engine: "postgres".into(),
-                schema: Some("public".into()),
-                table: Some("orders".into()),
-                extraction: None,
-            },
-            destination: ManifestDestination {
-                kind: "gcs".into(),
-                uri: "gs://b/base".into(),
-            },
-            format: "parquet".into(),
-            compression: "zstd".into(),
-            schema_fingerprint: "xxh3:0123456789abcdef".into(),
-            row_count: 1,
-            part_count: 1,
-            parts: vec![ManifestPart {
-                part_id: 0,
-                path: part.into(),
-                rows: 1,
-                size_bytes: 1,
-                content_fingerprint: "xxh3:0123456789abcdef".into(),
-                content_md5: String::new(),
-                status: PartStatus::Committed,
-            }],
-            column_checksums: None,
-            checksum_render: None,
-            checksum_key_column: None,
-            row_hash: None,
-            split_window: None,
-        }
-    }
+    pub(super) use crate::load::tests::run_manifest as success_manifest;
 
     /// Round-10: a column the staged parquet records but the live source lost
     /// must WARN (Snowflake silently omits it; counts stay green). Additive
@@ -5723,7 +5926,7 @@ mod live_only_decisions {
         // Idle: the delete proceeds AND the lease is held while it does.
         let (target, lease) =
             cleanup_target_leased(&plan, &store, Some(&state), &[], Some(&Default::default()));
-        assert_eq!(target.map(|(_, k)| k), Some(Vec::new()));
+        assert_eq!(target.map(|(_, c)| c.keys), Some(Vec::new()));
         assert!(
             lease.is_some(),
             "the delete must HOLD the prefix, not merely check it"
@@ -5744,7 +5947,7 @@ mod live_only_decisions {
         let (again, _) =
             cleanup_target_leased(&plan, &store, Some(&state), &[], Some(&Default::default()));
         assert_eq!(
-            again.map(|(_, k)| k),
+            again.map(|(_, c)| c.keys),
             Some(Vec::new()),
             "the lease is released with its holder — the next load cleans up normally"
         );
@@ -5753,7 +5956,7 @@ mod live_only_decisions {
         // with, and refusing would break the documented stateless path for nothing.
         let (stateless, none) =
             cleanup_target_leased(&plan, &store, None, &[], Some(&Default::default()));
-        assert_eq!(stateless.map(|(_, k)| k), Some(Vec::new()));
+        assert_eq!(stateless.map(|(_, c)| c.keys), Some(Vec::new()));
         assert!(none.is_none());
     }
 

@@ -513,11 +513,11 @@ fn soak_spill_mongo() {
     let rss_before = peak_child_rss_bytes();
 
     let db = unique_name("soak_spill_mg");
-    let m = MongoTest::connect(27018, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = Rig::mongo_cdc("t")
-        .source_url(&MongoTest::url(27018, &db))
+        .source_url(&MongoTest::url(mongo_rs_port(), &db))
         .census_oracle();
     // Pin the anchor over the empty collection first: Mongo resumes from a token,
     // and a cycle seeded before the anchor exists is a cycle the stream never sees.

@@ -4,8 +4,10 @@ use std::collections::HashMap;
 
 use mysql::prelude::Queryable as _;
 
+use crate::config::SourceType;
 use crate::error::Result;
 use crate::source::cdc::ReadableColumns;
+use crate::sql::quote_ident;
 
 /// What `columns_from: grants` guarantees, said once to the operator at `rivet check` and at the start of a change-stream run.
 pub(crate) const BOUNDARY: &str = "columns_from: grants - batch reads are enforced by the server (a column the \
@@ -27,17 +29,13 @@ pub(crate) fn denied_by_server(err: &anyhow::Error) -> Option<String> {
         })
 }
 
-/// `name` as a MySQL identifier, safe for any text.
-pub(crate) fn quote_ident(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
-}
-
 /// `SELECT` of `columns` from `db.table`, every name quoted.
 pub(crate) fn projection_sql(db: Option<&str>, table: &str, columns: &[String]) -> String {
-    let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+    let quote = |name: &str| quote_ident(SourceType::Mysql, name);
+    let cols: Vec<String> = columns.iter().map(|c| quote(c)).collect();
     let rel = match db {
-        Some(db) => format!("{}.{}", quote_ident(db), quote_ident(table)),
-        None => quote_ident(table),
+        Some(db) => format!("{}.{}", quote(db), quote(table)),
+        None => quote(table),
     };
     format!("SELECT {} FROM {rel}", cols.join(", "))
 }
@@ -216,7 +214,7 @@ mod tests {
 
     #[test]
     fn an_identifier_is_quoted_for_any_text() {
-        assert_eq!(quote_ident("a`b"), "`a``b`");
+        assert_eq!(quote_ident(SourceType::Mysql, "a`b"), "`a``b`");
         assert_eq!(
             projection_sql(Some("d b"), "t", &s(&["id", "x`y", "ім'я"])), // allow-cyrillic
             "SELECT `id`, `x``y`, `ім'я` FROM `d b`.`t`"                  // allow-cyrillic

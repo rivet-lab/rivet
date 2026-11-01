@@ -233,19 +233,19 @@ def _mongosh(url: str, script: str) -> Proc:
 # $work/cdc.block, which always succeeds), so a failed DDL sailed through and
 # resurfaced later as a bogus `independent-readback[…]`. Here a setup failure is
 # reported as a setup failure.
-_CDC_LOCKS: dict[str, threading.Lock] = {}
+_CDC_LOCKS: dict[str, threading.RLock] = {}
 _CDC_LOCKS_GUARD = threading.Lock()
 
 
-def _cdc_lock_for(engine: str) -> threading.Lock:
+def _cdc_lock_for(engine: str) -> threading.RLock:
     """The cdc probe lock for one ENGINE, shared by every version of that family.
 
     Lives HERE, beside the fixtures it protects, because `orc_cdc_probe` is ONE
     table on ONE stand: `RIVET_CDC_<ENGINE>_URL` is a fixed env var, not a
     per-version container, so every version of an engine drops and recreates the
-    same physical table. Two callers run per engine×VERSION and both must take
-    it — `blessed_flow.sc_blessed_flow` and
-    `corruption.verify_cdc_corruption_is_detected`; the preflight callers
+    same physical table. Every per-engine×VERSION caller takes it —
+    `blessed_flow.sc_blessed_flow`, `corruption.verify_cdc_corruption_is_detected`
+    and `cdc_probe` itself (re-entrant, so a holder may open a probe); the preflight callers
     (verify_cdc_e2e, verify_cdc_differential, partner_shape) run once, serially,
     before any version container exists.
 
@@ -254,7 +254,7 @@ def _cdc_lock_for(engine: str) -> threading.Lock:
     `orc_cdc_probe does not exist` collision came back on 2026-09-20.
     """
     with _CDC_LOCKS_GUARD:
-        return _CDC_LOCKS.setdefault(engine, threading.Lock())
+        return _CDC_LOCKS.setdefault(engine, threading.RLock())
 
 
 def _slot_name(prefix: str, work: Path) -> str:
@@ -544,23 +544,24 @@ def cdc_probe(engine: str, url: str, *, config_url: str | None = None,
     Yields (engine, work, block), or None when the source setup failed; the stream is
     cleaned up either way. `config_url` is what rivet dials (a proxy); setup and cleanup
     always use `url`."""
-    eng = _ENGINES[engine]
-    work = _workdir()
-    block = eng.setup(url, work)
-    try:
-        if block is None:
-            yield None
-            return
-        if edit_block is not None:
-            block = edit_block(block)
-        tls = "\n  tls: { accept_invalid_certs: true }" if engine == "mssql" else ""
-        (work / "c.yaml").write_text(
-            f"source:\n  type: {engine}\n  url: \"{config_url or url}\"{tls}\nexports:\n"
-            f"  - name: {scenarios.cell_export(work / 'c.yaml')}\n    table: orc_cdc_probe\n    mode: cdc\n    format: parquet\n"
-            f"    {block}\n    destination:\n      type: local\n      path: ./output/\n")
-        yield eng, work, block
-    finally:
-        eng.cleanup(url, work)
+    with _cdc_lock_for(engine):
+        eng = _ENGINES[engine]
+        work = _workdir()
+        block = eng.setup(url, work)
+        try:
+            if block is None:
+                yield None
+                return
+            if edit_block is not None:
+                block = edit_block(block)
+            tls = "\n  tls: { accept_invalid_certs: true }" if engine == "mssql" else ""
+            (work / "c.yaml").write_text(
+                f"source:\n  type: {engine}\n  url: \"{config_url or url}\"{tls}\nexports:\n"
+                f"  - name: {scenarios.cell_export(work / 'c.yaml')}\n    table: orc_cdc_probe\n    mode: cdc\n    format: parquet\n"
+                f"    {block}\n    destination:\n      type: local\n      path: ./output/\n")
+            yield eng, work, block
+        finally:
+            eng.cleanup(url, work)
 
 
 def _cdc_write_cfg(
@@ -1502,10 +1503,59 @@ def _differential_engine(led: "Ledger", eng: str, runner: Path) -> None:
                            f"would drop this engine's differential entirely\n{tail}",
                            "reference stalled")
             else:
-                # Neither AGREE nor DISAGREE: the harness itself did not complete.
-                # Seven plumbing artefacts in two days say this happens, and a gate
-                # that reports its own races as release blockers gets muted — so it
-                # is a SKIP with the tail attached, never a silent pass.
-                led.skipped(eng, "cdc", f"differential:{scen}", "-",
-                            f"differential[{eng}/{scen}]: harness did not complete\n{tail}",
-                            "harness")
+                led.failed(eng, "cdc", f"differential:{scen}", "-",
+                           f"differential[{eng}/{scen}]: no verdict (exit {r.returncode}); neither AGREE nor DISAGREE\n{tail}",
+                           "no verdict")
+
+
+def self_test() -> None:
+    """A probe holds its engine lock from setup to cleanup; a differential run with no verdict FAILS, never SKIPs."""
+    live = {"now": 0, "max": 0}
+    guard = threading.Lock()
+
+    def setup(_url: str, _work: Path) -> str:
+        with guard:
+            live["now"] += 1
+            live["max"] = max(live["max"], live["now"])
+        time.sleep(0.05)
+        return "cdc: {}"
+
+    def cleanup(_url: str, _work: Path) -> None:
+        with guard:
+            live["now"] -= 1
+
+    fake = _Engine("selftest", "id", setup, lambda _u: None, lambda _u: None, cleanup)
+    _ENGINES["selftest"] = fake
+    try:
+        def probe() -> None:
+            with cdc_probe("selftest", "u") as got:
+                assert got is not None
+                time.sleep(0.05)
+
+        workers = [threading.Thread(target=probe) for _ in range(4)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+        assert live["max"] == 1, f"{live['max']} probes of one engine overlapped"
+        with cdc_probe("selftest", "u"), cdc_probe("selftest", "u"):
+            pass
+    finally:
+        del _ENGINES["selftest"]
+
+    real_run, real_bin, real_note = subprocess.run, rivet_bin, note_invariant_violations
+    for out, rc in (("", 1), ("", 0), ("rivet run failed", 1)):
+        subprocess.run = lambda *_a, **_k: subprocess.CompletedProcess([], rc, out, "")
+        globals()["rivet_bin"] = lambda: Path("rivet")
+        globals()["note_invariant_violations"] = lambda *_a, **_k: None
+        led = Ledger(colour=False)
+        led._buf = []
+        try:
+            _differential_engine(led, "mysql", Path("run.py"))
+        finally:
+            subprocess.run = real_run
+            globals()["rivet_bin"] = real_bin
+            globals()["note_invariant_violations"] = real_note
+        got = {c.status.name for c in led.cells}
+        assert got == {"FAIL"} and led.cells, f"exit {rc} with no verdict read {got}, not FAIL"
+    print("self-test ok: a cdc probe is serialised per engine; a differential run with no verdict fails")

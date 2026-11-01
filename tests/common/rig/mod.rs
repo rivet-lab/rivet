@@ -286,7 +286,7 @@ impl Rig {
     /// checkpoint, like the SQL CDC constructors. Override the db with
     /// `.source_url(&MongoTest::url(PORT, &db))`.
     pub fn mongo_cdc(table: &str) -> Self {
-        let mut r = Self::new("mongo", super::env::MONGO_RS_URL, table);
+        let mut r = Self::new("mongo", &super::env::mongo_rs_url(), table);
         r.mode = "cdc".to_string();
         r.cdc_lines.push("until_current: true".into());
         r.cdc_lines.push("__CKPT__".into()); // resolved at render time
@@ -1064,15 +1064,15 @@ impl CdcScenario {
         }
     }
 
-    /// MongoDB (replica set :27018): a fresh database, one collection, unpinned and
+    /// MongoDB (replica set :27018): a fresh database, one uniquely named collection, unpinned and
     /// shaped — see [`Self::mysql_with`]. The scenario's `_id`s are `i64`.
     pub fn mongo_with(label: &str, shape: impl FnOnce(Rig, &str) -> Rig) -> Self {
-        Self::mongo_on(27018, label, shape)
+        Self::mongo_on(super::env::mongo_rs_port(), label, shape)
     }
 
     /// [`Self::mongo_with`] on the replica set member listening on `PORT`.
     pub fn mongo_on(port: u16, label: &str, shape: impl FnOnce(Rig, &str) -> Rig) -> Self {
-        Self::mongo_collection_on(port, label, "t", shape)
+        Self::mongo_collection_on(port, label, &super::unique_name(label), shape)
     }
 
     /// [`Self::mongo_with`] with the collection named `collection`: a warehouse that every cell shares one schema of needs the table named per cell.
@@ -1081,7 +1081,7 @@ impl CdcScenario {
         collection: &str,
         shape: impl FnOnce(Rig, &str) -> Rig,
     ) -> Self {
-        Self::mongo_collection_on(27018, label, collection, shape)
+        Self::mongo_collection_on(super::env::mongo_rs_port(), label, collection, shape)
     }
 
     /// [`Self::mongo_on`] with the collection named `collection`.

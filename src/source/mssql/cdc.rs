@@ -37,6 +37,7 @@ use crate::source::cdc::checkpoint_identity::IdentityVerdict;
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
 use crate::source::require_tls_or_loopback;
+use crate::types::hex_bytes;
 
 /// Does the capture instance carry every column of its source table?
 ///
@@ -882,7 +883,7 @@ impl MssqlChangeStream {
                     }
                     "__$start_lsn" => {
                         if let ColumnData::Binary(Some(b)) = data {
-                            lsn = hex(b);
+                            lsn = hex_bytes(b);
                         }
                     }
                     n if n.starts_with("__$") => {} // skip other metadata
@@ -1155,10 +1156,6 @@ fn cell_fallthrough(data: &ColumnData<'_>) -> Result<RivetValue> {
     )
 }
 
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 async fn connect(
     cfg: &MssqlCdcConfig,
     tls: Option<&TlsConfig>,
@@ -1281,9 +1278,9 @@ mod tests {
         let anchor = super::probe_max_lsn(&probe).unwrap();
         assert_eq!(
             anchor,
-            super::hex(&[0, 0, 0, 0x2d, 0, 0, 0, 0xd8, 0x01, 0x94])
+            crate::types::hex_bytes(&[0, 0, 0, 0x2d, 0, 0, 0, 0xd8, 0x01, 0x94])
         );
-        let older_event = super::hex(&[0, 0, 0, 0x2a, 0, 0, 0x01, 0xa8, 0, 0x04]);
+        let older_event = crate::types::hex_bytes(&[0, 0, 0, 0x2a, 0, 0, 0x01, 0xa8, 0, 0x04]);
         assert!(
             anchor > older_event,
             "BigQuery/Snowflake order __pos.lsn as a string: {anchor} vs {older_event}"

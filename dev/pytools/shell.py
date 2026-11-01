@@ -138,6 +138,7 @@ def run(
             input=stdin,
             capture_output=quiet,
             text=True,
+            errors="replace",
             timeout=timeout,
             env=full_env,
             cwd=str(cwd) if cwd else None,
@@ -183,6 +184,33 @@ def docker_exec(container: str, *args: str, stdin: str | None = None, **kw) -> P
     """
     flags = ["-i"] if stdin is not None else []
     return docker("exec", *flags, container, *args, stdin=stdin, **kw)
+
+
+def capture(
+    argv: Sequence[str], env: dict[str, str] | None = None, timeout: float | None = 900
+) -> subprocess.CompletedProcess:
+    """`subprocess.run` with text capture and `env` laid over the environment; a timeout raises."""
+    return subprocess.run(
+        argv, capture_output=True, text=True, errors="replace", env={**os.environ, **(env or {})}, timeout=timeout
+    )
+
+
+def psql_state(container: str, sql: str, *, timeout: float | None) -> str:
+    """Trimmed `psql -tAc` output from the `rivet_state` database in `container`."""
+    return capture(
+        ["docker", "exec", container, "psql", "-U", "rivet", "-d", "rivet_state", "-tAc", sql],
+        timeout=timeout,
+    ).stdout.strip()
+
+
+def duckdb_list(duckdb_argv: Sequence[str], sql: str, *, timeout: float | None) -> str:
+    """Trimmed headerless `-list` output of `sql` run through the harness DuckDB."""
+    return capture([*duckdb_argv, "-noheader", "-list", "-c", sql], timeout=timeout).stdout.strip()
+
+
+def say(msg: str = "") -> None:
+    """A progress line on stdout, flushed."""
+    print(msg, flush=True)
 
 
 # ── preconditions ──────────────────────────────────────────────────────────────
@@ -298,3 +326,35 @@ def main(fn: Callable[[], int | None]) -> None:
         raise SystemExit(e.code)
     except KeyboardInterrupt:
         raise SystemExit(130)
+
+
+def _self_test() -> int:
+    """`capture` overlays env and raises on timeout; `psql_state` and `duckdb_list` build their argv."""
+    import tempfile
+
+    assert capture(["sh", "-c", "echo $SHELL_SELF_TEST"], env={"SHELL_SELF_TEST": "x"}).stdout == "x\n"
+    latin1 = run(["printf", r"a\350b"])
+    assert latin1.ok and latin1.stdout == "a\ufffdb", "a byte that is not UTF-8 must be read, not crash the caller"
+    assert capture(["printf", r"a\350b"]).stdout == "a\ufffdb"
+    try:
+        capture(["sleep", "5"], timeout=0.2)
+        raise AssertionError("a timeout must raise")
+    except subprocess.TimeoutExpired:
+        pass
+    with tempfile.TemporaryDirectory() as d:
+        fake = Path(d) / "docker"
+        fake.write_text('#!/bin/sh\necho "  $*  "\n')
+        fake.chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{d}:{old}"
+        try:
+            assert psql_state("c1", "select 1", timeout=5) == "exec c1 psql -U rivet -d rivet_state -tAc select 1"
+        finally:
+            os.environ["PATH"] = old
+    assert duckdb_list(["echo"], "q", timeout=5) == "-noheader -list -c q"
+    print("shell self-test ok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_self_test() if sys.argv[1:] == ["--self-test"] else 2)

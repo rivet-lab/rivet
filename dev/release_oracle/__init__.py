@@ -16,8 +16,8 @@ that engine). A cell that forgets this looks correct and fails as the PRODUCT:
   * a fixed probe table (`orc_cdc_probe`) on the shared CDC stand: version A's
     cleanup drops it mid-capture for B. Surfaced as "the capture wrote no part"
     on 3 of 7 postgres versions and "Table not found" in another cell — read as
-    a rivet bug for a whole run. The lock lives in `cdc._cdc_lock_for`; EVERY
-    per-version toucher must take it (blessed_flow did, corruption.py did not).
+    a rivet bug for a whole run. The lock lives in `cdc._cdc_lock_for`; `cdc_probe`
+    takes it itself; any other per-version toucher of the probe must too.
   * a config path keyed by pid+engine, or by a destination SUBDIRECTORY whose
     name is a constant ("users", "full"): N versions write N destinations into
     ONE file, so a cell corrupts its own part and then validates another

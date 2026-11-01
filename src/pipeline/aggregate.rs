@@ -33,14 +33,8 @@ use super::{format_bytes, strip_chunked_recovery_hint};
 /// JSON schema can evolve independently of column layout.  Field names mirror
 /// the `export_metrics` columns; `Option` fields are emitted as JSON `null`
 /// (kept, not skipped) so consumers see a fixed-shape object every row.
-///
-/// `dead_code`-allowed because the only production caller — the `rivet metrics
-/// --json` flag dispatch — is added in a later wave (the CLI arg lives in
-/// `cli.rs`/`args.rs`); this serialization layer lands first so wiring the flag
-/// is a one-liner.  Exercised today by the module's unit tests.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct MetricRowJson {
+struct MetricRowJson {
     pub export_name: String,
     pub run_id: Option<String>,
     pub run_at: String,
@@ -83,15 +77,6 @@ impl From<&ExportMetric> for MetricRowJson {
 }
 
 /// Render metric rows as a pretty-printed JSON array for `rivet metrics --json`.
-///
-/// An empty slice renders as `[]` (not an error, not the human-table's
-/// "No metrics recorded yet." text) so machine consumers always parse a valid
-/// JSON array.  The caller is responsible for the `--config` existence check
-/// (finding #9) before reaching here — this function is pure formatting.
-///
-/// `dead_code`-allowed until the `rivet metrics --json` flag dispatch (a later
-/// wave, in the off-limits `cli.rs`/`args.rs`) calls it.
-#[allow(dead_code)]
 pub(super) fn metrics_to_json(metrics: &[ExportMetric]) -> Result<String> {
     let rows: Vec<MetricRowJson> = metrics.iter().map(MetricRowJson::from).collect();
     serde_json::to_string_pretty(&rows).map_err(|e| {

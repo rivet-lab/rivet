@@ -446,14 +446,17 @@ fn the_workflow_emits_the_metrics_and_never_gates_on_them() {
         "ci.yml's `{JOB}` job does not upload its JSON — a metrics file that lives and dies \
          inside one runner is not a trend anybody can read across runs"
     );
-    // Its shaping is graded where it is cheap to grade: the gate-scripts job.
-    super::nonvacuity::require_needle(
-        &text,
-        CI,
-        "harness_metrics.py --self-test",
-        1,
-        "The emitter's own unit checks must run in CI too, not only in this suite.",
-    );
+    let gate_shell: String = jobs
+        .get(serde_yaml_ng::Value::from("gate-scripts"))
+        .and_then(|j| j["steps"].as_sequence())
+        .expect("ci.yml has a `gate-scripts` job with steps")
+        .iter()
+        .filter_map(|s| s.get("run").and_then(|r| r.as_str()))
+        .flat_map(|s| s.lines())
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    super::nonvacuity::require_gate_self_test(&gate_shell, ".github/scripts/harness_metrics.py");
 
     // …and the half that keeps it a thermometer.
     assert_eq!(

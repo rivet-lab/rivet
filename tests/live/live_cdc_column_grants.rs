@@ -1056,8 +1056,8 @@ fn columns_from_grants_is_refused_by_every_command_oracle() {
 #[ignore = "live: needs only the rig harness env; the refusal comes before any connection"]
 fn columns_from_grants_is_refused_by_every_command_mongo() {
     columns_from_grants_is_refused_by_every_command(vec![
-        Rig::mongo_batch("orders").source_url(&MongoTest::url(27018, "cg_refused")),
-        Rig::mongo_cdc("orders").source_url(&MongoTest::url(27018, "cg_refused")),
+        Rig::mongo_batch("orders").source_url(&MongoTest::url(mongo_rs_port(), "cg_refused")),
+        Rig::mongo_cdc("orders").source_url(&MongoTest::url(mongo_rs_port(), "cg_refused")),
     ]);
 }
 

@@ -1,0 +1,67 @@
+time="2026-10-31T22:32:32+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 24.8: server 24.8.14.39
+   30/30 ok
+time="2026-10-31T22:33:46+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 25.8: server 25.8.33.6
+   30/30 ok
+time="2026-10-31T22:34:33+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 26.3: server 26.3.62.3
+   30/30 ok
+time="2026-10-31T22:35:22+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 26.8: server 26.8.36.3
+   30/30 ok
+time="2026-10-31T22:36:58+01:00" level=warning msg="Found orphan containers ([rivet-mongos-1 rivet-mongo-shard-cfg-1 rivet-mongo-shard-b-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container rivet-clickhouse Recreate 
+ Container rivet-clickhouse Recreated 
+ Container rivet-clickhouse Starting 
+ Container rivet-clickhouse Started 
+== 26.10: server 26.10.3.7
+   30/30 ok
+
+cell | 24.8 (24.8.14.39) | 25.8 (25.8.33.6) | 26.3 (26.3.62.3) | 26.8 (26.8.36.3) | 26.10 (26.10.3.7)
+cdc:mysql | ok | ok | ok | ok | ok
+cdc:postgres | ok | ok | ok | ok | ok
+cdc:mssql | ok | ok | ok | ok | ok
+cdc:crash | ok | ok | ok | ok | ok
+full | ok | ok | ok | ok | ok
+incremental | ok | ok | ok | ok | ok
+init | ok | ok | ok | ok | ok
+rekey-refused | ok | ok | ok | ok | ok
+mv-count | ok | ok | ok | ok | ok
+types | ok | ok | ok | ok | ok
+s3:push | ok | ok | ok | ok | ok
+s3:pull | ok | ok | ok | ok | ok
+azure:push | ok | ok | ok | ok | ok
+azure:pull | ok | ok | ok | ok | ok
+reload-tz-time | ok | ok | ok | ok | ok
+odd-key-pull | ok | ok | ok | ok | ok
+adopt-resume | ok | ok | ok | ok | ok
+range-refused:push | ok | ok | ok | ok | ok
+range-refused:pull | ok | ok | ok | ok | ok
+retry:cdc | ok | ok | ok | ok | ok
+retry:exhausted | ok | ok | ok | ok | ok
+retry:full-not-resent | ok | ok | ok | ok | ok
+full:crash-hooks | ok | ok | ok | ok | ok
+partition:full | ok | ok | ok | ok | ok
+partition:cdc | ok | ok | ok | ok | ok
+partition:changed | ok | ok | ok | ok | ok
+partition:incremental | ok | ok | ok | ok | ok
+lib:version-order | ok | ok | ok | ok | ok
+lib:unknown-pos | ok | ok | ok | ok | ok
+lib:pull-by-name | ok | ok | ok | ok | ok

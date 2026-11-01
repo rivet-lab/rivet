@@ -1,12 +1,13 @@
 # Loading rivet Parquet into ClickHouse (preview)
 
-> **Status: Preview.** Live-tested against ClickHouse 24.8 (the stand's `clickhouse`
-> compose service). See [Known limits](#known-limits) and
+> **Status: Preview.** Live-tested against ClickHouse 24.8, 25.8, 26.3, 26.8 and 26.10
+> (the stand's `clickhouse` compose service, 24.8 by default; `dev/clickhouse/version_matrix.py`
+> runs every gate cell on each). See [Known limits](#known-limits) and
 > [engine maturity](../engine-maturity.md) for what is still open before GA.
 
 `rivet load` writes an export's Parquet into ClickHouse over the HTTP interface
 ([ADR-0035](../adr/0035-clickhouse-load-target.md)). The export may land in GCS, S3
-or Azure (`rivet init` takes `--gcs-bucket` or `--s3-bucket`); the ClickHouse
+or Azure (`rivet init` takes `--gcs-bucket`, `--s3-bucket` or `--azure-container`); the ClickHouse
 database must already exist.
 
 ## Generate the config
@@ -24,8 +25,8 @@ rivet run  -c rivet.yaml    # Parquet into GCS
 rivet load -c rivet.yaml    # Parquet into ClickHouse
 ```
 
-A CDC scaffold captures changes from its anchor on; rows that existed before are not
-in it. For them, set `cdc.initial: snapshot` (or a `cdc.backfill:`) before the first run.
+A CDC scaffold carries a first-run baseline (`cdc.backfill: auto`), so the first run
+reads the rows that already exist and then captures changes from its anchor on.
 
 The generated block:
 
@@ -57,8 +58,9 @@ re-run load) carries the same key and version, so it collapses the same way.
 
 `rivet compact` on a ClickHouse config does nothing: it passes a change-log table
 by with "this warehouse keeps a change log behind a view and never compacts; nothing
-to merge" (and a full-load table with "a full load overwrites its table"). A deleted key stays in the log as its last version with `__is_deleted`
-set, so live state is `WHERE NOT __is_deleted`.
+to merge" (and a full-load table with "a full load overwrites its table"). A deleted key stays in the log as its last version
+(`__op = 'delete'`); the view flags it `__is_deleted`, so live state is the view read
+`WHERE NOT __is_deleted`.
 
 ## What lands
 
@@ -122,8 +124,9 @@ load:
   warns when a CDC export partitions by anything but a creation stamp (`created_at`,
   `CreatedDate`, …).
 - **Change the partition before the first load, not after.** A change log that exists
-  already keeps its partition. A load that declares a different one is refused before
-  it writes anything, and the refusal names both. A full-load table is created again on
+  already keeps its partition. A load that has parts to write and declares a different
+  one is refused before it writes anything, and the refusal names both; a load with
+  nothing new reports the table up to date without the check. A full-load table is created again on
   every load, so it always takes the partition the config declares.
 - **Not on ClickHouse:** `range:` (BigQuery's integer ranges), `ingestion:` (use
   `column: _rivet_exported_at`), `expiration_days` and `require_filter` (a TTL is the
@@ -155,6 +158,9 @@ load:
   named_collection: gcs_raw
 ```
 
+A collection the server already defines in its XML config (`<named_collections>`)
+works the same way: name it in `named_collection:`.
+
 ## Known limits
 
 - **Timestamp range.** `DateTime64` holds 1900-01-01 to 2299-12-31, and ClickHouse
@@ -164,6 +170,12 @@ load:
   value outside that range or has no min/max statistics
   (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`). A `Date32` outside the same range fails the
   insert: ClickHouse refuses it itself (measured on a part rivet sends).
+- **Naive timestamps are declared in UTC.** A timestamp without a zone lands as
+  `DateTime64(p, 'UTC')`, so it reads back as the source wrote it whatever the server's
+  or the session's time zone. A table created by 0.32.2 or earlier declares it
+  `DateTime64(p)`, which ClickHouse shows in the server's time zone; rivet keeps loading
+  such a table and warns with the `ALTER TABLE ... MODIFY COLUMN` that declares it in UTC
+  (the stored instants do not change; a key column cannot be altered).
 - **Types that land as something else.** `uuid` lands as `FixedString(16)` (the 16 raw
   bytes; the type report carries the `toUUID` expression to recover it), `json`/`jsonb`
   as `String` holding the JSON text, `time` as `Decimal64` seconds since midnight, and a

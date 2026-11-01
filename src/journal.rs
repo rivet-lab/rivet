@@ -1,7 +1,4 @@
 //! **Layer: Observability**
-// Query methods and event fields are intentionally defined for future consumers
-// (storage, CLI inspection, notifications).  Suppress dead_code for this module.
-#![allow(dead_code)]
 //!
 //! `RunJournal` is the canonical in-memory record of everything that happened
 //! during a pipeline run.  It accumulates typed, timestamped events and can

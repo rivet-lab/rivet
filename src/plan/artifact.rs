@@ -248,12 +248,6 @@ impl PlanArtifact {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    /// Serialize to compact JSON (used in tests and by callers that need minimal output).
-    #[allow(dead_code)]
-    pub fn to_json_compact(&self) -> Result<String> {
-        Ok(serde_json::to_string(self)?)
-    }
-
     /// Deserialize from a JSON string.
     pub fn from_json(s: &str) -> Result<Self> {
         Ok(serde_json::from_str(s)?)
@@ -880,7 +874,7 @@ mod tests {
                 strategy_rationale: String::new(),
             },
         );
-        let json = artifact.to_json_compact().unwrap();
+        let json = serde_json::to_string(&artifact).unwrap();
         let restored = PlanArtifact::from_json(&json).unwrap();
         assert_eq!(
             restored.computed.chunk_ranges,

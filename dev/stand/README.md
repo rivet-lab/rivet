@@ -10,11 +10,11 @@ the canonical `~/rivet` compose project.
 ## Up / down
 
 ```bash
+python3 -m dev.pytools.legacy_stand stand-up           # both tiers + post-seed (MSSQL, Mongo-CDC) — idempotent
+python3 -m dev.pytools.legacy_stand stand-up batch     # batch tier only
+python3 -m dev.pytools.legacy_stand stand-up cdc       # cdc tier only
+python3 -m dev.pytools.legacy_stand stand-verify       # cross-engine checksum: seeds must be identical
 cd dev/stand
-./up.sh            # both tiers + post-seed (MSSQL, Mongo-CDC) — idempotent
-./up.sh batch      # batch tier only
-./up.sh cdc        # cdc tier only
-./verify.sh        # cross-engine checksum: seeds must be identical
 docker compose --profile batch --profile cdc down   # stop (volumes survive)
 ```
 
@@ -32,15 +32,41 @@ docker compose --profile batch --profile cdc down   # stop (volumes survive)
 | Mongo 5.0     | 27105                          | 27205 (rs0)                    |
 | Mongo 8.0     | 27108                          | 27208 (rs0)                    |
 
+## Mongo version and topology for the live cells
+
+The live cells read the Mongo replica set at `RIVET_TEST_MONGO_RS_PORT` (default 27018, the
+canonical compose `mongo-rs`). The version is the stand's choice: point the variable at a CDC
+instance of this stand and the same test body runs on that server.
+
+```bash
+docker compose --profile cdc up -d --wait mongo44-cdc mongo50-cdc mongo80-cdc
+RIVET_TEST_MONGO_RS_PORT=27208 python3 dev/pytools/live_slot.py -- cargo nextest run --test live_suite \
+  --run-ignored all -E 'test(live_clickhouse_load::a_mongo_)'      # 27204 = 4.4, 27205 = 5.0, 27208 = 8.0
+docker compose --profile cdc rm -sf -v mongo44-cdc mongo50-cdc mongo80-cdc
+```
+
+Each cell prints `mongo-server: <version>` so the run shows what it ran on. Port 27017 to 27020
+on a machine with a tunnel to another host may belong to that host: read the printed version.
+
+The sharded cluster (two shards, a config server and `mongos` on 27991, every data directory a
+tmpfs) is the canonical compose profile `shard`; `MONGO_VERSION` picks the image:
+
+```bash
+docker compose --profile shard up -d --wait mongos
+docker compose --profile shard rm -sf -v mongos mongo-shard-a mongo-shard-b mongo-shard-cfg
+```
+
+Do not stop it with `docker compose down`: that removes every container of the project.
+
 ## Seeds (`seeds/`)
 
 - `common/{postgres,mysql,mssql}.sql` — users **50k**, orders **200k**,
   events **500k**. Every value is a pure function of the row number `n`
   (modulo arithmetic from fixed epochs), so all six SQL instances hold the
-  **same rows**; `verify.sh` asserts identical count/sum tuples (sums in
+  **same rows**; `stand-verify` asserts identical count/sum tuples (sums in
   integer cents to dodge client decimal formatting).
 - `mongo_seed.py` (host python3, stdlib only) — deterministic Extended-JSON
-  generator; `up.sh` pipes it into `mongoimport` inside each mongo container.
+  generator; `stand-up` pipes it into `mongoimport` inside each mongo container.
   Heavy perf collections `orders` 200k + `events` 500k docs on the batch
   instances (same shape/volume class; Mongo is volume-parity, not
   row-parity). `$numberInt`/`$numberLong` wrappers pin identical BSON types
@@ -51,12 +77,12 @@ docker compose --profile batch --profile cdc down   # stop (volumes survive)
 
 PG / MySQL seed on FIRST boot of an empty volume
 (`docker-entrypoint-initdb.d`); MSSQL (no initdb hook) and ALL Mongo
-instances (CDC ones have no PRIMARY during initdb) are seeded by `up.sh`,
+instances (CDC ones have no PRIMARY during initdb) are seeded by `stand-up`,
 idempotently.
 
 ## Notes
 
 - Data volumes are named per instance (`stand_pg14_batch_data`, …): restarts
-  and `down` keep data; `down -v` resets everything (next `up.sh` re-seeds).
+  and `down` keep data; `down -v` resets everything (next `stand-up` re-seeds).
 - All containers are `restart: unless-stopped` — the stand survives reboots.
 - amd64-only images (MySQL 5.7, both MSSQL) run under OrbStack Rosetta.

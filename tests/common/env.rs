@@ -135,6 +135,22 @@ pub fn oracle_latin1_url() -> String {
 pub const ORACLE_CDC_URL: &str = "oracle://c%23%23rivetcdc:rivet@127.0.0.1:1521/FREEPDB1";
 pub const MONGO_URL: &str = "mongodb://127.0.0.1:27017";
 pub const MONGO_RS_URL: &str = "mongodb://127.0.0.1:27018/?directConnection=true";
+/// The `mongo-rs` stand's URL on the port the stand chose.
+pub fn mongo_rs_url() -> String {
+    format!(
+        "mongodb://127.0.0.1:{}/?directConnection=true",
+        mongo_rs_port()
+    )
+}
+pub const MONGO_SHARD_PORT: u16 = 27991;
+pub const MONGO_SHARD_URL: &str = "mongodb://127.0.0.1:27991/?directConnection=true";
+/// Host port of the `mongo-rs` stand; `RIVET_TEST_MONGO_RS_PORT` names the one a non-default `MONGO_VERSION` stand is published on.
+pub fn mongo_rs_port() -> u16 {
+    std::env::var("RIVET_TEST_MONGO_RS_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(27018)
+}
 
 /// The least-privilege read-only login on the auth-enabled `mongo-auth` service
 /// (:27020, created by dev/mongo/init-auth.js). `read` on `harmdb` only — no
@@ -170,6 +186,9 @@ pub const CLICKHOUSE_USER: &str = "rivet";
 pub const CLICKHOUSE_PASSWORD: &str = "rivet";
 pub const CLICKHOUSE_DB: &str = "rivet";
 pub const CLICKHOUSE_HTTP_URL: &str = "http://127.0.0.1:8123";
+/// ClickHouse whose server time zone is Asia/Tokyo (`clickhouse-tz`).
+pub const CLICKHOUSE_TZ_HTTP_URL: &str = "http://127.0.0.1:8125";
+
 /// The stand ClickHouse over HTTPS, its certificate signed by the test CA in `dev/clickhouse/tls/ca.pem`.
 pub const CLICKHOUSE_HTTPS_URL: &str = "https://localhost:8443";
 
@@ -309,19 +328,10 @@ pub fn make_shared_world_readable() {
 
 /// Attempt a TCP connect with a short timeout.  Returns `true` if reachable.
 fn tcp_alive(host: &str, port: u16, timeout: Duration) -> bool {
-    let addr = format!("{host}:{port}");
-    addr.to_socket_addrs_alive(timeout).is_some()
-}
-
-trait ToSocketAddrsAlive {
-    fn to_socket_addrs_alive(&self, timeout: Duration) -> Option<()>;
-}
-
-impl ToSocketAddrsAlive for String {
-    fn to_socket_addrs_alive(&self, timeout: Duration) -> Option<()> {
-        let addr: std::net::SocketAddr = self.parse().ok()?;
-        TcpStream::connect_timeout(&addr, timeout).ok().map(|_| ())
-    }
+    format!("{host}:{port}")
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .is_some_and(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())
 }
 
 /// Fail fast with an actionable message if the docker-compose stack is not
@@ -384,6 +394,8 @@ pub enum LiveService {
     Mongo,
     /// MongoDB single-node replica set (change-stream CDC). TCP :27018.
     MongoRs,
+    /// Two-shard MongoDB cluster behind mongos (profile `shard`). TCP :27991.
+    MongoShard,
     /// Auth-enabled MongoDB with a least-privilege read-only user. TCP :27020.
     MongoAuth,
     Minio,
@@ -404,6 +416,8 @@ pub enum LiveService {
     DuckDb,
     /// ADR-0014 Parquet validator: `clickhouse/clickhouse-server`. HTTP :8123.
     ClickHouse,
+    /// ClickHouse at server time zone Asia/Tokyo. HTTP :8125.
+    ClickHouseTz,
 }
 
 impl LiveService {
@@ -440,8 +454,13 @@ impl LiveService {
             LiveService::Mongo => ("127.0.0.1", 27017, "service `mongo` in docker-compose.yaml"),
             LiveService::MongoRs => (
                 "127.0.0.1",
-                27018,
+                mongo_rs_port(),
                 "service `mongo-rs` (single-node replica set) in docker-compose.yaml",
+            ),
+            LiveService::MongoShard => (
+                "127.0.0.1",
+                MONGO_SHARD_PORT,
+                "profile `shard` — run: docker compose --profile shard up -d --wait mongos",
             ),
             LiveService::MongoAuth => (
                 "127.0.0.1",
@@ -493,6 +512,11 @@ impl LiveService {
                 "127.0.0.1",
                 CLICKHOUSE_PORT_HTTP,
                 "service `clickhouse` in docker-compose.yaml (HTTP :8123)",
+            ),
+            LiveService::ClickHouseTz => (
+                "127.0.0.1",
+                8125,
+                "service `clickhouse-tz` — run: docker compose --profile tz up -d clickhouse-tz",
             ),
             // Not used (DuckDb is handled before addr() in require_alive),
             // but kept exhaustive so future TCP-style probes do not panic.
