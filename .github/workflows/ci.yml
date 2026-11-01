@@ -1246,71 +1246,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # `mutation_tiers.py` was removed with the rotation it graded (2026-08-17).
-      # It existed to prove the nightly `case` arms named real files and that the
-      # day expression was base-10 — questions with no subject once the rotation
-      # is gone.
-      - name: The exclusion checker's own site/function keying
-        run: python3 .github/scripts/mutants_exclusions.py --self-test
-      # The outcome cache decides whether a mutation run happens at all, so its
-      # own logic is gated the same way. Its self-test RED-proves the one thing
-      # that would be catastrophic and silent: a cache replaying PASS for a set
-      # that contains a missed mutant.
-      - name: Mutation outcome cache self-test
-        run: python3 .github/scripts/mutants_cache.py --self-test
-      - name: Commit-msg trailer filter self-test
-        run: .githooks/strip-trailers --self-test
+      - name: Every gate script's own self-test (found, not listed)
+        run: python3 .github/scripts/gate_self_tests.py
       - name: No live test grades rivet by rivet's own report alone (shrink-only)
-        run: |
-          python3 dev/pytools/self_oracle_lint.py --self-test
-          python3 dev/pytools/self_oracle_lint.py
+        run: python3 dev/pytools/self_oracle_lint.py
       - name: Every connection the Python harness opens is held by a `with`
-        run: |
-          python3 dev/pytools/connection_lint.py --self-test
-          python3 dev/pytools/connection_lint.py
-      - name: Fault catalog and nightly comparison self-tests
-        run: |
-          python3 dev/pytools/fault_catalog.py --self-test
-          python3 dev/pytools/nightly.py --self-test
-      - name: Evidence ledger self-test
-        run: python3 dev/pytools/evidence.py --self-test
-      # The PRIORITISER's classification, graded over a coverage export copied
-      # from a real `cargo llvm-cov --lib --bins --json` run: an executed
-      # function, an untaken branch inside one, a function measured at zero, a
-      # file the report never mentions, an uncovered line, an unparseable name —
-      # and six report shapes it must REFUSE rather than read as "nothing is
-      # covered". Everything it does not know must land in the graded class;
-      # that fallback is the only thing standing between this split and "it
-      # wasn't covered, so it doesn't count".
-      #
-      # It also grades the P2-AUDIT's oracle, over PR #265's four real kills:
-      # a mutant caught in the audit run that was never CLASSIFIED P2 says
-      # nothing about the report-only class, and reading it as `oracle-lied`
-      # failed a PR whose own diff was clean.
-      - name: The mutant prioritiser fails closed
-        run: python3 .github/scripts/mutants_classify.py --self-test
-      # The harness thermometer's SHAPING, over fixtures of counts: an unknown
-      # count must publish as null and never 0, a rate over an unknown or a zero
-      # denominator must be null, contradictory inputs must be reported rather
-      # than repaired, and the census must refuse to describe an empty tree as a
-      # harness with no guards. No gate rides on the numbers; the numbers still
-      # have to be true.
-      - name: The harness metrics say `unknown`, not `zero`
-        run: python3 .github/scripts/harness_metrics.py --self-test
-      - name: The E2E scope skips only docs and E2E-unused harness (self-test)
-        run: python3 .github/scripts/e2e_scope.py --self-test
-      - name: Every selected E2E test lands in exactly one leg (self-test)
-        run: python3 .github/scripts/e2e_legs.py --self-test
-      # `--self-test` returns before any stage, container or binary is touched —
-      # it grades the argv/env coercion only, so this invocation needs no
-      # RIVET_PREV_RELEASE_BIN and is not a gate run (cf. the Makefile-scoped
-      # entry-point guard in tests/offline/release_oracle_entrypoint_guard.rs).
+        run: python3 dev/pytools/connection_lint.py
       - name: The release oracle's env-flag grammar is one grammar
         run: python3 -m dev.release_oracle --self-test
-      - name: Release tagging refuses a commit without a green full gate (self-test)
-        run: python3 dev/pytools/release.py --self-test
-      - name: The Homebrew formula installs the Linux build Homebrew's image can run (self-test)
-        run: python3 dev/pytools/homebrew_formula.py --self-test
       # uv: the rig oracle's self-test writes and reads parquet through the pinned duckdb/pyarrow.
       - uses: taiki-e/install-action@v2.87.28
         with:

@@ -7,8 +7,8 @@ engines run on":
 
     python3 -m dev.pytools.legacy_stand legacy       [TARGET ...]  # dev/legacy/run_legacy.sh
     python3 -m dev.pytools.legacy_stand full-matrix  [TARGET ...]  # dev/legacy/run_full_matrix.sh
-    python3 -m dev.pytools.legacy_stand stand-up     [batch|cdc]   # dev/stand/up.sh
-    python3 -m dev.pytools.legacy_stand stand-verify               # dev/stand/verify.sh
+    python3 -m dev.pytools.legacy_stand stand-up     [batch|cdc]
+    python3 -m dev.pytools.legacy_stand stand-verify
 
 `TARGET ...` may also come from `$TARGETS` (whitespace-separated), as in the
 shell. Every pinned version, port, URL, credential and container name is
@@ -137,8 +137,8 @@ Commands:
                                 (default: pg-12 pg-13 pg-14 pg-15 mysql-57)
   full-matrix  [TARGET ...]     dev/legacy/run_full_matrix.sh — full e2e per version
                                 (default: pg-12 pg-13 pg-14 pg-15 pg-16 mysql-57 mysql-80)
-  stand-up     [batch|cdc|all]  dev/stand/up.sh — bring up + post-seed the stand
-  stand-verify                  dev/stand/verify.sh — cross-engine seed parity
+  stand-up     [batch|cdc|all]  bring up + post-seed the stand
+  stand-verify                  cross-engine seed parity
 
 TARGET may also be supplied via $TARGETS (whitespace-separated).
 Binaries: $RIVET / $SEED (default target/release/{rivet,seed})."""
@@ -639,7 +639,7 @@ def full_matrix(target_names: Sequence[str]) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# dev/stand/up.sh
+# stand-up
 # ══════════════════════════════════════════════════════════════════════════════
 SA_PASS = "Rivet_Passw0rd!"
 
@@ -881,12 +881,12 @@ def seed_mongo(container: str, orders: int, events: int, user_mod: int) -> None:
 
 
 def stand_up(tier: str = "all") -> int:
-    """`dev/stand/up.sh`: compose up, wait for health, then finish the seeding
+    """Compose up, wait for health, then finish the seeding
     the initdb hooks cannot do (MSSQL has no hook; a CDC Mongo replica set has no
     PRIMARY at initdb time). Idempotent — safe to re-run any time."""
     profiles = STAND_PROFILES.get(tier)
     if profiles is None:
-        say("usage: up.sh [batch|cdc]")
+        say("usage: stand-up [batch|cdc|all]")
         return 2
 
     shell.require("docker", hint="install Docker / OrbStack and start the daemon")
@@ -927,12 +927,12 @@ def stand_up(tier: str = "all") -> int:
         for container, orders, events, umod in STAND_MONGO_CDC:
             seed_mongo(container, orders, events, umod)
 
-    say("== done; run ./verify.sh to cross-check the seeds")
+    say("== done; run python3 -m dev.pytools.legacy_stand stand-verify to cross-check the seeds")
     return 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# dev/stand/verify.sh
+# stand-verify
 # ══════════════════════════════════════════════════════════════════════════════
 # The common seed is deterministic, so every BATCH SQL engine must report the
 # IDENTICAL tuple of
@@ -1065,7 +1065,7 @@ _SQL_CLIENTS: dict[str, Callable[[str, int], Cell]] = {
 
 
 def stand_verify() -> int:
-    """`dev/stand/verify.sh`: cross-engine seed parity. Exit 0 when every group
+    """Cross-engine seed parity. Exit 0 when every group
     agrees, 1 on any mismatch or unusable cell."""
     fail = 0
     for name, spec in (
@@ -1099,12 +1099,12 @@ def main_cli(argv: Sequence[str] | None = None) -> int:
         return full_matrix(_targets(rest, FULL_DEFAULT))
     if cmd == "stand-up":
         if len(rest) > 1:
-            say("usage: up.sh [batch|cdc]")
+            say("usage: stand-up [batch|cdc|all]")
             return 2
         return stand_up(rest[0] if rest else "all")
     if cmd == "stand-verify":
         if rest:
-            say("usage: verify.sh")
+            say("usage: stand-verify")
             return 2
         return stand_verify()
 

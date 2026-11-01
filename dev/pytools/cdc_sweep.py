@@ -49,6 +49,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "dev"))
+from pytools import shell  # noqa: E402
 from pytools.duckcli import ARGV as DUCKDB  # noqa: E402
 
 STATE_URL = os.environ.get(
@@ -236,10 +237,7 @@ CASES: list[Case] = [
 
 
 # ── plumbing ──────────────────────────────────────────────────────────────────
-def sh(argv: list[str], env: dict | None = None, timeout: int = 900):
-    return subprocess.run(
-        argv, capture_output=True, text=True, env={**os.environ, **(env or {})}, timeout=timeout
-    )
+sh = shell.capture
 
 
 def run_rivet(cfg: Path, env: dict, timeout: int = 300, extra: dict | None = None):
@@ -262,13 +260,13 @@ def run_rivet(cfg: Path, env: dict, timeout: int = 300, extra: dict | None = Non
 
 
 def psql_state(sql: str) -> str:
-    return sh(
-        ["docker", "exec", STATE_CONTAINER, "psql", "-U", "rivet", "-d", "rivet_state", "-tAc", sql]
-    ).stdout.strip()
+    """Trimmed `psql -tAc` output from the sweep's state database."""
+    return shell.psql_state(STATE_CONTAINER, sql, timeout=900)
 
 
 def duckdb(sql: str) -> str:
-    return sh([*DUCKDB, "-noheader", "-list", "-c", sql]).stdout.strip()
+    """Trimmed DuckDB `-list` output of `sql`."""
+    return shell.duckdb_list(DUCKDB, sql, timeout=900)
 
 
 def owned_by(export: str) -> str:

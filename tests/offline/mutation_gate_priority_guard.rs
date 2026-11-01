@@ -334,17 +334,9 @@ fn the_mutation_gate_actually_invokes_the_prioritiser() {
             ),
         );
     }
-    super::nonvacuity::require_needle(
-        // Three one-line `run:` steps, hence the floor of 2: the point of a
-        // floor is to catch a job whose scripts stopped PARSING (which lands at
-        // zero), not to count them — set at 3 it fires on the deleted step
-        // before the needle does, and reports "this guard is reading the
-        // workflow wrong" about a workflow the guard read correctly.
+    super::nonvacuity::require_gate_self_test(
         &job_shell("gate-scripts", 2),
-        "ci.yml's `gate-scripts` shell",
-        "mutants_classify.py --self-test",
-        1,
-        "The classifier's own unit checks must run in CI, not only in this suite.",
+        ".github/scripts/mutants_classify.py",
     );
 }
 
