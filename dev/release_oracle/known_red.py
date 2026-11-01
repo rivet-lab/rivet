@@ -33,15 +33,6 @@ _TS9 = (
     "(exact native is Timestamp(ns), ADR-0038 CP1, Oracle engine step), so the 1 ns sentinel lands truncated. "
     "Renewed 2026-11-01: still live (target/triage/sent_oracle_alone.log); closes when the Oracle engine step lands Timestamp(ns)"
 )
-_BYTES_704 = (
-    "#704 accepted byte change (owner, 2026-11-01): a nullable column with no NULL in a write call took a 20000-row base mini-batch under parquet 60, "
-    "so the dictionary fallback landed on another row; write_in_spans now cuts at 1024 rows. Decoded values are identical, only dictionary-page sizes change. "
-    "Closes when the baseline is the release that carries the new bytes"
-)
-_AB_704 = (
-    "#704 accepted byte change (owner, 2026-11-01): only the part-bytes fingerprint differs (manifest.fingerp, manifest.fingerprints[0]); the other six ab-diff scenarios are identical. "
-    "Closes when the baseline is the release that carries the new bytes"
-)
 
 
 def _open(cell: str, symptom: str, reason: str) -> KnownRed:
@@ -61,33 +52,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              _EXPIRES),
     KnownRed('sentinels[rivet_sent_ts9/keyset]: SUCCEEDED WITH A CHANGED VALUE: `V` differs',
              _TS9,
-             _EXPIRES),
-    KnownRed('byte-identical[postgres/full]: 1 of 1 parts differ in bytes',
-             _BYTES_704,
-             _EXPIRES),
-    KnownRed('byte-identical[mysql/full]: 1 of 1 parts differ in bytes',
-             _BYTES_704,
-             _EXPIRES),
-    KnownRed('byte-identical[mysql/chunked]: 3 of 3 parts differ in bytes',
-             _BYTES_704,
-             _EXPIRES),
-    KnownRed('byte-identical[mssql/full]: 1 of 1 parts differ in bytes',
-             _BYTES_704,
-             _EXPIRES),
-    KnownRed('byte-identical[mssql/chunked]: 3 of 3 parts differ in bytes',
-             _BYTES_704,
-             _EXPIRES),
-    KnownRed('byte-identical[mongo/full]: 1 of 1 parts differ in bytes',
-             _BYTES_704,
-             _EXPIRES),
-    KnownRed('ab-diff[full]: DIFFERS from the previous release in manifest.fingerp, manifest.fingerprints[0] —',
-             _AB_704,
-             _EXPIRES),
-    KnownRed('ab-diff[incremental]: DIFFERS from the previous release in manifest.fingerp, manifest.fingerprints[0] —',
-             _AB_704,
-             _EXPIRES),
-    KnownRed('ab-diff: 8 scenarios compared, 2 DIFFER (full, incremental)',
-             _AB_704,
              _EXPIRES),
 )
 
