@@ -1,0 +1,20 @@
+--- a/src/manifest/census.rs
++++ b/src/manifest/census.rs
+@@ -242,7 +242,7 @@
+     pub fn succeeded(&self) -> Vec<&CensusRun<'a>> {
+         self.runs
+             .iter()
+-            .filter(|r| r.manifest.status == ManifestStatus::Success)
++            .filter(|_| true)
+             .collect()
+     }
+ 
+@@ -253,7 +253,7 @@
+         }
+         self.succeeded()
+             .into_iter()
+-            .filter(|r| r.family == family)
++            .filter(|_| true)
+             .collect()
+     }
+ 

@@ -238,6 +238,33 @@ impl<'a> ManifestCensus<'a> {
             .collect()
     }
 
+    /// Every run that finished with `Success`, in listing order.
+    pub fn succeeded(&self) -> Vec<&CensusRun<'a>> {
+        self.runs
+            .iter()
+            .filter(|r| r.manifest.status == ManifestStatus::Success)
+            .collect()
+    }
+
+    /// The `Success` runs of `family`; an empty family selects nothing.
+    pub fn completed(&self, family: &str) -> Vec<&CensusRun<'a>> {
+        if family.is_empty() {
+            return Vec::new();
+        }
+        self.succeeded()
+            .into_iter()
+            .filter(|r| r.family == family)
+            .collect()
+    }
+
+    /// The `Success` `--pool --split` units of `family`; a failed or interrupted attempt declares parts gc may have collected.
+    pub fn completed_split_units(&self, family: &str) -> Vec<&CensusRun<'a>> {
+        self.completed(family)
+            .into_iter()
+            .filter(|r| r.is_split_unit())
+            .collect()
+    }
+
     /// The set of destination keys CLAIMED by the runs of `family` — every
     /// `Committed` part they declare, resolved against `manifest_dir`.
     ///
@@ -319,7 +346,7 @@ fn keep_one_per_run(keyed: &[(String, RunManifest)]) -> Vec<bool> {
 
 /// A listed key whose final segment is a per-run manifest COPY
 /// (`manifest-<run_id>.json`) rather than the canonical pointer.
-fn is_copy_key(key: &str) -> bool {
+pub fn is_copy_key(key: &str) -> bool {
     is_run_unique_manifest_name(key.rsplit('/').next().unwrap_or(""))
 }
 
@@ -604,6 +631,54 @@ mod tests {
             census.split_units("").is_empty(),
             "an empty family disambiguates nothing"
         );
+    }
+
+    /// Only `Success` runs complete; a failed, interrupted or running run of the family is not counted.
+    #[test]
+    fn completed_selects_only_the_success_runs_of_one_family() {
+        let mut failed = m("r2", "orders", "orders");
+        failed.status = ManifestStatus::Failed;
+        let mut running = m("r3", "orders", "orders");
+        running.status = ManifestStatus::Running;
+        let keyed = vec![
+            keyed("r1", m("r1", "orders", "orders")),
+            keyed("r2", failed),
+            keyed("r3", running),
+            keyed("r4", m("r4", "other", "other")),
+        ];
+        let census = ManifestCensus::new(&keyed);
+        let ids = |runs: Vec<&CensusRun>| -> Vec<String> {
+            runs.iter().map(|r| r.manifest.run_id.clone()).collect()
+        };
+        assert_eq!(ids(census.completed("orders")), vec!["r1"]);
+        assert_eq!(ids(census.succeeded()), vec!["r1", "r4"]);
+        assert!(census.completed("").is_empty());
+    }
+
+    /// A failed unit declares parts gc may have collected, so only `Success` units complete.
+    #[test]
+    fn completed_split_units_skip_a_failed_unit_and_a_plain_run() {
+        let mut ok = m("r1", "daily-unit", "daily");
+        ok.split_window = Some(window(None, Some("1000")));
+        let mut failed = m("r2", "daily-unit", "daily");
+        failed.split_window = Some(window(Some("1000"), None));
+        failed.status = ManifestStatus::Failed;
+        let mut foreign = m("r4", "other-unit", "other");
+        foreign.split_window = Some(window(None, Some("5")));
+        let keyed = vec![
+            keyed("r1", ok),
+            keyed("r2", failed),
+            keyed("r3", m("r3", "daily", "daily")),
+            keyed("r4", foreign),
+        ];
+        let census = ManifestCensus::new(&keyed);
+        let ids: Vec<&str> = census
+            .completed_split_units("daily")
+            .iter()
+            .map(|r| r.manifest.run_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["r1"]);
+        assert!(census.completed_split_units("").is_empty());
     }
 
     // ── supersession / liveness ──────────────────────────────────────────────

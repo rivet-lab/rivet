@@ -98,6 +98,22 @@ scenarios:
     mongo:    { na: "engine-agnostic — the split fold/selection/reconstruct operates on the run-unique manifests, not per-engine SQL; proven once by the test in `what`" }
     oracle:   { na: "engine-agnostic — the split fold/selection/reconstruct operates on manifests and state, never the source engine" }
 
+  - id: validate_ignores_a_collected_failed_unit
+    what: "A Failed attempt of a unit whose parts gc collected must not fail `validate --depth full` on a prefix whose successes are whole: the value-checksum re-read keeps only Success units of the export's own family (ManifestCensus::completed_split_units). The live cell doctors a Failed manifest copy over the finished split prefix and requires exit 0. RED: split_unit_manifests_skips_a_failed_sibling_attempt."
+    postgres: { test: stand_pool_split_resume_grows_postgres }
+    mysql:    { test: stand_pool_split_resume_grows_mysql }
+    mssql:    { test: stand_pool_split_resume_grows_mssql }
+    mongo:    { na: "a MongoDB giant is never range-split (mongo_source_is_not_range_split_capable), so no split unit manifest exists" }
+    oracle:   { test: stand_pool_split_resume_grows_oracle }
+
+  - id: a_foreign_family_unit_never_tiles_the_range
+    what: "The completed-unit tiling of a --pool --split prefix counts only Success units of the export's own family: a foreign export sharing the prefix neither fills a gap (a _SUCCESS over missing rows) nor breaks a whole tiling (a false refusal). RED: a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling + a_foreign_family_unit_does_not_break_a_whole_tiling."
+    postgres: { na: "engine-agnostic — the split fold/selection/reconstruct operates on the run-unique manifests, not per-engine SQL; proven once by the test in `what`" }
+    mysql:    { na: "engine-agnostic — the split fold/selection/reconstruct operates on the run-unique manifests, not per-engine SQL; proven once by the test in `what`" }
+    mssql:    { na: "engine-agnostic — the split fold/selection/reconstruct operates on the run-unique manifests, not per-engine SQL; proven once by the test in `what`" }
+    mongo:    { na: "engine-agnostic — the split fold/selection/reconstruct operates on the run-unique manifests, not per-engine SQL; proven once by the test in `what`" }
+    oracle:   { na: "engine-agnostic — the split fold/selection/reconstruct operates on manifests and state, never the source engine" }
+
   - id: load_full_selects_every_split_unit
     what: "rivet load in Full (replace) mode must select ALL units of the split snapshot, not the single latest manifest — else N-1 units are silently dropped. RED: latest_full_over_a_split_family_selects_every_unit_not_just_the_last + latest_full_over_a_split_family_takes_the_newest_run_per_unit (group by export_name, latest per group)."
     postgres: { na: "engine-agnostic — the split fold/selection/reconstruct operates on the run-unique manifests, not per-engine SQL; proven once by the test in `what`" }

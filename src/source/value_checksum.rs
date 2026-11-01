@@ -771,26 +771,28 @@ fn split_unit_manifests(
     prefix: &str,
     canonical: crate::manifest::RunManifest,
 ) -> Result<Vec<crate::manifest::RunManifest>> {
-    use crate::manifest::{RunManifest, is_run_unique_manifest_name};
+    use crate::manifest::RunManifest;
+    use crate::manifest::census::{ManifestCensus, is_copy_key};
     if canonical.export_family.is_empty() {
         return Ok(vec![canonical]);
+    }
+    let mut keyed: Vec<(String, RunManifest)> = Vec::new();
+    for meta in dest.list_prefix(prefix)? {
+        if !is_copy_key(&meta.key) {
+            continue;
+        }
+        if let Ok(bytes) = dest.read(&meta.key)
+            && let Ok(m) = serde_json::from_slice::<RunManifest>(&bytes)
+        {
+            keyed.push((meta.key, m));
+        }
     }
     let mut seen = std::collections::BTreeSet::from([canonical.run_id.clone()]);
     let family = canonical.export_family.clone();
     let mut out = vec![canonical];
-    for meta in dest.list_prefix(prefix)? {
-        let base = meta.key.rsplit('/').next().unwrap_or("");
-        if !is_run_unique_manifest_name(base) {
-            continue;
-        }
-        let Ok(bytes) = dest.read(&meta.key) else {
-            continue;
-        };
-        let Ok(m) = serde_json::from_slice::<RunManifest>(&bytes) else {
-            continue;
-        };
-        if m.export_family == family && m.split_window.is_some() && seen.insert(m.run_id.clone()) {
-            out.push(m);
+    for unit in ManifestCensus::new(&keyed).completed_split_units(&family) {
+        if seen.insert(unit.manifest.run_id.clone()) {
+            out.push(unit.manifest.clone());
         }
     }
     Ok(out)
@@ -1881,6 +1883,71 @@ mod tests {
             "value-checksum fold must cover every same-family split unit (canonical + siblings), \
              deduped, and never a foreign family"
         );
+    }
+
+    fn local_prefix(dir: &std::path::Path) -> crate::destination::local::LocalDestination {
+        crate::destination::local::LocalDestination::new(&crate::config::DestinationConfig {
+            destination_type: crate::config::DestinationType::Local,
+            path: Some(dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn write_copy(dir: &std::path::Path, m: &crate::manifest::RunManifest) {
+        std::fs::write(
+            dir.join(crate::manifest::run_unique_manifest_name(&m.run_id)),
+            serde_json::to_vec(m).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A failed or interrupted attempt of a sibling unit declares parts gc may have collected; the fold skips it.
+    #[test]
+    fn split_unit_manifests_skips_a_failed_sibling_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut failed = split_unit("r0-failed", "orders#0", "orders");
+        failed.status = crate::manifest::ManifestStatus::Failed;
+        let mut interrupted = split_unit("r0-cut", "orders#0", "orders");
+        interrupted.status = crate::manifest::ManifestStatus::Interrupted;
+        for m in [
+            &failed,
+            &interrupted,
+            &split_unit("r0", "orders#0", "orders"),
+        ] {
+            write_copy(dir.path(), m);
+        }
+        let canonical = split_unit("r1", "orders#1", "orders");
+        write_copy(dir.path(), &canonical);
+        let units = split_unit_manifests(&local_prefix(dir.path()), "", canonical).unwrap();
+        let mut runs: Vec<&str> = units.iter().map(|m| m.run_id.as_str()).collect();
+        runs.sort_unstable();
+        assert_eq!(runs, vec!["r0", "r1"]);
+    }
+
+    /// A plain export's historical same-family copy is not a split unit and is not folded.
+    #[test]
+    fn split_unit_manifests_leaves_a_plain_exports_history_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plain = split_unit("old", "orders", "orders");
+        plain.split_window = None;
+        write_copy(dir.path(), &plain);
+        let canonical = split_unit("new", "orders", "orders");
+        write_copy(dir.path(), &canonical);
+        let units = split_unit_manifests(&local_prefix(dir.path()), "", canonical).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].run_id, "new");
+    }
+
+    /// A family-less canonical is checked alone, whatever else the prefix holds.
+    #[test]
+    fn split_unit_manifests_of_a_familyless_canonical_is_the_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        write_copy(dir.path(), &split_unit("s0", "orders#0", "orders"));
+        let canonical = split_unit("legacy", "orders", "");
+        let units = split_unit_manifests(&local_prefix(dir.path()), "", canonical).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].run_id, "legacy");
     }
 }
 

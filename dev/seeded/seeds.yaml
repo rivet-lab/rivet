@@ -4455,3 +4455,20 @@ seeds:
           - "lib:every_driver_leaves_a_canonical_pointer_that_changed_hands_during_the_jobs"
           - "lib:a_stateless_cleanup_keeps_a_pair_committed_after_the_plan"
           - "lib:a_canonical_unreadable_at_delete_time_stays_with_its_marker"
+
+  - name: manifest-census-reads-unfiltered
+    class: "a reader of the run manifests under one prefix counts a Failed attempt or a foreign export's unit, so validate --depth full fails a healthy prefix on parts gc collected, and a foreign unit tiles a gap a split export still has"
+    history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: a Failed unit manifest whose parts gc had collected made validate --depth full exit 1 (could not verify), and completed_units_tile counted a foreign family's unit; closed 2026-11-01 by routing the readers through ManifestCensus::succeeded / completed / completed_split_units"
+    scope: source
+    patch: manifest-census-reads-unfiltered/shared.patch
+    engines:
+      postgres:
+        cells: [stand_pool_split_resume_grows_postgres, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
+      mysql:
+        cells: [stand_pool_split_resume_grows_mysql, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
+      mssql:
+        cells: [stand_pool_split_resume_grows_mssql, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
+      oracle:
+        cells: [stand_pool_split_resume_grows_oracle, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
+      mongo:
+        na: "a MongoDB giant is never range-split (mongo_source_is_not_range_split_capable), so no split unit manifest exists to read; the CDC position check shares the same census and is graded by lib:a_failed_copy_is_not_read_and_a_successful_one_is"
