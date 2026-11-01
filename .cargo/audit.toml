@@ -74,20 +74,18 @@ ignore = [
     "RUSTSEC-2026-0194", # quick-xml: quadratic duplicate-attribute check
     "RUSTSEC-2026-0195", # quick-xml: unbounded namespace-declaration allocation
 
-    # ─── zstd-safe 7.3.0 via mysql_common binlog (RUSTSEC-2026-0391, -0395..0406, -0398, -0403) ──
-    # Path: mysql 28.0.4 -> mysql_common 0.37.3 (binlog feature) -> zstd 0.13.3, zstd-safe 7.3.0.
-    # Status: the fixes need zstd >= 0.14.3 / zstd-safe >= 8.2.0. mysql_common 0.37.3 and
-    #       0.38.2 (latest) both require zstd "0.13", so no upstream path. zstd 0.14 (parquet)
-    #       and zstd-safe 8.2.0 are already in the tree.
-    # Reachability: only CDC on MySQL with compressed binlog transactions. mysql_common builds a
-    #       fresh zstd decoder per payload (no reused context, so 0391 cannot leak across
-    #       streams). 0398 needs the `seekable` feature, which is not compiled (cargo tree -e
-    #       features). 0403 is hit only by a failed legacy-frame decode of a payload from the
-    #       configured MySQL server.
-    # 2026-10-29 (#724): the 0395..0406 set is fixed only in zstd-safe 8.2.0 as well. Encoder, try_clone,
-    #       dictionary, seekable and around_pos APIs are not reached; the decoder is zstd::Decoder and
-    #       copy_decode only.
-    # Action: drop all entries when mysql_common requires zstd >= 0.14 (tracked in #724).
+    # ─── zstd 0.13.3 / zstd-safe 7.3.0 via parquet 59 and mysql_common binlog (RUSTSEC-2026-0391, -0395..0406) ──
+    # Path: parquet =59.0.0 (ZSTD page codec) -> zstd 0.13.3; mysql 28.0.4 -> mysql_common 0.37.3 (binlog) -> zstd 0.13.3.
+    # Status: the fixes need zstd >= 0.14.3 / zstd-safe >= 8.2.0; mysql_common 0.37.3 and 0.38.2 require zstd "0.13",
+    #       and parquet is pinned to 59.0.0 (2026-11-01), so no path in the tree reaches zstd 0.14.
+    # Reachability, parquet: zstd::bulk Compressor/Decompressor only (compress2, decompressDCtx, an empty
+    #       load_dictionary); no stream, no with_context, no NbWorkers, no dictionary, no clone, no seekable.
+    #       The zstd-safe features compiled are arrays, legacy, std, zdict_builder (cargo tree -e features):
+    #       experimental (0395, 0399, 0402, 0404), seekable (0396, 0398, 0405) and zstdmt (0406) are off;
+    #       0391, 0397, 0403 are stream APIs (0403 names the bulk API unaffected); 0400 needs a stream open
+    #       on the context; 0401 train_from_buffer is not called.
+    # Reachability, mysql: only CDC on MySQL with compressed binlog transactions, a fresh zstd::Decoder per payload.
+    # Action: drop all entries when mysql_common requires zstd >= 0.14 and parquet moves past 59 (#724).
     "RUSTSEC-2026-0391", # zstd: stream context reuse leak (mysql_common binlog)
     "RUSTSEC-2026-0398", # zstd-safe: Seekable::decompress (seekable feature off)
     "RUSTSEC-2026-0403", # zstd-safe: uninit memory on failed legacy-frame decode

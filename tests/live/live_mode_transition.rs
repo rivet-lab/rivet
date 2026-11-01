@@ -959,6 +959,38 @@ fn source_url_without_its_default_port_continues_postgres() {
     source_url_without_its_default_port_continues(SqlEngine::Pg);
 }
 
+/// Two source URLs that differ before an `@` in their query are two sources: a destination of its own gets the table whole.
+fn two_hosts_with_an_at_in_the_query_are_two_sources(e: SqlEngine, tail: &str) {
+    e.alive();
+    let (table, _guard) = e.table("at_in_query");
+    e.insert(&table, 1..=10, 180, Some(10));
+    let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let why = "the oracle attaches the source by the config's URL, which carries a query it does not read";
+    let rig = read_by_the_cell(
+        staged_for(e, e.rig(&table), &INCREMENTAL_ID, first.path())
+            .source_url(&format!("{}{tail}", e.url())),
+        why,
+    );
+    rig.run_ok();
+    assert_eq!(delivered_ids(e, first.path()), (1..=10).collect::<Vec<_>>());
+    let other = e.url().replace("127.0.0.1", "localhost");
+    assert_ne!(other, e.url(), "the stand URL names 127.0.0.1");
+    rig.source_url(&format!("{other}{tail}"))
+        .dest_path(second.path().to_path_buf())
+        .run_ok();
+    let ids = delivered_ids(e, second.path());
+    assert!(
+        ids == (1..=10).collect::<Vec<_>>(),
+        "an @ in the query merged two sources: the second delivered ids {ids:?}, the source holds 1..=10"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn two_hosts_with_an_at_in_the_query_are_two_sources_postgres() {
+    two_hosts_with_an_at_in_the_query_are_two_sources(SqlEngine::Pg, "?application_name=svc@corp");
+}
+
 /// The same table name read through another `search_path` is another stream: refused twice by code; the old source restored continues, a reset delivers the other schema's rows in full, another destination changes nothing.
 #[test]
 #[ignore = "live: requires docker compose postgres"]

@@ -39,6 +39,7 @@ Each integration file under `tests/` maps to one domain:
 | `chunked_sparse_ids.rs` | Sparse-ID chunk planner edge cases | – |
 | `retry_integration.rs` | `classify_error` classifier table | Task 4.3 |
 | `format_golden.rs` | CSV + Parquet writer goldens including extreme values | Task 2.4 |
+| `parquet_bytes_golden.rs` | Parquet file bytes of ten writer shapes pinned to the digests of the v0.32.2 tag (`tests/fixtures/parquet_bytes_0_32_2.txt`, regenerated only by `dev/pytools/parquet_golden.py` as a deliberate byte change) | – |
 | `format_fuzz.rs` | Deterministic fuzz-smoke for format serialization | Task 4A.3 |
 | `validate_regression.rs` | Validate-output contract (row count, empty, corrupt) | Task 2.1 |
 | `config_fuzz.rs` | YAML + placeholder fuzz-smoke | Task 4A.1 |
@@ -220,7 +221,7 @@ enters review with its interaction tests or not at all.
 bottom-to-top order (`LAYERS`, one line per module saying what the layer is for). A
 module may reference only the modules below it:
 
-`error < test_hook < scalar < resource < workers < redact < tuning < types < gcp_auth < config < connect < format < sql < enrich < quality < journal < destination < manifest < state < plan < source < preflight < init < load < notify < pipeline < cli < mcp < fuzz < lib < main < bin`
+`error < test_hook < scalar < resource < workers < url_text < redact < tuning < types < gcp_auth < config < connect < format < sql < enrich < quality < journal < destination < manifest < state < plan < source < preflight < init < load < notify < pipeline < cli < mcp < fuzz < lib < main < bin`
 
 A reference is a path written in product code that resolves to another top-level
 module: `crate::m::…` anywhere (a type, a call, an attribute argument, a serde
