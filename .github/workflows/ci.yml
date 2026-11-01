@@ -355,7 +355,7 @@ jobs:
           list_into() {  # list_into <outfile> <extra cargo-mutants args...>
             local out="$1"; shift
             local rc=0
-            cargo mutants --in-diff pr.diff "$@" --list --colors=never > "$out" || rc=$?
+            cargo mutants --in-diff /nonexistent-g4-proof "$@" --list --colors=never > "$out" || rc=$?
             if [ "$rc" -ne 0 ]; then
               say state tool-error
               say result tool-error
