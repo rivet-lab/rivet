@@ -1,16 +1,16 @@
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 5896acd8..5ca507b8 100644
+index 49d7e0eb..f1eb3e10 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -111,6 +111,7 @@ pub(crate) struct MysqlChangeStream {
-     in_transaction: bool,
-     /// Whether the server folds identifier case (`lower_case_table_names` other than 0), read only when the run projects.
+@@ -113,6 +113,7 @@ pub(crate) struct MysqlChangeStream {
      fold_names: bool,
+     /// The databases the captured tables live in: what a statement dropping a database is compared with.
+     captured_databases: Vec<String>,
 +    grants_conn: Option<mysql::Conn>,
  }
  
  impl MysqlChangeStream {
-@@ -778,8 +779,12 @@ impl MysqlChangeStream {
+@@ -780,8 +781,12 @@ impl MysqlChangeStream {
          let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
              return Ok(());
          };
@@ -24,10 +24,10 @@ index 5896acd8..5ca507b8 100644
          let now = read.unwrap_or_default();
          let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
              r.get(t).map(|c| c.columns.clone())
-@@ -932,6 +937,7 @@ impl MysqlChangeStream {
-             grants_pending: None,
+@@ -937,6 +942,7 @@ impl MysqlChangeStream {
              in_transaction: false,
-             fold_names: false,
+             fold_names,
+             captured_databases,
 +            grants_conn: None,
          })
      }
