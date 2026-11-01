@@ -1154,6 +1154,28 @@ seeds:
       mongo:
         na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so validate has no partitioned export to read"
 
+  - name: check-reads-declared-list-not-run-set
+    class: "a whole-config `check` or `doctor` reads the declared export list instead of the run set, so a CDC backfill recipe is described as an export, planned, counted in the `--target` tally and its unused destination probed"
+    history: "found 2026-11-01 while closing #755: a whole-config `rivet check` printed `Export: <recipe>`, counted a refused column twice, and rejected a config over a recipe's `destination: stdout` that `plan` and `run` never use; closed 2026-11-01 by routing check, its planner and doctor through declared_exports"
+    scope: source
+    patch: check-reads-declared-list-not-run-set/shared.patch
+    engines:
+      postgres:
+        cells:
+          - check_and_doctor_describe_the_declared_exports_postgres
+          - check_target_note_counts_a_refused_column_once_per_loaded_table_postgres
+      mysql:
+        cells: [check_and_doctor_describe_the_declared_exports_mysql]
+      mssql:
+        cells: [check_and_doctor_describe_the_declared_exports_mssql]
+      oracle:
+        cells: [check_and_doctor_describe_the_declared_exports_oracle]
+      mongo:
+        cells: [check_and_doctor_describe_the_declared_exports_mongo]
+      lib:
+        cells:
+          - "lib:check_leaves_a_backfill_recipe_out_of_a_whole_config_and_keeps_it_when_named"
+
   - name: stdout-swallowed-by-child-processes
     class: "a `destination: stdout` export is handed to a child process, whose stdout the parent reads as its event stream"
     history: "`rivet run --parallel-export-processes > out.csv` exited 0 with 0 bytes and a summary of `rows: 120` (v0.31.0)"

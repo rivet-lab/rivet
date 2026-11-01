@@ -599,13 +599,8 @@ fn batch_plans(
     let config_dir = std::path::Path::new(config_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let named = export_name
-        .map(|name| crate::pipeline::run_set::RunSet::select(&config, Some(name)))
-        .transpose()?;
-    let selected: Vec<&crate::config::ExportConfig> = match &named {
-        Some(run_set) => run_set.declared().iter().collect(),
-        None => config.exports.iter().collect(),
-    };
+    let run_set = crate::pipeline::run_set::RunSet::select(&config, export_name)?;
+    let selected = run_set.declared();
     let mut probe = if config.source.columns_from_grants() {
         Some(
             crate::source::create_source(&config.source)
@@ -616,7 +611,7 @@ fn batch_plans(
     };
     let mut plans = Vec::new();
     for e in selected
-        .into_iter()
+        .iter()
         .filter(|e| e.mode != crate::config::ExportMode::Cdc)
     {
         let plan = crate::plan::build::build_plan_on(
@@ -1501,6 +1496,35 @@ mod subcommand_error_tests {
         let one = super::batch_plans(path, Some("whole"), None).unwrap();
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].0, "whole");
+    }
+
+    /// A whole-config `check` plans the exports a run runs: a `cdc.backfill` recipe has no plan of its own, and named with `-e` it keeps one.
+    #[test]
+    fn check_leaves_a_backfill_recipe_out_of_a_whole_config_and_keeps_it_when_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("rivet.yaml");
+        std::fs::write(
+            &cfg,
+            "source:\n  type: postgres\n  url: postgresql://u:p@127.0.0.1:1/db\n\
+             exports:\n\
+             \x20 - name: base\n    table: t\n    mode: full\n\
+             \x20   format: parquet\n    destination: { type: stdout }\n\
+             \x20 - name: whole\n    table: u\n    mode: full\n\
+             \x20   format: parquet\n    destination: { type: local, path: ./out/b }\n\
+             \x20 - name: stream\n    tables: [t]\n    mode: cdc\n\
+             \x20   cdc: { backfill: auto, checkpoint: ./c.ckpt }\n\
+             \x20   format: parquet\n    destination: { type: local, path: ./out/c }\n",
+        )
+        .unwrap();
+        let path = cfg.to_str().unwrap();
+        let names = |plans: &[super::BatchPlan]| -> Vec<String> {
+            plans.iter().map(|(n, _)| n.clone()).collect()
+        };
+        let whole = super::batch_plans(path, None, None).unwrap();
+        assert_eq!(names(&whole), ["whole"]);
+        assert!(super::report_plan_compatibility(whole, false).is_ok());
+        let named = super::batch_plans(path, Some("base"), None).unwrap();
+        assert_eq!(names(&named), ["base"]);
     }
 
     /// `rivet check` ends in an error for a config the planner refuses, before any connection is made.

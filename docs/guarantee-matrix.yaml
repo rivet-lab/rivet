@@ -407,6 +407,17 @@ guarantees:
       mssql: { test: validate_reads_every_partition_mssql, asserts: "exactly the deleted partition fails" }
       oracle: { test: validate_reads_every_partition_oracle, asserts: "exactly the deleted partition fails" }
 
+  - id: check_and_doctor_skip_a_backfill_recipe_in_a_whole_config
+    stated:
+      - file: docs/cdc-full-cycle.md
+        sentence: "A whole-config `check` and `doctor` take the same exports `run` runs: the recipe is the stream's baseline read, not an export of its own, so neither lists it nor probes its destination (the baseline leg takes the recipe's read settings only)."
+    held_by:
+      postgres: { test: check_and_doctor_describe_the_declared_exports_postgres, asserts: "a whole-config check lists the stream only, -e names the recipe, doctor probes one destination" }
+      mysql: { test: check_and_doctor_describe_the_declared_exports_mysql, asserts: "a whole-config check lists the stream only, -e names the recipe, doctor probes one destination" }
+      mssql: { test: check_and_doctor_describe_the_declared_exports_mssql, asserts: "a whole-config check lists the stream only, -e names the recipe, doctor probes one destination" }
+      mongo: { test: check_and_doctor_describe_the_declared_exports_mongo, asserts: "a whole-config check lists the stream only, -e names the recipe, doctor probes one destination" }
+      oracle: { test: check_and_doctor_describe_the_declared_exports_oracle, asserts: "a whole-config check lists the stream only, -e names the recipe, doctor probes one destination" }
+
   - id: run_validate_fails_the_run_as_validate_would
     stated:
       - file: docs/reference/cli.md
