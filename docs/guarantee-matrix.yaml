@@ -397,6 +397,16 @@ guarantees:
       mongo: { test: validate_never_queries_the_source_mongo, asserts: "validate opened {during_validate} connection(s) to the source" }
       oracle: { test: validate_never_queries_the_source_oracle, asserts: "validate opened {during_validate} connection(s) to the source" }
 
+  - id: validate_verifies_every_partition_of_a_partitioned_export
+    stated:
+      - file: docs/cloud-destinations.md
+        sentence: "A partition the source holds and the destination does not fails with `RIVET_VERIFY_PARTITION_NOT_DELIVERED` (exit 3)."
+    held_by:
+      postgres: { test: validate_reads_every_partition_postgres, asserts: "exactly the deleted partition fails" }
+      mysql: { test: validate_reads_every_partition_mysql, asserts: "exactly the deleted partition fails" }
+      mssql: { test: validate_reads_every_partition_mssql, asserts: "exactly the deleted partition fails" }
+      oracle: { test: validate_reads_every_partition_oracle, asserts: "exactly the deleted partition fails" }
+
   - id: run_validate_fails_the_run_as_validate_would
     stated:
       - file: docs/reference/cli.md

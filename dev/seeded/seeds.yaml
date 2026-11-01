@@ -1137,6 +1137,23 @@ seeds:
         cells:
           - "lib:a_plan_with_an_unexpanded_partition_token_is_refused_before_any_write"
 
+  - name: validate-reads-literal-partition-prefix
+    class: "a command that verifies a delivered tree takes the declared export list instead of the run set, so a `partition_by` export is read at the literal `{partition}` prefix, finds no manifest, and exits 0 as a legacy run with a partition deleted"
+    history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: `rivet validate` of a `partition_by` export exited 0 (legacy_run) with a partition directory removed; closed 2026-11-01 by routing validate through RunSet::in_process and failing a partition with no manifest"
+    scope: source
+    patch: validate-reads-literal-partition-prefix/shared.patch
+    engines:
+      postgres:
+        cells: [validate_reads_every_partition_postgres, validate_passes_a_partition_day_without_rows_postgres]
+      mysql:
+        cells: [validate_reads_every_partition_mysql]
+      mssql:
+        cells: [validate_reads_every_partition_mssql]
+      oracle:
+        cells: [validate_reads_every_partition_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so validate has no partitioned export to read"
+
   - name: stdout-swallowed-by-child-processes
     class: "a `destination: stdout` export is handed to a child process, whose stdout the parent reads as its event stream"
     history: "`rivet run --parallel-export-processes > out.csv` exited 0 with 0 bytes and a summary of `rows: 120` (v0.31.0)"

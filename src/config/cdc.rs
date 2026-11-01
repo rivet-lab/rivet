@@ -366,6 +366,50 @@ pub fn without_backfill_recipes<'a>(
         .collect()
 }
 
+/// The names a whole-config invocation must not run itself: each is a `mode: cdc` export's `backfill:` recipe.
+fn backfill_recipes_to_skip(exports: &[ExportConfig]) -> std::collections::HashSet<String> {
+    let recipes = backfill_recipe_names(exports);
+    for e in exports.iter().filter(|e| recipes.contains(&e.name)) {
+        log::info!(
+            "export '{}': skipped — it is the backfill recipe of a `mode: cdc` export, \
+             which runs it after the anchor (run it alone with `-e {}` to export it on \
+             its own)",
+            e.name,
+            e.name
+        );
+    }
+    recipes
+}
+
+/// The exports an invocation was asked for: one named export, or the whole config minus the CDC backfill recipes.
+pub fn declared_exports(
+    config: &super::Config,
+    export_name: Option<&str>,
+) -> crate::error::Result<Vec<ExportConfig>> {
+    match export_name {
+        Some(name) => Ok(vec![
+            config
+                .exports
+                .iter()
+                .find(|e| e.name == name)
+                .ok_or_else(|| {
+                    crate::error::coded(
+                        crate::error::codes::CLI_EXPORT_UNKNOWN,
+                        format!("export '{}' not found in config", name),
+                    )
+                })?
+                .clone(),
+        ]),
+        None => {
+            let recipes = backfill_recipes_to_skip(&config.exports);
+            Ok(without_backfill_recipes(&config.exports, &recipes)
+                .into_iter()
+                .cloned()
+                .collect())
+        }
+    }
+}
+
 /// Two captured tables that share a LEAF name (`sales.orders`, `archive.orders`)
 /// while a recipe of either declares `columns:` — a `table.column` type key is
 /// narrowed by leaf, so one recipe's types would reach BOTH tables.

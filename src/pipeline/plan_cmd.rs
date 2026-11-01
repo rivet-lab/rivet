@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::config::Config;
+use crate::config::{Config, ExportConfig};
 use crate::error::Result;
 use crate::plan::{
     ComputedPlanData, ExportRecommendation, ExtractionStrategy, PlanArtifact, PlanDiagnostics,
@@ -27,6 +27,7 @@ use crate::state::StateStore;
 use crate::{preflight, source};
 
 use super::chunked::{chunk_plan_fingerprint, detect_and_generate_chunks};
+use super::run_set::RunSet;
 
 /// Output format for `rivet plan`.
 pub enum PlanOutputFormat {
@@ -50,44 +51,37 @@ fn refuse_annotate_scoped_to_export(annotate_waves: bool, has_export: bool) -> b
 /// Iterates over all matching exports, builds a `PlanArtifact` for each, and
 /// either prints or saves it according to `format`.
 /// The exports `rivet plan` plans: `export_name` alone, or every batch export of the config.
-fn plannable_exports<'a>(
-    config: &'a Config,
-    export_name: Option<&str>,
-) -> Result<Vec<&'a crate::config::ExportConfig>> {
-    Ok(if let Some(name) = export_name {
-        let e = config
-            .exports
-            .iter()
-            .find(|e| e.name == name)
-            .ok_or_else(|| {
-                crate::error::coded(
-                    crate::error::codes::CLI_EXPORT_UNKNOWN,
-                    format!("export '{}' not found in config", name),
-                )
-            })?;
-        vec![e]
-    } else {
-        // The two whole-config skips `run` and `check` already apply: a CDC export
-        // has no batch plan, and a backfill recipe runs inside its stream's own
-        // run. Aborting on the first of them left every mixed config unplannable —
-        // and `--annotate-waves`, which refuses `--export`, with it.
-        let recipes = crate::config::backfill_recipe_names(&config.exports);
-        let mut plannable = Vec::new();
-        for e in &config.exports {
-            match crate::config::batch_plan_skip_reason(e, &recipes) {
-                Some(why) => log::warn!("plan: skipped '{}' — {why}", e.name),
-                None => plannable.push(e),
-            }
+fn plannable_exports(config: &Config, export_name: Option<&str>) -> Result<Vec<ExportConfig>> {
+    let selected = RunSet::select(config, export_name)?;
+    if export_name.is_some() {
+        return Ok(selected.declared().to_vec());
+    }
+    let kept: std::collections::HashSet<&str> = selected
+        .declared()
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    let recipes: std::collections::HashSet<String> = config
+        .exports
+        .iter()
+        .filter(|e| !kept.contains(e.name.as_str()))
+        .map(|e| e.name.clone())
+        .collect();
+    let mut plannable = Vec::new();
+    for e in &config.exports {
+        match crate::config::batch_plan_skip_reason(e, &recipes) {
+            Some(why) => log::warn!("plan: skipped '{}' — {why}", e.name),
+            None => plannable.push(e.clone()),
         }
-        if plannable.is_empty() {
-            crate::rivet_bail!(
-                crate::error::codes::PLAN_NOTHING_TO_PLAN,
-                "nothing to plan: every export in the config is a CDC stream or a backfill \
-                 recipe (see the skips above) — run them with `rivet run`"
-            );
-        }
-        plannable
-    })
+    }
+    if plannable.is_empty() {
+        crate::rivet_bail!(
+            crate::error::codes::PLAN_NOTHING_TO_PLAN,
+            "nothing to plan: every export in the config is a CDC stream or a backfill \
+             recipe (see the skips above) — run them with `rivet run`"
+        );
+    }
+    Ok(plannable)
 }
 
 pub fn run_plan_command(
@@ -121,7 +115,7 @@ pub fn run_plan_command(
 
     let mut built: Vec<(PlanArtifact, PrioritizationInputs, ExportRecommendation)> = Vec::new();
 
-    for export in exports {
+    for export in &exports {
         built.push(build_plan_artifact(
             &config,
             export,

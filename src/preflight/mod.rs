@@ -377,20 +377,12 @@ pub fn check(
 ) -> Result<bool> {
     let config = Config::load_with_params(config_path, params)?;
 
-    let exports: Vec<&ExportConfig> = if let Some(name) = export_name {
-        let e = config
-            .exports
-            .iter()
-            .find(|e| e.name == name)
-            .ok_or_else(|| {
-                crate::error::coded(
-                    crate::error::codes::CLI_EXPORT_UNKNOWN,
-                    format!("export '{}' not found in config", name),
-                )
-            })?;
-        vec![e]
-    } else {
-        config.exports.iter().collect()
+    let named = export_name
+        .map(|name| crate::config::declared_exports(&config, Some(name)))
+        .transpose()?;
+    let exports: Vec<&ExportConfig> = match &named {
+        Some(declared) => declared.iter().collect(),
+        None => config.exports.iter().collect(),
     };
 
     // A preflight must never bless a config the RUNNER refuses.
@@ -725,19 +717,11 @@ pub fn load_type_reports(
     crate::plan::load_settings::RecordedKeys,
 )> {
     let policy = TypePolicy::warn_only();
-    // A `cdc.backfill` recipe is a READ recipe, never a load target: the run loop
-    // deliberately does not run it (the rows it describes land in the CDC export's
-    // own `snapshot/` prefix), so it has no recorded load spec and never will.
-    // Typing it here made EVERY config pairing `backfill:` with `load:` refuse to
-    // load at all — "no column types recorded … run `rivet run` for this export
-    // first", advice no run can satisfy. The skip rule the run loop applies has to
-    // hold on this side too; the load plans are built from these reports, so one
-    // filter here covers the typing and the plan set both.
-    let recipes = crate::config::backfill_recipe_names(&config.exports);
+    let declared = crate::config::declared_exports(config, None)?;
     let mut out = Vec::with_capacity(config.exports.len());
     let mut keys = crate::plan::load_settings::RecordedKeys::new();
     let mut failures: Vec<String> = Vec::new();
-    for export in config.exports.iter().filter(|e| !recipes.contains(&e.name)) {
+    for export in &declared {
         let units: Vec<Option<String>> = match export.multiplex_tables() {
             Some(tables) => tables.iter().cloned().map(Some).collect(),
             None => vec![None],
