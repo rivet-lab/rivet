@@ -4465,10 +4465,10 @@ seeds:
       postgres:
         cells: [stand_pool_split_resume_grows_postgres, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
       mysql:
-        cells: [stand_pool_split_resume_grows_mysql, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
+        cells: ["lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
       mssql:
         cells: [stand_pool_split_resume_grows_mssql, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
       oracle:
-        cells: [stand_pool_split_resume_grows_oracle, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
+        cells: ["lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
       mongo:
         na: "a MongoDB giant is never range-split (mongo_source_is_not_range_split_capable), so no split unit manifest exists to read; the CDC position check shares the same census and is graded by lib:a_failed_copy_is_not_read_and_a_successful_one_is"
