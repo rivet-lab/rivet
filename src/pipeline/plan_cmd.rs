@@ -56,10 +56,20 @@ fn plannable_exports(config: &Config, export_name: Option<&str>) -> Result<Vec<E
     if export_name.is_some() {
         return Ok(selected.declared().to_vec());
     }
-    let no_recipes = std::collections::HashSet::new();
+    let kept: std::collections::HashSet<&str> = selected
+        .declared()
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    let recipes: std::collections::HashSet<String> = config
+        .exports
+        .iter()
+        .filter(|e| !kept.contains(e.name.as_str()))
+        .map(|e| e.name.clone())
+        .collect();
     let mut plannable = Vec::new();
-    for e in selected.declared() {
-        match crate::config::batch_plan_skip_reason(e, &no_recipes) {
+    for e in &config.exports {
+        match crate::config::batch_plan_skip_reason(e, &recipes) {
             Some(why) => log::warn!("plan: skipped '{}' — {why}", e.name),
             None => plannable.push(e.clone()),
         }

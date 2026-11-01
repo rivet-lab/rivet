@@ -2216,6 +2216,52 @@ mod tests {
     }
 
     #[test]
+    fn a_partition_without_a_manifest_is_a_fatal_failure_naming_the_export() {
+        let mut v = ManifestVerification::legacy();
+        v.require_partition_delivered("out/created_at=2026-03-02", "events");
+        assert!(!v.legacy_run && !v.passed);
+        assert_eq!(
+            v.failures.as_slice(),
+            [Failure::PartitionNotDelivered {
+                prefix: "out/created_at=2026-03-02".into(),
+                export: "events".into(),
+            }]
+        );
+        assert_eq!(
+            v.failures[0].to_string(),
+            "no manifest at out/created_at=2026-03-02: the source holds this partition of \
+             `events` but the destination holds none of it — it was never delivered or its \
+             directory was removed. Re-deliver it with `rivet run --export events`"
+        );
+        assert!(v.has_verified_wrong_failure());
+    }
+
+    #[test]
+    fn a_delivered_partition_and_a_read_error_are_left_alone() {
+        let mut found = ManifestVerification {
+            manifest_found: true,
+            manifest_self_consistent: true,
+            parts_verified: 1,
+            passed: true,
+            ..ManifestVerification::empty()
+        };
+        found.require_partition_delivered("p", "events");
+        assert!(found.passed && found.failures.is_empty());
+
+        let mut unreadable = ManifestVerification::legacy();
+        unreadable.legacy_run = false;
+        unreadable.failures.push(Failure::ManifestReadError {
+            detail: "permission denied".into(),
+        });
+        unreadable.recompute_passed();
+        unreadable.require_partition_delivered("p", "events");
+        assert!(matches!(
+            unreadable.failures.as_slice(),
+            [Failure::ManifestReadError { .. }]
+        ));
+    }
+
+    #[test]
     fn require_manifest_is_noop_on_a_real_passing_manifest() {
         // A found, passing verdict is untouched — `--prefix` plus real data is
         // the normal "validate this exact prefix" case and must still pass.

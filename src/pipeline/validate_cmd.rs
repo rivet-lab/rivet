@@ -1325,6 +1325,50 @@ mod tests {
         );
     }
 
+    /// A `partition_by` export whose source cannot be read is refused with its cause and a remedy that works without the source.
+    #[test]
+    fn a_partitioned_export_with_an_unreadable_source_is_refused_and_its_remedy_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("out");
+        let yaml = format!(
+            "source:\n  type: postgres\n  url: postgresql://nobody@127.0.0.1:1/nope\nexports:\n  - name: events\n    table: events\n    mode: full\n    format: parquet\n    partition_by: created_at\n    destination:\n      type: local\n      path: \"{}/{{partition}}\"\n",
+            root.to_string_lossy()
+        );
+        let cfg = dir.path().join("rivet.yaml");
+        std::fs::write(&cfg, yaml).unwrap();
+
+        let err = run_validate_command(
+            cfg.to_str().unwrap(),
+            Some("events"),
+            ValidateOutputFormat::Json(None),
+            ValidateTarget::default(),
+        )
+        .expect_err("an unreadable source cannot list the partitions");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("validate could not list the partitions of a `partition_by` export")
+                && text.contains("rivet validate --export <name> --prefix <partition directory>"),
+            "the refusal names its cause and its remedy: {text}"
+        );
+        assert!(
+            crate::error::error_code(&err).is_some(),
+            "the refusal is coded: {text}"
+        );
+
+        let partition = root.join("created_at=2026-03-01");
+        stage_dataset(&partition, &success_manifest(Vec::new()));
+        run_validate_command(
+            cfg.to_str().unwrap(),
+            Some("events"),
+            ValidateOutputFormat::Json(None),
+            ValidateTarget {
+                prefix_override: Some(partition.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .expect("the remedy verifies one partition with the source unreachable");
+    }
+
     /// Without `--prefix`, an absent manifest stays the benign M6 legacy-run
     /// pass (exit 0) — today's behaviour is preserved for config-resolved
     /// destinations that may legitimately be pre-0.7.0 prefixes.

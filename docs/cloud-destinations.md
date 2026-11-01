@@ -188,6 +188,14 @@ the last whole dataset; a resume that wrote a part and then failed removes
 **never queries the source**: only `HEAD` / `GET _SUCCESS` /
 `GET manifest.json` against the resolved destination.
 
+One exception: an export with `partition_by` has no single prefix, so `validate`
+reads the source once for the partition list (the min / max and NULL count of the
+partition column, the same read `rivet run` makes) and verifies every
+`<parent>__<bucket>` directory. A partition the source holds and the destination
+does not fails with `RIVET_VERIFY_PARTITION_NOT_DELIVERED` (exit 3). An unreadable
+source is refused (`RIVET_SOURCE_PROBE_UNREADABLE`); verify one directory without
+the source with `rivet validate --export <name> --prefix <partition directory>`.
+
 Validate flags:
 
 - `--date YYYY-MM-DD` — resolve `{date}` against the given day instead of
