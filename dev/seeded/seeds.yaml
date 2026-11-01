@@ -4391,6 +4391,28 @@ seeds:
         na: "SourceEngine, which orders a change log for a warehouse, has no Oracle variant, so no Oracle change log is ranked by this path"
       lib:
         cells: ["lib:a_mongo_position_orders_by_cluster_time_then_ordinal_then_token", "lib:mongo_orders_by_cluster_time_ordinal_then_token_and_partitions_by_id"]
+
+  - name: failed-first-load-owns-target
+    class: "a ledger row of a load that never succeeded (`failed`, `writing`) is read as ownership of the target, so a table someone created after a failed first load is overwritten or adopted without RIVET_LOAD_TARGET_NOT_RIVETS"
+    history: "issue #613, found 2026-10-08 verifying #611; owner decision 2026-10-28 (own only after the first successful load); RED on main 2026-10-31 (lib: the retry after a failed first full load reached the write over a table that appeared since)"
+    scope: source
+    patch: failed-first-load-owns-target/shared.patch
+    engines:
+      postgres:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      mysql:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      mssql:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      mongo:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      oracle:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      lib:
+        cells:
+          - "lib:a_retry_after_a_failed_first_load_refuses_a_table_that_appeared_since"
+          - "lib:a_table_is_rivets_own_only_after_its_first_successful_load"
+
   - name: clickhouse-paren-sorting-key
     class: "an existing ClickHouse change log's key is read from `system.tables.sorting_key` text without its tuple parentheses taken off, so ClickHouse 26's `(id)` reads as another key than `load.pk` and every CDC load into an existing log is refused RIVET_LOAD_TARGET_OBJECT_CONFLICT"
     history: "found 2026-10-31 by the ClickHouse version matrix (dev/clickhouse/version_matrix.py): every change-log cell red on 26.8 and 26.10, green on 24.8-26.3"
