@@ -98,8 +98,8 @@ fn any_userinfo_span(raw: &str) -> Option<(usize, usize)> {
     let scheme = raw.find("://")? + 3;
     let rest = &raw[scheme..];
     let at = rest.rfind('@')?;
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    (at < authority_end || rest[..at].contains(':')).then_some((scheme, scheme + at))
+    let before = &rest[..at];
+    (!before.contains(['/', '?', '#']) || before.contains(':')).then_some((scheme, scheme + at))
 }
 
 /// The text of a URL after its userinfo (the host list and path, query included): the RFC 3986 authority decides it, and a host list that is no host list falls back to the credential reading.

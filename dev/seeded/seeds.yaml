@@ -2681,7 +2681,7 @@ seeds:
         na: "the `;user=…;password=…` URL form is SQL Server's; the other engines' passwords sit in a userinfo the key already drops"
   - name: url-authority-at-in-query
     class: "a connection URL read by its last `@` instead of the `@` inside its authority: an `@` in the query or fragment (`?application_name=svc@corp`) becomes the end of a userinfo, the host after it is the query text, and two hosts share one source state key, lease and resume progress"
-    history: "found 2026-10-31 by the roast duplication lens and confirmed by a rivet-verifier probe: `postgresql://h1:5432/a?application_name=svc@corp` and the same with h2 both keyed as `postgres://corp:5432`; closed 2026-11-01 by routing every reader through config::url::authority"
+    history: "found 2026-10-31 by the roast duplication lens and confirmed by a rivet-verifier probe: `postgresql://h1:5432/a?application_name=svc@corp` and the same with h2 both keyed as `postgres://corp:5432`; closed 2026-11-01 by routing every reader through url_text::authority"
     scope: source
     patch: url-authority-at-in-query/shared.patch
     engines:

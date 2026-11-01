@@ -40,7 +40,7 @@ entries:
     copies: [src/config/url.rs:19, src/config/source.rs:686, src/config/source.rs:676, src/redact.rs:76, src/connect/mod.rs:74, src/state/mod.rs:214]
     status: done
     verdict: "confirmed: postgresql://h1:5432/a?application_name=svc@corp and the same with h2 both key as postgres://corp:5432"
-    closes: "the URL authority fix PR moves every reader to config::url; the url-authority exceptions are deleted"
+    closes: "the URL authority fix PR moves every reader to url_text; the url-authority exceptions are deleted"
   - id: R5
     date: 2026-10-31
     lens: duplication of functionality and bypassed seams
