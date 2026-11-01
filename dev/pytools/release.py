@@ -21,6 +21,9 @@ Preconditions the script enforces, in order (1-5 unchanged from the bash):
    of exactly HEAD's commit, on a clean tree, and the latest such run says
    RELEASE-READY. A reduced run (`make release-oracle`, an escape, a narrowed
    scope, no seeded recall) is never enough.
+7. The seeded recall's run record (`recall-runs.jsonl` in the seeded state dir,
+   or `--recall-record FILE`) holds a complete, green recall of exactly HEAD's
+   commit from a clean tree.
 
 WHAT THIS SCRIPT DOES **NOT** CHECK (reported, not invented):
 
@@ -64,7 +67,7 @@ ROOT = shell.ROOT
 CARGO_TOML = ROOT / "Cargo.toml"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
-USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE]
+USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE]
 
 Options:
   --dry-run     Validate only; do not create or push a tag
@@ -72,6 +75,7 @@ Options:
   --tag vX.Y.Z  Override tag (default: v<version from Cargo.toml>)
   --message     Annotated tag message (default: vX.Y.Z: <CHANGELOG subtitle>)
   --gate-record The gate's verdict lines (default: dev/release-oracle/timings.jsonl)
+  --recall-record  The seeded recall's run lines (default: recall-runs.jsonl in the seeded state dir)
   --self-test   Check the gate-record precondition on fixtures; tags nothing
   -h, --help    Show this help"""
 
@@ -98,6 +102,7 @@ class Args:
     tag_override: str = ""
     message: str = ""
     gate_record: str = ""
+    recall_record: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -135,6 +140,12 @@ def parse_args(argv: list[str]) -> Args:
             if not value:
                 raise _Usage()
             a.gate_record = value
+            i += 2
+        elif arg == "--recall-record":
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+            if not value:
+                raise _Usage()
+            a.recall_record = value
             i += 2
         elif arg in ("-h", "--help"):
             raise _Usage()
@@ -252,6 +263,28 @@ def gate_refusal(sha: str, record: Path) -> str | None:
     return None
 
 
+def recall_refusal(sha: str, record: Path | None) -> str | None:
+    """Why `sha` may not be tagged on the seeded recall's account: no complete green recall of exactly this commit from a clean tree."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from dev.seeded import run_record
+
+    return run_record.refusal(sha, record or run_record.seeded_dir() / run_record.RUNS_FILE)
+
+
+def tag_refusal(sha: str, gate: Path, recall: Path | None) -> tuple[str, str] | None:
+    """The first record precondition `sha` fails, as (why, hint), gate record before recall record; None when both hold."""
+    why = gate_refusal(sha, gate)
+    if why:
+        return why, ("run `make release-oracle-full` on this commit and tag it once the gate says RELEASE-READY; "
+                     "pass --gate-record FILE when the gate ran on another machine")
+    why = recall_refusal(sha, recall)
+    if why:
+        return why, ("a tag needs a complete green seeded recall of this commit; "
+                     "pass --recall-record FILE when it ran on another machine")
+    return None
+
+
 def self_test() -> int:
     """The gate-record precondition on fixture lines: only the latest clean full-gate green run of this exact commit passes."""
     import tempfile
@@ -282,7 +315,38 @@ def self_test() -> int:
                 path.write_text("\n".join(lines) + "\n")
             got = gate_refusal(sha, path)
             assert (got is None) if want is None else (got is not None and want in got), (i, lines, got)
-    print(f"self-test ok: release gate record — {len(cases)} cases, only a clean green full-gate run of this commit tags")
+    def run(**kw) -> str:
+        base = {"sha": sha, "complete": True, "green": True, "dirty": False}
+        return json.dumps({**base, **kw})
+
+    recall_cases = [
+        ([], "no seeded-recall record"),
+        ([run(sha=other)], "no complete green"),
+        ([run(complete=False)], "1 incomplete, red or dirty"),
+        ([run(green=False)], "1 incomplete, red or dirty"),
+        ([run(dirty=True)], "1 incomplete, red or dirty"),
+        ([run(dirty=None)], "1 incomplete, red or dirty"),
+        (["not json", run()], None),
+        ([run(complete=False), run()], None),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        for i, (lines, want) in enumerate(recall_cases):
+            path = Path(d) / f"r{i}.jsonl"
+            if lines:
+                path.write_text("\n".join(lines) + "\n")
+            got = recall_refusal(sha, path)
+            assert (got is None) if want is None else (got is not None and want in got), (i, lines, got)
+    with tempfile.TemporaryDirectory() as d:
+        gate, good, bad = Path(d) / "gate.jsonl", Path(d) / "good.jsonl", Path(d) / "bad.jsonl"
+        gate.write_text(rec() + "\n")
+        good.write_text(run() + "\n")
+        bad.write_text(run(complete=False) + "\n")
+        assert tag_refusal(sha, gate, good) is None
+        narrowed, ungated = tag_refusal(sha, gate, bad), tag_refusal(sha, Path(d) / "none.jsonl", good)
+        assert narrowed and "seeded recall" in narrowed[1], "a gate-green sha with a narrowed recall must be refused by the tag path"
+        assert ungated and "release-oracle-full" in ungated[1], "a recall-green sha with no gate record must be refused by the tag path"
+    print(f"self-test ok: release gate record — {len(cases)} cases, only a clean green full-gate run of this commit tags; "
+          f"{len(recall_cases)} recall cases, only a complete green recall of it")
     return 0
 
 
@@ -363,13 +427,9 @@ def main_cli(argv: list[str] | None = None) -> int:
 
     sha = _git("rev-parse", "HEAD").check("git rev-parse HEAD").stdout.strip()
     record = Path(args.gate_record) if args.gate_record else GATE_RECORD
-    why = gate_refusal(sha, record)
-    if why:
-        raise shell.Fail(
-            f"error: {why}",
-            hint="run `make release-oracle-full` on this commit and tag it once the gate says RELEASE-READY; "
-                 "pass --gate-record FILE when the gate ran on another machine",
-        )
+    refused = tag_refusal(sha, record, Path(args.recall_record) if args.recall_record else None)
+    if refused:
+        raise shell.Fail(f"error: {refused[0]}", hint=refused[1])
     head = sha[:8]
     branch = (
         _git("rev-parse", "--abbrev-ref", "HEAD")
@@ -388,6 +448,7 @@ def main_cli(argv: list[str] | None = None) -> int:
   version: {version}
   commit:  {head} ({branch})
   gate:    {FULL_GATE} RELEASE-READY ({record})
+  recall:  complete green seeded recall of this commit
   message: {message}
   push:    {"yes" if args.push else "no"}
   CI:      .github/workflows/release.yml (on tag push)"""
