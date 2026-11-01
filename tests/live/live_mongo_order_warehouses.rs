@@ -2,8 +2,6 @@
 
 use crate::common::*;
 
-const PORT: u16 = 27018;
-
 enum Wh {
     Bq(BqLive),
     Sf(SfLive),
@@ -345,13 +343,13 @@ fn tie_cell(wh: Wh, label: &str) {
     let db = unique_name(label);
     let _guard = wh.guard(&coll);
     let _db = MongoDbGuard {
-        port: PORT,
+        port: mongo_rs_port(),
         db: db.clone(),
     };
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection(&coll);
     let rig = wh.shaped(
-        Rig::mongo_cdc(&coll).source_url(&MongoTest::url(PORT, &db)),
+        Rig::mongo_cdc(&coll).source_url(&MongoTest::url(mongo_rs_port(), &db)),
         &coll,
         false,
     );
@@ -400,17 +398,17 @@ fn re_snapshot_cell(wh: Wh, label: &str) {
     let db = unique_name(label);
     let _guard = wh.guard(&coll);
     let _db = MongoDbGuard {
-        port: PORT,
+        port: mongo_rs_port(),
         db: db.clone(),
     };
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection(&coll);
     for id in 1..=3 {
         m.upsert_set(&coll, id, "v", "7");
     }
     let rig = wh
         .shaped(
-            Rig::mongo_cdc(&coll).source_url(&MongoTest::url(PORT, &db)),
+            Rig::mongo_cdc(&coll).source_url(&MongoTest::url(mongo_rs_port(), &db)),
             &coll,
             false,
         )
@@ -468,4 +466,84 @@ fn a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_
         return;
     };
     re_snapshot_cell(wh, "mgo_rs_sf");
+}
+
+/// Chunks move through the run and it is killed at three points: the view equals Mongo, id by id.
+fn shard_cell(wh: Wh, label: &str) {
+    require_alive(LiveService::MongoShard);
+    let coll = unique_name(label);
+    let db = unique_name(label);
+    let _guard = wh.guard(&coll);
+    let _db = MongoDbGuard {
+        port: MONGO_SHARD_PORT,
+        db: db.clone(),
+    };
+    let m = MongoTest::connect(MONGO_SHARD_PORT, &db);
+    m.shard_collection(&coll, &SHARD_SPLITS);
+    for id in 1..=SHARD_DOCS {
+        m.upsert_set(&coll, id, "v", "0");
+    }
+    let rig = wh
+        .shaped(
+            Rig::mongo_cdc(&coll).source_url(&MongoTest::url(MONGO_SHARD_PORT, &db)),
+            &coll,
+            false,
+        )
+        .cdc("initial: snapshot")
+        .cdc("rollover: 2");
+    rig.run_ok();
+    let mover = ChunkMover::start(MONGO_SHARD_PORT, &db, &coll, vec![5, 25, 45]);
+    for (rounds, hook) in [
+        (0..4, "cdc_after_checkpoint_before_ack"),
+        (4..8, "cdc_after_flush_before_ack"),
+        (8..12, "cdc_after_ack"),
+    ] {
+        for round in rounds {
+            m.shard_round(&coll, round);
+        }
+        let killed = rig.run_with_env("RIVET_TEST_PANIC_AT", hook);
+        assert!(
+            !killed.status.success(),
+            "the hook {hook} must kill the run"
+        );
+    }
+    for round in 12..14 {
+        m.shard_round(&coll, round);
+    }
+    let (moved, refused) = mover.stop();
+    rig.run_ok();
+    run_ok_load(&rig);
+    let want: Vec<(i64, i64)> = m
+        .current_state_i64(&coll, "v")
+        .into_iter()
+        .map(|(id, v)| (id, v.parse().expect("v")))
+        .collect();
+    let got = wh.live_pairs(&coll);
+    println!(
+        "shard-cell: moves accepted {moved} refused {refused}; source rows {}; view rows {}",
+        want.len(),
+        got.len()
+    );
+    assert_eq!(
+        got, want,
+        "the view equals the source: count, ids and values"
+    );
+}
+
+#[test]
+#[ignore = "live: requires the mongo shard cluster + BigQuery creds"]
+fn a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_as_the_source_bigquery() {
+    let Some(wh) = Wh::bq("mgo_shard_bq") else {
+        return;
+    };
+    shard_cell(wh, "mgo_shard_bq");
+}
+
+#[test]
+#[ignore = "live: requires the mongo shard cluster + Snowflake creds"]
+fn a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_as_the_source_snowflake() {
+    let Some(wh) = Wh::sf("mgo_shard_sf") else {
+        return;
+    };
+    shard_cell(wh, "mgo_shard_sf");
 }

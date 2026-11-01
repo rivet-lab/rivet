@@ -390,7 +390,7 @@ fn the_duckdb_oracle_reaches_sql_server_and_mongodb_too() {
 
     // MongoDB: two documents, read through `mongo_scan`.
     let db = unique_name("orc_mg").to_lowercase();
-    let m = MongoTest::connect(27018, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.seed_int_id("t", 2);
     let (attach, from) = OracleEngine::MongoRs.source_sql(&db, "t");
     assert!(

@@ -18,6 +18,7 @@ sources:
   mssql_cdc:    {container: rivet-mssql-cdc-1,    url: "sqlserver://sa:Rivet_Passw0rd!@127.0.0.1:1434/rivet"}
   mongo:        {container: rivet-mongo-1,        url: "mongodb://127.0.0.1:27017"}
   mongo_rs:     {container: rivet-mongo-rs-1,     url: "mongodb://127.0.0.1:27018/?directConnection=true"}
+  mongo_shard:  {container: rivet-mongos-1,       url: "mongodb://127.0.0.1:27991/?directConnection=true"}
 
 # Persistent databases on every source: `rivet` (tests, gate) and `rivet_bench` (the seeded
 # 1M-row harness fixture, expensive to rebuild). Nothing else is permanent.

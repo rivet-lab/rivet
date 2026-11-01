@@ -234,12 +234,12 @@ fn mssql_cdc_flush_past_the_partition_budget_is_cut_and_every_part_notes_its_par
 #[test]
 #[ignore = "live: requires docker compose mongo-rs + the rivet-duckdb oracle"]
 fn mongo_cdc_says_its_parts_cannot_be_budgeted_by_a_declared_partition() {
-    const PORT: u16 = 27018;
+    let rs_port = mongo_rs_port();
     let db = unique_name("pfooter_mongo");
-    let m = MongoTest::connect(PORT, &db);
+    let m = MongoTest::connect(rs_port, &db);
     m.drop_collection("t");
     let rig = Rig::mongo_cdc("t")
-        .source_url(&MongoTest::url(PORT, &db))
+        .source_url(&MongoTest::url(rs_port, &db))
         .duckdb_oracle()
         .top_line(CDC_LOAD);
     rig.run_ok(); // anchor

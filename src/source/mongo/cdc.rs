@@ -66,6 +66,8 @@ pub(crate) struct MongoChangeStream {
     /// never fires, and the run never terminates (bug-hunt hang). `None` unless
     /// `until_current`, or when the server did not report `operationTime`.
     until_current_ts: Option<mongodb::bson::Timestamp>,
+    /// The resume-token clusterTime a bounded drain must reach before it stops; see `token_floor`.
+    token_floor: Option<mongodb::bson::Timestamp>,
     /// Heterogeneous-`_id` warn state, mirroring the batch full-scan warning
     /// ([`super::MongoSource::warn_if_heterogeneous_id`]): a whole-db change stream
     /// can carry mixed `_id` BSON types across events, and the flat `_id` column
@@ -233,21 +235,71 @@ mod token_data_tests {
     }
 }
 
-/// Pure bound verdicts (#161): Mongo was the only engine whose `until_current`
-/// stop rules lived inline in the drain loop instead of a testable transition
-/// (its siblings: MySQL `commit_past_bound`, PG `tx_disposition`, MSSQL
-/// `fill_sql`). Two rules, both unit-tested in both directions:
-///
-/// An EMPTY poll's disposition: the stream's resume token has silently advanced
-/// past the open-time `_data` target → the backlog is drained, STOP; no target
-/// (unbounded shouldn't reach here, and an unparseable boundary fails OPEN) →
-/// STOP; otherwise the backlog is still coming → POLL again.
-fn idle_poll_stops(advanced: Option<&str>, target: Option<&str>) -> bool {
+/// How long a drain waits, once its token is past the open-time target, for the token to reach the open-time clusterTime bound.
+const BOUND_WAIT_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// An empty poll ends the drain once the token is past the open-time target and has reached the open-time clusterTime bound, or has waited `BOUND_WAIT_CEILING` for it, or when there is no target.
+fn idle_poll_stops(
+    advanced: Option<&str>,
+    target: Option<&str>,
+    bound: Option<mongodb::bson::Timestamp>,
+    waited: std::time::Duration,
+) -> bool {
     match (advanced, target) {
-        (Some(cur), Some(tgt)) => cur > tgt,
+        (Some(cur), Some(tgt)) => {
+            cur > tgt && (token_reached_bound(cur, bound) || waited >= BOUND_WAIT_CEILING)
+        }
         (_, None) => true,
         _ => false,
     }
+}
+
+/// Whether the token is past the open-time target while still below the open-time clusterTime bound, the one state `BOUND_WAIT_CEILING` limits.
+fn bound_unmet(
+    advanced: Option<&str>,
+    target: Option<&str>,
+    bound: Option<mongodb::bson::Timestamp>,
+) -> bool {
+    advanced
+        .zip(target)
+        .is_some_and(|(cur, tgt)| cur > tgt && !token_reached_bound(cur, bound))
+}
+
+/// Whether a `hello` answer comes from a `mongos` router, which names itself `isdbgrid` in `msg`.
+fn is_mongos(hello: &mongodb::bson::Document) -> bool {
+    hello.get_str("msg") == Ok("isdbgrid")
+}
+
+/// The clusterTime a resume token must reach before a bounded drain stops: the open-time bound itself on a replica set, one increment past it on a sharded cluster, where a shard's noop token at the bound's own tick sorts before another shard's write at that tick.
+fn token_floor(
+    bound: Option<mongodb::bson::Timestamp>,
+    sharded: bool,
+) -> Option<mongodb::bson::Timestamp> {
+    bound.map(|b| match (sharded, b.increment.checked_add(1)) {
+        (true, Some(increment)) => mongodb::bson::Timestamp {
+            time: b.time,
+            increment,
+        },
+        (true, None) => mongodb::bson::Timestamp {
+            time: b.time.saturating_add(1),
+            increment: 0,
+        },
+        (false, _) => b,
+    })
+}
+
+/// Whether the clusterTime a resume token's `_data` opens with (`82` + seconds + increment, big-endian hex) is at or past `bound`; an unreadable token or no bound counts as reached.
+fn token_reached_bound(data: &str, bound: Option<mongodb::bson::Timestamp>) -> bool {
+    let Some(b) = bound else { return true };
+    let parsed = data
+        .strip_prefix("82")
+        .filter(|rest| rest.len() >= 16)
+        .and_then(|rest| {
+            let time = u32::from_str_radix(rest.get(..8)?, 16).ok()?;
+            let increment = u32::from_str_radix(rest.get(8..16)?, 16).ok()?;
+            Some((time, increment))
+        });
+    parsed.is_none_or(|ct| ct >= (b.time, b.increment))
 }
 
 /// The TIME bound: an event whose `cluster_time` is past the open-time cluster
@@ -556,20 +608,21 @@ impl MongoChangeStream {
         // A `until_current` run that cannot pin its ceiling must FAIL, not degrade:
         // MongoDB has no catch-up exit, so an unset bound means the run never ends.
         // See `until_current_bound` for why this engine differs from the SQL ones.
-        let (operation_time, probe_err) = if until_current {
+        let (operation_time, sharded, probe_err) = if until_current {
             session.block_on(async {
                 match server_identity(session.client(), &db_name).await {
-                    Ok(d) => (d.get_timestamp("operationTime").ok(), None),
+                    Ok(d) => (d.get_timestamp("operationTime").ok(), is_mongos(&d), None),
                     // Keep the driver's own words. A refusal that says "the
                     // deployment does not report one" when the server actually said
                     // "not authorized on admin" sends the operator the wrong way.
-                    Err(e) => (None, Some(e.to_string())),
+                    Err(e) => (None, false, Some(e.to_string())),
                 }
             })
         } else {
-            (None, None)
+            (None, false, None)
         };
         let until_current_ts = until_current_bound(until_current, operation_time, probe_err)?;
+        let token_floor = token_floor(until_current_ts, sharded);
         let this = Self {
             session,
             stream,
@@ -578,6 +631,7 @@ impl MongoChangeStream {
             until_current,
             target_data,
             until_current_ts,
+            token_floor,
             hetero_first: None,
             hetero_warned: false,
             configured_tables: configured_tables.to_vec(),
@@ -947,6 +1001,7 @@ impl ChangeStream for MongoChangeStream {
         let until_current = self.until_current;
         let target = self.target_data.clone();
         let bound_ts = self.until_current_ts;
+        let floor_ts = self.token_floor;
         // Split the borrow: `block_on` reads `&session`, the future drives
         // `&mut stream` — disjoint fields.
         let session = &self.session;
@@ -958,6 +1013,7 @@ impl ChangeStream for MongoChangeStream {
         let hetero_warned = &mut self.hetero_warned;
         let configured_tables = &self.configured_tables;
         let clock = &mut self.clock;
+        let mut bound_wait: Option<std::time::Instant> = None;
         loop {
             // Pull one raw event (or terminate). Bounded run: drain up to the
             // open-time target; `next_if_any` returns `None` on an empty poll, but a
@@ -972,7 +1028,22 @@ impl ChangeStream for MongoChangeStream {
                             .and_then(|t| serde_json::to_value(&t).ok())
                             .as_ref()
                             .and_then(token_data);
-                        if idle_poll_stops(advanced.as_deref(), target.as_deref()) {
+                        let unmet = bound_unmet(advanced.as_deref(), target.as_deref(), floor_ts);
+                        if unmet {
+                            bound_wait.get_or_insert_with(std::time::Instant::now);
+                        }
+                        let waited = bound_wait.map_or(std::time::Duration::ZERO, |t| t.elapsed());
+                        if idle_poll_stops(advanced.as_deref(), target.as_deref(), floor_ts, waited)
+                        {
+                            if unmet {
+                                log::warn!(
+                                    "mongodb cdc: the change stream did not reach the cluster time \
+                                     the run opened at within {}s (a shard is not advancing its \
+                                     resume token); the run stops here and the writes still \
+                                     pending arrive on the next run from the checkpoint",
+                                    BOUND_WAIT_CEILING.as_secs()
+                                );
+                            }
                             return None;
                         }
                         continue; // backlog still coming — poll again
@@ -1295,15 +1366,110 @@ mod tests {
     /// loop (siblings: commit_past_bound / tx_disposition / fill_sql).
     #[test]
     fn idle_poll_stops_both_directions() {
-        // stop: token advanced past the open-time target — backlog drained.
-        assert!(idle_poll_stops(Some("82AB"), Some("8299")));
-        // stop: no target (fail OPEN on an unparseable boundary).
-        assert!(idle_poll_stops(None, None));
-        assert!(idle_poll_stops(Some("82AB"), None));
-        // poll: backlog still coming (at or below the target, or no token yet).
-        assert!(!idle_poll_stops(Some("8299"), Some("82AB")));
-        assert!(!idle_poll_stops(Some("82AB"), Some("82AB")));
-        assert!(!idle_poll_stops(None, Some("82AB")));
+        let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
+        let now = std::time::Duration::ZERO;
+        let past = "82000000640000000A";
+        let bound_met = at(100, 10);
+        assert!(idle_poll_stops(Some(past), Some("81"), bound_met, now));
+        assert!(idle_poll_stops(Some(past), Some("81"), at(100, 9), now));
+        assert!(idle_poll_stops(Some(past), Some("81"), None, now));
+        assert!(idle_poll_stops(None, None, bound_met, now));
+        assert!(idle_poll_stops(Some(past), None, bound_met, now));
+        assert!(!idle_poll_stops(Some(past), Some("81"), at(100, 11), now));
+        assert!(!idle_poll_stops(Some(past), Some("81"), at(101, 0), now));
+        assert!(!idle_poll_stops(Some("81"), Some(past), bound_met, now));
+        assert!(!idle_poll_stops(Some(past), Some(past), bound_met, now));
+        assert!(!idle_poll_stops(None, Some(past), bound_met, now));
+    }
+
+    /// A token that never reaches the bound ends the drain once the ceiling has passed, and never before; a token not past the target does not stop at any wait.
+    #[test]
+    fn a_token_that_never_reaches_the_bound_stops_the_drain_at_the_ceiling() {
+        let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
+        let secs = std::time::Duration::from_secs;
+        let past = "82000000640000000A";
+        let never = at(101, 0);
+        assert!(!idle_poll_stops(Some(past), Some("81"), never, secs(0)));
+        assert!(!idle_poll_stops(Some(past), Some("81"), never, secs(119)));
+        assert!(idle_poll_stops(
+            Some(past),
+            Some("81"),
+            never,
+            BOUND_WAIT_CEILING
+        ));
+        assert!(idle_poll_stops(Some(past), Some("81"), never, secs(3600)));
+        assert!(!idle_poll_stops(Some("81"), Some(past), never, secs(3600)));
+        assert!(!idle_poll_stops(None, Some(past), never, secs(3600)));
+        assert_eq!(BOUND_WAIT_CEILING, secs(120));
+        assert!(bound_unmet(Some(past), Some("81"), never));
+        assert!(!bound_unmet(Some(past), Some("81"), at(100, 10)));
+        assert!(!bound_unmet(Some(past), Some("81"), None));
+        assert!(!bound_unmet(Some("81"), Some(past), never));
+        assert!(!bound_unmet(Some(past), Some(past), never));
+        assert!(!bound_unmet(None, Some(past), never));
+        assert!(!bound_unmet(Some(past), None, never));
+    }
+
+    /// Only a `mongos` answer marks the connection as sharded.
+    #[test]
+    fn only_a_mongos_hello_marks_the_connection_sharded() {
+        use mongodb::bson::doc;
+        assert!(is_mongos(&doc! { "msg": "isdbgrid", "ok": 1 }));
+        assert!(!is_mongos(
+            &doc! { "isWritablePrimary": true, "setName": "rs0", "ok": 1 }
+        ));
+        assert!(!is_mongos(&doc! { "msg": "other" }));
+        assert!(!is_mongos(&doc! {}));
+    }
+
+    /// A sharded drain stops only on a token past the bound's own tick; a replica set stops at it.
+    #[test]
+    fn a_sharded_drain_needs_a_token_past_the_bound_tick() {
+        let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
+        let bound = at(100, 10);
+        assert_eq!(token_floor(bound, false), bound);
+        assert_eq!(token_floor(bound, true), at(100, 11));
+        assert_eq!(token_floor(at(100, u32::MAX), true), at(101, 0));
+        assert_eq!(token_floor(at(u32::MAX, u32::MAX), true), at(u32::MAX, 0));
+        assert_eq!(token_floor(None, true), None);
+        assert_eq!(token_floor(None, false), None);
+        let at_bound = "82000000640000000A";
+        assert!(idle_poll_stops(
+            Some(at_bound),
+            Some("81"),
+            token_floor(bound, false),
+            std::time::Duration::ZERO
+        ));
+        assert!(!idle_poll_stops(
+            Some(at_bound),
+            Some("81"),
+            token_floor(bound, true),
+            std::time::Duration::ZERO
+        ));
+        assert!(idle_poll_stops(
+            Some("82000000640000000B"),
+            Some("81"),
+            token_floor(bound, true),
+            std::time::Duration::ZERO
+        ));
+        assert!(bound_unmet(
+            Some(at_bound),
+            Some("81"),
+            token_floor(bound, true)
+        ));
+    }
+
+    /// A token whose clusterTime is below the open-time bound has not drained the backlog, whatever it compares to the target.
+    #[test]
+    fn a_token_below_the_open_time_bound_has_not_reached_it() {
+        let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
+        let token = "826AE5B2FD000000EC2B042C01002B026E5A1004";
+        assert!(token_reached_bound(token, at(0x6AE5B2FD, 0xEC)));
+        assert!(!token_reached_bound(token, at(0x6AE5B2FD, 0xED)));
+        assert!(!token_reached_bound(token, at(0x6AE5B2FE, 0)));
+        assert!(token_reached_bound(token, None));
+        assert!(token_reached_bound("not-a-token", at(1, 0)));
+        assert!(token_reached_bound("82", at(1, 0)));
     }
 
     /// `until_current` must REFUSE without its bound, and only then.

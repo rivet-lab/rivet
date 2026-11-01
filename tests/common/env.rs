@@ -135,6 +135,22 @@ pub fn oracle_latin1_url() -> String {
 pub const ORACLE_CDC_URL: &str = "oracle://c%23%23rivetcdc:rivet@127.0.0.1:1521/FREEPDB1";
 pub const MONGO_URL: &str = "mongodb://127.0.0.1:27017";
 pub const MONGO_RS_URL: &str = "mongodb://127.0.0.1:27018/?directConnection=true";
+/// The `mongo-rs` stand's URL on the port the stand chose.
+pub fn mongo_rs_url() -> String {
+    format!(
+        "mongodb://127.0.0.1:{}/?directConnection=true",
+        mongo_rs_port()
+    )
+}
+pub const MONGO_SHARD_PORT: u16 = 27991;
+pub const MONGO_SHARD_URL: &str = "mongodb://127.0.0.1:27991/?directConnection=true";
+/// Host port of the `mongo-rs` stand; `RIVET_TEST_MONGO_RS_PORT` names the one a non-default `MONGO_VERSION` stand is published on.
+pub fn mongo_rs_port() -> u16 {
+    std::env::var("RIVET_TEST_MONGO_RS_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(27018)
+}
 
 /// The least-privilege read-only login on the auth-enabled `mongo-auth` service
 /// (:27020, created by dev/mongo/init-auth.js). `read` on `harmdb` only — no
@@ -378,6 +394,8 @@ pub enum LiveService {
     Mongo,
     /// MongoDB single-node replica set (change-stream CDC). TCP :27018.
     MongoRs,
+    /// Two-shard MongoDB cluster behind mongos (profile `shard`). TCP :27991.
+    MongoShard,
     /// Auth-enabled MongoDB with a least-privilege read-only user. TCP :27020.
     MongoAuth,
     Minio,
@@ -436,8 +454,13 @@ impl LiveService {
             LiveService::Mongo => ("127.0.0.1", 27017, "service `mongo` in docker-compose.yaml"),
             LiveService::MongoRs => (
                 "127.0.0.1",
-                27018,
+                mongo_rs_port(),
                 "service `mongo-rs` (single-node replica set) in docker-compose.yaml",
+            ),
+            LiveService::MongoShard => (
+                "127.0.0.1",
+                MONGO_SHARD_PORT,
+                "profile `shard` — run: docker compose --profile shard up -d --wait mongos",
             ),
             LiveService::MongoAuth => (
                 "127.0.0.1",

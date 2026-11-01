@@ -3725,11 +3725,11 @@ fn init_cdc_writes_the_capture_instance_the_catalog_holds_mssql() {
 fn the_config_init_writes_runs_cdc_mongo() {
     let db = unique_name("oc_initc");
     let _guard = MongoDbGuard {
-        port: 27018,
+        port: mongo_rs_port(),
         db: db.clone(),
     };
-    MongoTest::connect(27018, &db).seed_int_id("t", 3);
-    init_config_runs(&MongoTest::url(27018, &db), "t", "cdc");
+    MongoTest::connect(mongo_rs_port(), &db).seed_int_id("t", 3);
+    init_config_runs(&MongoTest::url(mongo_rs_port(), &db), "t", "cdc");
 }
 
 #[test]

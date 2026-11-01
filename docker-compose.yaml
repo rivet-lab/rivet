@@ -914,7 +914,7 @@ services:
     image: mongo:${MONGO_VERSION:-7}
     command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
-      - "27018:27017"
+      - "${MONGO_RS_HOST_PORT:-27018}:27017"
     healthcheck:
       # Healthy ONLY when this node is an elected PRIMARY, so `--wait` blocks until
       # `db.watch()` can actually run (else error 13436 NotPrimaryOrSecondary).
@@ -978,6 +978,60 @@ services:
       timeout: 3s
       retries: 30
 
+  # Two-shard cluster behind mongos :27991 (profile `shard`).
+  mongo-shard-cfg:
+    image: mongo:${MONGO_VERSION:-7}
+    profiles: ["shard"]
+    command: ["mongod", "--configsvr", "--port", "27017", "--replSet", "shardcfg", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+    tmpfs: ["/data/db", "/data/configdb"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"shardcfg\",configsvr:true,members:[{_id:0,host:\"mongo-shard-cfg:27017\"}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)' || mongo --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"shardcfg\",configsvr:true,members:[{_id:0,host:\"mongo-shard-cfg:27017\"}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)'"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+
+  mongo-shard-a:
+    image: mongo:${MONGO_VERSION:-7}
+    profiles: ["shard"]
+    command: ["mongod", "--shardsvr", "--port", "27017", "--replSet", "sharda", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+    tmpfs: ["/data/db", "/data/configdb"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"sharda\",members:[{_id:0,host:\"mongo-shard-a:27017\"}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)' || mongo --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"sharda\",members:[{_id:0,host:\"mongo-shard-a:27017\"}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)'"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+
+  mongo-shard-b:
+    image: mongo:${MONGO_VERSION:-7}
+    profiles: ["shard"]
+    command: ["mongod", "--shardsvr", "--port", "27017", "--replSet", "shardb", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+    tmpfs: ["/data/db", "/data/configdb"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"shardb\",members:[{_id:0,host:\"mongo-shard-b:27017\"}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)' || mongo --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"shardb\",members:[{_id:0,host:\"mongo-shard-b:27017\"}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)'"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+
+  mongos:
+    image: mongo:${MONGO_VERSION:-7}
+    profiles: ["shard"]
+    command: ["mongos", "--configdb", "shardcfg/mongo-shard-cfg:27017", "--bind_ip_all"]
+    ports:
+      - "27991:27017"
+    tmpfs: ["/data/db", "/data/configdb"]
+    depends_on:
+      mongo-shard-cfg: {condition: service_healthy}
+      mongo-shard-a: {condition: service_healthy}
+      mongo-shard-b: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'var n=db.adminCommand({listShards:1}).shards.map(function(x){return x._id}); if(n.indexOf(\"sharda\")<0){sh.addShard(\"sharda/mongo-shard-a:27017\")}; if(n.indexOf(\"shardb\")<0){sh.addShard(\"shardb/mongo-shard-b:27017\")}; db.adminCommand({listShards:1}).shards.length==2?quit(0):quit(1)' || mongo --quiet --eval 'var n=db.adminCommand({listShards:1}).shards.map(function(x){return x._id}); if(n.indexOf(\"sharda\")<0){sh.addShard(\"sharda/mongo-shard-a:27017\")}; if(n.indexOf(\"shardb\")<0){sh.addShard(\"shardb/mongo-shard-b:27017\")}; db.adminCommand({listShards:1}).shards.length==2?quit(0):quit(1)'"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
   # ---- MySQL statement-truth stand: dev/pytools/statement_truth.py (docs/statement-truth.md) ----
   mysql-stmt-80: &mysql-stmt
     image: mysql:8.0

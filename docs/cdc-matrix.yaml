@@ -106,6 +106,14 @@ scenarios:
     mongo:    { test: roast_until_current_terminates_under_sustained_writes_and_keeps_backlog }
     oracle:   { test: roast_oracle_cdc_until_current_open_bound_two_runs_lose_nothing }
 
+  - id: cdc_until_current_sharded_reads_every_write_before_the_run
+    what: "until_current: true on a sharded source — a run delivers every write committed before it started, even when one shard is idle and another lags; chunks moving and runs killed change no row of the destination"
+    postgres: { na: "a PostgreSQL source is one instance with one WAL; there is no second shard whose log can lag behind the position the first one reports" }
+    mysql:    { na: "a MySQL source is one binlog stream per server; the replication position is a single total order, so no shard can lag behind it" }
+    mssql:    { na: "a SQL Server source is one transaction log; its LSN order is total, so no second log can trail the position the first one reports" }
+    mongo:    { test: a_sharded_mongo_run_delivers_every_write_committed_before_it_started, note: "mongos merges the change streams of two shards; the end-to-end cell is a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_into_clickhouse_as_the_source" }
+    oracle:   { na: "an Oracle source is one redo stream per instance read through LogMiner; a single SCN order covers it, so no second stream can trail the position" }
+
   - id: cdc_until_current_open_bound_two_runs
     what: "DEFER-NOT-DROP: a writer commits through run 1, which terminates and captures a prefix; run 2 drains the tail; the distinct-id union re-read from the parquet equals the SOURCE id set. Termination is load-bearing on the open-time bound for PostgreSQL (continuous slot re-peek — the PG variant runs rollover: 5, the RED shape that hung the pre-bound code) AND MongoDB (a tailable change stream that never empty-polls under sustained writes — the cluster-time bound stops it; disabling the pin hangs the sustained-writes test); MySQL (NON_BLOCK EOF) and SQL Server (Agent scan-gap empty poll) terminate natively, so their bound is a precise-stop refinement and their test proves defer-not-drop (each verified fix-invariant for termination by a disable-bound probe)"
     postgres: { test: roast_pg_until_current_open_bound_two_runs_lose_nothing }

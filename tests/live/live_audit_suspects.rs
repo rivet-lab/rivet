@@ -6,7 +6,6 @@ use crate::common::*;
 use mysql::prelude::Queryable as _;
 
 const MYSQL_CDC_ROOT_URL: &str = "mysql://root:rivet@127.0.0.1:3307/rivet";
-const MONGO_RS_PORT: u16 = 27018;
 
 /// Combined stdout+stderr of a finished run.
 fn said(out: &std::process::Output) -> String {
@@ -140,11 +139,11 @@ fn mongo_cdc_a_dropped_captured_collection_is_refused_not_skipped() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("aud_mdrop");
-    let m = MongoTest::connect(MONGO_RS_PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
 
     let rig = Rig::mongo_cdc("t")
-        .source_url(&MongoTest::url(MONGO_RS_PORT, &db))
+        .source_url(&MongoTest::url(mongo_rs_port(), &db))
         .duckdb_oracle();
     rig.run_ok(); // anchor
     m.upsert_set("t", 1, "v", "a");
@@ -587,12 +586,12 @@ fn mongo_cdc_dropping_another_collection_does_not_stop_capture() {
     require_alive(LiveService::MongoRs);
     require_alive(LiveService::DuckDb);
     let db = unique_name("aud_mother");
-    let m = MongoTest::connect(MONGO_RS_PORT, &db);
+    let m = MongoTest::connect(mongo_rs_port(), &db);
     m.drop_collection("t");
     m.upsert_set("other", 9, "v", "z");
 
     let rig = Rig::mongo_cdc("t")
-        .source_url(&MongoTest::url(MONGO_RS_PORT, &db))
+        .source_url(&MongoTest::url(mongo_rs_port(), &db))
         .duckdb_oracle();
     rig.run_ok(); // anchor
     m.drop_collection("other");
