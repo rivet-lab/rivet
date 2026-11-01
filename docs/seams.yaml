@@ -47,18 +47,7 @@ seams:
       - "b'@'"
       - "find_userinfo ("
       - "userinfo_span ("
-    exceptions:
-      - {at: src/bin/seed/mssql.rs::connect, dated: 2026-10-31, reason: "seed binary splits the userinfo itself", closes: "seed binary calls config::url"}
-      - {at: src/config/source.rs::find_userinfo, dated: 2026-10-31, reason: "a second userinfo finder", closes: "delete it, call config::url"}
-      - {at: src/config/source.rs::redact_for_artifact, dated: 2026-10-31, reason: "splits the userinfo itself", closes: "call config::url"}
-      - {at: src/config/source.rs::resolve_url, dated: 2026-10-31, reason: "splits the userinfo itself", closes: "call config::url"}
-      - {at: src/config/source.rs::source_state_key, dated: 2026-10-31, reason: "confirmed defect: a ? query holding @ makes two hosts collide on one state key", closes: "call config::url, url authority fix PR"}
-      - {at: src/connect/mod.rs::url_host_port, dated: 2026-10-31, reason: "splits the authority itself", closes: "call config::url"}
-      - {at: src/redact.rs::redact_url_passwords, dated: 2026-10-31, reason: "splits the userinfo itself", closes: "call config::url"}
-      - {at: src/redact.rs::userinfo_span, dated: 2026-10-31, reason: "a second userinfo span reader", closes: "delete it, call config::url"}
-      - {at: src/source/mssql/mod.rs::parse_mssql_url, dated: 2026-10-31, reason: "splits the authority itself", closes: "call config::url"}
-      - {at: src/source/oracle/mod.rs::parse_oracle_url, dated: 2026-10-31, reason: "splits the authority itself", closes: "call config::url"}
-      - {at: src/state/mod.rs::redact_pg_url, dated: 2026-10-31, reason: "splits the userinfo itself", closes: "call config::url"}
+    exceptions: []
   - id: object-store-retry
     owner: src/destination/cloud.rs::new_with_retries
     reads: "the retry policy every object-store operator is wrapped in"

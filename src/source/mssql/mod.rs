@@ -146,7 +146,7 @@ impl Drop for MssqlSource {
 }
 
 /// Parsed `sqlserver://user[:password]@host[:port]/db` connection parts.
-pub(crate) struct MssqlUrl {
+pub struct MssqlUrl {
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -268,40 +268,33 @@ pub(crate) fn mssql_trusts_cert_without_verify(cfg: &TlsConfig) -> bool {
     cfg.mode == TlsMode::Disable || cfg.mode == TlsMode::Require || cfg.accept_invalid_certs
 }
 
-pub(crate) fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
-    let rest = url
+pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
+    let authority = url
         .strip_prefix("sqlserver://")
         .or_else(|| url.strip_prefix("mssql://"))
+        .and_then(|_| crate::config::url::authority(url))
         .ok_or_else(|| {
             crate::error::coded(
                 crate::error::codes::CONFIG_SOURCE_URL_INVALID,
                 format!("mssql url must start with sqlserver:// — got {url}"),
             )
         })?;
-    // userinfo @ host:port / db   (rsplit the last '@' so a '@' in a password
-    // is tolerated; '/' splits host from db).
-    let (userinfo, hostpart) = rest.rsplit_once('@').ok_or_else(|| {
+    let userinfo = authority.userinfo.ok_or_else(|| {
         crate::error::coded(
             crate::error::codes::CONFIG_SOURCE_URL_INVALID,
             format!("mssql url missing user@host: {url}"),
         )
     })?;
-    // Percent-DECODE the userinfo. `build_url_from_fields` (config/source.rs)
-    // percent-ENCODES user/password for every engine so a credential's
-    // `/ @ : ? #` can't break URL parsing or defeat redaction. PG/MySQL/Mongo
-    // hand the URL to a driver parser that decodes per RFC 3986; this hand-rolled
-    // MSSQL parser is the one that must decode itself, or tiberius receives the
-    // literal `%40`/`%2F` bytes and auth fails for any password outside the
-    // unreserved set — exactly the special chars SQL Server's complexity policy
-    // encourages (regression guarded by `mssql_url_percent_decodes_userinfo`).
     let (user, password) = match userinfo.split_once(':') {
         Some((u, p)) => (pct_decode(u), pct_decode(p)),
         None => (pct_decode(userinfo), String::new()),
     };
-    let (hostport, database) = hostpart
-        .split_once('/')
-        .map(|(h, d)| (h, d.to_string()))
-        .unwrap_or((hostpart, String::new()));
+    let hostport = authority.hosts;
+    let database = authority
+        .rest
+        .strip_prefix('/')
+        .unwrap_or_default()
+        .to_string();
     let (host, port) = match hostport.rsplit_once(':') {
         Some((h, p)) => (
             h.to_string(),
@@ -1394,6 +1387,96 @@ mod tests {
         assert_eq!(parsed.host, "db.internal");
         assert_eq!(parsed.port, 1433);
         assert_eq!(parsed.database, "rivet");
+    }
+
+    #[test]
+    fn an_at_sign_after_the_authority_stays_out_of_the_host() {
+        for tail in ["/rivet?application_name=svc@corp", "/rivet#f@corp"] {
+            let parsed = parse_mssql_url(&format!("sqlserver://sa:pw@h1:1433{tail}"))
+                .expect("a query holding @ parses");
+            assert_eq!((parsed.host.as_str(), parsed.port), ("h1", 1433), "{tail}");
+            assert_eq!(
+                (parsed.user.as_str(), parsed.password.as_str()),
+                ("sa", "pw")
+            );
+        }
+        let err = parse_mssql_url("sqlserver://h1:1433/rivet?application_name=svc@corp")
+            .err()
+            .expect("no userinfo is refused, not read from the query");
+        assert!(err.to_string().contains("missing user@host"), "{err}");
+    }
+
+    struct Parts(String, u16, String, String, String);
+
+    fn legacy_parse(url: &str) -> Option<Parts> {
+        let rest = url
+            .strip_prefix("sqlserver://")
+            .or_else(|| url.strip_prefix("mssql://"))?;
+        let (userinfo, hostpart) = rest.rsplit_once('@')?;
+        let (user, password) = match userinfo.split_once(':') {
+            Some((u, p)) => (super::pct_decode(u), super::pct_decode(p)),
+            None => (super::pct_decode(userinfo), String::new()),
+        };
+        let (hostport, database) = hostpart
+            .split_once('/')
+            .map(|(h, d)| (h, d.to_string()))
+            .unwrap_or((hostpart, String::new()));
+        let (host, port) = match hostport.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
+            None => (hostport.to_string(), 1433),
+        };
+        (!database.is_empty()).then_some(Parts(host, port, user, password, database))
+    }
+
+    #[test]
+    fn the_parser_reads_what_the_legacy_parser_read_unless_an_at_or_a_delimiter_moved_the_authority()
+     {
+        let (mut same, mut moved) = (0, 0);
+        for url in crate::config::url::corpus::urls("sqlserver") {
+            let (old, new) = (legacy_parse(&url), parse_mssql_url(&url).ok());
+            match (old, new) {
+                (Some(o), Some(n)) if !crate::config::url::corpus::at_after_authority(&url) => {
+                    assert_eq!(
+                        (o.0, o.1, o.2, o.3, o.4),
+                        (n.host, n.port, n.user, n.password, n.database),
+                        "{url}"
+                    );
+                    same += 1;
+                }
+                (None, None) => same += 1,
+                _ => {
+                    assert!(
+                        crate::config::url::corpus::at_after_authority(&url)
+                            || url.contains("u:p/w@")
+                            || url.contains("u:p?w@")
+                            || url.contains("u:p#w@"),
+                        "{url}"
+                    );
+                    moved += 1;
+                }
+            }
+        }
+        assert!(same > 300 && moved > 30, "{same} {moved}");
+    }
+
+    #[test]
+    fn the_loopback_gate_and_the_parser_dial_the_same_host() {
+        for url in [
+            "sqlserver://127.0.0.1:1/x@evil.com/db",
+            "sqlserver://sa:pw@127.0.0.1:1433/db?x=@evil.com",
+            "sqlserver://sa:pw@127.0.0.1:1433/db#@evil.com",
+        ] {
+            let gate = crate::config::url::host_port_span(url);
+            match parse_mssql_url(url) {
+                Ok(p) => assert!(
+                    gate == format!("{}:{}", p.host, p.port) || gate == p.host,
+                    "{url}: gate {gate} parser {}",
+                    p.host
+                ),
+                Err(e) => assert!(e.to_string().contains("missing user@host"), "{url}: {e}"),
+            }
+        }
+        assert!(parse_mssql_url("sqlserver://127.0.0.1:1/x@evil.com/db").is_err());
     }
 
     /// The JDBC-property and ADO forms are refused as before, and the refusal — which quotes the string — carries no password once redacted.

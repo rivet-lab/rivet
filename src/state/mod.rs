@@ -176,57 +176,20 @@ pub(super) fn pg_detail(e: &dyn std::error::Error) -> String {
     }
 }
 
-/// Redact the password from a PostgreSQL URL for safe use in log/error messages.
-/// `postgresql://user:SECRET@host/db` → `postgresql://user:***@host/db`
-/// Uses `rfind('@')` so passwords containing `@` are handled correctly.
+/// `scheme://user:SECRET@host/db` as `scheme://user:***@host/db`, for log and error messages; the credential reading never leaks a password holding `/ ? # @ :`.
 fn redact_pg_url(url: &str) -> String {
-    // Mask the password in `scheme://user:password@host/...`. RIVET_STATE_URL is
-    // operator-supplied and may be NON-conforming — a raw password can contain any
-    // of `/ ? # @ :` that a well-formed URL would percent-encode. There is no
-    // unambiguous parse of such a URL, so a redactor MUST default-deny: never leak,
-    // even at the cost of over-redacting a pathological host.
-    //
-    // Rule (rounds 2/3/4 converged here after the bounded/two-pass forms each leaked
-    // a different shape): the userinfo ends at the LAST '@' before whitespace (the
-    // URL / log-line terminator), and the user is everything up to the FIRST ':'
-    // (the password separator; a ':' inside the password is masked with the rest).
-    //   * one '@' (the normal case): the real terminator → host preserved.
-    //   * a password with a raw '/','?','#','@' (round-3 `pa/ss`, round-4 `Kp@9x/..`):
-    //     the last '@' is still the true terminator → tail masked, no leak.
-    //   * a ':'-bearing password (`a:b:c:secret`): FIRST ':' splits → prefix masked.
-    //   * a stray '@' in a query (`?opt=a@b`) — vanishingly rare for a connection
-    //     URL — over-redacts the host but never leaks (default-deny).
-    // Residual limitation (round-4 #4/#5, documented): a raw WHITESPACE in the
-    // password terminates the URL scan (whitespace ends the token in a log line), so
-    // a password containing a literal space/tab may not be fully masked. This is
-    // out of reliable scope — a space in a URL is itself non-conforming (must be
-    // %20-encoded), and treating a whitespace-bounded `:`-bearing span as userinfo
-    // would mangle every common credential-free `scheme://host:port/db ...` log line.
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
-    };
-    let after_scheme = &url[scheme_end + 3..];
-    let span_end = after_scheme
-        .find(char::is_whitespace)
-        .unwrap_or(after_scheme.len());
-    let span = &after_scheme[..span_end];
-    // No '@' → no userinfo to redact.
-    let Some(at_rel) = span.rfind('@') else {
-        return url.to_string();
-    };
-    let userinfo = &span[..at_rel];
-    // No ':' before the '@' → user-only, no password to mask.
-    let Some(colon) = userinfo.find(':') else {
-        return url.to_string();
-    };
-    let user = &userinfo[..colon];
-    let at_pos = scheme_end + 3 + at_rel;
-    format!(
-        "{}://{}:***@{}",
-        &url[..scheme_end],
-        user,
-        &url[at_pos + 1..]
-    )
+    let mut out = String::with_capacity(url.len());
+    for word in url.split_inclusive(|c: char| c.is_ascii_whitespace()) {
+        let span = crate::config::url::credential_span(word, crate::config::url::Mask::Password);
+        match span.and_then(|(start, at)| {
+            let user = word.get(start..at)?.split(':').next()?;
+            Some((word.get(..start)?, user, word.get(at..)?))
+        }) {
+            Some((scheme, user, host)) => out.extend([scheme, user, ":***", host]),
+            None => out.push_str(word),
+        }
+    }
+    out
 }
 
 // ─── SQLite connection helper ─────────────────────────────────────────────────
@@ -918,6 +881,58 @@ mod tests {
             redact_pg_url("postgresql://u:secret@host:5432/db"),
             "postgresql://u:***@host:5432/db"
         );
+    }
+
+    fn legacy_redact_pg_url(url: &str) -> String {
+        let Some(scheme_end) = url.find("://") else {
+            return url.to_string();
+        };
+        let after_scheme = &url[scheme_end + 3..];
+        let span_end = after_scheme
+            .find(char::is_whitespace)
+            .unwrap_or(after_scheme.len());
+        let span = &after_scheme[..span_end];
+        let Some(at_rel) = span.rfind('@') else {
+            return url.to_string();
+        };
+        let userinfo = &span[..at_rel];
+        let Some(colon) = userinfo.find(':') else {
+            return url.to_string();
+        };
+        let at_pos = scheme_end + 3 + at_rel;
+        format!(
+            "{}://{}:***@{}",
+            &url[..scheme_end],
+            &userinfo[..colon],
+            &url[at_pos + 1..]
+        )
+    }
+
+    #[test]
+    fn redact_pg_url_masks_what_the_legacy_masker_masked_and_never_leaks_more() {
+        let mut compared = 0;
+        for scheme in ["postgresql", "postgres", "mysql", "sqlserver", "clickhouse"] {
+            for url in crate::config::url::corpus::urls(scheme) {
+                for text in [
+                    url.clone(),
+                    format!("connecting to {url} then retry"),
+                    format!("{url} and {url}"),
+                ] {
+                    let (new, old) = (redact_pg_url(&text), legacy_redact_pg_url(&text));
+                    for secret in ["pw", "p%40w", "a:b"] {
+                        if old.contains(secret) {
+                            continue;
+                        }
+                        assert!(!new.contains(&format!(":{secret}@")), "{text}: {new}");
+                    }
+                    if !text.contains(' ') {
+                        assert_eq!(new, old, "{text}");
+                    }
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 7000, "{compared}");
     }
 
     #[test]

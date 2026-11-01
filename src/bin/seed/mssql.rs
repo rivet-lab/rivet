@@ -106,28 +106,16 @@ pub fn seed_mssql(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Parse `sqlserver://user:pass@host:port/db` and log in (trust-cert, loopback
-/// dev — same posture as the source engine on a loopback host).
-// ponytail: inline parse (no percent-decoding) — dev creds only; reuse rivet's
-// parse_mssql_url if this ever needs URL-encoded passwords.
+/// Log in to `sqlserver://user:pass@host:port/db` (trust-cert, loopback dev).
 async fn connect(url: &str) -> Result<MssqlClient> {
-    let rest = url
-        .strip_prefix("sqlserver://")
-        .or_else(|| url.strip_prefix("mssql://"))
-        .with_context(|| format!("mssql url must start with sqlserver://: {url}"))?;
-    let (userinfo, hostportdb) = rest
-        .rsplit_once('@')
-        .with_context(|| format!("mssql url missing user:pass@: {url}"))?;
-    let (user, pass) = userinfo
-        .split_once(':')
-        .with_context(|| format!("mssql url userinfo must be user:pass: {url}"))?;
-    let (hostport, db) = hostportdb
-        .split_once('/')
-        .with_context(|| format!("mssql url must include /<database>: {url}"))?;
-    let (host, port) = hostport.rsplit_once(':').unwrap_or((hostport, "1433"));
-    let port: u16 = port
-        .parse()
-        .with_context(|| format!("mssql url port not a number: {port}"))?;
+    let parts = rivet::source::mssql::parse_mssql_url(url)?;
+    let (user, pass, host, port, db) = (
+        parts.user.as_str(),
+        parts.password.as_str(),
+        parts.host.as_str(),
+        parts.port,
+        parts.database.as_str(),
+    );
 
     let mut config = Config::new();
     config.host(host);
