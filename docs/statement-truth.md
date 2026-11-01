@@ -7,7 +7,7 @@ Rust test replays every recorded statement through the reader and compares the t
 
 MySQL is the first engine: the binlog reader's QUERY-event verdict (`src/source/mysql/cdc.rs`).
 Another engine adds a `dev/pytools/statement_truth_<engine>.py` module, a fixture directory and an
-adapter next to its reader; `dev/pytools/statement_truth.py` and `src/source/statement_truth.rs` do not change.
+adapter next to its reader, and one row in the `ENGINES` table of `dev/pytools/statement_truth.py` (its `--self-test` fails on a row without a module or a fixture); `src/source/statement_truth.rs` does not change.
 
 ## The stand
 
