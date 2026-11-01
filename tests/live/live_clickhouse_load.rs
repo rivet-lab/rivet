@@ -351,9 +351,9 @@ fn a_sql_server_primary_key_move_flags_the_old_key_deleted_in_clickhouse() {
     clickhouse_rows_match_source(&view, source(), "1");
 }
 
-/// A load that dies after appending but before recording itself re-appends every
-/// part on the next load: the copies share key and version, so the view is
-/// unchanged and the count gate still passes.
+/// A load that dies after appending but before recording itself re-appends its parts on
+/// the next load: the copies share key and version, so the view is unchanged and the
+/// count gate still passes. The crash follows a first successful load, which owns the log.
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + mysql-cdc"]
 fn a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view() {
@@ -364,6 +364,11 @@ fn a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view() {
     let db = Db::new("rivet_chtest");
     let rig = into_clickhouse(Rig::mysql_cdc(&tbl), &db);
     let view = format!("{}.{tbl}", db.0);
+    rig.run_ok();
+    load(&rig);
+    conn()
+        .query_drop(format!("INSERT INTO {tbl} (id, v) VALUES (6, 6)"))
+        .expect("change");
     rig.run_ok();
 
     let crashed = rig.load_args_env(
@@ -383,7 +388,10 @@ fn a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view() {
     let physical: u64 = ch(&format!("SELECT count() FROM {view}__changes"))
         .parse()
         .expect("count");
-    assert_eq!(physical, 10, "the re-run appended every row a second time");
+    assert_eq!(
+        physical, 7,
+        "the re-run appended the second run's row twice"
+    );
     clickhouse_rows_match_source(&view, source_rows(&tbl), "");
 }
 
