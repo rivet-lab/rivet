@@ -260,17 +260,21 @@ class Cargo:
         self.env = env
         self.skipped: dict[str, str] = {}
 
-    @staticmethod
-    def binaries(cells) -> list[str]:
-        """The nextest binary flags these cells need; a seed with no cells still compiles the library."""
+    def binaries(self, cells) -> list[str]:
+        """The nextest binary flags these cells need: `--lib` for `lib:` cells, else the top-level tests/<name>.rs defining the cell, else live_suite."""
         if not cells:
             return ["--lib"]
-        flags = []
-        if any(not c.startswith(LIB) for c in cells):
-            flags += ["--test", "live_suite"]
-        if any(c.startswith(LIB) for c in cells):
-            flags += ["--lib"]
-        return flags
+        tops = sorted((self.tree / "tests").glob("*.rs"))
+        picked: list[tuple[str, ...]] = []
+        for c in cells:
+            if c.startswith(LIB):
+                one: tuple[str, ...] = ("--lib",)
+            else:
+                owner = [f.stem for f in tops if re.search(rf"\bfn {re.escape(c)}\(", f.read_text())]
+                one = ("--test", owner[0] if owner else "live_suite")
+            if one not in picked:
+                picked.append(one)
+        return [flag for one in picked for flag in one]
 
     def build(self, cells, log: Path) -> subprocess.CompletedProcess:
         """Compile the test binaries (and the rivet binary they drive)."""
@@ -508,6 +512,14 @@ def self_test() -> int:
     )
     got = cell_outcomes(sample, {"state::tests::u1": "no url"}, ("t1", "t2", "lib:u1", "t3"))
     assert got == {"t1": "PASS", "t2": "FAIL", "lib:u1": "SKIP", "t3": "ABSENT"}, got
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "tests").mkdir()
+        (Path(td) / "tests" / "top_level.rs").write_text("fn offline_cell() {}\n")
+        probe = Cargo.__new__(Cargo)
+        probe.tree = Path(td)
+        assert probe.binaries(["offline_cell", "live_cell", "lib:u1"]) == ["--test", "top_level", "--test", "live_suite", "--lib"]
+        assert probe.binaries(["live_cell", "other_live"]) == ["--test", "live_suite"]
+        assert probe.binaries([]) == ["--lib"]
     patch = "--- a/src/a.rs\n+++ b/src/a.rs\n@@\n--- a/src/b.rs\n+++ b/src/b.rs\n@@\n"
     assert stale_message("s", patch, "error: patch failed: src/b.rs:12\nerror: src/b.rs: patch does not apply") \
         == "seed s no longer applies to src/b.rs: update the patch"

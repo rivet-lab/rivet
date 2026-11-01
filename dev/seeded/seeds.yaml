@@ -3592,22 +3592,22 @@ seeds:
       oracle:
         na: "Oracle CDC tables are written OWNER.TABLE by init and LogMiner routes by that qualified name"
 
-  - name: parquet-write-call-pins-column-arena
-    class: "the Parquet writer is handed a whole batch per call, and parquet 59.1+ keeps the arena of every call's fixed-width columns (Oracle NUMBER(19), decimal(p>18), uuid) alive while a column chunk's min/max statistic lives, so a capped export's memory grows with the row count"
-    history: "2026-10-28 - found by the 0.32.2 gate (flat-rss[oracle/full_and_incremental_under_a_row_group_cap], 147 MiB at 5M rows against 107 at 1M) after #702 moved parquet to 60; bisected to parquet 59.0.0 green, 59.3.2 and 60.0.0 red"
+  - name: parquet-writer-bytes-move-from-release
+    class: "a writer property or an arrow/parquet version moves the bytes of the Parquet file written for the same rows, so a re-export differs from the release users run"
+    history: "2026-11-01 - parquet 60 (#702) moved the page grid of nullable columns without NULLs; owner decision option A: pin 59.0.0 and hold the v0.32.2 digests"
     scope: source
-    patch: parquet-write-call-pins-column-arena/shared.patch
+    patch: parquet-writer-bytes-move-from-release/shared.patch
     engines:
       postgres:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
       mysql:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
       mssql:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
       mongo:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
       oracle:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
 
   - name: bigquery-transient-job-error-final
     class: "a BigQuery job that ends with a documented retryable errorResult.reason (backendError, internalError, jobBackendError, jobInternalError, rateLimitExceeded, jobRateLimitExceeded) is coded RIVET_LOAD_WAREHOUSE_REJECTED, exit 1, so a scheduler fails the task for good"
