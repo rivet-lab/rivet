@@ -111,14 +111,18 @@ recover from raw object listing:
    that survives object renames, lifecycle migrations, and CDN copies.
 
 `content_fingerprint` is the **supported dedup key**: it is an xxh3 over the
-exact part bytes, computed deterministically. **Identical rows produce
-identical bytes — and therefore the same `content_fingerprint` — within one
-rivet release.** A release can change the bytes of the same rows (0.32.3 did,
-for a nullable column with no NULL in a write call; decoded values are equal),
-so across an upgrade dedup on the key instead. A re-extraction of the same window
+exact part bytes, computed deterministically. Because rivet pins the Parquet
+`created_by` to a version-independent constant, **identical rows produce
+identical bytes — and therefore the same `content_fingerprint` — across rivet
+releases**, not just within one build. So a re-extraction of the same window
 (e.g. a crash + `--resume`, or a deliberate re-run) yields parts a downstream
 `MERGE` can dedup on by fingerprint alone. Two parts with the same
 `content_fingerprint` are byte-identical and interchangeable; drop one.
+
+One accepted exception: the first release after 0.32.2 changes the bytes of a
+nullable column that holds no NULL in a write call (decoded values are equal), so a
+part written by 0.32.2 and one written after it carry different fingerprints;
+dedup across that upgrade on the key.
 
 (The fingerprint is over file *bytes*, not logical rows — so it is stable for
 the same rows + schema + compression settings. Changing `compression:` or the
