@@ -216,11 +216,9 @@ fn run_child_processes_flag_keeps_its_partition_fallback_postgres() {
     assert_eq!(delivered_tree(root.path()), fixture_tree("created_at"));
 }
 
-#[test]
-#[ignore = "live: requires docker compose mysql"]
-fn apply_forms_partition_like_run_mysql() {
+/// The MySQL partition fixture.
+fn mysql_partition_fixture() -> MysqlTable {
     use mysql::prelude::Queryable;
-    require_alive(LiveService::Mysql);
     let table = unique_name("run_set_part");
     let mut c = mysql_connect();
     c.query_drop(format!(
@@ -232,14 +230,11 @@ fn apply_forms_partition_like_run_mysql() {
         fixture_values(&|day| format!("'{day} 10:00:00'"))
     ))
     .expect("seed the partition fixture");
-    let table = MysqlTable::adopt(table);
-    assert_every_apply_form_partitions(&|| Rig::mysql_batch(table.name()), "created_at");
+    MysqlTable::adopt(table)
 }
 
-#[test]
-#[ignore = "live: requires docker compose mssql"]
-fn apply_forms_partition_like_run_mssql() {
-    require_alive(LiveService::Mssql);
+/// The SQL Server partition fixture.
+fn mssql_partition_fixture() -> MssqlTable {
     let table = unique_name("run_set_part");
     mssql_exec(&format!(
         "CREATE TABLE {table} (id BIGINT PRIMARY KEY, created_at DATETIME2 NULL)"
@@ -250,6 +245,34 @@ fn apply_forms_partition_like_run_mssql() {
         table.name(),
         fixture_values(&|day| format!("'{day}T10:00:00'"))
     ));
+    table
+}
+
+/// The Oracle partition fixture.
+#[cfg(feature = "oracle")]
+fn oracle_partition_fixture() -> OracleTable {
+    let table = OracleTable::create("run_set_part", "id NUMBER(10) PRIMARY KEY, d DATE");
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LEVEL, CASE WHEN MOD(LEVEL, {NULL_EVERY}) = 0 THEN NULL \
+         ELSE DATE '2026-03-01' + MOD(LEVEL - 1, {DAYS}) END FROM dual CONNECT BY LEVEL <= {ROWS}",
+        table.name()
+    ));
+    table
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn apply_forms_partition_like_run_mysql() {
+    require_alive(LiveService::Mysql);
+    let table = mysql_partition_fixture();
+    assert_every_apply_form_partitions(&|| Rig::mysql_batch(table.name()), "created_at");
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn apply_forms_partition_like_run_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = mssql_partition_fixture();
     assert_every_apply_form_partitions(&|| Rig::mssql_batch(table.name()), "created_at");
 }
 
@@ -258,12 +281,7 @@ fn apply_forms_partition_like_run_mssql() {
 #[ignore = "live: requires docker compose oracle"]
 fn apply_forms_partition_like_run_oracle() {
     require_alive(LiveService::Oracle);
-    let table = OracleTable::create("run_set_part", "id NUMBER(10) PRIMARY KEY, d DATE");
-    ora_exec(&format!(
-        "INSERT INTO {} SELECT LEVEL, CASE WHEN MOD(LEVEL, {NULL_EVERY}) = 0 THEN NULL \
-         ELSE DATE '2026-03-01' + MOD(LEVEL - 1, {DAYS}) END FROM dual CONNECT BY LEVEL <= {ROWS}",
-        table.name()
-    ));
+    let table = oracle_partition_fixture();
     assert_every_apply_form_partitions(&|| Rig::oracle_batch(table.name()), "D");
 }
 
@@ -509,4 +527,209 @@ fn stdout_survives_child_processes_mongo() {
             .dest_stdout()
     };
     assert_stdout_survives_child_processes(&rig_of, 1);
+}
+
+/// `rivet validate` of a delivered `partition_by` tree: the control exits 0, a deleted partition does not.
+fn assert_validate_reads_every_partition(rig_of: &dyn Fn() -> Rig, col: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let rig = partitioned(rig_of(), col, root.path());
+    let run = rig.run_args(&[]);
+    assert!(run.status.success(), "run failed:\n{}", text_of(&run));
+    assert_eq!(delivered_tree(root.path()), fixture_tree(col));
+
+    let intact = rig.cli(&["validate", "--format", "json"]);
+    assert!(
+        intact.status.success(),
+        "control: validate of an intact partition tree must exit 0:\n{}",
+        text_of(&intact)
+    );
+    let verdicts = validate_verdicts(&intact);
+    assert_eq!(
+        verdicts.len(),
+        fixture_tree(col).len(),
+        "validate must verify one prefix per partition: {verdicts:?}"
+    );
+    assert!(
+        verdicts.values().all(|passed| *passed),
+        "control: every partition of an intact tree passes: {verdicts:?}"
+    );
+
+    let day = "2026-03-02";
+    let gone = format!("{col}={day}");
+    std::fs::remove_dir_all(root.path().join(&gone)).expect("delete one partition");
+    let broken = rig.cli(&["validate", "--format", "json"]);
+    assert!(
+        !broken.status.success(),
+        "validate must not exit 0 with partition `{gone}` deleted:\n{}",
+        text_of(&broken)
+    );
+    assert_eq!(
+        broken.status.code(),
+        Some(3),
+        "a missing partition is verified-wrong, exit 3:\n{}",
+        text_of(&broken)
+    );
+    assert!(
+        text_of(&broken).contains("RIVET_VERIFY_PARTITION_NOT_DELIVERED"),
+        "{}",
+        text_of(&broken)
+    );
+    let verdicts = validate_verdicts(&broken);
+    let failed: Vec<&String> = verdicts
+        .iter()
+        .filter(|(_, passed)| !**passed)
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "exactly the deleted partition fails: {verdicts:?}"
+    );
+    assert!(
+        failed[0].ends_with(&format!("__{day}")),
+        "the failing verdict names the deleted partition: {failed:?}"
+    );
+}
+
+/// `export_name -> passed` of a `validate --format json` run.
+fn validate_verdicts(output: &std::process::Output) -> BTreeMap<String, bool> {
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", text_of(output)));
+    json["exports"]
+        .as_array()
+        .expect("exports array")
+        .iter()
+        .map(|e| {
+            (
+                e["export_name"].as_str().unwrap().to_string(),
+                e["verification"]["passed"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn validate_reads_every_partition_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = pg_partition_fixture();
+    assert_validate_reads_every_partition(&|| Rig::pg_batch(table.name()), "created_at");
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn validate_reads_every_partition_mysql() {
+    require_alive(LiveService::Mysql);
+    let table = mysql_partition_fixture();
+    assert_validate_reads_every_partition(&|| Rig::mysql_batch(table.name()), "created_at");
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn validate_reads_every_partition_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = mssql_partition_fixture();
+    assert_validate_reads_every_partition(&|| Rig::mssql_batch(table.name()), "created_at");
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn validate_reads_every_partition_oracle() {
+    require_alive(LiveService::Oracle);
+    let table = oracle_partition_fixture();
+    assert_validate_reads_every_partition(&|| Rig::oracle_batch(table.name()), "D");
+}
+
+/// A day between the first and last row holds no rows, yet `run` delivers it a manifest, so `validate` passes it.
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn validate_passes_a_partition_day_without_rows_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("run_set_gap");
+    pg_connect()
+        .batch_execute(&format!(
+            "CREATE TABLE {table} (id BIGINT PRIMARY KEY, created_at TIMESTAMP);
+             INSERT INTO {table} VALUES (1, '2026-03-01 10:00:00'), (2, '2026-03-03 10:00:00');"
+        ))
+        .expect("seed the gap fixture");
+    let table = PgTable::adopt(table);
+    let root = tempfile::tempdir().unwrap();
+    let rig = partitioned(Rig::pg_batch(table.name()), "created_at", root.path());
+    let run = rig.run_args(&[]);
+    assert!(run.status.success(), "run failed:\n{}", text_of(&run));
+    let validate = rig.cli(&["validate", "--format", "json"]);
+    assert!(
+        validate.status.success(),
+        "validate of a delivered tree with an empty day must exit 0:\n{}",
+        text_of(&validate)
+    );
+    let verdicts = validate_verdicts(&validate);
+    assert_eq!(verdicts.len(), 3, "one verdict per day: {verdicts:?}");
+    assert!(verdicts.values().all(|passed| *passed), "{verdicts:?}");
+}
+
+/// An empty source has no partitions: `validate` exits 0 and says so, as `run` exits 0 with nothing delivered.
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn validate_of_a_partitioned_export_over_an_empty_table_exits_zero_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("run_set_empty");
+    pg_connect()
+        .batch_execute(&format!(
+            "CREATE TABLE {table} (id BIGINT PRIMARY KEY, created_at TIMESTAMP);"
+        ))
+        .expect("create the empty fixture");
+    let table = PgTable::adopt(table);
+    let root = tempfile::tempdir().unwrap();
+    let rig = partitioned(Rig::pg_batch(table.name()), "created_at", root.path());
+    let run = rig.run_args(&[]);
+    assert!(
+        run.status.success(),
+        "control: run failed:\n{}",
+        text_of(&run)
+    );
+    let validate = rig.cli(&["validate"]);
+    assert!(
+        validate.status.success(),
+        "validate over an empty source must exit 0:\n{}",
+        text_of(&validate)
+    );
+    assert!(
+        text_of(&validate)
+            .contains("partition_by found no rows in the source: no partition to validate"),
+        "validate says why it verified nothing:\n{}",
+        text_of(&validate)
+    );
+}
+
+/// `--prefix` pins one directory: the literal prefix is verified and the source is not asked for partitions.
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn validate_prefix_of_a_partitioned_export_verifies_that_directory_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = pg_partition_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let rig = partitioned(Rig::pg_batch(table.name()), "created_at", root.path());
+    let run = rig.run_args(&[]);
+    assert!(run.status.success(), "run failed:\n{}", text_of(&run));
+    let dir = root.path().join("created_at=2026-03-02");
+    let pinned = rig.cli(&[
+        "validate",
+        "--prefix",
+        dir.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert!(pinned.status.success(), "{}", text_of(&pinned));
+    let verdicts = validate_verdicts(&pinned);
+    assert_eq!(verdicts.len(), 1, "{verdicts:?}");
+    assert!(verdicts.values().all(|passed| *passed), "{verdicts:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let gone = rig.cli(&["validate", "--prefix", dir.to_str().unwrap()]);
+    assert!(
+        !gone.status.success(),
+        "a pinned prefix with no dataset must fail:\n{}",
+        text_of(&gone)
+    );
 }

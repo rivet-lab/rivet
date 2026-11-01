@@ -13,7 +13,7 @@ use super::partition_expand;
 pub(super) struct ChildProcessesOk(());
 
 /// The exports an invocation was asked for: one named export, or the whole config minus the CDC backfill recipes.
-pub(super) struct RunSet {
+pub(crate) struct RunSet {
     declared: Vec<ExportConfig>,
     /// The config's own `parallel_export_processes: true`.
     config_asks_children: bool,
@@ -26,33 +26,17 @@ const PARTITIONED_RUNS_IN_PROCESS: &str = "partition_by: --parallel-export-proce
 
 impl RunSet {
     /// Select `export_name`, or every export a whole-config invocation runs itself.
-    pub(super) fn select(config: &Config, export_name: Option<&str>) -> Result<Self> {
-        let declared = match export_name {
-            Some(name) => vec![
-                config
-                    .exports
-                    .iter()
-                    .find(|e| e.name == name)
-                    .ok_or_else(|| {
-                        crate::error::coded(
-                            crate::error::codes::CLI_EXPORT_UNKNOWN,
-                            format!("export '{}' not found in config", name),
-                        )
-                    })?
-                    .clone(),
-            ],
-            None => {
-                let recipes = backfill_recipes_to_skip(&config.exports);
-                crate::config::without_backfill_recipes(&config.exports, &recipes)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            }
-        };
+    pub(crate) fn select(config: &Config, export_name: Option<&str>) -> Result<Self> {
+        let declared = crate::config::declared_exports(config, export_name)?;
         Ok(Self {
             declared,
             config_asks_children: config.parallel_export_processes,
         })
+    }
+
+    /// The selected exports as declared, `partition_by` exports not yet expanded.
+    pub(crate) fn declared(&self) -> &[ExportConfig] {
+        &self.declared
     }
 
     /// Whether a selected export is a `partition_by` export.
@@ -61,7 +45,7 @@ impl RunSet {
     }
 
     /// The exports to run in this process: each `partition_by` export replaced by one export per bucket.
-    pub(super) fn in_process(
+    pub(crate) fn in_process(
         &self,
         source: &SourceConfig,
         config_dir: &Path,
@@ -112,21 +96,6 @@ impl RunSet {
             .filter(|(_, declared)| declared.len() > 1)
             .map(|(ok, _)| ok))
     }
-}
-
-/// The names a whole-config invocation must not run itself: each is a `mode: cdc` export's `backfill:` recipe.
-fn backfill_recipes_to_skip(exports: &[ExportConfig]) -> std::collections::HashSet<String> {
-    let recipes = crate::config::backfill_recipe_names(exports);
-    for e in exports.iter().filter(|e| recipes.contains(&e.name)) {
-        log::info!(
-            "export '{}': skipped — it is the backfill recipe of a `mode: cdc` export, \
-             which runs it after the anchor (run it alone with `-e {}` to export it on \
-             its own)",
-            e.name,
-            e.name
-        );
-    }
-    recipes
 }
 
 #[cfg(test)]

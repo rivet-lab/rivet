@@ -287,8 +287,8 @@ pub fn accept_state(
 ) -> Result<()> {
     let config = Config::load_with_params(config_path, params)?;
     require_known_export(&config, config_path, export_name)?;
-    let export = config.exports.iter().find(|e| e.name == export_name);
-    let export = export.expect("a known export is in the config");
+    let run_set = crate::pipeline::run_set::RunSet::select(&config, Some(export_name))?;
+    let export = &run_set.declared()[0];
     if export.mode == crate::config::ExportMode::Cdc {
         println!(
             "Export '{export_name}' is a cdc export: it stores a log position, not a cursor, so `state accept` has nothing to keep for it; nothing changed."

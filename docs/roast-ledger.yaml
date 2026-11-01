@@ -22,7 +22,7 @@ entries:
     lens: duplication of functionality and bypassed seams
     title: commands pick their exports without RunSet::select
     copies: [src/pipeline/run_set.rs:29, src/pipeline/validate_cmd.rs:113, src/pipeline/plan_cmd.rs:74, src/preflight/mod.rs:384, src/preflight/mod.rs:736, src/load/plan.rs:196, src/cli/dispatch.rs:603, src/pipeline/reconcile_cmd.rs:48, src/pipeline/repair_cmd.rs:90, src/pipeline/cli.rs:290]
-    status: accepted-as-bugfix
+    status: done
     verdict: "confirmed on the binary: validate with partition_by reads the literal {partition} prefix and exits 0 legacy_run with a partition deleted"
     closes: "the RunSet fix PR routes each command through RunSet::select; the run-set exceptions are deleted"
   - id: R3

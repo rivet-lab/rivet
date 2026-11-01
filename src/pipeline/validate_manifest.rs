@@ -292,6 +292,8 @@ pub enum Failure {
     /// that was never written.  Fatal: a required-but-missing manifest is a
     /// refusal reason, not a "cannot certify" advisory.
     ManifestRequiredButAbsent { prefix: String },
+    /// A `partition_by` partition the source holds rows for has no manifest at its prefix: every delivered partition, empty days included, carries one, so the partition was never delivered or was removed.
+    PartitionNotDelivered { prefix: String, export: String },
     /// `_SUCCESS` is present and the manifest it was written after is not: rivet writes the marker only once the manifest is in place, so this prefix lost its manifest and its parts cannot be verified.
     ManifestMissingUnderMarker { prefix: String },
     /// The manifest's own run status is not `success` (`failed`, `interrupted`,
@@ -362,6 +364,7 @@ impl Failure {
             Failure::UntrackedObject { .. } => "RIVET_VERIFY_UNTRACKED_OBJECT",
             Failure::ContentVerificationUnmet { .. } => "RIVET_VERIFY_CONTENT_UNMET",
             Failure::ManifestRequiredButAbsent { .. } => "RIVET_VERIFY_MANIFEST_REQUIRED",
+            Failure::PartitionNotDelivered { .. } => "RIVET_VERIFY_PARTITION_NOT_DELIVERED",
             Failure::ManifestMissingUnderMarker { .. } => "RIVET_VERIFY_MANIFEST_MISSING",
             Failure::RunNotSuccessful { .. } => "RIVET_VERIFY_RUN_NOT_SUCCESSFUL",
             Failure::ValueCheckNotAvailable { .. } => "RIVET_VERIFY_VALUE_CHECK_NOT_AVAILABLE",
@@ -455,6 +458,12 @@ impl std::fmt::Display for Failure {
                  written, or the data was relocated. Run the export first, or \
                  drop --prefix to validate the config-resolved destination."
             ),
+            Failure::PartitionNotDelivered { prefix, export } => write!(
+                f,
+                "no manifest at {prefix}: the source holds this partition of `{export}` but the \
+                 destination holds none of it — it was never delivered or its directory was \
+                 removed. Re-deliver it with `rivet run --export {export}`"
+            ),
             Failure::ManifestMissingUnderMarker { prefix } => write!(
                 f,
                 "`_SUCCESS` is present at {prefix} and manifest.json is not: the marker is written \
@@ -536,11 +545,24 @@ impl ManifestVerification {
     /// / head failure, is left untouched — those are already classified.  Only
     /// the "legacy / cannot certify" case is escalated, and only when required.
     pub fn require_manifest_present(&mut self, prefix: &str) {
+        self.require_manifest_with(Failure::ManifestRequiredButAbsent {
+            prefix: prefix.to_string(),
+        });
+    }
+
+    /// Turn the same bare absent-manifest verdict into the fatal `failure` of a partition the source holds.
+    pub fn require_partition_delivered(&mut self, prefix: &str, export: &str) {
+        self.require_manifest_with(Failure::PartitionNotDelivered {
+            prefix: prefix.to_string(),
+            export: export.to_string(),
+        });
+    }
+
+    /// Push `failure` for an absent manifest that carries no other failure.
+    fn require_manifest_with(&mut self, failure: Failure) {
         if !self.manifest_found && !self.has_failures() {
             self.legacy_run = false;
-            self.failures.push(Failure::ManifestRequiredButAbsent {
-                prefix: prefix.to_string(),
-            });
+            self.failures.push(failure);
             self.recompute_passed();
         }
     }
@@ -2184,6 +2206,52 @@ mod tests {
     }
 
     #[test]
+    fn a_partition_without_a_manifest_is_a_fatal_failure_naming_the_export() {
+        let mut v = ManifestVerification::legacy();
+        v.require_partition_delivered("out/created_at=2026-03-02", "events");
+        assert!(!v.legacy_run && !v.passed);
+        assert_eq!(
+            v.failures.as_slice(),
+            [Failure::PartitionNotDelivered {
+                prefix: "out/created_at=2026-03-02".into(),
+                export: "events".into(),
+            }]
+        );
+        assert_eq!(
+            v.failures[0].to_string(),
+            "no manifest at out/created_at=2026-03-02: the source holds this partition of \
+             `events` but the destination holds none of it — it was never delivered or its \
+             directory was removed. Re-deliver it with `rivet run --export events`"
+        );
+        assert!(v.has_verified_wrong_failure());
+    }
+
+    #[test]
+    fn a_delivered_partition_and_a_read_error_are_left_alone() {
+        let mut found = ManifestVerification {
+            manifest_found: true,
+            manifest_self_consistent: true,
+            parts_verified: 1,
+            passed: true,
+            ..ManifestVerification::empty()
+        };
+        found.require_partition_delivered("p", "events");
+        assert!(found.passed && found.failures.is_empty());
+
+        let mut unreadable = ManifestVerification::legacy();
+        unreadable.legacy_run = false;
+        unreadable.failures.push(Failure::ManifestReadError {
+            detail: "permission denied".into(),
+        });
+        unreadable.recompute_passed();
+        unreadable.require_partition_delivered("p", "events");
+        assert!(matches!(
+            unreadable.failures.as_slice(),
+            [Failure::ManifestReadError { .. }]
+        ));
+    }
+
+    #[test]
     fn require_manifest_is_noop_on_a_real_passing_manifest() {
         // A found, passing verdict is untouched — `--prefix` plus real data is
         // the normal "validate this exact prefix" case and must still pass.
@@ -2432,6 +2500,13 @@ mod tests {
                 "RIVET_VERIFY_MANIFEST_MISSING",
             ),
             (
+                Failure::PartitionNotDelivered {
+                    prefix: "p".into(),
+                    export: "e".into(),
+                },
+                "RIVET_VERIFY_PARTITION_NOT_DELIVERED",
+            ),
+            (
                 Failure::ValueChecksumMismatch {
                     detail: "flip".into(),
                 },
@@ -2520,6 +2595,7 @@ mod tests {
                 Failure::UntrackedObject { .. } => "UntrackedObject",
                 Failure::ContentVerificationUnmet { .. } => "ContentVerificationUnmet",
                 Failure::ManifestRequiredButAbsent { .. } => "ManifestRequiredButAbsent",
+                Failure::PartitionNotDelivered { .. } => "PartitionNotDelivered",
                 Failure::ManifestMissingUnderMarker { .. } => "ManifestMissingUnderMarker",
                 Failure::RunNotSuccessful { .. } => "RunNotSuccessful",
                 Failure::ValueCheckNotAvailable { .. } => "ValueCheckNotAvailable",
