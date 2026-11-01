@@ -46,7 +46,7 @@ import time
 from pathlib import Path
 
 from .core import Ledger, Status, binary_stamp, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
-from ..pytools.release import CANONICAL_CONFIG, binary_is_tree
+from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
 from . import (
     bigquery,
     blessed_flow,
@@ -214,50 +214,60 @@ def gate_config(ns: argparse.Namespace) -> dict:
 
 
 def gate_kind(ns: argparse.Namespace, config: dict | None = None) -> str:
-    """`release-oracle-full` only for a whole-scope run that gave nothing up: seeded recall on, a clean build, no escape, the canonical configuration; else `release-oracle`."""
+    """The record kind of a run that gave nothing up (a clean build, no escape, the canonical configuration): `release-oracle-island` for `--island`, `release-oracle-full` with seeded recall on; else `release-oracle`."""
     from .core import FULL_GATE, REDUCED_GATE
     reduced = (ns.engines or ns.versions or ns.no_cloud or ns.latest_only or ns.no_clean or ns.fast_clean
-               or ns.without_prev_release_comparison or ns.without_replica_topologies or not ns.with_seeded_recall
+               or ns.without_prev_release_comparison or ns.without_replica_topologies
                or (config or gate_config(ns)) != CANONICAL_CONFIG)
-    return REDUCED_GATE if reduced else FULL_GATE
+    if reduced:
+        return REDUCED_GATE
+    return ISLAND_GATE if ns.island else FULL_GATE if ns.with_seeded_recall else REDUCED_GATE
 
 
 def _gate_kind_self_test() -> None:
-    """Only `make release-oracle-full`'s arguments make a full-gate verdict; each escape, a missing recall or a narrowed scope makes it reduced."""
+    """Only `make release-oracle-full`'s and `make release-oracle-island`'s arguments make their record kind; each escape, a missing recall or a narrowed scope makes a run reduced."""
     import re
 
-    from .core import FULL_GATE, REDUCED_GATE
-    recipe = re.search(r"^release-oracle-full:.*?(?=^\S)", (ROOT / "Makefile").read_text(), re.M | re.S)
-    assert recipe, "the Makefile has no release-oracle-full target"
-    call = re.search(r"-m dev\.release_oracle (.*?)\$\(ARGS\)", recipe.group(0))
-    assert call, "release-oracle-full does not run the gate"
-    argv = call.group(1).split()
-    from .core import GRADING_KNOBS
+    from .core import FULL_GATE, GRADING_KNOBS, REDUCED_GATE
+    makefile = (ROOT / "Makefile").read_text()
+
+    def argv_of(target: str) -> list[str]:
+        recipe = re.search(rf"^{target}:.*?(?=^\S)", makefile, re.M | re.S)
+        assert recipe, f"the Makefile has no {target} target"
+        call = re.search(r"-m dev\.release_oracle (.*?)\$\(ARGS\)", recipe.group(0))
+        assert call, f"{target} does not run the gate"
+        return call.group(1).split()
+
     watched = ("RIVET_ORACLE_SEEDED_RECALL", "RIVET_ORACLE_LATEST_ONLY", regression._ESCAPE_ENV, scenarios._REPLICA_ESCAPE_ENV,
                "RIVET_GATE_STATE_URL", *GRADING_KNOBS)
     saved = {k: os.environ.pop(k, None) for k in watched}
     try:
         os.environ["RIVET_GATE_STATE_URL"] = "postgresql://state.invalid/rivet"
-        assert gate_kind(parse_args(argv)) == FULL_GATE, f"`make release-oracle-full` runs {argv}: not a full gate"
         assert gate_kind(parse_args([])) == REDUCED_GATE, "a run without seeded recall is a full gate"
-        for extra in (["--no-cloud"], ["--no-clean"], ["--fast-clean"], ["--latest-only"], ["--engines", "postgres"],
-                      ["--without-prev-release-comparison"], ["--without-replica-topologies"], ["--bless-cdc"],
-                      ["--bless-local"], ["--bless-gifs"]):
-            assert gate_kind(parse_args([*argv, *extra])) == REDUCED_GATE, f"{extra} still reads as a full gate"
-        for knob in sorted(GRADING_KNOBS):
-            os.environ[knob] = "10"
-            assert gate_kind(parse_args(argv)) == REDUCED_GATE, f"{knob} still reads as a full gate"
-            del os.environ[knob]
-        os.environ["RIVET_GATE_STATE_URL"] = ""
-        assert gate_kind(parse_args(argv)) == REDUCED_GATE, "an empty state URL grades SQLite only and still reads as a full gate"
-        assert gate_config(parse_args([*argv, "--state-url", "postgresql://state.invalid/rivet"])) == CANONICAL_CONFIG
-        bare = re.search(r"^release-oracle:.*?\n\t(.*)", (ROOT / "Makefile").read_text(), re.M)
+        for target, kind in (("release-oracle-full", FULL_GATE), ("release-oracle-island", ISLAND_GATE)):
+            argv = argv_of(target)
+            assert gate_kind(parse_args(argv)) == kind, f"`make {target}` runs {argv}: not a {kind} run"
+            for extra in (["--no-cloud"], ["--no-clean"], ["--fast-clean"], ["--latest-only"], ["--engines", "postgres"],
+                          ["--without-prev-release-comparison"], ["--without-replica-topologies"], ["--bless-cdc"],
+                          ["--bless-local"], ["--bless-gifs"]):
+                assert gate_kind(parse_args([*argv, *extra])) == REDUCED_GATE, f"{extra} still reads as a {kind} run"
+            for knob in sorted(GRADING_KNOBS):
+                os.environ[knob] = "10"
+                assert gate_kind(parse_args(argv)) == REDUCED_GATE, f"{knob} still reads as a {kind} run"
+                del os.environ[knob]
+            os.environ["RIVET_GATE_STATE_URL"] = ""
+            assert gate_kind(parse_args(argv)) == REDUCED_GATE, f"an empty state URL grades SQLite only and still reads as a {kind} run"
+            os.environ["RIVET_GATE_STATE_URL"] = "postgresql://state.invalid/rivet"
+            assert gate_config(parse_args([*argv, "--state-url", "postgresql://state.invalid/rivet"])) == CANONICAL_CONFIG
+        assert "--island" not in argv_of("release-oracle-full") and "--island" in argv_of("release-oracle-island")
+        assert "--with-seeded-recall" in argv_of("release-oracle-full"), "the per-run gate runs the recall"
+        bare = re.search(r"^release-oracle:.*?\n\t(.*)", makefile, re.M)
         assert bare and "--without-prev-release-comparison" in bare.group(1), "the bare gate gives nothing up"
     finally:
         for k in watched:
             os.environ.pop(k, None)
         os.environ.update({k: v for k, v in saved.items() if v is not None})
-    print("self-test ok: only release-oracle-full's arguments (seeded recall on, nothing given up) make a full-gate verdict")
+    print("self-test ok: only release-oracle-full's and release-oracle-island's arguments (nothing given up) make their record kinds")
 
 
 def _gate_modules() -> list[object]:
@@ -486,11 +496,16 @@ def _stage_table_self_test() -> None:
         table = build_stages(ns, {}) + gate_stages(ns)
         cut = waves(table)
         assert [s for w in cut for s in w] == table, "the waves must hold every stage once, in table order"
-        measuring = {"release regression", "perf regression", "source harm regression", "previous-release differential",
-                     "field symptom replay", "scale memory"}
-        assert measuring <= {s.name for s in table}, measuring - {s.name for s in table}
+        measuring = {s.name for s in island_stages(table)}
+        assert measuring, "the table marks no stage as measured"
         shared = [[s.name for s in w] for w in cut if len(w) > 1 and measuring & {s.name for s in w}]
         assert not shared, f"a stage that measures against the previous release shares its wave: {shared}"
+        per_run, island = selected_stages(ns, table), selected_stages(parse_args([*argv, "--island"]), table)
+        assert {s.name for s in per_run} | {s.name for s in island} == {s.name for s in table}, "every stage runs in the gate or the island"
+        assert not {s.name for s in per_run} & {s.name for s in island} and {s.name for s in island} == measuring, \
+            "the island is exactly the measured stages and the per-run gate runs none of them"
+        assert island_functions(table) == {s.run.__name__ for s in island} and all(
+            f.startswith("verify_") for f in island_functions(table)), island_functions(table)
         assert table[-1].name == "live modules" and [s.name for s in cut[-1]] == ["live modules"], \
             "live modules runs last and alone: it runs what no stage before it ran"
         assert "release hygiene" in {s.name for s in table}, "cargo audit and docgen --check are gate stages"
@@ -542,6 +557,9 @@ def _stages_self_test() -> None:
     probe.close_matrix_rows(doc)
     fails = [c.detail for c in probe.cells if c.status is Status.FAIL]
     assert len(fails) == 2 and "sc_b() and it recorded no ledger row" in fails[0] and "sc_never() never ran" in fails[1], fails
+    owned = Ledger(colour=False)
+    owned.close_matrix_rows(doc, owned=lambda fn: fn == "sc_never")
+    assert [c.detail for c in owned.cells if c.status is Status.FAIL] == [fails[1]], "a run grades only the stages it owns"
     import ast
 
     real = yaml.safe_load((ROOT / "docs/release-gate-matrix.yaml").read_text())
@@ -1137,6 +1155,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="also run the seeded-defect recall stage (dev/seeded): re-introduce each known bug class "
              "as a source patch in a scratch tree, build it, and require its catching cells to go red. "
              "On in `make release-oracle-full` (a run without it is a reduced gate); `make seeded-recall` runs it alone.")
+    ap.add_argument(
+        "--island", action="store_true",
+        help="run ONLY the measured stages (the ones holding the whole machine: release regression, perf, source harm, "
+             "previous-release differential, field symptom replay, scale memory, flat RSS) and record a `release-oracle-island` "
+             "verdict line; every other run leaves them out. A tag needs this record green for the same commit "
+             "(`make release-oracle-island`).")
     ap.add_argument("--no-cloud", action="store_true", help="local stage only (skip BigQuery)")
     ap.add_argument("--keep", action="store_true", help="leave engine containers up (debug)")
     ap.add_argument(
@@ -1235,7 +1259,7 @@ def clean_tree_and_build(led: Ledger, *, fast: bool = False) -> bool:
     return True
 
 
-#: Held by a stage that MEASURES (timings, RSS, server counters against the previous release): nothing else runs beside it.
+#: Held by a stage that MEASURES (timings, RSS, server counters against the previous release): nothing else runs beside it. These stages are the island.
 ALONE = "the whole machine"
 #: The long-lived stand's source servers, driven by ONE runner at a time: a nextest run's test groups and the
 #: upgrade lanes each serialise their own flock users and server-global settings, and neither sees the other's.
@@ -1277,6 +1301,21 @@ def run_stages(led: Ledger, stages: Sequence[Stage]) -> None:
             wave[0].run(led)
         else:
             run_concurrently(led, " + ".join(st.name for st in wave), [(st.name, st.run) for st in wave])
+
+
+def island_stages(table: Sequence[Stage]) -> list[Stage]:
+    """The measured island: every stage that holds the whole machine."""
+    return [st for st in table if ALONE in st.needs]
+
+
+def selected_stages(ns: argparse.Namespace, table: Sequence[Stage]) -> list[Stage]:
+    """What this run executes of the table: only the island under `--island`, everything else otherwise."""
+    return [st for st in table if (ALONE in st.needs) is ns.island]
+
+
+def island_functions(table: Sequence[Stage]) -> frozenset[str]:
+    """The stage functions the island runs, by name: the rows the per-run gate does not owe and the island run does."""
+    return frozenset(st.run.__name__ for st in island_stages(table))
 
 
 def build_stages(ns: argparse.Namespace, built: dict) -> list[Stage]:
@@ -1331,17 +1370,17 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         serial("session state", lambda led: scenarios.verify_session_state(led)),
         serial("cdc e2e", lambda led: cdc.verify_cdc_e2e(led)),
         serial("cdc differential", lambda led: cdc.verify_cdc_differential(led)),
-        measured("release regression", lambda led: regression.verify_release_regression(led)),
+        measured("release regression", regression.verify_release_regression),
         # The offline battery under llvm-cov compiles and reads no server; the upgrade cells wait on servers and BigQuery.
         Stage("live-only coverage", lambda led: scenarios.verify_live_only_coverage(led), frozenset({CARGO})),
         Stage("upgrade continuity", lambda led: upgrade.verify_upgrade_continuity(led), frozenset({STAND})),
         Stage("upgrade from a field state", lambda led: field_state.verify_upgrade_from_field_state(led), frozenset({STAND})),
-        measured("perf regression", lambda led: perf.verify_perf_regression(led)),
-        measured("source harm regression", lambda led: regression.verify_harm_regression(led)),
-        measured("previous-release differential", lambda led: regression.verify_previous_release_differential(led)),
-        measured("field symptom replay", lambda led: regression.verify_field_symptom_replay(led)),
-        measured("scale memory", lambda led: regression.verify_scale_memory(led)),
-        measured("flat rss", lambda led: guarantees.verify_flat_rss(led)),
+        measured("perf regression", perf.verify_perf_regression),
+        measured("source harm regression", regression.verify_harm_regression),
+        measured("previous-release differential", regression.verify_previous_release_differential),
+        measured("field symptom replay", regression.verify_field_symptom_replay),
+        measured("scale memory", regression.verify_scale_memory),
+        measured("flat rss", guarantees.verify_flat_rss),
         serial("byte-identical parts", lambda led: guarantees.verify_byte_identical_parts(led)),
         serial("state backend parity", lambda led: state_parity.verify_state_backend_parity(led, **state)),
         warehouse("shared state", lambda led: shared_state.verify_shared_state_same_name(led)),
@@ -1959,24 +1998,33 @@ def main(argv: list[str] | None = None) -> int:
                        f"binary identity: {rivet_bin()} reports {version[0] if version else 'no version'}, "
                        f"not the tree's commit {tree[0][:9]} — the gate would grade another binary")
             return 1
-        run_stages(led, gate_stages(ns))
+        table = gate_stages(ns)
+        run_stages(led, selected_stages(ns, table))
         # Kept outside the work dir the gate deletes: a census row must name a log that still exists.
         kept = ROOT / "target" / "gate-failures" / f"rivet-oracle-{os.getpid()}.log"
         kept.parent.mkdir(parents=True, exist_ok=True)
         if (work / "rivet-oracle.log").is_file():
             shutil.copy2(work / "rivet-oracle.log", kept)
-        skip_census.verify_oracle_verdict_census(led, kept)
-        verify_seeded_recall(led, ns.with_seeded_recall)
+        if not ns.island:
+            skip_census.verify_oracle_verdict_census(led, kept)
+            verify_seeded_recall(led, ns.with_seeded_recall)
         verify_no_invariant_violations(led)
         # Only a FULL run can say a known red no longer fires, and only one writes a verdict line.
         full = not (ns.engines or ns.versions or ns.no_cloud or ns.latest_only)
+        island = island_functions(table)
         if full:
-            led.close_known_red()
+            if not ns.island:
+                led.close_known_red()
             # A bless run returns before most stages on purpose (run_scenarios), so it cannot grade the matrix.
             if not (ns.bless_local or ns.bless_cdc):
-                led.close_matrix_rows()
+                led.close_matrix_rows(owned=(lambda fn: fn in island) if ns.island else (lambda fn: fn not in island))
         led.stand_invalid = dog.stop()
-        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate_kind(ns, config), tree=tree, config=config)
+        gate = gate_kind(ns, config)
+        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate, tree=tree, config=config)
+        if gate == ISLAND_GATE:
+            print("  island record only: a tag also needs a green `make release-oracle-full` of this commit.")
+        elif not ns.island:
+            print("  the measured island is not part of this gate: a tag also needs a green `make release-oracle-island` of this commit.")
         # A run that graded nothing against the previous release has to say so
         # AFTER the verdict, where the reader's eye lands: `RELEASE-READY` is
         # derived from the rows and is literally true ("every non-skipped cell is
