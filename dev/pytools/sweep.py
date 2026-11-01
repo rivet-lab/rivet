@@ -85,7 +85,7 @@ ROOT = shell.ROOT
 USAGE = (
     "usage: dev/pytools/sweep.py source-parity [rivet-binary]\n"
     "       dev/pytools/sweep.py test-cruft [--cloud]\n"
-    "       dev/pytools/sweep.py self-test"
+    "       dev/pytools/sweep.py --self-test | live-self-test"
 )
 
 # The comparison core is the CDC sibling's, on purpose — one `norm`, one `chk`,
@@ -595,27 +595,66 @@ def _sweep_live_tmp(max_age_days: float = 2.0) -> None:
         print(f"  live-tmp: pruned {removed} entries older than {max_age_days:g} days")
 
 
-def _self_test() -> int:
+def _live_self_test() -> int:
     """Live: a dead process's MySQL table whose name holds a non-ASCII character is swept, and gone when read back."""
     container = registry.source("mysql_cdc")["container"]
     if not _container_up(container):
-        print(f"sweep self-test FAILED: {container} is not up, nothing was graded")
+        print(f"sweep live-self-test FAILED: {container} is not up, nothing was graded")
         return 1
     name = f"sweep_selftest_\u00e8_{2**22 + 12345}_1"
     q = lambda sql: shell.docker_exec(container, *cdc_stand.mysql_argv(f"SET NAMES utf8mb4; {sql}", db="rivet"), timeout=300)  # noqa: E731
     try:
         made = q(f"CREATE TABLE {_my_quote(name)} (id INT)")
         if not made.ok:
-            print(f"sweep self-test FAILED: could not create the table: {made.out}")
+            print(f"sweep live-self-test FAILED: could not create the table: {made.out}")
             return 1
         _my_cruft("mysql_cdc", container, "rivet")
         left = [t for t in _lines(q("SHOW TABLES")) if "sweep_selftest_" in t]
         if left:
-            print(f"sweep self-test FAILED: the sweep left {left}")
+            print(f"sweep live-self-test FAILED: the sweep left {left}")
             return 1
     finally:
         q(f"DROP TABLE IF EXISTS {_my_quote(name)}")
-    print("sweep self-test ok: a table named with a non-ASCII character is dropped, not skipped or crashed on")
+    print("sweep live-self-test ok: a table named with a non-ASCII character is dropped, not skipped or crashed on")
+    return 0
+
+
+_FAKE_DOCKER = """#!/usr/bin/env python3
+import pathlib, sys
+argv = sys.argv[1:]
+query = argv[-1]
+if query == "SHOW TABLES":
+    raw = "sweep_selftest_\\u00e8_4217305_1\\n".encode("utf-8" if "--default-character-set=utf8mb4" in argv else "latin-1")
+    sys.stdout.buffer.write(raw)
+elif query.startswith("DROP TABLE"):
+    with open(pathlib.Path(__file__).with_name("drops.bin"), "ab") as f:
+        f.write(query.encode("utf-8") + b"\\n")
+"""
+
+
+def _self_test() -> int:
+    """Offline: a listed non-ASCII table name is dropped as itself, and a listing in the wrong charset cannot crash the sweep."""
+    import contextlib
+    import io
+    import os
+    import stat
+    import tempfile
+
+    want = f"DROP TABLE IF EXISTS {_my_quote('sweep_selftest_' + chr(0xe8) + '_4217305_1')}"
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = Path(tmp) / "docker"
+        fake.write_text(_FAKE_DOCKER)
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{tmp}{os.pathsep}{old_path}"
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                _my_cruft("mysql_cdc", "fake-container", "rivet")
+        finally:
+            os.environ["PATH"] = old_path
+        drops = (Path(tmp) / "drops.bin").read_bytes().decode("utf-8").splitlines()
+    assert drops == [want], f"the sweep dropped {drops}, expected [{want!r}]"
+    print("sweep self-test ok: a table named with a non-ASCII character is dropped as itself, read through the real shell decode")
     return 0
 
 
@@ -630,8 +669,10 @@ def main_cli(argv: Sequence[str] | None = None) -> int:
     if cmd in ("test-cruft", "test_cruft", "cruft"):
         return test_cruft(cloud="--cloud" in rest or "--bigquery" in rest)
 
-    if cmd in ("self-test", "--self-test"):
+    if cmd == "--self-test":
         return _self_test()
+    if cmd == "live-self-test":
+        return _live_self_test()
 
     print(USAGE)
     return 1
