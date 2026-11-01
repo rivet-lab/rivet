@@ -548,6 +548,26 @@ def _imports_shadowed_by_a_local() -> list[str]:
     return out
 
 
+def _oracle_restart_self_test() -> None:
+    """`_oracle_restarted` on scripted answers: a slow restart is waited out, a dead one is named by its ORA- line and its log."""
+    from unittest import mock
+
+    from .core import Proc
+
+    def fake(out: str, rc: int = 0) -> Callable[..., Proc]:
+        return lambda *a, **kw: Proc(a, rc, out, "")
+
+    polls = iter(range(10**6))
+    late = lambda: next(polls) >= 61
+    with mock.patch("dev.release_oracle.core.docker_exec", fake("Database opened.")), mock.patch(f"{__name__}.docker", fake("")):
+        assert _oracle_restarted("c", late, delay=0) == "", "an Oracle that answers after 61 polls, which the old 60 gave up on, is waited for"
+    log = "ORA-00443: background process did not start"
+    with mock.patch("dev.release_oracle.core.docker_exec", fake("ORA-27102: out of memory\nSP2-0640: Not connected", 1)), \
+            mock.patch(f"{__name__}.docker", fake(f"line one\n{log}")):
+        why = _oracle_restarted("c", lambda: False, tries=3, delay=0)
+    assert "no answer in 3 polls" in why and "ORA-27102" in why and "SP2-0640" in why and "rc=1" in why and log in why, why
+
+
 def _self_test() -> int:
     """Grade this module's env-flag grammar against `regression`'s.
 
@@ -574,6 +594,7 @@ def _self_test() -> int:
 
     seeded.self_test()
     guarantees.self_test()
+    _oracle_restart_self_test()
     cdc.self_test()
     import contextlib
     import io
@@ -1275,6 +1296,25 @@ def _usable_port(port: int) -> int:
     return port
 
 
+#: Polls, two seconds apart, that Oracle gets to answer: after its first start and again after the processes restart.
+ORACLE_READY_TRIES = 150
+#: processes=200 lets the listener's lagging handler count refuse a 16-cell connect burst (ORA-12516); measured 189/300 refused at 200, 0/300 at 1000.
+ORACLE_RESTART_SQL = "alter system set processes=1000 scope=spfile;\nshutdown immediate\nstartup\nexit\n"
+
+
+def _oracle_restarted(name: str, ready: Callable[[], bool], tries: int = ORACLE_READY_TRIES, delay: float = 2.0) -> str:
+    """Restart Oracle with ORACLE_RESTART_SQL and wait until `ready`; "" when it answers, else the restart's own ORA- lines and the container log's tail."""
+    from .core import docker_exec, wait_until
+
+    sql = docker_exec(name, "sqlplus", "-s", "/", "as", "sysdba", timeout=180, stdin=ORACLE_RESTART_SQL)
+    if wait_until(ready, tries=tries, delay=delay):
+        return ""
+    ora = [ln for ln in sql.out.splitlines() if "ORA-" in ln or "SP2-" in ln]
+    tail = docker("logs", "--tail", "15", name).out.strip().splitlines()[-15:]
+    return (f"no answer in {tries} polls; sqlplus rc={sql.returncode}, {'; '.join(ora[-5:]) or 'no ORA- line'}; "
+            f"container log: {' | '.join(tail) or 'empty'}")
+
+
 def _host_port_open(port: int) -> bool:
     """True when the published port accepts a TCP connect from the host, the path the seed and rivet use."""
     import socket
@@ -1445,7 +1485,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
     # that never came up, which surfaced as a seed error blaming the SQL rather
     # than the bring-up — the same "ignored boolean" shape this gate exists to
     # catch elsewhere.
-    tries = 150 if engine == "oracle" else 45
+    tries = ORACLE_READY_TRIES if engine == "oracle" else 45
     if not wait_until(ready, tries=tries, delay=2.0):
         # FAIL, not SKIP: an engine the gate was asked to grade and did not is a hole.
         led.failed(engine, tag, "all", "-",
@@ -1460,11 +1500,9 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
                     "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet")
 
     if engine == "oracle":
-        # processes=200 lets the listener's lagging handler count refuse a 16-cell connect burst (ORA-12516); measured 189/300 refused at 200, 0/300 at 1000.
-        docker_exec(name, "sqlplus", "-s", "/", "as", "sysdba", timeout=180,
-                    stdin="alter system set processes=1000 scope=spfile;\nshutdown immediate\nstartup\nexit\n")
-        if not wait_until(ready, tries=60, delay=2.0):
-            led.skipped(engine, tag, "all", "-", f"{engine}:{tag} not ready after the processes restart", "not ready")
+        why = _oracle_restarted(name, ready)
+        if why:
+            led.failed(engine, tag, "all", "-", f"{engine}:{tag} not ready after the processes restart: {why}", "not ready")
             return None
 
     return matrix_cfg("url", engine).replace("%PORT%", str(port))
