@@ -925,22 +925,18 @@ seeds:
   - name: snowflake-full-load-empties-before-copy
     class: a whole-table Snowflake load replaces the target before its COPY succeeds, so a failed or lost COPY leaves the table empty until a retry succeeds
     history: "2026-10-16 retry matrix F6: `CREATE OR REPLACE TABLE` then `COPY` in one script; a COPY of an unreadable part left the target with 0 rows (read through DuckDB's snowflake extension), exit 1, on main through 0.31.0"
-    scope: source
+    scope: target
     patch: snowflake-full-load-empties-before-copy/shared.patch
     engines:
-      postgres:
-        cells: [snowflake_full_load_that_fails_keeps_the_last_table_postgres]
-      mysql:
-        cells: [snowflake_full_load_that_fails_keeps_the_last_table_mysql]
-      mssql:
-        na: "the load driver never reads the source engine: one code path, graded by the lib cell and the postgres/mysql cells"
-      mongo:
-        na: "the load driver never reads the source engine: one code path, graded by the lib cell and the postgres/mysql cells"
-      oracle:
-        na: "the load driver never reads the source engine: one code path, graded by the lib cell and the postgres/mysql cells"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
+          - "snowflake_full_load_that_fails_keeps_the_last_table_postgres"
+          - "snowflake_full_load_that_fails_keeps_the_last_table_mysql"
           - "lib:a_full_load_swaps_in_only_a_counted_copy_and_drops_its_staging_table"
+      clickhouse:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: load-append-writes-before-asking
     class: a load writes a warehouse name before asking whether the ledger has a record of it, or journals a stop before the write in a way the next load reads as ownership
@@ -1451,24 +1447,25 @@ seeds:
   - name: missing-bucket-read-as-no-manifest
     class: a 404 on an object is read as "the object is absent" when the bucket or container itself does not exist
     history: "`rivet validate` on a bucket that does not exist reported `legacy_run` and exited 0 on S3, GCS and Azure (CLI sweep 5, 2026-10-07)"
-    scope: source
+    scope: destination
     patch: missing-bucket-read-as-no-manifest/shared.patch
     engines:
-      postgres:
+      local:
+        na: "the seed edits src/destination/cloud.rs, which only the s3, gcs and azure stores run; a local directory has no bucket to be missing"
+      s3:
         cells:
-          - validate_fails_on_a_missing_bucket_s3
-          - validate_fails_on_a_missing_bucket_gcs
-          - validate_fails_on_a_missing_bucket_azure
-      mysql:
-        na: "`validate` reads the destination only: the MinIO, fake-gcs and Azurite cells are listed under postgres, and no source engine is involved"
-      mssql:
-        na: "`validate` reads the destination only: the MinIO, fake-gcs and Azurite cells are listed under postgres, and no source engine is involved"
-      mongo:
-        na: "`validate` reads the destination only: the MinIO, fake-gcs and Azurite cells are listed under postgres, and no source engine is involved"
-      oracle:
-        na: "`validate` reads the destination only: the MinIO, fake-gcs and Azurite cells are listed under postgres, and no source engine is involved"
+          - "validate_fails_on_a_missing_bucket_s3"
+      gcs:
+        cells:
+          - "validate_fails_on_a_missing_bucket_gcs"
+      azure:
+        cells:
+          - "validate_fails_on_a_missing_bucket_azure"
+      stdout:
+        na: "the seed edits src/destination/cloud.rs, which only the s3, gcs and azure stores run; stdout writes no bucket"
       lib:
-        cells: ["lib:head_refuses_a_missing_container_and_reads_a_missing_key_as_absent"]
+        cells:
+          - "lib:head_refuses_a_missing_container_and_reads_a_missing_key_as_absent"
 
   - name: check-describes-the-config-not-the-plan
     class: a preflight command describes a strategy derived from the config instead of the plan the runner builds
@@ -2235,182 +2232,129 @@ seeds:
   - name: snowflake-cdc-base-without-baseline-accepted
     class: "a cdc stream into a warehouse whose base is the default layout names nothing to build the base from, and config load accepts it: the base starts empty and misses every row the stream never touches"
     history: "2026-10-28 - Snowflake's default layout made a baseline a prerequisite of a cdc export; `cdc.backfill:`, `cdc.initial: snapshot` or `load.layout: log_view` are the three ways out"
-    scope: source
+    scope: target
     patch: snowflake-cdc-base-without-baseline-accepted/shared.patch
     engines:
-      postgres:
-        na: "config load reads the YAML, never a source"
-      mysql:
-        na: "config load reads the YAML, never a source"
-      mssql:
-        na: "config load reads the YAML, never a source"
-      mongo:
-        na: "config load reads the YAML, never a source"
-      oracle:
-        na: "config load reads the YAML, never a source"
-      lib:
-        cells: ["lib:a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load"]
+      bigquery:
+        na: "the seed edits src/config/mod.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
+        cells:
+          - "lib:a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load"
+      clickhouse:
+        na: "the seed edits src/config/mod.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: snowflake-probe-counts-by-count-if
     class: "a catalog probe sums COUNT_IF terms, which are NULL over zero rows, so a free table name has no kind and the load stops before any write"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; every load onto a free name failed in 0.26.0 through 0.31.0"
-    scope: source
+    scope: target
     patch: snowflake-probe-counts-by-count-if/shared.patch
     engines:
-      postgres:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mysql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mssql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mongo:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      oracle:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
           - "lib:the_object_kind_is_read_from_the_catalog_answer"
           - "lib:object_kind_probe_reads_the_schema_catalog_with_uppercased_names"
+      clickhouse:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: snowflake-change-log-told-by-error-text
     class: "whether a change log exists is read from the text of a failed SELECT, which `snow` wraps at 80 columns"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; a table name of 21 to 30 characters split `does not exist` over two lines"
-    scope: source
+    scope: target
     patch: snowflake-change-log-told-by-error-text/shared.patch
     engines:
-      postgres:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mysql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mssql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mongo:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      oracle:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
           - "lib:a_missing_change_log_is_the_first_cycle_by_the_catalog_not_by_an_error_text"
+      clickhouse:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: snowflake-retry-read-from-answer-text
     class: "whether a Snowflake request is sent again is read from the words of the answer, not from its HTTP status"
     history: "2026-10-28 - the SQL API transport replaced the `snow` CLI; the retry verdict is the typed status (429, 5xx), and a 422 whose message says `try again` is the warehouse's refusal"
-    scope: source
+    scope: target
     patch: snowflake-retry-read-from-answer-text/shared.patch
     engines:
-      postgres:
-        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
-      mysql:
-        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
-      mssql:
-        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
-      mongo:
-        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
-      oracle:
-        na: "the Snowflake transport is shared by every source and is not built by a source adapter"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/snowflake_rest.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
           - "lib:the_verdict_to_retry_is_the_status_never_the_words_of_the_answer"
+      clickhouse:
+        na: "the seed edits src/load/snowflake_rest.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: snowflake-connection-line-ignored-at-config-load
     class: "a Snowflake load that still names a `snow` CLI connection is accepted at config load and fails later, far from the line that caused it"
     history: "2026-10-28 - the SQL API transport replaced the `snow` CLI; a config with only `connection:` must stop at load with the fields that replace it"
-    scope: source
+    scope: target
     patch: snowflake-connection-line-ignored-at-config-load/shared.patch
     engines:
-      postgres:
-        na: "the load block is read from the config, not by a source adapter"
-      mysql:
-        na: "the load block is read from the config, not by a source adapter"
-      mssql:
-        na: "the load block is read from the config, not by a source adapter"
-      mongo:
-        na: "the load block is read from the config, not by a source adapter"
-      oracle:
-        na: "the load block is read from the config, not by a source adapter"
-      lib:
+      bigquery:
+        na: "the seed edits src/config/mod.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
           - "lib:a_snowflake_load_that_names_a_snow_cli_connection_is_refused_with_the_fields_that_replace_it"
+      clickhouse:
+        na: "the seed edits src/config/mod.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: snowflake-add-column-per-column-keyword
     class: "the ALTER that reconciles a change log repeats ADD COLUMN per column, a syntax error on Snowflake"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; the adopt test and the CDC snapshot cell failed at `unexpected COLUMN`"
-    scope: source
+    scope: target
     patch: snowflake-add-column-per-column-keyword/shared.patch
     engines:
-      postgres:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mysql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mssql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mongo:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      oracle:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
           - "lib:alter_add_columns_reconciles_an_existing_log_and_never_replaces_it"
+      clickhouse:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: snowflake-parquet-read-without-logical-types
     class: "a part is read without Parquet logical types, so a timestamp without a zone is stored as its microsecond integer taken for seconds and a TIME cannot be cast"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; 0.24.2 stored `2026-10-13 21:25:02.145628` as year 56785866 with LOAD OK"
-    scope: source
+    scope: target
     patch: snowflake-parquet-read-without-logical-types/shared.patch
     engines:
-      postgres:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mysql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mssql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mongo:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      oracle:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
           - "lib:both_scripts_read_parts_by_an_inline_format_under_a_closed_stage_url"
+      clickhouse:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: snowflake-binary-column-not-cast
     class: "a binary column goes through the COPY transform as VARIANT and the load fails on its type"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; `expecting BINARY but got VARIANT` on 0.24.2 and on main"
-    scope: source
+    scope: target
     patch: snowflake-binary-column-not-cast/shared.patch
     engines:
-      postgres:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mysql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mssql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mongo:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      oracle:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
           - "lib:both_scripts_read_parts_by_an_inline_format_under_a_closed_stage_url"
+      clickhouse:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: snowflake-stage-url-left-open
     class: "the stage URL is the destination prefix as written, so without a trailing slash every FILES entry names a file that does not exist"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; `Remote file ... was not found` on 0.24.2 and on main"
-    scope: source
+    scope: target
     patch: snowflake-stage-url-left-open/shared.patch
     engines:
-      postgres:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mysql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mssql:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      mongo:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      oracle:
-        na: "the Snowflake load statements are built from the recorded load spec, not by a source adapter"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
         cells:
           - "lib:both_scripts_read_parts_by_an_inline_format_under_a_closed_stage_url"
+      clickhouse:
+        na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: resume-trusts-a-completion-without-a-part
     class: "a resume trusts a chunk task marked completed that names no part and no row count of zero, so the chunk's keys are never read"
@@ -2577,19 +2521,23 @@ seeds:
   - name: missing-bucket-uncoded-on-write
     class: "a store's \"not found\" on a write is passed up raw, so a bucket that does not exist reads as a failed upload with no code"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6, row 582): `rivet run` into a missing fake-gcs bucket exited 1 with opendal's `NotFound (persistent) at write` dump, while `head` already refused RIVET_DEST_CONTAINER_NOT_FOUND, through 0.31.0; fixed by `absent_container_or` on every write"
-    scope: source
+    scope: destination
     patch: missing-bucket-uncoded-on-write/shared.patch
     engines:
-      postgres:
-        cells: [a_run_into_a_missing_bucket_is_refused_by_code_s3, a_run_into_a_missing_bucket_is_refused_by_code_gcs, a_run_into_a_missing_bucket_is_refused_by_code_azure]
-      mysql:
-        na: "the write reaches the destination after the source is read; the source engine does not take part, graded by the postgres cells over MinIO, fake-gcs and Azurite"
-      mssql:
-        na: "the write reaches the destination after the source is read; the source engine does not take part, graded by the postgres cells over MinIO, fake-gcs and Azurite"
-      mongo:
-        na: "the write reaches the destination after the source is read; the source engine does not take part, graded by the postgres cells over MinIO, fake-gcs and Azurite"
-      oracle:
-        na: "the write reaches the destination after the source is read; the source engine does not take part, graded by the postgres cells over MinIO, fake-gcs and Azurite"
+      local:
+        na: "the seed edits src/destination/cloud.rs, which only the s3, gcs and azure stores run; a local directory has no bucket to be missing"
+      s3:
+        cells:
+          - "a_run_into_a_missing_bucket_is_refused_by_code_s3"
+      gcs:
+        cells:
+          - "a_run_into_a_missing_bucket_is_refused_by_code_gcs"
+      azure:
+        cells:
+          - "a_run_into_a_missing_bucket_is_refused_by_code_azure"
+      stdout:
+        na: "the seed edits src/destination/cloud.rs, which only the s3, gcs and azure stores run; stdout writes no bucket"
+
   - name: collection-refusal-uncoded-on-run
     class: "one refusal is raised by two paths (the preflight and the export), and only one of them carries the code"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6): `check` refused a missing MongoDB collection RIVET_SOURCE_COLLECTION_NOT_FOUND, `run` printed the same sentence with no code, through 0.31.0; fixed by one `refuse_a_missing_collection` for both"
@@ -3634,23 +3582,17 @@ seeds:
   - name: bigquery-transient-job-error-final
     class: "a BigQuery job that ends with a documented retryable errorResult.reason (backendError, internalError, jobBackendError, jobInternalError, rateLimitExceeded, jobRateLimitExceeded) is coded RIVET_LOAD_WAREHOUSE_REJECTED, exit 1, so a scheduler fails the task for good"
     history: "2026-10-28 - issue #707, pilot incident: a CDC compact MERGE under airflow-provider-rivet failed with 'Error encountered during execution. Retrying may solve the problem.' and the task failed final"
-    scope: source
+    scope: target
     patch: bigquery-transient-job-error-final/shared.patch
     engines:
-      postgres:
-        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
-      mysql:
-        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
-      mssql:
-        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
-      mongo:
-        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
-      oracle:
-        na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
-      lib:
+      bigquery:
         cells:
           - "lib:a_job_failed_with_a_transient_reason_is_unavailable_and_retryable"
           - "lib:a_statement_failed_with_a_transient_reason_is_retryable_and_a_bad_one_is_not"
+      snowflake:
+        na: "the seed edits src/load/bq_rest.rs, which only a BigQuery load runs; Snowflake loads through its own loader (src/load/snowflake.rs)"
+      clickhouse:
+        na: "the seed edits src/load/bq_rest.rs, which only a BigQuery load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
   - name: transient-warehouse-code-exits-by-text
     class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
@@ -4455,20 +4397,14 @@ seeds:
   - name: clickhouse-paren-sorting-key
     class: "an existing ClickHouse change log's key is read from `system.tables.sorting_key` text without its tuple parentheses taken off, so ClickHouse 26's `(id)` reads as another key than `load.pk` and every CDC load into an existing log is refused RIVET_LOAD_TARGET_OBJECT_CONFLICT"
     history: "found 2026-10-31 by the ClickHouse version matrix (dev/clickhouse/version_matrix.py): every change-log cell red on 26.8 and 26.10, green on 24.8-26.3"
-    scope: source
+    scope: target
     patch: clickhouse-paren-sorting-key/shared.patch
     engines:
-      postgres:
-        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
-      mysql:
-        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
-      mssql:
-        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
-      mongo:
-        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
-      oracle:
-        na: "the change log's key is read in the ClickHouse loader after the source is done: one code path, graded by the lib cell and the version matrix"
-      lib:
+      bigquery:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; Snowflake loads through its own loader (src/load/snowflake.rs)"
+      clickhouse:
         cells:
           - "lib:an_existing_change_log_that_this_load_would_corrupt_is_refused"
 

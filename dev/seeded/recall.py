@@ -28,17 +28,44 @@ from dev.seeded import run_record
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "seeds.yaml"
+
+
+def enum_variants(rel: str, name: str, root: Path = ROOT) -> tuple[str, ...]:
+    """The lowercased variants of the Rust enum `name` in `rel`, in declaration order; a missing or empty enum is an error."""
+    text = (root / rel).read_text()
+    m = re.search(rf"\benum {re.escape(name)} \{{", text)
+    if m is None:
+        raise ValueError(f"`enum {name}` not found in {rel}")
+    out, depth = [], 1
+    for line in text[m.end():].splitlines():
+        t = line.strip()
+        ident = re.match(r"[A-Za-z0-9_]+", t)
+        if depth == 1 and t and not t.startswith(("//", "#")) and ident and ident.group()[0].isupper():
+            out.append(ident.group().lower())
+        depth += t.count("{") - min(t.count("}"), depth)
+        if depth == 0:
+            break
+    if not out:
+        raise ValueError(f"`enum {name}` in {rel} has no variants")
+    return tuple(out)
+
+
 SCOPES = {
-    "source": ("postgres", "mysql", "mssql", "mongo", "oracle"),
+    "source": enum_variants("src/config/source.rs", "SourceType"),
+    "target": enum_variants("src/config/load.rs", "LoadTargetKind"),
+    "destination": enum_variants("src/config/destination.rs", "DestinationType"),
     "state": ("postgres-state", "sqlite-state"),
 }
 OPTIONAL = ("lib",)
+MIN_NA_REASON = 30
 CAUGHT, MISSED, STALE, BROKEN, NO_CONTROL, NA = "CAUGHT", "MISSED", "STALE", "BROKEN", "NO-CONTROL", "N/A"
+ABORTED = "ABORTED"
 #: Every declared cell skipped on this stand for a reason it named: reported, never a catch, held under a ceiling.
 NOT_GRADED_HERE = "NOT-GRADED-HERE"
 #: The gate matrix row whose `not_graded_here_ceiling` bounds the NOT-GRADED-HERE rows.
 GATE_MATRIX = ROOT / "docs" / "release-gate-matrix.yaml"
 LIB = "lib:"
+CELL_VERDICTS = ("PASS", "FAIL", "SKIP", "ABSENT")
 
 
 @dataclass(frozen=True)
@@ -82,8 +109,8 @@ def parse_manifest(doc: dict, patch_dir: Path = HERE) -> list[Row]:
         for eng, e in engines.items():
             e = e or {}
             if "na" in e:
-                if set(e) != {"na"} or not str(e["na"]).strip():
-                    raise ValueError(f"seed {name}/{eng}: `na:` takes a reason and nothing else")
+                if set(e) != {"na"} or len(str(e["na"]).strip()) < MIN_NA_REASON:
+                    raise ValueError(f"seed {name}/{eng}: `na:` takes a reason of at least {MIN_NA_REASON} characters and nothing else")
                 rows.append(Row(name, eng, na=str(e["na"]).strip()))
                 continue
             patch, cells = e.get("patch", s.get("patch")), e.get("cells")
@@ -123,7 +150,7 @@ def stale_message(seed: str, patch_text: str, git_out: str) -> str:
 
 
 def cell_outcomes(out: str, skipped: dict[str, str], cells: tuple[str, ...]) -> dict[str, str]:
-    """Each cell's verdict in one nextest run: PASS, FAIL, SKIP (self-skipped, graded nothing) or ABSENT."""
+    """Each cell's verdict in one nextest run: PASS, FAIL (a failed test), SKIP (self-skipped), ABSENT, or the raw status of a test nextest stopped (TIMEOUT, ABORT, ...)."""
     final = nextest_outcomes(out)
     skip_names = {k.split("::")[-1] for k in skipped}
     res: dict[str, str] = {}
@@ -132,8 +159,10 @@ def cell_outcomes(out: str, skipped: dict[str, str], cells: tuple[str, ...]) -> 
         seen = [s for n, s in final.items() if n == bare or n.endswith("::" + bare)]
         if not seen:
             res[c] = "ABSENT"
-        elif any(s not in ("PASS", "LEAK") for s in seen):
+        elif any(s == "FAIL" or s.startswith("FAIL ") for s in seen):
             res[c] = "FAIL"
+        elif any(s not in ("PASS", "LEAK") for s in seen):
+            res[c] = next(s for s in seen if s not in ("PASS", "LEAK"))
         else:
             res[c] = "SKIP" if bare in skip_names else "PASS"
     return res
@@ -158,6 +187,10 @@ def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
     red = [c for c in green if seeded.get(c) == "FAIL"]
     if red:
         return Verdict(row, CAUGHT, ", ".join(red))
+    stopped = [f"{c}={seeded[c]}" for c in green if seeded.get(c) not in (None, *CELL_VERDICTS)]
+    if stopped:
+        return Verdict(row, ABORTED, f"a control-green cell was stopped, not failed ({', '.join(stopped)}): only a failing "
+                                     "assertion catches a seed, so a hang-class seed needs a watchdog test that fails")
     said = ", ".join(f"{c}={seeded.get(c, 'ABSENT')}" for c in green)
     return Verdict(row, MISSED, f"every control-green cell stayed green under the seed ({said})")
 
@@ -338,18 +371,18 @@ def recompiled(build_out: str) -> bool:
 # ── the run ───────────────────────────────────────────────────────────────────
 
 
-def not_graded_here_ceiling(matrix: Path = GATE_MATRIX) -> int:
-    """The gate matrix's bound on NOT-GRADED-HERE rows (row `seeded_recall`, key `not_graded_here_ceiling`)."""
+def gate_ceiling(key: str, matrix: Path = GATE_MATRIX) -> int:
+    """The gate matrix's integer bound `key` on the `seeded_recall` row."""
     rows = (yaml.safe_load(matrix.read_text()) or {}).get("infra") or []
     row = next((r for r in rows if r.get("id") == "seeded_recall"), None)
-    if row is None or not isinstance(row.get("not_graded_here_ceiling"), int):
-        raise SystemExit(f"{matrix}: the seeded_recall row names no integer not_graded_here_ceiling")
-    return row["not_graded_here_ceiling"]
+    if row is None or not isinstance(row.get(key), int):
+        raise SystemExit(f"{matrix}: the seeded_recall row names no integer {key}")
+    return row[key]
 
 
-def record(led: Ledger, out: list[Verdict], ceiling: int | None = None) -> bool:
-    """One ledger row per graded verdict: CAUGHT passes, N/A is not a row, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), anything else (MISSED, STALE, BROKEN, NO-CONTROL) fails the gate; True when no row failed."""
-    here, green = [], True
+def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceiling: int | None = None) -> bool:
+    """One ledger row per verdict: CAUGHT passes, N/A is a counted N/A row held under `na_ceiling`, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), anything else (MISSED, STALE, BROKEN, NO-CONTROL, ABORTED) fails the gate; True when no row failed."""
+    here, nas, green = [], 0, True
     for v in out:
         msg = f"seeded {v.row.seed} × {v.row.engine}: {v.status} — {v.detail}"
         if v.status == CAUGHT:
@@ -357,10 +390,13 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None) -> bool:
         elif v.status == NOT_GRADED_HERE:
             led.skipped(v.row.engine, "seeded", v.row.seed, "-", msg)
             here.append(f"{v.row.seed} × {v.row.engine}")
-        elif v.status != NA:
+        elif v.status == NA:
+            led.not_applicable(v.row.engine, "seeded", v.row.seed, "-", msg)
+            nas += 1
+        else:
             led.failed(v.row.engine, "seeded", v.row.seed, "-", msg)
             green = False
-    limit = not_graded_here_ceiling() if ceiling is None else ceiling
+    limit = gate_ceiling("not_graded_here_ceiling") if ceiling is None else ceiling
     if len(here) > limit:
         led.failed("-", "seeded", "not_graded_here", "-",
                    f"seeded recall: {len(here)} row(s) NOT-GRADED-HERE, over the gate matrix's ceiling of {limit} "
@@ -369,6 +405,15 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None) -> bool:
         green = False
     elif here:
         print(f"  {len(here)} row(s) NOT-GRADED-HERE (ceiling {limit}): " + ", ".join(here))
+    na_limit = gate_ceiling("na_ceiling") if na_ceiling is None else na_ceiling
+    if nas > na_limit:
+        led.failed("-", "seeded", "na_rows", "-",
+                   f"seeded recall: {nas} N/A row(s), over the gate matrix's na_ceiling of {na_limit} "
+                   "(docs/release-gate-matrix.yaml seeded_recall): a new `na:` is a cell nobody wrote; "
+                   "give the seed its cell on that engine or raise the ceiling with a dated reason")
+        green = False
+    elif nas:
+        print(f"  {nas} N/A row(s) (ceiling {na_limit})")
     return green
 
 
@@ -473,12 +518,13 @@ def self_test() -> int:
 
     with tempfile.TemporaryDirectory() as d:
         pd = Path(d)
+        WHY = "the code path does not exist on this engine"
         (pd / "p.patch").write_text("--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n")
         eng = {"postgres": {"patch": "p.patch", "cells": ["t1", "lib:u1"]}, "mysql": {"patch": "p.patch", "cells": []},
-               "mssql": {"na": "why"}, "mongo": {"na": "why"}, "oracle": {"na": "why"}}
+               "mssql": {"na": WHY}, "mongo": {"na": WHY}, "oracle": {"na": WHY}}
         rows = parse_manifest({"seeds": [{"name": "s", "scope": "source", "engines": eng}]}, pd)
         assert [(r.engine, r.cells, r.na) for r in rows][:3] == [
-            ("postgres", ("t1", "lib:u1"), None), ("mysql", (), None), ("mssql", (), "why")], rows
+            ("postgres", ("t1", "lib:u1"), None), ("mysql", (), None), ("mssql", (), WHY)], rows
         bad = [
             ({"seeds": []}, "no seeds"),
             ({"seeds": [{"name": "s", "scope": "nope", "engines": eng}]}, "scope"),
@@ -486,6 +532,7 @@ def self_test() -> int:
             ({"seeds": [{"name": "s", "scope": "source", "engines": {k: v for k, v in eng.items() if k != "mongo"}}]},
              "missing ['mongo']"),
             ({"seeds": [{"name": "s", "scope": "source", "engines": {**eng, "mongo": {"na": ""}}}]}, "takes a reason"),
+            ({"seeds": [{"name": "s", "scope": "source", "engines": {**eng, "mongo": {"na": "n/a"}}}]}, "takes a reason"),
             ({"seeds": [{"name": "s", "scope": "source", "engines": {**eng, "mssql": {"patch": "gone.patch",
                                                                                       "cells": []}}}]}, "does not exist"),
             ({"seeds": [{"name": "s", "scope": "source", "engines": eng}] * 2}, "duplicate"),
@@ -498,8 +545,44 @@ def self_test() -> int:
                 assert want in str(e), (want, str(e))
             else:
                 raise AssertionError(f"accepted a manifest that should fail with {want!r}")
+        wh = {"seeds": [{"name": "w", "scope": "target", "patch": "p.patch", "engines": {
+            "bigquery": {"na": WHY}, "snowflake": {"cells": ["t1"]}, "clickhouse": {"na": WHY}}},
+            {"name": "d", "scope": "destination", "patch": "p.patch", "engines": {
+                "local": {"na": WHY}, "s3": {"cells": ["t2"]}, "gcs": {"na": WHY}, "azure": {"na": WHY}, "stdout": {"na": WHY},
+                "lib": {"cells": ["lib:u1"]}}}]}
+        assert [r.engine for r in parse_manifest(wh, pd) if r.cells] == ["snowflake", "s3", "lib"]
+        for scope, drop in (("target", "clickhouse"), ("destination", "stdout")):
+            short = {"seeds": [{**wh["seeds"][0 if scope == "target" else 1],
+                                "engines": {k: v for k, v in wh["seeds"][0 if scope == "target" else 1]["engines"].items()
+                                            if k != drop}}]}
+            try:
+                parse_manifest(short, pd)
+            except ValueError as e:
+                assert f"missing ['{drop}']" in str(e), str(e)
+            else:
+                raise AssertionError(f"a {scope} seed that leaves out {drop} was accepted")
+    for scope, rel, name in (("source", "src/config/source.rs", "SourceType"), ("target", "src/config/load.rs", "LoadTargetKind"),
+                             ("destination", "src/config/destination.rs", "DestinationType")):
+        assert SCOPES[scope] == enum_variants(rel, name), (scope, SCOPES[scope])
+    assert {"bigquery", "snowflake", "clickhouse"} <= set(SCOPES["target"]) and {"s3", "gcs", "azure"} <= set(SCOPES["destination"])
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "e.rs").write_text("pub enum Kind {\n    /// doc\n    #[serde(rename = \"a\")]\n    Alpha,\n"
+                                      "    Beta { x: u8 },\n    Gamma(u8),\n}\nenum Other {\n    Zed,\n}\n")
+        assert enum_variants("e.rs", "Kind", Path(d)) == ("alpha", "beta", "gamma")
+        for bad_enum in ("Nope", "Empty"):
+            (Path(d) / "e.rs").write_text("enum Empty {\n}\n")
+            try:
+                enum_variants("e.rs", bad_enum, Path(d))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"enum {bad_enum} read as variants")
     pg = Row("s", "postgres", "p.patch", ("t1", "t2"))
     assert grade(pg, {"t1": "PASS", "t2": "PASS"}, {"t1": "PASS", "t2": "FAIL"}).status == CAUGHT
+    for stopped in ("TIMEOUT", "ABORT", "SIGKILL", "EXECFAIL", "SIGSEGV"):
+        v = grade(pg, {"t1": "PASS", "t2": "PASS"}, {"t1": "PASS", "t2": stopped})
+        assert v.status == ABORTED and stopped in v.detail, (stopped, v)
+    assert grade(pg, {"t1": "PASS", "t2": "PASS"}, {"t1": "TIMEOUT", "t2": "FAIL"}).status == CAUGHT, "a real failure still catches"
     assert grade(pg, {"t1": "PASS", "t2": "PASS"}, {"t1": "PASS", "t2": "PASS"}).status == MISSED
     # red already on the unpatched tree proves nothing: that cell is not graded
     assert grade(pg, {"t1": "FAIL", "t2": "PASS"}, {"t1": "FAIL", "t2": "PASS"}).status == MISSED
@@ -518,6 +601,10 @@ def self_test() -> int:
     )
     got = cell_outcomes(sample, {"state::tests::u1": "no url"}, ("t1", "t2", "lib:u1", "t3"))
     assert got == {"t1": "PASS", "t2": "FAIL", "lib:u1": "SKIP", "t3": "ABSENT"}, got
+    for status, want in (("TIMEOUT", "TIMEOUT"), ("ABORT", "ABORT"), ("SIGKILL", "SIGKILL"), ("FAIL", "FAIL"), ("FAIL + LEAK", "FAIL"),
+                         ("PASS", "PASS"), ("LEAK", "PASS")):
+        line = f"{status:>11} [   9.0s] (1/1) rivet-cli::live_suite live_a::t1\n"
+        assert cell_outcomes(line, {}, ("t1",)) == {"t1": want}, (status, cell_outcomes(line, {}, ("t1",)))
     with tempfile.TemporaryDirectory() as td:
         (Path(td) / "tests").mkdir()
         (Path(td) / "tests" / "top_level.rs").write_text("fn offline_cell() {}\n")
@@ -540,19 +627,30 @@ def self_test() -> int:
     assert grade(skip, {"t1": "SKIP", "t2": "FAIL"}, {}).status == NO_CONTROL, "a red control is not a stand skip"
     assert grade(skip, {"t1": "SKIP", "t2": "PASS"}, {"t2": "SKIP"}).status == MISSED, \
         "a green control the seed made skip is no catch"
-    limit = not_graded_here_ceiling()
+    limit = gate_ceiling("not_graded_here_ceiling")
     for n, red in ((limit, False), (limit + 1, True)):
         rows = [Verdict(Row(f"s{i}", "mysql", "p", ("t1",)), NOT_GRADED_HERE, "skipped") for i in range(n)]
         led = Ledger(colour=False)
         assert record(led, rows) is (not red)
         assert sum(c.status.name == "SKIP" for c in led.cells) == n and led.red is red, (n, limit, led.cells)
-    for status in (MISSED, STALE, BROKEN, NO_CONTROL):
+    for status in (MISSED, STALE, BROKEN, NO_CONTROL, ABORTED):
         led = Ledger(colour=False)
         green = record(led, [Verdict(pg, CAUGHT, "t2"), Verdict(Row("s", "mysql", "p", ()), status, "x"),
                              Verdict(Row("s", "mongo", na="x"), NA, "x")], ceiling=0)
-        assert led.red and not green and [c.status.name for c in led.cells] == ["PASS", "FAIL"], (status, led.cells)
+        assert led.red and not green and [c.status.name for c in led.cells] == ["PASS", "FAIL", "NA"], (status, led.cells)
     real = parse_manifest(yaml.safe_load(MANIFEST.read_text()))
     assert not unknown_cells(real), unknown_cells(real)
+    na_limit = gate_ceiling("na_ceiling")
+    assert sum(r.na is not None for r in real) == na_limit, (
+        f"the manifest has {sum(r.na is not None for r in real)} `na:` rows and the gate matrix's na_ceiling is {na_limit}: "
+        "they must match; write the cell, or raise the ceiling with a dated reason")
+    for n, red in ((na_limit, False), (na_limit + 1, True)):
+        rows = [Verdict(Row(f"s{i}", "mongo", na="x" * MIN_NA_REASON), NA, "x") for i in range(n)]
+        led = Ledger(colour=False)
+        assert record(led, rows, ceiling=0) is (not red) and led.red is red, (n, na_limit)
+        assert sum(c.status.name == "NA" for c in led.cells) == n, "every N/A row is a ledger row"
+    led = Ledger(colour=False)
+    assert not record(led, [Verdict(pg, ABORTED, "stopped")], ceiling=0) and led.red, "ABORTED fails the gate"
     saved = os.environ.get("RIVET_GATE_STATE_URL")
     os.environ["RIVET_GATE_STATE_URL"] = "postgresql://u:p@127.0.0.1:5433/rivet_state"
     os.environ["RIVET_SELFTEST_CARRIER_BIN"] = ".gate-baseline/field/rivet"

@@ -69,6 +69,7 @@ class Status(str, Enum):
     SKIP = "SKIP"
     KNOWN = "KNOWN"  # a failure recorded in known_red.py with a reason, in date
     INFRA = "INFRA"  # the ORACLE could not read (its own transport), so the cell graded nothing
+    NA = "N/A"
 
 
 @dataclass(frozen=True)
@@ -339,6 +340,10 @@ class Ledger:
     def skipped(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str = "") -> None:
         self.skip(msg)
         self.add(engine, version, scenario, store, Status.SKIP, detail or msg)
+
+    def not_applicable(self, engine: str, version: str, scenario: str, store: str, reason: str) -> None:
+        """Record a declared N/A row with its reason; it neither passes nor fails."""
+        self.add(engine, version, scenario, store, Status.NA, reason)
 
     # ── verdict ──
     @property
