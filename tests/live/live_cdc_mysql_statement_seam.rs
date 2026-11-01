@@ -416,6 +416,7 @@ fn on_a_server_that_keeps_case_a_database_spelled_in_another_case_is_another_dat
             format!("TRUNCATE TABLE `{}`.`KINDS`", shadow.0),
             format!("TRUNCATE TABLE `{}`.`{KELVIN}inds`", shadow.0),
             format!("TRUNCATE TABLE `{}`.`kinds`", shadow.0),
+            format!("DROP DATABASE `{}`", shadow.0),
         ],
     );
 }
