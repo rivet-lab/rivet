@@ -519,6 +519,23 @@ mod tests {
         assert_eq!(fp(&[whole.slice(3, 4)]), fp(&[fixture(3, 4)]));
     }
 
+    #[test]
+    fn a_nonzero_array_offset_reads_the_values_it_names() {
+        let buf = arrow::buffer::Buffer::from_slice_ref([10i64, 20, 30, 40, 50]);
+        let data = arrow::array::ArrayData::builder(DataType::Int64)
+            .len(3)
+            .offset(2)
+            .add_buffer(buf)
+            .build()
+            .unwrap();
+        let offset: ArrayRef = arrow::array::make_array(data);
+        let fresh: ArrayRef = Arc::new(Int64Array::from(vec![30i64, 40, 50]));
+        assert_eq!(
+            fp(&[one_col("id", DataType::Int64, offset)]),
+            fp(&[one_col("id", DataType::Int64, fresh)])
+        );
+    }
+
     fn canonical(dt: &DataType) -> bool {
         ValueFingerprint::new(&Schema::new(vec![Field::new("c", dt.clone(), true)])).is_some()
     }

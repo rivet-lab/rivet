@@ -1247,6 +1247,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn record_part_gives_each_manifest_entry_its_own_value_fingerprint() {
+        let plan = test_plan();
+        let mut summary = test_summary(&plan);
+        let mut parts = synthetic_parts(3);
+        for (i, p) in parts.iter_mut().enumerate() {
+            p.value_fingerprint = Some(format!("xxh3v1:{i:016x}"));
+        }
+        for (i, p) in parts.iter().enumerate() {
+            record_part(
+                &plan,
+                &mut summary,
+                None,
+                p,
+                PartKind::Chunk {
+                    chunk_index: i as i64,
+                },
+                UnitId::Chunk(i as i64),
+            );
+        }
+        let got: Vec<Option<String>> = summary
+            .manifest_parts
+            .iter()
+            .map(|p| p.value_fingerprint.clone())
+            .collect();
+        let want: Vec<Option<String>> = parts.iter().map(|p| p.value_fingerprint.clone()).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn nonempty_successful_run_must_have_nonempty_manifest_parts() {
         // Contrapositive of M1: a successful run that committed at least one
         // file must surface that file in the cloud manifest. Before

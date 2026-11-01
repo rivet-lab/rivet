@@ -1003,4 +1003,9 @@ exclude_re = [
     # - new_request_id (snowflake_rest.rs): the version and variant bits are set with `(n & !mask) | bits`,
     #   so the OR operands never share a bit and `^` yields the same UUID; no input distinguishes them.
     "replace \\| with \\^ in new_request_id$",
+    # - fixed (value_fingerprint.rs): `data.offset() * width` is the start of the values buffer. Arrow's
+    #   `to_data` rebuilds a primitive or fixed-size buffer already sliced to element 0, so `offset()` is 0
+    #   for every array the fingerprint reads and `/` yields the same start; the offset test uses a raw
+    #   offset-2 ArrayData and still passes under `/` because `make_array` normalises it.
+    "replace \\* with / in fixed$",
 ]

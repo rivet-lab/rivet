@@ -1970,16 +1970,55 @@ fn split_now_hands_the_closed_part_its_value_fingerprint() {
         vec![std::sync::Arc::new(Int64Array::from(vec![1, 2]))],
     )
     .unwrap();
-    let mut acc = crate::manifest::value_fingerprint::ValueFingerprint::new(&batch.schema())
+    let mut direct = crate::manifest::value_fingerprint::ValueFingerprint::new(&batch.schema())
         .expect("canonical schema");
-    acc.update(&batch).expect("same schema");
-    sink.value_fp = super::ValueSlot::Open(acc);
+    direct.update(&batch).expect("same schema");
+    sink.track_value(&batch);
     sink.part_rows = 2;
     sink.split_now().unwrap();
     assert_eq!(sink.completed_parts.len(), 1);
-    let fp = sink.completed_parts[0]
-        .value_fingerprint
-        .as_deref()
+    assert_eq!(
+        sink.completed_parts[0].value_fingerprint.as_deref(),
+        Some(direct.finish().as_str())
+    );
+}
+
+#[test]
+fn write_sink_parts_carries_each_part_its_own_value_fingerprint() {
+    let dst_dir = tempfile::tempdir().unwrap();
+    let dest =
+        crate::destination::local::LocalDestination::new(&crate::config::DestinationConfig {
+            destination_type: crate::config::DestinationType::Local,
+            path: Some(dst_dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })
         .unwrap();
-    assert!(fp.starts_with("xxh3v1:"), "{fp}");
+    let mut sink = minimal_sink();
+    for (rows, fp) in [
+        (1usize, "xxh3v1:00000000000000aa"),
+        (2, "xxh3v1:00000000000000bb"),
+    ] {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, b"parquet bytes").unwrap();
+        sink.completed_parts.push(CompletedPart {
+            tmp,
+            rows,
+            value_fingerprint: Some(fp.to_string()),
+        });
+    }
+    let (parts, wrote) =
+        crate::pipeline::commit::write_sink_parts(&dest, &mut sink, None, |i, _| {
+            format!("part_{i}.parquet")
+        });
+    wrote.expect("both parts write");
+    assert_eq!(
+        parts
+            .iter()
+            .map(|p| p.value_fingerprint.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("xxh3v1:00000000000000aa"),
+            Some("xxh3v1:00000000000000bb")
+        ]
+    );
 }
