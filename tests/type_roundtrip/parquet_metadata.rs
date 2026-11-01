@@ -18,9 +18,10 @@
 //! semantic JSON/UUID/enum apart from plain Utf8. This test enforces that
 //! invariant on every column.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use arrow::datatypes::{Metadata, SchemaRef};
+use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -41,7 +42,7 @@ fn read_parquet_arrow_schema(path: &Path) -> SchemaRef {
     builder.schema().clone()
 }
 
-fn field_metadata<'a>(schema: &'a SchemaRef, name: &str) -> &'a Metadata {
+fn field_metadata<'a>(schema: &'a SchemaRef, name: &str) -> &'a HashMap<String, String> {
     schema
         .field_with_name(name)
         .unwrap_or_else(|_| panic!("schema is missing field `{name}`"))
