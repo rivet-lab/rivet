@@ -11,6 +11,7 @@ const LAYERS: &[(&str, &str)] = &[
     ("scalar", "source scalar text parsed into typed bounds"),
     ("resource", "process memory sampling and limits"),
     ("workers", "the bounded executor every pool runs on"),
+    ("url_text", "pure readers of the text of a connection URL"),
     ("redact", "the credential redaction chokepoint"),
     ("tuning", "source tuning profiles and adaptive sizing"),
     ("types", "the internal type system and delivered text forms"),

@@ -54,7 +54,7 @@
 pub fn redact_url_passwords(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for word in s.split_inclusive(|c: char| c.is_ascii_whitespace()) {
-        match crate::config::url::credential_span(word, crate::config::url::Mask::Password)
+        match crate::url_text::credential_span(word, crate::url_text::Mask::Password)
             .and_then(|(start, at)| word.get(..start).zip(word.get(at..)))
         {
             Some((scheme, host)) => {

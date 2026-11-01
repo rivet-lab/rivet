@@ -339,7 +339,7 @@ impl SourceConfig {
         }
         if let Some(ref raw) = out.url
             && let Some((userinfo, at)) =
-                super::url::credential_span(raw, super::url::Mask::AnyUserinfo)
+                crate::url_text::credential_span(raw, crate::url_text::Mask::AnyUserinfo)
         {
             let mut s = String::with_capacity(raw.len());
             s.push_str(&raw[..userinfo]);
@@ -543,7 +543,7 @@ impl SourceConfig {
 
         let resolved = resolve_env_vars(&raw)?;
 
-        if let Some(userinfo) = super::url::authority(&resolved).and_then(|a| a.userinfo)
+        if let Some(userinfo) = crate::url_text::authority(&resolved).and_then(|a| a.userinfo)
             && userinfo.contains(':')
             && !userinfo.ends_with(':')
         {
@@ -662,7 +662,7 @@ impl SourceType {
 /// `engine://host:port/database` of `url`, credentials, query and fragment dropped; a keyword/value string keeps its pairs with the password masked.
 pub(crate) fn source_state_key(source_type: SourceType, url: &str) -> String {
     let url = &crate::redact::redact_keyword_passwords(url);
-    let rest = super::url::server_and_path(url);
+    let rest = crate::url_text::server_and_path(url);
     let at_host = rest.split(['?', '#']).next().unwrap_or(rest);
     let key = format!("{source_type:?}://{}", at_host.trim_end_matches('/')).to_lowercase();
     canonical_source_key(&key)
@@ -1298,7 +1298,7 @@ mod tests {
 
     // ── credential_span ──────────────────────────────────────────────────────
     fn any_userinfo(url: &str) -> Option<(usize, usize)> {
-        crate::config::url::credential_span(url, crate::config::url::Mask::AnyUserinfo)
+        crate::url_text::credential_span(url, crate::url_text::Mask::AnyUserinfo)
     }
 
     #[test]

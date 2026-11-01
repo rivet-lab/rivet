@@ -103,6 +103,7 @@ pub(crate) mod plan;
 // — same "internal, may change at any patch" disclaimer as the rest of
 // the public-by-necessity surface.
 pub mod redact;
+pub(crate) mod url_text;
 // Test-only fault-injection hook used by `tests/live_crash_recovery.rs`.
 // Activated by the `RIVET_TEST_PANIC_AT` env var; no-op otherwise.  See
 // module docs for details.

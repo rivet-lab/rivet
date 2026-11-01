@@ -4,8 +4,9 @@ pub(crate) mod postgres;
 pub(crate) mod tls;
 
 use crate::config::TlsConfig;
-use crate::config::url::{host_is_loopback, host_port_span};
+use crate::config::url::host_is_loopback;
 use crate::error::{Result, TlsHandshakeFailed};
+use crate::url_text::host_port_span;
 
 /// True when a rendered driver error names a failed TLS handshake or an untrusted certificate.
 pub(crate) fn is_tls_handshake_failure(text: &str) -> bool {
@@ -295,8 +296,8 @@ mod connect_error_tests {
     #[test]
     fn host_and_port_are_the_legacy_reading_except_where_a_fragment_ends_the_authority() {
         let (mut same, mut fragment) = (0, 0);
-        for (_, scheme) in crate::config::url::corpus::SOURCES {
-            for url in crate::config::url::corpus::urls(scheme) {
+        for (_, scheme) in crate::url_text::corpus::SOURCES {
+            for url in crate::url_text::corpus::urls(scheme) {
                 let (old, new) = (legacy_url_host_port(&url), url_host_port(&url));
                 if url.contains('#') && old != new {
                     fragment += 1;

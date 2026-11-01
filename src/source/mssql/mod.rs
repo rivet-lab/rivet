@@ -272,7 +272,7 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
     let authority = url
         .strip_prefix("sqlserver://")
         .or_else(|| url.strip_prefix("mssql://"))
-        .and_then(|_| crate::config::url::authority(url))
+        .and_then(|_| crate::url_text::authority(url))
         .ok_or_else(|| {
             crate::error::coded(
                 crate::error::codes::CONFIG_SOURCE_URL_INVALID,
@@ -1432,10 +1432,10 @@ mod tests {
     fn the_parser_reads_what_the_legacy_parser_read_unless_an_at_or_a_delimiter_moved_the_authority()
      {
         let (mut same, mut moved) = (0, 0);
-        for url in crate::config::url::corpus::urls("sqlserver") {
+        for url in crate::url_text::corpus::urls("sqlserver") {
             let (old, new) = (legacy_parse(&url), parse_mssql_url(&url).ok());
             match (old, new) {
-                (Some(o), Some(n)) if !crate::config::url::corpus::at_after_authority(&url) => {
+                (Some(o), Some(n)) if !crate::url_text::corpus::at_after_authority(&url) => {
                     assert_eq!(
                         (o.0, o.1, o.2, o.3, o.4),
                         (n.host, n.port, n.user, n.password, n.database),
@@ -1446,7 +1446,7 @@ mod tests {
                 (None, None) => same += 1,
                 _ => {
                     assert!(
-                        crate::config::url::corpus::at_after_authority(&url)
+                        crate::url_text::corpus::at_after_authority(&url)
                             || url.contains("u:p/w@")
                             || url.contains("u:p?w@")
                             || url.contains("u:p#w@"),
@@ -1466,7 +1466,7 @@ mod tests {
             "sqlserver://sa:pw@127.0.0.1:1433/db?x=@evil.com",
             "sqlserver://sa:pw@127.0.0.1:1433/db#@evil.com",
         ] {
-            let gate = crate::config::url::host_port_span(url);
+            let gate = crate::url_text::host_port_span(url);
             match parse_mssql_url(url) {
                 Ok(p) => assert!(
                     gate == format!("{}:{}", p.host, p.port) || gate == p.host,

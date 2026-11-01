@@ -36,7 +36,7 @@ seams:
       - {at: src/preflight/mod.rs::check, dated: 2026-10-31, reason: "looks the export up by name", closes: "route preflight check through RunSet::select"}
       - {at: src/preflight/mod.rs::load_type_reports, dated: 2026-10-31, reason: "drops backfill recipes by hand", closes: "route load type reports through RunSet::select"}
   - id: url-authority
-    owner: src/config/url.rs::host_port_span
+    owner: src/url_text.rs::host_port_span
     reads: "the userinfo and the host span of a connection URL"
     bypass:
       - "rsplit_once ( '@' )"

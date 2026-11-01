@@ -180,7 +180,7 @@ pub(super) fn pg_detail(e: &dyn std::error::Error) -> String {
 fn redact_pg_url(url: &str) -> String {
     let mut out = String::with_capacity(url.len());
     for word in url.split_inclusive(|c: char| c.is_ascii_whitespace()) {
-        let span = crate::config::url::credential_span(word, crate::config::url::Mask::Password);
+        let span = crate::url_text::credential_span(word, crate::url_text::Mask::Password);
         match span.and_then(|(start, at)| {
             let user = word.get(start..at)?.split(':').next()?;
             Some((word.get(..start)?, user, word.get(at..)?))
@@ -912,7 +912,7 @@ mod tests {
     fn redact_pg_url_masks_what_the_legacy_masker_masked_and_never_leaks_more() {
         let mut compared = 0;
         for scheme in ["postgresql", "postgres", "mysql", "sqlserver", "clickhouse"] {
-            for url in crate::config::url::corpus::urls(scheme) {
+            for url in crate::url_text::corpus::urls(scheme) {
                 for text in [
                     url.clone(),
                     format!("connecting to {url} then retry"),

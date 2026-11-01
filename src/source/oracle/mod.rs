@@ -113,7 +113,7 @@ pub(crate) fn parse_oracle_url(url: &str) -> Result<OracleUrl> {
     let authority = url
         .get(..9)
         .filter(|scheme| scheme.eq_ignore_ascii_case("oracle://"))
-        .and_then(|_| crate::config::url::authority(url))
+        .and_then(|_| crate::url_text::authority(url))
         .ok_or_else(|| {
             crate::error::coded(
                 crate::error::codes::CONFIG_SOURCE_URL_INVALID,

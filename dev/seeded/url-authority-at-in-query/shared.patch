@@ -1,6 +1,6 @@
---- a/src/config/url.rs
-+++ b/src/config/url.rs
-@@ -17,7 +17,7 @@
+--- a/src/url_text.rs
++++ b/src/url_text.rs
+@@ -15,7 +15,7 @@
  /// [`authority`] of the text after the scheme.
  fn split_authority(after: &str) -> Authority<'_> {
      let (authority, rest) = after.split_at(after.find(['/', '?', '#']).unwrap_or(after.len()));
