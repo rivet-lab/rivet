@@ -764,7 +764,12 @@ fn changelog_conflict(
              (the export's mode changed; ADR-0035). {restart}"
         ));
     }
+    let sorting_key = sorting_key.trim();
     let key: Vec<String> = sorting_key
+        .strip_prefix('(')
+        .and_then(|k| k.strip_suffix(')'))
+        .filter(|k| !k.contains(['(', ')']))
+        .unwrap_or(sorting_key)
         .split(',')
         .map(|c| c.trim().trim_matches('`').to_string())
         .filter(|c| !c.is_empty())
@@ -1325,6 +1330,28 @@ mod tests {
             ),
             None,
             "the catalog's spelling of the same key"
+        );
+        assert_eq!(
+            conflict(
+                &cdc,
+                &pk,
+                ("ReplacingMergeTree", "(`id`)"),
+                &cols,
+                &cdc_want
+            ),
+            None,
+            "a one-column key as ClickHouse 26 spells it"
+        );
+        assert!(
+            conflict(
+                &cdc,
+                &pk,
+                ("ReplacingMergeTree", "(id, toDate(at))"),
+                &cols,
+                &cdc_want
+            )
+            .is_some(),
+            "a key that is an expression is not this load's key"
         );
 
         let narrow = [("id", "Int64"), ("at", "Nullable(DateTime64(3, 'UTC'))")];
@@ -2008,7 +2035,7 @@ mod tests {
             "columns matched by name, the later version won"
         );
         let e = format!("{:#}", refused.expect_err("a NULL key must refuse"));
-        assert!(e.contains("`id`") && e.contains("NULL"), "{e}");
+        assert!(e.contains("id") && e.contains("NULL"), "{e}");
     }
 
     #[test]
