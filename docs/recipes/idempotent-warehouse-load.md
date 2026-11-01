@@ -119,11 +119,6 @@ releases**, not just within one build. So a re-extraction of the same window
 `MERGE` can dedup on by fingerprint alone. Two parts with the same
 `content_fingerprint` are byte-identical and interchangeable; drop one.
 
-One accepted exception: the first release after 0.32.2 changes the bytes of a
-nullable column that holds no NULL in a write call (decoded values are equal), so a
-part written by 0.32.2 and one written after it carry different fingerprints;
-dedup across that upgrade on the key.
-
 (The fingerprint is over file *bytes*, not logical rows — so it is stable for
 the same rows + schema + compression settings. Changing `compression:` or the
 column projection changes the bytes, hence the fingerprint.)

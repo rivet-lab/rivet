@@ -2679,6 +2679,23 @@ seeds:
         na: "the `;user=…;password=…` URL form is SQL Server's; the other engines' passwords sit in a userinfo the key already drops"
       oracle:
         na: "the `;user=…;password=…` URL form is SQL Server's; the other engines' passwords sit in a userinfo the key already drops"
+  - name: url-authority-at-in-query
+    class: "a connection URL read by its last `@` instead of the `@` inside its authority: an `@` in the query or fragment (`?application_name=svc@corp`) becomes the end of a userinfo, the host after it is the query text, and two hosts share one source state key, lease and resume progress"
+    history: "found 2026-10-31 by the roast duplication lens and confirmed by a rivet-verifier probe: `postgresql://h1:5432/a?application_name=svc@corp` and the same with h2 both keyed as `postgres://corp:5432`; closed 2026-11-01 by routing every reader through url_text::authority"
+    scope: source
+    patch: url-authority-at-in-query/shared.patch
+    engines:
+      postgres:
+        cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
+      mysql:
+        cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
+      mssql:
+        cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key, lib:an_at_sign_after_the_authority_stays_out_of_the_host, lib:the_loopback_gate_and_the_parser_dial_the_same_host]
+      mongo:
+        cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
+      oracle:
+        cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
+
   - name: mongo-standalone-uncoded
     class: "a server error that names a missing deployment prerequisite is passed up as the driver's raw dump instead of the coded prerequisite refusal"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6, row 808): `mode: cdc` on a standalone MongoDB exited 1 with `Error code 40573 … RawDocumentBuf { data: … }`, while `doctor` named it plainly, through 0.31.0; fixed by `names_standalone` in diagnose_stream_error"
@@ -3558,22 +3575,22 @@ seeds:
       oracle:
         na: "Oracle CDC tables are written OWNER.TABLE by init and LogMiner routes by that qualified name"
 
-  - name: parquet-write-call-pins-column-arena
-    class: "the Parquet writer is handed a whole batch per call, and parquet 59.1+ keeps the arena of every call's fixed-width columns (Oracle NUMBER(19), decimal(p>18), uuid) alive while a column chunk's min/max statistic lives, so a capped export's memory grows with the row count"
-    history: "2026-10-28 - found by the 0.32.2 gate (flat-rss[oracle/full_and_incremental_under_a_row_group_cap], 147 MiB at 5M rows against 107 at 1M) after #702 moved parquet to 60; bisected to parquet 59.0.0 green, 59.3.2 and 60.0.0 red"
+  - name: parquet-writer-bytes-move-from-release
+    class: "a writer property or an arrow/parquet version moves the bytes of the Parquet file written for the same rows, so a re-export differs from the release users run"
+    history: "2026-11-01 - parquet 60 (#702) moved the page grid of nullable columns without NULLs; owner decision option A: pin 59.0.0 and hold the v0.32.2 digests"
     scope: source
-    patch: parquet-write-call-pins-column-arena/shared.patch
+    patch: parquet-writer-bytes-move-from-release/shared.patch
     engines:
       postgres:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
       mysql:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
       mssql:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
       mongo:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
       oracle:
-        cells: ["lib:a_batch_is_written_in_mini_batch_calls_that_end_at_every_group_end"]
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
 
   - name: bigquery-transient-job-error-final
     class: "a BigQuery job that ends with a documented retryable errorResult.reason (backendError, internalError, jobBackendError, jobInternalError, rateLimitExceeded, jobRateLimitExceeded) is coded RIVET_LOAD_WAREHOUSE_REJECTED, exit 1, so a scheduler fails the task for good"
@@ -4374,6 +4391,28 @@ seeds:
         na: "SourceEngine, which orders a change log for a warehouse, has no Oracle variant, so no Oracle change log is ranked by this path"
       lib:
         cells: ["lib:a_mongo_position_orders_by_cluster_time_then_ordinal_then_token", "lib:mongo_orders_by_cluster_time_ordinal_then_token_and_partitions_by_id"]
+
+  - name: failed-first-load-owns-target
+    class: "a ledger row of a load that never succeeded (`failed`, `writing`) is read as ownership of the target, so a table someone created after a failed first load is overwritten or adopted without RIVET_LOAD_TARGET_NOT_RIVETS"
+    history: "issue #613, found 2026-10-08 verifying #611; owner decision 2026-10-28 (own only after the first successful load); RED on main 2026-10-31 (lib: the retry after a failed first full load reached the write over a table that appeared since)"
+    scope: source
+    patch: failed-first-load-owns-target/shared.patch
+    engines:
+      postgres:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      mysql:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      mssql:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      mongo:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      oracle:
+        na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
+      lib:
+        cells:
+          - "lib:a_retry_after_a_failed_first_load_refuses_a_table_that_appeared_since"
+          - "lib:a_table_is_rivets_own_only_after_its_first_successful_load"
+
   - name: clickhouse-paren-sorting-key
     class: "an existing ClickHouse change log's key is read from `system.tables.sorting_key` text without its tuple parentheses taken off, so ClickHouse 26's `(id)` reads as another key than `load.pk` and every CDC load into an existing log is refused RIVET_LOAD_TARGET_OBJECT_CONFLICT"
     history: "found 2026-10-31 by the ClickHouse version matrix (dev/clickhouse/version_matrix.py): every change-log cell red on 26.8 and 26.10, green on 24.8-26.3"
@@ -4393,3 +4432,26 @@ seeds:
       lib:
         cells:
           - "lib:an_existing_change_log_that_this_load_would_corrupt_is_refused"
+
+  - name: cleanup-removes-a-pointer-that-changed-hands
+    class: "`cleanup_source` removes a directory's canonical manifest.json and _SUCCESS on the strength of a read taken before the warehouse jobs ran, so an extract that commits during the jobs loses its markers and the dataset reads as not whole, exit 0"
+    history: "found 2026-11-01 by a rivet-verifier probe of cleanup_target_leased (canonical_run_id read once, maybe_cleanup removes unconditionally); RED on main 2026-11-01 (lib cell: r2's canonical manifest.json absent after the load cleaned r1)"
+    scope: source
+    patch: cleanup-removes-a-pointer-that-changed-hands/shared.patch
+    engines:
+      postgres:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      mysql:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      mssql:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      mongo:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      oracle:
+        na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
+      lib:
+        cells:
+          - "lib:a_run_committed_during_the_jobs_keeps_its_canonical_markers_through_cleanup"
+          - "lib:every_driver_leaves_a_canonical_pointer_that_changed_hands_during_the_jobs"
+          - "lib:a_stateless_cleanup_keeps_a_pair_committed_after_the_plan"
+          - "lib:a_canonical_unreadable_at_delete_time_stays_with_its_marker"

@@ -496,6 +496,15 @@ fn cleanup_source_never_deletes_parts_an_extract_committed_during_the_load() {
         "fixture is inert: no attempt committed an extract inside the load's window, so this \
          run proves nothing about the cleanup"
     );
+    let after_race = bq.gcs_objects();
+    for marker in ["manifest.json", "_SUCCESS"] {
+        assert!(
+            after_race
+                .iter()
+                .any(|n| n.rsplit('/').next() == Some(marker)),
+            "the committed run's {marker} must survive the load that raced it: {after_race:?}"
+        );
+    }
 
     // Everything the stream has acknowledged must still reach the warehouse.
     rig.run_ok();

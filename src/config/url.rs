@@ -1,36 +1,9 @@
-//! Pure readers of a connection URL: its host span, whether it stays on the box, and its `sslmode`.
+//! Pure readers of a connection URL: whether it stays on the box and its `sslmode`.
 
 use super::TlsConfig;
+use crate::url_text::host_port_span;
 
-/// Whether the host in a `scheme://[user[:pass]@]host[:port][/db][?…]`
-/// connection URL is a loopback address (`127.0.0.0/8`, `::1`) or the literal
-/// `localhost`.
-///
-/// Used by [`require_tls_or_loopback`] to decide TLS posture from the host:
-/// loopback is the docker / local-dev case where the bytes never leave the box,
-/// so plaintext is fine; a remote host without TLS leaks credentials and rows.
-///
-/// Fails **closed**: any URL we cannot confidently parse a loopback host out of
-/// is treated as non-loopback, so a parse gap can only ever *tighten* the gate
-/// (refuse a connection), never silently allow plaintext to an unverified host.
-/// The `host[:port][,host:port…]` span of a URL — scheme stripped, path/query
-/// dropped, `user[:pass]@` userinfo removed (rsplit the last `@` so an `@` in a
-/// password stays with the userinfo). Empty when the URL carries no authority.
-pub(crate) fn host_port_span(url: &str) -> &str {
-    let after_scheme = match url.split_once("://") {
-        Some((_, rest)) => rest,
-        None => url,
-    };
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    match authority.rsplit_once('@') {
-        Some((_, hp)) => hp,
-        None => authority,
-    }
-}
-
+/// Whether every host of a `scheme://[user[:pass]@]host[:port][/db][?…]` URL is loopback; fails closed on any URL it cannot confidently read.
 pub(crate) fn host_is_loopback(url: &str) -> bool {
     let host_port = host_port_span(url);
     // A comma seedlist (`host1:p1,host2:p2` — valid for MongoDB AND multi-host

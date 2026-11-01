@@ -78,19 +78,6 @@
   new fields continues from the same ledger. Rate limits (429) and 503/5xx answers are retried under the
   same request id, decided by the HTTP status and never by the message text.
 
-- **Parquet writer memory stays flat again under `target_row_group_mb` on wide fixed-width columns**
-  (Oracle `NUMBER(19)`, any `decimal(p>18)`, `uuid`): since the arrow and parquet 60 update (#702) the
-  library kept the whole arena of every write call alive for as long as a column chunk's min/max
-  statistic lived, so a capped Oracle export grew with the row count (147 MiB at 5M rows against
-  107 MiB at 1M). Rivet now hands the writer calls of at most 1024 rows that end at every row group end.
-  **Behaviour change:** the Parquet bytes of a nullable column that holds no NULL in a call differ from
-  0.32.2 (the library took one 20000-row mini-batch for such a column, so its dictionary fallback lands on
-  another row and the dictionary page sizes change; postgres/full `id`, 569109 to 549350 bytes). Decoded
-  values are identical, and non-nullable or NULL-bearing columns keep their bytes. A `content_fingerprint`
-  and a part checksum of the same rows therefore differ across this upgrade: a downstream dedup on the
-  fingerprint does not match a part written by 0.32.2. `rivet validate` and `--resume` work in both
-  directions across the upgrade (neither compares the fingerprint of another release); nothing needs
-  re-exporting.
 - **Homebrew moved to `brew install rivet-lab/tap/rivet`** (the tap is now `rivet-lab/homebrew-tap`;
   `panchenkoai/rivet/rivet` keeps working through GitHub's redirect). **On Linux the formula installs
   the glibc 2.28 build:** the one it installed before needed glibc 2.38+ and exited on Ubuntu 22.04,

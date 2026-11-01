@@ -2000,6 +2000,38 @@ mod tests {
         );
     }
 
+    /// A cursor stored under the key an `@` in the query used to produce is refused under the key of the same URL now, and `state accept` continues from it.
+    #[test]
+    fn a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted() {
+        let url = "postgresql://h1:5432/a?application_name=svc@corp";
+        let old = "postgres://corp:5432";
+        let now = crate::config::source_state_key(crate::config::SourceType::Postgres, url);
+        assert_eq!(now, "postgres://h1:5432/a");
+        let s = store();
+        s.update_with_column(&delivering(old, LANDING), "100")
+            .unwrap();
+        let said = refusal(
+            s.claim(delivering(&now, LANDING)),
+            "RIVET_STATE_CURSOR_SOURCE_RESPELLED",
+        );
+        for want in [
+            old,
+            now.as_str(),
+            "cursor `100`",
+            "`rivet state accept -c <config> --export orders` moves the progress from `postgres://corp:5432` to `postgres://h1:5432/a`",
+        ] {
+            assert!(said.contains(want), "{want}\n{said}");
+        }
+        assert_eq!(scopes(&s), [old], "a refusal writes nothing");
+        s.accept(&delivering(&now, LANDING)).unwrap();
+        assert_eq!(scopes(&s), [now.as_str()]);
+        let claim = s.claim(delivering(&now, LANDING)).unwrap();
+        assert_eq!(
+            claim.cursor().unwrap().last_cursor_value.as_deref(),
+            Some("100")
+        );
+    }
+
     /// The remedy for two servers works from the refused state: accept, reset, then a full pass is allowed; the progress it writes makes the old address the refused one.
     #[test]
     fn two_servers_sharing_a_destination_start_over_by_accept_then_reset() {

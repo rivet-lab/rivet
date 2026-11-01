@@ -104,3 +104,27 @@ scenarios:
     mssql:    { na: "parse_mssql_url refuses the string before any state write" }
     mongo:    { na: "the mongodb driver refuses the string before any state write" }
     oracle:   { na: "parse_oracle_url refuses the string before any state write" }
+
+  - id: at_sign_after_the_authority
+    what: "an `@` in a URL's query or fragment is not a userinfo end: two hosts never share a source state key, and the SQL Server parser and the loopback gate dial the same host."
+    postgres: { test: an_at_sign_after_the_authority_does_not_make_two_hosts_one_source }
+    mysql:    { test: an_at_sign_after_the_authority_does_not_make_two_hosts_one_source }
+    mssql:    { test: the_loopback_gate_and_the_parser_dial_the_same_host }
+    mongo:    { test: an_at_sign_after_the_authority_does_not_make_two_hosts_one_source }
+    oracle:   { test: an_at_sign_after_the_authority_does_not_make_two_hosts_one_source }
+
+  - id: at_sign_after_the_authority_upgrade
+    what: "a cursor stored by an earlier release under the key an `@` in the query produced is refused under the key of the same URL now with RIVET_STATE_CURSOR_SOURCE_RESPELLED, and `rivet state accept` continues from it."
+    postgres: { test: a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted }
+    mysql:    { test: a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted }
+    mssql:    { test: a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted }
+    mongo:    { test: a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted }
+    oracle:   { test: a_cursor_stored_under_the_old_at_in_query_key_is_refused_then_accepted }
+
+  - id: at_sign_after_the_authority_live
+    what: "two source URLs that differ before an `@` in their query are two sources: the second, delivered to a destination of its own, holds the table whole."
+    postgres: { test: two_hosts_with_an_at_in_the_query_are_two_sources_postgres }
+    mysql:    { na: "the MySQL driver refuses an unknown URL parameter, so no query tail can carry the `@`" }
+    mssql:    { na: "the SQL Server URL reads everything after the first `/` as the database, so a query tail names a database" }
+    mongo:    { na: "no live cell: the key of a mongodb:// URL with an `@` in its query is graded by the lib cell an_at_sign_after_the_authority_does_not_make_two_hosts_one_source" }
+    oracle:   { na: "parse_oracle_url takes the service name from the path and has no query tail" }

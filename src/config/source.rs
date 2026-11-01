@@ -338,12 +338,13 @@ impl SourceConfig {
             }
         }
         if let Some(ref raw) = out.url
-            && let Some((userinfo_end, scheme_end)) = find_userinfo(raw)
+            && let Some((userinfo, at)) =
+                crate::url_text::credential_span(raw, crate::url_text::Mask::AnyUserinfo)
         {
             let mut s = String::with_capacity(raw.len());
-            s.push_str(&raw[..scheme_end]); // "postgresql://"
+            s.push_str(&raw[..userinfo]);
             s.push_str("REDACTED");
-            s.push_str(&raw[userinfo_end..]); // "@host:port/db…"
+            s.push_str(&raw[at..]);
             out.url = Some(s);
             redacted = true;
         }
@@ -542,9 +543,7 @@ impl SourceConfig {
 
         let resolved = resolve_env_vars(&raw)?;
 
-        if resolved.contains('@')
-            && resolved.contains(':')
-            && let Some(userinfo) = resolved.split('@').next()
+        if let Some(userinfo) = crate::url_text::authority(&resolved).and_then(|a| a.userinfo)
             && userinfo.contains(':')
             && !userinfo.ends_with(':')
         {
@@ -660,30 +659,10 @@ impl SourceType {
     }
 }
 
-/// Locate `user[:password]@` userinfo inside a standard URL.
-///
-/// Returns `(userinfo_end_index, scheme_end_index)` where:
-/// - `scheme_end_index` points right after `"://"` (start of userinfo)
-/// - `userinfo_end_index` points at the `@` separator (exclusive of `@`)
-///
-/// Returns `None` if the URL has no userinfo segment.
-fn find_userinfo(raw: &str) -> Option<(usize, usize)> {
-    let scheme = raw.find("://")? + 3;
-    let rest = &raw[scheme..];
-    // The LAST `@` ends the userinfo when it sits in the authority or a `:` precedes
-    // it: a raw `${VAR}` password may hold `/ ? # @`. Only a `:`-free `@` past the
-    // authority (`host/db?filter=a@b`) is left in the path/query.
-    let at = rest.rfind('@')?;
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    (at < authority_end || rest[..at].contains(':')).then_some((scheme + at, scheme))
-}
-
 /// `engine://host:port/database` of `url`, credentials, query and fragment dropped; a keyword/value string keeps its pairs with the password masked.
 pub(crate) fn source_state_key(source_type: SourceType, url: &str) -> String {
-    // A keyword/value password may hold `@`, which would read as the end of a userinfo.
     let url = &crate::redact::redact_keyword_passwords(url);
-    let rest = url.split_once("://").map_or(url.as_str(), |(_, r)| r);
-    let rest = find_userinfo(url).map_or(rest, |(at, _)| &url[at + 1..]);
+    let rest = crate::url_text::server_and_path(url);
     let at_host = rest.split(['?', '#']).next().unwrap_or(rest);
     let key = format!("{source_type:?}://{}", at_host.trim_end_matches('/')).to_lowercase();
     canonical_source_key(&key)
@@ -795,6 +774,39 @@ mod tests {
             k,
             source_state_key(SourceType::Postgres, "postgresql://u@db.host:5432/other")
         );
+    }
+
+    #[test]
+    fn an_at_sign_after_the_authority_does_not_make_two_hosts_one_source() {
+        use super::{SourceType::*, source_state_key};
+        for (engine, scheme) in [
+            (Postgres, "postgresql"),
+            (Mysql, "mysql"),
+            (Mssql, "sqlserver"),
+            (Oracle, "oracle"),
+            (Mongo, "mongodb"),
+        ] {
+            for tail in [
+                "/a?application_name=svc@corp",
+                "/a?x=u:p@corp",
+                "/a#frag@corp",
+                "?k=v@corp",
+            ] {
+                let key = |host: &str, userinfo: &str| {
+                    source_state_key(engine, &format!("{scheme}://{userinfo}{host}:1234{tail}"))
+                };
+                for userinfo in ["", "u:pw@", "u@"] {
+                    let (h1, h2) = (key("h1", userinfo), key("h2", userinfo));
+                    assert_ne!(h1, h2, "{scheme} {userinfo} {tail}");
+                    let path = tail.split(['?', '#']).next().unwrap();
+                    assert_eq!(
+                        h1,
+                        format!("{engine:?}://h1:1234{path}").to_lowercase(),
+                        "{scheme} {userinfo} {tail}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1284,12 +1296,15 @@ mod tests {
         assert!(msg.contains("host"), "{msg}");
     }
 
-    // ── find_userinfo ────────────────────────────────────────────────────────
+    // ── credential_span ──────────────────────────────────────────────────────
+    fn any_userinfo(url: &str) -> Option<(usize, usize)> {
+        crate::url_text::credential_span(url, crate::url_text::Mask::AnyUserinfo)
+    }
 
     #[test]
-    fn find_userinfo_detects_password_in_url() {
+    fn any_userinfo_detects_password_in_url() {
         let url = "postgresql://user:pass@host/db";
-        let result = find_userinfo(url);
+        let result = any_userinfo(url);
         assert!(result.is_some(), "should detect user:pass@");
     }
 
@@ -1315,34 +1330,25 @@ mod tests {
     }
 
     #[test]
-    fn find_userinfo_no_password_no_at_returns_none() {
-        assert!(find_userinfo("postgresql://host/db").is_none());
+    fn any_userinfo_no_password_no_at_returns_none() {
+        assert!(any_userinfo("postgresql://host/db").is_none());
     }
 
     #[test]
-    fn find_userinfo_user_only_at_sign_matches() {
+    fn any_userinfo_user_only_at_sign_matches() {
         let url = "postgresql://user@host/db";
-        assert!(find_userinfo(url).is_some(), "bare user@ should match");
+        assert!(any_userinfo(url).is_some(), "bare user@ should match");
     }
 
     #[test]
-    fn find_userinfo_no_at_sign_returns_none() {
-        assert!(find_userinfo("postgresql://db.example.com:5432/app").is_none());
+    fn any_userinfo_no_at_sign_returns_none() {
+        assert!(any_userinfo("postgresql://db.example.com:5432/app").is_none());
     }
 
     // ── SEC-RED: embedded `@` in password must not leak to plan artifact ──────
 
     #[test]
     fn sec_artifact_redaction_password_with_at() {
-        // SEC-RED V7: find_userinfo (used by redact_for_artifact when building
-        // the persisted plan JSON) splits userinfo at the FIRST `@` via
-        // `rest.find('@')`, leaking the password tail after an embedded `@`.
-        // For `postgresql://rivet:p@ssw0rd@host/db` the first `@` sits right
-        // after `p`, so `userinfo_end` lands before `ssw0rd@host/db` and the
-        // rewrite emits `postgresql://REDACTED@ssw0rd@host/db` — the password
-        // tail `ssw0rd` round-trips into the artifact. The terminator must be
-        // the LAST `@` before the path (rfind semantics, as already used by
-        // redact_pg_url in state/mod.rs:564).
         let mut src = make_source(SourceType::Postgres);
         src.url = Some("postgresql://rivet:p@ssw0rd@db.example.com:5432/orders".into());
         let (redacted, flag) = src.redact_for_artifact();

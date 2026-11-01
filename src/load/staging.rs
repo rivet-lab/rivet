@@ -182,7 +182,7 @@ pub(super) fn cleanup_target_leased<'a>(
     runs: &[(String, crate::manifest::RunManifest)],
     writing: Option<&std::collections::HashSet<String>>,
 ) -> (
-    Option<(&'a crate::destination::gcs::GcsStore, Vec<String>)>,
+    Option<(&'a crate::destination::gcs::GcsStore, Cleanup)>,
     Option<crate::state::LoadLease<'a>>,
 ) {
     let (target, lease) = prefix_target_leased(plan, store, state);
@@ -220,12 +220,37 @@ fn join_key(dir: &str, name: &str) -> String {
     }
 }
 
-/// What `cleanup_source` deletes: the manifest and parts of every run read that nobody is still writing, plus a directory's canonical manifest and `_SUCCESS` when they describe one of those runs.
+/// What `cleanup_source` deletes: plain keys now, and a directory's canonical `manifest.json` and `_SUCCESS` only while that manifest still describes a cleaned run.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Cleanup {
+    pub(super) keys: Vec<String>,
+    canonical_dirs: Vec<String>,
+    runs: std::collections::HashSet<String>,
+}
+
+impl Cleanup {
+    /// A cleanup of exactly `keys`, with no canonical pointer to retire.
+    #[cfg(test)]
+    pub(super) fn plain(keys: Vec<String>) -> Self {
+        Self {
+            keys,
+            ..Self::default()
+        }
+    }
+
+    /// The directories whose canonical pointer is retired when it still names a cleaned run.
+    #[cfg(test)]
+    pub(super) fn canonical_dirs(&self) -> &[String] {
+        &self.canonical_dirs
+    }
+}
+
+/// The manifests, parts and (when they name a cleaned run) canonical pointers of every run read that nobody is still writing.
 pub(super) fn cleanup_keys(
     runs: &[(String, crate::manifest::RunManifest)],
     writing: &std::collections::HashSet<String>,
     canonical_run: impl Fn(&str) -> Option<String>,
-) -> Vec<String> {
+) -> Cleanup {
     let done: Vec<&(String, crate::manifest::RunManifest)> = runs
         .iter()
         .filter(|(_, m)| !writing.contains(&m.run_id))
@@ -233,16 +258,20 @@ pub(super) fn cleanup_keys(
     let ids: std::collections::HashSet<&str> =
         done.iter().map(|(_, m)| m.run_id.as_str()).collect();
     let mut keys = std::collections::BTreeSet::new();
+    let mut canonical_dirs = std::collections::BTreeSet::new();
     for (key, m) in done {
         keys.insert(key.clone());
         keys.extend(load::reconcile::resolve_parts(key, m));
         let dir = key.rsplit_once('/').map_or("", |(d, _)| d);
         if canonical_run(dir).is_some_and(|id| ids.contains(id.as_str())) {
-            keys.insert(join_key(dir, crate::manifest::MANIFEST_FILENAME));
-            keys.insert(join_key(dir, crate::manifest::SUCCESS_FILENAME));
+            canonical_dirs.insert(dir.to_string());
         }
     }
-    keys.into_iter().collect()
+    Cleanup {
+        keys: keys.into_iter().collect(),
+        canonical_dirs: canonical_dirs.into_iter().collect(),
+        runs: ids.into_iter().map(str::to_string).collect(),
+    }
 }
 
 /// [`cleanup_target`] under the prefix lease: the prefix to clean, or `None` when cleanup is off, refused, or the lease is held elsewhere.
@@ -370,9 +399,9 @@ pub(super) fn maybe_gc_orphans(
 /// data is loaded and gated, so a stuck delete must not fail the load. Cleanup
 /// deletes exactly the listed keys through an injected [`GcsStore`], so no
 /// adapter owns a delete path. Returns whether the source was actually cleaned.
-pub(super) fn maybe_cleanup(cleanup: Option<(&GcsStore, &[String])>) -> bool {
+pub(super) fn maybe_cleanup(cleanup: Option<(&GcsStore, &Cleanup)>) -> bool {
     match cleanup {
-        Some((store, keys)) => match keys.iter().try_for_each(|k| store.remove(k)) {
+        Some((store, cleanup)) => match remove_cleanup(store, cleanup) {
             Ok(()) => true,
             Err(e) => {
                 eprintln!(
@@ -384,6 +413,24 @@ pub(super) fn maybe_cleanup(cleanup: Option<(&GcsStore, &[String])>) -> bool {
         },
         None => false,
     }
+}
+
+/// Remove the plain keys, and each canonical pointer only when it still names a cleaned run at the moment of its delete.
+fn remove_cleanup(store: &GcsStore, cleanup: &Cleanup) -> anyhow::Result<()> {
+    let names_cleaned_run =
+        |dir: &str| canonical_run_id(store, dir).is_some_and(|id| cleanup.runs.contains(&id));
+    for dir in &cleanup.canonical_dirs {
+        if names_cleaned_run(dir) {
+            store.remove(&join_key(dir, crate::manifest::SUCCESS_FILENAME))?;
+        }
+    }
+    cleanup.keys.iter().try_for_each(|k| store.remove(k))?;
+    for dir in &cleanup.canonical_dirs {
+        if names_cleaned_run(dir) {
+            store.remove(&join_key(dir, crate::manifest::MANIFEST_FILENAME))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

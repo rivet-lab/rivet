@@ -229,6 +229,16 @@ impl Rig {
             .expect("oracle_container_out needs `.census_oracle()`/`.duckdb_oracle()`")
     }
 
+    /// Rewrites delivered part `part` in place through the DuckDB container that reads it; `select` reads the part's current rows as `src`.
+    pub fn rewrite_part(&self, part: &Path, select: &str) {
+        let container = self.oracle_container_out();
+        let name = part.file_name().unwrap().to_string_lossy().into_owned();
+        super::super::duckdb::duckdb_run_sql_json(&format!(
+            "CREATE TEMP TABLE src AS SELECT * FROM read_parquet('{container}/{name}'); \
+             COPY ({select}) TO '{container}/{name}' (FORMAT parquet)"
+        ));
+    }
+
     pub fn row_census(&self) -> super::super::duckdb::RowCensus {
         let container = self.oracle_container_dir.as_ref().expect(
             "row_census needs `.census_oracle()` — the DuckDB container reads \

@@ -4,8 +4,9 @@ pub(crate) mod postgres;
 pub(crate) mod tls;
 
 use crate::config::TlsConfig;
-use crate::config::url::{host_is_loopback, host_port_span};
+use crate::config::url::host_is_loopback;
 use crate::error::{Result, TlsHandshakeFailed};
+use crate::url_text::host_port_span;
 
 /// True when a rendered driver error names a failed TLS handshake or an untrusted certificate.
 pub(crate) fn is_tls_handshake_failure(text: &str) -> bool {
@@ -69,9 +70,7 @@ impl std::fmt::Display for UnreachableTarget {
 
 /// The `(host, port)` of a connection URL; the port is empty when the URL has none.
 fn url_host_port(url: &str) -> (String, String) {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
-    let hosts = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let hosts = host_port_span(url);
     let first = hosts.split(',').next().unwrap_or(hosts);
     match first.rsplit_once(':') {
         Some((h, p)) if !h.is_empty() && !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
@@ -277,6 +276,42 @@ mod connect_error_tests {
         );
         assert_eq!(hp("sqlserver://sa:p@[::1]:1433/db"), "::1|1433");
         assert_eq!(hp("localhost:5432"), "localhost|5432");
+    }
+
+    fn legacy_url_host_port(url: &str) -> (String, String) {
+        let rest = url.split_once("://").map_or(url, |(_, r)| r);
+        let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+        let hosts = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let first = hosts.split(',').next().unwrap_or(hosts);
+        match first.rsplit_once(':') {
+            Some((h, p))
+                if !h.is_empty() && !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                (h.trim_matches(['[', ']']).to_string(), p.to_string())
+            }
+            _ => (first.trim_matches(['[', ']']).to_string(), String::new()),
+        }
+    }
+
+    #[test]
+    fn host_and_port_are_the_legacy_reading_except_where_a_fragment_ends_the_authority() {
+        let (mut same, mut fragment) = (0, 0);
+        for (_, scheme) in crate::url_text::corpus::SOURCES {
+            for url in crate::url_text::corpus::urls(scheme) {
+                let (old, new) = (legacy_url_host_port(&url), url_host_port(&url));
+                if url.contains('#') && old != new {
+                    fragment += 1;
+                } else {
+                    assert_eq!(old, new, "{url}");
+                    same += 1;
+                }
+            }
+        }
+        assert!(same > 2500 && fragment > 0, "{same} {fragment}");
+        assert_eq!(
+            url_host_port("postgresql://h1:5432#f@corp:9"),
+            ("h1".to_string(), "5432".to_string())
+        );
     }
 
     #[test]

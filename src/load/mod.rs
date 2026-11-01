@@ -12,7 +12,7 @@
 use crate::destination::gcs::GcsStore;
 use crate::types::target::{TargetColumnSpec, TargetStatus};
 use anyhow::{Context, Result};
-use staging::maybe_cleanup;
+use staging::{Cleanup, maybe_cleanup};
 
 mod bigquery;
 pub(crate) mod bq_rest;
@@ -519,8 +519,10 @@ fn ensure_own(fqtn: &str, ownership: Ownership, verb: &str) -> Result<()> {
         Ownership::Foreign => crate::rivet_bail!(
             crate::error::codes::LOAD_TARGET_NOT_RIVETS,
             "refusing to {verb} `{fqtn}`: it exists, and this state DB's load ledger has no \
-             record of rivet loading it — it may hold someone else's data. Drop or rename it, \
-             or load into another table"
+             record of a successful rivet load into it — it may hold someone else's data, or \
+             what a first rivet load that never completed left behind (such a load consumed no \
+             run, so the next load delivers its rows again). Drop or rename it, or load into \
+             another table"
         ),
         Ownership::Unreadable => crate::rivet_bail!(
             crate::error::codes::LOAD_LEDGER_UNREADABLE,
@@ -710,7 +712,7 @@ pub fn run_load(
     specs: &[TargetColumnSpec],
     uris: &[String],
     expected_rows: Option<u64>,
-    cleanup: Option<(&GcsStore, &[String])>,
+    cleanup: Option<(&GcsStore, &Cleanup)>,
     ownership: Ownership,
 ) -> Result<LoadReport> {
     before_write(whole_table_preflight(
@@ -790,7 +792,7 @@ fn append_and_view(
     uris: &[String],
     pk: &[String],
     expected_delta: Option<u64>,
-    cleanup: Option<(&GcsStore, &[String])>,
+    cleanup: Option<(&GcsStore, &Cleanup)>,
     ownership: Ownership,
     rebuild_changelog: bool,
     label: &str,
@@ -1004,7 +1006,7 @@ pub fn run_load_cdc(
     pk: &[String],
     engine: cdc::SourceEngine,
     expected_delta: Option<u64>,
-    cleanup: Option<(&GcsStore, &[String])>,
+    cleanup: Option<(&GcsStore, &Cleanup)>,
     ownership: Ownership,
     rebuild_changelog: bool,
 ) -> Result<CdcLoadReport> {
@@ -1041,7 +1043,7 @@ pub fn run_load_buffer(
     uris: &[String],
     pk: &[String],
     expected_delta: Option<u64>,
-    cleanup: Option<(&GcsStore, &[String])>,
+    cleanup: Option<(&GcsStore, &Cleanup)>,
     ownership: Ownership,
     label: &str,
 ) -> Result<CdcLoadReport> {
@@ -1086,7 +1088,7 @@ pub fn run_load_incremental(
     pk: &[String],
     cursor_column: &str,
     expected_delta: Option<u64>,
-    cleanup: Option<(&GcsStore, &[String])>,
+    cleanup: Option<(&GcsStore, &Cleanup)>,
     ownership: Ownership,
     rebuild_changelog: bool,
 ) -> Result<CdcLoadReport> {
@@ -1449,6 +1451,8 @@ pub(crate) mod tests {
         writes: Journal,
         /// Runs at each `object_kind` probe: what a test observes, or dies at, mid-load.
         on_probe: Option<ProbeHook>,
+        /// Runs at each call that changes the warehouse: the extract that commits while the jobs run.
+        on_write: Option<ProbeHook>,
         /// The dialect the fake speaks; BigQuery when unset.
         dialect: Option<cdc::Warehouse>,
     }
@@ -1489,12 +1493,21 @@ pub(crate) mod tests {
             self
         }
 
+        /// Run `hook` at every call that changes the warehouse.
+        pub(crate) fn writing(mut self, hook: impl Fn(&str) + 'static) -> Self {
+            self.on_write = Some(Box::new(hook));
+            self
+        }
+
         /// The shared record of every call that changed the warehouse.
         pub(crate) fn writes(&self) -> Journal {
             self.writes.clone()
         }
 
         fn wrote(&self, what: String) {
+            if let Some(hook) = &self.on_write {
+                hook(&what);
+            }
             self.writes.borrow_mut().push(what);
         }
     }
@@ -1785,7 +1798,7 @@ pub(crate) mod tests {
         }
         let foreign = format!("{:#}", stops[0].1);
         assert!(
-            foreign.contains("no record of rivet loading it"),
+            foreign.contains("no record of a successful rivet load"),
             "{foreign}"
         );
 
@@ -1925,7 +1938,10 @@ pub(crate) mod tests {
             "{:#}",
             load_incremental_as(&f, Ownership::Foreign).unwrap_err()
         );
-        assert!(err.contains("no record of rivet loading it"), "{err}");
+        assert!(
+            err.contains("no record of a successful rivet load"),
+            "{err}"
+        );
         assert!(calls(&f).is_empty(), "nothing renamed or appended");
     }
 
@@ -2010,7 +2026,10 @@ pub(crate) mod tests {
 
         let foreign = full_load_left(5);
         let err = format!("{:#}", full_load(&foreign, Ownership::Foreign).unwrap_err());
-        assert!(err.contains("no record of rivet loading it"), "{err}");
+        assert!(
+            err.contains("no record of a successful rivet load"),
+            "{err}"
+        );
         assert!(foreign.materialized.borrow().is_empty());
 
         let viewed = FakeLoader {
@@ -2394,8 +2413,10 @@ pub(crate) mod tests {
                 5,
                 format!(
                     "refusing to {verb} `db.{name}`: it exists, and this state DB's load ledger \
-                     has no record of rivet loading it — it may hold someone else's data. Drop \
-                     or rename it, or load into another table"
+                     has no record of a successful rivet load into it — it may hold someone else's \
+                     data, or what a first rivet load that never completed left behind (such a \
+                     load consumed no run, so the next load delivers its rows again). Drop or \
+                     rename it, or load into another table"
                 ),
             ))
         };
@@ -2589,6 +2610,50 @@ pub(crate) mod tests {
         );
     }
 
+    /// A committed run `run` whose one part is `part`.
+    pub(crate) fn run_manifest(run: &str, part: &str) -> crate::manifest::RunManifest {
+        use crate::manifest::*;
+        RunManifest {
+            manifest_version: MANIFEST_VERSION,
+            run_id: run.into(),
+            export_name: "orders".into(),
+            export_family: "orders".into(),
+            mode: "cdc".into(),
+            started_at: "2026-08-21T00:00:00Z".into(),
+            finished_at: "2026-08-21T00:01:00Z".into(),
+            status: ManifestStatus::Success,
+            source: ManifestSource {
+                engine: "postgres".into(),
+                schema: Some("public".into()),
+                table: Some("orders".into()),
+                extraction: None,
+            },
+            destination: ManifestDestination {
+                kind: "gcs".into(),
+                uri: "gs://b/base".into(),
+            },
+            format: "parquet".into(),
+            compression: "zstd".into(),
+            schema_fingerprint: "xxh3:0123456789abcdef".into(),
+            row_count: 1,
+            part_count: 1,
+            parts: vec![ManifestPart {
+                part_id: 0,
+                path: part.into(),
+                rows: 1,
+                size_bytes: 1,
+                content_fingerprint: "xxh3:0123456789abcdef".into(),
+                content_md5: String::new(),
+                status: PartStatus::Committed,
+            }],
+            column_checksums: None,
+            checksum_render: None,
+            checksum_key_column: None,
+            row_hash: None,
+            split_window: None,
+        }
+    }
+
     /// The one-column spec, for a driver-level test in a sibling module.
     pub(crate) fn spec_ok() -> Vec<TargetColumnSpec> {
         spec(TargetStatus::Ok)
@@ -2610,6 +2675,136 @@ pub(crate) mod tests {
     /// The cleanup prefix the driver receives (a `gs://bucket/…` URI) and its
     /// bucket-relative form the fs store is keyed by.
     const REL: &str = "p";
+
+    /// Make `run` the directory's committed run at `REL`, the way an extract's commit leaves it.
+    fn commit_canonical(store: &GcsStore, run: &str) {
+        let bytes = serde_json::to_vec(&run_manifest(run, "x.parquet")).unwrap();
+        store
+            .put(
+                &format!("{REL}/{}", crate::manifest::MANIFEST_FILENAME),
+                &bytes,
+            )
+            .unwrap();
+        store
+            .put(
+                &format!("{REL}/{}", crate::manifest::SUCCESS_FILENAME),
+                crate::manifest::success_marker_body(&bytes).as_bytes(),
+            )
+            .unwrap();
+    }
+
+    /// A pointer another run takes over while a driver's warehouse jobs run survives that driver's cleanup, whichever driver it is.
+    #[test]
+    fn every_driver_leaves_a_canonical_pointer_that_changed_hands_during_the_jobs() {
+        type Driver = Box<dyn Fn(&FakeLoader, &Cleanup, &GcsStore)>;
+        let runs: [(&str, Driver); 4] = [
+            (
+                "full",
+                Box::new(|f, c, s| {
+                    run_load(
+                        f,
+                        "t",
+                        &spec(TargetStatus::Ok),
+                        &uris(),
+                        Some(10),
+                        Some((s, c)),
+                        Ownership::Own,
+                    )
+                    .unwrap();
+                }),
+            ),
+            (
+                "cdc",
+                Box::new(|f, c, s| {
+                    run_load_cdc(
+                        f,
+                        "t",
+                        &spec(TargetStatus::Ok),
+                        &uris(),
+                        &["id".into()],
+                        cdc::SourceEngine::MySql,
+                        Some(10),
+                        Some((s, c)),
+                        Ownership::Own,
+                        false,
+                    )
+                    .unwrap();
+                }),
+            ),
+            (
+                "incremental",
+                Box::new(|f, c, s| {
+                    run_load_incremental(
+                        f,
+                        "t",
+                        &spec(TargetStatus::Ok),
+                        &uris(),
+                        &["id".into()],
+                        "id",
+                        Some(10),
+                        Some((s, c)),
+                        Ownership::Own,
+                        false,
+                    )
+                    .unwrap();
+                }),
+            ),
+            (
+                "buffer",
+                Box::new(|f, c, s| {
+                    run_load_buffer(
+                        f,
+                        "t",
+                        &spec(TargetStatus::Ok),
+                        &uris(),
+                        &["id".into()],
+                        Some(10),
+                        Some((s, c)),
+                        Ownership::Own,
+                        "buffer",
+                    )
+                    .unwrap();
+                }),
+            ),
+        ];
+        for (driver, run) in runs {
+            let dir = tempfile::tempdir().unwrap();
+            let store = fs_store_with_prefix(&dir, REL);
+            commit_canonical(&store, "r1");
+            let racing = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+            let cleanup = staging::cleanup_keys(
+                &[(
+                    format!("{REL}/manifest-r1.json"),
+                    run_manifest("r1", "x.parquet"),
+                )],
+                &Default::default(),
+                |_| Some("r1".into()),
+            );
+            let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+            let seen = fired.clone();
+            let f = FakeLoader {
+                rows: 10,
+                ..Default::default()
+            }
+            .writing(move |_| {
+                seen.set(true);
+                commit_canonical(&racing, "r2");
+            });
+            run(&f, &cleanup, &store);
+            assert!(fired.get(), "{driver}: fixture is inert");
+            assert!(
+                store.read(&format!("{REL}/manifest.json")).is_ok_and(|b| {
+                    serde_json::from_slice::<crate::manifest::RunManifest>(&b)
+                        .is_ok_and(|m| m.run_id == "r2")
+                }),
+                "{driver}: r2's canonical manifest.json survives r1's cleanup"
+            );
+            assert!(
+                store.read(&format!("{REL}/_SUCCESS")).is_ok(),
+                "{driver}: r2's _SUCCESS survives r1's cleanup"
+            );
+        }
+    }
 
     /// Runs that declare rows but whose files are gone must never empty the table.
     #[test]
@@ -2702,7 +2897,7 @@ pub(crate) mod tests {
             &spec(TargetStatus::Ok),
             &uris(),
             Some(10),
-            Some((&store, &[format!("{REL}/x.parquet")][..])),
+            Some((&store, &Cleanup::plain(vec![format!("{REL}/x.parquet")]))),
             Ownership::Own,
         )
         .unwrap_err()
@@ -2728,7 +2923,7 @@ pub(crate) mod tests {
             &spec(TargetStatus::Ok),
             &uris(),
             Some(10),
-            Some((&store, &[format!("{REL}/x.parquet")][..])),
+            Some((&store, &Cleanup::plain(vec![format!("{REL}/x.parquet")]))),
             Ownership::Own,
         )
         .unwrap();
@@ -2796,7 +2991,7 @@ pub(crate) mod tests {
             &["id".into()],
             cdc::SourceEngine::MySql,
             Some(5),
-            Some((&store, &[format!("{REL}/x.parquet")][..])),
+            Some((&store, &Cleanup::plain(vec![format!("{REL}/x.parquet")]))),
             Ownership::Own,
             false,
         )
@@ -2863,7 +3058,7 @@ pub(crate) mod tests {
             &uris(),
             &["id".into()],
             Some(5),
-            Some((&store, &[format!("{REL}/x.parquet")][..])),
+            Some((&store, &Cleanup::plain(vec![format!("{REL}/x.parquet")]))),
             Ownership::Own,
             "CDC",
         )
@@ -2914,7 +3109,7 @@ pub(crate) mod tests {
             &["id".into()],
             cdc::SourceEngine::MySql,
             Some(5),
-            Some((&store, &[format!("{REL}/x.parquet")][..])),
+            Some((&store, &Cleanup::plain(vec![format!("{REL}/x.parquet")]))),
             Ownership::Own,
             false,
         )

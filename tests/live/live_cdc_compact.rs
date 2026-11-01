@@ -860,7 +860,10 @@ fn a_base_table_rivet_never_loaded_is_refused_before_any_write() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!out.status.success(), "a foreign base must refuse:\n{said}");
-    assert!(said.contains("no record of rivet loading it"), "{said}");
+    assert!(
+        said.contains("no record of a successful rivet load"),
+        "{said}"
+    );
     assert_eq!(
         bq.read_bq_count(&table),
         "1",
