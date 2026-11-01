@@ -37,7 +37,8 @@ const LEDGER_STATUSES: &[&str] = &[
 
 /// Seam bypass exceptions listed in docs/seams.yaml. Shrink-only.
 // 0 -> 34 (2026-10-31): first registry; 8 manifest-census, 9 run-set, 11 url-authority, 1 object-store-retry, 5 cdc-captured-tables; each closes with the fix named on its entry.
-const SEAM_EXCEPTION_CEILING: usize = 34; // ratchet-pin: seam-bypass-exceptions
+// 34 -> 23 (2026-11-01): the 11 url-authority exceptions closed by routing every reader through url_text.
+const SEAM_EXCEPTION_CEILING: usize = 23; // ratchet-pin: seam-bypass-exceptions
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

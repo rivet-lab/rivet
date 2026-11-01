@@ -110,20 +110,18 @@ pub(crate) fn parse_oracle_url(url: &str) -> Result<OracleUrl> {
     const FORM: &str = "oracle://USER@HOST:PORT/SERVICE, with :PASSWORD after USER \
                         (percent-encode @ : / ? # in the password)";
     let url = url.trim();
-    let rest = url
+    let authority = url
         .get(..9)
         .filter(|scheme| scheme.eq_ignore_ascii_case("oracle://"))
-        .map(|_| &url[9..])
+        .and_then(|_| crate::url_text::authority(url))
         .ok_or_else(|| {
             crate::error::coded(
                 crate::error::codes::CONFIG_SOURCE_URL_INVALID,
                 format!("oracle: URL must start with oracle:// — {FORM}"),
             )
         })?;
-    // The authority ends at the first '/', '?' or '#': the same reading as the
-    // credential redactor and the TLS gate, so all three see one host.
-    let (authority, path) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
-    let (userinfo, hostport) = authority.rsplit_once('@').ok_or_else(|| {
+    let (path, hostport) = (authority.rest, authority.hosts);
+    let userinfo = authority.userinfo.ok_or_else(|| {
         crate::error::coded(
             crate::error::codes::CONFIG_SOURCE_URL_INVALID,
             format!("oracle: URL needs a user before the host — {FORM}"),
