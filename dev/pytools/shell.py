@@ -138,6 +138,7 @@ def run(
             input=stdin,
             capture_output=quiet,
             text=True,
+            errors="replace",
             timeout=timeout,
             env=full_env,
             cwd=str(cwd) if cwd else None,
@@ -190,7 +191,7 @@ def capture(
 ) -> subprocess.CompletedProcess:
     """`subprocess.run` with text capture and `env` laid over the environment; a timeout raises."""
     return subprocess.run(
-        argv, capture_output=True, text=True, env={**os.environ, **(env or {})}, timeout=timeout
+        argv, capture_output=True, text=True, errors="replace", env={**os.environ, **(env or {})}, timeout=timeout
     )
 
 
@@ -332,6 +333,9 @@ def _self_test() -> int:
     import tempfile
 
     assert capture(["sh", "-c", "echo $SHELL_SELF_TEST"], env={"SHELL_SELF_TEST": "x"}).stdout == "x\n"
+    latin1 = run(["printf", r"a\350b"])
+    assert latin1.ok and latin1.stdout == "a\ufffdb", "a byte that is not UTF-8 must be read, not crash the caller"
+    assert capture(["printf", r"a\350b"]).stdout == "a\ufffdb"
     try:
         capture(["sleep", "5"], timeout=0.2)
         raise AssertionError("a timeout must raise")

@@ -1064,7 +1064,7 @@ impl CdcScenario {
         }
     }
 
-    /// MongoDB (replica set :27018): a fresh database, one collection, unpinned and
+    /// MongoDB (replica set :27018): a fresh database, one uniquely named collection, unpinned and
     /// shaped — see [`Self::mysql_with`]. The scenario's `_id`s are `i64`.
     pub fn mongo_with(label: &str, shape: impl FnOnce(Rig, &str) -> Rig) -> Self {
         Self::mongo_on(super::env::mongo_rs_port(), label, shape)
@@ -1072,7 +1072,7 @@ impl CdcScenario {
 
     /// [`Self::mongo_with`] on the replica set member listening on `PORT`.
     pub fn mongo_on(port: u16, label: &str, shape: impl FnOnce(Rig, &str) -> Rig) -> Self {
-        Self::mongo_collection_on(port, label, "t", shape)
+        Self::mongo_collection_on(port, label, &super::unique_name(label), shape)
     }
 
     /// [`Self::mongo_with`] with the collection named `collection`: a warehouse that every cell shares one schema of needs the table named per cell.
