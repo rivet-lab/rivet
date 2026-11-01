@@ -193,8 +193,8 @@ impl Selection {
 
     /// Refuse a selection that names no export or no table of `cfg`, listing what it could name.
     fn check(&self, cfg: &crate::config::Config) -> Result<()> {
-        let run_set = crate::pipeline::run_set::RunSet::select(cfg, None)?;
-        let loadable: Vec<&crate::config::ExportConfig> = run_set.declared().iter().collect();
+        let declared = crate::config::declared_exports(cfg, None)?;
+        let loadable: Vec<&crate::config::ExportConfig> = declared.iter().collect();
         if let Some(name) = self.export.as_deref()
             && !loadable.iter().any(|e| e.name == name)
         {

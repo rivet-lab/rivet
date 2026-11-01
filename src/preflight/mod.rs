@@ -378,10 +378,10 @@ pub fn check(
     let config = Config::load_with_params(config_path, params)?;
 
     let named = export_name
-        .map(|name| crate::pipeline::run_set::RunSet::select(&config, Some(name)))
+        .map(|name| crate::config::declared_exports(&config, Some(name)))
         .transpose()?;
     let exports: Vec<&ExportConfig> = match &named {
-        Some(run_set) => run_set.declared().iter().collect(),
+        Some(declared) => declared.iter().collect(),
         None => config.exports.iter().collect(),
     };
 
@@ -717,11 +717,11 @@ pub fn load_type_reports(
     crate::plan::load_settings::RecordedKeys,
 )> {
     let policy = TypePolicy::warn_only();
-    let run_set = crate::pipeline::run_set::RunSet::select(config, None)?;
+    let declared = crate::config::declared_exports(config, None)?;
     let mut out = Vec::with_capacity(config.exports.len());
     let mut keys = crate::plan::load_settings::RecordedKeys::new();
     let mut failures: Vec<String> = Vec::new();
-    for export in run_set.declared() {
+    for export in &declared {
         let units: Vec<Option<String>> = match export.multiplex_tables() {
             Some(tables) => tables.iter().cloned().map(Some).collect(),
             None => vec![None],

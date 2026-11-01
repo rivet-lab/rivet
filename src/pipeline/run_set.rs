@@ -27,28 +27,7 @@ const PARTITIONED_RUNS_IN_PROCESS: &str = "partition_by: --parallel-export-proce
 impl RunSet {
     /// Select `export_name`, or every export a whole-config invocation runs itself.
     pub(crate) fn select(config: &Config, export_name: Option<&str>) -> Result<Self> {
-        let declared = match export_name {
-            Some(name) => vec![
-                config
-                    .exports
-                    .iter()
-                    .find(|e| e.name == name)
-                    .ok_or_else(|| {
-                        crate::error::coded(
-                            crate::error::codes::CLI_EXPORT_UNKNOWN,
-                            format!("export '{}' not found in config", name),
-                        )
-                    })?
-                    .clone(),
-            ],
-            None => {
-                let recipes = backfill_recipes_to_skip(&config.exports);
-                crate::config::without_backfill_recipes(&config.exports, &recipes)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            }
-        };
+        let declared = crate::config::declared_exports(config, export_name)?;
         Ok(Self {
             declared,
             config_asks_children: config.parallel_export_processes,
@@ -117,21 +96,6 @@ impl RunSet {
             .filter(|(_, declared)| declared.len() > 1)
             .map(|(ok, _)| ok))
     }
-}
-
-/// The names a whole-config invocation must not run itself: each is a `mode: cdc` export's `backfill:` recipe.
-fn backfill_recipes_to_skip(exports: &[ExportConfig]) -> std::collections::HashSet<String> {
-    let recipes = crate::config::backfill_recipe_names(exports);
-    for e in exports.iter().filter(|e| recipes.contains(&e.name)) {
-        log::info!(
-            "export '{}': skipped — it is the backfill recipe of a `mode: cdc` export, \
-             which runs it after the anchor (run it alone with `-e {}` to export it on \
-             its own)",
-            e.name,
-            e.name
-        );
-    }
-    recipes
 }
 
 #[cfg(test)]

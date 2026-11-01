@@ -17,9 +17,10 @@ seams:
       - {at: src/source/cdc/validate.rs::check_positions, dated: 2026-10-31, reason: "own Success-only filter over run manifests", closes: "ManifestCensus exposes a success filter"}
       - {at: src/source/value_checksum.rs::split_unit_manifests, dated: 2026-10-31, reason: "confirmed defect: no Success filter, a failed unit manifest counts", closes: "ManifestCensus::split_units census fix PR"}
   - id: run-set
-    owner: src/pipeline/run_set.rs::RunSet
+    owner: src/config/cdc.rs::declared_exports
     reads: "the exports one invocation runs: one named export, or the whole config minus the CDC backfill recipes"
     scope: [src/pipeline/, src/cli/, src/preflight/, src/load/, src/plan/]
+    also_in: [src/pipeline/run_set.rs]
     bypass:
       - "backfill_recipe_names ("
       - "exports . iter ( ) . filter ( | e | e . name == name )"
