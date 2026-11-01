@@ -510,3 +510,107 @@ fn stdout_survives_child_processes_mongo() {
     };
     assert_stdout_survives_child_processes(&rig_of, 1);
 }
+
+/// `rivet validate` of a delivered `partition_by` tree: the control exits 0, a deleted partition does not.
+fn assert_validate_reads_every_partition(rig_of: &dyn Fn() -> Rig, col: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let rig = partitioned(rig_of(), col, root.path());
+    let run = rig.run_args(&[]);
+    assert!(run.status.success(), "run failed:\n{}", text_of(&run));
+    assert_eq!(delivered_tree(root.path()), fixture_tree(col));
+
+    let intact = rig.cli(&["validate", "--format", "json"]);
+    assert!(
+        intact.status.success(),
+        "control: validate of an intact partition tree must exit 0:\n{}",
+        text_of(&intact)
+    );
+    let verdicts = validate_verdicts(&intact);
+    assert_eq!(
+        verdicts.len(),
+        fixture_tree(col).len(),
+        "validate must verify one prefix per partition: {verdicts:?}"
+    );
+    assert!(
+        verdicts.values().all(|passed| *passed),
+        "control: every partition of an intact tree passes: {verdicts:?}"
+    );
+
+    let day = "2026-03-02";
+    let gone = format!("{col}={day}");
+    std::fs::remove_dir_all(root.path().join(&gone)).expect("delete one partition");
+    let broken = rig.cli(&["validate", "--format", "json"]);
+    assert!(
+        !broken.status.success(),
+        "validate must not exit 0 with partition `{gone}` deleted:\n{}",
+        text_of(&broken)
+    );
+    let verdicts = validate_verdicts(&broken);
+    let failed: Vec<&String> = verdicts
+        .iter()
+        .filter(|(_, passed)| !**passed)
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "exactly the deleted partition fails: {verdicts:?}"
+    );
+    assert!(
+        failed[0].ends_with(&format!("__{day}")),
+        "the failing verdict names the deleted partition: {failed:?}"
+    );
+}
+
+/// `export_name -> passed` of a `validate --format json` run.
+fn validate_verdicts(output: &std::process::Output) -> BTreeMap<String, bool> {
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", text_of(output)));
+    json["exports"]
+        .as_array()
+        .expect("exports array")
+        .iter()
+        .map(|e| {
+            (
+                e["export_name"].as_str().unwrap().to_string(),
+                e["verification"]["passed"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn validate_reads_every_partition_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = pg_partition_fixture();
+    assert_validate_reads_every_partition(&|| Rig::pg_batch(table.name()), "created_at");
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn validate_of_a_partition_gap_day_matches_run_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("run_set_gap");
+    pg_connect()
+        .batch_execute(&format!(
+            "CREATE TABLE {table} (id BIGINT PRIMARY KEY, created_at TIMESTAMP);
+             INSERT INTO {table} VALUES (1, '2026-03-01 10:00:00'), (2, '2026-03-03 10:00:00');"
+        ))
+        .expect("seed the gap fixture");
+    let table = PgTable::adopt(table);
+    let root = tempfile::tempdir().unwrap();
+    let rig = partitioned(Rig::pg_batch(table.name()), "created_at", root.path());
+    let run = rig.run_args(&[]);
+    assert!(run.status.success(), "run failed:\n{}", text_of(&run));
+    let validate = rig.cli(&["validate", "--format", "json"]);
+    eprintln!(
+        "GAP-TREE {:?}",
+        delivered_tree(root.path()).keys().collect::<Vec<_>>()
+    );
+    eprintln!(
+        "GAP-VERDICTS {:?} exit {:?}",
+        validate_verdicts(&validate),
+        validate.status.code()
+    );
+}

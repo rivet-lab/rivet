@@ -13,7 +13,7 @@ use super::partition_expand;
 pub(super) struct ChildProcessesOk(());
 
 /// The exports an invocation was asked for: one named export, or the whole config minus the CDC backfill recipes.
-pub(super) struct RunSet {
+pub(crate) struct RunSet {
     declared: Vec<ExportConfig>,
     /// The config's own `parallel_export_processes: true`.
     config_asks_children: bool,
@@ -26,7 +26,7 @@ const PARTITIONED_RUNS_IN_PROCESS: &str = "partition_by: --parallel-export-proce
 
 impl RunSet {
     /// Select `export_name`, or every export a whole-config invocation runs itself.
-    pub(super) fn select(config: &Config, export_name: Option<&str>) -> Result<Self> {
+    pub(crate) fn select(config: &Config, export_name: Option<&str>) -> Result<Self> {
         let declared = match export_name {
             Some(name) => vec![
                 config
@@ -55,13 +55,18 @@ impl RunSet {
         })
     }
 
+    /// The selected exports as declared, `partition_by` exports not yet expanded.
+    pub(crate) fn declared(&self) -> &[ExportConfig] {
+        &self.declared
+    }
+
     /// Whether a selected export is a `partition_by` export.
     fn is_partitioned(&self) -> bool {
         partition_expand::any_partitioned(&self.declared.iter().collect::<Vec<_>>())
     }
 
     /// The exports to run in this process: each `partition_by` export replaced by one export per bucket.
-    pub(super) fn in_process(
+    pub(crate) fn in_process(
         &self,
         source: &SourceConfig,
         config_dir: &Path,
