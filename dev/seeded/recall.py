@@ -23,6 +23,7 @@ import yaml
 
 from dev.release_oracle.core import Ledger, isolate_state_db, nextest_filter, nextest_outcomes, self_skipped
 from dev.release_oracle.live_modules import EXCLUSIVE_ENV, exclusive_tests, live_modules_env
+from dev.seeded import run_record
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -180,8 +181,8 @@ def git(cwd: Path, *args: str) -> str:
 
 
 def scratch_base() -> Path:
-    """Where the scratch worktree and its own target dir live (kept between runs so builds stay incremental)."""
-    return Path(os.environ.get("RIVET_SEEDED_DIR", ROOT / "target" / "seeded"))
+    """Where the scratch worktree, its own target dir and the run record live (kept between runs so builds stay incremental)."""
+    return run_record.seeded_dir()
 
 
 def prepare_tree(base: Path) -> tuple[Path, str]:
@@ -346,9 +347,9 @@ def not_graded_here_ceiling(matrix: Path = GATE_MATRIX) -> int:
     return row["not_graded_here_ceiling"]
 
 
-def record(led: Ledger, out: list[Verdict], ceiling: int | None = None) -> None:
-    """One ledger row per graded verdict: CAUGHT passes, N/A is not a row, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), anything else (MISSED, STALE, BROKEN, NO-CONTROL) fails the gate."""
-    here = []
+def record(led: Ledger, out: list[Verdict], ceiling: int | None = None) -> bool:
+    """One ledger row per graded verdict: CAUGHT passes, N/A is not a row, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), anything else (MISSED, STALE, BROKEN, NO-CONTROL) fails the gate; True when no row failed."""
+    here, green = [], True
     for v in out:
         msg = f"seeded {v.row.seed} × {v.row.engine}: {v.status} — {v.detail}"
         if v.status == CAUGHT:
@@ -358,18 +359,21 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None) -> None:
             here.append(f"{v.row.seed} × {v.row.engine}")
         elif v.status != NA:
             led.failed(v.row.engine, "seeded", v.row.seed, "-", msg)
+            green = False
     limit = not_graded_here_ceiling() if ceiling is None else ceiling
     if len(here) > limit:
         led.failed("-", "seeded", "not_graded_here", "-",
                    f"seeded recall: {len(here)} row(s) NOT-GRADED-HERE, over the gate matrix's ceiling of {limit} "
                    f"(docs/release-gate-matrix.yaml seeded_recall): a row whose cells now skip on this stand is new: "
                    + ", ".join(here))
+        green = False
     elif here:
         print(f"  {len(here)} row(s) NOT-GRADED-HERE (ceiling {limit}): " + ", ".join(here))
+    return green
 
 
-def recall(led: Ledger, rows: list[Row]) -> list[Verdict]:
-    """Grade every row: STALE check, one CONTROL run on the unpatched tree, then one build+run per patch."""
+def recall(led: Ledger, rows: list[Row], *, complete: bool = True) -> list[Verdict]:
+    """Grade every row: STALE check, one CONTROL run on the unpatched tree, then one build+run per patch; appends the run to the record."""
     t0 = time.perf_counter()
     led.phase("Seeded-defect recall — does the harness catch known bug classes re-introduced?")
     verdicts: dict[Row, Verdict] = {}
@@ -426,7 +430,9 @@ def recall(led: Ledger, rows: list[Row]) -> list[Verdict]:
             verdicts[r] = grade(r, control, seeded, control_skips)
 
     out = [verdicts.get(r) or grade(r, control, {}, control_skips) for r in rows]
-    record(led, out)
+    green = record(led, out)
+    dirty = bool(git(ROOT, "status", "--porcelain", "--untracked-files=no"))
+    run_record.append_run(base / run_record.RUNS_FILE, sha=sha, complete=complete, green=green, dirty=dirty)
     print(render(out))
     print(f"  seeded-defect recall took {(time.perf_counter() - t0) / 60:.1f} min; logs under {logs}")
     return out
@@ -538,13 +544,13 @@ def self_test() -> int:
     for n, red in ((limit, False), (limit + 1, True)):
         rows = [Verdict(Row(f"s{i}", "mysql", "p", ("t1",)), NOT_GRADED_HERE, "skipped") for i in range(n)]
         led = Ledger(colour=False)
-        record(led, rows)
+        assert record(led, rows) is (not red)
         assert sum(c.status.name == "SKIP" for c in led.cells) == n and led.red is red, (n, limit, led.cells)
     for status in (MISSED, STALE, BROKEN, NO_CONTROL):
         led = Ledger(colour=False)
-        record(led, [Verdict(pg, CAUGHT, "t2"), Verdict(Row("s", "mysql", "p", ()), status, "x"),
-                     Verdict(Row("s", "mongo", na="x"), NA, "x")], ceiling=0)
-        assert led.red and [c.status.name for c in led.cells] == ["PASS", "FAIL"], (status, led.cells)
+        green = record(led, [Verdict(pg, CAUGHT, "t2"), Verdict(Row("s", "mysql", "p", ()), status, "x"),
+                             Verdict(Row("s", "mongo", na="x"), NA, "x")], ceiling=0)
+        assert led.red and not green and [c.status.name for c in led.cells] == ["PASS", "FAIL"], (status, led.cells)
     real = parse_manifest(yaml.safe_load(MANIFEST.read_text()))
     assert not unknown_cells(real), unknown_cells(real)
     saved = os.environ.get("RIVET_GATE_STATE_URL")
@@ -586,7 +592,12 @@ def self_test() -> int:
         if p.returncode != 0:
             stale.append(stale_message(patch.split("/")[0], (HERE / patch).read_text(), p.stdout))
     assert not stale, "a seed that no longer applies is a STALE row in the gate; re-cut it on this tree: " + "; ".join(stale)
-    print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, stale and build checks")
+    with tempfile.TemporaryDirectory() as td:
+        rec = Path(td) / "sub" / run_record.RUNS_FILE
+        assert "no seeded-recall record" in run_record.refusal("a" * 40, rec)
+        run_record.append_run(rec, sha="a" * 40, complete=True, green=True, dirty=False)
+        assert run_record.refusal("a" * 40, rec) is None and run_record.refusal("b" * 40, rec) is not None, "a written run must be the one the tag rule reads"
+    print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, stale and build checks, run record")
     return 0
 
 
@@ -601,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
         return self_test()
     rows = select(parse_manifest(yaml.safe_load(MANIFEST.read_text())), ns.seeds, ns.engines)
     led = Ledger()
-    recall(led, rows)
+    recall(led, rows, complete=not (ns.seeds or ns.engines))
     return 1 if led.red else 0
 
 
