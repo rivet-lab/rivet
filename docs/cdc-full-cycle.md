@@ -85,6 +85,11 @@ skips the stream and the recipe, saying so — on the §1 config that leaves not
 to plan and it exits non-zero with "nothing to plan" (expected — not a fault in
 the config); with a plain batch export alongside it plans that one and exits 0.
 
+A whole-config `check` and `doctor` take the same exports `run` runs: the recipe is
+the stream's baseline read, not an export of its own, so neither lists it nor probes
+its destination (the baseline leg takes the recipe's read settings only). Name it
+with `rivet check --export <recipe>` to grade it alone.
+
 ## 3. Run 1 — anchor, then baseline — then load 1
 
 ```sh

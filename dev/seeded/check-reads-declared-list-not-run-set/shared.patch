@@ -1,0 +1,56 @@
+--- a/src/preflight/mod.rs
++++ b/src/preflight/mod.rs
+@@ -377,8 +377,13 @@
+ ) -> Result<bool> {
+     let config = Config::load_with_params(config_path, params)?;
+ 
+-    let declared = crate::config::declared_exports(&config, export_name)?;
+-    let exports: Vec<&ExportConfig> = declared.iter().collect();
++    let named = export_name
++        .map(|name| crate::config::declared_exports(&config, Some(name)))
++        .transpose()?;
++    let exports: Vec<&ExportConfig> = match &named {
++        Some(declared) => declared.iter().collect(),
++        None => config.exports.iter().collect(),
++    };
+ 
+     // A preflight must never bless a config the RUNNER refuses.
+     //
+--- a/src/preflight/doctor.rs
++++ b/src/preflight/doctor.rs
+@@ -218,7 +218,7 @@
+     }
+ 
+     let mut seen_destinations: Vec<String> = Vec::new();
+-    for export in &crate::config::declared_exports(&config, None)? {
++    for export in &config.exports {
+         let dest_key = super::destination_identity(&export.destination);
+         if seen_destinations.contains(&dest_key) {
+             continue;
+--- a/src/cli/dispatch.rs
++++ b/src/cli/dispatch.rs
+@@ -599,8 +599,13 @@
+     let config_dir = std::path::Path::new(config_path)
+         .parent()
+         .unwrap_or_else(|| std::path::Path::new("."));
+-    let run_set = crate::pipeline::run_set::RunSet::select(&config, export_name)?;
+-    let selected = run_set.declared();
++    let named = export_name
++        .map(|name| crate::pipeline::run_set::RunSet::select(&config, Some(name)))
++        .transpose()?;
++    let selected: Vec<&crate::config::ExportConfig> = match &named {
++        Some(run_set) => run_set.declared().iter().collect(),
++        None => config.exports.iter().collect(),
++    };
+     let mut probe = if config.source.columns_from_grants() {
+         Some(
+             crate::source::create_source(&config.source)
+@@ -611,7 +616,7 @@
+     };
+     let mut plans = Vec::new();
+     for e in selected
+-        .iter()
++        .into_iter()
+         .filter(|e| e.mode != crate::config::ExportMode::Cdc)
+     {
+         let plan = crate::plan::build::build_plan_on(

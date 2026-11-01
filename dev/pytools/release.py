@@ -87,6 +87,8 @@ ACTIONS_URL = "https://github.com/rivet-lab/rivet/actions/workflows/release.yml"
 GATE_RECORD = ROOT / "dev" / "release-oracle" / "timings.jsonl"
 #: The only gate kind whose green verdict supports a tag (dev/release_oracle/core.py FULL_GATE).
 FULL_GATE = "release-oracle-full"
+#: The configuration a full gate runs under: no bless mode, no tolerance override, both state backends graded.
+CANONICAL_CONFIG: dict = {"bless": [], "knobs": {}, "state": ["postgres", "sqlite"]}
 
 
 class _Usage(Exception):
@@ -236,8 +238,13 @@ def changelog_subtitle(version: str, changelog: Path = CHANGELOG) -> str:
 
 
 # ── the gate's verdict ─────────────────────────────────────────────────────────
+def binary_is_tree(stamp: object, sha: str) -> bool:
+    """Is a binary stamped `stamp` (the commit `rivet --version` prints) built from the commit `sha`?"""
+    return isinstance(stamp, str) and stamp != "" and sha.startswith(stamp)
+
+
 def gate_refusal(sha: str, record: Path) -> str | None:
-    """Why `sha` may not be tagged by the gate record, or None when its latest full-gate run is RELEASE-READY on a clean tree."""
+    """Why `sha` may not be tagged by the gate record, or None when its latest full-gate run is RELEASE-READY on a clean tree with a binary built from `sha`, under the canonical configuration."""
     if not record.is_file():
         return f"no gate record at {record}"
     runs, reduced = [], 0
@@ -260,6 +267,12 @@ def gate_refusal(sha: str, record: Path) -> str | None:
         return f"the latest {FULL_GATE} run of {sha[:12]} ({last.get('at')}) graded a tree with uncommitted changes"
     if last.get("verdict") != "RELEASE-READY":
         return f"the latest {FULL_GATE} run of {sha[:12]} ({last.get('at')}) says {last.get('verdict')}"
+    if not binary_is_tree(last.get("binary"), sha):
+        return (f"the latest {FULL_GATE} run of {sha[:12]} ({last.get('at')}) graded a binary stamped "
+                f"{last.get('binary')!r}, not this commit")
+    if last.get("config") != CANONICAL_CONFIG:
+        return (f"the latest {FULL_GATE} run of {sha[:12]} ({last.get('at')}) ran under {last.get('config')!r}, "
+                f"not the canonical configuration {CANONICAL_CONFIG!r}")
     return None
 
 
@@ -292,7 +305,7 @@ def self_test() -> int:
     sha, other = "a" * 40, "b" * 40
 
     def rec(**kw) -> str:
-        base = {"at": "t", "sha": sha, "gate": FULL_GATE, "dirty": False, "verdict": "RELEASE-READY"}
+        base = {"at": "t", "sha": sha, "binary": sha[:9], "gate": FULL_GATE, "config": CANONICAL_CONFIG, "dirty": False, "verdict": "RELEASE-READY"}
         return json.dumps({**base, **kw})
 
     cases = [
@@ -304,6 +317,15 @@ def self_test() -> int:
         ([rec(verdict="NOT GRADED")], "says NOT GRADED"),
         ([rec(dirty=True)], "uncommitted changes"),
         ([rec(dirty=None)], "uncommitted changes"),
+        ([rec(binary=other[:9])], "graded a binary stamped"),
+        ([rec(binary="")], "graded a binary stamped"),
+        ([rec(binary=None)], "graded a binary stamped"),
+        ([rec(binary="unknown")], "graded a binary stamped"),
+        ([rec(binary=sha[:7])], None),
+        ([rec(config=None)], "not the canonical configuration"),
+        ([rec(config={"bless": ["gifs"], "knobs": {}, "state": ["postgres", "sqlite"]})], "not the canonical configuration"),
+        ([rec(config={"bless": [], "knobs": {"RIVET_PERF_WALL_TOL": "10"}, "state": ["postgres", "sqlite"]})], "not the canonical configuration"),
+        ([rec(config={"bless": [], "knobs": {}, "state": ["sqlite"]})], "not the canonical configuration"),
         ([rec(), rec(verdict="NOT RELEASABLE")], "says NOT RELEASABLE"),
         (["not json", rec()], None),
         ([rec(verdict="NOT RELEASABLE"), rec(), rec(gate="release-oracle", verdict="NOT RELEASABLE")], None),

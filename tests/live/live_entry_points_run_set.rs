@@ -4,6 +4,9 @@
 //! The delivered side is re-read from the destination (Parquet parts per directory, stdout
 //! bytes) and compared with the fixture the test wrote into the source.
 //!
+//! `check` and `doctor` of a whole config describe that same set: a `cdc.backfill` recipe is the
+//! read recipe of its stream, never an export of its own.
+//!
 //! `rivet apply` has no stdout cell: it prints its wave headers on stdout as well, so no reader
 //! can take an export's bytes out of it.
 
@@ -731,5 +734,125 @@ fn validate_prefix_of_a_partitioned_export_verifies_that_directory_postgres() {
         !gone.status.success(),
         "a pinned prefix with no dataset must fail:\n{}",
         text_of(&gone)
+    );
+}
+
+/// The `export` of every NDJSON object `check --json` printed.
+fn checked_export_names(output: &std::process::Output) -> BTreeSet<String> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .map(|v| {
+            v["export"]
+                .as_str()
+                .or_else(|| v["export_name"].as_str())
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+/// A whole-config `check` and `doctor` describe the stream, not its recipe; named with `-e`, the recipe is still described.
+fn assert_check_and_doctor_describe_the_declared_exports(scn: &CdcScenario) {
+    let stream = scn.table.as_str();
+    let header = |t: &str, name: &str| t.lines().any(|l| l.starts_with(&format!("Export: {name}")));
+
+    let whole = text_of(&scn.rig.cli(&["check"]));
+    assert!(
+        header(&whole, stream),
+        "control: the stream is described:\n{whole}"
+    );
+    assert!(
+        !header(&whole, "baseline"),
+        "a whole-config check must not describe the backfill recipe as an export:\n{whole}"
+    );
+
+    let json = scn.rig.cli(&["check", "--json"]);
+    assert_eq!(
+        checked_export_names(&json),
+        BTreeSet::from([stream.to_string()]),
+        "check --json describes the stream only:\n{}",
+        text_of(&json)
+    );
+
+    let named = text_of(&scn.rig.cli(&["check", "-e", "baseline"]));
+    assert!(
+        header(&named, "baseline"),
+        "named with -e, the recipe is still described:\n{named}"
+    );
+    assert!(
+        !header(&named, stream),
+        "-e baseline describes the recipe alone:\n{named}"
+    );
+
+    let doctor = text_of(&scn.rig.cli(&["doctor"]));
+    let probed = doctor.matches("Destination Local(").count();
+    assert_eq!(
+        probed, 1,
+        "doctor probes the stream's destination, not the recipe's unused one:\n{doctor}"
+    );
+}
+
+#[cfg(feature = "oracle")]
+fn backfilled_oracle(rig: Rig, table: &str) -> Rig {
+    rig.cdc("backfill: auto")
+        .also_batch_export("baseline", &format!("RIVET.{table}"), "full")
+}
+
+fn backfilled(rig: Rig, table: &str) -> Rig {
+    rig.cdc("backfill: auto")
+        .also_batch_export("baseline", table, "full")
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres-cdc"]
+fn check_and_doctor_describe_the_declared_exports_postgres() {
+    let scn = CdcScenario::pg_with("ck_decl", "id BIGINT PRIMARY KEY, v INT", backfilled);
+    assert_check_and_doctor_describe_the_declared_exports(&scn);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql-cdc"]
+fn check_and_doctor_describe_the_declared_exports_mysql() {
+    let scn = CdcScenario::mysql_with("ck_decl", "id BIGINT PRIMARY KEY, v INT", backfilled);
+    assert_check_and_doctor_describe_the_declared_exports(&scn);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql-cdc with SQL Server Agent"]
+fn check_and_doctor_describe_the_declared_exports_mssql() {
+    let scn = CdcScenario::mssql_with("ck_decl", "id INT PRIMARY KEY, v INT", backfilled);
+    assert_check_and_doctor_describe_the_declared_exports(&scn);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo-rs"]
+fn check_and_doctor_describe_the_declared_exports_mongo() {
+    let mut scn = CdcScenario::mongo_with("ck_decl", backfilled);
+    scn.insert(1);
+    assert_check_and_doctor_describe_the_declared_exports(&scn);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn check_and_doctor_describe_the_declared_exports_oracle() {
+    let scn = CdcScenario::oracle_with("ck_decl", backfilled_oracle);
+    assert_check_and_doctor_describe_the_declared_exports(&scn);
+}
+
+/// The `--target` note counts the columns of the tables the load creates: one table, one refused column, one count.
+#[test]
+#[ignore = "live: requires docker compose postgres-cdc"]
+fn check_target_note_counts_a_refused_column_once_per_loaded_table_postgres() {
+    let scn = CdcScenario::pg_with(
+        "ck_tally",
+        "id BIGINT PRIMARY KEY, big NUMERIC(50,0)",
+        backfilled,
+    );
+    let said = text_of(&scn.rig.cli(&["check", "--target", "bigquery"]));
+    assert!(
+        said.contains("Note: 1 column FAIL bigquery compatibility"),
+        "the recipe's report must not count the same column a second time:\n{said}"
     );
 }
