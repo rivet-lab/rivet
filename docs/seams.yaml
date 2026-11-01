@@ -10,12 +10,6 @@ seams:
     exceptions:
       - {at: src/load/reconcile.rs::is_run_unique_manifest, dated: 2026-10-31, reason: "name wrapper feeding is_manifest_key for the GCS lister", closes: "ManifestCensus owns the name test; call it from fetch_manifests_keyed"}
       - {at: src/pipeline/manifest_reconcile.rs::reconcile_manifest_against_listing, dated: 2026-10-31, reason: "name filter of the untracked-object scan, not a manifest read", closes: "ManifestCensus exposes the run-unique name test"}
-      - {at: src/pipeline/split.rs::completed_units_in_prefix, dated: 2026-10-31, reason: "own status and window filters over read_unit_manifests", closes: "ManifestCensus::split_units census fix"}
-      - {at: src/pipeline/split.rs::completed_units_tile, dated: 2026-10-31, reason: "confirmed defect: no family filter over read_unit_manifests, a foreign family tiles the range", closes: "ManifestCensus::split_units census fix PR"}
-      - {at: src/pipeline/split.rs::try_read_unit_manifests, dated: 2026-10-31, reason: "the shared lister of unit manifests under a prefix", closes: "ManifestCensus takes this listing as its input"}
-      - {at: src/pipeline/validate_manifest.rs::read_sibling_manifests, dated: 2026-10-31, reason: "sanctioned I/O feeder reading sibling manifests for ManifestCensus", closes: "ManifestCensus owns the listing and the parse"}
-      - {at: src/source/cdc/validate.rs::check_positions, dated: 2026-10-31, reason: "own Success-only filter over run manifests", closes: "ManifestCensus exposes a success filter"}
-      - {at: src/source/value_checksum.rs::split_unit_manifests, dated: 2026-10-31, reason: "confirmed defect: no Success filter, a failed unit manifest counts", closes: "ManifestCensus::split_units census fix PR"}
   - id: run-set
     owner: src/config/cdc.rs::declared_exports
     reads: "the exports one invocation runs: one named export, or the whole config minus the CDC backfill recipes"

@@ -219,55 +219,26 @@ pub(crate) fn probe_and_synthesize(
     Ok(Some(synthesize(giant, &key, &bounds)))
 }
 
-/// The set of split-unit export names that ALREADY completed into the shared
-/// prefix — a unit is complete iff it left a run-unique manifest COPY with status
-/// `Success` (the durable, mode-agnostic, cloud-safe completion signal; a crashed
-/// unit never finalizes one). `--pool --split --resume` reads this ONCE per giant
-/// and skips the named units, re-running only the rest (#167 per-unit resume).
-///
-/// `dest_config` is the giant's destination; it is expanded with the FAMILY (the
-/// same `{export}`→family resolution `build_plan` does for a split unit) so it
-/// points at the ONE shared prefix. Best-effort: any listing/read/parse failure
-/// yields an empty set (the unit is treated as incomplete and re-run — safe,
-/// never a skip that could drop data). Read-only.
-/// Read every run-unique unit manifest under the split prefix — the shared listing
-/// scaffolding both [`completed_units_in_prefix`] and [`reconstruct_units_from_prefix`]
-/// need (expand the destination for today's family, list the prefix, parse each
-/// `manifest-<run_id>.json`). A dest/list/read/parse failure yields an empty vec; both
-/// callers read "nothing found" as "no prior split". Read-only.
-fn read_unit_manifests(
+/// Read every run-unique manifest copy under the split prefix of `family`, keyed by object key.
+/// An `Err` is a LISTING/OPEN failure, distinct from "listed fine, zero manifests": reconstruction
+/// refuses on it, while the skip set reads it as "nothing completed" and re-runs.
+fn list_split_prefix(
     dest_config: &crate::config::DestinationConfig,
     family: &str,
-) -> Vec<crate::manifest::RunManifest> {
-    try_read_unit_manifests(dest_config, family).unwrap_or_default()
-}
-
-/// The strict twin: an Err is a LISTING/OPEN failure, distinct from "listed
-/// fine, zero unit manifests". `reconstruct_units_from_prefix` must tell them
-/// apart (round-5 lifecycle): its `None` contract means "genuine first run —
-/// caller re-samples", and re-sampling because a cloud listing BLIPPED is the
-/// original finding-2 silent gap resurrected by a transient error (fresh
-/// boundaries + name-based skip over old-window Success units). Skip-callers
-/// keep the lenient shape — an empty skip set merely re-runs everything.
-fn try_read_unit_manifests(
-    dest_config: &crate::config::DestinationConfig,
-    family: &str,
-) -> anyhow::Result<Vec<crate::manifest::RunManifest>> {
-    use crate::manifest::{RunManifest, is_run_unique_manifest_name};
+) -> anyhow::Result<Vec<(String, crate::manifest::RunManifest)>> {
+    use crate::manifest::RunManifest;
     let ctx = crate::destination::placeholder::PlaceholderContext::for_today(family);
     let expanded = crate::destination::placeholder::expand_destination(dest_config.clone(), &ctx);
     let dest = crate::destination::create_destination(&expanded)?;
-    let listing = dest.list_prefix("")?;
     let mut out = Vec::new();
-    for meta in listing {
-        let base = meta.key.rsplit('/').next().unwrap_or("");
-        if !is_run_unique_manifest_name(base) {
+    for meta in dest.list_prefix("")? {
+        if !crate::manifest::census::is_copy_key(&meta.key) {
             continue;
         }
         if let Ok(bytes) = dest.read(&meta.key)
             && let Ok(m) = serde_json::from_slice::<RunManifest>(&bytes)
         {
-            out.push(m);
+            out.push((meta.key, m));
         }
     }
     Ok(out)
@@ -352,20 +323,16 @@ pub(crate) fn completed_units_tile(
     dest_config: &crate::config::DestinationConfig,
     family: &str,
 ) -> bool {
-    use crate::manifest::ManifestStatus;
-    let mut latest: std::collections::BTreeMap<usize, crate::manifest::RunManifest> =
+    let keyed = list_split_prefix(dest_config, family).unwrap_or_default();
+    let census = crate::manifest::census::ManifestCensus::new(&keyed);
+    let mut latest: std::collections::BTreeMap<usize, &crate::manifest::RunManifest> =
         Default::default();
-    for m in read_unit_manifests(dest_config, family) {
-        if m.status != ManifestStatus::Success || m.split_window.is_none() {
+    for run in census.completed_split_units(family) {
+        let m = run.manifest;
+        if m.split_window.is_none() {
             continue;
         }
-        // Ordinal from the LAST `#` — the caller (repair) knows only the
-        // FAMILY, and a unit's name is `{giant}#{ord}` for a giant in it.
-        let Some(ord) = m
-            .export_name
-            .rsplit_once('#')
-            .and_then(|(_, s)| s.parse::<usize>().ok())
-        else {
+        let Some(ord) = run.unit_index().and_then(|s| s.parse::<usize>().ok()) else {
             continue;
         };
         match latest.get(&ord) {
@@ -408,11 +375,11 @@ pub(crate) fn completed_units_in_prefix(
     dest_config: &crate::config::DestinationConfig,
     family: &str,
 ) -> std::collections::BTreeSet<String> {
-    use crate::manifest::ManifestStatus;
-    read_unit_manifests(dest_config, family)
+    let keyed = list_split_prefix(dest_config, family).unwrap_or_default();
+    crate::manifest::census::ManifestCensus::new(&keyed)
+        .completed(family)
         .into_iter()
-        .filter(|m| matches!(m.status, ManifestStatus::Success))
-        .map(|m| m.export_name)
+        .map(|run| run.manifest.export_name.clone())
         .collect()
 }
 
@@ -469,7 +436,7 @@ pub(crate) fn reconstruct_units_from_prefix(
     // completed-units listing would then name-skip old-window units — the
     // finding-2 silent gap, resurrected by one transient cloud error
     // (round-5 lifecycle). Refuse loudly; a resume can be retried.
-    let manifests = try_read_unit_manifests(dest_config, family).map_err(|e| {
+    let keyed = list_split_prefix(dest_config, family).map_err(|e| {
         crate::error::coded(
             crate::error::codes::DEST_PREFIX_UNLISTABLE,
             format!(
@@ -480,6 +447,7 @@ pub(crate) fn reconstruct_units_from_prefix(
             ),
         )
     })?;
+    let manifests = keyed.into_iter().map(|(_, m)| m).collect();
     Ok(reconstruct_units_from_manifests(manifests, giant))
 }
 
@@ -1171,6 +1139,126 @@ mod tests {
             completed_units_tile(&dest, "orders"),
             "the NEWER #0 tiles whichever copy the listing returns first"
         );
+    }
+
+    fn write_family_unit(
+        dir: &std::path::Path,
+        run: &str,
+        family: &str,
+        name: &str,
+        window: (Option<&str>, Option<&str>),
+        finished: &str,
+    ) {
+        let mut m = unit_manifest(run, name, crate::manifest::ManifestStatus::Success);
+        m.export_family = family.into();
+        m.finished_at = finished.into();
+        m.split_window = Some(crate::manifest::SplitWindow {
+            key_column: "id".into(),
+            lo: window.0.map(str::to_string),
+            hi: window.1.map(str::to_string),
+        });
+        std::fs::write(
+            dir.join(format!("manifest-{run}.json")),
+            serde_json::to_vec(&m).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn local_dest(dir: &std::path::Path) -> crate::config::DestinationConfig {
+        crate::config::DestinationConfig {
+            destination_type: crate::config::DestinationType::Local,
+            path: Some(dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// A unit of another family under the same prefix never fills a hole in this family's tiling.
+    #[test]
+    fn a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = local_dest(dir.path());
+        write_family_unit(
+            dir.path(),
+            "a0",
+            "orders",
+            "orders#0",
+            (None, Some("m")),
+            "2026-08-21T00:01:00Z",
+        );
+        write_family_unit(
+            dir.path(),
+            "x1",
+            "other",
+            "other#1",
+            (Some("m"), None),
+            "2026-08-21T00:01:00Z",
+        );
+        assert!(
+            !completed_units_tile(&dest, "orders"),
+            "orders#1 never ran; the foreign other#1 must not stand in for it"
+        );
+    }
+
+    /// A newer unit of another family never displaces this family's unit of the same ordinal.
+    #[test]
+    fn a_foreign_family_unit_does_not_break_a_whole_tiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = local_dest(dir.path());
+        write_family_unit(
+            dir.path(),
+            "a0",
+            "orders",
+            "orders#0",
+            (None, Some("m")),
+            "2026-08-21T00:01:00Z",
+        );
+        write_family_unit(
+            dir.path(),
+            "a1",
+            "orders",
+            "orders#1",
+            (Some("m"), None),
+            "2026-08-21T00:01:00Z",
+        );
+        write_family_unit(
+            dir.path(),
+            "x0",
+            "other",
+            "other#0",
+            (None, Some("q")),
+            "2026-08-21T00:09:00Z",
+        );
+        assert!(
+            completed_units_tile(&dest, "orders"),
+            "the foreign other#0 finished later but is not a unit of orders"
+        );
+    }
+
+    /// The resume skip set holds the successes of this family only.
+    #[test]
+    fn the_completed_units_of_a_prefix_are_this_familys() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = local_dest(dir.path());
+        write_family_unit(
+            dir.path(),
+            "a0",
+            "orders",
+            "orders#0",
+            (None, Some("m")),
+            "2026-08-21T00:01:00Z",
+        );
+        write_family_unit(
+            dir.path(),
+            "x0",
+            "other",
+            "other#0",
+            (None, Some("q")),
+            "2026-08-21T00:09:00Z",
+        );
+        let done: Vec<String> = completed_units_in_prefix(&dest, "orders")
+            .into_iter()
+            .collect();
+        assert_eq!(done, vec!["orders#0".to_string()]);
     }
 
     #[test]

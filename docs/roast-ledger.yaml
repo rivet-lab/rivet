@@ -6,7 +6,7 @@ entries:
     lens: duplication of functionality and bypassed seams
     title: value_checksum reads split unit manifests without ManifestCensus and without a Success filter
     copies: [src/source/value_checksum.rs:783, src/manifest/census.rs:231]
-    status: accepted-as-bugfix
+    status: done
     verdict: "confirmed: split_unit_manifests counts a failed unit manifest"
     closes: "the ManifestCensus fix PR; the split_unit_manifests exception in docs/seams.yaml is deleted"
   - id: R1b
@@ -14,7 +14,7 @@ entries:
     lens: duplication of functionality and bypassed seams
     title: completed_units_tile tiles a range from manifests of any family
     copies: [src/pipeline/split.rs:358, src/pipeline/split.rs:264, src/manifest/census.rs:231]
-    status: accepted-as-bugfix
+    status: done
     verdict: "confirmed: no family filter over read_unit_manifests, a foreign family tiles the range"
     closes: "the ManifestCensus fix PR; the completed_units_tile and try_read_unit_manifests exceptions are deleted"
   - id: R2

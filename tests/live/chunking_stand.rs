@@ -471,6 +471,51 @@ fn run_pool_split_rerun_with(
         (n + grown, n + grown),
         "a re-run, resumed or fresh, declares every current id exactly once"
     );
+    assert_validate_ignores_a_collected_failed_unit(&rig);
+}
+
+/// A failed attempt of a unit whose parts were collected must not fail `validate --depth full` on a prefix whose successes are whole.
+fn assert_validate_ignores_a_collected_failed_unit(rig: &Rig) {
+    let export = rig.export_name();
+    let control = rig.cli(&["validate", "--export", export, "--depth", "full"]);
+    assert!(
+        control.status.success(),
+        "control: validate --depth full of the whole split prefix must exit 0:\n{}{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let dir = rig.out_dir();
+    let unit = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("manifest-"))
+        })
+        .expect("a unit manifest copy");
+    let mut failed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&unit).unwrap()).unwrap();
+    failed["run_id"] = "collected-failed-attempt".into();
+    failed["status"] = "failed".into();
+    failed["finished_at"] = "2000-01-01T00:00:00+00:00".into();
+    for part in failed["parts"].as_array_mut().unwrap() {
+        part["path"] = "collected-by-gc.parquet".into();
+    }
+    std::fs::write(
+        dir.join(rivet::manifest::run_unique_manifest_name(
+            "collected-failed-attempt",
+        )),
+        serde_json::to_vec(&failed).unwrap(),
+    )
+    .unwrap();
+    let after = rig.cli(&["validate", "--export", export, "--depth", "full"]);
+    assert!(
+        after.status.success(),
+        "a failed attempt whose parts were collected must not fail a prefix whose successes are whole:\n{}{}",
+        String::from_utf8_lossy(&after.stdout),
+        String::from_utf8_lossy(&after.stderr)
+    );
 }
 
 /// Drops the stand's temp table on scope exit, per engine.

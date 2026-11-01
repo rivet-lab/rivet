@@ -106,30 +106,8 @@ pub(crate) fn check_positions(dest: &dyn Destination, prefix: &str) -> Result<Po
     // question the loader does. They do not overlap (one per run) and the canonical
     // duplicates one of them, so preferring the copies also avoids double-counting.
     // The canonical stays the fallback for prefixes written before copies existed.
-    let mut manifests: Vec<RunManifest> = Vec::new();
+    let mut copies: Vec<(String, RunManifest)> = Vec::new();
     for m in dest.list_prefix(prefix)? {
-        // THIS prefix's own copies, not a nested leg's. The listing recurses on both
-        // the local and the cloud destination, so an `initial: snapshot` export's
-        // `<prefix>/snapshot/manifest-<run_id>.json` was swept up here — and its
-        // `parts[].path` is relative to `snapshot/`, so validate looked for those
-        // parts at the CDC root and reported `cdc __pos check could not complete: No
-        // such file or directory`, exit 1, on a correct export. MEASURED: the
-        // documented production shape (`cdc: { initial: snapshot }`) failed
-        // `rivet validate --depth full` outright, and moving that one file aside made
-        // the same command exit 0. It broke every `rivet validate && deploy` gate.
-        //
-        // A separator in the key RELATIVE TO THIS PREFIX means a nested leg; the
-        // copies this prefix owns sit directly under it.
-        //
-        // Relative, because `list_prefix` returns FULL keys — `cdc/manifest-r1.json`,
-        // not `manifest-r1.json`. The first cut of this guard tested the whole key,
-        // so it skipped EVERY copy including this prefix's own, and `check_positions`
-        // fell through to the canonical `manifest.json`. On the prefix that has none
-        // — a daemon or crashed CDC run, where only the run-unique copies exist —
-        // that is a false-clean `PASSED, 0 parts verified`, which is exactly the
-        // #173 defect this fallback was written to remove. Nothing caught it: the
-        // broken guard survived the lib suite AND all 106 live CDC tests, because
-        // every one of them leaves a canonical manifest behind.
         let rel = m
             .key
             .strip_prefix(prefix)
@@ -138,17 +116,17 @@ pub(crate) fn check_positions(dest: &dyn Destination, prefix: &str) -> Result<Po
         if rel.contains('/') {
             continue;
         }
-        let base = rel;
-        if crate::manifest::is_run_unique_manifest_name(base) {
-            let m: RunManifest = serde_json::from_slice(&dest.read(&m.key)?)?;
-            // Success-only (round-8): a Failed copy's spared parts are terminal
-            // debris gc legitimately deletes after supersession — reading them
-            // here resurrected the false exit-3 the fold's filter closed.
-            if m.status == crate::manifest::ManifestStatus::Success {
-                manifests.push(m);
-            }
+        if crate::manifest::census::is_copy_key(rel) {
+            let parsed: RunManifest = serde_json::from_slice(&dest.read(&m.key)?)?;
+            copies.push((m.key, parsed));
         }
     }
+    let census = crate::manifest::census::ManifestCensus::new(&copies);
+    let mut manifests: Vec<RunManifest> = census
+        .succeeded()
+        .into_iter()
+        .map(|run| run.manifest.clone())
+        .collect();
     if manifests.is_empty() && dest.head(&manifest_key)?.is_some() {
         manifests.push(serde_json::from_slice(&dest.read(&manifest_key)?)?);
     }
@@ -476,6 +454,84 @@ mod v016_checkpoint_compat {
             "a monotonic single run has no backwards jump: {:?}",
             got.violations
         );
+    }
+
+    /// Writes one monotonic `__pos` part and returns a local destination over its root.
+    fn dest_with_part(
+        part: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::destination::local::LocalDestination,
+    ) {
+        use std::sync::Arc;
+
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+
+        let dir = tempfile::tempdir().expect("dest root");
+        let root = dir.path().join("cdc");
+        std::fs::create_dir_all(&root).expect("prefix");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "__pos",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec![
+                r#"{"lsn":"0/10"}"#,
+                r#"{"lsn":"0/20"}"#,
+            ]))],
+        )
+        .expect("batch");
+        let f = std::fs::File::create(root.join(part)).expect("part file");
+        let mut w = ArrowWriter::try_new(f, schema, None).expect("writer");
+        w.write(&batch).expect("write");
+        w.close().expect("close");
+        let dest =
+            crate::destination::local::LocalDestination::new(&crate::config::DestinationConfig {
+                destination_type: crate::config::DestinationType::Local,
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            })
+            .expect("local destination");
+        (dir, dest)
+    }
+
+    fn write_manifest(dir: &tempfile::TempDir, name: &str, run: &str, part: &str, ok: bool) {
+        let mut m = crate::manifest::RunManifest::for_test(run, &[(part, 2)]);
+        if !ok {
+            m.status = crate::manifest::ManifestStatus::Failed;
+        }
+        std::fs::write(
+            dir.path().join("cdc").join(name),
+            serde_json::to_string(&m).expect("serialize"),
+        )
+        .expect("manifest");
+    }
+
+    /// A failed copy declares a part gc collected; only the successful copy is read.
+    #[test]
+    fn a_failed_copy_is_not_read_and_a_successful_one_is() {
+        let (dir, dest) = dest_with_part("cdc-000000.parquet");
+        write_manifest(&dir, "manifest-r1.json", "r1", "cdc-000000.parquet", true);
+        write_manifest(&dir, "manifest-r2.json", "r2", "collected.parquet", false);
+        let got = super::check_positions(&dest, "cdc").expect("positions");
+        assert_eq!((got.parts, got.rows), (1, 2));
+        assert!(got.violations.is_empty(), "{:?}", got.violations);
+    }
+
+    /// With no successful copy the canonical manifest answers, as before.
+    #[test]
+    fn with_only_a_failed_copy_the_canonical_manifest_answers() {
+        let (dir, dest) = dest_with_part("cdc-000000.parquet");
+        write_manifest(&dir, "manifest-r2.json", "r2", "collected.parquet", false);
+        write_manifest(&dir, "manifest.json", "r1", "cdc-000000.parquet", true);
+        let got = super::check_positions(&dest, "cdc").expect("positions");
+        assert_eq!((got.parts, got.rows), (1, 2));
+        assert!(got.violations.is_empty(), "{:?}", got.violations);
     }
 
     #[test]

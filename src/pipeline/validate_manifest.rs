@@ -35,10 +35,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::destination::{Destination, ObjectMeta};
 use crate::error::Result;
-use crate::manifest::census::ManifestCensus;
+use crate::manifest::census::{ManifestCensus, is_copy_key};
 use crate::manifest::{
-    MANIFEST_FILENAME, PartStatus, RunManifest, SUCCESS_FILENAME, is_run_unique_manifest_name,
-    join_key, parse_success_marker, success_marker_body,
+    MANIFEST_FILENAME, PartStatus, RunManifest, SUCCESS_FILENAME, join_key, parse_success_marker,
+    success_marker_body,
 };
 use crate::pipeline::manifest_reconcile::{PartPresence, reconcile_manifest_against_listing};
 
@@ -634,8 +634,7 @@ fn read_sibling_manifests(
 ) -> Vec<(String, RunManifest)> {
     let mut out = Vec::new();
     for meta in listing {
-        let base = meta.key.rsplit('/').next().unwrap_or("");
-        if !is_run_unique_manifest_name(base) {
+        if !is_copy_key(&meta.key) {
             continue;
         }
         if let Ok(bytes) = read_capped(dest, &meta.key, MANIFEST_MAX_BYTES)
@@ -666,16 +665,7 @@ fn merge_split_unit_parts(
     let mut merged = canonical.clone();
     let mut seen: std::collections::BTreeSet<String> =
         merged.parts.iter().map(|p| p.path.clone()).collect();
-    for unit in census.split_units(&canonical.export_family) {
-        // Success-only (round-7): a crashed unit's Failed/Interrupted copy
-        // declares parts gc legitimately deletes as terminal debris — folding
-        // them into the presence target armed a false PartMissing
-        // stop-the-line after a documented gc pass. The filter lives HERE, in
-        // the fold, because `split_units` is the family's identity (markers
-        // included) for every other consumer.
-        if unit.manifest.status != crate::manifest::ManifestStatus::Success {
-            continue;
-        }
+    for unit in census.completed_split_units(&canonical.export_family) {
         for p in &unit.manifest.parts {
             if p.status == PartStatus::Committed && seen.insert(p.path.clone()) {
                 merged.parts.push(p.clone());
