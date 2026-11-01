@@ -3558,6 +3558,23 @@ seeds:
       oracle:
         na: "Oracle CDC tables are written OWNER.TABLE by init and LogMiner routes by that qualified name"
 
+  - name: parquet-writer-bytes-move-from-release
+    class: "a writer property or an arrow/parquet version moves the bytes of the Parquet file written for the same rows, so a re-export differs from the release users run"
+    history: "2026-11-01 - parquet 60 (#702) moved the page grid of nullable columns without NULLs; owner decision option A: pin 59.0.0 and hold the v0.32.2 digests"
+    scope: source
+    patch: parquet-writer-bytes-move-from-release/shared.patch
+    engines:
+      postgres:
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
+      mysql:
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
+      mssql:
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
+      mongo:
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
+      oracle:
+        cells: ["parquet_bytes_match_the_v0_32_2_digests"]
+
   - name: bigquery-transient-job-error-final
     class: "a BigQuery job that ends with a documented retryable errorResult.reason (backendError, internalError, jobBackendError, jobInternalError, rateLimitExceeded, jobRateLimitExceeded) is coded RIVET_LOAD_WAREHOUSE_REJECTED, exit 1, so a scheduler fails the task for good"
     history: "2026-10-28 - issue #707, pilot incident: a CDC compact MERGE under airflow-provider-rivet failed with 'Error encountered during execution. Retrying may solve the problem.' and the task failed final"
