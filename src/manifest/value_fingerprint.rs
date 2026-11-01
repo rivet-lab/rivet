@@ -468,6 +468,62 @@ mod tests {
     }
 
     #[test]
+    fn every_written_type_is_canonical_with_its_width() {
+        let fixed = [
+            (DataType::Int8, 1),
+            (DataType::UInt8, 1),
+            (DataType::Int16, 2),
+            (DataType::UInt16, 2),
+            (DataType::Float16, 2),
+            (DataType::Int32, 4),
+            (DataType::UInt32, 4),
+            (DataType::Float32, 4),
+            (DataType::Date32, 4),
+            (DataType::Time32(TimeUnit::Second), 4),
+            (DataType::Decimal32(9, 2), 4),
+            (DataType::Int64, 8),
+            (DataType::UInt64, 8),
+            (DataType::Float64, 8),
+            (DataType::Date64, 8),
+            (DataType::Time64(TimeUnit::Nanosecond), 8),
+            (DataType::Timestamp(TimeUnit::Second, None), 8),
+            (DataType::Duration(TimeUnit::Millisecond), 8),
+            (DataType::Decimal64(18, 4), 8),
+            (DataType::Decimal128(38, 9), 16),
+            (DataType::Decimal256(76, 10), 32),
+            (DataType::FixedSizeBinary(5), 5),
+        ];
+        for (dt, width) in fixed {
+            assert_eq!(fixed_width(&dt), Some(width), "{dt:?}");
+            assert!(canonical(&dt), "{dt:?}");
+        }
+        let other = [
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Binary,
+            DataType::LargeBinary,
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+            DataType::LargeList(Arc::new(Field::new("item", DataType::Utf8, true))),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Int32, true)), 3),
+        ];
+        for dt in other {
+            assert!(canonical(&dt), "{dt:?}");
+        }
+    }
+
+    #[test]
+    fn a_sliced_batch_hashes_like_a_fresh_one() {
+        let whole = fixture(0, 9);
+        assert_eq!(fp(&[whole.slice(3, 4)]), fp(&[fixture(3, 4)]));
+    }
+
+    fn canonical(dt: &DataType) -> bool {
+        ValueFingerprint::new(&Schema::new(vec![Field::new("c", dt.clone(), true)])).is_some()
+    }
+
+    #[test]
     fn null_is_distinct_from_a_value() {
         let a = one_col(
             "c",

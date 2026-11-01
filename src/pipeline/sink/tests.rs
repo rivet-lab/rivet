@@ -1958,3 +1958,28 @@ fn a_column_override_key_spelled_in_another_case_is_refused_at_schema() {
         .on_schema(schema)
         .expect("an exact key, or one naming no column in any case, passes");
 }
+
+#[test]
+fn split_now_hands_the_closed_part_its_value_fingerprint() {
+    use arrow::array::{Int64Array, RecordBatch};
+    use arrow::datatypes::{DataType, Field, Schema};
+    let mut sink = minimal_sink();
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new("c", DataType::Int64, true)]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(Int64Array::from(vec![1, 2]))],
+    )
+    .unwrap();
+    let mut acc = crate::manifest::value_fingerprint::ValueFingerprint::new(&batch.schema())
+        .expect("canonical schema");
+    acc.update(&batch).expect("same schema");
+    sink.value_fp = super::ValueSlot::Open(acc);
+    sink.part_rows = 2;
+    sink.split_now().unwrap();
+    assert_eq!(sink.completed_parts.len(), 1);
+    let fp = sink.completed_parts[0]
+        .value_fingerprint
+        .as_deref()
+        .unwrap();
+    assert!(fp.starts_with("xxh3v1:"), "{fp}");
+}
