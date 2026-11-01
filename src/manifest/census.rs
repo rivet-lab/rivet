@@ -508,6 +508,7 @@ mod tests {
             size_bytes: 100,
             content_fingerprint: "xxh3:0123456789abcdef".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status,
         }
     }

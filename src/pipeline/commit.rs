@@ -395,6 +395,8 @@ pub(crate) struct PartRecord {
     /// local temp file alongside the fingerprint.  Empty if it could not be
     /// computed — verification degrades to size-only for that part.
     pub md5: String,
+    /// The part's value digest from the sink, `None` when the sink could not compute one.
+    pub value_fingerprint: Option<String>,
 }
 
 /// How a committed part is journaled.
@@ -478,6 +480,7 @@ pub(crate) fn write_part_file(
         bytes,
         fingerprint,
         md5,
+        value_fingerprint: None,
     })
 }
 
@@ -526,6 +529,10 @@ pub(crate) fn write_sink_parts(
                 name_for(idx, count),
                 &sink.parts_landed,
             )
+            .map(|rec| PartRecord {
+                value_fingerprint: part.value_fingerprint.clone(),
+                ..rec
+            })
         };
         match one() {
             Ok(rec) => written.push(rec),
@@ -585,6 +592,13 @@ pub(crate) fn record_part(
         part.fingerprint.clone(),
         part.md5.clone(),
     );
+    if let Some(entry) = summary
+        .manifest_parts
+        .iter_mut()
+        .find(|p| p.part_id == recorded.part_id)
+    {
+        entry.value_fingerprint = part.value_fingerprint.clone();
+    }
     let deduped = recorded.deduped;
     if !deduped {
         summary.total_rows += part.rows;
@@ -816,6 +830,7 @@ pub(crate) mod tests {
             bytes: 1024,
             fingerprint: "xxh3:1234567890abcdef".into(),
             md5: String::new(),
+            value_fingerprint: None,
         }
     }
 
@@ -1145,6 +1160,7 @@ pub(crate) mod tests {
                 bytes: 1024 * ((i as u64) + 1),
                 fingerprint: format!("xxh3:{i:016x}"),
                 md5: String::new(),
+                value_fingerprint: None,
             })
             .collect()
     }
@@ -1160,6 +1176,7 @@ pub(crate) mod tests {
             size_bytes: 10,
             content_fingerprint: String::new(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: crate::manifest::PartStatus::Committed,
         };
         assert!(adopt_part(&mut summary, part.clone()));
@@ -1353,6 +1370,7 @@ pub(crate) mod tests {
             bytes: 64,
             fingerprint: "xxh3:000000000000dead".into(),
             md5: String::new(),
+            value_fingerprint: None,
         };
         record_part(
             &plan,
@@ -1406,6 +1424,7 @@ pub(crate) mod tests {
             size_bytes: 4096,
             content_fingerprint: String::new(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: crate::manifest::PartStatus::Committed,
         });
 
@@ -1451,6 +1470,7 @@ pub(crate) mod tests {
             size_bytes: 4096,
             content_fingerprint: String::new(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: crate::manifest::PartStatus::Committed,
         });
         summary.files_committed = 1;
@@ -1503,6 +1523,7 @@ pub(crate) mod tests {
             size_bytes: 1024,
             content_fingerprint: String::new(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: crate::manifest::PartStatus::Committed,
         });
         // This run re-reads that same page: same path → dedup in place.
@@ -1547,6 +1568,7 @@ pub(crate) mod tests {
             size_bytes: 1,
             content_fingerprint: String::new(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: crate::manifest::PartStatus::Committed,
         };
         let mut integrity = Integrity::default();

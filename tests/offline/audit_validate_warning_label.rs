@@ -60,6 +60,7 @@ fn one_part_manifest() -> RunManifest {
             size_bytes: 4,
             content_fingerprint: "xxh3:1111111111111111".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }],
         column_checksums: None,

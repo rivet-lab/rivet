@@ -1355,6 +1355,7 @@ fn build_manifest(
                 size_bytes: p.bytes,
                 content_fingerprint: p.fingerprint.clone(),
                 content_md5: p.md5.clone(),
+                value_fingerprint: None,
                 status: PartStatus::Committed,
             })
             .collect(),

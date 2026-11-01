@@ -534,6 +534,7 @@ mod tests {
             bytes: 10,
             fingerprint: String::new(),
             md5: String::new(),
+            value_fingerprint: None,
         };
         super::record_durable_parts(
             &store,

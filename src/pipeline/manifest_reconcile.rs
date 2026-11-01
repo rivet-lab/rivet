@@ -215,6 +215,7 @@ mod tests {
             size_bytes: size,
             content_fingerprint: "xxh3:0".into(),
             content_md5: md5.into(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }
     }

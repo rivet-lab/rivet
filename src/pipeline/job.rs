@@ -3793,6 +3793,7 @@ mod tests {
                     size_bytes: 1,
                     content_fingerprint: String::new(),
                     content_md5: String::new(),
+                    value_fingerprint: None,
                     status: crate::manifest::PartStatus::Committed,
                 });
             }

@@ -466,6 +466,7 @@ fn write_run_manifest(
             part.size_bytes,
             part.content_fingerprint.clone(),
             part.content_md5.clone(),
+            part.value_fingerprint.clone(),
         );
     }
     if !summary.column_checksums.is_empty() {
@@ -1587,6 +1588,7 @@ mod tests {
                 size_bytes: 7,
                 content_fingerprint: "xxh3:1".into(),
                 content_md5: String::new(),
+                value_fingerprint: None,
                 status: crate::manifest::PartStatus::Committed,
             });
             s
@@ -1717,6 +1719,7 @@ mod tests {
             size_bytes: 7,
             content_fingerprint: "xxh3:1".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: crate::manifest::PartStatus::Committed,
         });
         s.column_checksums = vec![crate::manifest::ColumnChecksum {

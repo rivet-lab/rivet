@@ -2634,6 +2634,7 @@ pub(crate) mod tests {
                 size_bytes: 1,
                 content_fingerprint: "xxh3:0123456789abcdef".into(),
                 content_md5: String::new(),
+                value_fingerprint: None,
                 status: PartStatus::Committed,
             }],
             column_checksums: None,

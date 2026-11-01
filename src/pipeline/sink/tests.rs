@@ -610,6 +610,7 @@ fn minimal_sink() -> ExportSink {
         quality: QualityTracker::default(),
         max_file_size: None,
         completed_parts: Vec::new(),
+        value_fp: super::ValueSlot::Empty,
         strip_internal_column: None,
         column_max_bytes: std::collections::HashMap::new(),
         max_batch_memory_bytes: None,

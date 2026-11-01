@@ -387,6 +387,7 @@ fn record_repair_parts_in_manifest(
             size_bytes: p.size_bytes,
             content_fingerprint: p.content_fingerprint.clone(),
             content_md5: p.content_md5.clone(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         });
         next_id += 1;
@@ -903,6 +904,7 @@ mod tests {
             size_bytes: 100,
             content_fingerprint: "xxh3:0000000000000000".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         };
         // A finalized run: 2 committed parts, 20 rows.
@@ -1027,6 +1029,7 @@ mod tests {
             size_bytes: 1,
             content_fingerprint: "xxh3:0000000000000000".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }
     }

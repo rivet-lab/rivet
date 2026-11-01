@@ -31,6 +31,14 @@ use crate::types::refuse_override_case_miss;
 pub(crate) struct CompletedPart {
     pub(in crate::pipeline) tmp: tempfile::NamedTempFile,
     pub(in crate::pipeline) rows: usize,
+    pub(in crate::pipeline) value_fingerprint: Option<String>,
+}
+
+/// The open part's value accumulator: not started, open, or refused for a column type outside the canonical set.
+pub(crate) enum ValueSlot {
+    Empty,
+    Open(crate::manifest::value_fingerprint::ValueFingerprint),
+    Refused,
 }
 
 pub(crate) struct ExportSink {
@@ -76,6 +84,8 @@ pub(crate) struct ExportSink {
     pub(in crate::pipeline) quality: QualityTracker,
     pub(in crate::pipeline) max_file_size: Option<u64>,
     completed_parts: Vec<CompletedPart>,
+    /// The open part's value fingerprint, fed from the destination batches before enrichment.
+    value_fp: ValueSlot,
     /// When set, this column is removed from Arrow batches before enrichment and write (the coalesce cursor).
     pub(in crate::pipeline) strip_internal_column: Option<String>,
     /// Running per-column max byte length for string/binary columns (Epic 8).
@@ -449,6 +459,7 @@ impl ExportSink {
             dest_schema: None,
             meta: plan.meta_columns.clone(),
             enriched_schema: None,
+            value_fp: ValueSlot::Empty,
             exported_at_us,
             quality: QualityTracker::new(plan.quality.clone()),
             max_file_size: plan.max_file_size_bytes,
@@ -536,9 +547,11 @@ impl ExportSink {
     pub(in crate::pipeline) fn seal_parts(&mut self) -> Result<Vec<CompletedPart>> {
         self.finish_writer()?;
         if self.part_rows > 0 {
+            let value_fingerprint = self.take_value_fingerprint();
             self.completed_parts.push(CompletedPart {
                 tmp: std::mem::replace(&mut self.tmp, tempfile::NamedTempFile::new()?),
                 rows: self.part_rows,
+                value_fingerprint,
             });
             self.part_rows = 0;
         }
@@ -549,9 +562,11 @@ impl ExportSink {
         self.finish_writer()?;
 
         let old_tmp = std::mem::replace(&mut self.tmp, tempfile::NamedTempFile::new()?);
+        let value_fingerprint = self.take_value_fingerprint();
         self.completed_parts.push(CompletedPart {
             tmp: old_tmp,
             rows: self.part_rows,
+            value_fingerprint,
         });
         self.part_rows = 0;
         // The partition budget is per load job, hence per FILE: the new part starts with
@@ -684,6 +699,34 @@ impl ExportSink {
         }
     }
 
+    /// Feed a destination slice into the open part's value fingerprint, refusing the part on an unsupported type.
+    fn track_value(&mut self, batch: &RecordBatch) {
+        let open = match std::mem::replace(&mut self.value_fp, ValueSlot::Refused) {
+            ValueSlot::Refused => return,
+            ValueSlot::Empty => {
+                crate::manifest::value_fingerprint::ValueFingerprint::new(batch.schema_ref())
+            }
+            ValueSlot::Open(v) => Some(v),
+        };
+        self.value_fp = match open.and_then(|mut v| v.update(batch).map(|()| v)) {
+            Some(v) => ValueSlot::Open(v),
+            None => {
+                log::warn!(
+                    "value fingerprint omitted for a part: a column type is outside the canonical set"
+                );
+                ValueSlot::Refused
+            }
+        };
+    }
+
+    /// Close the open part's value fingerprint; `None` when the part had no rows or was refused.
+    fn take_value_fingerprint(&mut self) -> Option<String> {
+        match std::mem::replace(&mut self.value_fp, ValueSlot::Empty) {
+            ValueSlot::Open(v) => Some(v.finish()),
+            ValueSlot::Empty | ValueSlot::Refused => None,
+        }
+    }
+
     pub fn track_shape(&mut self, batch: &RecordBatch) {
         use arrow::array::{BinaryArray, LargeBinaryArray, LargeStringArray, StringArray};
         use arrow::datatypes::DataType;
@@ -804,6 +847,7 @@ impl ExportSink {
         self.track_quality(dest_batch)?;
         self.track_shape(dest_batch);
         self.track_checksum(dest_batch);
+        self.track_value(dest_batch);
 
         let output = if let Some(es) = &self.enriched_schema {
             enrich::enrich_batch(dest_batch, &self.meta, es, self.exported_at_us)?

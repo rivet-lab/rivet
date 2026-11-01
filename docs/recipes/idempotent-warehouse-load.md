@@ -110,14 +110,24 @@ recover from raw object listing:
 2. A **content-addressable identity** per part (`content_fingerprint`)
    that survives object renames, lifecycle migrations, and CDN copies.
 
-`content_fingerprint` is the **supported dedup key**: it is an xxh3 over the
-exact part bytes, computed deterministically. Because rivet pins the Parquet
-`created_by` to a version-independent constant, **identical rows produce
-identical bytes — and therefore the same `content_fingerprint` — across rivet
-releases**, not just within one build. So a re-extraction of the same window
-(e.g. a crash + `--resume`, or a deliberate re-run) yields parts a downstream
-`MERGE` can dedup on by fingerprint alone. Two parts with the same
-`content_fingerprint` are byte-identical and interchangeable; drop one.
+`value_fingerprint` (`xxh3v1:…`) is the **supported dedup key**. It digests the
+part's schema (column names and types) and its row values in row order, so two
+parts with the same `value_fingerprint` hold the same rows, in the same order,
+under the same schema — whatever Parquet encoding, compression, row-group size
+or rivet build wrote them. A re-extraction of the same window (a crash +
+`--resume`, a deliberate re-run, a repair) yields parts a downstream `MERGE`
+can dedup on by this key alone. The digest excludes the `_rivet_exported_at`
+column, so turning `meta_columns.exported_at` on does not change it.
+
+`content_fingerprint` keeps its promise: an xxh3 over the exact part bytes.
+Identical rows produce identical bytes, and therefore the same
+`content_fingerprint`, across rivet releases with the same settings. It moves
+whenever the bytes move (compression, row-group size, the Parquet writer), so
+use it for file identity and integrity, not for dedup across encodings.
+
+A part written by rivet 0.32.2 or earlier has no `value_fingerprint`. The field
+is optional: absent means unknown, not a mismatch. Such a part dedups on
+`content_fingerprint` only.
 
 (The fingerprint is over file *bytes*, not logical rows — so it is stable for
 the same rows + schema + compression settings. Changing `compression:` or the

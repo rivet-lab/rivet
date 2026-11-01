@@ -51,6 +51,7 @@ fn run_manifest(run_id: &str, rows: i64, source_rows: i64) -> RunManifest {
             size_bytes: 1,
             content_fingerprint: "xxh3:0".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }],
         column_checksums: None,

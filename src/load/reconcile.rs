@@ -878,6 +878,7 @@ mod tests {
                 size_bytes: 1,
                 content_fingerprint: "xxh3:0".into(),
                 content_md5: String::new(),
+                value_fingerprint: None,
                 status: PartStatus::Committed,
             }],
             column_checksums: None,

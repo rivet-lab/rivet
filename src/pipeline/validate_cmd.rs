@@ -1234,6 +1234,7 @@ mod tests {
             size_bytes: 4,
             content_fingerprint: "xxh3:1111111111111111".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }]);
         stage_dataset(&prefix, &m); // the part itself is never written
@@ -1360,6 +1361,7 @@ mod tests {
             size_bytes: part_body.len() as u64,
             content_fingerprint: "xxh3:1111111111111111".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }]);
         // Non-empty → Form B does NOT early-return; it proceeds to read the
@@ -1442,6 +1444,7 @@ mod tests {
             size_bytes: 4,
             content_fingerprint: "xxh3:1111111111111111".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }]);
         stage_dataset(&prefix, &m); // the part itself is never written → PartMissing

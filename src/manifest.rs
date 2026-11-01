@@ -30,6 +30,7 @@ use crate::config::DestinationConfig;
 /// two verifiers over one artifact set (`--validate`, `rivet load`) answer from
 /// ONE classification instead of two dialects that must agree by review.
 pub mod census;
+pub mod value_fingerprint;
 
 /// Current manifest schema version.  See ADR-0012 §Manifest schema.
 pub const MANIFEST_VERSION: u32 = 1;
@@ -449,6 +450,9 @@ pub struct ManifestPart {
     /// size-only.  `#[serde(default)]` keeps pre-0.7.x manifests parseable.
     #[serde(default)]
     pub content_md5: String,
+    /// `xxh3v1:` digest of the rows' values in order, independent of the Parquet encoding; the warehouse dedup key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_fingerprint: Option<String>,
     pub status: PartStatus,
 }
 
@@ -513,6 +517,7 @@ impl RunManifest {
                     size_bytes: 1,
                     content_fingerprint: format!("xxh3:{i:016x}"),
                     content_md5: String::new(),
+                    value_fingerprint: None,
                     status: PartStatus::Committed,
                 })
                 .collect(),
@@ -635,6 +640,7 @@ mod tests {
             size_bytes: size,
             content_fingerprint: format!("xxh3:{:016x}", id as u64),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }
     }

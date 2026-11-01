@@ -1782,6 +1782,7 @@ mod tests {
                 size_bytes: 10,
                 content_fingerprint: String::new(),
                 content_md5: String::new(),
+                value_fingerprint: None,
                 status: PartStatus::Committed,
             });
             s

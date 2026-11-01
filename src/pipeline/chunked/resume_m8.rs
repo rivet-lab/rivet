@@ -373,6 +373,7 @@ pub(crate) fn rehydrate_manifest_parts_probed(
                 // part is DECLARED + size-verified, never a lying mismatch.
                 content_fingerprint: String::new(),
                 content_md5: String::new(),
+                value_fingerprint: None,
                 status: crate::manifest::PartStatus::Committed,
             },
         );
@@ -958,6 +959,7 @@ pub(crate) mod tests {
             size_bytes: size,
             content_fingerprint: "xxh3:1".into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: crate::manifest::PartStatus::Committed,
         }
     }
@@ -1287,6 +1289,7 @@ pub(crate) mod tests {
                 bytes: 4096,
                 fingerprint: "xxh3:abc".into(),
                 md5: String::new(),
+                value_fingerprint: None,
             },
             PartKind::Chunk { chunk_index: 2 },
             UnitId::Chunk(2),

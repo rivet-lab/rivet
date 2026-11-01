@@ -1078,6 +1078,7 @@ mod tests {
             size_bytes: size,
             content_fingerprint: fp.into(),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         }
     }

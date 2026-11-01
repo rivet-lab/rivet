@@ -153,6 +153,7 @@ impl ManifestBuilder {
     /// `part_id` is the 1-based ordinal of the part within this run.
     /// `relative_path` is the destination-prefix-relative path (the same
     /// `remote_key` passed to `dest.write`).
+    #[allow(clippy::too_many_arguments)]
     pub fn record_part(
         &mut self,
         part_id: u32,
@@ -161,6 +162,7 @@ impl ManifestBuilder {
         size_bytes: u64,
         content_fingerprint: String,
         content_md5: String,
+        value_fingerprint: Option<String>,
     ) {
         self.parts.push(ManifestPart {
             part_id,
@@ -169,6 +171,7 @@ impl ManifestBuilder {
             size_bytes,
             content_fingerprint,
             content_md5,
+            value_fingerprint,
             status: PartStatus::Committed,
         });
     }
@@ -407,6 +410,7 @@ pub fn record_committed_part_with_fingerprint(
         size_bytes,
         content_fingerprint,
         content_md5,
+        value_fingerprint: None,
         status: PartStatus::Committed,
     });
     RecordedPart {
@@ -617,6 +621,7 @@ mod tests {
             4096,
             "xxh3:aaaaaaaaaaaaaaaa".into(),
             String::new(),
+            None,
         );
         b.record_part(
             2,
@@ -625,6 +630,7 @@ mod tests {
             2048,
             "xxh3:bbbbbbbbbbbbbbbb".into(),
             String::new(),
+            None,
         );
 
         let m = b.finalize(ManifestStatus::Success);
@@ -775,6 +781,7 @@ mod tests {
             4096,
             "xxh3:1111111111111111".into(),
             String::new(),
+            None,
         );
         b.record_part(
             2,
@@ -783,6 +790,7 @@ mod tests {
             8192,
             "xxh3:2222222222222222".into(),
             String::new(),
+            None,
         );
         b.finalize(status)
     }
@@ -942,6 +950,7 @@ mod tests {
                 size_bytes: 1,
                 content_fingerprint: "xxh3:0".into(),
                 content_md5: String::new(),
+                value_fingerprint: None,
                 status: PartStatus::Committed,
             });
         }

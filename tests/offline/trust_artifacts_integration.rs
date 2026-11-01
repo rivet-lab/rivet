@@ -177,6 +177,7 @@ fn part(part_id: u32, rows: i64, size: u64, fp: &str) -> ManifestPart {
         size_bytes: size,
         content_fingerprint: fp.into(),
         content_md5: String::new(),
+        value_fingerprint: None,
         status: PartStatus::Committed,
     }
 }
@@ -868,6 +869,7 @@ fn builder_to_writer_roundtrips_through_serde_and_keeps_all_fields() {
         4096,
         "xxh3:1111111111111111".into(),
         String::new(),
+        None,
     );
     b.record_part(
         2,
@@ -876,6 +878,7 @@ fn builder_to_writer_roundtrips_through_serde_and_keeps_all_fields() {
         8192,
         "xxh3:2222222222222222".into(),
         String::new(),
+        None,
     );
     let m = b.finalize(ManifestStatus::Success);
     write_manifest(dest_proxy.as_writer(), &m).unwrap();
@@ -921,6 +924,7 @@ fn builder_finalize_failed_status_skips_success_marker_through_full_writer() {
         2048,
         "xxh3:abcdefabcdefabcd".into(),
         String::new(),
+        None,
     );
     let m = b.finalize(ManifestStatus::Failed);
     let outcome = write_manifest(dest_proxy.as_writer(), &m).unwrap();
@@ -993,6 +997,7 @@ fn builder_records_parts_in_call_order_preserving_part_id_choice() {
         30,
         "xxh3:cccccccccccccccc".into(),
         String::new(),
+        None,
     );
     b.record_part(
         1,
@@ -1001,6 +1006,7 @@ fn builder_records_parts_in_call_order_preserving_part_id_choice() {
         10,
         "xxh3:aaaaaaaaaaaaaaaa".into(),
         String::new(),
+        None,
     );
     b.record_part(
         2,
@@ -1009,6 +1015,7 @@ fn builder_records_parts_in_call_order_preserving_part_id_choice() {
         20,
         "xxh3:bbbbbbbbbbbbbbbb".into(),
         String::new(),
+        None,
     );
 
     let m = b.finalize(ManifestStatus::Success);
@@ -1066,6 +1073,7 @@ fn schema_fingerprint_in_manifest_matches_state_helper_output() {
         1024,
         "xxh3:0000000000000001".into(),
         String::new(),
+        None,
     );
     let m = b.finalize(ManifestStatus::Success);
     write_manifest(dest_proxy.as_writer(), &m).unwrap();
@@ -1662,6 +1670,7 @@ fn summary_schema_fingerprint_flows_into_manifest_via_builder() {
         4096,
         "xxh3:1111111111111111".into(),
         String::new(),
+        None,
     );
     let m = b.finalize(ManifestStatus::Success);
     write_manifest(dest_proxy.as_writer(), &m).unwrap();
@@ -1758,6 +1767,7 @@ fn parts_with_payloads(payloads: &[&[u8]]) -> Vec<ManifestPart> {
             size_bytes: b.len() as u64,
             content_fingerprint: format!("xxh3:{:016x}", xxhash_rust::xxh3::xxh3_64(b)),
             content_md5: String::new(),
+            value_fingerprint: None,
             status: PartStatus::Committed,
         })
         .collect()
