@@ -170,20 +170,20 @@ pub(crate) fn folded(name: &str, byte_per_char: bool, spelling: Spelling) -> Str
     let bytes = bytes_of(name, byte_per_char);
     let spellings = spelling.spellings();
     let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
+    let mut rest = bytes.as_slice();
+    while let Some((&first, tail)) = rest.split_first() {
         let spelled = spellings
             .iter()
             .flat_map(|set| set.iter())
-            .find(|(seq, _)| bytes[i..].starts_with(seq));
+            .find(|(seq, _)| rest.starts_with(seq));
         match spelled {
             Some((seq, letter)) => {
                 out.push(*letter);
-                i += seq.len();
+                rest = &rest[seq.len()..];
             }
             None => {
-                out.push(bytes[i].to_ascii_lowercase());
-                i += 1;
+                out.push(first.to_ascii_lowercase());
+                rest = tail;
             }
         }
     }
