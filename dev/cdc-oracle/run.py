@@ -483,13 +483,14 @@ debezium.source.offset.flush.interval.ms=1000
 debezium.source.snapshot.mode=no_data
 quarkus.log.level=WARN
 """
-        # The config path is /debezium/config/ — mounting at /conf/ produces only a
-        # WARNING and a process that starts and captures nothing.
         with open(os.path.join(work, "application.properties"), "w") as f:
             f.write(props)
-        sh("docker", "run", "-d", "--name", srv, "--network", net,
-           "-v", f"{work}/application.properties:/debezium/config/application.properties",
+        started_ms = int(mongo("Date.now()")) if a.engine == "mongo" else 0
+        sh("docker", "create", "--name", srv, "--network", net,
            "-v", f"{work}:/data", "quay.io/debezium/server:3.0.0.Final")
+        sh("docker", "cp", os.path.join(work, "application.properties"),
+           f"{srv}:/debezium/config/application.properties")
+        sh("docker", "start", srv)
 
         # 4. wait for the connector to be STREAMING, not merely for the container
         #    to be up. Refuses rather than proceeding: a scenario run against a
@@ -511,16 +512,11 @@ quarkus.log.level=WARN
                         f"WHERE slot_name='{dbz_slot}'") == "t":
                     break
             elif a.engine == "mongo":
-                # Ask the SERVER, not the connector. Debezium writes offsets.dat
-                # only after its FIRST event, and events come after this wait — a
-                # deadlock by construction, and the reason the first attempt hung.
-                # MongoDB reports open cursors in currentOp, and a change stream is
-                # a cursor with a $changeStream pipeline stage, so its presence IS
-                # the readiness signal.
                 cur = mongo("db.getSiblingDB('admin').aggregate(["
                             "{$currentOp:{idleCursors:true}},"
                             "{$match:{'cursor.originatingCommand.pipeline.0.$changeStream':"
-                            "{$exists:true}}}]).toArray().length")
+                            "{$exists:true},"
+                            f"'cursor.createdDate':{{$gte:new Date({started_ms})}}}}}}]).toArray().length")
                 if cur.strip().isdigit() and int(cur.strip()) > 0:
                     break
             elif a.engine == "mssql":
@@ -562,8 +558,6 @@ quarkus.log.level=WARN
                 mysql(f"CREATE TABLE IF NOT EXISTS {t}_probe (id bigint PRIMARY KEY)")
                 mysql(f"INSERT INTO {t}_probe VALUES ({probe_key})")
             else:
-                # A server-wide `$changeStream` cursor in currentOp can be a previous
-                # scenario's (a SIGKILLed Debezium never closes it): only delivery counts.
                 mongo(f"db.{t}_probe.insertOne({{_id: {probe_key}}})")
             probe_jsonl = os.path.join(work, "debezium.jsonl")
             # 300s, not 120: measured 2026-08-29 on the shared mysql-cdc
