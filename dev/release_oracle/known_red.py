@@ -22,9 +22,25 @@ class KnownRed:
     expires: str  # YYYY-MM-DD
 
 
-_EXPIRES = "2026-10-31"
+_EXPIRES = "2026-11-15"
 _ORACLE_CDC_LOAD = (
     "Oracle CDC does not load yet (ADR-0037; the Oracle GA work). The previous release's `rivet init --mode cdc` writes no `load:` block, and this cell still drives the previous release through `load`, which refuses. `upgrade[oracle/cdc-load/init=this]` grades what the scaffold does promise (the baseline Parquet equals the source). The cycle stays unsupported until Oracle CDC loads"
+)
+
+
+_TS9 = (
+    "Oracle TIMESTAMP(9) is delivered at microseconds today: docs/type-capability-matrix.yaml's oracle TIMESTAMP(9) row is a known_defect "
+    "(exact native is Timestamp(ns), ADR-0038 CP1, Oracle engine step), so the 1 ns sentinel lands truncated. "
+    "Renewed 2026-11-01: still live (target/triage/sent_oracle_alone.log); closes when the Oracle engine step lands Timestamp(ns)"
+)
+_BYTES_704 = (
+    "#704 accepted byte change (owner, 2026-11-01): a nullable column with no NULL in a write call took a 20000-row base mini-batch under parquet 60, "
+    "so the dictionary fallback landed on another row; write_in_spans now cuts at 1024 rows. Decoded values are identical, only dictionary-page sizes change. "
+    "Closes when the baseline is the release that carries the new bytes"
+)
+_AB_704 = (
+    "#704 accepted byte change (owner, 2026-11-01): only the part-bytes fingerprint differs (manifest.fingerp, manifest.fingerprints[0]); the other six ab-diff scenarios are identical. "
+    "Closes when the baseline is the release that carries the new bytes"
 )
 
 
@@ -41,11 +57,38 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              _ORACLE_CDC_LOAD,
              _EXPIRES),
     KnownRed('sentinels[rivet_sent_ts9/full]: SUCCEEDED WITH A CHANGED VALUE: `V` differs',
-             "Oracle TIMESTAMP(9) is delivered at microseconds today: docs/type-capability-matrix.yaml's oracle TIMESTAMP(9) row is a known_defect (exact native is Timestamp(ns), ADR-0038 CP1, Oracle engine step), so the 1 ns sentinel lands truncated",
-             "2026-10-31"),
+             _TS9,
+             _EXPIRES),
     KnownRed('sentinels[rivet_sent_ts9/keyset]: SUCCEEDED WITH A CHANGED VALUE: `V` differs',
-             "Oracle TIMESTAMP(9) is delivered at microseconds today: docs/type-capability-matrix.yaml's oracle TIMESTAMP(9) row is a known_defect (exact native is Timestamp(ns), ADR-0038 CP1, Oracle engine step), so the 1 ns sentinel lands truncated",
-             "2026-10-31"),
+             _TS9,
+             _EXPIRES),
+    KnownRed('byte-identical[postgres/full]: 1 of 1 parts differ in bytes',
+             _BYTES_704,
+             _EXPIRES),
+    KnownRed('byte-identical[mysql/full]: 1 of 1 parts differ in bytes',
+             _BYTES_704,
+             _EXPIRES),
+    KnownRed('byte-identical[mysql/chunked]: 3 of 3 parts differ in bytes',
+             _BYTES_704,
+             _EXPIRES),
+    KnownRed('byte-identical[mssql/full]: 1 of 1 parts differ in bytes',
+             _BYTES_704,
+             _EXPIRES),
+    KnownRed('byte-identical[mssql/chunked]: 3 of 3 parts differ in bytes',
+             _BYTES_704,
+             _EXPIRES),
+    KnownRed('byte-identical[mongo/full]: 1 of 1 parts differ in bytes',
+             _BYTES_704,
+             _EXPIRES),
+    KnownRed('ab-diff[full]: DIFFERS from the previous release in manifest.fingerp, manifest.fingerprints[0] —',
+             _AB_704,
+             _EXPIRES),
+    KnownRed('ab-diff[incremental]: DIFFERS from the previous release in manifest.fingerp, manifest.fingerprints[0] —',
+             _AB_704,
+             _EXPIRES),
+    KnownRed('ab-diff: 8 scenarios compared, 2 DIFFER (full, incremental)',
+             _AB_704,
+             _EXPIRES),
 )
 
 

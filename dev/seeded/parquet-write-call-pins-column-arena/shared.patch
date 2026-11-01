@@ -1,10 +1,10 @@
 diff --git a/src/format/parquet.rs b/src/format/parquet.rs
-index 66cfc3f8..d8ea1711 100644
+index ebefef37..f07e192a 100644
 --- a/src/format/parquet.rs
 +++ b/src/format/parquet.rs
-@@ -90,19 +90,8 @@ impl SpanSink for ArrowWriter<Box<dyn Write + Send>> {
- /// statistic lives, so a call stays small; the cuts match the library's own, the bytes stay equal.
- /// Every pass moves at least one row, so the row count bounds the passes.
+@@ -91,19 +91,8 @@ impl SpanSink for ArrowWriter<Box<dyn Write + Send>> {
+ /// column with no NULL in a call (uniform levels) took 20000-row mini-batches in one call, so its
+ /// dictionary fallback lands on another row and its page sizes change; decoded values are equal.
  fn write_in_spans(sink: &mut impl SpanSink, batch: &RecordBatch, group_rows: usize) -> Result<()> {
 -    let mut at = 0;
 -    for _ in 0..batch.num_rows() {

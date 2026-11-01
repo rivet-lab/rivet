@@ -84,11 +84,12 @@ impl SpanSink for ArrowWriter<Box<dyn Write + Send>> {
     }
 }
 
-/// Writes `batch` in calls of at most one column-writer mini-batch, none past a row group end.
+/// Writes `batch` in calls of at most `DEFAULT_WRITE_BATCH_SIZE` rows, none past a row group end.
 ///
-/// Parquet 59.1+ pins a call's whole decimal/fixed-width arena for as long as a chunk's min/max
-/// statistic lives, so a call stays small; the cuts match the library's own, the bytes stay equal.
-/// Every pass moves at least one row, so the row count bounds the passes.
+/// Parquet 59.1+ pins a call's whole decimal/fixed-width arena while a chunk's min/max statistic lives.
+/// Non-nullable and NULL-bearing columns keep the library's own cuts and stay byte-identical; a nullable
+/// column with no NULL in a call (uniform levels) took 20000-row mini-batches in one call, so its
+/// dictionary fallback lands on another row and its page sizes change; decoded values are equal.
 fn write_in_spans(sink: &mut impl SpanSink, batch: &RecordBatch, group_rows: usize) -> Result<()> {
     let mut at = 0;
     for _ in 0..batch.num_rows() {
@@ -134,13 +135,6 @@ impl super::Format for ParquetFormat {
                 field.data_type()
             );
         }
-        // OPT-5: pin a version-independent `created_by`. By default parquet-rs
-        // stamps each file with its own version (e.g. "parquet-rs version
-        // 58.0.0"); that string changes on a lib bump, so identical rows would
-        // produce different bytes — breaking the manifest `content_fingerprint`
-        // as a *cross-release* dedup key. A constant keeps identical rows
-        // byte-identical across rivet/parquet-rs versions. Writer provenance
-        // lives in the run manifest/journal, not the file footer.
         let inner = ArrowWriter::try_new(writer, schema.clone(), Some(self.writer_properties()))?;
         let group_rows = self
             .row_group_rows
@@ -368,7 +362,7 @@ mod tests {
         );
     }
 
-    // ── OPT-5: byte-determinism for the manifest content_fingerprint ──────────
+    // ── byte-determinism of identical rows ───────────────────────────────────
 
     fn write_batch_to_bytes(compression: CompressionType) -> Vec<u8> {
         let schema = int64_schema();
@@ -384,8 +378,6 @@ mod tests {
 
     #[test]
     fn output_is_byte_deterministic_for_identical_rows() {
-        // Identical rows must produce byte-identical Parquet so the manifest
-        // `content_fingerprint` (xxh3 of the file bytes) is a stable dedup key.
         let a = write_batch_to_bytes(CompressionType::Zstd);
         let b = write_batch_to_bytes(CompressionType::Zstd);
         assert_eq!(a, b, "identical rows must yield byte-identical parquet");
@@ -402,8 +394,6 @@ mod tests {
             Some("rivet"),
             "created_by must be the pinned constant"
         );
-        // Must not leak the parquet-rs version — that's the cross-release drift
-        // that would break the fingerprint as a dedup key.
         let cb = created_by.unwrap();
         assert!(
             !cb.contains("version") && !cb.contains("parquet"),
@@ -542,6 +532,45 @@ mod tests {
         }
     }
 
+    /// The bytes `create_writer` produces for `batches`, failing at the first byte past `max`.
+    fn span_bytes(
+        fmt: &ParquetFormat,
+        batches: &[arrow::record_batch::RecordBatch],
+        max: usize,
+    ) -> Vec<u8> {
+        let out = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = CappedSink {
+            out: out.clone(),
+            max,
+        };
+        let mut w = fmt
+            .create_writer(&batches[0].schema(), Box::new(sink))
+            .unwrap();
+        for b in batches {
+            w.write_batch(b).unwrap();
+        }
+        w.finish().unwrap();
+        out.lock().unwrap().clone()
+    }
+
+    /// Every row of a Parquet file, decoded into one batch.
+    fn decoded(bytes: Vec<u8>) -> arrow::record_batch::RecordBatch {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|b| b.unwrap()).collect();
+        arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap()
+    }
+
+    const CODEC_AND_GROUPS: [(Option<usize>, CompressionType); 4] = [
+        (Some(45_000), CompressionType::Zstd),
+        (Some(26_000), CompressionType::None),
+        (Some(777), CompressionType::Snappy),
+        (None, CompressionType::Zstd),
+    ];
+
     #[test]
     fn spans_leave_the_file_byte_identical_to_whole_batch_writes() {
         // Batches straddle row group ends, and a group holds several 20,000-row pages.
@@ -551,29 +580,58 @@ mod tests {
             mixed_batch(80_001, 30_000),
             mixed_batch(110_001, 9_000),
         ];
-        for (groups, codec) in [
-            (Some(45_000), CompressionType::Zstd),
-            (Some(26_000), CompressionType::None),
-            (Some(777), CompressionType::Snappy),
-            (None, CompressionType::Zstd),
-        ] {
+        for (groups, codec) in CODEC_AND_GROUPS {
             let fmt = ParquetFormat::new(codec, None, groups);
             let expected = whole_batch_bytes(&fmt, &batches);
-            let out = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let sink = CappedSink {
-                out: out.clone(),
-                max: expected.len(),
-            };
-            let mut w = fmt
-                .create_writer(&batches[0].schema(), Box::new(sink))
-                .unwrap();
-            for b in &batches {
-                w.write_batch(b).unwrap();
-            }
-            w.finish().unwrap();
+            let got = span_bytes(&fmt, &batches, expected.len());
             assert!(
-                *out.lock().unwrap() == expected,
+                got == expected,
                 "row groups {groups:?}: spans changed the bytes"
+            );
+        }
+    }
+
+    /// Nullable columns that hold no NULL: uniform levels, whose page cuts the spans move.
+    fn dense_nullable_batch(lo: i64, n: usize) -> arrow::record_batch::RecordBatch {
+        use arrow::array::{Decimal128Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        let ids = || lo..lo + n as i64;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("d38", DataType::Decimal128(38, 2), true),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from_iter_values(ids())),
+                Arc::new(StringArray::from_iter_values(ids().map(|i| {
+                    format!("value-{i:08}-{}", i.wrapping_mul(0x9E37_79B9))
+                }))),
+                Arc::new(
+                    Decimal128Array::from_iter_values(ids().map(|i| i128::from(i) * 7))
+                        .with_precision_and_scale(38, 2)
+                        .unwrap(),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn spans_leave_the_decoded_values_of_a_nullable_column_without_nulls_identical() {
+        let batches = [
+            dense_nullable_batch(1, 30_000),
+            dense_nullable_batch(30_001, 50_000),
+            dense_nullable_batch(80_001, 9_000),
+        ];
+        for (groups, codec) in CODEC_AND_GROUPS {
+            let fmt = ParquetFormat::new(codec, None, groups);
+            let whole = whole_batch_bytes(&fmt, &batches);
+            let got = span_bytes(&fmt, &batches, usize::MAX);
+            assert!(
+                decoded(got) == decoded(whole),
+                "row groups {groups:?}: spans changed the decoded values"
             );
         }
     }
