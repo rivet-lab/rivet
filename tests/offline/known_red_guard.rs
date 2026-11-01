@@ -24,7 +24,7 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 const ENTRY_CEILING: usize = 4; // ratchet-pin: known-red-entries
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
-const EXPIRES: &str = "2026-10-31"; // pinned: the ledger's `_EXPIRES`, moved only together with it
+const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

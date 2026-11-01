@@ -32,9 +32,10 @@ use std::path::Path;
 
 use chrono::NaiveDate;
 
-use crate::config::Config;
+use crate::config::{Config, ExportConfig};
 use crate::destination::placeholder::PlaceholderContext;
 use crate::error::Result;
+use crate::pipeline::run_set::RunSet;
 use crate::pipeline::validate_manifest::ManifestVerification;
 use crate::pipeline::validate_manifest::{ValidateDepth, verify_at_destination};
 
@@ -97,33 +98,36 @@ pub fn run_validate_command(
 ) -> Result<()> {
     let config = Config::load_with_params(config_path, None)?;
 
-    let exports: Vec<&crate::config::ExportConfig> = match export_name {
-        Some(name) => match config.exports.iter().find(|e| e.name == name) {
-            Some(e) => vec![e],
-            None => crate::rivet_bail!(
-                crate::error::codes::CLI_EXPORT_UNKNOWN,
-                "export '{}' not found in config",
-                name
-            ),
-        },
-        None => {
-            // A `cdc.backfill` recipe never runs on its own, so its prefix holds
-            // nothing to certify; the baseline it describes is verified under the
-            // CDC export's `snapshot/`. Same whole-config rule as `run`.
-            let recipes = crate::config::backfill_recipe_names(&config.exports);
-            config
-                .exports
-                .iter()
-                .filter(|e| !recipes.contains(&e.name))
-                .collect()
-        }
+    let config_dir = Path::new(config_path).parent().unwrap_or(Path::new("."));
+    let run_set = RunSet::select(&config, export_name)?;
+    let exports: Vec<ExportConfig> = if target.prefix_override.is_some() {
+        run_set.declared().to_vec()
+    } else {
+        run_set
+            .in_process(&config.source, config_dir, None)
+            .map_err(|e| {
+                crate::error::recoded(
+                    &e,
+                    crate::error::codes::SOURCE_PROBE_UNREADABLE,
+                    format!(
+                        "validate could not list the partitions of a `partition_by` export: the \
+                         source holds the partition list and was not readable.\n  {e:#}\n  \
+                         Validate one partition without the source with \
+                         `rivet validate --export <name> --prefix <partition directory>`."
+                    ),
+                )
+            })?
     };
 
-    if exports.is_empty() {
+    if run_set.declared().is_empty() {
         crate::rivet_bail!(
             crate::error::codes::CONFIG_NO_EXPORTS,
             "no exports defined in config — nothing to validate"
         );
+    }
+    if exports.is_empty() {
+        println!("partition_by found no rows in the source: no partition to validate");
+        return Ok(());
     }
 
     // `--prefix` only makes sense for a single export; with multiple
@@ -417,6 +421,8 @@ fn verify_one_prefix(
             // real manifest, or an absent one already carrying a read error).
             if target.prefix_override.is_some() {
                 v.require_manifest_present(&resolved_prefix);
+            } else if let Some(window) = &export.partition_window {
+                v.require_partition_delivered(&resolved_prefix, &window.parent);
             }
             // Capture the verdict before `v` is moved into the result: the
             // deeper Form B checksum re-read below must run *only* on a
@@ -1317,6 +1323,50 @@ mod tests {
             verification["failures"][0]["kind"],
             "manifest_required_but_absent"
         );
+    }
+
+    /// A `partition_by` export whose source cannot be read is refused with its cause and a remedy that works without the source.
+    #[test]
+    fn a_partitioned_export_with_an_unreadable_source_is_refused_and_its_remedy_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("out");
+        let yaml = format!(
+            "source:\n  type: postgres\n  url: postgresql://nobody@127.0.0.1:1/nope\nexports:\n  - name: events\n    table: events\n    mode: full\n    format: parquet\n    partition_by: created_at\n    destination:\n      type: local\n      path: \"{}/{{partition}}\"\n",
+            root.to_string_lossy()
+        );
+        let cfg = dir.path().join("rivet.yaml");
+        std::fs::write(&cfg, yaml).unwrap();
+
+        let err = run_validate_command(
+            cfg.to_str().unwrap(),
+            Some("events"),
+            ValidateOutputFormat::Json(None),
+            ValidateTarget::default(),
+        )
+        .expect_err("an unreadable source cannot list the partitions");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("validate could not list the partitions of a `partition_by` export")
+                && text.contains("rivet validate --export <name> --prefix <partition directory>"),
+            "the refusal names its cause and its remedy: {text}"
+        );
+        assert!(
+            crate::error::error_code(&err).is_some(),
+            "the refusal is coded: {text}"
+        );
+
+        let partition = root.join("created_at=2026-03-01");
+        stage_dataset(&partition, &success_manifest(Vec::new()));
+        run_validate_command(
+            cfg.to_str().unwrap(),
+            Some("events"),
+            ValidateOutputFormat::Json(None),
+            ValidateTarget {
+                prefix_override: Some(partition.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .expect("the remedy verifies one partition with the source unreachable");
     }
 
     /// Without `--prefix`, an absent manifest stays the benign M6 legacy-run

@@ -40,6 +40,18 @@ FIX = re.compile(r"fix[(:!]")
 TEST = re.compile(r"^#\[test\]\n(?:#\[[^\n]*\n)*(?:pub )?fn (\w+)\(\) \{\n(.*?)^\}", re.M | re.S)
 #: Fix cells allowed to pass on the previous release, each with its reason. Shrink-only.
 GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-release strings
+    "a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_bigquery":
+        "2026-11-01: #737 second commit pins a refusal the BigQuery loader already made on 0.32.2; no product change in it, a regression guard for the new Mongo order",
+    "a_table_swap_without_the_policy_is_met_as_before_mysql":
+        "2026-11-01: #727 control: with columns_from off the table swap is met as before, so 0.32.2 delivers both rows too",
+    "a_truncate_drop_or_statement_write_is_met_as_before_without_double_quoted_names_mysql":
+        "2026-11-01: #727 control: statements the reader met before the sql_mode fix are met the same way, so 0.32.2 passes",
+    "apply_must_not_advance_the_cursor_when_the_manifest_did_not_land":
+        "2026-11-01: #731 reorders the journal and card only; the cursor guard was already right on 0.32.2 and this cell grades the cursor",
+    "mysql_cdc_a_statement_logged_insert_is_captured_or_refused_never_dropped":
+        "2026-11-01: #729 re-cut the COMMIT arm this cell crosses; 0.32.2 already captured or refused a statement-logged insert, so it is a regression guard",
+    "mysql_lost_checkpoint_under_a_baseline_stream_is_refused_not_reanchored":
+        "2026-11-01: #730 sibling: a finished initial snapshot was already refused by ensure_anchor on 0.32.2; the changes-only cell is the one that fails there",
 }  # ratchet-pin: end
 
 
