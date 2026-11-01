@@ -355,7 +355,8 @@ class Ledger:
             return "STAND-INVALID"
         return "NOT RELEASABLE" if self.red else "NOT GRADED" if self.ungraded_cells else "RELEASE-READY"
 
-    def report(self, *, full: bool = False, gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None) -> int:
+    def report(self, *, full: bool = False, gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None,
+               config: dict | None = None) -> int:
         """Print the table and the verdict; only a `full` gate run records a timings line (naming `gate`) and may say RELEASE-READY."""
         self.record_evidence()
         print()
@@ -431,7 +432,7 @@ class Ledger:
                 TIMINGS_HISTORY, timed, self._spans, verdict,
                 sum(c.status is Status.PASS for c in self.cells),
                 sum(c.status is Status.FAIL for c in self.cells),
-                self._phase_load, gate=gate, tree=tree,
+                self._phase_load, gate=gate, tree=tree, config=config,
             )
         known = [c for c in self.cells if c.status is Status.KNOWN]
         if known:
@@ -478,8 +479,8 @@ def tree_identity() -> tuple[str, bool]:
 
 def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tuple[str, float]],
                    verdict: str, passed: int, failed: int, loads: dict[str, tuple[float, float]] | None = None,
-                   gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None) -> dict:
-    """Append this run's verdict (full commit, gate kind, dirty tree), phase and span timings and load averages to `path`; print the phase deltas against the previous run."""
+                   gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None, config: dict | None = None) -> dict:
+    """Append this run's verdict (full commit, the graded binary's stamp, gate kind, the configuration it ran under, dirty tree), phase and span timings and load averages to `path`; print the phase deltas against the previous run."""
     import datetime as _dt
     import json as _json
 
@@ -488,7 +489,9 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
         "at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "commit": sha[:8],
         "sha": sha,
+        "binary": binary_stamp(),
         "gate": gate,
+        "config": config,
         "dirty": dirty,
         "verdict": verdict,
         "passed": passed,
@@ -592,23 +595,17 @@ class Proc:
         return f"exit {self.returncode}{f' [{code.group(1)}]' if code else ''}: {first_error(err)[:300]}"
 
 
-#: Every RIVET_* variable the gate, the Rust harness or the Makefile's GATE_ENV READS from the
-#: shell. Any other RIVET_* in the inherited environment is the PRODUCT's (a fault hook, a state
-#: URL, a tuning knob left over from a manual repro) and is dropped before the first cell: `run()`
-#: merges os.environ into every child, so a leftover looked like a product failure in every cell.
-#: Enumerated from the code, graded by tests/offline/harness_env_hygiene_guard.rs.
+#: RIVET_* variables the gate, the Rust harness or the Makefile's GATE_ENV read from the shell and that change no verdict; graded by harness_env_hygiene_guard.rs.
 HARNESS_ENV: frozenset[str] = frozenset((
-    "RIVET_ALLOW_WORKTREE_LIVE", "RIVET_BIN", "RIVET_BIN_OVERRIDE",
+    "RIVET_ALLOW_WORKTREE_LIVE", "RIVET_BIN_OVERRIDE",
     "RIVET_CDC_STATE_URL", "RIVET_CONC_SRC_CONTAINER", "RIVET_CONC_SRC_URL", "RIVET_CONC_STATE_URL",
     "RIVET_FAILURE_MONGO_URL", "RIVET_FIELD_LOCK", "RIVET_FIELD_MYSQL_CONTAINER", "RIVET_FIELD_REPLAY_BIN",
     "RIVET_FLOW_VERDICTS", "RIVET_GATE_SHARED_STATE", "RIVET_GATE_STATE_URL",
-    "RIVET_HARM_SLACK", "RIVET_HARM_TOL", "RIVET_LEASE_CARRIER_BIN", "RIVET_LOCK_WAIT", "RIVET_MIGRATION_CARRIER_BIN",
+    "RIVET_LEASE_CARRIER_BIN", "RIVET_LOCK_WAIT", "RIVET_MIGRATION_CARRIER_BIN",
     "RIVET_ORACLE_DOCKER", "RIVET_ORACLE_LATEST_ONLY", "RIVET_ORACLE_LOG", "RIVET_ORACLE_SELFTEST_FLAG",
     "RIVET_ORACLE_VERSIONS", "RIVET_ORACLE_WITHOUT_PREV_RELEASE", "RIVET_ORACLE_WORK",
-    "RIVET_PERF_BQ_WALL_TOL", "RIVET_PERF_CPU_TOL", "RIVET_PERF_RSS_TOL", "RIVET_PERF_WALL_TOL",
     "RIVET_PREV_RELEASE_BIN", "RIVET_REGENERATE_FIXTURES",
     "RIVET_STATE_COPY_FROM_BIN", "RIVET_REGRESSION_SOURCE_URL",
-    "RIVET_REGRESSION_WALL_TOL", "RIVET_SCALE_CHUNK", "RIVET_SCALE_RSS_TOL",
     "RIVET_SF_CONNECTION", "RIVET_SF_DATABASE", "RIVET_SF_SCHEMA", "RIVET_SF_STORAGE_INTEGRATION",
     "RIVET_SF_WAREHOUSE", "RIVET_SKIP_LOG", "RIVET_SNOWFLAKE_ACCOUNT", "RIVET_SNOWFLAKE_KEY",
     "RIVET_SNOWFLAKE_ROLE", "RIVET_SNOWFLAKE_USER",
@@ -618,21 +615,23 @@ HARNESS_ENV: frozenset[str] = frozenset((
     "RIVET_TEST_STATE_TOXI_URL", "RIVET_TEST_STATE_URL", "RIVET_TINYFS_DIR",
     "RIVET_UPG_KEEP", "RIVET_UPG_ORACLE_CDC_URL",
 ))
+#: RIVET_* variables that move a tolerance or what a stage measures: allowed in the shell, recorded in the gate's configuration, and any one set makes the run no full gate.
+GRADING_KNOBS: frozenset[str] = frozenset((
+    "RIVET_HARM_SLACK", "RIVET_HARM_TOL", "RIVET_PERF_BQ_WALL_TOL", "RIVET_PERF_CPU_TOL", "RIVET_PERF_RSS_TOL",
+    "RIVET_PERF_WALL_TOL", "RIVET_REGRESSION_WALL_TOL", "RIVET_SCALE_CHUNK", "RIVET_SCALE_RSS_TOL",
+))
 #: The per-engine URL families (`RIVET_CDC_<ENGINE>_URL`, `RIVET_ORACLE_<ENGINE>_URL`), read by name.
 HARNESS_ENV_FAMILY = re.compile(r"^RIVET_(CDC|ORACLE)_[A-Z0-9]+_URL$")
 
 
 def is_harness_env(name: str) -> bool:
     """Is `name` a RIVET_* variable the harness itself reads (so the shell may hand it in)?"""
-    return name in HARNESS_ENV or bool(HARNESS_ENV_FAMILY.match(name))
+    return name in HARNESS_ENV or name in GRADING_KNOBS or bool(HARNESS_ENV_FAMILY.match(name))
 
 
-def scrub_inherited_rivet_env() -> list[str]:
-    """Drop every inherited RIVET_* that is not the harness's own; return the dropped names."""
-    dropped = sorted(k for k in os.environ if k.startswith("RIVET_") and not is_harness_env(k))
-    for k in dropped:
-        del os.environ[k]
-    return dropped
+def unlisted_env() -> list[str]:
+    """Every inherited RIVET_* the harness does not read and every BLESS_*: the gate refuses to start while any is set."""
+    return sorted(k for k in os.environ if (k.startswith("RIVET_") and not is_harness_env(k)) or k.startswith("BLESS_"))
 
 
 def run(
@@ -748,6 +747,19 @@ def run_lanes(led: "Ledger", cells: Sequence[tuple[object, Callable[["Ledger"], 
         raise raised[0]
 
 
+_BLESSING = {"verdicts": False, "duckdb": False, "cdc": False}
+
+
+def set_blessing(*, local: bool, cdc: bool) -> None:
+    """The golden re-capture modes of this run, from `--bless-local` / `--bless-cdc`; the environment turns none on."""
+    _BLESSING.update(verdicts=local, duckdb=local, cdc=cdc)
+
+
+def blessing(kind: str) -> bool:
+    """Is the `verdicts`, `duckdb` or `cdc` golden being re-captured by this run?"""
+    return _BLESSING[kind]
+
+
 # ── the release binary under test ──────────────────────────────────────────────
 def target_dir() -> Path:
     """Cargo's target directory: $CARGO_TARGET_DIR (relative to the repo) when set."""
@@ -801,8 +813,17 @@ def self_skipped(skip_log: Path) -> dict[str, str]:
 
 
 def rivet_bin() -> Path:
-    """$RIVET_BIN, else the release binary cargo builds under `target_dir()`."""
-    return Path(os.environ.get("RIVET_BIN", target_dir() / "release" / "rivet"))
+    """The release binary cargo builds under `target_dir()`: the one locator every stage uses, never an inherited variable."""
+    return target_dir() / "release" / "rivet"
+
+
+_VERSION_STAMP = re.compile(r"\(([0-9a-f]{7,40})\)")
+
+
+def binary_stamp() -> str:
+    """The commit `rivet --version` prints for the gate's binary, or "" when it prints none (an `unknown` build)."""
+    m = _VERSION_STAMP.search(rivet("--version").stdout)
+    return m.group(1) if m else ""
 
 
 def release_bin_env() -> dict[str, str]:

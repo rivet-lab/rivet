@@ -377,13 +377,8 @@ pub fn check(
 ) -> Result<bool> {
     let config = Config::load_with_params(config_path, params)?;
 
-    let named = export_name
-        .map(|name| crate::config::declared_exports(&config, Some(name)))
-        .transpose()?;
-    let exports: Vec<&ExportConfig> = match &named {
-        Some(declared) => declared.iter().collect(),
-        None => config.exports.iter().collect(),
-    };
+    let declared = crate::config::declared_exports(&config, export_name)?;
+    let exports: Vec<&ExportConfig> = declared.iter().collect();
 
     // A preflight must never bless a config the RUNNER refuses.
     //

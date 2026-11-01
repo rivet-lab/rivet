@@ -513,11 +513,6 @@ def prev_binary() -> Path | None:
     return p if p.is_file() and os.access(p, os.X_OK) else None
 
 
-# The named escape. Read from the ENVIRONMENT rather than threaded down as a
-# parameter, because that is how every other gate-wide knob reaches this layer
-# (`RIVET_STATE_URL`, `BLESS_*`): `__main__` exports it once after parsing argv,
-# and `core.run` merges os.environ into every child. It also means a CI job that
-# can set env but not argv has the same one switch, spelled the same way.
 _ESCAPE_FLAG = "--without-prev-release-comparison"
 _ESCAPE_ENV = "RIVET_ORACLE_WITHOUT_PREV_RELEASE"
 

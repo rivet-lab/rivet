@@ -14,14 +14,16 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "dev/fixtures/statement_truth"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import statement_truth_mysql  # noqa: E402
+
+ENGINES = {"mysql": statement_truth_mysql}
+
 
 def engine_module(engine: str):
-    """The generator module of one engine, imported by name so a missing module is a static fact."""
-    if engine == "mysql":
-        import statement_truth_mysql
-
-        return statement_truth_mysql
-    raise SystemExit(f"statement_truth: no generator for engine {engine!r}; the engines are: mysql")
+    """The generator module of one engine, from the static table."""
+    if engine not in ENGINES:
+        sys.exit(f"unknown engine {engine!r}; known: {sorted(ENGINES)}")
+    return ENGINES[engine]
 
 
 def fixture_path(engine: str, server: str) -> Path:
@@ -150,8 +152,23 @@ def run_slice(engine: str, servers: list[str], subset: str, dump_to: str | None 
 COMMANDS = {"up": cmd_up, "down": cmd_down, "seed": cmd_seed, "generate": cmd_generate, "check": cmd_check}
 
 
+def self_test() -> int:
+    """Every engine of the table has the generator surface and a fixture for each of its servers."""
+    for engine, mod in ENGINES.items():
+        for name in ("PROFILE", "SERVERS", "generate", "reseed"):
+            assert hasattr(mod, name), f"{engine}: module has no {name}"
+        for server in mod.SERVERS:
+            assert fixture_path(engine, server).is_file(), f"{engine} {server}: no fixture at {fixture_path(engine, server)}"
+        assert (FIXTURES / engine).is_dir()
+    assert set(ENGINES) == {p.name for p in FIXTURES.iterdir() if p.is_dir()}, "fixture directory without an engine in the table"
+    print(f"statement_truth self-test ok: {sorted(ENGINES)}")
+    return 0
+
+
 def main() -> int:
-    """Command line: <engine> <up|down|seed|generate|check> [--server NAME ...]."""
+    """Command line: <engine> <up|down|seed|generate|check> [--server NAME ...] or --self-test."""
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("engine")
     ap.add_argument("command", choices=sorted(COMMANDS))
