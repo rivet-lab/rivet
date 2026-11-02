@@ -109,8 +109,10 @@ pub(crate) struct MysqlChangeStream {
     grants_pending: Option<(String, u64)>,
     /// Whether the binlog is between a `BEGIN` and the commit that closes it: no privilege statement can sit inside.
     in_transaction: bool,
-    /// Whether the server folds identifier case (`lower_case_table_names` other than 0), read only when the run projects.
+    /// Whether the server folds identifier case (`lower_case_table_names` other than 0).
     fold_names: bool,
+    /// The databases the captured tables live in: what a statement dropping a database is compared with.
+    captured_databases: Vec<String>,
 }
 
 impl MysqlChangeStream {
@@ -888,6 +890,8 @@ impl MysqlChangeStream {
             .flatten()
             .unwrap_or_default();
         let bare_db = Self::bare_name_databases(&mut conn, &own_db, &configured_tables);
+        let fold_names = Self::folds_names_on(&mut conn)?;
+        let captured_databases = captured_databases(&configured_tables, &bare_db, &own_db);
         conn.query_drop(format!(
             "SET SESSION net_write_timeout = {DUMP_WRITE_TIMEOUT_SECS}"
         ))
@@ -931,7 +935,8 @@ impl MysqlChangeStream {
             grants_source: None,
             grants_pending: None,
             in_transaction: false,
-            fold_names: false,
+            fold_names,
+            captured_databases,
         })
     }
 
@@ -1131,7 +1136,6 @@ impl MysqlChangeStream {
         }
         let grants_source = readable.is_some().then(|| (url.to_string(), tls.cloned()));
         let projecting = readable.is_some();
-        let fold_names = projecting && Self::folds_names_on(&mut conn)?;
         let with_dir = |mut s: Self| {
             s.tx = crate::source::cdc::tx_buffer::TxBuffer::new(
                 crate::source::cdc::CdcEngine::Mysql,
@@ -1139,7 +1143,6 @@ impl MysqlChangeStream {
             );
             s.readable = readable;
             s.grants_source = grants_source;
-            s.fold_names = fold_names;
             s
         };
         if let Some(path) = ckpt
@@ -1289,14 +1292,18 @@ impl MysqlChangeStream {
         self.refuse_changed_grants_at(&data)?;
         if let Some(EventData::QueryEvent(qe)) = &data {
             self.note_statement(qe.query_raw(), log_pos);
+            let text = QueryText {
+                raw: qe.query_raw(),
+                db: qe.schema_raw(),
+                collation: client_collation(qe.status_vars_raw()),
+            };
             if let Some(refusal) = query_refusal(
                 self.readable.is_some(),
                 self.fold_names,
-                &qe.query(),
-                qe.query_raw(),
-                &qe.schema(),
+                &text,
                 event_mode(qe),
                 &self.configured_tables,
+                &self.captured_databases,
             ) {
                 return Err(refusal.into_error());
             }
@@ -2269,6 +2276,8 @@ pub(crate) enum QueryRefusal {
     ColumnRename((String, String)),
     TableRename(Option<(String, String)>),
     Drop(Option<(String, String)>),
+    DropDatabase(Option<String>),
+    PartitionRows(Option<(String, String)>),
     StatementWrite(Option<(String, String)>),
     Mention(String),
 }
@@ -2284,6 +2293,10 @@ impl QueryRefusal {
             }
             QueryRefusal::TableRename(t) => undecodable(table_rename_refusal_message(t.as_ref())),
             QueryRefusal::Drop(t) => truncated(drop_refusal_message(t.as_ref())),
+            QueryRefusal::DropDatabase(db) => {
+                truncated(drop_database_refusal_message(db.as_deref()))
+            }
+            QueryRefusal::PartitionRows(t) => truncated(partition_rows_refusal_message(t.as_ref())),
             QueryRefusal::StatementWrite(t) => {
                 undecodable(statement_dml_refusal_message(t.as_ref()))
             }
@@ -2292,22 +2305,143 @@ impl QueryRefusal {
     }
 }
 
+/// A QUERY event's text as the binlog carries it: the statement, the database it ran in, and the collation id of the client character set it is spelled in.
+pub(crate) struct QueryText<'a> {
+    pub(crate) raw: &'a [u8],
+    pub(crate) db: &'a [u8],
+    pub(crate) collation: Option<u16>,
+}
+
+/// The collation id of the client character set among the raw status variables of a QUERY event.
+pub(crate) fn client_collation(status_vars: &[u8]) -> Option<u16> {
+    StatusVarsIterator::new(status_vars).find_map(|var| match var.get_value() {
+        Ok(StatusVarVal::Charset { charset_client, .. }) => Some(charset_client),
+        _ => None,
+    })
+}
+
+/// How a server that folds identifier case compares the names of one statement.
+#[derive(Clone, Copy)]
+struct NameFold {
+    byte_per_char: bool,
+    spelling: super::folded_name::Spelling,
+}
+
+impl NameFold {
+    /// The name as the server compares it.
+    fn of(self, name: &str) -> String {
+        super::folded_name::folded(name, self.byte_per_char, self.spelling)
+    }
+}
+
+/// The databases the captured tables live in: a qualified name's own, a bare name's resolved one.
+pub(crate) fn captured_databases(
+    configured: &[String],
+    bare_db: &HashMap<String, String>,
+    own_db: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = configured
+        .iter()
+        .filter_map(|c| match c.split_once('.') {
+            Some((db, _)) => Some(db.to_string()),
+            None => bare_db
+                .get(c)
+                .cloned()
+                .or_else(|| (!own_db.is_empty()).then(|| own_db.to_string())),
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The table to report when a statement's target is a captured one: `Some` when it is, and then the statement's table as the server compares it on a server that folds; `None` when the statement is about another table.
+fn captured_table(
+    target: Option<&(String, String)>,
+    configured: &[String],
+    fold: Option<NameFold>,
+) -> Option<Option<(String, String)>> {
+    let Some(fold) = fold else {
+        let named = target.map(|(sc, tb)| (sc.as_str(), tb.as_str()));
+        return undecodable_event_is_ours(named, configured).then(|| target.cloned());
+    };
+    if configured.is_empty() {
+        return Some(target.cloned());
+    }
+    let Some((schema, table)) = target else {
+        return Some(None);
+    };
+    let (schema, table) = (fold.of(schema), fold.of(table));
+    configured
+        .iter()
+        .any(|c| {
+            crate::source::cdc::sink::table_matches(
+                crate::source::cdc::CdcEngine::Mysql,
+                &c.to_ascii_lowercase(),
+                &schema,
+                &table,
+            )
+        })
+        .then_some(Some((schema, table)))
+}
+
+/// Whether a database a statement drops holds a captured table: an unreadable name does, so does any when nothing is configured.
+fn captured_database(
+    name: Option<&str>,
+    configured: &[String],
+    databases: &[String],
+    fold: Option<NameFold>,
+) -> Option<Option<String>> {
+    let Some(name) = name else {
+        return Some(None);
+    };
+    if configured.is_empty() {
+        return Some(Some(name.to_string()));
+    }
+    match fold {
+        None => databases
+            .iter()
+            .any(|d| d == name)
+            .then(|| Some(name.to_string())),
+        Some(fold) => {
+            let name = fold.of(name);
+            databases
+                .iter()
+                .any(|d| d.to_ascii_lowercase() == name)
+                .then_some(Some(name))
+        }
+    }
+}
+
 /// The refusal a Query event earns: its text is read only without the grants policy, or under it for a statement that names a captured table.
 pub(crate) fn query_refusal(
     policy: bool,
     fold: bool,
-    sql: &str,
-    raw: &[u8],
-    event_db: &str,
+    text: &QueryText<'_>,
     mode: SqlMode,
     configured: &[String],
+    databases: &[String],
 ) -> Option<QueryRefusal> {
-    let mention = mention_under_policy(policy, fold, raw, configured);
+    use super::folded_name::{Spelling, folded, lossless_text};
+    let mention = mention_under_policy(policy, fold, text.raw, configured);
     let by_text = lexer_may_refuse(policy, mention.is_some());
-    let ours = |t: Option<&(String, String)>| {
-        undecodable_event_is_ours(t.map(|(sc, tb)| (sc.as_str(), tb.as_str())), configured)
+    let spelling = Spelling::of_collation(text.collation);
+    let (sql, byte_per_char) = lossless_text(text.raw, spelling);
+    let (db, db_bytes) = lossless_text(text.db, Spelling::Utf8);
+    let fold = fold.then_some(NameFold {
+        byte_per_char,
+        spelling,
+    });
+    let event_db = match fold {
+        Some(_) => folded(&db, db_bytes, Spelling::Utf8),
+        None => db,
     };
-    if let Some(t) = truncate_target(sql, event_db, mode).filter(|t| by_text && ours(Some(t))) {
+    let (sql, event_db) = (sql.as_str(), event_db.as_str());
+    let ours = |t: Option<&(String, String)>| captured_table(t, configured, fold);
+    if let Some(t) = truncate_target(sql, event_db, mode)
+        .filter(|_| by_text)
+        .and_then(|t| ours(Some(&t)).flatten())
+    {
         return Some(QueryRefusal::Truncate(t));
     }
     if let Some(t) = refused_column_rename(mention.is_some(), sql, event_db, mode, configured) {
@@ -2318,12 +2452,24 @@ pub(crate) fn query_refusal(
     }
     if let Some(t) = drop_table_targets(sql, event_db, mode)
         .filter(|_| by_text)
-        .and_then(|ts| ts.into_iter().find(|t| ours(t.as_ref())))
+        .and_then(|ts| ts.into_iter().find_map(|t| ours(t.as_ref())))
     {
         return Some(QueryRefusal::Drop(t));
     }
-    if let Some(t) =
-        statement_dml_target(sql, event_db, mode).filter(|t| by_text && ours(t.as_ref()))
+    if let Some(db) = drop_database_target(sql, mode)
+        .and_then(|name| captured_database(name.as_deref(), configured, databases, fold))
+    {
+        return Some(QueryRefusal::DropDatabase(db));
+    }
+    if let Some(t) = partition_rows_targets(sql, event_db, mode)
+        .filter(|_| by_text)
+        .and_then(|ts| ts.into_iter().find_map(|t| ours(t.as_ref())))
+    {
+        return Some(QueryRefusal::PartitionRows(t));
+    }
+    if let Some(t) = statement_dml_target(sql, event_db, mode)
+        .filter(|_| by_text)
+        .and_then(|t| ours(t.as_ref()))
     {
         return Some(QueryRefusal::StatementWrite(t));
     }
@@ -2390,6 +2536,80 @@ pub(crate) fn drop_table_targets(
                 (end == group.len()).then(|| qualified(schema, table, event_db))
             })
             .collect(),
+    )
+}
+
+/// The database a `DROP DATABASE` or `DROP SCHEMA` QUERY event removes (`None` for an unreadable name); `None` when the event is not one.
+pub(crate) fn drop_database_target(sql: &str, mode: SqlMode) -> Option<Option<String>> {
+    let toks = significant(sql, mode);
+    if !(word_is(&toks, 0, "drop")
+        && (word_is(&toks, 1, "database") || word_is(&toks, 1, "schema")))
+    {
+        return None;
+    }
+    let at = 2 + 2 * usize::from(word_is(&toks, 2, "if") && word_is(&toks, 3, "exists"));
+    Some(match table_name_at(&toks, at) {
+        Some((None, name, end)) if end == toks.len() => Some(name),
+        _ => None,
+    })
+}
+
+/// The tables an `ALTER TABLE` QUERY event takes rows from or gives rows to without a row event (`TRUNCATE`, `DROP` and `EXCHANGE PARTITION`; `None` for an unreadable name); `None` when the event does none of these.
+pub(crate) fn partition_rows_targets(
+    sql: &str,
+    event_db: &str,
+    mode: SqlMode,
+) -> Option<Vec<Option<(String, String)>>> {
+    let tokens = alter_tokens(sql, mode)?;
+    let (table, at) = alter_header(&tokens, event_db)?;
+    let mut out = Vec::new();
+    for start in alter_spec_starts(&tokens, at) {
+        if !alter_word(&tokens, start + 1, "partition") {
+            continue;
+        }
+        if alter_word(&tokens, start, "truncate") || alter_word(&tokens, start, "drop") {
+            out.push(Some(table.clone()));
+        } else if alter_word(&tokens, start, "exchange") {
+            out.push(Some(table.clone()));
+            let other = (alter_word(&tokens, start + 3, "with")
+                && alter_word(&tokens, start + 4, "table"))
+            .then(|| alter_table_name(&tokens, start + 5, event_db))
+            .flatten();
+            out.push(other.map(|(t, _)| t));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Refuse a captured table whose partitions are emptied or swapped out: the rows leave (or arrive) in the source without a row event.
+pub(crate) fn partition_rows_refusal_message(target: Option<&(String, String)>) -> String {
+    let what = match target {
+        Some((schema, table)) if !schema.is_empty() => format!("`{schema}.{table}`"),
+        Some((_, table)) => format!("`{table}`"),
+        None => "a table this reader could not identify".to_string(),
+    };
+    format!(
+        "mysql cdc: captured table {what} had a partition truncated, dropped or exchanged \
+         (ALTER TABLE ... TRUNCATE, DROP or EXCHANGE PARTITION) in the log being read, and this \
+         reader cannot represent that as a change: the server moves those rows with no row \
+         event, so every row it took out would stay live in the destination and every row it \
+         brought in would never be delivered. {}",
+        crate::source::cdc::checkpoint_identity::RECOVER
+    )
+}
+
+/// Refuse a database dropped with a captured table in it: its rows leave the source without events, and a table created again under the name is another table's history.
+pub(crate) fn drop_database_refusal_message(database: Option<&str>) -> String {
+    let what = match database {
+        Some(db) => format!("database `{db}`, which holds a captured table,"),
+        None => "a database this reader could not identify".to_string(),
+    };
+    format!(
+        "mysql cdc: {what} was DROPped, and this reader cannot represent that as a change. \
+         Skipping it would leave every row the captured table held live in the destination, and \
+         a table created again under the same name would continue that history as if it were \
+         one table. {}",
+        crate::source::cdc::checkpoint_identity::RECOVER
     )
 }
 
@@ -4802,20 +5022,44 @@ mod tests {
 
     fn refusal(policy: bool, fold: bool, raw: &[u8]) -> Option<QueryRefusal> {
         let cfg = vec!["shop.kinds".to_string(), "shop.ship".to_string()];
+        let text = QueryText {
+            raw,
+            db: b"x",
+            collation: Some(45),
+        };
         query_refusal(
             policy,
             fold,
-            &String::from_utf8_lossy(raw),
-            raw,
-            "x",
+            &text,
             SqlMode::default(),
             &cfg,
+            &["shop".to_string()],
+        )
+    }
+
+    fn at(t: &str) -> Option<(String, String)> {
+        Some(("shop".to_string(), t.to_string()))
+    }
+
+    fn refusal_in(collation: u16, fold: bool, raw: &[u8]) -> Option<QueryRefusal> {
+        let cfg = vec!["shop.kinds".to_string(), "shop.ship".to_string()];
+        let text = QueryText {
+            raw,
+            db: b"x",
+            collation: Some(collation),
+        };
+        query_refusal(
+            false,
+            fold,
+            &text,
+            SqlMode::default(),
+            &cfg,
+            &["shop".to_string()],
         )
     }
 
     #[test]
-    fn a_statement_is_read_for_its_table_exactly_without_the_policy_whatever_the_server_folds() {
-        let at = |t: &str| Some(("shop".to_string(), t.to_string()));
+    fn a_statement_is_read_for_the_table_it_spells_whatever_the_server_folds() {
         for fold in [false, true] {
             assert_eq!(
                 refusal(false, fold, b"TRUNCATE TABLE shop.kinds"),
@@ -4829,13 +5073,6 @@ mod tests {
                 refusal(false, fold, b"DELETE FROM shop.kinds"),
                 Some(QueryRefusal::StatementWrite(at("kinds")))
             );
-            assert_eq!(refusal(false, fold, b"TRUNCATE TABLE shop.KINDS"), None);
-            assert_eq!(refusal(false, fold, b"DROP TABLE shop.KINDS"), None);
-            assert_eq!(refusal(false, fold, b"DELETE FROM shop.KINDS"), None);
-            assert_eq!(
-                refusal(false, fold, "TRUNCATE TABLE shop.\u{212a}inds".as_bytes()),
-                None
-            );
             assert_eq!(
                 refusal(
                     false,
@@ -4845,6 +5082,17 @@ mod tests {
                 None
             );
             assert_eq!(
+                refusal(
+                    false,
+                    fold,
+                    "TRUNCATE TABLE shop.\u{4e00}\u{4e8c}".as_bytes()
+                ),
+                None
+            );
+            assert_eq!(refusal(false, fold, b"TRUNCATE TABLE shop.kind"), None);
+            assert_eq!(refusal(false, fold, b"TRUNCATE TABLE shop.kindsx"), None);
+            assert_eq!(refusal(false, fold, b"TRUNCATE TABLE other.kinds"), None);
+            assert_eq!(
                 refusal(false, fold, b"ALTER TABLE shop.kinds RENAME COLUMN a TO b"),
                 None
             );
@@ -4853,6 +5101,413 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn a_server_that_keeps_case_reads_another_spelling_as_another_table() {
+        let kelvin = "TRUNCATE TABLE shop.\u{212a}inds";
+        for raw in [
+            &b"TRUNCATE TABLE shop.KINDS"[..],
+            b"DROP TABLE shop.KINDS",
+            b"DELETE FROM shop.KINDS",
+            b"TRUNCATE TABLE SHOP.kinds",
+            kelvin.as_bytes(),
+        ] {
+            assert_eq!(
+                refusal(false, false, raw),
+                None,
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_that_folds_reads_the_spellings_it_resolves_to_the_captured_table() {
+        let kelvin = "\u{212a}inds";
+        for raw in [
+            "TRUNCATE TABLE shop.KINDS".to_string(),
+            "TRUNCATE TABLE SHOP.kinds".to_string(),
+            format!("TRUNCATE TABLE `shop`.`{kelvin}`"),
+            format!("TRUNCATE TABLE shop.{kelvin}"),
+            "TRUNCATE TABLE shop.k\u{130}nds".to_string(),
+            "TRUNCATE TABLE shop.K\u{130}NDS".to_string(),
+        ] {
+            let got = refusal(false, true, raw.as_bytes());
+            assert!(
+                matches!(&got, Some(QueryRefusal::Truncate(t)) if t.1 == "kinds"),
+                "{raw}: {got:?}"
+            );
+        }
+        assert_eq!(
+            refusal(false, true, b"DROP TABLE shop.KINDS"),
+            Some(QueryRefusal::Drop(at("kinds")))
+        );
+        assert_eq!(
+            refusal(false, true, b"DELETE FROM shop.KINDS WHERE id = 1"),
+            Some(QueryRefusal::StatementWrite(at("kinds")))
+        );
+        assert_eq!(
+            refusal(
+                false,
+                true,
+                format!("DROP TABLE shop.a, shop.{kelvin}").as_bytes()
+            ),
+            Some(QueryRefusal::Drop(at("kinds")))
+        );
+    }
+
+    #[test]
+    fn a_bare_name_is_read_in_the_database_the_event_ran_in_as_the_server_folds_it() {
+        let cfg = vec!["shop.kinds".to_string()];
+        let run = |fold: bool, db: &[u8], raw: &[u8]| {
+            let text = QueryText {
+                raw,
+                db,
+                collation: Some(45),
+            };
+            query_refusal(
+                false,
+                fold,
+                &text,
+                SqlMode::default(),
+                &cfg,
+                &["shop".to_string()],
+            )
+        };
+        assert_eq!(
+            run(true, b"SHOP", b"TRUNCATE KINDS"),
+            Some(QueryRefusal::Truncate(at("kinds").unwrap()))
+        );
+        assert_eq!(
+            run(true, "SHOP".as_bytes(), b"DELETE FROM kinds"),
+            Some(QueryRefusal::StatementWrite(at("kinds")))
+        );
+        assert_eq!(run(false, b"SHOP", b"TRUNCATE KINDS"), None);
+        assert_eq!(
+            run(false, b"shop", b"TRUNCATE kinds"),
+            Some(QueryRefusal::Truncate(at("kinds").unwrap()))
+        );
+        assert_eq!(run(true, b"other", b"TRUNCATE KINDS"), None);
+    }
+
+    #[test]
+    fn the_fold_is_the_one_the_client_character_set_spells() {
+        let spelled = |bytes: &[u8]| [&b"TRUNCATE TABLE shop.k"[..], bytes, b"nds"].concat();
+        let kelvin = [
+            (45, &[0xE2, 0x84, 0xAA][..]),
+            (33, &[0xE2, 0x84, 0xAA]),
+            (63, &[0xE2, 0x84, 0xAA]),
+            (248, &[0x81, 0x36, 0xBF, 0x32]),
+        ];
+        for (collation, bytes) in kelvin {
+            let raw = [&b"TRUNCATE TABLE shop."[..], bytes, b"inds"].concat();
+            assert_eq!(
+                refusal_in(collation, true, &raw),
+                Some(QueryRefusal::Truncate(at("kinds").unwrap())),
+                "collation {collation}"
+            );
+        }
+        let dotted = [
+            (45, &[0xC4, 0xB0][..]),
+            (248, &[0x81, 0x30, 0x90, 0x32]),
+            (12, &[0x8F, 0xAA, 0xC4]),
+            (97, &[0x8F, 0xAA, 0xC4]),
+            (30, &[0xDD]),
+        ];
+        for (collation, bytes) in dotted {
+            let raw = spelled(bytes);
+            assert_eq!(
+                refusal_in(collation, true, &raw),
+                Some(QueryRefusal::Truncate(at("kinds").unwrap())),
+                "collation {collation}"
+            );
+        }
+        for (collation, bytes) in [
+            (8, &[0xC4, 0xB0][..]),
+            (8, &[0xDD]),
+            (45, &[0xDD]),
+            (45, &[0x8F, 0xAA, 0xC4]),
+            (248, &[0xC4, 0xB0]),
+            (30, &[0xC4, 0xB0]),
+            (12, &[0xC4, 0xB0]),
+        ] {
+            assert_eq!(
+                refusal_in(collation, true, &spelled(bytes)),
+                None,
+                "collation {collation} {bytes:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_database_dropped_with_a_captured_table_in_it_is_refused_in_the_spelling_the_server_folds()
+    {
+        let drop_db = |fold: bool, raw: &str| refusal(false, fold, raw.as_bytes());
+        for raw in [
+            "DROP DATABASE shop",
+            "DROP SCHEMA shop",
+            "DROP DATABASE IF EXISTS shop",
+            "drop database `shop`",
+            "DROP /**/ DATABASE /**/ shop",
+        ] {
+            for fold in [false, true] {
+                assert_eq!(
+                    drop_db(fold, raw),
+                    Some(QueryRefusal::DropDatabase(Some("shop".to_string()))),
+                    "{raw} fold={fold}"
+                );
+            }
+        }
+        for raw in [
+            "DROP DATABASE SHOP",
+            "DROP SCHEMA IF EXISTS `Shop`",
+            "DROP DATABASE sh\u{130}p",
+        ] {
+            assert_eq!(drop_db(false, raw), None, "{raw}");
+        }
+        for raw in ["DROP DATABASE SHOP", "DROP SCHEMA IF EXISTS `Shop`"] {
+            assert_eq!(
+                drop_db(true, raw),
+                Some(QueryRefusal::DropDatabase(Some("shop".to_string()))),
+                "{raw}"
+            );
+        }
+        for raw in [
+            "DROP DATABASE other",
+            "DROP DATABASE IF EXISTS shopx",
+            "DROP DATABASE sho",
+            "DROP TABLESPACE shop",
+            "SELECT 'DROP DATABASE shop'",
+            "DROP DATABASE \u{43a}\u{438}\u{43d}",
+        ] {
+            for fold in [false, true] {
+                assert_eq!(drop_db(fold, raw), None, "{raw} fold={fold}");
+            }
+        }
+        assert_eq!(
+            drop_db(false, "DROP DATABASE `a"),
+            Some(QueryRefusal::DropDatabase(None))
+        );
+    }
+
+    #[test]
+    fn a_database_drop_names_the_cause_the_harm_and_the_recovery() {
+        let said = drop_database_refusal_message(Some("shop"));
+        assert!(
+            said.contains("database `shop`, which holds a captured table, was DROPped"),
+            "{said}"
+        );
+        assert!(
+            said.contains("every row the captured table held live in the destination"),
+            "{said}"
+        );
+        assert!(
+            said.contains(crate::source::cdc::checkpoint_identity::RECOVER),
+            "{said}"
+        );
+        assert!(
+            drop_database_refusal_message(None)
+                .contains("a database this reader could not identify")
+        );
+    }
+
+    #[test]
+    fn a_partition_of_a_captured_table_that_loses_or_gains_rows_without_a_row_event_is_refused() {
+        let part = |fold: bool, raw: &str| refusal(false, fold, raw.as_bytes());
+        for raw in [
+            "ALTER TABLE shop.kinds TRUNCATE PARTITION p0",
+            "ALTER TABLE shop.kinds TRUNCATE PARTITION ALL",
+            "ALTER TABLE shop.kinds DROP PARTITION p0, p1",
+            "ALTER TABLE shop.kinds EXCHANGE PARTITION p0 WITH TABLE shop.swap",
+            "ALTER TABLE shop.kinds EXCHANGE PARTITION p0 WITH TABLE shop.swap WITHOUT VALIDATION",
+            "ALTER TABLE shop.swap EXCHANGE PARTITION p0 WITH TABLE shop.kinds",
+            "alter table `shop`.`kinds` truncate partition p0",
+            "ALTER TABLE shop.kinds ADD COLUMN c INT, TRUNCATE PARTITION p1",
+            "ALTER TABLE shop.a EXCHANGE PARTITION p0 WITH TABLE shop.ship",
+        ] {
+            let got = part(false, raw);
+            assert!(
+                matches!(got, Some(QueryRefusal::PartitionRows(_))),
+                "{raw}: {got:?}"
+            );
+        }
+        assert_eq!(
+            part(
+                false,
+                "ALTER TABLE shop.a EXCHANGE PARTITION p0 WITH TABLE shop.b, ADD COLUMN c INT"
+            ),
+            None
+        );
+        assert_eq!(
+            part(true, "ALTER TABLE SHOP.KINDS TRUNCATE PARTITION p0"),
+            Some(QueryRefusal::PartitionRows(at("kinds")))
+        );
+        assert_eq!(
+            part(false, "ALTER TABLE SHOP.KINDS TRUNCATE PARTITION p0"),
+            None
+        );
+        assert_eq!(
+            part(true, "ALTER TABLE shop.\u{212a}inds DROP PARTITION p0"),
+            Some(QueryRefusal::PartitionRows(at("kinds")))
+        );
+    }
+
+    #[test]
+    fn a_partition_statement_that_moves_no_rows_or_touches_no_captured_table_is_no_refusal() {
+        for fold in [false, true] {
+            for raw in [
+                "ALTER TABLE shop.kinds REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (6))",
+                "ALTER TABLE shop.kinds REBUILD PARTITION p0",
+                "ALTER TABLE shop.kinds OPTIMIZE PARTITION p0",
+                "ALTER TABLE shop.kinds ANALYZE PARTITION p0",
+                "ALTER TABLE shop.kinds CHECK PARTITION p0",
+                "ALTER TABLE shop.kinds ADD PARTITION (PARTITION p9 VALUES LESS THAN (99))",
+                "ALTER TABLE shop.kinds DROP COLUMN note",
+                "ALTER TABLE shop.kinds COMMENT = 'TRUNCATE PARTITION p0'",
+                "ALTER TABLE shop.other TRUNCATE PARTITION p0",
+                "ALTER TABLE shop.other DROP PARTITION p0",
+                "ALTER TABLE shop.other EXCHANGE PARTITION p0 WITH TABLE shop.swap",
+                "ALTER TABLE other.kinds TRUNCATE PARTITION p0",
+                "SELECT 'ALTER TABLE shop.kinds TRUNCATE PARTITION p0'",
+            ] {
+                assert_eq!(
+                    refusal(false, fold, raw.as_bytes()),
+                    None,
+                    "{raw} fold={fold}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_client_collation_is_read_from_the_charset_status_variable() {
+        let flags2 = [0u8, 1, 2, 3, 4];
+        let charset = [4u8, 45, 0, 8, 0, 255, 0];
+        assert_eq!(
+            client_collation(&[flags2.as_slice(), &charset].concat()),
+            Some(45)
+        );
+        assert_eq!(client_collation(&charset), Some(45));
+        assert_eq!(client_collation(&flags2), None);
+        assert_eq!(client_collation(&[]), None);
+    }
+
+    #[test]
+    fn a_database_drop_with_text_after_the_name_is_unreadable_and_refused() {
+        assert_eq!(
+            refusal(false, false, b"DROP DATABASE other extra"),
+            Some(QueryRefusal::DropDatabase(None))
+        );
+        assert_eq!(
+            drop_database_target("DROP DATABASE shop extra", SqlMode::default()),
+            Some(None)
+        );
+        assert_eq!(
+            drop_database_target("DROP DATABASE shop", SqlMode::default()),
+            Some(Some("shop".to_string()))
+        );
+        assert_eq!(
+            drop_database_target("DROP DATABASE IF", SqlMode::default()),
+            Some(Some("IF".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_exchange_names_its_other_table_only_after_with_table() {
+        let t = |sql: &str| partition_rows_targets(sql, "shop", SqlMode::default());
+        assert_eq!(
+            t("ALTER TABLE a EXCHANGE PARTITION p0 WITH TABLE b"),
+            Some(vec![
+                Some(("shop".to_string(), "a".to_string())),
+                Some(("shop".to_string(), "b".to_string()))
+            ])
+        );
+        assert_eq!(
+            t("ALTER TABLE a EXCHANGE PARTITION p0 BOGUS TABLE b"),
+            Some(vec![Some(("shop".to_string(), "a".to_string())), None])
+        );
+        assert_eq!(
+            t("ALTER TABLE a EXCHANGE PARTITION p0 WITH b c"),
+            Some(vec![Some(("shop".to_string(), "a".to_string())), None])
+        );
+    }
+
+    #[test]
+    fn a_partition_refusal_without_a_schema_names_the_bare_table() {
+        let said = partition_rows_refusal_message(Some(&(String::new(), "kinds".to_string())));
+        assert!(
+            said.contains("captured table `kinds` had a partition"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_partition_refusal_names_the_table_the_harm_and_the_recovery() {
+        let said = partition_rows_refusal_message(at("kinds").as_ref());
+        assert!(
+            said.contains(
+                "captured table `shop.kinds` had a partition truncated, dropped or exchanged"
+            ),
+            "{said}"
+        );
+        assert!(
+            said.contains("every row it took out would stay live in the destination"),
+            "{said}"
+        );
+        assert!(
+            said.contains(crate::source::cdc::checkpoint_identity::RECOVER),
+            "{said}"
+        );
+        assert!(
+            partition_rows_refusal_message(None).contains("a table this reader could not identify")
+        );
+    }
+
+    #[test]
+    fn the_databases_of_the_captured_tables_come_from_their_names_and_the_bare_ones_resolve() {
+        let bare: HashMap<String, String> = [("kinds".to_string(), "resolved".to_string())].into();
+        let cfg = vec![
+            "b.t".to_string(),
+            "a.t".to_string(),
+            "a.u".to_string(),
+            "kinds".to_string(),
+            "free".to_string(),
+        ];
+        assert_eq!(
+            captured_databases(&cfg, &bare, "own"),
+            vec!["a", "b", "own", "resolved"]
+        );
+        assert_eq!(
+            captured_databases(&cfg, &bare, ""),
+            vec!["a", "b", "resolved"]
+        );
+        assert!(captured_databases(&[], &bare, "own").is_empty());
+    }
+
+    #[test]
+    fn a_collation_nothing_is_known_of_tries_every_spelling() {
+        let raw = [&b"TRUNCATE TABLE shop.k"[..], &[0xDD], b"nds"].concat();
+        assert_eq!(
+            refusal_in(251, true, &raw),
+            Some(QueryRefusal::Truncate(at("kinds").unwrap()))
+        );
+        let none = QueryText {
+            raw: &raw,
+            db: b"x",
+            collation: None,
+        };
+        assert_eq!(
+            query_refusal(
+                false,
+                true,
+                &none,
+                SqlMode::default(),
+                &["shop.kinds".to_string()],
+                &[]
+            ),
+            Some(QueryRefusal::Truncate(at("kinds").unwrap()))
+        );
     }
 
     #[test]

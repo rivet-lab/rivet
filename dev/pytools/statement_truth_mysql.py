@@ -64,7 +64,7 @@ DML_VARS = (
     "Com_replace", "Com_replace_select", "Com_load",
 )
 COM_VARS = ("Com_truncate", "Com_drop_table", "Com_rename_table", *PRIV_VARS, *DML_VARS)
-REFUSING = ("truncate", "drop", "rename_table", "rename_column", "statement_write")
+REFUSING = ("truncate", "drop", "rename_table", "rename_column", "statement_write", "data_change")
 
 
 class ServerError(Exception):
@@ -352,6 +352,11 @@ def snapshot(adm: Conn, dbs) -> Snap:
         f"WHERE table_schema IN ({names})"
     ):
         fingerprint[(r[0].decode(), r[1].decode())].append("tb:" + "|".join(c.decode() for c in r[2:]))
+    for r in adm.must(
+        "SELECT table_schema, table_name, partition_name, partition_description FROM information_schema.partitions "
+        f"WHERE table_schema IN ({names}) AND partition_name IS NOT NULL ORDER BY table_schema, table_name, partition_ordinal_position"
+    ):
+        fingerprint[(r[0].decode(), r[1].decode())].append("pt:" + "|".join((c or b"").decode() for c in r[2:]))
     out: Snap = {db: {} for db in dbs}
     for db in dbs:
         tables = sorted(t for (d, t) in cols if d == db)
@@ -373,16 +378,22 @@ class Delta:
     columns: tuple = ()
     data: tuple = ()
     emptied: tuple = ()
+    rows_only: tuple = ()
 
 
 def slots(table: tuple) -> list[str]:
     """The column definitions of a snapshot entry by position, without the names."""
-    return [line.split("|", 1)[1] for line in table[1].split("\n") if not line.startswith(("ix:", "tb:"))]
+    return [line.split("|", 1)[1] for line in table[1].split("\n") if not line.startswith(("ix:", "tb:", "pt:"))]
+
+
+def shape(table: tuple) -> list[str]:
+    """The definition lines of a snapshot entry without its partition layout."""
+    return [line for line in table[1].split("\n") if not line.startswith("pt:")]
 
 
 def delta(base: Snap, now: Snap) -> Delta:
     """The difference between the seed snapshot and a later one."""
-    gone, new, columns, data, emptied = [], [], [], [], []
+    gone, new, columns, data, emptied, rows_only = [], [], [], [], [], []
     for db in now:
         b, a = base[db], now[db]
         gone += [(db, t) for t in sorted(set(b) - set(a))]
@@ -394,7 +405,9 @@ def delta(base: Snap, now: Snap) -> Delta:
                 data.append((db, t))
                 if a[t][2] == 0:
                     emptied.append((db, t))
-    return Delta(tuple(gone), tuple(new), tuple(columns), tuple(data), tuple(emptied))
+                if b[t][0] == a[t][0] and shape(b[t]) == shape(a[t]):
+                    rows_only.append((db, t))
+    return Delta(tuple(gone), tuple(new), tuple(columns), tuple(data), tuple(emptied), tuple(rows_only))
 
 
 def classify(d: Delta, com: dict[str, int], errno: int) -> tuple[str, list[str]]:
@@ -415,6 +428,8 @@ def classify(d: Delta, com: dict[str, int], errno: int) -> tuple[str, list[str]]
         return "truncate", full(d.emptied)
     if d.data and any(com[v] for v in DML_VARS):
         return "statement_write", full(d.data)
+    if ok and d.rows_only and not any(com[v] for v in DML_VARS):
+        return "data_change", full(d.rows_only)
     return "none", []
 
 
@@ -810,6 +825,68 @@ def cases_gadgets(names: dict[int, tuple[str, str]], blanks: dict[int, list[int]
     return out
 
 
+PART_DB = "st_part"
+DROPDB = "st_dropdb"
+DROPOTHER = "st_dropother"
+PART_DBS = (PART_DB, DROPDB, DROPOTHER)
+
+PART_OPS = {
+    "trunc_part": "ALTER TABLE {k} TRUNCATE PARTITION p0",
+    "trunc_part_all": "ALTER TABLE {k} TRUNCATE PARTITION ALL",
+    "drop_part": "ALTER TABLE {k} DROP PARTITION p0",
+    "drop_part_two": "ALTER TABLE {k} DROP PARTITION p0, p1",
+    "exchange": "ALTER TABLE {k} EXCHANGE PARTITION p0 WITH TABLE {s}",
+    "exchange_without": "ALTER TABLE {k} EXCHANGE PARTITION p0 WITH TABLE {s} WITHOUT VALIDATION",
+    "exchange_into_plain": "ALTER TABLE {o} EXCHANGE PARTITION p0 WITH TABLE {p}",
+    "exchange_from_plain": "ALTER TABLE {k} EXCHANGE PARTITION p0 WITH TABLE {p}",
+    "reorganize": "ALTER TABLE {k} REORGANIZE PARTITION p0, p1 INTO (PARTITION p01 VALUES LESS THAN (6))",
+    "rebuild": "ALTER TABLE {k} REBUILD PARTITION p0",
+    "optimize": "ALTER TABLE {k} OPTIMIZE PARTITION p0",
+    "analyze": "ALTER TABLE {k} ANALYZE PARTITION p0",
+    "other_trunc": "ALTER TABLE {o} TRUNCATE PARTITION p0",
+    "other_drop": "ALTER TABLE {o} DROP PARTITION p0",
+    "other_exchange": "ALTER TABLE {o} EXCHANGE PARTITION p0 WITH TABLE {s}",
+    "lit_trunc_part": "UPDATE {s} SET note = 'ALTER TABLE kinds TRUNCATE PARTITION p0' WHERE id = 1",
+}
+DROPDB_OPS = {
+    "database": "DROP DATABASE {d}",
+    "schema": "DROP SCHEMA {d}",
+    "database_if": "DROP DATABASE IF EXISTS {d}",
+    "database_upper": "DROP DATABASE {D}",
+    "database_lower_kw": "drop database {d}",
+    "database_tick": "DROP DATABASE `{d}`",
+    "database_cmt": "DROP /**/ DATABASE /**/ {d}",
+    "other": "DROP DATABASE {x}",
+    "other_if": "DROP DATABASE IF EXISTS {x}",
+    "missing_if": "DROP DATABASE IF EXISTS st_zz_missing",
+    "lit_drop": "UPDATE st_probe.p SET b = 'DROP DATABASE st_dropdb' WHERE id = 1",
+}
+
+
+def cases_partitions(defaults: list[tuple[int, str, str]], folds: list[list]) -> list[Case]:
+    """Partition operations on a partitioned captured table and DROP DATABASE of a captured database, in several spellings."""
+    out: list[Case] = []
+    spelled = {"bare": "{n}", "tickdot": "`st_part`.`{n}`", "dot": "st_part.{n}", "upper": "ST_PART.{N}"}
+    for coll in (UTF8MB4, 8):
+        for style, tpl in spelled.items():
+            names = {n: tpl.format(n=n, N=n.upper()) for n in ("kinds", "plain", "swap", "other")}
+            for op, body in PART_OPS.items():
+                sql = body.format(k=names["kinds"], p=names["plain"], s=names["swap"], o=names["other"])
+                out.append(Case(f"E.{coll}.part.{op}.{style}", f"part_{op}", coll, "default", PART_DB, sql.encode(), (PART_DB,)))
+        for op, body in DROPDB_OPS.items():
+            for where, db in (("from_probe", PROBE_DB), ("from_target", DROPDB)):
+                sql = body.format(d=DROPDB, D=DROPDB.upper(), x=DROPOTHER)
+                out.append(Case(f"E.{coll}.dropdb.{op}.{where}", f"dropdb_{op}", coll, "default", db, sql.encode(), (DROPDB, DROPOTHER, PROBE_DB)))
+    for coll, charset, _ in defaults:
+        for key, spelled_name in fold_spellings(folds).items():
+            for op in ("trunc_part", "drop_part", "exchange"):
+                sql = PART_OPS[op].format(k=f"st_part.{q(spelled_name)}", s="st_part.swap", p="st_part.plain", o="st_part.other")
+                raw = encode(sql, charset)
+                if raw is not None:
+                    out.append(Case(f"E.{coll}.partfold.{op}.{key}", f"part_fold_{op}", coll, "default", PART_DB, raw, (PART_DB,)))
+    return out
+
+
 class Session:
     """The case connection: changes charset, sql_mode and database only when a case needs another."""
 
@@ -879,6 +956,7 @@ def com_status(conn: Conn) -> dict[str, int]:
 def restore(adm: Conn, base: Snap, now: Snap, tables: dict) -> None:
     """Rebuild every table that differs from the seed, then check the databases match it again."""
     for db, tbls in now.items():
+        adm.must(f"CREATE DATABASE IF NOT EXISTS {q(db)} DEFAULT CHARACTER SET utf8mb4")
         for t in sorted(set(tbls) - set(base[db])):
             adm.must(f"DROP TABLE IF EXISTS {q(db)}.{q(t)}")
         for t in sorted(base[db]):
@@ -946,6 +1024,7 @@ def run_cases(server: str, cases: list[Case], adm: Conn, base: Snap, tables: dic
                 adm.must(line)
             dirty = True
         if dirty:
+            sess.key = None
             start = adm.position()
     return outcomes, sorted(sess.refused)
 
@@ -1014,7 +1093,7 @@ def generate(server: str, subset: str | None = None) -> tuple[dict, list[dict]]:
     names = {cid: (cs, name) for cid, cs, name, _ in colls}
     pairs = [(cid, cs, name) for cid, cs, name, _ in colls]
     defaults = [(cid, cs, name) for cid, cs, name, d in colls if d]
-    which = subset or "ABCD"
+    which = subset or "ABCDE"
     folds: list[list] = []
     cases: list[Case] = []
     if "A" in which:
@@ -1027,6 +1106,10 @@ def generate(server: str, subset: str | None = None) -> tuple[dict, list[dict]]:
         probe = Conn(cfg.port)
         folds = fold_set(probe)
         cases += cases_gadgets(names, blank_bytes(probe, sorted(names)), defaults, folds)
+        probe.close()
+    if "E" in which:
+        probe = Conn(cfg.port)
+        cases += cases_partitions(defaults, folds or fold_set(probe))
         probe.close()
     if len({c.id for c in cases}) != len(cases):
         raise RuntimeError("case ids must be unique")

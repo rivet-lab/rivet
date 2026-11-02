@@ -1,0 +1,12 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 49d7e0eb..a20cffdd 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2457,6 +2457,7 @@ pub(crate) fn query_refusal(
+         return Some(QueryRefusal::Drop(t));
+     }
+     if let Some(db) = drop_database_target(sql, mode)
++        .filter(|_| false)
+         .and_then(|name| captured_database(name.as_deref(), configured, databases, fold))
+     {
+         return Some(QueryRefusal::DropDatabase(db));

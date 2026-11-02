@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 49d7e0eb..a05a3f8c 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2462,7 +2462,7 @@ pub(crate) fn query_refusal(
+         return Some(QueryRefusal::DropDatabase(db));
+     }
+     if let Some(t) = partition_rows_targets(sql, event_db, mode)
+-        .filter(|_| by_text)
++        .filter(|_| false)
+         .and_then(|ts| ts.into_iter().find_map(|t| ours(t.as_ref())))
+     {
+         return Some(QueryRefusal::PartitionRows(t));

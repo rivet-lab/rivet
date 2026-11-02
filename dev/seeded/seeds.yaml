@@ -4495,6 +4495,57 @@ seeds:
           - "lib:a_stateless_cleanup_keeps_a_pair_committed_after_the_plan"
           - "lib:a_canonical_unreadable_at_delete_time_stays_with_its_marker"
 
+  - name: cdc-no-policy-name-compare-ignores-the-fold
+    class: "without `columns_from: grants` the name of a statement's table is compared exactly on a server that folds case: a TRUNCATE, DROP TABLE or statement-format write spelled in another case or with a character the server folds (the Kelvin sign for k, U+0130 for i) is not seen as the captured table, so the run exits 0 and the destination keeps rows the source lost"
+    history: "owner roast 2026-10-30, handoff issue-no-policy-truncate-fold; RED on main 2026-11-01 (MySQL 8.4 lctn1: the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_TRUNCATED (exit 5))"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-no-policy-name-compare-ignores-the-fold/mysql.patch
+        cells: [a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql, a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql, a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql, "lib:a_statement_is_read_for_the_table_it_spells_whatever_the_server_folds", "lib:a_server_that_folds_reads_the_spellings_it_resolves_to_the_captured_table", "lib:every_server_fixture_agrees_with_the_reader_without_the_policy"]
+      postgres:
+        na: "the logical stream carries decoded changes and no statement text the reader lexes (a TRUNCATE is its own message), so this path is never reached"
+      mssql:
+        na: "the log is a change table, not statements: this path is never reached"
+      oracle:
+        na: "LogMiner rows are decoded changes, not statement text this reader lexes: this path is never reached"
+      mongo:
+        na: "the change stream carries no statement text: this path is never reached"
+
+  - name: cdc-drop-database-not-refused
+    class: "a DROP DATABASE or DROP SCHEMA of a database that holds a captured table is not read by the binlog reader: MySQL logs it as a statement and no row events, so the run exits 0 and every row of the table stays live in the destination"
+    history: "owner roast 2026-10-31, handoff issue-no-policy-drop-database-partition; RED on main 2026-11-01 (the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_TRUNCATED (exit 5))"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-drop-database-not-refused/mysql.patch
+        cells: [a_database_dropped_with_a_captured_table_stops_the_stream_mysql, "lib:a_database_dropped_with_a_captured_table_in_it_is_refused_in_the_spelling_the_server_folds", "lib:every_server_fixture_has_no_ascii_statement_that_passes_under_the_policy", "lib:every_server_fixture_agrees_with_the_reader_without_the_policy"]
+      postgres:
+        na: "the logical stream carries decoded changes and no statement text the reader lexes (a TRUNCATE is its own message), so this path is never reached"
+      mssql:
+        na: "the log is a change table, not statements: this path is never reached"
+      oracle:
+        na: "LogMiner rows are decoded changes, not statement text this reader lexes: this path is never reached"
+      mongo:
+        na: "the change stream carries no statement text: this path is never reached"
+
+  - name: cdc-partition-data-change-not-refused
+    class: "an ALTER TABLE ... TRUNCATE PARTITION, DROP PARTITION or EXCHANGE PARTITION of a captured table is not read by the binlog reader: the rows it takes out have no row events, so the run exits 0 and they stay live in the destination"
+    history: "owner roast 2026-10-31, handoff issue-no-policy-drop-database-partition; RED on main 2026-11-01 (the invocation ends with success (exit 0), expected RIVET_SOURCE_CDC_TRUNCATED (exit 5))"
+    scope: source
+    engines:
+      mysql:
+        patch: cdc-partition-data-change-not-refused/mysql.patch
+        cells: [a_partition_removed_from_a_captured_table_stops_the_stream_mysql, a_partitioned_table_exchanged_with_a_captured_table_stops_the_stream_mysql, "lib:a_partition_of_a_captured_table_that_loses_or_gains_rows_without_a_row_event_is_refused", "lib:every_server_fixture_agrees_with_the_reader_without_the_policy"]
+      postgres:
+        na: "the logical stream carries decoded changes and no statement text the reader lexes (a TRUNCATE is its own message), so this path is never reached"
+      mssql:
+        na: "the log is a change table, not statements: this path is never reached"
+      oracle:
+        na: "LogMiner rows are decoded changes, not statement text this reader lexes: this path is never reached"
+      mongo:
+        na: "the change stream carries no statement text: this path is never reached"
+
   - name: manifest-census-reads-unfiltered
     class: "a reader of the run manifests under one prefix counts a Failed attempt or a foreign export's unit, so validate --depth full fails a healthy prefix on parts gc collected, and a foreign unit tiles a gap a split export still has"
     history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: a Failed unit manifest whose parts gc had collected made validate --depth full exit 1 (could not verify), and completed_units_tile counted a foreign family's unit; closed 2026-11-01 by routing the readers through ManifestCensus::succeeded / completed / completed_split_units"

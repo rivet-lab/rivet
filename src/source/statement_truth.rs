@@ -15,6 +15,7 @@ pub(crate) enum Class {
     RenameTable,
     RenameColumn,
     StatementWrite,
+    DataChange,
     Privilege,
 }
 
@@ -28,6 +29,7 @@ impl Class {
             "rename_table" => Class::RenameTable,
             "rename_column" => Class::RenameColumn,
             "statement_write" => Class::StatementWrite,
+            "data_change" => Class::DataChange,
             "privilege" => Class::Privilege,
             other => panic!("statement truth: unknown class `{other}` in the corpus"),
         }

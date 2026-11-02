@@ -531,6 +531,20 @@ jobs:
         run: python3 dev/pytools/statement_truth.py mysql up
       - name: Regenerate the corpus from the servers and diff it against the fixtures
         run: python3 dev/pytools/statement_truth.py mysql check
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2.87.28
+        with:
+          tool: cargo-nextest,uv
+      - name: Run the statement-seam cells against each stand
+        run: |
+          for port in 3331 3332 3333; do
+            RIVET_TEST_MYSQL_STMT_URL="mysql://root@127.0.0.1:$port" \
+              cargo nextest run --run-ignored ignored-only --no-fail-fast \
+              -E 'binary(live_suite) and test(live_cdc_mysql_statement_seam::)'
+          done
       - name: Dump stand logs on failure
         if: failure()
         run: docker compose --profile mysql-stmt logs --no-color --tail 100
