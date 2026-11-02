@@ -1481,6 +1481,34 @@ exports:
         );
     }
 
+    /// The recovery header names BigQuery's autoload degradations only for BigQuery.
+    #[test]
+    fn the_recovery_header_speaks_for_its_own_target() {
+        let report = ExportTypeReport {
+            export: "e".into(),
+            table: None,
+            columns: vec![],
+            violations: vec![],
+            target_failures: false,
+            recovery_sql: Some("SELECT 1".into()),
+        };
+        let bq = render_table(&report, Some(ExportTarget::BigQuery));
+        assert!(
+            bq.contains("bigquery type recovery — bare autoload degrades"),
+            "{bq}"
+        );
+        assert!(bq.contains("    SELECT 1\n"), "{bq}");
+        let ch = render_table(&report, Some(ExportTarget::ClickHouse));
+        assert!(
+            ch.contains("type recovery for Parquet loaded without `rivet load`"),
+            "{ch}"
+        );
+        assert!(
+            !ch.contains("BYTES") && !ch.contains("--autodetect"),
+            "{ch}"
+        );
+    }
+
     #[test]
     fn col_width_long_value_returns_that_length() {
         let row = TypeReportRow {
