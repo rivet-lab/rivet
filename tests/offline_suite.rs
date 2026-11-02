@@ -53,6 +53,8 @@ mod batch_oracle_gate;
 #[path = "offline/capture_markers.rs"]
 mod capture_markers;
 
+#[path = "offline/cdc_cli_claims_checkpoint.rs"]
+mod cdc_cli_claims_checkpoint;
 #[path = "offline/cdc_cli_surface_guard.rs"]
 mod cdc_cli_surface_guard;
 

@@ -224,6 +224,14 @@ scenarios:
     mongo:    { test: a_corrupt_cdc_checkpoint_is_refused_by_code_mongo }
     oracle:   { test: a_corrupt_cdc_checkpoint_is_refused_by_code_oracle }
 
+  - id: rivet_cdc_command_on_an_export_checkpoint
+    what: "`rivet cdc --checkpoint` over the checkpoint a `mode: cdc` export owns is refused as RIVET_SOURCE_CDC_CHECKPOINT_SHARED (exit 5) before it reads or acks a change, the file present or lost; the export's own run then delivers every change"
+    postgres: { test: rivet_cdc_is_refused_the_checkpoint_an_export_owns_postgres }
+    mysql:    { test: rivet_cdc_is_refused_the_checkpoint_an_export_owns_mysql }
+    mssql:    { test: rivet_cdc_is_refused_the_checkpoint_an_export_owns_mssql }
+    mongo:    { test: rivet_cdc_is_refused_the_checkpoint_an_export_owns_mongo }
+    oracle:   { test: rivet_cdc_is_refused_the_checkpoint_an_export_owns_oracle }
+
   - id: cdc_truncate_code
     what: "a TRUNCATE inside the stream is refused as RIVET_SOURCE_CDC_TRUNCATED (exit 5), and the re-baseline delivers the source"
     postgres: { test: a_cdc_truncate_is_refused_by_code_postgres }

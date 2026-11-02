@@ -138,7 +138,7 @@ in a bucket, `rivet/cdc/` / `./output/rivet/cdc/` for a whole-schema stream). in
 `RIVET_INIT_CDC_NAME_TAKEN` (exit 5), writing nothing, when that checkpoint already exists or another
 config in the directory names the same checkpoint or destination: write the config under another
 `-o` name. A run records which config and export own a checkpoint (`<checkpoint>.owner`) and refuses
-`RIVET_SOURCE_CDC_CHECKPOINT_SHARED` (exit 5) for another config while the owner still names it.
+`RIVET_SOURCE_CDC_CHECKPOINT_SHARED` (exit 5) for another config while the owner still names it. `rivet cdc --checkpoint` records itself the same way (`{"config":"","export":"rivet cdc"}`) and is refused a checkpoint an export owns, and an export a checkpoint a `rivet cdc` command holds, before either reads a change; delete `<checkpoint>.owner` to hand a finished command's position to an export.
 
 ## Flags (summary)
 

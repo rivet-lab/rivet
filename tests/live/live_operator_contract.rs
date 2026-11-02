@@ -1235,6 +1235,90 @@ fn a_checkpoint_another_config_reads_is_refused_and_walked_out_oracle() {
     }));
 }
 
+/// `rivet cdc` over the checkpoint a `mode: cdc` export owns is refused `RIVET_SOURCE_CDC_CHECKPOINT_SHARED` (exit 5) before it reads or acks a change, the checkpoint untouched, the file present or gone; the export then delivers every change.
+fn rivet_cdc_is_refused_the_checkpoint_an_export_owns(mut s: CdcScenario) {
+    s.insert(1);
+    s.settle();
+    s.rig.run_ok();
+    s.insert(2);
+    s.settle();
+    let ckpt = s.rig.checkpoint();
+    let held = std::fs::read(&ckpt).expect("the export wrote its checkpoint");
+    let refused = Refused::by_code("RIVET_SOURCE_CDC_CHECKPOINT_SHARED", 5);
+    for _ in 0..2 {
+        let out = s.rig.cli_cdc_raw(true);
+        assert_refused(&out, refused);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("Nothing was read"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read(&ckpt).expect("the checkpoint stays"),
+            held,
+            "the refused command left the export's position alone"
+        );
+    }
+    s.rig.run_ok();
+    std::fs::remove_file(&ckpt).expect("lose the checkpoint file");
+    assert_refused(&s.rig.cli_cdc_raw(true), refused);
+    assert!(!ckpt.exists(), "the refusal does not recreate the file");
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn rivet_cdc_is_refused_the_checkpoint_an_export_owns_mysql() {
+    rivet_cdc_is_refused_the_checkpoint_an_export_owns(CdcScenario::mysql_with(
+        "oc_ckcmd",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+        |r, _| r.cdc("initial: snapshot"),
+    ));
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn rivet_cdc_is_refused_the_checkpoint_an_export_owns_postgres() {
+    rivet_cdc_is_refused_the_checkpoint_an_export_owns(CdcScenario::pg_with(
+        "oc_ckcmd",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+        |r, _| {
+            let ckpt = r.checkpoint();
+            r.cdc("initial: snapshot").checkpoint_path(ckpt)
+        },
+    ));
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn rivet_cdc_is_refused_the_checkpoint_an_export_owns_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    rivet_cdc_is_refused_the_checkpoint_an_export_owns(CdcScenario::mssql_with(
+        "oc_ckcmd",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+        |r, _| r.cdc("initial: snapshot"),
+    ));
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo-rs"]
+fn rivet_cdc_is_refused_the_checkpoint_an_export_owns_mongo() {
+    rivet_cdc_is_refused_the_checkpoint_an_export_owns(CdcScenario::mongo_with(
+        "oc_ckcmd",
+        |r, _| r.cdc("initial: snapshot"),
+    ));
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn rivet_cdc_is_refused_the_checkpoint_an_export_owns_oracle() {
+    let _serial = cross_process_serial("oracle_cdc");
+    rivet_cdc_is_refused_the_checkpoint_an_export_owns(CdcScenario::oracle_with(
+        "oc_ckcmd",
+        |r, _| r.cdc("initial: snapshot"),
+    ));
+}
+
 /// RESULTS 17 (PostgreSQL): a slot dropped under a baselined stream is refused as `RIVET_SOURCE_CDC_LOG_GAP` (exit 5); the re-baseline delivers the source.
 fn pg_dropped_slot_is_refused_by_code(after_a_changes_run: bool) {
     let slot = unique_name("oc_slotgone_slot");

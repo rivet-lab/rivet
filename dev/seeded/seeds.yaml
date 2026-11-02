@@ -1752,6 +1752,22 @@ seeds:
         cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_mongo]
       oracle:
         cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_oracle]
+  - name: rivet-cdc-skips-the-checkpoint-claim
+    class: "`rivet cdc --checkpoint` reads a checkpoint a `mode: cdc` export owns without claiming it, and acks the stream's position, so the export skips the changes the command read, exit 0"
+    history: "found 2026-11-01 by the entry-parity hunt (AXIS GAP 1): `dispatch_cdc` never routed through `claim_checkpoint`; RED on main 266a7de5 (`rivet cdc` over an export's checkpoint exit 0 on PostgreSQL, MySQL and SQL Server)"
+    scope: source
+    patch: rivet-cdc-skips-the-checkpoint-claim/shared.patch
+    engines:
+      postgres:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_postgres]
+      mysql:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_mysql]
+      mssql:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_mssql]
+      mongo:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_mongo]
+      oracle:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_oracle]
   - name: io-error-classified-by-its-path-text
     class: "an `io::Error` (a missing directory, a read-only file) is retried as transient because a path in its message contains a network word (`dns`, `reset`), so a permanent stop exits 2"
     history: "0.32.2, 2026-10-20: #639's mutation shard baseline failed `an_unwritable_aggregate_path_is_refused_by_code` with exit 2 for 1 because its temp dir was named `.tmprDnsA7`; RED on main c1cf6a92 with a directory named `dns`"

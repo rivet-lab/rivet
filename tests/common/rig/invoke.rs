@@ -520,6 +520,12 @@ impl Rig {
             .expect("a bounded `rivet cdc` run ends on its own")
     }
 
+    /// One `rivet cdc` over this rig's stream, ungraded: its exit, stdout and stderr, whatever they are.
+    pub fn cli_cdc_raw(&self, checkpointed: bool) -> std::process::Output {
+        let mut cmd = self.invoke_command(&self.cdc_cli_argv(checkpointed), &[]);
+        crate::common::runner::output_of(&mut cmd).1
+    }
+
     /// The source URL this rig's `rivet cdc` argv carries inline.
     pub fn cdc_source_url(&self) -> &str {
         &self.source_url
