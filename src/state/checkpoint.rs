@@ -452,6 +452,39 @@ impl StateStore {
             .unwrap_or(0))
     }
 
+    /// The count of `run_id`'s tasks not completed and all its tasks, read behind any writer removing the run's rows; refuses, and drops the resume pointer to it, when the run or a planned task is gone.
+    pub fn settle_chunk_run(
+        &self,
+        run_id: &str,
+        planned: usize,
+    ) -> Result<(i64, Vec<ChunkTaskInfo>)> {
+        let lock = match &self.conn {
+            StateConn::Sqlite(_) => "",
+            StateConn::Postgres(_) => " FOR UPDATE",
+        };
+        let tasks = self.chunk_tasks_of(run_id, lock)?;
+        let run = self.query_opt(
+            &format!("SELECT status FROM chunk_run WHERE run_id = ?1{lock}"),
+            &[run_id.into()],
+            |r| r.text(0),
+        )?;
+        if run.is_none() || tasks.len() != planned {
+            self.execute(
+                "UPDATE export_state SET resume_run_id = NULL, resume_owner = NULL \
+                 WHERE resume_run_id = ?1",
+                &[run_id.into()],
+            )?;
+            crate::rivet_bail!(
+                crate::error::codes::STATE_CHUNK_CHECKPOINT_GONE,
+                "chunk checkpoint run '{run_id}' lost its checkpoint rows while it ran (its \
+                 `chunk_run` row or planned chunk tasks are gone), so the parts it wrote are in no \
+                 manifest. Run the export again: it starts a new chunk run."
+            );
+        }
+        let pending = tasks.iter().filter(|t| t.status != "completed").count();
+        Ok((pending as i64, tasks))
+    }
+
     /// Mark the chunk run completed; refuses when its row is gone (the checkpoint was removed under the run).
     pub fn finalize_chunk_run_completed(&self, run_id: &str) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
@@ -557,9 +590,16 @@ impl StateStore {
     }
 
     pub fn list_chunk_tasks_for_run(&self, run_id: &str) -> Result<Vec<ChunkTaskInfo>> {
+        self.chunk_tasks_of(run_id, "")
+    }
+
+    /// The tasks of `run_id` in chunk order, `lock` appended to the SELECT.
+    fn chunk_tasks_of(&self, run_id: &str, lock: &str) -> Result<Vec<ChunkTaskInfo>> {
         self.query(
-            "SELECT chunk_index, start_key, end_key, status, attempts, last_error, rows_written, file_name
-             FROM chunk_task WHERE run_id = ?1 ORDER BY chunk_index ASC",
+            &format!(
+                "SELECT chunk_index, start_key, end_key, status, attempts, last_error, rows_written, file_name
+                 FROM chunk_task WHERE run_id = ?1 ORDER BY chunk_index ASC{lock}"
+            ),
             &[run_id.into()],
             |r| ChunkTaskInfo {
                 chunk_index: r.i64(0),
@@ -608,6 +648,52 @@ mod tests {
             err.to_string(),
             "chunk checkpoint run 'run_2' has no `chunk_run` row left to complete: its \
              checkpoint rows were removed while it ran, so the parts it wrote are in no \
+             manifest. Run the export again: it starts a new chunk run."
+        );
+    }
+
+    /// A run whose `chunk_run` row or planned tasks are gone is refused by code; one whole is counted as it stands.
+    #[test]
+    fn settling_a_chunk_run_whose_rows_are_gone_is_refused_and_a_whole_one_is_counted() {
+        let (_dir, s) = store_on_disk();
+        s.create_chunk_run("run_1", "orders", "h", 1).unwrap();
+        s.insert_chunk_tasks("run_1", &[(0, 9), (10, 19)]).unwrap();
+        s.claim_next_chunk_task("run_1").unwrap();
+        s.complete_chunk_task("run_1", 0, 3, Some("f.parquet"))
+            .unwrap();
+        let (pending, tasks) = s.settle_chunk_run("run_1", 2).unwrap();
+        assert_eq!((pending, tasks.len()), (1, 2));
+        for (planned, what) in [(3, "a task short"), (1, "a task over")] {
+            let err = s.settle_chunk_run("run_1", planned).expect_err(what);
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_STATE_CHUNK_CHECKPOINT_GONE"),
+                "{what}"
+            );
+        }
+        let key = crate::state::ProgressKey {
+            export_name: "orders".into(),
+            source: "p".into(),
+            stream: String::new(),
+            schema: String::new(),
+            population: String::new(),
+            column: None,
+            landing: Default::default(),
+            mode: "chunked",
+            continues_high_water: false,
+            resumable: true,
+        };
+        s.set_resume_run_id(&key, "run_1").unwrap();
+        s.execute("DELETE FROM chunk_run WHERE run_id = ?1", &["run_1".into()])
+            .unwrap();
+        let err = s
+            .settle_chunk_run("run_1", 2)
+            .expect_err("no chunk_run row");
+        assert_eq!(s.get_resume_run_id("orders", "p").unwrap(), None);
+        assert_eq!(
+            err.to_string(),
+            "chunk checkpoint run 'run_1' lost its checkpoint rows while it ran (its \
+             `chunk_run` row or planned chunk tasks are gone), so the parts it wrote are in no \
              manifest. Run the export again: it starts a new chunk run."
         );
     }
