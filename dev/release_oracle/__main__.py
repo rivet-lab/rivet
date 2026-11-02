@@ -47,6 +47,7 @@ from pathlib import Path
 
 from .core import Ledger, Status, binary_stamp, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
 from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
+from ..pytools.shell import find_keg_tools
 from . import (
     bigquery,
     blessed_flow,
@@ -645,8 +646,11 @@ def _self_test() -> int:
     from .partner_shape import init_slot
     assert init_slot("    cdc:\n      slot: rivet_rivet_public_cdc  # logical slot\n") == "rivet_rivet_public_cdc"
     assert init_slot("mode: cdc\n") is None, "a config naming no slot names none"
-    from . import stand_disk
+    from . import stand_disk, stand_memory, stand_profiles
+    failure.self_test()
     stand_disk.self_test()
+    stand_memory.self_test()
+    stand_profiles.self_test()
     sunk = Ledger(colour=False)
     sunk._buf = []
     sunk.failed("mysql", "8.0", "seed", "-", "seed had errors")
@@ -972,7 +976,8 @@ def _self_test() -> int:
     shown.close_known_red()
     said = [c.detail for c in shown.cells if c.scenario == "known_red"]
     assert any(other.match in d and "PASSED" in d for d in said), said
-    assert any(k.match in d and "no cell" in d for d in said), said
+    assert any(k.match in d and "no cell" in d and "run that leg again" in d and "remove it from" not in d for d in said), said
+    assert any(other.match in d and "remove it from dev/release_oracle/known_red.py" in d for d in said), said
     kr.KNOWN_RED = real_reds
     from . import core as _c
     saved_env, saved_bless = dict(os.environ), dict(_c._BLESSING)
@@ -1749,7 +1754,8 @@ def _run_one_version(led: Ledger, ns: argparse.Namespace, engine: str, line: str
     parts = line.split()
     tag, image, port = parts[0], parts[1], int(parts[2])
     led.phase(f"{engine} {tag} ({image})")
-    with led.span(f"{engine}: bring-up"):
+    from . import stand_memory
+    with led.span(f"{engine}: bring-up"), stand_memory.admitted(engine, led.ok):
         url = bring_up(led, engine, tag, image, port)
     if not url:
         led.add(engine, tag, "all", "-", Status.FAIL, "bring-up failed")
@@ -1885,9 +1891,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     from .core import set_cell_parallel
     set_cell_parallel(ns.cell_parallel)
-    from . import stand_sweep
+    from . import stand_profiles, stand_sweep
     for line in stand_sweep.sweep():
         print(f"  {line}")
+    refused = stand_profiles.refusal(stand_profiles.bring_up())
+    if refused:
+        print(refused, file=sys.stderr)
+        return 3
 
     # A clean-tree run builds the binary itself; only --no-clean needs one up front.
     if ns.no_clean and (not rivet_bin().is_file() or not os.access(rivet_bin(), os.X_OK)):
@@ -1901,6 +1911,11 @@ def main(argv: list[str] | None = None) -> int:
     # version into a cryptic "seed had errors" and the gate into NOT-RELEASABLE,
     # with nothing pointing at the environment as the cause.
     engines_wanted = [e for e in ns.engines.split(",") if e]
+    if (not engines_wanted or "postgres" in engines_wanted) and "psql" in find_keg_tools():
+        print("the postgres cells shell to `psql` and none is on PATH or in a Homebrew keg (libpq) — install libpq "
+              "and add its bin to PATH.",
+              file=sys.stderr)
+        return 2
     if (not engines_wanted or "mongo" in engines_wanted) and not run(["python3", "-c", "import pymongo"]).ok:
         exe = shutil.which("python3") or "python3"
         print(f"mongo seed needs pymongo but `{exe}` can't import it — `pip install pymongo`, "

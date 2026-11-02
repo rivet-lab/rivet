@@ -308,11 +308,12 @@ class Ledger:
         for k in known_red.KNOWN_RED:
             if k.match not in self.known_seen:
                 # Straight to FAIL: the message quotes the entry, so `failed` would match it.
-                why = ("its cell PASSED this run — it is fixed"
-                       if k.match in self.known_passed else
-                       "no cell this run exercised it, so it excuses nothing")
-                msg = (f"known-red entry `{k.match}` matched no failure: {why}; "
-                       "remove it from dev/release_oracle/known_red.py")
+                passed = k.match in self.known_passed
+                why = ("its cell PASSED this run — it is fixed; remove it from dev/release_oracle/known_red.py"
+                       if passed else
+                       "no cell this run exercised it, so it excuses nothing; its engine leg or stage may not have run: "
+                       "run that leg again, and remove the entry only after a run in which its cell passed")
+                msg = f"known-red entry `{k.match}` matched no failure: {why}"
                 self.bad(msg)
                 self.add("-", "-", "known_red", "-", Status.FAIL, msg)
 
@@ -804,6 +805,9 @@ SKIP_ALLOWED: dict[str, str] = {
         "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
     "live_cdc_mysql_statement_seam::a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql":
         "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
+    "live_clickhouse_load::a_cdc_stream_staged_on_real_gcs_is_pulled_by_clickhouse":
+        "2026-11-02: needs a GCS HMAC key pair (RIVET_TEST_GCS_HMAC_ID / _SECRET) that no gate host holds, "
+        "and minting one is an owner action; closes when the keys are provisioned and the gate env exports them",
 }
 
 
