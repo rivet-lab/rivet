@@ -461,7 +461,7 @@ fn a_second_load_beside_a_live_one_is_busy_and_retryable_then_loads() {
     );
 }
 
-/// A load whose lease another holder took while it was writing the warehouse fails, is recorded `failed`, and the next load owns the table.
+/// A load whose lease another holder took while it was writing the warehouse fails and is recorded `failed`; the table is rivet's own from an earlier success, so the next load finishes the job.
 #[test]
 #[ignore = "live: requires postgres + a PostgreSQL state server + BigQuery creds"]
 fn a_load_whose_lease_is_taken_during_the_write_fails_and_is_recorded_failed() {
@@ -481,6 +481,21 @@ fn a_load_whose_lease_is_taken_during_the_write_fails_and_is_recorded_failed() {
     let env = [("RIVET_STATE_URL", url.as_str()), SHORT_TTL[0]];
     let out = rig.run_args_env(&[], &env);
     assert!(out.status.success(), "the extract:\n{}", stderr(&out));
+    rig.load_ok(&["--pool", "1"], &env);
+    assert_eq!(state.ledger(&t), vec!["success".to_string()]);
+    pg_connect()
+        .batch_execute(&format!(
+            "INSERT INTO {t} (id, v) SELECT g, md5(g::text) FROM generate_series({}, {}) g",
+            ROWS + 1,
+            ROWS + 10
+        ))
+        .expect("rows the second load carries");
+    let out = rig.run_args_env(&[], &env);
+    assert!(
+        out.status.success(),
+        "the second extract:\n{}",
+        stderr(&out)
+    );
 
     let stalled = rig.twin();
     let (out, ()) = stalled_under_its_lease(
@@ -504,7 +519,10 @@ fn a_load_whose_lease_is_taken_during_the_write_fails_and_is_recorded_failed() {
         said.contains("This run's warehouse write is done and is recorded as failed"),
         "{said}"
     );
-    assert_eq!(state.ledger(&t), vec!["failed".to_string()]);
+    assert_eq!(
+        state.ledger(&t),
+        vec!["success".to_string(), "failed".to_string()]
+    );
     let written: i64 = bq.read_bq_count(&t).parse().expect("a count");
     assert_eq!(written, source_rows(&t), "the write the message names");
 
@@ -515,6 +533,72 @@ fn a_load_whose_lease_is_taken_during_the_write_fails_and_is_recorded_failed() {
         loaded,
         source_rows(&t),
         "the table is rivet's own for the next load"
+    );
+    assert_eq!(
+        state.ledger(&t),
+        vec!["success", "failed", "success"],
+        "the third load is recorded on top of the failed second"
+    );
+}
+
+/// A first load whose lease was lost during the write consumed no run: every next load is refused `RIVET_LOAD_TARGET_NOT_RIVETS` with the drop remedy and leaves the table alone, and a load after the drop delivers the source.
+#[test]
+#[ignore = "live: requires postgres + a PostgreSQL state server + BigQuery creds"]
+fn a_first_load_whose_lease_is_taken_during_the_write_leaves_the_table_unowned() {
+    let Some(bq) = BqLive::from_env("lease_first") else {
+        return;
+    };
+    let Some(state) = ScratchState::create("lk_first") else {
+        return;
+    };
+    let (t, rig, _guard) = loadable(&bq, "lk_first");
+    let rig = rig.a_failed_run_may_leave(
+        &[Leftover::LoadAttempt],
+        "the lease is lost after the warehouse write: the load did reach the write",
+    );
+    let _cleanup = bq.cleanup(&[&t]);
+    let url = state.url();
+    let env = [("RIVET_STATE_URL", url.as_str()), SHORT_TTL[0]];
+    let out = rig.run_args_env(&[], &env);
+    assert!(out.status.success(), "the extract:\n{}", stderr(&out));
+
+    let stalled = rig.twin();
+    let (out, ()) = stalled_under_its_lease(
+        &state,
+        &t,
+        At::Writing,
+        move || stalled.load_args_env(&["--pool", "1"], &env),
+        |_| taken_by_another_holder(&state, &t),
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert_eq!(state.ledger(&t), vec!["failed"]);
+    the_other_holder_ends(&state);
+
+    for cycle in 1..=2 {
+        let again = rig.load_args_env(&["--pool", "1"], &env);
+        assert_refused(&again, Refused::by_code("RIVET_LOAD_TARGET_NOT_RIVETS", 5));
+        let said = stderr(&again);
+        assert!(
+            said.contains("no record of a successful rivet load")
+                && said.contains("Drop or rename it"),
+            "cycle {cycle}: the refusal says why and names the remedy:\n{said}"
+        );
+        let held: i64 = bq.read_bq_count(&t).parse().expect("a count");
+        assert_eq!(
+            held,
+            source_rows(&t),
+            "cycle {cycle}: the table is left as the crashed load wrote it"
+        );
+    }
+    assert_eq!(state.ledger(&t), vec!["failed", "refused", "refused"]);
+
+    bq.exec(&format!("DROP TABLE `{}.{}.{t}`", bq.project, bq.dataset));
+    rig.load_ok(&["--pool", "1"], &env);
+    let loaded: i64 = bq.read_bq_count(&t).parse().expect("a count");
+    assert_eq!(
+        loaded,
+        source_rows(&t),
+        "the drop remedy delivers the source"
     );
 }
 
