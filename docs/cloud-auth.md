@@ -388,8 +388,10 @@ RivetRunOperator(
 )
 ```
 
-On a worker inside Google Cloud, prefer the attached service account or Workload Identity over a
-key file: rivet reads it through ADC with no file on disk.
+Secret Manager is read today with a key file (`GOOGLE_APPLICATION_CREDENTIALS`) or gcloud ADC
+only. An attached service account, GKE / Cloud Run Workload Identity (the metadata server) and
+Workload Identity Federation (`external_account`) are not supported for this read yet — see
+[research/workload-identity.md](research/workload-identity.md).
 
 Grant the credential read access on each secret, not on the project:
 
