@@ -46,12 +46,22 @@ GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-re
         "2026-11-01: #727 control: with columns_from off the table swap is met as before, so 0.32.2 delivers both rows too",
     "a_truncate_drop_or_statement_write_is_met_as_before_without_double_quoted_names_mysql":
         "2026-11-01: #727 control: statements the reader met before the sql_mode fix are met the same way, so 0.32.2 passes",
+    "a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view":
+        "2026-11-02: #743 moved this cell's crash behind a first successful load; re-appending after a crash held on 0.32.2 too, and the cell that fails there is a_first_load_that_dies_after_appending_is_refused_until_the_leftovers_are_dropped; closes when the baseline moves past 0.32.2",
+    "apply_forms_partition_like_run_mssql":
+        "2026-11-02: #755 only moved the fixture into a helper; the apply forms partition like run on 0.32.2 too, and the cell that fails there is validate_reads_every_partition_mssql; closes when the baseline moves past 0.32.2",
+    "apply_forms_partition_like_run_mysql":
+        "2026-11-02: #755 only moved the fixture into a helper; the apply forms partition like run on 0.32.2 too, and the cell that fails there is validate_reads_every_partition_mysql; closes when the baseline moves past 0.32.2",
+    "apply_forms_partition_like_run_oracle":
+        "2026-11-02: #755 only moved the fixture into a helper; the apply forms partition like run on 0.32.2 too, and the cell that fails there is validate_reads_every_partition_oracle; closes when the baseline moves past 0.32.2",
     "apply_must_not_advance_the_cursor_when_the_manifest_did_not_land":
         "2026-11-01: #731 reorders the journal and card only; the cursor guard was already right on 0.32.2 and this cell grades the cursor",
     "mysql_cdc_a_statement_logged_insert_is_captured_or_refused_never_dropped":
         "2026-11-01: #729 re-cut the COMMIT arm this cell crosses; 0.32.2 already captured or refused a statement-logged insert, so it is a regression guard",
     "mysql_lost_checkpoint_under_a_baseline_stream_is_refused_not_reanchored":
         "2026-11-01: #730 sibling: a finished initial snapshot was already refused by ensure_anchor on 0.32.2; the changes-only cell is the one that fails there",
+    "validate_prefix_of_a_partitioned_export_verifies_that_directory_postgres":
+        "2026-11-02: #755 control: a pinned --prefix verified that one directory on 0.32.2 as well; it guards the run-set validate from widening it; closes when the baseline moves past 0.32.2",
 }  # ratchet-pin: end
 
 

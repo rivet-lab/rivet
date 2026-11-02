@@ -395,6 +395,47 @@ fn a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view() {
     clickhouse_rows_match_source(&view, source_rows(&tbl), "");
 }
 
+/// A first load that dies after appending consumed no run and owns nothing: every next load is refused `RIVET_LOAD_TARGET_NOT_RIVETS` with the drop remedy, and a load after the drop delivers the source.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mysql-cdc"]
+fn a_first_load_that_dies_after_appending_is_refused_until_the_leftovers_are_dropped() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = seeded("rivet_ch_first", 5);
+    let db = Db::new("rivet_chtest");
+    let mut rig = into_clickhouse(Rig::mysql_cdc(&tbl), &db);
+    let view = format!("{}.{tbl}", db.0);
+    rig.run_ok();
+
+    let crashed = rig.load_args_env(
+        &[],
+        &[
+            (PASSWORD_ENV, CLICKHOUSE_PASSWORD),
+            ("RIVET_TEST_PANIC_AT", "load_after_append"),
+        ],
+    );
+    assert!(
+        !crashed.status.success(),
+        "the fault hook must stop the first load"
+    );
+    let said = rig.refuses_twice_then(
+        &["load"],
+        &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)],
+        Refused::by_code("RIVET_LOAD_TARGET_NOT_RIVETS", 5),
+        vec![],
+    );
+    assert!(
+        said.contains("no record of a successful rivet load") && said.contains("Drop or rename it"),
+        "the refusal says why and names the remedy:\n{said}"
+    );
+
+    ch(&format!("DROP VIEW IF EXISTS {view}"));
+    ch(&format!("DROP TABLE IF EXISTS {view}__changes"));
+    load(&rig);
+    clickhouse_rows_match_source(&view, source_rows(&tbl), "");
+}
+
 /// A PostgreSQL `(id, v, updated_at)` table on the main stand holding ids `1..=n`.
 fn pg_batch_seeded(prefix: &str, n: i64) -> (String, PgTable, postgres::Client) {
     let mut c = pg_connect();

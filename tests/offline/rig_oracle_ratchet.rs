@@ -32,7 +32,8 @@ const NO_ORACLE_CEILING: usize = 29; // ratchet-pin: no-oracle-opt-outs
 // committed before the column was added; they and the checkpoint stay, as on every mid-drain CDC stop.
 // 47 -> 51 (2026-10-29, #719): four column-grants cells whose failed run leaves its parts, rows and checkpoint for the re-run by design.
 // 51 -> 52 (2026-10-29, #719 follow-up): the same helper; a refused run leaves its parts, rows and checkpoint for the re-run by design.
-const FAILED_RUN_LEFTOVER_CEILING: usize = 52; // ratchet-pin: failed-run-leftover-declarations
+// 52 -> 53 (2026-11-02): a BigQuery first load whose lease is lost mid-write (a_first_load_whose_lease_is_taken_during_the_write_*): the unowned table and its failed load_run row stay for the refusal the cell then asserts.
+const FAILED_RUN_LEFTOVER_CEILING: usize = 53; // ratchet-pin: failed-run-leftover-declarations
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).
 // 2 -> 1 (2026-10-08): a run that fails before its first write leaves the prefix alone, so a failed manifest before a write is a failure, no longer an excuse.
