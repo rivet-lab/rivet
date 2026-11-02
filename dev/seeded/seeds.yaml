@@ -4535,6 +4535,27 @@ seeds:
       mongo:
         na: "a MongoDB giant is never range-split (mongo_source_is_not_range_split_capable), so no split unit manifest exists to read; the CDC position check shares the same census and is graded by lib:a_failed_copy_is_not_read_and_a_successful_one_is"
 
+  - name: named-profile-falls-back
+    class: a named AWS profile is resolved with the ambient environment layered over it, so an ambient AWS_PROFILE or AWS keys select another identity and a missing profile falls through to environment keys or instance metadata
+    history: "found 2026-11-02 while probing #773: `aws_profile: named-prod` signed with the keys of `AWS_PROFILE=ambient-dev`, with `AWS_ACCESS_KEY_ID` from the environment, and a missing profile signed with environment keys or asked the EC2 metadata service"
+    scope: destination
+    patch: named-profile-falls-back/shared.patch
+    engines:
+      local:
+        na: "the seed edits the S3 store's profile resolver; a local directory names no AWS profile"
+      s3:
+        cells:
+          - ambient_access_keys_never_replace_a_named_profile
+          - an_ambient_aws_profile_that_differs_is_refused_before_any_request
+          - a_missing_named_profile_is_refused_before_any_request
+          - a_named_profile_without_static_keys_is_refused_not_sent_to_the_instance_metadata
+      gcs:
+        na: "the seed edits the S3 store's profile resolver; GCS names a key file, graded by named-credential-falls-back"
+      azure:
+        na: "the seed edits the S3 store's profile resolver; Azure reads named env vars refused by read_credential_env"
+      stdout:
+        na: "the seed edits the S3 store's profile resolver; stdout names no credential"
+
   - name: state-prefix-match-reads-text-as-pattern
     class: "the run-status ledger matches a destination prefix with LIKE, so path text is read as a pattern: on Postgres a backslash escapes the next character and a live run under `a\\b/` is not found by its own child prefix (cleanup_source and gc_orphans then delete its unmanifested parts), and on both backends `_`, `%` and (SQLite) letter case make a look-alike prefix count as live"
     history: "found 2026-11-01 by the text x state-backend hunt (text #9): PG `prefix_overlaps` false where SQLite said true for a run on `gs://b/vN/a\\b/` and its child `.../orders/`; RED on main 2026-11-02 on both backends"

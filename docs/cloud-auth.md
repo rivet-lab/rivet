@@ -107,10 +107,24 @@ CLI v1 wrote, and AWS CLI v2's "IAM user" mode still writes).
 
 It does **not** work for AWS Login / SSO profiles that store
 short-lived sessions in `~/.aws/login/cache/` — reqsign 0.16's loader
-doesn't read that format and falls through to IMDS, hanging or failing
-with the error quoted above.
+doesn't read that format. Rivet stops at start-up with
+`RIVET_DEST_CREDENTIALS_INVALID` naming the profile, before any request.
 
 If you have an AWS Login profile, use **Path B** instead.
+
+A named profile is used or refused, never replaced. Rivet reads only that
+profile from the shared files (`AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`
+move the files, default `~/.aws`) and stops with `RIVET_DEST_CREDENTIALS_INVALID`
+before any request when:
+
+- the profile is missing, or holds no `aws_access_key_id` + `aws_secret_access_key`
+  (nor a `role_arn` + `web_identity_token_file`);
+- the environment sets `AWS_PROFILE` to another profile: run with
+  `env -u AWS_PROFILE rivet ...`, or set `aws_profile` to that name.
+
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in the environment never replace the
+profile's keys, and the EC2 instance-metadata service is never asked. Remove
+`aws_profile` to use the ambient AWS chain.
 
 ```yaml
 destination:
@@ -127,7 +141,8 @@ destination:
   but this leaves the reqsign default-chain still wired up and can
   trigger surprise IMDS lookups.  Pick one path.
 - **`AWS_PROFILE` env var alone**: rivet doesn't read it.  Either
-  set `aws_profile:` in the config or use the env-var path.
+  set `aws_profile:` in the config or use the env-var path.  An `AWS_PROFILE`
+  that differs from `aws_profile:` is refused (see Path C).
 
 ---
 

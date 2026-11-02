@@ -33,8 +33,10 @@ to the matching setup. Skip any step you have already done.
 | **S3** | temporary keys from `aws configure export-credentials` (+ `session_token_env`), static IAM keys (`access_key_env` / `secret_key_env`), or a static-key `aws_profile:` | `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:ListBucket`, `s3:GetBucketLocation` |
 | **Azure** | storage account key (`account_key_env`) or SAS token (`sas_token_env`) | account key = full access; SAS needs `rwdlc` |
 
-- rivet does not read `AWS_PROFILE`, and SSO/login profiles do not work as
-  `aws_profile:`. Export temporary credentials instead (the `sso` option above).
+- rivet does not read `AWS_PROFILE`; one that differs from `aws_profile:` is refused
+  (`RIVET_DEST_CREDENTIALS_INVALID`), as is a missing or keyless profile. SSO/login
+  profiles do not work as `aws_profile:`. Export temporary credentials instead (the
+  `sso` option above).
 - Temporary AWS keys expire, usually after about an hour. Re-run the
   `export-credentials` line before the next run.
 - BigQuery and Snowflake loads read **GCS only** (`destination: type: gcs`). A ClickHouse
