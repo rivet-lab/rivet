@@ -955,10 +955,10 @@ pub mod codes {
         "RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT",
         "re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run",
     );
-    /// A CDC export's checkpoint is the one another config's export still reads.
+    /// A CDC checkpoint is the one another stream (another config's export, or a `rivet cdc` command) still reads.
     pub const SOURCE_CDC_CHECKPOINT_SHARED: Code = refusal(
         "RIVET_SOURCE_CDC_CHECKPOINT_SHARED",
-        "give the export a `cdc.checkpoint` of its own and keep the shared file, the other export's position; with `cdc.initial: snapshot` its first run re-reads every table",
+        "give the export a `cdc.checkpoint` (or the `rivet cdc` command a `--checkpoint`) of its own and keep the shared file, the other stream's position; with `cdc.initial: snapshot` an export's first run re-reads every table",
     );
     pub const SOURCE_CDC_CHECKPOINT_INVALID: Code = refusal(
         "RIVET_SOURCE_CDC_CHECKPOINT_INVALID",

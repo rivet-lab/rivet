@@ -241,7 +241,8 @@ pub(super) fn claim_checkpoint(config_path: &str, export: &ExportConfig) -> Resu
     let config = std::path::Path::new(config_path);
     let dir = config.parent().unwrap_or_else(|| std::path::Path::new("."));
     let ckpt = crate::source::cdc::resolve_checkpoint(raw, dir);
-    crate::source::cdc::checkpoint_identity::claim_checkpoint(&ckpt, config, &export.name)
+    let me = crate::source::cdc::checkpoint_identity::CheckpointOwner::export(config, &export.name);
+    crate::source::cdc::checkpoint_identity::claim_checkpoint(&ckpt, &me)
 }
 
 /// The checkpoint path and state keys of a file-anchored stream, or `None`.

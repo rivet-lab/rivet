@@ -1467,6 +1467,26 @@ seeds:
         cells:
           - "lib:head_refuses_a_missing_container_and_reads_a_missing_key_as_absent"
 
+  - name: named-credential-falls-back
+    class: a credential the config names that cannot be used is dropped and an ambient identity is built instead
+    history: "a GCS `credentials_file` that was a directory, an empty or malformed file passed config and fell back to the VM metadata identity; a relative path was read under the working directory (hunt 2026-11-01)"
+    scope: destination
+    patch: named-credential-falls-back/shared.patch
+    engines:
+      local:
+        na: "the seed edits the GCS store and the config key reader; a local directory names no credential to fall back from"
+      s3:
+        na: "the seed edits the GCS store and the config key reader; S3 reads named env vars refused by read_credential_env"
+      gcs:
+        cells:
+          - "lib:a_named_credentials_file_that_is_no_key_is_refused_before_any_identity_is_built"
+          - "lib:a_named_credentials_file_that_is_no_key_stops_the_load"
+          - "lib:a_relative_credentials_file_is_read_beside_the_config"
+      azure:
+        na: "the seed edits the GCS store and the config key reader; Azure reads named env vars refused by read_credential_env"
+      stdout:
+        na: "the seed edits the GCS store and the config key reader; stdout names no credential"
+
   - name: check-describes-the-config-not-the-plan
     class: a preflight command describes a strategy derived from the config instead of the plan the runner builds
     history: "`rivet check` printed `Strategy: chunked(id, size=100000)` and `column: ?` for a `mode: chunked` export the run executed as one unchunked pass (CLI sweep 20, 2026-10-07)"
@@ -1752,6 +1772,22 @@ seeds:
         cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_mongo]
       oracle:
         cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_oracle]
+  - name: rivet-cdc-skips-the-checkpoint-claim
+    class: "`rivet cdc --checkpoint` reads a checkpoint a `mode: cdc` export owns without claiming it, and acks the stream's position, so the export skips the changes the command read, exit 0"
+    history: "found 2026-11-01 by the entry-parity hunt (AXIS GAP 1): `dispatch_cdc` never routed through `claim_checkpoint`; RED on main 266a7de5 (`rivet cdc` over an export's checkpoint exit 0 on PostgreSQL, MySQL and SQL Server)"
+    scope: source
+    patch: rivet-cdc-skips-the-checkpoint-claim/shared.patch
+    engines:
+      postgres:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_postgres]
+      mysql:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_mysql]
+      mssql:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_mssql]
+      mongo:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_mongo]
+      oracle:
+        cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_oracle]
   - name: io-error-classified-by-its-path-text
     class: "an `io::Error` (a missing directory, a read-only file) is retried as transient because a path in its message contains a network word (`dns`, `reset`), so a permanent stop exits 2"
     history: "0.32.2, 2026-10-20: #639's mutation shard baseline failed `an_unwritable_aggregate_path_is_refused_by_code` with exit 2 for 1 because its temp dir was named `.tmprDnsA7`; RED on main c1cf6a92 with a directory named `dns`"
@@ -4519,3 +4555,14 @@ seeds:
         na: "the seed edits the S3 store's profile resolver; Azure reads named env vars refused by read_credential_env"
       stdout:
         na: "the seed edits the S3 store's profile resolver; stdout names no credential"
+
+  - name: state-prefix-match-reads-text-as-pattern
+    class: "the run-status ledger matches a destination prefix with LIKE, so path text is read as a pattern: on Postgres a backslash escapes the next character and a live run under `a\\b/` is not found by its own child prefix (cleanup_source and gc_orphans then delete its unmanifested parts), and on both backends `_`, `%` and (SQLite) letter case make a look-alike prefix count as live"
+    history: "found 2026-11-01 by the text x state-backend hunt (text #9): PG `prefix_overlaps` false where SQLite said true for a run on `gs://b/vN/a\\b/` and its child `.../orders/`; RED on main 2026-11-02 on both backends"
+    scope: state
+    patch: state-prefix-match-reads-text-as-pattern/shared.patch
+    engines:
+      postgres-state:
+        cells: ["lib:postgres_state_decides_liveness_by_literal_path_containment", "lib:postgres_state_cleanup_and_gc_follow_the_literal_prefix"]
+      sqlite-state:
+        cells: ["lib:sqlite_state_decides_liveness_by_literal_path_containment", "lib:sqlite_state_cleanup_and_gc_follow_the_literal_prefix"]

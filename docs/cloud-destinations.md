@@ -99,7 +99,7 @@ untested / not supported as Rivet destinations
 
 | Mode | Fields | Notes |
 |---|---|---|
-| Service-account file | `credentials_file: /path/to/sa.json` | Long-lived service-account JSON. |
+| Service-account file | `credentials_file: /path/to/sa.json` | Long-lived service-account JSON; relative paths are read beside the config, and an unusable file is refused, never replaced by another identity. |
 | Service-account env  | *(none set; `GOOGLE_APPLICATION_CREDENTIALS` exported)* | Path to the SA JSON in env. |
 | Application Default Credentials | *(none set; `gcloud auth application-default login`)* | Local-dev / workstation auth. |
 

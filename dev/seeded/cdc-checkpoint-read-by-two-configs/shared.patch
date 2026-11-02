@@ -1,12 +1,12 @@
 diff --git a/src/source/cdc/checkpoint_identity.rs b/src/source/cdc/checkpoint_identity.rs
-index 2b56b9cb..fce50c9a 100644
+index cc81db9..c22095a 100644
 --- a/src/source/cdc/checkpoint_identity.rs
 +++ b/src/source/cdc/checkpoint_identity.rs
-@@ -114,6 +114,7 @@ pub(crate) fn claim_checkpoint(
-         export: export.to_string(),
-     };
+@@ -182,6 +182,7 @@ fn shared(ckpt: &std::path::Path, held: &CheckpointOwner, me: &CheckpointOwner)
+ /// Claim the checkpoint `ckpt` for the stream `me`: refuse one another stream still reads, record `me` beside it otherwise.
+ pub(crate) fn claim_checkpoint(ckpt: &std::path::Path, me: &CheckpointOwner) -> Result<()> {
      let record = owner_path(ckpt);
-+    let _ = std::fs::remove_file(owner_path(ckpt));
-     let held = owner_of(ckpt);
-     if let Some(owner) = &held {
-         if owner == &me {
++    let _ = std::fs::remove_file(&record);
+     if let Some(held) = owner_of(ckpt) {
+         if &held == me {
+             return Ok(());

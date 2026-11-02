@@ -339,14 +339,19 @@ mod tests {
         ]
     }
 
-    /// Time spent and names found by `mentions_name` over `text` for every name.
+    /// Names found by `mentions_name` over `text`, and the fastest of three searches' time.
     fn timed_search(names: &[String], text: &[u8]) -> (std::time::Duration, usize) {
-        let started = std::time::Instant::now();
-        let hits = names
-            .iter()
-            .filter(|n| mentions_name(true, n, text))
-            .count();
-        (started.elapsed(), hits)
+        (0..3)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let hits = names
+                    .iter()
+                    .filter(|n| mentions_name(true, n, text))
+                    .count();
+                (started.elapsed(), hits)
+            })
+            .min()
+            .expect("three runs")
     }
 
     /// Four times the text costs under eight times the time, whatever else the machine is doing.

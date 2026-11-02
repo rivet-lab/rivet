@@ -1045,8 +1045,8 @@ mod clickhouse {
                 Resolved::warn(
                     ChType::DateTime64(p, Some(super::CLICKHOUSE_TIMESTAMP_ZONE.into())),
                     "DateTime64 holds 1900-01-01 to 2299-12-31; rivet load refuses a part holding a \
-                     value outside it, but a load pulled through a named collection (or any other \
-                     reader) gets the nearest end, silently",
+                     value outside it, pushed or pulled through a named collection, but any other \
+                     reader of the Parquet gets the nearest end, silently",
                 )
             }
             RivetType::String | RivetType::Text | RivetType::Enum => Resolved::ok(ChType::String),

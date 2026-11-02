@@ -7,12 +7,13 @@ on:
   pull_request:
     branches: [master, main]
     types: [opened, edited, synchronize, reopened]
+  merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr-rules-${{ github.event.pull_request.number }}
+  group: pr-rules-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -31,7 +32,5 @@ jobs:
           python3 dev/pytools/changelog.py check
           python3 dev/pytools/live_slot.py --self-test
       - name: Commits, PR title and body, added lines, raised ratchets, CHANGELOG
-        # The checkout is the merge of the PR into the base branch: its first parent is the base tip the PR is
-        # graded against. `pull_request.base.sha` can lag behind it, and then commits already on the base
-        # branch are graded as the PR's own.
+        if: github.event_name == 'pull_request'
         run: python3 dev/pytools/pr_ready.py ci --base "$(git rev-parse HEAD^1)" --event "$GITHUB_EVENT_PATH"

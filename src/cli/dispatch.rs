@@ -328,6 +328,10 @@ struct CdcArgs {
 fn dispatch_cdc(a: CdcArgs) -> Result<()> {
     let (url, _prov) = resolve_init_source(a.source, a.source_env, a.source_file)?;
     let ckpt = a.checkpoint.map(std::path::PathBuf::from);
+    if let Some(c) = &ckpt {
+        let me = crate::source::cdc::checkpoint_identity::CheckpointOwner::command();
+        crate::source::cdc::checkpoint_identity::claim_checkpoint(c, &me)?;
+    }
     use crate::source::cdc::{CdcEngine, CdcEngineOpts, DrainMode};
     let cdc_cfg = crate::source::cdc::CdcConfig {
         url: url.clone(),

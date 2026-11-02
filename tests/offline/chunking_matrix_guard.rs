@@ -1752,45 +1752,47 @@ fn shared_harness_items() -> &'static HashMap<String, String> {
 
 /// The cited test's body plus every `fn`/`const` it reaches by name, transitively: in its own file, else in tests/common (the shared harness).
 pub(super) fn test_closure(name: &str) -> Option<String> {
-    let mut stack = vec![repo_root().join("src"), repo_root().join("tests")];
-    while let Some(dir) = stack.pop() {
-        for p in std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-        {
-            if p.is_dir() {
-                stack.push(p);
-                continue;
+    let items = tree_items().iter().find(|items| items.contains_key(name))?;
+    let shared = shared_harness_items();
+    let lookup = |n: &str| items.get(n).or_else(|| shared.get(n));
+    let (mut seen, mut todo, mut out) = (HashSet::new(), vec![name.to_string()], String::new());
+    while let Some(n) = todo.pop() {
+        if !seen.insert(n.clone()) {
+            continue;
+        }
+        let Some(body) = lookup(&n) else { continue };
+        out.push_str(body);
+        for ident in body.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if lookup(ident).is_some() && !seen.contains(ident) {
+                todo.push(ident.to_string());
             }
-            if p.extension().is_none_or(|x| x != "rs") {
-                continue;
-            }
-            let items = items_in(&std::fs::read_to_string(&p).unwrap_or_default());
-            if !items.contains_key(name) {
-                continue;
-            }
-            let shared = shared_harness_items();
-            let lookup = |n: &str| items.get(n).or_else(|| shared.get(n));
-            let (mut seen, mut todo, mut out) =
-                (HashSet::new(), vec![name.to_string()], String::new());
-            while let Some(n) = todo.pop() {
-                if !seen.insert(n.clone()) {
-                    continue;
-                }
-                let Some(body) = lookup(&n) else { continue };
-                out.push_str(body);
-                for ident in body.split(|c: char| !c.is_alphanumeric() && c != '_') {
-                    if lookup(ident).is_some() && !seen.contains(ident) {
-                        todo.push(ident.to_string());
-                    }
-                }
-            }
-            return Some(out);
         }
     }
-    None
+    Some(out)
+}
+
+/// The items of every `.rs` file under src/ and tests/, parsed once per process in walk order.
+fn tree_items() -> &'static [HashMap<String, String>] {
+    static FILES: std::sync::OnceLock<Vec<HashMap<String, String>>> = std::sync::OnceLock::new();
+    FILES.get_or_init(|| {
+        let mut out = Vec::new();
+        let mut stack = vec![repo_root().join("src"), repo_root().join("tests")];
+        while let Some(dir) = stack.pop() {
+            for p in std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+            {
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(items_in(&std::fs::read_to_string(&p).unwrap_or_default()));
+                }
+            }
+        }
+        out
+    })
 }
 
 /// A runner cell names a test that reaches the row's claim, not a neighbouring one.
