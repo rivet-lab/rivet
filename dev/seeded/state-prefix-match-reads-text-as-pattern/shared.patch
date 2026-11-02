@@ -1,0 +1,15 @@
+diff --git a/src/state/run_status_store.rs b/src/state/run_status_store.rs
+index fe8f3b4..56f4d3e 100644
+--- a/src/state/run_status_store.rs
++++ b/src/state/run_status_store.rs
+@@ -378,8 +378,8 @@ impl StateStore {
+ fn prefix_overlaps(alias: &str, param: &str) -> String {
+     format!(
+         "(rtrim({alias}.prefix, '/') = rtrim({param}, '/') \
+-         OR substr({alias}.prefix, 1, length(rtrim({param}, '/')) + 1) = rtrim({param}, '/') || '/' \
+-         OR substr(rtrim({param}, '/'), 1, length(rtrim({alias}.prefix, '/')) + 1) = rtrim({alias}.prefix, '/') || '/')"
++         OR {alias}.prefix LIKE rtrim({param}, '/') || '/%' \
++         OR rtrim({param}, '/') LIKE rtrim({alias}.prefix, '/') || '/%')"
+     )
+ }
+ 

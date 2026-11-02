@@ -5848,6 +5848,88 @@ mod live_only_decisions {
         );
     }
 
+    /// What cleanup and gc decide for a live run recorded at a base prefix and a per-table child, under path text a LIKE pattern or an escape would misread.
+    fn assert_cleanup_and_gc_follow_the_literal_prefix(state: &StateStore, tag: &str) {
+        for (i, (seg, twin)) in [
+            ("a\\b", "ab"),
+            ("p\\q", "pq"),
+            ("a_b", "aXb"),
+            ("a%b", "aXYb"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let base = format!("gs://b/{tag}_{i}/{seg}/");
+            let child = format!("gs://b/{tag}_{i}/{seg}/orders");
+            let twin_child = format!("gs://b/{tag}_{i}/{twin}/orders");
+            let run = format!("{tag}_run_{i}");
+            state
+                .begin_run(&run, "cdc", &base, "2026-08-21T00:00:00Z")
+                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            write_at(
+                &dir,
+                &format!("{tag}_{i}/{twin}/orders/part-000000.parquet"),
+                b"rows",
+            );
+            assert!(
+                prefix_has_active_run(&fs_store(&dir), &child, Some(state)),
+                "cleanup must refuse the child {child:?} of a live run on {base:?}"
+            );
+            assert!(
+                !prefix_has_active_run(&fs_store(&dir), &twin_child, Some(state)),
+                "the look-alike {twin_child:?} is not under the live run's {base:?}"
+            );
+            if !seg.contains('\\') {
+                write_at(
+                    &dir,
+                    &format!("{tag}_{i}/{seg}/orders/part-000000.parquet"),
+                    b"rows",
+                );
+                maybe_gc_orphans(
+                    &fs_store(&dir),
+                    &plan_at(LoadMode::Full, &child),
+                    Some(state),
+                );
+                assert!(
+                    dir.path()
+                        .join(format!("{tag}_{i}/{seg}/orders/part-000000.parquet"))
+                        .exists(),
+                    "gc must spare the unmanifested part under the live run on {base:?}"
+                );
+                maybe_gc_orphans(
+                    &fs_store(&dir),
+                    &plan_at(LoadMode::Full, &twin_child),
+                    Some(state),
+                );
+                assert!(
+                    !dir.path()
+                        .join(format!("{tag}_{i}/{twin}/orders/part-000000.parquet"))
+                        .exists(),
+                    "gc must collect the look-alike {twin_child:?}: no run is writing under it"
+                );
+            }
+            state
+                .finish_run(&run, "success", "2026-08-21T00:00:01Z")
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn sqlite_state_cleanup_and_gc_follow_the_literal_prefix() {
+        let s = StateStore::open_in_memory().unwrap();
+        assert_cleanup_and_gc_follow_the_literal_prefix(&s, "sq");
+    }
+
+    #[test]
+    fn postgres_state_cleanup_and_gc_follow_the_literal_prefix() {
+        let Some(s) = StateStore::postgres_for_test() else {
+            return;
+        };
+        let tag = format!("pg{}", std::process::id());
+        assert_cleanup_and_gc_follow_the_literal_prefix(&s, &tag);
+    }
+
     /// The cleanup truth table, including the LAZINESS the `if` chain had: the
     /// activity probe is a state-DB query plus a bucket listing and must not run
     /// for a config that never asked for cleanup. Kills `delete ! in

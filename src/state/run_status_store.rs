@@ -373,18 +373,13 @@ impl StateStore {
     }
 }
 
-/// The prefix-containment predicate, EITHER direction, so a query at any
-/// granularity matches: equal (batch: run and load prefix coincide); the run
-/// at-or-under the query (a partitioned run's `…/created_at=…/` vs the load's
-/// base); the query at-or-under the run (a CDC run records its BASE `…/`, the
-/// load gc's a per-TABLE child). Over-matching only makes gc SPARE — the safe
-/// direction. `rtrim(x,'/')` + `||` + `LIKE` are portable across SQLite and
-/// Postgres. `alias` is the `run_status` row, `param` the query prefix.
+/// The prefix-containment predicate on LITERAL path text, either direction: equal; the run at-or-under the query; the query at-or-under the run.
+/// No `LIKE`, so `\`, `%`, `_` and case mean the same on SQLite and Postgres. `alias` is the `run_status` row, `param` the query prefix.
 fn prefix_overlaps(alias: &str, param: &str) -> String {
     format!(
         "(rtrim({alias}.prefix, '/') = rtrim({param}, '/') \
-         OR {alias}.prefix LIKE rtrim({param}, '/') || '/%' \
-         OR rtrim({param}, '/') LIKE rtrim({alias}.prefix, '/') || '/%')"
+         OR substr({alias}.prefix, 1, length(rtrim({param}, '/')) + 1) = rtrim({param}, '/') || '/' \
+         OR substr(rtrim({param}, '/'), 1, length(rtrim({alias}.prefix, '/')) + 1) = rtrim({alias}.prefix, '/') || '/')"
     )
 }
 
@@ -411,6 +406,25 @@ fn live_on_prefix(alias: &str, param: &str) -> String {
         overlap = prefix_overlaps(alias, param),
         newer_overlap = prefix_overlaps("r2", param),
     )
+}
+
+#[cfg(test)]
+impl StateStore {
+    /// The Postgres state named by `RIVET_TEST_STATE_URL`, or `None` after recording the skip.
+    pub(crate) fn postgres_for_test() -> Option<Self> {
+        let Ok(url) = std::env::var("RIVET_TEST_STATE_URL") else {
+            crate::test_hook::skip_live("RIVET_TEST_STATE_URL unset");
+            return None;
+        };
+        if !url.starts_with("postgres") {
+            crate::test_hook::skip_live("RIVET_TEST_STATE_URL is not a postgres URL");
+            return None;
+        }
+        Some(
+            Self::open_at_ref(&crate::state::StateRef::Postgres(url))
+                .expect("open the Postgres test state"),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -519,8 +533,9 @@ mod tests {
         let overlap = prefix_overlaps("r", "?1");
         assert_eq!(
             overlap,
-            "(rtrim(r.prefix, '/') = rtrim(?1, '/') OR r.prefix LIKE rtrim(?1, '/') || '/%' \
-             OR rtrim(?1, '/') LIKE rtrim(r.prefix, '/') || '/%')"
+            "(rtrim(r.prefix, '/') = rtrim(?1, '/') \
+             OR substr(r.prefix, 1, length(rtrim(?1, '/')) + 1) = rtrim(?1, '/') || '/' \
+             OR substr(rtrim(?1, '/'), 1, length(rtrim(r.prefix, '/')) + 1) = rtrim(r.prefix, '/') || '/')"
         );
         let live = live_on_prefix("r", "?1");
         assert!(live.starts_with(&overlap), "{live}");
@@ -1006,5 +1021,128 @@ mod tests {
             !s.has_active_run_on_prefix("gs://b/exports/orders").unwrap(),
             "a sibling prefix that merely string-starts-with must not count as active"
         );
+    }
+
+    /// The path containment the ledger must answer, spelled on literal characters.
+    fn literal_overlap(run: &str, query: &str) -> bool {
+        let (r, q) = (run.trim_end_matches('/'), query.trim_end_matches('/'));
+        r == q || r.starts_with(&format!("{q}/")) || q.starts_with(&format!("{r}/"))
+    }
+
+    /// Hostile path segments paired with a look-alike that differs in exactly the characters a LIKE pattern or an escape would swallow.
+    const HOSTILE_SEGMENTS: &[(&str, &str)] = &[
+        ("a\\b", "ab"),
+        ("p\\q", "pq"),
+        ("a\\", "a"),
+        ("\\", "x"),
+        ("a\\\\b", "a\\b"),
+        ("a\\_b", "a_b"),
+        ("a\\%b", "a%b"),
+        ("a_b", "aXb"),
+        ("a%b", "aXYb"),
+        ("%", "x"),
+        ("_", "x"),
+        ("a'b", "a\"b"),
+        ("caf\u{e9}", "cafe"),
+        ("\u{65e5}\u{672c}", "\u{672c}\u{672c}"),
+        ("a b", "a  b"),
+        ("Up", "up"),
+    ];
+
+    /// Every (run prefix, query prefix) pair the hostile segments produce, in the shapes gc and cleanup ask.
+    fn hostile_prefix_pairs() -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        for (seg, twin) in HOSTILE_SEGMENTS {
+            let base = format!("gs://b/v1/{seg}/");
+            let other = format!("gs://b/v1/{twin}/");
+            pairs.push((base.clone(), base.clone()));
+            pairs.push((base.clone(), format!("{base}orders/")));
+            pairs.push((format!("{base}d=1/"), base.clone()));
+            pairs.push((format!("{base}d=1/"), format!("{base}d=1")));
+            pairs.push((base.clone(), format!("{other}orders/")));
+            pairs.push((other.clone(), format!("{base}orders/")));
+            pairs.push((format!("{other}d=1/"), base.clone()));
+            pairs.push((base.clone(), format!("{base}x")));
+            pairs.push((format!("{base}x"), base.clone()));
+        }
+        pairs
+    }
+
+    /// The decision gc and cleanup take from the ledger equals literal path containment for every hostile pair.
+    fn assert_ledger_decides_by_literal_containment(s: &StateStore, tag: &str) {
+        let mut wrong = Vec::new();
+        for (i, (run_prefix, query)) in hostile_prefix_pairs().iter().enumerate() {
+            let run = format!("{tag}_{i}");
+            let export = format!("{tag}_exp_{i}");
+            s.begin_run(&run, &export, run_prefix, "2026-01-01T00:00:00Z")
+                .unwrap();
+            let want = literal_overlap(run_prefix, query);
+            let single = s.has_active_run_on_prefix(query).unwrap();
+            let named = s.active_run_ids_on_prefix(query).unwrap().contains(&run);
+            s.finish_run(&run, "success", "2026-01-01T00:00:01Z")
+                .unwrap();
+            if single != want || named != want {
+                wrong.push(format!(
+                    "run {run_prefix:?} query {query:?}: want {want}, has_active {single}, active_ids {named}"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the ledger's liveness answer must be path containment on the literal text:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// The split path closes the ceased units of a giant under exactly the prefixes that literally contain its run's prefix.
+    fn assert_split_stamp_decides_by_literal_containment(s: &StateStore, tag: &str) {
+        let mut wrong = Vec::new();
+        for (i, (run_prefix, query)) in hostile_prefix_pairs().iter().enumerate() {
+            let giant = format!("{tag}_g{i}");
+            let run = format!("{tag}_s{i}");
+            s.begin_run(
+                &run,
+                &format!("{giant}#4"),
+                run_prefix,
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+            let want = literal_overlap(run_prefix, query);
+            let stamped = !s
+                .interrupt_ceased_split_units(&giant, query, 2, "2026-01-01T00:00:01Z")
+                .unwrap()
+                .is_empty();
+            s.finish_run(&run, "success", "2026-01-01T00:00:02Z").ok();
+            if stamped != want {
+                wrong.push(format!(
+                    "run {run_prefix:?} query {query:?}: want {want}, stamped {stamped}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    fn unique_tag(kind: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{kind}_{}_{nanos}", std::process::id())
+    }
+
+    #[test]
+    fn sqlite_state_decides_liveness_by_literal_path_containment() {
+        let s = StateStore::open_in_memory().unwrap();
+        assert_ledger_decides_by_literal_containment(&s, &unique_tag("lit"));
+        assert_split_stamp_decides_by_literal_containment(&s, &unique_tag("spl"));
+    }
+
+    #[test]
+    fn postgres_state_decides_liveness_by_literal_path_containment() {
+        let Some(s) = StateStore::postgres_for_test() else {
+            return;
+        };
+        assert_ledger_decides_by_literal_containment(&s, &unique_tag("lit"));
+        assert_split_stamp_decides_by_literal_containment(&s, &unique_tag("spl"));
     }
 }

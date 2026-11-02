@@ -4498,3 +4498,14 @@ seeds:
         cells: ["lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
       mongo:
         na: "a MongoDB giant is never range-split (mongo_source_is_not_range_split_capable), so no split unit manifest exists to read; the CDC position check shares the same census and is graded by lib:a_failed_copy_is_not_read_and_a_successful_one_is"
+
+  - name: state-prefix-match-reads-text-as-pattern
+    class: "the run-status ledger matches a destination prefix with LIKE, so path text is read as a pattern: on Postgres a backslash escapes the next character and a live run under `a\\b/` is not found by its own child prefix (cleanup_source and gc_orphans then delete its unmanifested parts), and on both backends `_`, `%` and (SQLite) letter case make a look-alike prefix count as live"
+    history: "found 2026-11-01 by the text x state-backend hunt (text #9): PG `prefix_overlaps` false where SQLite said true for a run on `gs://b/vN/a\\b/` and its child `.../orders/`; RED on main 2026-11-02 on both backends"
+    scope: state
+    patch: state-prefix-match-reads-text-as-pattern/shared.patch
+    engines:
+      postgres-state:
+        cells: ["lib:postgres_state_decides_liveness_by_literal_path_containment", "lib:postgres_state_cleanup_and_gc_follow_the_literal_prefix"]
+      sqlite-state:
+        cells: ["lib:sqlite_state_decides_liveness_by_literal_path_containment", "lib:sqlite_state_cleanup_and_gc_follow_the_literal_prefix"]
