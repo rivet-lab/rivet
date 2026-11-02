@@ -241,7 +241,11 @@ impl CloudBackend for GcsBackend {
                 .disable_config_load();
             log::info!("GCS: allow_anonymous (emulator mode; no OAuth / service account)");
         } else if let Some(cred_file) = &config.credentials_file {
-            builder = builder.credential_path(cred_file);
+            crate::config::credential_file::google_key("destination.credentials_file", cred_file)?;
+            builder = builder
+                .credential_path(cred_file)
+                .disable_vm_metadata()
+                .disable_config_load();
             log::info!("GCS: using credentials_file from config: {}", cred_file);
         } else if let Some(loader) = gcp_auth::try_authorized_user_loader()? {
             // A refreshing loader, not a static `.token()`: opendal pins a
@@ -316,6 +320,45 @@ mod tests {
         assert_eq!(scheme(&s3), "s3");
         assert_eq!(scheme(&az), "azblob");
         assert_eq!(scheme(&gcs), "gcs");
+    }
+
+    /// A named `credentials_file` that is not a usable key is refused by code before any credential is built.
+    #[test]
+    fn a_named_credentials_file_that_is_no_key_is_refused_before_any_identity_is_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, b"").unwrap();
+        let broken = dir.path().join("broken.json");
+        std::fs::write(&broken, b"{\"type\": \"service_acc").unwrap();
+        let user = dir.path().join("user.json");
+        std::fs::write(
+            &user,
+            br#"{"type":"authorized_user","client_id":"i","client_secret":"s","refresh_token":"r"}"#,
+        )
+        .unwrap();
+        let other = dir.path().join("other.json");
+        std::fs::write(&other, b"{}").unwrap();
+        for (label, path) in [
+            ("a directory", dir.path().to_path_buf()),
+            ("an empty file", empty),
+            ("malformed JSON", broken),
+            ("an authorized_user file", user),
+            ("a JSON object that is no key", other),
+        ] {
+            let cfg = crate::config::DestinationConfig {
+                destination_type: crate::config::DestinationType::Gcs,
+                bucket: Some("b".into()),
+                credentials_file: Some(path.display().to_string()),
+                ..Default::default()
+            };
+            let err = GcsBackend::build_operator(&cfg).expect_err(label);
+            crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+            let shown = format!("{err:#}");
+            assert!(
+                shown.contains("credentials_file") && shown.contains(&path.display().to_string()),
+                "{label}: the refusal names the field and the path: {shown}"
+            );
+        }
     }
 
     #[test]
