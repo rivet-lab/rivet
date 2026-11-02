@@ -31,12 +31,7 @@ fn read_credential_env(env_name: &str, label: &str) -> Result<zeroize::Zeroizing
 
 /// Resolve the shared-file profile `profile` and nothing else: refuses by `RIVET_DEST_CREDENTIALS_INVALID` when an ambient `AWS_PROFILE` selects another profile or the profile holds no static keys or web-identity role, and disables the instance-metadata fallback.
 fn named_profile_config(profile: &str) -> Result<reqsign::AwsConfig> {
-    let cfg = reqsign::AwsConfig {
-        profile: profile.to_string(),
-        ec2_metadata_disabled: true,
-        ..Default::default()
-    }
-    .from_profile();
+    let cfg = profile_only(profile).from_profile();
     let invalid =
         |why: String| crate::error::coded(crate::error::codes::DEST_CREDENTIALS_INVALID, why);
     if cfg.profile != profile {
@@ -53,6 +48,15 @@ fn named_profile_config(profile: &str) -> Result<reqsign::AwsConfig> {
         )));
     }
     Ok(cfg)
+}
+
+/// The reqsign config that reads `profile` and never the instance metadata, before the shared files are read.
+fn profile_only(profile: &str) -> reqsign::AwsConfig {
+    reqsign::AwsConfig {
+        profile: profile.to_string(),
+        ec2_metadata_disabled: true,
+        ..Default::default()
+    }
 }
 
 impl CloudBackend for S3Backend {
@@ -115,6 +119,14 @@ impl CloudBackend for S3Backend {
 
 #[cfg(test)]
 mod tests {
+    /// The config a named profile signs with reads that profile and never falls to the instance metadata.
+    #[test]
+    fn a_named_profile_reads_that_profile_and_never_the_instance_metadata() {
+        let cfg = super::profile_only("prod");
+        assert_eq!(cfg.profile, "prod");
+        assert!(cfg.ec2_metadata_disabled);
+    }
+
     // ── aws_profile thread-safety ─────────────────────────────────────────────
     //
     // The key invariant: when `aws_profile` is set in DestinationConfig, the
