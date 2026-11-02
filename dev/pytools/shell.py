@@ -377,7 +377,7 @@ def _self_test() -> int:
         (keg / "psql").chmod(0o755)
         old, dirs = os.environ["PATH"], KEG_TOOL_DIRS["psql"]
         try:
-            os.environ["PATH"] = "/usr/bin:/bin"
+            os.environ["PATH"] = d
             KEG_TOOL_DIRS["psql"] = (str(Path(d, "absent")),)
             assert find_keg_tools() == ["psql"] and not have("psql"), "a tool in no keg stays missing"
             KEG_TOOL_DIRS["psql"] = (str(Path(d, "absent")), str(keg))
