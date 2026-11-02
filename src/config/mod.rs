@@ -1,4 +1,5 @@
 mod cdc;
+pub(crate) mod credential_file;
 pub mod cursor;
 pub(crate) mod destination;
 mod export;
@@ -134,7 +135,44 @@ impl Config {
             Self::from_yaml(&resolved).map_err(|e| e.context(format!("config file '{}'", path)))?;
         config.record_queries_as_written(&contents);
         config.anchor_paths(path, std::env::current_dir().ok())?;
+        config.anchor_credential_files(path, std::env::current_dir().ok())?;
         Ok(config)
+    }
+
+    /// Anchor every relative `credentials_file` to the config file's directory and read it through the one key reader, so a named key that is missing or unusable stops the load; refuses while only the working directory (where earlier releases read it) holds the file.
+    fn anchor_credential_files(
+        &mut self,
+        config_path: &str,
+        cwd: Option<std::path::PathBuf>,
+    ) -> crate::error::Result<()> {
+        let Some(dir) = std::path::absolute(config_path)
+            .ok()
+            .and_then(|p| p.parent().map(destination::normalized))
+        else {
+            return Ok(());
+        };
+        for export in &mut self.exports {
+            let Some(written) = export.destination.credentials_file.clone() else {
+                continue;
+            };
+            let anchored = credential_file::anchor(&dir, &written);
+            let field = format!("export '{}': credentials_file", export.name);
+            let old = cwd
+                .as_ref()
+                .map(|c| destination::normalized(&c.join(&written)));
+            if !std::path::Path::new(&anchored).exists()
+                && let Some(old) = old.filter(|o| o.exists())
+            {
+                crate::rivet_bail!(
+                    crate::error::codes::CONFIG_SECRET_UNSET,
+                    "{field} '{written}' is relative and now names {anchored} (beside the config), while {} (under the working directory, where earlier releases read it) holds a file and {anchored} holds none: move the key to {anchored}, or make credentials_file absolute",
+                    old.display()
+                );
+            }
+            credential_file::google_key(&field, &anchored)?;
+            export.destination.credentials_file = Some(anchored);
+        }
+        Ok(())
     }
 
     /// Anchor every relative local destination path to the config file's directory: the one place a path in the file is resolved, so every command reads and writes one location whatever directory rivet is started from; refuses while the directory under the working directory (where a release before 0.32 wrote) alone holds the export's files.
@@ -1295,16 +1333,6 @@ impl Config {
             }
         }
 
-        if let Some(cred_path) = &export.destination.credentials_file
-            && !std::path::Path::new(cred_path).exists()
-        {
-            crate::config_bail!(
-                crate::error::codes::CONFIG_SECRET_UNSET,
-                "export '{}': credentials_file '{}' does not exist",
-                export.name,
-                cred_path
-            );
-        }
         Ok(())
     }
 

@@ -49,3 +49,11 @@ scenarios:
     s3:    { na: "destination-agnostic — see the local cell." }
     azure: { na: "destination-agnostic — see the local cell." }
     stdout:  { na: "destination-agnostic — see the local cell. (rivet skips the manifest entirely for a streaming destination, so there is no verdict to gate on either.)" }
+
+  - id: named_credential_never_falls_back_to_an_ambient_identity
+    what: "a credential the config NAMES that cannot be used stops the run by a coded refusal that names the field and the path, and never reaches an ambient identity (VM metadata, ADC, a profile). GCS `credentials_file` (a directory, an empty or malformed file, a JSON that is no service-account, impersonated or external-account key) is `RIVET_DEST_CREDENTIALS_INVALID`, a missing file `RIVET_CONFIG_SECRET_UNSET`, both raised before any operator or network request exists; a relative path is read beside the config, not under the working directory."
+    local: { na: "a local directory is written with the process's own filesystem rights; no credential is named, so there is no identity to fall back to." }
+    gcs:   { test: a_named_credentials_file_that_is_no_key_is_refused_before_any_identity_is_built, note: "twin config cells in src/config/tests/credential_file.rs pin the beside-the-config anchoring and the refusal at load" }
+    s3:    { test: read_credential_env_missing_var_errors_with_label, note: "a named access_key_env / secret_key_env that is unset is refused; `aws_profile` still lets an ambient AWS_PROFILE override the named profile, recorded as an open defect in the PR that added this row" }
+    azure: { test: azure_destination_account_key_env_missing_var_errors }
+    stdout:  { na: "stdout names no credential: the bytes go to the caller's pipe, so there is no identity to select or fall back from." }

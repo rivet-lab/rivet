@@ -1467,6 +1467,26 @@ seeds:
         cells:
           - "lib:head_refuses_a_missing_container_and_reads_a_missing_key_as_absent"
 
+  - name: named-credential-falls-back
+    class: a credential the config names that cannot be used is dropped and an ambient identity is built instead
+    history: "a GCS `credentials_file` that was a directory, an empty or malformed file passed config and fell back to the VM metadata identity; a relative path was read under the working directory (hunt 2026-11-01)"
+    scope: destination
+    patch: named-credential-falls-back/shared.patch
+    engines:
+      local:
+        na: "the seed edits the GCS store and the config key reader; a local directory names no credential to fall back from"
+      s3:
+        na: "the seed edits the GCS store and the config key reader; S3 reads named env vars refused by read_credential_env"
+      gcs:
+        cells:
+          - "lib:a_named_credentials_file_that_is_no_key_is_refused_before_any_identity_is_built"
+          - "lib:a_named_credentials_file_that_is_no_key_stops_the_load"
+          - "lib:a_relative_credentials_file_is_read_beside_the_config"
+      azure:
+        na: "the seed edits the GCS store and the config key reader; Azure reads named env vars refused by read_credential_env"
+      stdout:
+        na: "the seed edits the GCS store and the config key reader; stdout names no credential"
+
   - name: check-describes-the-config-not-the-plan
     class: a preflight command describes a strategy derived from the config instead of the plan the runner builds
     history: "`rivet check` printed `Strategy: chunked(id, size=100000)` and `column: ?` for a `mode: chunked` export the run executed as one unchunked pass (CLI sweep 20, 2026-10-07)"

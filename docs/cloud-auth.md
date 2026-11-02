@@ -167,6 +167,16 @@ Or via env (`GOOGLE_APPLICATION_CREDENTIALS`):
 export GOOGLE_APPLICATION_CREDENTIALS=/etc/rivet/sa.json
 ```
 
+A `credentials_file:` is read when the config loads. A relative path is resolved
+beside the config file, whatever directory rivet is started from; if only the
+working directory holds the file, rivet stops and names both places. A directory,
+an empty or malformed file, or a JSON that is no `service_account`,
+`impersonated_service_account` or `external_account` key (an `authorized_user`
+file from `gcloud auth application-default login` is one) stops with
+`RIVET_DEST_CREDENTIALS_INVALID`, a missing file with `RIVET_CONFIG_SECRET_UNSET`.
+A named key is never replaced by the VM metadata identity or by ADC: remove the
+field to use those.
+
 Rivet reads that key file itself and mints the access token **in process** —
 the RFC 7523 `jwt-bearer` grant (a claim set signed RS256 with the file's own
 `private_key`, exchanged at `https://oauth2.googleapis.com/token`). The same

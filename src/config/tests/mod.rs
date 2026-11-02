@@ -2,6 +2,7 @@ mod azure;
 mod codes;
 mod columns_from;
 mod compression;
+mod credential_file;
 mod goldens;
 mod parse_helpers;
 mod secops;
@@ -1153,23 +1154,18 @@ exports:
 
 #[test]
 fn gcs_credentials_file_missing_rejected() {
-    let err = Config::from_yaml(
-        r#"
-source:
-  type: postgres
-  url: "postgresql://localhost/test"
-exports:
-  - name: t
-    query: "SELECT 1"
-    format: parquet
-    destination:
-      type: gcs
-      bucket: b
-      credentials_file: /nonexistent/path/sa.json
-"#,
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rivet.yaml");
+    std::fs::write(
+        &path,
+        "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\nexports:\n  - name: t\n    query: \"SELECT 1\"\n    format: parquet\n    destination:\n      type: gcs\n      bucket: b\n      credentials_file: /nonexistent/path/sa.json\n",
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("does not exist"), "got: {}", err);
+    .unwrap();
+    let err = Config::load(&path.display().to_string()).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("does not exist"),
+        "got: {err:#}"
+    );
 }
 
 #[test]

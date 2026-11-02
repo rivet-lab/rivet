@@ -1,0 +1,29 @@
+diff --git a/src/config/mod.rs b/src/config/mod.rs
+index 0fabe968..0fe30e79 100644
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -135,7 +135,6 @@ impl Config {
+             Self::from_yaml(&resolved).map_err(|e| e.context(format!("config file '{}'", path)))?;
+         config.record_queries_as_written(&contents);
+         config.anchor_paths(path, std::env::current_dir().ok())?;
+-        config.anchor_credential_files(path, std::env::current_dir().ok())?;
+         Ok(config)
+     }
+ 
+diff --git a/src/destination/gcs.rs b/src/destination/gcs.rs
+index b4bcb54e..23d6a9de 100644
+--- a/src/destination/gcs.rs
++++ b/src/destination/gcs.rs
+@@ -241,11 +241,7 @@ impl CloudBackend for GcsBackend {
+                 .disable_config_load();
+             log::info!("GCS: allow_anonymous (emulator mode; no OAuth / service account)");
+         } else if let Some(cred_file) = &config.credentials_file {
+-            crate::config::credential_file::google_key("destination.credentials_file", cred_file)?;
+-            builder = builder
+-                .credential_path(cred_file)
+-                .disable_vm_metadata()
+-                .disable_config_load();
++            builder = builder.credential_path(cred_file);
+             log::info!("GCS: using credentials_file from config: {}", cred_file);
+         } else if let Some(loader) = gcp_auth::try_authorized_user_loader()? {
+             // A refreshing loader, not a static `.token()`: opendal pins a

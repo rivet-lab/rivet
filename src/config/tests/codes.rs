@@ -163,13 +163,18 @@ fn a_remote_custom_endpoint_is_coded_destination_endpoint_unsafe() {
 
 #[test]
 fn a_missing_credentials_file_is_coded_secret_unset() {
-    assert_refused(
-        &with_destination(
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rivet.yaml");
+    std::fs::write(
+        &path,
+        with_destination(
             "      type: gcs\n      bucket: b\n      credentials_file: /nonexistent/rivet-codes-key.json\n",
         ),
-        crate::error::codes::CONFIG_SECRET_UNSET,
-        "does not exist",
-    );
+    )
+    .unwrap();
+    let err = Config::load(&path.display().to_string()).unwrap_err();
+    crate::error::assert_coded(&err, "RIVET_CONFIG_SECRET_UNSET", 1);
+    assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
 }
 
 #[test]
