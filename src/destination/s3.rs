@@ -29,6 +29,32 @@ fn read_credential_env(env_name: &str, label: &str) -> Result<zeroize::Zeroizing
     Ok(zeroize::Zeroizing::new(value))
 }
 
+/// Resolve the shared-file profile `profile` and nothing else: refuses by `RIVET_DEST_CREDENTIALS_INVALID` when an ambient `AWS_PROFILE` selects another profile or the profile holds no static keys or web-identity role, and disables the instance-metadata fallback.
+fn named_profile_config(profile: &str) -> Result<reqsign::AwsConfig> {
+    let cfg = reqsign::AwsConfig {
+        profile: profile.to_string(),
+        ec2_metadata_disabled: true,
+        ..Default::default()
+    }
+    .from_profile();
+    let invalid =
+        |why: String| crate::error::coded(crate::error::codes::DEST_CREDENTIALS_INVALID, why);
+    if cfg.profile != profile {
+        return Err(invalid(format!(
+            "aws_profile '{profile}' is overridden by AWS_PROFILE='{}' in the environment, which would sign with another identity.\n  Fix: unset AWS_PROFILE for this run (env -u AWS_PROFILE rivet ...), or set aws_profile to '{}'.",
+            cfg.profile, cfg.profile
+        )));
+    }
+    let static_keys = cfg.access_key_id.is_some() && cfg.secret_access_key.is_some();
+    let web_identity = cfg.role_arn.is_some() && cfg.web_identity_token_file.is_some();
+    if !static_keys && !web_identity {
+        return Err(invalid(format!(
+            "aws_profile '{profile}' resolved no static credentials: it is missing from the shared AWS config and credentials files (AWS_CONFIG_FILE / AWS_SHARED_CREDENTIALS_FILE, default ~/.aws), or holds no aws_access_key_id + aws_secret_access_key (an SSO or login profile does not). A named profile is never replaced by environment keys or the instance metadata.\n  Fix: add the static keys to the profile; or export temporary keys (aws configure export-credentials --format env) and use access_key_env / secret_key_env / session_token_env; or remove aws_profile to use the ambient AWS chain."
+        )));
+    }
+    Ok(cfg)
+}
+
 impl CloudBackend for S3Backend {
     // opendal's S3 lister puts the ETag in `content_md5`; its writer does not. On an
     // SSE-KMS / SSE-C object the ETag is not the MD5, so trusting it turns every
@@ -74,19 +100,12 @@ impl CloudBackend for S3Backend {
             builder = builder.session_token(token.as_str());
         }
 
-        // `aws_profile` uses reqsign's per-instance loader (no `env::set_var`,
-        // so it's safe under `--parallel-exports`).  Caveat: the default chain
-        // falls through to IMDS, which hangs off-EC2 — see `docs/cloud-auth.md`
-        // for the AWS SSO / Identity Center bridge.
         if let Some(profile) = &config.aws_profile {
             log::info!("S3: using AWS profile '{}'", profile);
-            let cred_config = reqsign::AwsConfig {
-                profile: profile.clone(),
-                ..Default::default()
-            }
-            .from_profile()
-            .from_env();
-            let loader = reqsign::AwsDefaultLoader::new(reqwest::Client::new(), cred_config);
+            let loader = reqsign::AwsDefaultLoader::new(
+                reqwest::Client::new(),
+                named_profile_config(profile)?,
+            );
             builder = builder.customized_credential_load(Box::new(loader));
         }
 

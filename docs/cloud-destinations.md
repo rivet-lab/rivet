@@ -82,7 +82,7 @@ at the output directory.
 |---|---|---|
 | Static keys | `access_key_env` + `secret_key_env` | Plain IAM access key pair. |
 | Static keys + session token | `access_key_env` + `secret_key_env` + `session_token_env` | STS / SSO / IAM Identity Center / AssumeRole / MFA. |
-| Profile | `aws_profile` | Reads `~/.aws/credentials` / `~/.aws/config` like the AWS CLI. |
+| Profile | `aws_profile` | Static keys of that profile from `~/.aws/credentials` / `~/.aws/config`; a missing or keyless profile, or a different `AWS_PROFILE` in the environment, is refused (`RIVET_DEST_CREDENTIALS_INVALID`), never replaced by env keys or EC2 metadata. |
 | Default chain | *(none of the above set)* | Env, profile, container, EC2/EKS — same precedence as the AWS SDK. |
 
 `region:` is optional when the SDK can derive one from the profile or env
