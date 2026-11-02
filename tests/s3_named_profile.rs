@@ -266,7 +266,10 @@ fn a_named_profile_that_assumes_a_web_identity_role_is_accepted() {
     );
     let mock = Mock::start();
     let cfg = s3(&mock.endpoint, Some("irsa"));
-    assert!(create_destination(&cfg).is_ok());
+    let built = create_destination(&cfg)
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"));
+    assert_eq!(built, Ok(()));
 }
 
 #[test]
