@@ -37,13 +37,13 @@ make statement-truth-generate   # rewrites dev/fixtures/statement_truth/mysql/<s
 make statement-truth-check      # regenerates and diffs; exit 1 on any difference
 ```
 
-`generate` and `check` take `--server NAME` (repeatable) to run one server. `--subset A|B|C|D` (any
+`generate` and `check` take `--server NAME` (repeatable) to run one server. `--subset A|B|C|D|E` (any
 combination) runs a slice of the corpus and prints its size and speed without touching a fixture;
 `--dump PATH` writes the slice for inspection. `check` prints the removed, added and changed rows;
 a server patch release that changes only its version string is reported, not failed.
 
-A fixture holds 38,516 rows (319 KB gzipped) per server. The stand is up in about ten seconds
-with the images present; the three servers regenerate side by side in 9 to 14 minutes, which `check`
+A fixture holds 38,733 rows (322 KB gzipped) per server. The stand is up in about ten seconds
+with the images present; the three servers regenerate side by side in about 18 minutes, which `check`
 repeats. The password hash a `CREATE USER` or `ALTER USER` event logs is replaced by `<hash>` because it
 carries a random salt; nothing else in a regeneration varies.
 
@@ -80,6 +80,8 @@ What is sent, per server:
   The server logs a `DROP TABLE` already spelled with the stored name, so a near-name DROP reaches the
   log as the captured name; the other operations are logged as sent.
 
+- E: partition operations and database drops. Seed `27_st_part.sql` holds `st_part.kinds` (captured, RANGE-partitioned), `swap`, `plain` and `other` (an uncaptured partitioned table), and the databases `st_dropdb` (holds a captured table) and `st_dropother`. Sent in four name spellings and two client collations: `TRUNCATE PARTITION` (one, ALL), `DROP PARTITION` (one, two), `EXCHANGE PARTITION` with a partitioned table, a plain table and `WITHOUT VALIDATION`, `REORGANIZE`, `REBUILD`, `OPTIMIZE` and `ANALYZE PARTITION`, the same on the uncaptured table, a literal that spells one, and the fold spellings of `kinds` for the first three. `DROP DATABASE` and `DROP SCHEMA` of the captured database in seven spellings, of another database, `IF EXISTS` of a missing one, and a literal. A row whose server effect is a loss of rows without a row event and a definition change is classed `data_change`; the reader owes it a stop.
+
 The verdict of a row is read off the server: the `Com_*` counters of the statement, the table
 fingerprints before and after, and the bytes the binlog logged. A row is
 `{engine, id, case, errno, kind, touched, src, cs, conn, mode, db, sql (hex), expect}`; `src` says
@@ -95,7 +97,7 @@ reader passed it), `over` (the reader refused a statement that touched nothing i
 
 The MySQL adapter calls the binlog reader's own `query_refusal` and `statement_frame`, the way the event loop does, twice:
 
-- Without `columns_from: grants`: the TRUNCATE, DROP and statement-format write readers decide. A rename or a privilege change is not read without the policy, so it is not owed a stop.
+- Without `columns_from: grants`: the TRUNCATE, DROP TABLE, DROP DATABASE, partition-data-change and statement-format write readers decide, with the exact server fold under `lower_case_table_names` != 0. A rename or a privilege change is not read without the policy, so it is not owed a stop.
 - Under the policy: a statement is caught when `query_refusal` refuses it, or, for a privilege row, when `statement_frame` marks a grants re-read. A refusal of a statement that changes nothing is an over-stop. A separate test fails on any ASCII statement owed a stop that passes.
 
 Every disagreement must be in the adapter's ledger with a row count and a dated reason. The ledger equals the replay exactly: an entry that covers more rows, fewer rows or none fails the test, so the ledger shrinks when the reader is fixed and a partial fix cannot leave room for a later regression. The `coll.*_native` rows touch non-ASCII table names; `validate_table_ident` allows only `[A-Za-z0-9_.]`, so rivet cannot capture such a table and the rows are unreachable today. A missing

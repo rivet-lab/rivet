@@ -1,15 +1,20 @@
 //! Replays the MySQL statement-truth corpus through the QUERY-event readers of the binlog reader, with and without the grants policy.
 
-use super::cdc::{QueryRefusal, query_refusal, statement_frame};
+use super::cdc::{QueryRefusal, QueryText, captured_databases, query_refusal, statement_frame};
 use super::statement::SqlMode;
 use crate::source::statement_truth::{Class, Direction, Known, Row, corpora, ledger_failures};
 
 /// The refusal the event loop gives one logged statement.
 fn refusal(row: &Row, policy: bool, fold: bool, configured: &[String]) -> Option<QueryRefusal> {
     let raw = row.bytes();
-    let sql = String::from_utf8_lossy(&raw).into_owned();
     let mode = SqlMode::from_bits(row.mode);
-    query_refusal(policy, fold, &sql, &raw, &row.db, mode, configured)
+    let text = QueryText {
+        raw: &raw,
+        db: row.db.as_bytes(),
+        collation: Some(row.cs),
+    };
+    let databases = captured_databases(configured, &std::collections::HashMap::new(), "");
+    query_refusal(policy, fold, &text, mode, configured, &databases)
 }
 
 /// The class of a refusal.
@@ -18,7 +23,8 @@ fn class_of(refusal: &QueryRefusal) -> Class {
         QueryRefusal::Truncate(_) => Class::Truncate,
         QueryRefusal::ColumnRename(_) => Class::RenameColumn,
         QueryRefusal::TableRename(_) => Class::RenameTable,
-        QueryRefusal::Drop(_) => Class::Drop,
+        QueryRefusal::Drop(_) | QueryRefusal::DropDatabase(_) => Class::Drop,
+        QueryRefusal::PartitionRows(_) => Class::DataChange,
         QueryRefusal::StatementWrite(_) | QueryRefusal::Mention(_) => Class::StatementWrite,
     }
 }
@@ -77,7 +83,7 @@ macro_rules! unreachable_name {
 
 macro_rules! follow_up {
     () => {
-        "no-policy TRUNCATE/DROP/STATEMENT-write fold on lctn!=0 (.claude/handoff/2026-10-30/issue-no-policy-truncate-fold.md)"
+        "the statement text is read through a lossy view for NUL, lone lead bytes and 6-digit version comments (the fold and the spellings are closed by the exact server fold of 2026-11-01)"
     };
 }
 
@@ -156,24 +162,6 @@ const LEDGER_WITHOUT_POLICY: &[Known] = &[
         12,
         concat!(
             "2026-10-31: the 6-digit version comment /*!080000 */ runs on 8.4 and reads as a plain comment; open, follow-up ",
-            follow_up!()
-        ),
-    ),
-    missed(
-        Some("8.4-lctn1"),
-        "spell.",
-        24,
-        concat!(
-            "2026-10-31: names are compared unfolded under lower_case_table_names=1; open, follow-up ",
-            follow_up!()
-        ),
-    ),
-    missed(
-        Some("8.4-lctn1"),
-        "gadget.fold_",
-        135,
-        concat!(
-            "2026-10-31: U+0130 and U+212A fold to i and k under lower_case_table_names=1 and a near-name resolves to the captured table unseen; open, follow-up ",
             follow_up!()
         ),
     ),
@@ -278,6 +266,141 @@ const LEDGER_WITH_POLICY: &[Known] = &[
         108,
         concat!(
             "2026-10-31: a no-op change or a literal in a spelling that names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.0-lctn0"),
+        "part_analyze",
+        8,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn0"),
+        "part_analyze",
+        8,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn1"),
+        "part_analyze",
+        8,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.0-lctn0"),
+        "part_lit_trunc_part",
+        6,
+        concat!(
+            "2026-11-01: a literal that spells a partition statement and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn0"),
+        "part_lit_trunc_part",
+        6,
+        concat!(
+            "2026-11-01: a literal that spells a partition statement and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn1"),
+        "part_lit_trunc_part",
+        8,
+        concat!(
+            "2026-11-01: a literal that spells a partition statement and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.0-lctn0"),
+        "part_optimize",
+        8,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn0"),
+        "part_optimize",
+        8,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn1"),
+        "part_optimize",
+        8,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.0-lctn0"),
+        "part_rebuild",
+        6,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn0"),
+        "part_rebuild",
+        6,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn1"),
+        "part_rebuild",
+        8,
+        concat!(
+            "2026-11-01: a partition maintenance statement that changes no row and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.0-lctn0"),
+        "part_reorganize",
+        6,
+        concat!(
+            "2026-11-01: a partition maintenance statement that moves rows between partitions and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn0"),
+        "part_reorganize",
+        6,
+        concat!(
+            "2026-11-01: a partition maintenance statement that moves rows between partitions and names a captured table; ",
+            benign!()
+        ),
+    ),
+    over(
+        Some("8.4-lctn1"),
+        "part_reorganize",
+        8,
+        concat!(
+            "2026-11-01: a partition maintenance statement that moves rows between partitions and names a captured table; ",
             benign!()
         ),
     ),

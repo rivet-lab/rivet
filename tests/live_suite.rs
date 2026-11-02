@@ -97,6 +97,8 @@ mod live_cdc_mssql;
 mod live_cdc_multi_table_cycle;
 #[path = "live/live_cdc_mysql_reset.rs"]
 mod live_cdc_mysql_reset;
+#[path = "live/live_cdc_mysql_statement_seam.rs"]
+mod live_cdc_mysql_statement_seam;
 #[path = "live/live_cdc_oracle.rs"]
 mod live_cdc_oracle;
 #[cfg(feature = "oracle")]

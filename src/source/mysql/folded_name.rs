@@ -53,6 +53,143 @@ fn folds_inside(name: &str, text: &[u8]) -> bool {
     false
 }
 
+/// The byte spelling of identifiers in the client character set of a statement: what decides which byte sequences stand for the letters the server folds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    Utf8,
+    Gb18030,
+    Ujis,
+    Latin5,
+    Plain,
+    Unknown,
+}
+
+const UTF8_SPELLINGS: &[(&[u8], u8)] = &[(&[0xC4, 0xB0], b'i'), (&[0xE2, 0x84, 0xAA], b'k')];
+const GB18030_SPELLINGS: &[(&[u8], u8)] = &[
+    (&[0x81, 0x30, 0x90, 0x32], b'i'),
+    (&[0x81, 0x36, 0xBF, 0x32], b'k'),
+];
+const UJIS_SPELLINGS: &[(&[u8], u8)] = &[(&[0x8F, 0xAA, 0xC4], b'i')];
+const LATIN5_SPELLINGS: &[(&[u8], u8)] = &[(&[0xDD], b'i')];
+const EVERY_SPELLING: &[&[(&[u8], u8)]] = &[
+    UTF8_SPELLINGS,
+    GB18030_SPELLINGS,
+    UJIS_SPELLINGS,
+    LATIN5_SPELLINGS,
+];
+
+/// Collation ids of character sets that cannot spell a character the server folds to ASCII (every one is its own letter or an error), the ids of `information_schema.COLLATIONS` on 8.0.46 and 8.4.13.
+const PLAIN_COLLATIONS: &[(u16, u16)] = &[
+    (1, 11),
+    (13, 16),
+    (18, 29),
+    (31, 32),
+    (34, 44),
+    (47, 62),
+    (64, 75),
+    (77, 77),
+    (79, 82),
+    (84, 90),
+    (92, 96),
+    (99, 99),
+    (101, 124),
+    (128, 151),
+    (159, 183),
+];
+
+impl Spelling {
+    /// The spelling of the client character set a collation id names: `Unknown` for an id nothing is known of, which tries every spelling.
+    pub(crate) fn of_collation(id: Option<u16>) -> Self {
+        match id {
+            None => Self::Unknown,
+            Some(12 | 97 | 98 | 91) => Self::Ujis,
+            Some(30 | 78) => Self::Latin5,
+            Some(248..=250) => Self::Gb18030,
+            Some(33 | 45 | 46 | 63 | 76 | 83 | 192..=247 | 255..) => Self::Utf8,
+            Some(id) if PLAIN_COLLATIONS.iter().any(|&(a, b)| (a..=b).contains(&id)) => Self::Plain,
+            Some(_) => Self::Unknown,
+        }
+    }
+
+    fn spellings(self) -> &'static [&'static [(&'static [u8], u8)]] {
+        match self {
+            Self::Utf8 => &[UTF8_SPELLINGS],
+            Self::Gb18030 => &[GB18030_SPELLINGS],
+            Self::Ujis => &[UJIS_SPELLINGS],
+            Self::Latin5 => &[LATIN5_SPELLINGS],
+            Self::Plain => &[],
+            Self::Unknown => EVERY_SPELLING,
+        }
+    }
+
+    fn is_utf8_text(self) -> bool {
+        matches!(self, Self::Utf8 | Self::Plain | Self::Unknown)
+    }
+}
+
+const BYTE_BASE: u32 = 0xF700;
+
+/// Statement bytes as text that keeps every byte: UTF-8 text as it is, anything else with each byte from 0x80 up as one private-use character (`bytes_of` undoes it, and the flag says which of the two was made).
+pub(crate) fn lossless_text(raw: &[u8], spelling: Spelling) -> (String, bool) {
+    if spelling.is_utf8_text()
+        && let Ok(text) = std::str::from_utf8(raw)
+    {
+        return (text.to_string(), false);
+    }
+    let text = raw
+        .iter()
+        .map(|&b| {
+            if b < 0x80 {
+                char::from(b)
+            } else {
+                char::from_u32(BYTE_BASE + u32::from(b)).unwrap_or(char::REPLACEMENT_CHARACTER)
+            }
+        })
+        .collect();
+    (text, true)
+}
+
+/// The bytes a text stands for: a private-use character made by [`lossless_text`] is its byte, any other character its UTF-8.
+fn bytes_of(text: &str, byte_per_char: bool) -> Vec<u8> {
+    if !byte_per_char {
+        return text.as_bytes().to_vec();
+    }
+    let mut out = Vec::with_capacity(text.len());
+    let mut buf = [0u8; 4];
+    for c in text.chars() {
+        match u32::from(c).checked_sub(BYTE_BASE) {
+            Some(n @ 0x80..=0xFF) => out.push(n as u8),
+            _ => out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes()),
+        }
+    }
+    out
+}
+
+/// The name as the server compares it on a server that folds: ASCII lower case, with each spelling of a folded letter in this client character set replaced by the letter, every other byte kept.
+pub(crate) fn folded(name: &str, byte_per_char: bool, spelling: Spelling) -> String {
+    let bytes = bytes_of(name, byte_per_char);
+    let spellings = spelling.spellings();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut rest = bytes.as_slice();
+    while let Some((&first, tail)) = rest.split_first() {
+        let spelled = spellings
+            .iter()
+            .flat_map(|set| set.iter())
+            .find(|(seq, _)| rest.starts_with(seq));
+        match spelled {
+            Some((seq, letter)) => {
+                out.push(*letter);
+                rest = &rest[seq.len()..];
+            }
+            None => {
+                out.push(first.to_ascii_lowercase());
+                rest = tail;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Whether the bytes `raw` contain `name`: in any ASCII case when the server keeps case, else under the fold above (a name without `i` or `k`, or longer than a MySQL identifier, has no non-ASCII spelling).
 pub(crate) fn mentions_name(fold: bool, name: &str, raw: &[u8]) -> bool {
     if name.is_empty() {
@@ -319,5 +456,125 @@ mod tests {
             seen[usize::from(want)] += 1;
         }
         assert!(seen[0] > 2_000 && seen[1] > 2_000, "{seen:?}");
+    }
+
+    fn spelled_in(spelling: Spelling, cp: u32) -> Vec<u8> {
+        let letter = FOLDED_TO_ASCII.iter().find(|&&(c, _)| c == cp).unwrap().1;
+        let set: &[(&[u8], u8)] = match spelling {
+            Spelling::Utf8 => UTF8_SPELLINGS,
+            Spelling::Gb18030 => GB18030_SPELLINGS,
+            Spelling::Ujis => UJIS_SPELLINGS,
+            Spelling::Latin5 => LATIN5_SPELLINGS,
+            other => panic!("{other:?} has no table"),
+        };
+        set.iter()
+            .find(|&&(_, l)| l == letter)
+            .map(|&(seq, _)| seq.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The utf8 spelling table is exactly the UTF-8 encoding of each code point the server folds to ASCII.
+    #[test]
+    fn the_utf8_spellings_are_the_encodings_of_the_folded_code_points() {
+        for &(cp, letter) in &FOLDED_TO_ASCII {
+            let ch = char::from_u32(cp).unwrap();
+            let want = ch.to_string().into_bytes();
+            assert_eq!(spelled_in(Spelling::Utf8, cp), want, "U+{cp:04X}");
+            let name = format!("{ch}x");
+            assert_eq!(
+                folded(&name, false, Spelling::Utf8),
+                format!("{}x", char::from(letter))
+            );
+        }
+    }
+
+    /// A multibyte character set spells a folded letter in its own bytes; the same bytes in another set are not that letter.
+    #[test]
+    fn each_character_set_folds_only_its_own_spelling() {
+        let dotted_i = 0x0130;
+        let kelvin = 0x212A;
+        assert_eq!(folded("\u{f700}", false, Spelling::Utf8), "\u{f700}");
+        let gb = lossless_text(&[0x81, 0x30, 0x90, 0x32, b'x'], Spelling::Gb18030);
+        assert!(gb.1);
+        assert_eq!(folded(&gb.0, gb.1, Spelling::Gb18030), "ix");
+        assert_ne!(folded(&gb.0, gb.1, Spelling::Utf8), "ix");
+        let uj = lossless_text(&[0x8F, 0xAA, 0xC4, b'x'], Spelling::Ujis);
+        assert_eq!(folded(&uj.0, uj.1, Spelling::Ujis), "ix");
+        assert_ne!(folded(&uj.0, uj.1, Spelling::Latin5), "ix");
+        let l5 = lossless_text(&[0xDD, b'x'], Spelling::Latin5);
+        assert_eq!(folded(&l5.0, l5.1, Spelling::Latin5), "ix");
+        assert_ne!(folded(&l5.0, l5.1, Spelling::Plain), "ix");
+        assert_eq!(
+            spelled_in(Spelling::Gb18030, kelvin),
+            vec![0x81, 0x36, 0xBF, 0x32]
+        );
+        assert!(spelled_in(Spelling::Ujis, kelvin).is_empty());
+        assert!(spelled_in(Spelling::Latin5, kelvin).is_empty());
+        assert_eq!(spelled_in(Spelling::Latin5, dotted_i), vec![0xDD]);
+    }
+
+    /// An unknown collation tries every spelling; a plain one tries none.
+    #[test]
+    fn an_unknown_collation_tries_every_spelling_and_a_plain_one_none() {
+        let utf = "\u{130}x";
+        assert_eq!(folded(utf, false, Spelling::Unknown), "ix");
+        assert_eq!(folded(utf, false, Spelling::Plain), "\u{130}x");
+        assert_eq!(Spelling::of_collation(None), Spelling::Unknown);
+        assert_eq!(Spelling::of_collation(Some(251)), Spelling::Unknown);
+        assert_eq!(Spelling::of_collation(Some(8)), Spelling::Plain);
+        assert_eq!(Spelling::of_collation(Some(255)), Spelling::Utf8);
+        assert_eq!(Spelling::of_collation(Some(33)), Spelling::Utf8);
+        assert_eq!(Spelling::of_collation(Some(63)), Spelling::Utf8);
+        assert_eq!(Spelling::of_collation(Some(248)), Spelling::Gb18030);
+        assert_eq!(Spelling::of_collation(Some(12)), Spelling::Ujis);
+        assert_eq!(Spelling::of_collation(Some(30)), Spelling::Latin5);
+    }
+
+    /// Every byte string survives the lossless view: lossless_text then bytes_of gives the same bytes.
+    #[test]
+    fn the_lossless_text_round_trips_every_byte() {
+        let all: Vec<u8> = (0..=255u8).collect();
+        for spelling in [
+            Spelling::Utf8,
+            Spelling::Plain,
+            Spelling::Gb18030,
+            Spelling::Unknown,
+        ] {
+            let (text, per_byte) = lossless_text(&all, spelling);
+            assert!(
+                per_byte,
+                "{spelling:?}: a non-UTF-8 string takes the byte-per-character view"
+            );
+            assert_eq!(bytes_of(&text, per_byte), all);
+        }
+        let valid = "TRUNCATE `\u{130}x` \u{65e5}".as_bytes();
+        let (text, per_byte) = lossless_text(valid, Spelling::Utf8);
+        assert!(!per_byte);
+        assert_eq!(bytes_of(&text, per_byte), valid);
+        let (text, per_byte) = lossless_text(valid, Spelling::Gb18030);
+        assert!(per_byte);
+        assert_eq!(bytes_of(&text, per_byte), valid);
+    }
+
+    /// A megabyte of hostile bytes is read in linear time and never panics.
+    #[test]
+    fn a_megabyte_of_hostile_bytes_is_folded_in_one_pass() {
+        let mut hostile = Vec::with_capacity(1 << 20);
+        while hostile.len() < 1 << 20 {
+            hostile.extend_from_slice(&[
+                0xC4, 0xB0, 0xE2, 0x84, 0xAA, 0x81, 0x30, 0x90, 0x32, 0xFF, 0x00, b'K',
+            ]);
+        }
+        let start = std::time::Instant::now();
+        for spelling in [Spelling::Utf8, Spelling::Gb18030, Spelling::Unknown] {
+            let (text, per_byte) = lossless_text(&hostile, spelling);
+            let out = folded(&text, per_byte, spelling);
+            assert!(!out.is_empty());
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }

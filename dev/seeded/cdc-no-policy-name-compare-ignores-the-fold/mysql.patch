@@ -1,0 +1,13 @@
+diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
+index 49d7e0eb..62550cce 100644
+--- a/src/source/mysql/cdc.rs
++++ b/src/source/mysql/cdc.rs
+@@ -2428,7 +2428,7 @@ pub(crate) fn query_refusal(
+     let spelling = Spelling::of_collation(text.collation);
+     let (sql, byte_per_char) = lossless_text(text.raw, spelling);
+     let (db, db_bytes) = lossless_text(text.db, Spelling::Utf8);
+-    let fold = fold.then_some(NameFold {
++    let fold = (policy && fold).then_some(NameFold {
+         byte_per_char,
+         spelling,
+     });

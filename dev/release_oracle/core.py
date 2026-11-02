@@ -69,6 +69,7 @@ class Status(str, Enum):
     SKIP = "SKIP"
     KNOWN = "KNOWN"  # a failure recorded in known_red.py with a reason, in date
     INFRA = "INFRA"  # the ORACLE could not read (its own transport), so the cell graded nothing
+    NA = "N/A"
 
 
 @dataclass(frozen=True)
@@ -341,6 +342,10 @@ class Ledger:
     def skipped(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str = "") -> None:
         self.skip(msg)
         self.add(engine, version, scenario, store, Status.SKIP, detail or msg)
+
+    def not_applicable(self, engine: str, version: str, scenario: str, store: str, reason: str) -> None:
+        """Record a declared N/A row with its reason; it neither passes nor fails."""
+        self.add(engine, version, scenario, store, Status.NA, reason)
 
     # ── verdict ──
     @property
@@ -791,6 +796,14 @@ SKIP_ALLOWED: dict[str, str] = {
     "live_destination_parity::a_relative_destination_path_moved_by_the_upgrade_is_refused_until_the_files_follow":
         "skips only when the previous release already anchors a relative destination.path beside its config "
         "(0.32.0 on): the move it refuses arises from a release before 0.32 only",
+    "live_cdc_mysql_statement_seam::a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql":
+        "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
+    "live_cdc_mysql_statement_seam::a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql":
+        "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
+    "live_cdc_mysql_statement_seam::a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql":
+        "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
+    "live_cdc_mysql_statement_seam::a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql":
+        "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
 }
 
 

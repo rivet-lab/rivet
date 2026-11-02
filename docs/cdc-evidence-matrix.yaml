@@ -225,7 +225,10 @@ shapes:
         roast_mysql_cdc_refuses_a_truncate_instead_of_silently_diverging live. RED
         against two mutants on different asserts: the guard disabled (back to the
         measured `status: success, rows: 2` over an EMPTY source) and the addressing
-        removed (which fails a bystander export reading the same binlog)."
+        removed (which fails a bystander export reading the same binlog). Since 2026-11-01
+        the reader compares by the exact server fold and also stops on DROP DATABASE of a
+        captured database and partition TRUNCATE/DROP/EXCHANGE (query_refusal), graded by the
+        statement-truth replay and the cells of cdc_mysql_no_policy_* in docs/cdc-matrix.yaml."
     mssql:
       sound: "closed 2026-08-25 (src/source/mssql/cdc.rs::resume_from_checkpoint). A
         checkpoint that PARSES but carries no 'lsn' yielded None via `.and_then`, which
