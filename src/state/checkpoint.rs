@@ -657,13 +657,14 @@ mod tests {
     fn settling_a_chunk_run_whose_rows_are_gone_is_refused_and_a_whole_one_is_counted() {
         let (_dir, s) = store_on_disk();
         s.create_chunk_run("run_1", "orders", "h", 1).unwrap();
-        s.insert_chunk_tasks("run_1", &[(0, 9), (10, 19)]).unwrap();
+        s.insert_chunk_tasks("run_1", &[(0, 9), (10, 19), (20, 29)])
+            .unwrap();
         s.claim_next_chunk_task("run_1").unwrap();
         s.complete_chunk_task("run_1", 0, 3, Some("f.parquet"))
             .unwrap();
-        let (pending, tasks) = s.settle_chunk_run("run_1", 2).unwrap();
-        assert_eq!((pending, tasks.len()), (1, 2));
-        for (planned, what) in [(3, "a task short"), (1, "a task over")] {
+        let (pending, tasks) = s.settle_chunk_run("run_1", 3).unwrap();
+        assert_eq!((pending, tasks.len()), (2, 3));
+        for (planned, what) in [(4, "a task short"), (2, "a task over")] {
             let err = s.settle_chunk_run("run_1", planned).expect_err(what);
             assert_eq!(
                 crate::error::error_code(&err),
@@ -687,7 +688,7 @@ mod tests {
         s.execute("DELETE FROM chunk_run WHERE run_id = ?1", &["run_1".into()])
             .unwrap();
         let err = s
-            .settle_chunk_run("run_1", 2)
+            .settle_chunk_run("run_1", 3)
             .expect_err("no chunk_run row");
         assert_eq!(s.get_resume_run_id("orders", "p").unwrap(), None);
         assert_eq!(

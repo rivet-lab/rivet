@@ -347,17 +347,28 @@ fn a_killed_run_does_not_block_the_reset(engine: SqlEngine, key_line: &str, stat
     s.assert_every_row_delivered_once("the run after a killed run and a reset");
 }
 
+trait LeavesPagesBesideAReleasedClaim: Sized {
+    /// Declares what a run whose checkpoint rows are removed under it leaves: its pages beside a released claim.
+    fn leaving_its_pages_beside_a_released_claim(self) -> Self;
+}
+
+impl LeavesPagesBesideAReleasedClaim for Rig {
+    fn leaving_its_pages_beside_a_released_claim(self) -> Self {
+        self.a_failed_run_may_leave(
+            &[
+                Leftover::OrphanPart,
+                Leftover::FileLog,
+                Leftover::ChunkCheckpoint,
+            ],
+            "the test removes the run's checkpoint rows under it: the run fails after writing pages and leaves them beside its released claim",
+        )
+    }
+}
+
 /// A run whose chunk-checkpoint rows are deleted under it fails; it does not publish an empty success.
 fn a_run_whose_checkpoint_rows_vanish_fails_loudly(engine: SqlEngine, state: State) {
     let mut s = Scenario::new(engine, RANGE, state);
-    s.rig = s.rig.a_failed_run_may_leave(
-        &[
-            Leftover::OrphanPart,
-            Leftover::FileLog,
-            Leftover::ChunkCheckpoint,
-        ],
-        "the test deletes the run's checkpoint rows under it: the run fails after writing pages and leaves them beside its released claim",
-    );
+    s.rig = s.rig.leaving_its_pages_beside_a_released_claim();
     let export = s.rig.export_name().to_string();
     let mut owner = s.spawn_mid_run();
     s.state.exec(
@@ -417,14 +428,7 @@ fn a_run_that_loses_its_checkpoint_rows_ends_gone(
     if parallel {
         s.rig = s.rig.export_line("parallel: 3");
     }
-    s.rig = s.rig.a_failed_run_may_leave(
-        &[
-            Leftover::OrphanPart,
-            Leftover::FileLog,
-            Leftover::ChunkCheckpoint,
-        ],
-        "the test removes the run's checkpoint rows under it: the run fails after writing pages and leaves them beside its released claim",
-    );
+    s.rig = s.rig.leaving_its_pages_beside_a_released_claim();
     let export = s.rig.export_name().to_string();
     let mut owner = s.spawn_mid_run();
     let mut held = None;
