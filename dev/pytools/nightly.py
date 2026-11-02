@@ -1,11 +1,11 @@
-"""The nightly run: the full release gate, a prev-vs-cur soak, and (Sundays) the fault catalog.
+"""The nightly run: the full release gate, the measuring island, a prev-vs-cur soak, and (Sundays) the fault catalog.
 
 The soak compares the SAME workload on both binaries: the current one must pass, and per
 engine, mode and stream its median cycle time and peak RSS must stay within tolerance of
 the previous release's. Reports land in dev/nightly_runs/<date>/. Scheduled by launchd
 (dev/launchd/ai.rivet.nightly.plist.example); `--self-test` grades the comparison alone.
 
-    uv run python dev/pytools/nightly.py [--soak 30m] [--skip-gate] [--faults]
+    uv run python dev/pytools/nightly.py [--soak 30m] [--skip-gate] [--skip-island] [--faults]
 """
 
 from __future__ import annotations
@@ -21,6 +21,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DUR_TOL, DUR_SLACK = 1.5, 0.5
 RSS_TOL, RSS_SLACK = 1.3, 16.0
+
+
+def gate_steps(argv: list[str]) -> list[tuple[str, str]]:
+    """The (label, make target) gate runs this nightly makes, in order: the per-run gate, then the island of the same checkout."""
+    if "--skip-gate" in argv:
+        return []
+    return [s for s in (("gate", "release-oracle-full"), ("island", "release-oracle-island"))
+            if not (s[0] == "island" and "--skip-island" in argv)]
 
 
 def soak_regressions(prev: dict, cur: dict) -> list[str]:
@@ -61,6 +69,8 @@ def self_test() -> int:
     assert soak_regressions(series([1, 1, 1], [50]), series([1, 1, 1], [200]))
     failed = series([1], [50]) | {"verdict": "FAIL"}
     assert soak_regressions(series([1], [50]), failed)
+    assert [t for _, t in gate_steps([])] == ["release-oracle-full", "release-oracle-island"]
+    assert [t for _, t in gate_steps(["--skip-island"])] == ["release-oracle-full"] and gate_steps(["--skip-gate"]) == []
     print("nightly self-test: ok")
     return 0
 
@@ -73,10 +83,10 @@ def main(argv: list[str]) -> int:
     out.mkdir(parents=True, exist_ok=True)
     report = [f"# rivet nightly — {day}", ""]
     rc = 0
-    if "--skip-gate" not in argv:
-        g = subprocess.run(["make", "release-oracle-full"], cwd=ROOT,
-                           stdout=open(out / "gate.log", "w"), stderr=subprocess.STDOUT)
-        report.append(f"- gate: {'green' if g.returncode == 0 else 'RED'} (gate.log)")
+    for label, target in gate_steps(argv):
+        g = subprocess.run(["make", target], cwd=ROOT,
+                           stdout=open(out / f"{label}.log", "w"), stderr=subprocess.STDOUT)
+        report.append(f"- {label} ({target}): {'green' if g.returncode == 0 else 'RED'} ({label}.log)")
         rc |= g.returncode != 0
     duration = argv[argv.index("--soak") + 1] if "--soak" in argv else "30m"
     prev = Path(os.environ.get("RIVET_PREV_RELEASE_BIN") or next(
