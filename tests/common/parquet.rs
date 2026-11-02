@@ -372,9 +372,7 @@ pub fn parquet_rows_from_bytes(bytes: Vec<u8>) -> usize {
         .sum()
 }
 
-/// The `i64` `id` column values of a single `.parquet` file, WITH multiplicity
-/// (so duplicates are observable). Accepts `Int64` (the canonical `BIGINT id`
-/// seeders) or `Int32` (an `INT id` source column) — panics on anything else.
+/// The `i64` `id` column values of one `.parquet` file with multiplicity; Int64, Int32 or scale-0 Decimal128.
 pub fn parquet_ids(path: &Path) -> Vec<i64> {
     use arrow::array::{Array, AsArray};
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -403,7 +401,15 @@ pub fn parquet_ids(path: &Path) -> Vec<i64> {
                     }
                 }
             }
-            other => panic!("id column: expected Int32/Int64, got {other:?}"),
+            arrow::datatypes::DataType::Decimal128(_, 0) => {
+                let a = col.as_primitive::<arrow::datatypes::Decimal128Type>();
+                for i in 0..a.len() {
+                    if !a.is_null(i) {
+                        out.push(i64::try_from(a.value(i)).expect("id fits i64"));
+                    }
+                }
+            }
+            other => panic!("id column: expected Int32/Int64/Decimal128(_, 0), got {other:?}"),
         }
     }
     out
