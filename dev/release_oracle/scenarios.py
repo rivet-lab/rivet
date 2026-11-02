@@ -42,6 +42,7 @@ import threading
 import shutil
 import socket
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -219,9 +220,41 @@ def _skipped(led: Ledger, eng: str, ver: str, scenario: str, store: str, msg: st
 
 # ── small shared helpers ─────────────────────────────────────────────────────
 def cfg(*query: str) -> str:
-    """Query matrix.yaml through lib/cfg.py — one source of truth, no PyYAML (a
-    release gate must run on a bare python3)."""
-    return run([PY, str(_asset("lib/cfg.py")), str(MATRIX), *query]).stdout.strip()
+    """Query matrix.yaml through lib/cfg.py, the one reader; a refused query stops the run."""
+    p = run([PY, str(_asset("lib/cfg.py")), str(MATRIX), *query])
+    if p.returncode != 0:
+        raise SystemExit(f"matrix.yaml {' '.join(query)}: {p.stderr.strip() or 'cfg.py exited ' + str(p.returncode)}")
+    return p.stdout.strip()
+
+
+def matrix_reader_self_test() -> None:
+    """lib/cfg.py reads a versions row in any key order, and a row it cannot read stops the run."""
+    global MATRIX
+    real = MATRIX
+    head = "engines:\n  x:\n    versions:\n"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            MATRIX = Path(d) / "m.yaml"
+            MATRIX.write_text(head + '      - { tag: "1", image: "a:1", port: 5 }\n      - { port: 6, image: "a:2", tag: "2" }  # c\n')
+            assert cfg("versions", "x") == "1 a:1 5\n2 a:2 6", cfg("versions", "x")
+            for bad in ['      - tag: "1"\n        image: "a:1"\n        port: 5\n',
+                        '      - { tag: "1", image: "a:1" }\n',
+                        '      - { tag: "1", image: "a:1", port: x }\n',
+                        '      - { tag: "1", image: "a:1", port: 5 }\n      - { tag: "2" image: "a:2" port: 6 }\n',
+                        ""]:
+                MATRIX.write_text(head + bad)
+                try:
+                    cfg("versions", "x")
+                except SystemExit:
+                    continue
+                raise AssertionError(f"an unreadable versions block must stop the run: {bad!r}")
+            MATRIX = real
+        for e in cfg("engines").split():
+            rows = [r.split() for r in cfg("versions", e).splitlines()]
+            assert rows and all(len(r) == 3 and r[2].isdigit() for r in rows), (e, rows)
+    finally:
+        MATRIX = real
+    print("self-test ok: matrix.yaml versions rows are read in any key order and an unreadable row stops the run")
 
 
 def _tcp_open(host: str, port: int, timeout: float = 3.0) -> bool:

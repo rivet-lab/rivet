@@ -76,17 +76,6 @@ from . import (
 )
 
 
-def matrix_cfg(*args: str) -> str:
-    """Query matrix.yaml through the existing `lib/cfg.py` reader.
-
-    Kept as a subprocess rather than re-implemented: it is the one parser both
-    implementations share, so the matrix cannot mean two different things while
-    the port is in flight (and PyYAML is not a dependency here)."""
-    p = run(["python3", str(HERE.parent / "release-oracle" / "lib" / "cfg.py"),
-             str(HERE.parent / "release-oracle" / "matrix.yaml"), *args])
-    return p.stdout.strip()
-
-
 BUCKET = "rivet-oracle"
 
 
@@ -714,8 +703,8 @@ def _self_test() -> int:
 
     # Two versions of the gate's matrix must never mint one name: every cell's dirs,
     # prefixes and names come from `scenarios.Scope`, keyed on engine AND version.
-    grid = [(e, line.split()[0]) for e in matrix_cfg("engines").split()
-            for line in matrix_cfg("versions", e).splitlines() if line.split()]
+    grid = [(e, line.split()[0]) for e in scenarios.cfg("engines").split()
+            for line in scenarios.cfg("versions", e).splitlines() if line.split()]
     scopes = [scenarios.Scope(e, t) for e, t in grid]
     for mint in (lambda s: s.name("x", "t"), lambda s: str(s.dir("x", "t")),
                  lambda s: s.prefix("x", "t")):
@@ -1070,6 +1059,7 @@ def _self_test() -> int:
     _lanes_self_test()
     skip_census._self_test()
     fix_cells._self_test()
+    scenarios.matrix_reader_self_test()
     field_state._self_test()
     print("\nregression stage (child harness, stand, banner):")
     return regression._self_test()
@@ -1596,7 +1586,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
             led.failed(engine, tag, "all", "-", f"{engine}:{tag} not ready after the processes restart: {why}", "not ready")
             return None
 
-    return matrix_cfg("url", engine).replace("%PORT%", str(port))
+    return scenarios.cfg("url", engine).replace("%PORT%", str(port))
 
 
 def seed_engine(engine: str, tag: str, url: str) -> str:
@@ -1609,7 +1599,7 @@ def seed_engine(engine: str, tag: str, url: str) -> str:
     from .core import docker_exec
 
     name = engine_container(engine, tag)
-    seed = ROOT / matrix_cfg("seed", engine)
+    seed = ROOT / scenarios.cfg("seed", engine)
     body = seed.read_text() if engine != "mongo" else ""
     if engine == "oracle":
         # The gate's own TIMESTAMP WITH TIME ZONE fixture, in the gate's own container only.
@@ -1655,7 +1645,7 @@ def _run_one_engine(led: Ledger, ns: argparse.Namespace, engine: str) -> None:
     through the scenarios, then torn down. Takes `led` so a parallel caller can
     hand it a BUFFERED sub-ledger (its output is flushed as one block afterwards)."""
     version_lines = [
-        l for l in matrix_cfg("versions", engine).splitlines() if len(l.split()) >= 3
+        l for l in scenarios.cfg("versions", engine).splitlines() if len(l.split()) >= 3
     ]
     # --versions: narrow this RUN, never the declared grid (see the flag's help).
     want = _wanted_versions(getattr(ns, "versions", ""), engine)
@@ -1761,7 +1751,7 @@ def run_concurrently(led: Ledger, title: str, stages: list[tuple[str, Callable[[
 
 def engine_loop(led: Ledger, ns: argparse.Namespace) -> None:
     wanted = [e for e in ns.engines.split(",") if e] if ns.engines else None
-    engines = [e for e in matrix_cfg("engines").split() if not wanted or e in wanted]
+    engines = [e for e in scenarios.cfg("engines").split() if not wanted or e in wanted]
     cap = max(1, ns.engine_parallel)
 
     # Serial (unchanged behaviour) when asked or with nothing to overlap.

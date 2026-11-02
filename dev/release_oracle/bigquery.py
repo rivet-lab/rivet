@@ -20,7 +20,6 @@ from typing import Callable
 
 from . import gcp, scenarios
 from .core import (
-    ROOT,
     Ledger,
     docker,
     docker_exec,
@@ -30,30 +29,11 @@ from .core import (
     run,
 )
 
-# The golden and the two dependency-free helper scripts stay in the BASH tree and
-# are shared, not copied: one blessed artifact and one matrix parser, so the two
-# implementations cannot come to mean different things while the port is in
-# flight. (A second copy of a golden is a golden that will drift.)
-_BASH_HERE = ROOT / "dev" / "release-oracle"
-_LIB = _BASH_HERE / "lib"
-_MATRIX_YAML = _BASH_HERE / "matrix.yaml"
-
 # Ports this stage owns, distinct from the main engine loop's so a BQ run can
 # share a machine with one.
 _PORTS = {"postgres": 55099, "mysql": 55098, "mssql": 55097}
 
 _TAG = "bq"
-
-
-def _matrix_cfg(*args: str) -> str:
-    """Query matrix.yaml through the existing `lib/cfg.py` reader.
-
-    A subprocess rather than a re-implementation, on purpose: it is the one
-    parser both implementations share, and it deliberately avoids PyYAML so a
-    broken pip can never block a release gate.
-    """
-    p = run(["python3", str(_LIB / "cfg.py"), str(_MATRIX_YAML), *args])
-    return p.stdout.strip()
 
 
 def _grade_chain(led: Ledger, engine: str, url: str, table: str, bucket: str, pfx: str,
@@ -532,7 +512,7 @@ def _bq_one_engine(
     the old sequential-only comment warned about). Records its rows/spans into `led`
     (a buffered child under parallelism). The `bq {engine}: run/load/readback` spans answer whether the load and the
     read-back SELECT actually speed up under parallelism or are BQ-rate-limited."""
-    versions = _matrix_cfg("versions", engine).splitlines()
+    versions = scenarios.cfg("versions", engine).splitlines()
     fields = versions[0].split() if versions else []
     image = fields[1] if len(fields) > 1 else ""
     port = _PORTS[engine]
@@ -652,8 +632,8 @@ def run_bigquery_golden(
 ) -> None:
     _up, _seed = bring_up, seed_engine
 
-    proj_env = _matrix_cfg("bq", "project_env")
-    dset_env = _matrix_cfg("bq", "dataset_env")
+    proj_env = scenarios.cfg("bq", "project_env")
+    dset_env = scenarios.cfg("bq", "dataset_env")
     proj = os.environ.get(proj_env, "")
     dset = os.environ.get(dset_env, "")
 
@@ -670,10 +650,10 @@ def run_bigquery_golden(
 
     led.phase(f"BigQuery golden stage ({proj}.{dset}_<engine>) — one dataset PER SOURCE")
     bucket = os.environ.get("BQ_ORACLE_BUCKET", "")
-    matrix = _matrix_cfg("bq", "tables")  # the single comprehensive matrix name
+    matrix = scenarios.cfg("bq", "tables")  # the single comprehensive matrix name
     work = _work_dir()
 
-    engines = [e for e in _matrix_cfg("engines").split()
+    engines = [e for e in scenarios.cfg("engines").split()
                if e != "mongo" and _PORTS.get(e) is not None]  # mongo: no type matrix
 
     kw = dict(proj=proj, dset=dset, bucket=bucket, matrix=matrix, work=work,

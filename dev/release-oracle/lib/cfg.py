@@ -58,6 +58,15 @@ def scalar(block, key, base_indent=None):
     return ""
 
 
+def version_row(s):
+    """`tag image port` from a flow-map row in any key order; any other row is an error."""
+    m = re.fullmatch(r"-\s*\{(.*)\}\s*(#.*)?", s)
+    fields = dict(re.findall(r"(\w+):\s*\"?([^\",}]*?)\"?\s*(?:,|$)", m.group(1))) if m else {}
+    if not m or not (fields.get("tag") and fields.get("image") and (fields.get("port") or "").isdigit()):
+        sys.exit(f"unreadable versions row (want `- {{ tag: .., image: .., port: .. }}`): {s}")
+    return f"{fields['tag']} {fields['image']} {fields['port']}"
+
+
 def main():
     rows = read(sys.argv[1])
     q, a = sys.argv[2], sys.argv[3:]
@@ -70,10 +79,10 @@ def main():
     elif q == "versions":
         eng = sub_block(top_block(rows, "engines"), a[0], base_indent=2)
         ver = sub_block(eng, "versions", base_indent=4)
-        for _, s, _ in ver:
-            m = re.search(r"tag:\s*\"?([^\",}]+)\"?.*image:\s*\"?([^\",}]+)\"?.*port:\s*(\d+)", s)
-            if m:
-                print(f"{m.group(1).strip()} {m.group(2).strip()} {m.group(3)}")
+        rows_out = [version_row(s) for _, s, _ in ver]
+        if not rows_out:
+            sys.exit(f"engine {a[0]!r} has no versions rows")
+        print("\n".join(rows_out))
     elif q == "stores":
         st = top_block(rows, "stores")
         print("\n".join(s.split(":", 1)[0] for i, s, _ in st if i == 2 and ":" in s))
