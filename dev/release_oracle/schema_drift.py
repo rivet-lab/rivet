@@ -72,10 +72,8 @@ def verify_schema_fingerprint_moves_with_the_schema(
         )
         return
     if not have("psql"):
-        _skipped(
-            led, engine, tag, "schema_fingerprint_moves_with_the_schema", "-",
-            "schema-fingerprint: psql absent", "no psql",
-        )
+        led.failed(engine, tag, "schema_fingerprint_moves_with_the_schema", "-",
+                   "schema-fingerprint: psql is not on PATH; the cell that shells to it did not run", "no psql")
         return
 
     work = Scope(engine, tag).dir("sf")
