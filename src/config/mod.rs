@@ -1715,19 +1715,11 @@ fn line_has_unquoted_brace_value(line: &str) -> bool {
 /// authority (`http://[::1]:9000`) keeps its address so it compares against the
 /// loopback list.
 fn endpoint_host(endpoint: &str) -> Option<String> {
-    let (scheme, rest) = endpoint.split_once("://")?;
+    let (scheme, _) = endpoint.split_once("://")?;
     if scheme.is_empty() {
         return None;
     }
-    // Authority ends at the first `/` (path), `?` (query), or `#` (fragment);
-    // any `user[:pass]@` userinfo head is dropped (host is after the last `@`).
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .rsplit('@')
-        .next()
-        .unwrap_or("");
+    let authority = crate::url_text::host_port_span(endpoint);
     let host = if let Some(stripped) = authority.strip_prefix('[') {
         // Bracketed IPv6 literal: take up to the closing `]`.
         stripped.split(']').next().unwrap_or("")
