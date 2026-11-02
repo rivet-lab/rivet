@@ -214,6 +214,24 @@ def say(msg: str = "") -> None:
 
 
 # ── preconditions ──────────────────────────────────────────────────────────────
+#: Keg-only Homebrew tools: the directory that holds the binary, off PATH after `brew install`.
+KEG_TOOL_DIRS: dict[str, tuple[str, ...]] = {"psql": ("/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")}
+
+
+def find_keg_tools() -> list[str]:
+    """Append the keg directory of every tool of KEG_TOOL_DIRS that is not on PATH to `os.environ["PATH"]`; the tools still missing."""
+    missing = []
+    for tool, dirs in KEG_TOOL_DIRS.items():
+        if shutil.which(tool):
+            continue
+        found = next((d for d in dirs if (Path(d) / tool).is_file()), None)
+        if found is None:
+            missing.append(tool)
+        else:
+            os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{found}"
+    return missing
+
+
 def have(tool: str) -> bool:
     """Is `tool` usable — for `duckdb`, the uv-pinned package the harness runs (dev/pytools/duckcli.py), never a binary on PATH."""
     if tool == "duckdb":
@@ -352,6 +370,21 @@ def _self_test() -> int:
         finally:
             os.environ["PATH"] = old
     assert duckdb_list(["echo"], "q", timeout=5) == "-noheader -list -c q"
+    with tempfile.TemporaryDirectory() as d:
+        keg = Path(d, "libpq", "bin")
+        keg.mkdir(parents=True)
+        (keg / "psql").write_text("#!/bin/sh\n")
+        (keg / "psql").chmod(0o755)
+        old, dirs = os.environ["PATH"], KEG_TOOL_DIRS["psql"]
+        try:
+            os.environ["PATH"] = "/usr/bin:/bin"
+            KEG_TOOL_DIRS["psql"] = (str(Path(d, "absent")),)
+            assert find_keg_tools() == ["psql"] and not have("psql"), "a tool in no keg stays missing"
+            KEG_TOOL_DIRS["psql"] = (str(Path(d, "absent")), str(keg))
+            assert find_keg_tools() == [] and have("psql"), "a keg-only tool becomes resolvable"
+        finally:
+            os.environ["PATH"] = old
+            KEG_TOOL_DIRS["psql"] = dirs
     print("shell self-test ok")
     return 0
 
