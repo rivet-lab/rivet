@@ -334,7 +334,7 @@ impl Rig {
         ready: impl Fn(&Rig) -> bool,
         act: impl FnOnce(&Rig) -> T,
     ) -> Met<T> {
-        self.beside_a_live_run_it_may_refuse(envs, ready, act, |_| false)
+        self.beside(envs, ready, act, |_| false, |_, _| {})
     }
 
     /// [`Rig::beside_a_live_run`] for an action that may take the run's lease first: a run that did not exit 0 while `took_over(&acted)` is logged ungraded, as in [`Rig::runs_at_once`] (a snapshot cannot tell what the action removed from what the refused run left).
@@ -344,6 +344,29 @@ impl Rig {
         ready: impl Fn(&Rig) -> bool,
         act: impl FnOnce(&Rig) -> T,
         took_over: impl Fn(&T) -> bool,
+    ) -> Met<T> {
+        self.beside(envs, ready, act, took_over, |_, _| {})
+    }
+
+    /// [`Rig::beside_a_live_run`] for an action that takes the SOURCE away: a run that still ends with exit 0 is graded against the source, so `restore` puts it back after the run has exited and before it is graded.
+    pub fn beside_a_live_run_over_a_source_taken<T>(
+        &self,
+        envs: &[(&str, &str)],
+        ready: impl Fn(&Rig) -> bool,
+        act: impl FnOnce(&Rig) -> T,
+        restore: impl FnOnce(&Rig, &T),
+    ) -> Met<T> {
+        self.beside(envs, ready, act, |_| false, restore)
+    }
+
+    /// The one bracket behind the `beside_a_live_run*` family: `restore` runs only for a run that exited 0, before the reaping that grades it.
+    fn beside<T>(
+        &self,
+        envs: &[(&str, &str)],
+        ready: impl Fn(&Rig) -> bool,
+        act: impl FnOnce(&Rig) -> T,
+        took_over: impl Fn(&T) -> bool,
+        restore: impl FnOnce(&Rig, &T),
     ) -> Met<T> {
         let mut live = self.spawn_mid_run(envs, ready);
         let acted = act(self);
@@ -364,6 +387,9 @@ impl Rig {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
+        if status.success() {
+            restore(self, &acted);
+        }
         let run = match !status.success() && took_over(&acted) {
             true => live.reaped_beside_a_delivery(status),
             false => live.wait_with_output().expect("reap the run"),

@@ -17,7 +17,8 @@ declare; the source by its own scanner.
             killed by signal after its first part.
   ladder    every old release in turn, then this build, on ONE state.
   load      the delta families of upgrade_matrix, from each release older than the previous one.
-  config    this build's `check` and `plan` over the unchanged config, against the old release's own.
+  config    this build's `check` and `plan` over the unchanged config, against the old release's own;
+            the `cdc.backfill` recipe exports a whole-config check leaves out are not counted on the old side.
   contract  what a cron wrapper reads from `run`, `load` and `compact` (exit code, `status:` and verdict
             lines) in a clean cycle, an idle one and one with a warehouse table dropped: the old release
             against this build on the same history. Every difference is a `was -> is` row; one that
@@ -28,7 +29,7 @@ declare; the source by its own scanner.
             the way back is the pre-migration copy, graded by upgrade[*/way-back] in upgrade.py.
 
 A red row names its kind: re-baseline, restart, duplicate, loss, refuses its own old state, config no
-longer loads, contract, empty table.
+longer loads, config read differently, contract, empty table.
 
     python -m dev.release_oracle.field_state --fetch <cache dir>
     RIVET_PREV_RELEASE_BIN=<previous rivet> python -m dev.release_oracle.field_state [name part ...]
@@ -52,7 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .core import Ledger, Proc, isolate_state_db, rivet_bin, run, run_lanes, server_of, strategy_lines
+from .core import Ledger, Proc, checked_exports, isolate_state_db, rivet_bin, run, run_lanes, server_of, strategy_lines
 
 __all__ = ["verify_upgrade_from_field_state", "COMPATIBILITY_FLOOR", "ACCEPTED_DIFFERENCES"]
 
@@ -335,13 +336,36 @@ def rebaselined(before: dict[str, str], after: dict[str, str], tables: list[str]
     return sorted(n for t in tables for n in _of(list(after), t, True) if before.get(n) != after[n])
 
 
-def config_finding(was: dict[str, tuple[bool, list[str]]], now: dict[str, tuple[bool, list[str]]], why: str) -> str | None:
-    """How this build's `check` / `plan` answer the old config differently from the old release, or None."""
+def backfill_recipes(text: str) -> set[str]:
+    """The exports a `mode: cdc` export's `cdc.backfill` claims as baseline recipes: the ones a whole-config check leaves out."""
+    import yaml
+
+    try:
+        cfg = yaml.safe_load(text)
+        exports = [x for x in cfg["exports"] if isinstance(x, dict)]
+    except (yaml.YAMLError, KeyError, TypeError):
+        return set()
+    leaf = lambda t: str(t).rsplit(".", 1)[-1].lower()  # noqa: E731
+    out: set[str] = set()
+    for x in (x for x in exports if x.get("mode") == "cdc" and isinstance(x.get("cdc"), dict)):
+        spec = x["cdc"].get("backfill")
+        if isinstance(spec, list):
+            out |= {str(n) for n in spec}
+        elif spec:
+            tables = {leaf(t) for t in [x.get("table"), *(x.get("tables") or [])] if t}
+            out |= {str(y.get("name")) for y in exports if y.get("mode") != "cdc" and y.get("table") and leaf(y["table"]) in tables}
+    return out
+
+
+def config_finding(was: dict[str, tuple[bool, list[tuple[str, str]]]], now: dict[str, tuple[bool, list[tuple[str, str]]]],
+                   why: str, recipes: set[str] = frozenset()) -> tuple[str, str] | None:
+    """(kind, line) of how this build's `check` / `plan` answer the old config differently from the old release, or None; the old release's recipe exports are not in the run set."""
     for verb in ("check", "plan"):
         if was[verb][0] and not now[verb][0]:
-            return f"`rivet {verb}` passed on the old release and fails on this build: {why}"
-    if was["check"][0] and was["check"][1] != now["check"][1]:
-        return f"`rivet check` reads it differently: {was['check'][1]} on the old release, {now['check'][1]} on this build"
+            return "config no longer loads", f"`rivet {verb}` passed on the old release and fails on this build: {why}"
+    old = [x for x in was["check"][1] if x[0] not in recipes]
+    if was["check"][0] and old != now["check"][1]:
+        return "config read differently", f"`rivet check` reads it differently: {old} on the old release, {now['check'][1]} on this build"
     return None
 
 
@@ -525,9 +549,10 @@ def config_row(led: Ledger, row: tuple, name: str, e, ver: str, old: Path) -> No
     was = {v: e.rivet(old, v, "-c", "c.yaml") for v in ("check", "plan")}
     now = {v: e.rivet(rivet_bin(), v, "-c", "c.yaml") for v in ("check", "plan")}
     why = next((now[v].why for v in ("check", "plan") if not now[v].ok and was[v].ok), "")
-    bad = config_finding({v: (p.ok, strategy_lines(p)) for v, p in was.items()}, {v: (p.ok, strategy_lines(p)) for v, p in now.items()}, why)
+    bad = config_finding({v: (p.ok, checked_exports(p)) for v, p in was.items()}, {v: (p.ok, checked_exports(p)) for v, p in now.items()},
+                         why, backfill_recipes((e.dir / "c.yaml").read_text()))
     if bad:
-        return led.failed(*row, f"{name} config: config no longer loads — {bad}", "config no longer loads")
+        return led.failed(*row, f"{name} config: {bad[0]} — {bad[1]}", bad[0])
     led.passed(*row, f"{name} config: this build checks and plans the v{ver} config as v{ver} does "
                      f"(check exit {now['check'].returncode}, {len(strategy_lines(now['check']))} strategies; plan exit "
                      f"{was['plan'].returncode} then {now['plan'].returncode})", "config")
@@ -1223,17 +1248,29 @@ def _self_test() -> None:
     assert rebaselined(before, {**before, "p/cdc/a/snapshot/y.parquet": "9"}, ["a"]) == ["p/cdc/a/snapshot/y.parquet"]
     assert rebaselined(before, {**before, "p/cdc/a/snapshot/x.parquet": "7"}, ["A"]) == ["p/cdc/a/snapshot/x.parquet"]
     assert rebaselined(before, {**before, "p/cdc/b/snapshot/y.parquet": "9"}, ["a"]) == []
-    ok, same = (True, ["Strategy: keyset"]), {"check": (True, ["Strategy: keyset"]), "plan": (False, [])}
+    ks, cdc = ("a", "Strategy: keyset"), ("cdc", "Strategy: cdc")
+    ok, same = (True, [ks]), {"check": (True, [ks]), "plan": (False, [])}
     assert config_finding(same, same, "") is None
-    assert "fails on this build" in config_finding({**same, "plan": ok}, same, "exit 1")
-    assert "fails on this build" in config_finding(same, {**same, "check": (False, [])}, "exit 1")
-    assert "differently" in config_finding(same, {**same, "check": (True, ["Strategy: full"])}, "")
+    assert config_finding({**same, "plan": ok}, same, "exit 1")[0] == "config no longer loads"
+    assert config_finding(same, {**same, "check": (False, [])}, "exit 1")[0] == "config no longer loads"
+    assert config_finding(same, {**same, "check": (True, [("a", "Strategy: full")])}, "")[0] == "config read differently"
     assert config_finding({**same, "check": (False, [])}, same, "") is None
+    old, new = {**same, "check": (True, [ks, ("b", "Strategy: keyset"), cdc])}, {**same, "check": (True, [cdc])}
+    assert config_finding(old, new, "", {"a", "b"}) is None
+    assert config_finding(old, new, "")[0] == "config read differently"
+    assert config_finding(old, new, "", {"a"})[0] == "config read differently"
+    assert config_finding(old, {**same, "check": (True, [("b", "Strategy: keyset"), cdc])}, "", {"a"}) is None
+    assert config_finding(old, {**same, "check": (True, [("a", "Strategy: keyset"), cdc])}, "", {"a", "b"})[0] == "config read differently"
+    assert config_finding(old, {**same, "check": (True, [ks, ("b", "Strategy: keyset"), ("cdc", "Strategy: full")])}, "", {"a", "b"})[0] == "config read differently"
     init = ("exports:\n  - name: a\n    table: a\n    mode: chunked\n    chunk_by_key: id  # keyset\n    chunk_size: 100000\n"
             "    # keyset_incremental: true # append-only\n    destination:\n      type: gcs\n      bucket: b\n      prefix: exports/a/\n"
             "  - name: b\n    table: b\n    mode: chunked\n    chunk_by_key: id\n    destination: {type: gcs, bucket: b, prefix: exports/b/}\n"
             "  - name: cdc\n    tables: [a, b]\n    mode: cdc\n    cdc: {backfill: auto, until_current: true}\n"
             "    load:\n      tables:\n        a: {partition: none}\n        b: {partition: none}\n")
+    assert backfill_recipes(init) == {"a", "b"} and backfill_recipes("exports: [") == set() and backfill_recipes("exports: 3") == set()
+    assert backfill_recipes(init.replace("backfill: auto", "backfill: [b]")) == {"b"}
+    assert backfill_recipes(init.replace("backfill: auto, ", "")) == set()
+    assert backfill_recipes(init.replace("table: a\n", "table: public.A\n", 1).replace("tables: [a, b]", "table: a")) == {"a"}
     for shape in SHAPES:
         got = edited(init, shape.edits)
         assert got is not None and (got != init or not shape.edits), shape

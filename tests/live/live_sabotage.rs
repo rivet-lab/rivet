@@ -825,6 +825,11 @@ fn mongo_live(tag: &str) -> (Rig, MongoTest, MongoDbGuard) {
 
 /// [`mongo_live`] whose stopped run may `also` leave what [`stopped_mid_run`] names.
 fn mongo_live_leaving(tag: &str, also: &[Leftover]) -> (Rig, MongoTest, MongoDbGuard) {
+    mongo_live_of(tag, also, MONGO_LIVE)
+}
+
+/// [`mongo_live_leaving`] over `docs` documents.
+fn mongo_live_of(tag: &str, also: &[Leftover], docs: i64) -> (Rig, MongoTest, MongoDbGuard) {
     require_alive(LiveService::Mongo);
     let db = unique_name(tag);
     let guard = MongoDbGuard {
@@ -832,7 +837,7 @@ fn mongo_live_leaving(tag: &str, also: &[Leftover]) -> (Rig, MongoTest, MongoDbG
         db: db.clone(),
     };
     let m = MongoTest::connect(MONGO_PORT, &db);
-    m.seed_int_id("t", MONGO_LIVE);
+    m.seed_int_id("t", docs);
     let rig = Rig::mongo_batch("t")
         .source_url(&MongoTest::url(MONGO_PORT, &db))
         .mongo("page_size: 20000, resume: true");
@@ -2263,14 +2268,46 @@ fn table_changed_under_it(engine: SqlEngine, ddl: Ddl) {
     recovers(&rig, &[]);
 }
 
-/// The collection of a live MongoDB export dropped once it has committed a part, then seeded again with the documents it held: the run delivers or fails loudly, and a run then delivers the source.
+/// The collection of a live MongoDB export dropped once it has committed a part, then seeded again with the documents it held: the run delivers or fails loudly (a run that ends with exit 0 is graded against the collection put back), and a run then delivers the source.
 fn collection_dropped_under_it() {
     let (rig, m, _guard) = mongo_live("sab_ddl");
-    let met = rig.beside_a_live_run(&[], Rig::has_a_part, |_| m.drop_collection("t"));
+    let met = rig.beside_a_live_run_over_a_source_taken(
+        &[],
+        Rig::has_a_part,
+        |_| m.drop_collection("t"),
+        |_, ()| m.seed_int_id("t", MONGO_LIVE),
+    );
     let (run, ()) = met.answered_while_alive();
     rig.delivered_or_failed_loudly("the run whose collection was dropped under it", &run);
     m.seed_int_id("t", MONGO_LIVE);
     recovers(&rig, &[]);
+}
+
+/// The collection of a MongoDB export dropped only after its run has delivered and exited 0: the run is graded against the collection put back, never against the one that is gone.
+fn collection_dropped_after_the_run_ended() {
+    const DOCS: i64 = 2_000;
+    let (rig, m, _guard) = mongo_live_of("sab_ddl_late", &[], DOCS);
+    let restored = std::cell::Cell::new(false);
+    let met = rig.beside_a_live_run_over_a_source_taken(
+        &[],
+        |_| true,
+        |_| {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            m.drop_collection("t");
+        },
+        |_, ()| {
+            m.seed_int_id("t", DOCS);
+            restored.set(true);
+        },
+    );
+    assert!(
+        restored.get(),
+        "fixture: the run did not exit 0 before the collection was dropped"
+    );
+    rig.delivered_or_failed_loudly(
+        "the run that ended before its collection was dropped",
+        &met.run,
+    );
 }
 
 // clock_*: the state dated ahead of the host clock
@@ -5675,6 +5712,12 @@ fn a_table_dropped_under_a_live_run_delivers_or_fails_loudly_oracle() {
 #[ignore = "live: requires docker compose mongo"]
 fn a_table_dropped_under_a_live_run_delivers_or_fails_loudly_mongo() {
     collection_dropped_under_it();
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_dropped_after_its_run_delivered_is_graded_against_it_put_back_mongo() {
+    collection_dropped_after_the_run_ended();
 }
 
 #[test]

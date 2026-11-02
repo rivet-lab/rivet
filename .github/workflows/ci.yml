@@ -1488,7 +1488,7 @@ jobs:
           # quiet-window lock. On the shared instance the two canaries failed in
           # OPPOSITE directions and both blamed the product for the schedule; they were
           # the dominant E2E flake through 2026-08-16/17.
-          ( docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
+          ( docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle mysql-stmt-84-lctn1 > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
 
       - uses: dtolnay/rust-toolchain@master
         if: ${{ matrix.leg == 'pre' }}
@@ -1590,6 +1590,7 @@ jobs:
           # MySQL primary (:3308) → replica (:3309); live_cdc_replica wires up
           # replication itself, so we only wait for both servers to accept logins.
           for i in $(seq 1 30); do docker compose exec -T mysql-primary mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
+          for i in $(seq 1 60); do docker compose exec -T mysql-stmt-84-lctn1 mysql -h 127.0.0.1 -uroot -e "select 1" >/dev/null 2>&1 && break || sleep 2; done
           for i in $(seq 1 30); do docker compose exec -T mysql-replica mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
           # Oracle Free (gvenzl faststart) creates the app user on first start; its own
           # healthcheck script reports ready only once the PDB accepts logins.

@@ -9,37 +9,55 @@ const STAND_VAR: &str = "RIVET_TEST_MYSQL_STMT_URL";
 const KELVIN: &str = "\u{212A}";
 const DOTTED_I: &str = "\u{0130}";
 
-fn base_url() -> String {
+/// The stand under test: `RIVET_TEST_MYSQL_STMT_URL` when set, else the CDC server (keeps case) or the gate's folding `mysql-stmt` stand.
+fn base_url(folding: bool) -> String {
     std::env::var(STAND_VAR).unwrap_or_else(|_| {
-        MYSQL_CDC_URL
-            .replace("rivet:rivet@", "root:rivet@")
-            .replace("/rivet", "")
+        if folding {
+            gate_profile_url("mysql-stmt").to_string()
+        } else {
+            MYSQL_CDC_URL
+                .replace("rivet:rivet@", "root:rivet@")
+                .replace("/rivet", "")
+        }
     })
 }
 
-fn rig_base_url() -> String {
-    let admin = base_url();
-    if !admin.contains("root@") {
-        return admin;
+fn admin(base: &str) -> mysql::Conn {
+    mysql::Conn::new(mysql::Opts::from_url(base).unwrap()).unwrap_or_else(|e| {
+        panic!("live test requires the stand at {base} ({e}); a folding one: docker compose --profile mysql-stmt up -d --wait mysql-stmt-84-lctn1")
+    })
+}
+
+fn rig_base_url(base: &str) -> String {
+    if !base.contains("root@") {
+        return base.to_string();
     }
-    let mut c =
-        mysql::Conn::new(mysql::Opts::from_url(&admin).unwrap()).expect("connect to the stand");
+    let mut c = admin(base);
     c.query_drop("CREATE USER IF NOT EXISTS 'seam_rig'@'%' IDENTIFIED BY 'rivet'")
         .unwrap();
     c.query_drop("GRANT ALL ON *.* TO 'seam_rig'@'%'").unwrap();
-    admin.replace("root@", "seam_rig:rivet@")
+    base.replace("root@", "seam_rig:rivet@")
 }
 
 /// A database of its own on the stand under test, dropped with the value.
 struct Seam {
+    base: String,
     db: String,
     lctn: i64,
 }
 
 impl Seam {
     fn new(label: &str) -> Self {
+        Self::on(base_url(false), label)
+    }
+
+    fn folding(label: &str) -> Self {
+        Self::on(base_url(true), label)
+    }
+
+    fn on(base: String, label: &str) -> Self {
         let db = unique_name(label).to_lowercase();
-        let mut c = Self::admin();
+        let mut c = admin(&base);
         c.query_drop(format!("CREATE DATABASE `{db}`")).unwrap();
         let lctn: i64 = c
             .query_first("SELECT @@global.lower_case_table_names")
@@ -58,22 +76,18 @@ impl Seam {
             c.query_drop(format!("USE `{db}`")).unwrap();
             c.query_drop(ddl).unwrap();
         }
-        Self { db, lctn }
-    }
-
-    fn admin() -> mysql::Conn {
-        mysql::Conn::new(mysql::Opts::from_url(&base_url()).unwrap()).expect("connect to the stand")
+        Self { base, db, lctn }
     }
 
     fn conn(&self) -> mysql::Conn {
-        let mut c = Self::admin();
+        let mut c = admin(&self.base);
         c.query_drop("SET NAMES utf8mb4").unwrap();
         c.query_drop(format!("USE `{}`", self.db)).unwrap();
         c
     }
 
     fn url(&self) -> String {
-        format!("{}/{}", rig_base_url(), self.db)
+        format!("{}/{}", rig_base_url(&self.base), self.db)
     }
 
     fn rig(&self, table: &str, dir: &Path) -> Rig {
@@ -89,11 +103,14 @@ impl Seam {
 }
 
 /// A database spelled in another case than the captured one, dropped with the value.
-struct Shadow(String);
+struct Shadow {
+    base: String,
+    name: String,
+}
 
 impl Shadow {
-    fn new(name: &str) -> Self {
-        let mut c = Seam::admin();
+    fn new(base: &str, name: &str) -> Self {
+        let mut c = admin(base);
         c.query_drop(format!("DROP DATABASE IF EXISTS `{name}`"))
             .unwrap();
         c.query_drop(format!("CREATE DATABASE `{name}`")).unwrap();
@@ -106,19 +123,22 @@ impl Shadow {
             c.query_drop(format!("CREATE TABLE `{t}` (id INT PRIMARY KEY, v INT)"))
                 .unwrap();
         }
-        Self(name.to_string())
+        Self {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
     }
 }
 
 impl Drop for Shadow {
     fn drop(&mut self) {
-        let _ = Seam::admin().query_drop(format!("DROP DATABASE IF EXISTS `{}`", self.0));
+        let _ = admin(&self.base).query_drop(format!("DROP DATABASE IF EXISTS `{}`", self.name));
     }
 }
 
 impl Drop for Seam {
     fn drop(&mut self) {
-        let _ = Self::admin().query_drop(format!("DROP DATABASE IF EXISTS `{}`", self.db));
+        let _ = admin(&self.base).query_drop(format!("DROP DATABASE IF EXISTS `{}`", self.db));
     }
 }
 
@@ -214,7 +234,7 @@ fn recreated_database(db: &str, drop: &str) -> Vec<String> {
 fn needs_a_folding_server(seam: &Seam) -> bool {
     if !seam.folds() {
         skip_live(&format!(
-            "lower_case_table_names=0: another spelling is another table; point {STAND_VAR} at a folding stand (mysql://root@127.0.0.1:3333)"
+            "lower_case_table_names=0: another spelling is another table; {STAND_VAR} points at a stand that keeps case"
         ));
     }
     seam.folds()
@@ -227,7 +247,7 @@ const UNDECODABLE: &str = "RIVET_SOURCE_CDC_UNDECODABLE";
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc, or RIVET_TEST_MYSQL_STMT_URL at a statement-truth stand"]
 fn a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql() {
-    let s = Seam::new("seam_tc");
+    let s = Seam::folding("seam_tc");
     if !needs_a_folding_server(&s) {
         return;
     }
@@ -239,7 +259,7 @@ fn a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql
         &[format!("TRUNCATE TABLE `{db}`.`KINDS`")],
         TRUNCATED,
     );
-    let t = Seam::new("seam_tu");
+    let t = Seam::folding("seam_tu");
     stops(
         &t,
         "kinds",
@@ -252,7 +272,7 @@ fn a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc, or RIVET_TEST_MYSQL_STMT_URL at a statement-truth stand"]
 fn a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql() {
-    let s = Seam::new("seam_tk");
+    let s = Seam::folding("seam_tk");
     if !needs_a_folding_server(&s) {
         return;
     }
@@ -263,7 +283,7 @@ fn a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql()
         &[format!("TRUNCATE TABLE `{}`.`{KELVIN}inds`", s.db)],
         TRUNCATED,
     );
-    let t = Seam::new("seam_ti");
+    let t = Seam::folding("seam_ti");
     stops(
         &t,
         "kinds",
@@ -276,7 +296,7 @@ fn a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql()
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc, or RIVET_TEST_MYSQL_STMT_URL at a statement-truth stand"]
 fn a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql() {
-    let s = Seam::new("seam_dc");
+    let s = Seam::folding("seam_dc");
     if !needs_a_folding_server(&s) {
         return;
     }
@@ -295,7 +315,7 @@ fn a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc, or RIVET_TEST_MYSQL_STMT_URL at a statement-truth stand"]
 fn a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql() {
-    let s = Seam::new("seam_wc");
+    let s = Seam::folding("seam_wc");
     if !needs_a_folding_server(&s) {
         return;
     }
@@ -324,7 +344,7 @@ fn a_database_dropped_with_a_captured_table_stops_the_stream_mysql() {
             TRUNCATED,
         );
     }
-    let s = Seam::new("seam_d3");
+    let s = Seam::folding("seam_d3");
     if s.folds() {
         stops(
             &s,
@@ -378,18 +398,19 @@ fn a_partitioned_table_exchanged_with_a_captured_table_stops_the_stream_mysql() 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc, or RIVET_TEST_MYSQL_STMT_URL at a statement-truth stand"]
 fn the_same_statements_on_tables_the_export_does_not_capture_leave_the_stream_running_mysql() {
-    let s = Seam::new("seam_n1");
-    let mut steps = vec![
-        "TRUNCATE TABLE other".to_string(),
-        "ALTER TABLE otherparts TRUNCATE PARTITION p0".to_string(),
-        "ALTER TABLE otherparts DROP PARTITION p0".to_string(),
-        "ALTER TABLE parts EXCHANGE PARTITION p0 WITH TABLE swap".to_string(),
-        "DROP TABLE swap".to_string(),
-    ];
-    if s.folds() {
-        steps.push(format!("TRUNCATE TABLE `{}`.`OTHER`", s.db.to_uppercase()));
+    for s in [Seam::new("seam_n1"), Seam::folding("seam_n5")] {
+        let mut steps = vec![
+            "TRUNCATE TABLE other".to_string(),
+            "ALTER TABLE otherparts TRUNCATE PARTITION p0".to_string(),
+            "ALTER TABLE otherparts DROP PARTITION p0".to_string(),
+            "ALTER TABLE parts EXCHANGE PARTITION p0 WITH TABLE swap".to_string(),
+            "DROP TABLE swap".to_string(),
+        ];
+        if s.folds() {
+            steps.push(format!("TRUNCATE TABLE `{}`.`OTHER`", s.db.to_uppercase()));
+        }
+        passes(&s, "kinds", &steps);
     }
-    passes(&s, "kinds", &steps);
     let t = Seam::new("seam_n2");
     let other = Seam::new("seam_n3");
     let _ = &other;
@@ -408,15 +429,15 @@ fn on_a_server_that_keeps_case_a_database_spelled_in_another_case_is_another_dat
         ));
         return;
     }
-    let shadow = Shadow::new(&s.db.to_uppercase());
+    let shadow = Shadow::new(&s.base, &s.db.to_uppercase());
     passes(
         &s,
         "kinds",
         &[
-            format!("TRUNCATE TABLE `{}`.`KINDS`", shadow.0),
-            format!("TRUNCATE TABLE `{}`.`{KELVIN}inds`", shadow.0),
-            format!("TRUNCATE TABLE `{}`.`kinds`", shadow.0),
-            format!("DROP DATABASE `{}`", shadow.0),
+            format!("TRUNCATE TABLE `{}`.`KINDS`", shadow.name),
+            format!("TRUNCATE TABLE `{}`.`{KELVIN}inds`", shadow.name),
+            format!("TRUNCATE TABLE `{}`.`kinds`", shadow.name),
+            format!("DROP DATABASE `{}`", shadow.name),
         ],
     );
 }

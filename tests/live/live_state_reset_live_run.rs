@@ -383,11 +383,13 @@ fn a_run_whose_checkpoint_rows_vanish_fails_loudly(engine: SqlEngine, state: Sta
         owner.try_wait().unwrap().is_none(),
         "fixture: the run must still be alive when its checkpoint rows go"
     );
-    let status = owner.wait().unwrap();
+    let out = owner.wait_with_output().unwrap();
     assert_eq!(
-        status.code(),
+        out.status.code(),
         Some(5),
-        "a run that lost its checkpoint rows must refuse to finish"
+        "a run that lost its checkpoint rows must refuse to finish: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
     assert!(
         !s.rig.out_dir().join("_SUCCESS").exists(),
