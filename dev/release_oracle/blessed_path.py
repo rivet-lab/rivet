@@ -103,7 +103,7 @@ def _bucket(store: str) -> str:
 # call goes through `_bucket` now.
 BUCKET = "rivet-blessed"
 
-# The dev stand, by engine. `_matrix_cfg("url", engine)` owns the TEMPLATE; the
+# The dev stand, by engine. `scenarios.cfg("url", engine)` owns the TEMPLATE; the
 # ports here are the stand's, so the same walk runs against a local stand and
 # against the gate's own containers without two copies of the URL grammar.
 STAND_PORT = {"postgres": 5432, "mysql": 3306, "mssql": 1433, "mongo": 27017}
