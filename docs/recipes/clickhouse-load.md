@@ -73,7 +73,8 @@ to merge" (and a full-load table with "a full load overwrites its table"). A del
 
 For a CDC table the engine keeps one version per key: the highest version, computed
 from the change's source position (PostgreSQL LSN, MySQL binlog file number + offset,
-SQL Server LSN) and its order within the transaction. Insert order does not matter as
+SQL Server LSN, MongoDB clusterTime and the event's ordinal within it) and its order
+within the transaction. Insert order does not matter as
 long as the source's positions only grow. A MySQL checkpoint that would resume into a
 binlog renumbered by `RESET MASTER` or on another server is refused, and its remedy
 empties the change log first (see [Known limits](#known-limits)). The view reads the log
@@ -220,6 +221,9 @@ works the same way: name it in `named_collection:`.
 
 ## Not supported
 
+- **An Oracle CDC stream** under any `load:`: refused when the config is read, on every
+  warehouse. The Oracle CDC preview captures to files only (ADR-0037); an Oracle batch
+  export loads.
 - **`rivet compact`** and **`layout: base_buffer`**: the engine collapses the log
   itself, so there is nothing to merge.
 - **A CDC stream over a table from an earlier full load**: refused; drop or
