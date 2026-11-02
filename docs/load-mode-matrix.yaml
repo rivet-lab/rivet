@@ -86,6 +86,12 @@ scenarios:
     incremental: { na: "an incremental log has no snapshot leg" }
     cdc:         { test: a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_bigquery }
 
+  - id: a_sql_re_baseline_after_a_lost_log_loads_into_clickhouse_after_the_printed_truncate
+    what: "a MySQL, PostgreSQL or SQL Server stream into ClickHouse loses its log (PostgreSQL: the slot dropped), a key is deleted and another updated while it is lost, and the documented re-baseline runs (checkpoint, staged files and `cdc_snapshot` rows removed): the load is refused with RIVET_LOAD_REBASELINE_OVER_CHANGES (exit 5) and the view keeps what it served; the TRUNCATE the refusal printed, run as printed, then lets the load serve the source with the deleted key gone. The `cdc` cell is MySQL; PostgreSQL and SQL Server are a_postgres_re_baseline_after_a_dropped_slot_loads_only_after_the_printed_truncate and a_sql_server_re_baseline_after_a_lost_log_loads_only_after_the_printed_truncate (live_clickhouse_load.rs). RED-proven 2026-11-02 on all three: with the refusal turned into a proceed, the rig oracle finds the view disagreeing with the source."
+    full:        { na: "no change log" }
+    incremental: { na: "an incremental log has no snapshot leg" }
+    cdc:         { test: a_mysql_re_baseline_after_a_lost_log_loads_only_after_the_printed_truncate }
+
   - id: soft_delete_tombstone
     what: "a delete: cdc keeps a flagged tombstone (__is_deleted=true); incremental cannot observe deletes and never tombstones"
     full:        { na: "a full snapshot mirrors the source — a deleted row is simply absent next run" }
