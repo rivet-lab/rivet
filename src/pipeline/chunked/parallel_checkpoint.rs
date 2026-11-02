@@ -96,10 +96,8 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
         summary.resumed = stats.adopted_prior_work();
     }
 
-    let total_tasks = {
-        let tasks = state.list_chunk_tasks_for_run(&run_id)?;
-        tasks.len().max(1)
-    };
+    let planned = state.list_chunk_tasks_for_run(&run_id)?.len();
+    let total_tasks = planned.max(1);
     let parallel = cp.parallel.min(total_tasks);
     let pb_cp = ChunkProgress::new(&plan.export_name, total_tasks);
     let pb_cp_handle = pb_cp.handle();
@@ -473,8 +471,7 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
     // After the drain: record_part is what counts the rows.
     pb_cp.finish(summary.total_rows);
 
-    let pending = state.count_chunk_tasks_not_completed(&run_id)?;
-    let tasks = state.list_chunk_tasks_for_run(&run_id)?;
+    let (pending, tasks) = state.settle_chunk_run(&run_id, planned)?;
     super::incomplete_run_check(
         &plan.export_name,
         RUNNER,

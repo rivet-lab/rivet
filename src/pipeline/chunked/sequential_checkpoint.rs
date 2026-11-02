@@ -179,8 +179,8 @@ pub(crate) fn run_chunked_sequential_checkpoint(
         crate::test_hook::maybe_transient_once("after_resume_adopt")?;
     }
 
-    let total_tasks = state.count_chunk_tasks_total(&run_id).unwrap_or(1);
-    let pb = ChunkProgress::new(&plan.export_name, total_tasks);
+    let planned = state.count_chunk_tasks_total(&run_id)?;
+    let pb = ChunkProgress::new(&plan.export_name, planned);
     let pb_handle = pb.handle();
     // Per-batch progress feed: bar ticks during a chunk's read, not only at end.
     let streamed_rows = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
@@ -340,8 +340,7 @@ pub(crate) fn run_chunked_sequential_checkpoint(
         }
     }
 
-    let pending = state.count_chunk_tasks_not_completed(&run_id)?;
-    let tasks = state.list_chunk_tasks_for_run(&run_id)?;
+    let (pending, tasks) = state.settle_chunk_run(&run_id, planned)?;
     let met = if failures.is_empty() {
         Ok(())
     } else {

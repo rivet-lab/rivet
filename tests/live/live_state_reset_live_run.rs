@@ -347,17 +347,28 @@ fn a_killed_run_does_not_block_the_reset(engine: SqlEngine, key_line: &str, stat
     s.assert_every_row_delivered_once("the run after a killed run and a reset");
 }
 
+trait LeavesPagesBesideAReleasedClaim: Sized {
+    /// Declares what a run whose checkpoint rows are removed under it leaves: its pages beside a released claim.
+    fn leaving_its_pages_beside_a_released_claim(self) -> Self;
+}
+
+impl LeavesPagesBesideAReleasedClaim for Rig {
+    fn leaving_its_pages_beside_a_released_claim(self) -> Self {
+        self.a_failed_run_may_leave(
+            &[
+                Leftover::OrphanPart,
+                Leftover::FileLog,
+                Leftover::ChunkCheckpoint,
+            ],
+            "the test removes the run's checkpoint rows under it: the run fails after writing pages and leaves them beside its released claim",
+        )
+    }
+}
+
 /// A run whose chunk-checkpoint rows are deleted under it fails; it does not publish an empty success.
 fn a_run_whose_checkpoint_rows_vanish_fails_loudly(engine: SqlEngine, state: State) {
     let mut s = Scenario::new(engine, RANGE, state);
-    s.rig = s.rig.a_failed_run_may_leave(
-        &[
-            Leftover::OrphanPart,
-            Leftover::FileLog,
-            Leftover::ChunkCheckpoint,
-        ],
-        "the test deletes the run's checkpoint rows under it: the run fails after writing pages and leaves them beside its released claim",
-    );
+    s.rig = s.rig.leaving_its_pages_beside_a_released_claim();
     let export = s.rig.export_name().to_string();
     let mut owner = s.spawn_mid_run();
     s.state.exec(
@@ -395,6 +406,244 @@ fn a_run_whose_checkpoint_rows_vanish_fails_loudly(engine: SqlEngine, state: Sta
         String::from_utf8_lossy(&rerun.stderr)
     );
     s.assert_every_row_delivered_once("the run after one that lost its checkpoint rows");
+}
+
+/// How a chunk run's checkpoint rows go while it runs.
+#[derive(Clone, Copy)]
+enum Vanish {
+    /// A transaction holds their deletion open while the run reaches its end, and commits it afterwards.
+    HeldDelete,
+    /// A trigger removes the `chunk_run` row only, the tasks stay.
+    RunRowOnly,
+    /// A trigger removes the tasks only, the `chunk_run` row stays.
+    TasksOnly,
+}
+
+/// The run ends with `RIVET_STATE_CHUNK_CHECKPOINT_GONE` (exit 5) and no success marker, and the export run again delivers every row.
+fn a_run_that_loses_its_checkpoint_rows_ends_gone(
+    engine: SqlEngine,
+    state: State,
+    how: Vanish,
+    parallel: bool,
+) {
+    let mut s = Scenario::new(engine, RANGE, state);
+    if parallel {
+        s.rig = s.rig.export_line("parallel: 3");
+    }
+    s.rig = s.rig.leaving_its_pages_beside_a_released_claim();
+    let export = s.rig.export_name().to_string();
+    let mut owner = s.spawn_mid_run();
+    let mut held = None;
+    match how {
+        Vanish::HeldDelete => {
+            let State::Postgres(db) = &s.state else {
+                panic!("a held deletion needs the Postgres state");
+            };
+            let mut c = db.client();
+            c.batch_execute(&format!(
+                "BEGIN; \
+                 DELETE FROM chunk_task WHERE status = 'pending' AND run_id IN \
+                   (SELECT run_id FROM chunk_run WHERE export_name = '{export}'); \
+                 DELETE FROM chunk_run WHERE export_name = '{export}'"
+            ))
+            .expect("hold the deletion open");
+            held = Some(c);
+        }
+        Vanish::RunRowOnly | Vanish::TasksOnly => {
+            let table = match how {
+                Vanish::RunRowOnly => "chunk_run",
+                _ => "chunk_task",
+            };
+            s.state.exec(
+                &s.rig.config_path(),
+                &format!(
+                    "CREATE TRIGGER vanish AFTER UPDATE OF status ON chunk_task \
+                     WHEN NEW.status = 'completed' AND NEW.chunk_index = {} BEGIN \
+                     DELETE FROM {table} WHERE run_id = NEW.run_id; END",
+                    if parallel { 12 } else { 2 }
+                ),
+            );
+        }
+    }
+    if let Some(c) = held.as_mut() {
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_secs() < 8 && owner.try_wait().unwrap().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            owner.try_wait().unwrap().is_none(),
+            "the run ended while a writer was still removing its checkpoint rows, before it could tell they are gone: {:?}",
+            owner.try_wait().unwrap()
+        );
+        c.batch_execute("COMMIT").expect("commit the deletion");
+    }
+    let out = owner.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a run that lost its checkpoint rows must end as a refusal:\n{said}"
+    );
+    assert!(
+        said.contains("[RIVET_STATE_CHUNK_CHECKPOINT_GONE]"),
+        "the refusal must carry its code:\n{said}"
+    );
+    assert!(
+        !s.rig.out_dir().join("_SUCCESS").exists(),
+        "no success marker for a run whose checkpoint rows vanished"
+    );
+    if !matches!(how, Vanish::HeldDelete) {
+        s.state.exec(&s.rig.config_path(), "DROP TRIGGER vanish");
+    }
+    s.state.exec(
+        &s.rig.config_path(),
+        &format!(
+            "DELETE FROM chunk_task WHERE run_id IN \
+               (SELECT run_id FROM chunk_run WHERE export_name = '{export}'); \
+             DELETE FROM chunk_run WHERE export_name = '{export}'"
+        ),
+    );
+    let rerun = s.rig.run_args_env(&[], &s.env());
+    assert!(
+        rerun.status.success(),
+        "the remedy the refusal names, running the export again: {}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+    s.assert_every_row_delivered_once("the run after one that lost its checkpoint rows");
+}
+
+#[test]
+#[ignore = "live: requires postgres + postgres-state"]
+fn pg_state_a_range_run_ends_gone_while_a_writer_still_holds_the_deletion() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Pg,
+        State::postgres("reset_held"),
+        Vanish::HeldDelete,
+        false,
+    );
+}
+
+#[test]
+#[ignore = "live: requires postgres + postgres-state"]
+fn pg_state_a_parallel_range_run_ends_gone_while_a_writer_still_holds_the_deletion() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Pg,
+        State::postgres("reset_held_par"),
+        Vanish::HeldDelete,
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn pg_a_range_run_whose_chunk_run_row_alone_vanishes_ends_gone() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Pg,
+        State::Sqlite,
+        Vanish::RunRowOnly,
+        false,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn pg_a_parallel_range_run_whose_chunk_run_row_alone_vanishes_ends_gone() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Pg,
+        State::Sqlite,
+        Vanish::RunRowOnly,
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn pg_a_range_run_whose_tasks_alone_vanish_ends_gone() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Pg,
+        State::Sqlite,
+        Vanish::TasksOnly,
+        false,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn pg_a_parallel_range_run_whose_tasks_alone_vanish_ends_gone() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Pg,
+        State::Sqlite,
+        Vanish::TasksOnly,
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires mysql + postgres-state"]
+fn mysql_state_a_range_run_ends_gone_while_a_writer_still_holds_the_deletion() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Mysql,
+        State::postgres("reset_held_mysql"),
+        Vanish::HeldDelete,
+        false,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn mysql_a_range_run_whose_chunk_run_row_alone_vanishes_ends_gone() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Mysql,
+        State::Sqlite,
+        Vanish::RunRowOnly,
+        false,
+    );
+}
+
+#[test]
+#[ignore = "live: requires mssql + postgres-state"]
+fn mssql_state_a_range_run_ends_gone_while_a_writer_still_holds_the_deletion() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Mssql,
+        State::postgres("reset_held_mssql"),
+        Vanish::HeldDelete,
+        false,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn mssql_a_range_run_whose_chunk_run_row_alone_vanishes_ends_gone() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Mssql,
+        State::Sqlite,
+        Vanish::RunRowOnly,
+        false,
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires oracle + postgres-state"]
+fn oracle_state_a_range_run_ends_gone_while_a_writer_still_holds_the_deletion() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Oracle,
+        State::postgres("reset_held_oracle"),
+        Vanish::HeldDelete,
+        false,
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn oracle_a_range_run_whose_chunk_run_row_alone_vanishes_ends_gone() {
+    a_run_that_loses_its_checkpoint_rows_ends_gone(
+        SqlEngine::Oracle,
+        State::Sqlite,
+        Vanish::RunRowOnly,
+        false,
+    );
 }
 
 #[test]

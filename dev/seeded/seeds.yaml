@@ -1099,7 +1099,7 @@ seeds:
 
   - name: checkpoint-gone-at-completion
     class: a checkpointed run completes a chunk run whose row is no longer in the state, and publishes a success over the parts it can no longer list
-    history: "P-17, 2026-10-06 - the run whose `chunk_run` and `chunk_task` rows were removed under it finished exit 0 with `_SUCCESS` and 0 rows, 16 parts left in no manifest"
+    history: "P-17, 2026-10-06 - the run whose `chunk_run` and `chunk_task` rows were removed under it finished exit 0 with `_SUCCESS` and 0 rows, 16 parts left in no manifest; since 2026-11-02 the patch removes both places that notice it (the run-end check and the completion)"
     scope: state
     patch: checkpoint-gone-at-completion/shared.patch
     engines:
@@ -1110,6 +1110,19 @@ seeds:
       lib:
         cells:
           - "lib:completing_a_chunk_run_whose_row_is_gone_is_refused"
+  - name: chunk-run-end-check-blind-to-removed-rows
+    class: "a checkpointed run's end check counts the tasks it can still read without asking whether the run's rows were removed, and without waiting for a writer removing them, so a run that lost its checkpoint rows ends as the incomplete run RIVET_RUN_UNITS_FAILED with exit 1 (or exit 0 with a partial delivery when only the tasks went) instead of RIVET_STATE_CHUNK_CHECKPOINT_GONE with exit 5"
+    history: "2026-11-02 - gate 2026-11-02, 1 run in 12 under load: pg_state_a_range_run_whose_checkpoint_rows_vanish_fails_loudly ended exit 1 with 24 chunk tasks not completed; a transaction deleting the rows was still open, the claim skipped the locked rows and the count read them; fixed by StateStore::settle_chunk_run"
+    scope: state
+    patch: chunk-run-end-check-blind-to-removed-rows/shared.patch
+    engines:
+      sqlite-state:
+        cells: [pg_a_range_run_whose_chunk_run_row_alone_vanishes_ends_gone, pg_a_range_run_whose_tasks_alone_vanish_ends_gone, pg_a_parallel_range_run_whose_chunk_run_row_alone_vanishes_ends_gone, pg_a_parallel_range_run_whose_tasks_alone_vanish_ends_gone]
+      postgres-state:
+        cells: [pg_state_a_range_run_ends_gone_while_a_writer_still_holds_the_deletion, pg_state_a_parallel_range_run_ends_gone_while_a_writer_still_holds_the_deletion]
+      lib:
+        cells:
+          - "lib:settling_a_chunk_run_whose_rows_are_gone_is_refused_and_a_whole_one_is_counted"
   - name: apply-skips-partition-expansion
     class: an entry point builds its own export list instead of taking the run set, and runs a `partition_by` export unexpanded
     history: "`rivet apply <config>`, `--pool` and a sealed plan wrote the whole table under a directory literally named `{partition}`, exit 0 (v0.31.0)"

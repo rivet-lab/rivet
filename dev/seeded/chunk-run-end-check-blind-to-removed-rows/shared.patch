@@ -1,0 +1,22 @@
+diff --git a/src/state/checkpoint.rs b/src/state/checkpoint.rs
+index cd1f7d37..d39e6fff 100644
+--- a/src/state/checkpoint.rs
++++ b/src/state/checkpoint.rs
+@@ -460,7 +460,7 @@ impl StateStore {
+     ) -> Result<(i64, Vec<ChunkTaskInfo>)> {
+         let lock = match &self.conn {
+             StateConn::Sqlite(_) => "",
+-            StateConn::Postgres(_) => " FOR UPDATE",
++            StateConn::Postgres(_) => "",
+         };
+         let tasks = self.chunk_tasks_of(run_id, lock)?;
+         let run = self.query_opt(
+@@ -468,7 +468,7 @@ impl StateStore {
+             &[run_id.into()],
+             |r| r.text(0),
+         )?;
+-        if run.is_none() || tasks.len() != planned {
++        if false && (run.is_none() || tasks.len() != planned) {
+             self.execute(
+                 "UPDATE export_state SET resume_run_id = NULL, resume_owner = NULL \
+                  WHERE resume_run_id = ?1",
