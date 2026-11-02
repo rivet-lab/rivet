@@ -25,8 +25,9 @@ rivet run  -c rivet.yaml    # Parquet into GCS
 rivet load -c rivet.yaml    # Parquet into ClickHouse
 ```
 
-A CDC scaffold carries a first-run baseline (`cdc.backfill: auto`), so the first run
-reads the rows that already exist and then captures changes from its anchor on.
+A CDC scaffold carries a first-run baseline, so the first run reads the rows that
+already exist and then captures changes from its anchor on: `cdc.backfill: auto` over
+the schema's batch exports, or `cdc.initial: snapshot` for one `--table`.
 
 The generated block:
 

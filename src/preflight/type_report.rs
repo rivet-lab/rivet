@@ -58,7 +58,7 @@ pub struct ExportTypeReport {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub target_failures: bool,
     /// Target-native recovery SQL (ADR-0014 L5): a post-load transform that
-    /// recovers types bare autoload degrades (BigQuery JSON/UUID/DATETIME).
+    /// recovers types bare autoload degrades.
     /// `None` for targets that autoload faithfully (DuckDB) or when no target
     /// is set.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -802,11 +802,14 @@ fn render_table(report: &ExportTypeReport, target: Option<ExportTarget>) -> Stri
 
     if let Some(sql) = &report.recovery_sql {
         ln!("");
-        ln!(
-            "  {} type recovery — bare autoload degrades JSON/UUID→BYTES, naive",
-            target.map(|t| t.label()).unwrap_or("target")
-        );
-        ln!("  timestamp→TIMESTAMP, array→RECORD; load with --autodetect then run:");
+        let label = target.map(|t| t.label()).unwrap_or("target");
+        if target == Some(ExportTarget::BigQuery) {
+            ln!("  {label} type recovery — bare autoload degrades JSON/UUID→BYTES, naive");
+            ln!("  timestamp→TIMESTAMP, array→RECORD; load with --autodetect then run:");
+        } else {
+            ln!("  {label} type recovery for Parquet loaded without `rivet load` (which declares");
+            ln!("  these types itself):");
+        }
         for line in sql.lines() {
             ln!("    {line}");
         }
