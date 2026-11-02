@@ -35,7 +35,7 @@ SQL_PARSER = re.compile(r"^\+?\s*(sqlparser|sqlformat|sql-parse|pg_query|sqlpars
 BINARY = re.compile(r"\.(gif|png|jpg|jpeg|parquet|ico|pdf)$")
 MARK = re.compile(r"ratchet-pin:\s*([\w.-]+)(?:\s+(sum|strings|lines))?(?:\s+(min))?")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
-INT = re.compile(r"\b\d+\b")
+NUMBER = re.compile(r"(?<!\w)\d\w*")
 # Definitions that look like a pin by name; each must carry a `ratchet-pin:` marker.
 PIN_NAME = re.compile(
     r"^\s*(?:pub(?:\([a-z]+\))?\s+)?(?:const\s+|static\s+)?"
@@ -124,6 +124,16 @@ def _code(line: str) -> tuple[str, int]:
     return code, n
 
 
+def numbers(code: str, where: str) -> list[int]:
+    """Every numeric literal in `code`; one that is not plain decimal digits (`1_000`, `0x10`, `14usize`) is an error."""
+    out = []
+    for token in NUMBER.findall(code):
+        if not token.isdigit():
+            raise ValueError(f"{where}: numeric literal {token!r} is not plain decimal digits")
+        out.append(int(token))
+    return out
+
+
 def pins(text: str, path: str) -> dict[str, tuple[int, bool]]:
     """Every `ratchet-pin:` in a file: name → (measured value, is_floor). A shape it cannot read is an error."""
     lines = text.splitlines()
@@ -136,10 +146,10 @@ def pins(text: str, path: str) -> dict[str, tuple[int, bool]]:
         if name in out:
             raise ValueError(f"{path}:{i + 1}: ratchet-pin {name} declared twice")
         if measure is None:
-            ints = INT.findall(_code(line[: m.start()])[0])
-            if not ints:
-                raise ValueError(f"{path}:{i + 1}: ratchet-pin {name} has no integer on its line")
-            value = int(ints[-1])
+            ints = numbers(_code(line[: m.start()])[0], f"{path}:{i + 1}: ratchet-pin {name}")
+            if len(ints) != 1:
+                raise ValueError(f"{path}:{i + 1}: ratchet-pin {name} needs exactly one integer on its line, found {len(ints)}")
+            value = ints[0]
         else:
             body, closed = [], False
             for later in lines[i + 1 :]:
@@ -154,7 +164,7 @@ def pins(text: str, path: str) -> dict[str, tuple[int, bool]]:
             elif measure == "strings":
                 value = sum(_code(b)[1] for b in body if not b.strip().startswith(("#", "//")))
             else:
-                value = sum(int(x) for b in body for x in INT.findall(_code(b)[0]))
+                value = sum(sum(numbers(_code(b)[0], f"{path}:{i + 1}: ratchet-pin {name} sum")) for b in body)
         out[name] = (value, bool(floor))
     return out
 
@@ -335,6 +345,7 @@ def clippy(out: Path, label: str, extra: list[str]) -> tuple[str, str]:
 COMPILED = re.compile(r"^\s*Compiling rivet-cli\b", re.M)
 # cargo-mutants says "1 mutant tested", "2 mutants tested": a one-mutant diff must still have a verdict.
 DONE = re.compile(r"(\d+) mutants? tested in [^:]*: (.*)")
+COUNTED = re.compile(r"(\d+) (missed|timeouts?)\b")
 
 
 def mutant_verdict(mdir: Path, rc: int, log_text: str) -> tuple[str, str]:
@@ -348,10 +359,13 @@ def mutant_verdict(mdir: Path, rc: int, log_text: str) -> tuple[str, str]:
     fresh = [p.name for p in sorted((mdir / "log").glob("*.log")) if p.name != "baseline.log" and not COMPILED.search(p.read_text(errors="ignore"))]
     if fresh:
         return "FAIL", f"{len(fresh)} mutant build(s) were Fresh (never compiled): {', '.join(fresh[:3])}"
-    missed = [m for m in (mdir / "missed.txt").read_text().splitlines() if m] if (mdir / "missed.txt").exists() else []
-    timeout = [m for m in (mdir / "timeout.txt").read_text().splitlines() if m] if (mdir / "timeout.txt").exists() else []
-    if missed or timeout:
-        return "FAIL", f"{done.group(0)} | missed: {'; '.join(missed[:5])} {('| timeout: ' + '; '.join(timeout[:3])) if timeout else ''}".strip()
+    listed = {n: [m for m in (mdir / n).read_text().splitlines() if m] if (mdir / n).exists() else [] for n in ("missed.txt", "timeout.txt")}
+    counted = {("timeout" if k.startswith("timeout") else k): int(n) for n, k in COUNTED.findall(done.group(2))}
+    missed, timeout = listed["missed.txt"], listed["timeout.txt"]
+    if missed or timeout or counted.get("missed") or counted.get("timeout"):
+        return "FAIL", f"{done.group(0)} | missed: {'; '.join(missed[:5]) or counted.get('missed', 0)} {('| timeout: ' + ('; '.join(timeout[:3]) or str(counted['timeout']))) if timeout or counted.get('timeout') else ''}".strip()
+    if rc != 0:
+        return "FAIL", f"cargo-mutants exited {rc} (missed or timed-out mutants) but neither the summary nor missed.txt/timeout.txt names one: {done.group(0)}"
     return "PASS", done.group(0)
 
 
@@ -480,9 +494,18 @@ def self_test() -> int:
     )
     p = pins(rs, "t.rs")
     assert p == {"silent": (39, False), "independent": (106, True), "table": (5, False), "set": (2, False)}, p
+    assert pins("const X: usize = 14; // ratchet-pin: x // was 5\n", "a.rs") == {"x": (14, False)}
     assert pins("# head\n# ratchet-pin: rows lines\nsrc/a.rs:1: x\n\nsrc/b.rs:2: y\n", "b.txt") == {"rows": (2, False)}
     assert pins("  FIRST_RUN_CEILING: 304  # +14 on #411 ratchet-pin: first-run\n", "ci.yml") == {"first-run": (304, False)}
-    for broken in ("const X: usize = N; // ratchet-pin: x\n", "const T: &[u8] = &[ // ratchet-pin: t sum\n 1,\n"):
+    for broken in (
+        "const X: usize = N; // ratchet-pin: x\n",
+        "const T: &[u8] = &[ // ratchet-pin: t sum\n 1,\n",
+        "const X: usize = 14 + 5; // ratchet-pin: x\n",
+        "const X: usize = 4 * 2; // ratchet-pin: x\n",
+        "const X: usize = 1_000; // ratchet-pin: x\n",
+        "const X: usize = 0x10; // ratchet-pin: x\n",
+        "const T: &[usize] = &[ // ratchet-pin: t sum\n 1_000,\n]; // ratchet-pin: end\n",
+    ):
         try:
             pins(broken, "b.rs")
             raise AssertionError(f"an unreadable pin must be an error: {broken!r}")
@@ -529,6 +552,12 @@ def self_test() -> int:
         assert mutant_verdict(m, 0, "")[0] == "FAIL", "no summary line is no verdict"
         assert mutant_verdict(m, 1, ok)[0] == "FAIL", "a tool error is no verdict"
         (m / "log/src_a.rs_line_4.log").unlink()
+        for rc, summary in ((2, "3 mutants tested in 1m: 2 missed, 1 caught"), (3, "3 mutants tested in 1m: 1 timeout, 2 caught"), (0, "3 mutants tested in 1m: 1 missed, 2 caught")):
+            (m / "missed.txt").unlink()
+            assert mutant_verdict(m, rc, summary)[0] == "FAIL", f"rc {rc} with no missed.txt and `{summary}` must fail"
+            (m / "missed.txt").write_text("")
+        assert mutant_verdict(m, 2, ok)[0] == "FAIL", "rc 2 with nothing missed anywhere is a contradiction"
+        assert mutant_verdict(m, 3, ok)[0] == "FAIL", "rc 3 with nothing timed out anywhere is a contradiction"
         one = "1 mutant tested in 11m: 1 unviable"
         assert mutant_verdict(m, 0, one) == ("PASS", one), "one mutant is still a verdict"
     print("pr_ready self-test: ok")
