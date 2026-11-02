@@ -851,6 +851,7 @@ class _World:
         from .upgrade_matrix import CH_PASSWORD, CH_URL, CH_USER, _ch
 
         self.target, self.tables, self.src, self.old = target, tables, src, old
+        self.old_loaded = False
         self.db, self.pfx = bq_tmp(f"fs_{tag}"), f"field/{tag}"
         if target == "bigquery":
             self.proj, self.bucket = os.environ["BQ_ORACLE_PROJECT"], os.environ["BQ_ORACLE_BUCKET"]
@@ -871,6 +872,7 @@ class _World:
 
     def cycle(self, binary: Path) -> dict[str, Proc]:
         """`run`, `load` and `compact` in turn, each whatever the one before answered."""
+        self.old_loaded |= binary == self.old
         return {verb: self.e.rivet(binary, verb, "-c", "c.yaml") for verb in ("run", "load", "compact")}
 
     def plain(self, text: str) -> str:
@@ -902,7 +904,8 @@ class _World:
                 "mode": "cdc", "key": ["id"], "overrides": {}, "cursor_expr": None, "state": str(self.e.dir / ".rivet_state.db"),
                 "load": cfg["load"], "password": CH_PASSWORD if self.target == "clickhouse" else "",
                 "export": next(x["name"] for x in cfg["exports"] if x.get("mode") == "cdc"),
-                "verb": "compact" if self.target == "bigquery" else "load", "delta": False, "snapshot": True, "capture_instance": None}
+                "verb": "compact" if self.target == "bigquery" else "load", "delta": False, "snapshot": True, "capture_instance": None,
+                "released_by": [str(self.old)] if self.old_loaded else []}
         for attempt in (1, 2):
             try:
                 return verdict_status(grade_load(spec))

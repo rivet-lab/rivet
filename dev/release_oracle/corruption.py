@@ -523,7 +523,8 @@ def verify_reconcile_and_validate_cover_both_sides(led: Ledger, engine: str, tag
         "CREATE TABLE recon_probe(id INT PRIMARY KEY, v TEXT); "
         "INSERT INTO recon_probe SELECT g,'v'||g FROM generate_series(1,1000) g WHERE g NOT BETWEEN 500 AND 549;"
     ):
-        _skipped(led, engine, tag, "reconcile_and_validate_cover_both_sides", "-", "reconcile-coverage: psql absent", "no psql")
+        _failed(led, engine, tag, "reconcile_and_validate_cover_both_sides", "-",
+                "reconcile-coverage: the probe table could not be seeded through psql (absent from PATH, or the statement failed)", "psql")
         return
 
     def rec() -> int:

@@ -57,6 +57,11 @@ pub fn stand_url(source: &str) -> &'static str {
     text(&["sources", source, "url"])
 }
 
+/// URL that says a gate-started compose profile (`shard`, `tz`) is up.
+pub fn gate_profile_url(profile: &str) -> &'static str {
+    text(&["gate_profiles", profile, "url"])
+}
+
 /// `host:port` of a stand source, parsed from its URL.
 pub fn stand_host_port(source: &str) -> &'static str {
     let url = stand_url(source);

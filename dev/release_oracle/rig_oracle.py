@@ -48,10 +48,12 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import datetime as dt
+import functools
 import itertools
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -1495,6 +1497,46 @@ def load_run_filter(spec: dict) -> str:
     return f"export_name = {_lit(leaf)} AND ends_with(target_table, {_lit(fq)})"
 
 
+LAST_ZONE_LESS_RELEASE = (0, 32, 2)
+
+
+@functools.lru_cache(maxsize=None)
+def release_version(binary: str) -> tuple[int, ...]:
+    """The version triple a pinned release binary names in `--version`; a binary that names none is an error."""
+    p = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=60)
+    m = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", p.stdout)
+    if p.returncode or not m:
+        raise ValueError(f"`{binary} --version` names no version: {(p.stdout or p.stderr).strip()!r}")
+    return tuple(int(x) for x in m.groups())
+
+
+def zone_less(t: str) -> str:
+    """`t` as a release before the UTC change created the column: `DateTime64(p)` for `DateTime64(p, 'UTC')`."""
+    return re.sub(r"DateTime64\((\d+), 'UTC'\)", r"DateTime64(\1)", t)
+
+
+def created_zone_less(spec: dict) -> bool:
+    """True when a release at or before LAST_ZONE_LESS_RELEASE, named by the cell as having loaded this export, may have created the table."""
+    return any(release_version(b) <= LAST_ZONE_LESS_RELEASE for b in spec.get("released_by") or [])
+
+
+def clickhouse_type_findings(ch_of: dict, row_of: dict, wh_types: dict, native: dict, key: list[str], legacy: bool) -> list[str]:
+    """One line per column whose ClickHouse type is none the ledger allows; a naive timestamp may be zone-less only when `legacy`."""
+    bad: list[str] = []
+    for col, r in ch_of.items():
+        want, got = r.get("clickhouse"), wh_types.get(col)
+        if not want or got is None:
+            continue
+        marked = r.get("clickhouse_defect") or r.get("known_defect") or row_of.get(col, {}).get("known_defect")
+        allowed = {want, r.get("today_clickhouse")} if marked else {want}
+        delivery = str(r.get("delivery") or "")
+        if legacy and delivery.startswith("Timestamp(") and '"UTC"' not in delivery:
+            allowed |= {zone_less(w) for w in allowed if w}
+        if not any(got == w or (col in key and w == f"Nullable({got})") for w in allowed if w):
+            bad.append(f"TYPE: `{col}` ({native[col]}): the ledger loads ClickHouse {sorted(w for w in allowed if w)}, the table has {got}")
+    return bad
+
+
 def grade_load(spec: dict) -> dict:
     """Grade the warehouse table a `rivet load` (or `compact`) left: its live rows against the source, per column like a run."""
     from .duck import Oracle
@@ -1718,16 +1760,7 @@ def grade_load(spec: dict) -> dict:
     null_class = frozenset(c for c, xs in defects.items() if None in xs)
     bad = grade_findings(f, {}, forms, native, engine != "mongo", dict.fromkeys([*(spec.get("overrides") or {}), *ledgered]),
                          collapse=collapse, null_class=null_class)
-    for col, r in ch_of.items():
-        want, got = r.get("clickhouse"), wh_types.get(col)
-        if target != "clickhouse" or not want or got is None:
-            continue
-        # A marked row (known_defect, or a ClickHouse defect) excuses only the type it declares today.
-        marked = r.get("clickhouse_defect") or r.get("known_defect") or row_of.get(col, {}).get("known_defect")
-        allowed = {want, r.get("today_clickhouse")} if marked else {want}
-        # A key column cannot be Nullable in ClickHouse.
-        if not any(got == w or (col in key and w == f"Nullable({got})") for w in allowed if w):
-            bad.append(f"TYPE: `{col}` ({native[col]}): the ledger loads ClickHouse {sorted(w for w in allowed if w)}, the table has {got}")
+    bad += clickhouse_type_findings(ch_of, row_of, wh_types, native, key, created_zone_less(spec)) if target == "clickhouse" else []
     bad += [f"WAREHOUSE: {n}" for n in notes if "still exist" in n]
     out = {"failures": [f"WAREHOUSE {target} `{fq}`: {b}" for b in bad], "notes": notes,
            "facts": {k: v for k, v in f.items() if k not in ("pairs", "dst_cols", "src_stats", "dst_stats")}}
@@ -1923,7 +1956,51 @@ def _self_test() -> None:
     _ndjson_self_test()
     _stdout_self_test()
     _mongo_mixed_id_self_test()
+    _zone_less_self_test()
     print("rig_oracle self-test ok")
+
+
+def _zone_less_self_test() -> None:
+    """A zone-less naive timestamp is accepted only on a table a pinned release at or before the UTC change loaded, and never for a zoned one."""
+    import tempfile
+
+    utc = "Nullable(DateTime64(6, 'UTC'))"
+    naive = {"delivery": "Timestamp(µs)", "clickhouse": utc}
+    zoned = {"delivery": 'Timestamp(µs, "UTC")', "clickhouse": utc}
+    ch_of, native = {"n": naive, "z": zoned}, {"n": "DATETIME(6)", "z": "TIMESTAMPTZ"}
+
+    def findings(types: dict, legacy: bool) -> list[str]:
+        return clickhouse_type_findings(ch_of, {}, types, native, ["id"], legacy)
+
+    old = {"n": "Nullable(DateTime64(6))", "z": utc}
+    assert zone_less(utc) == "Nullable(DateTime64(6))" and zone_less("Int64") == "Int64"
+    assert findings({"n": utc, "z": utc}, False) == [] and findings({"n": utc, "z": utc}, True) == []
+    assert findings(old, True) == [], "a naive timestamp a release created stays zone-less"
+    tree = findings(old, False)
+    assert len(tree) == 1 and "`n`" in tree[0] and "TYPE" in tree[0], f"a zone-less type on a table this tree created is a finding: {tree}"
+    assert len(findings({"n": utc, "z": "Nullable(DateTime64(6))"}, True)) == 1, "a zoned column never loses its zone, legacy or not"
+    with tempfile.TemporaryDirectory() as d:
+        def binary(version: str) -> str:
+            path = os.path.join(d, f"rivet-{version}")
+            with open(path, "w") as f:
+                f.write(f"#!/bin/sh\necho 'rivet {version}'\n")
+            os.chmod(path, 0o755)
+            return path
+
+        assert created_zone_less({"released_by": [binary("0.32.2")]})
+        assert created_zone_less({"released_by": [binary("0.31.0"), binary("0.33.0")]})
+        assert not created_zone_less({"released_by": [binary("0.32.3")]}), "a release that already creates the zone is no excuse"
+        assert not created_zone_less({}) and not created_zone_less({"released_by": []}), "no release named: this tree created the table"
+        mute = os.path.join(d, "mute")
+        with open(mute, "w") as f:
+            f.write("#!/bin/sh\necho nothing\n")
+        os.chmod(mute, 0o755)
+        try:
+            created_zone_less({"released_by": [mute]})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a binary that names no version must be an error, not a verdict")
 
 
 def _mongo_mixed_id_self_test() -> None:

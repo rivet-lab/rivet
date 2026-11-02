@@ -230,7 +230,8 @@ def cell(led: Ledger, prev: Path, root: Path, engine: str, url: str, family: tup
                 "table": export.get("table"), "query": export.get("query"), "mode": "batch", "key": [KEY[engine]], "overrides": {},
                 "cursor_expr": None, "state": str(d / ".rivet_state.db"), "load": cfg["load"],
                 "password": CH_PASSWORD if target == "clickhouse" else "", "export": export["name"],
-                "verb": "load", "delta": load_mode == "Incremental", "snapshot": False, "capture_instance": None}
+                "verb": "load", "delta": load_mode == "Incremental", "snapshot": False, "capture_instance": None,
+                "released_by": [str(prev)]}
         try:
             status, detail = verdict_status(grade_load(spec))
         except Exception as e:  # noqa: BLE001 — an oracle error is a FAIL, never a pass

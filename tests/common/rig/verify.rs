@@ -125,6 +125,7 @@ impl Rig {
             }),
             key: self.census_key.as_deref(),
             leaves: &self.failed_run_leaves,
+            release: self.bin.as_deref(),
         };
         if crate::common::verify::settle(
             case,

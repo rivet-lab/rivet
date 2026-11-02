@@ -27,12 +27,7 @@ seams:
     owner: src/url_text.rs::host_port_span
     reads: "the userinfo and the host span of a connection URL"
     bypass:
-      - "rsplit_once ( '@' )"
-      - "split_once ( '@' )"
-      - "rfind ( '@' )"
-      - "find ( '@' )"
-      - "split ( '@' )"
-      - "b'@'"
+      - "'@'"
       - "find_userinfo ("
       - "userinfo_span ("
     exceptions: []

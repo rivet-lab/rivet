@@ -126,15 +126,19 @@ def parse_manifest(doc: dict, patch_dir: Path = HERE) -> list[Row]:
 
 def unknown_cells(rows: list[Row], root: Path = ROOT) -> list[tuple[Row, str]]:
     """Declared cells with no `fn <name>(` in the tree — a renamed test would otherwise grade as absent forever."""
-    live = "\n".join(p.read_text() for p in (root / "tests").rglob("*.rs"))
-    lib = "\n".join(p.read_text() for p in (root / "src").rglob("*.rs"))
+    live, lib = (_fn_names(root / tree) for tree in ("tests", "src"))
     out = []
     for r in rows:
         for c in r.cells:
-            src, name = (lib, c[len(LIB):]) if c.startswith(LIB) else (live, c)
-            if not re.search(rf"\bfn {re.escape(name)}\(", src):
+            names, name = (lib, c[len(LIB):]) if c.startswith(LIB) else (live, c)
+            if name not in names:
                 out.append((r, c))
     return out
+
+
+def _fn_names(tree: Path) -> set[str]:
+    """Every name a `fn <name>(` declares under one tree, read in one pass."""
+    return {m for p in tree.rglob("*.rs") for m in re.findall(r"\bfn (\w+)\(", p.read_text())}
 
 
 def patch_files(patch_text: str) -> list[str]:
@@ -613,6 +617,10 @@ def self_test() -> int:
         assert probe.binaries(["offline_cell", "live_cell", "lib:u1"]) == ["--test", "top_level", "--test", "live_suite", "--lib"]
         assert probe.binaries(["live_cell", "other_live"]) == ["--test", "live_suite"]
         assert probe.binaries([]) == ["--lib"]
+        (Path(td) / "src").mkdir()
+        (Path(td) / "src" / "a.rs").write_text("fn lib_cell() {}\nfn generic_cell<T>() {}\n")
+        named = Row("s", "postgres", "p", ("offline_cell", "renamed_cell", "lib:lib_cell", "lib:generic_cell", "lib:offline_cell"))
+        assert [c for _, c in unknown_cells([named], Path(td))] == ["renamed_cell", "lib:generic_cell", "lib:offline_cell"]
     patch = "--- a/src/a.rs\n+++ b/src/a.rs\n@@\n--- a/src/b.rs\n+++ b/src/b.rs\n@@\n"
     assert stale_message("s", patch, "error: patch failed: src/b.rs:12\nerror: src/b.rs: patch does not apply") \
         == "seed s no longer applies to src/b.rs: update the patch"

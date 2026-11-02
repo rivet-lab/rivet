@@ -53,6 +53,8 @@ pub(crate) struct Opts<'a> {
     pub key: Option<&'a str>,
     /// What the caller declared a failed run may leave (refusal.rs).
     pub leaves: &'a [Leftover],
+    /// The pinned release binary this invocation ran, when it is not this tree's build.
+    pub release: Option<&'a Path>,
 }
 
 /// One graded invocation: the parsed config and, for `run`, each export's manifests before it.
@@ -865,12 +867,28 @@ impl Case {
                 "base": with_ext(&self.image(e, "anchor"), "parquet"),
                 "upper": with_ext(&self.image(e, "prev"), "parquet"),
                 "anchor_keys": with_ext(&self.image(e, "anchor-keys"), "parquet"),
+                "released_by": self.released_by(e, opts.release),
             })
             .as_object()
             .expect("an object")
             .clone(),
         );
         Ok((spec, "grade-load"))
+    }
+
+    /// The pinned release binaries that have loaded `e`, `now` among them, kept beside the stream's images so every handle on the rig sees the same list.
+    fn released_by(&self, e: &Value, now: Option<&Path>) -> Vec<String> {
+        let path = with_ext(&self.image(e, "released-by"), "txt");
+        let mut seen: Vec<String> = std::fs::read_to_string(&path)
+            .map(|t| t.lines().map(str::to_string).collect())
+            .unwrap_or_default();
+        if let Some(bin) = now.map(|b| b.display().to_string())
+            && !seen.contains(&bin)
+        {
+            seen.push(bin);
+            std::fs::write(&path, seen.join("\n")).expect("record the release that loaded");
+        }
+        seen
     }
 
     /// The source facts every oracle verb needs: engine, URL, relation, key, overrides, cursor, state DB.

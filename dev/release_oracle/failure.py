@@ -365,13 +365,48 @@ def _mongo_case(led: Ledger, tok: str) -> None:
             client.drop_database(db)
 
 
+def _pg_unavailable(led: Ledger, scenario: str) -> bool:
+    """True once recorded: no psql is a FAIL (the cell cannot run), a stand PostgreSQL that is down a SKIP."""
+    if not have("psql"):
+        led.failed("postgres", VER, scenario, "-", f"{scenario}: psql is not on PATH; the cell that shells to it did not run", "no psql")
+        return True
+    if not _tcp_open("127.0.0.1", 5432):
+        led.skipped("postgres", VER, scenario, "-", f"{scenario}: the stand PostgreSQL (:5432) is unavailable", "no pg")
+        return True
+    return False
+
+
+def self_test() -> None:
+    """A missing psql records FAIL and a down stand SKIP; no gate cell turns a missing keg tool into a skip."""
+    import re
+
+    from ..pytools.shell import KEG_TOOL_DIRS
+
+    global have, _tcp_open
+    real = have, _tcp_open
+    try:
+        for psql, up, want in ((False, True, "FAIL"), (True, False, "SKIP"), (True, True, None)):
+            have, _tcp_open = (lambda tool, psql=psql: psql), (lambda host, port, up=up: up)
+            led = Ledger(colour=False)
+            led._buf = []
+            assert _pg_unavailable(led, "x") is (want is not None), (psql, up)
+            rows = [c for c in led.cells if c.scenario == "x"]
+            assert [c.status.name for c in rows] == ([want] if want else []), (psql, up, rows)
+    finally:
+        have, _tcp_open = real
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        lines = path.read_text().splitlines()
+        for n, line in enumerate(lines):
+            if any(re.search(rf"have\([\"']{tool}[\"']\)", line) for tool in KEG_TOOL_DIRS):
+                assert not any("skip" in nxt.lower() for nxt in lines[n + 1:n + 3]), \
+                    f"{path.name}:{n + 1}: a missing {sorted(KEG_TOOL_DIRS)} tool must record a failure, not a skip"
+    print("failure self-test ok")
+
+
 def verify_failed_run_tail(led: Ledger) -> None:
     """C1: what a RETURNED failure leaves behind, on every runner shape, then a clean re-run."""
     led.phase("Failed-run tail — errors that RETURN (single, chunked, checkpoint, keyset, drift, mongo)")
-    if not have("psql") or not _tcp_open("127.0.0.1", 5432):
-        led.skipped("postgres", VER, "failed_run_tail", "-",
-                    "failed_run_tail: the stand PostgreSQL (:5432) or psql is unavailable", "no pg")
-    else:
+    if not _pg_unavailable(led, "failed_run_tail"):
         tok = _token()
         for case in PG_CASES:
             _pg_case(led, case, tok)
@@ -538,9 +573,7 @@ def _reset_peer_case(led: Ledger, after_part: bool, tok: str) -> None:
 def verify_transient_retry_exact(led: Ledger) -> None:
     """C7: a transient fault retries to an exact result; after a durable part it stops instead."""
     led.phase("Transient retry — one-shot transients and a toxiproxy reset_peer, exactly once")
-    if not have("psql") or not _tcp_open("127.0.0.1", 5432):
-        led.skipped("postgres", VER, "transient_retry_exact", "-",
-                    "transient_retry_exact: the stand PostgreSQL (:5432) or psql is unavailable", "no pg")
+    if _pg_unavailable(led, "transient_retry_exact"):
         return
     tok = _token()
     for point in ("chunk_write", "after_resume_adopt"):
