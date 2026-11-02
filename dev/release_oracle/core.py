@@ -686,9 +686,20 @@ def docker_exec(container: str, *args: str, stdin: str | None = None, **kw) -> P
     return docker("exec", *flags, container, *args, stdin=stdin, **kw)
 
 
+def checked_exports(p: Proc) -> list[tuple[str, str]]:
+    """(export name, `Strategy:` line) of every export a `rivet check` printed."""
+    name, out = "", []
+    for ln in (x.strip() for x in p.out.splitlines()):
+        if ln.startswith("Export:"):
+            name = ln[len("Export:"):].strip()
+        elif ln.startswith("Strategy:"):
+            out.append((name, ln))
+    return out
+
+
 def strategy_lines(p: Proc) -> list[str]:
     """The `Strategy:` lines a `rivet check` printed."""
-    return [ln.strip() for ln in p.out.splitlines() if ln.strip().startswith("Strategy:")]
+    return [line for _, line in checked_exports(p)]
 
 
 # ── matrix cell concurrency ──────────────────────────────────────────────────────
@@ -797,14 +808,6 @@ SKIP_ALLOWED: dict[str, str] = {
     "live_destination_parity::a_relative_destination_path_moved_by_the_upgrade_is_refused_until_the_files_follow":
         "skips only when the previous release already anchors a relative destination.path beside its config "
         "(0.32.0 on): the move it refuses arises from a release before 0.32 only",
-    "live_cdc_mysql_statement_seam::a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql":
-        "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
-    "live_cdc_mysql_statement_seam::a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql":
-        "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
-    "live_cdc_mysql_statement_seam::a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql":
-        "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
-    "live_cdc_mysql_statement_seam::a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql":
-        "needs a MySQL that folds identifier case (lower_case_table_names other than 0); the stand here keeps case, the nightly runs it on the mysql-stmt stands",
     "live_clickhouse_load::a_cdc_stream_staged_on_real_gcs_is_pulled_by_clickhouse":
         "2026-11-02: needs a GCS HMAC key pair (RIVET_TEST_GCS_HMAC_ID / _SECRET) that no gate host holds, "
         "and minting one is an owner action; closes when the keys are provisioned and the gate env exports them",

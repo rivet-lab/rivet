@@ -1386,6 +1386,14 @@ scenarios:
     mongo:    { test: a_table_dropped_under_a_live_run_delivers_or_fails_loudly_mongo }
     oracle:   { test: a_table_dropped_under_a_live_run_delivers_or_fails_loudly_oracle }
 
+  - id: ddl_table_dropped_after_delivery
+    what: "the collection of a MongoDB export dropped only after its run delivered and exited 0 (a run that cannot be paced): the run is graded against the collection put back with the documents it held, never against the one that is gone"
+    postgres: { na: "the SQL cells slow their run to ten rows per 150 ms, so the statement always lands while it reads" }
+    mysql:    { na: "the SQL cells slow their run to ten rows per 150 ms, so the statement always lands while it reads" }
+    mssql:    { na: "the SQL cells slow their run to ten rows per 150 ms, so the statement always lands while it reads" }
+    mongo:    { test: a_collection_dropped_after_its_run_delivered_is_graded_against_it_put_back_mongo }
+    oracle:   { na: "the SQL cells slow their run to ten rows per 150 ms, so the statement always lands while it reads" }
+
   - id: hostile_text
     what: "text with a NUL (where the engine stores one: not PostgreSQL), control characters, quotes and a backslash, characters outside the basic plane, right-to-left text and the empty string; each value alone in a table of its own, exported whole twice: both runs deliver it as the source holds it (the default oracle compares the value) and `validate` passes, or both fail loudly"
     postgres: { test: hostile_text_is_delivered_or_fails_loudly_postgres }

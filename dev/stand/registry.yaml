@@ -20,10 +20,12 @@ sources:
   mongo_rs:     {container: rivet-mongo-rs-1,     url: "mongodb://127.0.0.1:27018/?directConnection=true"}
   mongo_shard:  {container: rivet-mongos-1,       url: &mongo_shard_url "mongodb://127.0.0.1:27991/?directConnection=true"}
 
-# Compose profiles the release gate starts itself, because live cells panic without their stand: the services to wait for and the URL whose port says the stand is up.
+# Stands the release gate starts itself: compose profile, services to wait for, URL that says it is up.
 gate_profiles:
-  shard: {services: [mongos],        url: *mongo_shard_url}
-  tz:    {services: [clickhouse-tz], url: "http://127.0.0.1:8125"}
+  shard:       {services: [mongos],               url: *mongo_shard_url}
+  tz:          {services: [clickhouse-tz],        url: "http://127.0.0.1:8125"}
+  mysql-stmt:  {services: [mysql-stmt-84-lctn1],  url: "mysql://root@127.0.0.1:3333"}
+  clickhouse:  {services: [clickhouse],           url: "http://127.0.0.1:8123", profile: ""}
 
 # Persistent databases on every source: `rivet` (tests, gate) and `rivet_bench` (the seeded
 # 1M-row harness fixture, expensive to rebuild). Nothing else is permanent.

@@ -55,6 +55,12 @@ GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-re
         "2026-11-01: #727 control: statements the reader met before the sql_mode fix are met the same way, so 0.32.2 passes",
     "a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view":
         "2026-11-02: #743 moved this cell's crash behind a first successful load; re-appending after a crash held on 0.32.2 too, and the cell that fails there is a_first_load_that_dies_after_appending_is_refused_until_the_leftovers_are_dropped; closes when the baseline moves past 0.32.2",
+    "a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_as_the_source_bigquery":
+        "2026-11-02: #738 rewrote the shard env of the cells; the BigQuery warehouse variant converges on 0.32.2 too (3 of 3 runs green there), and the a_sharded_ mongo cells and the Snowflake and ClickHouse variants of this body are the ones that fail there; closes when the baseline moves past 0.32.2",
+    "a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql":
+        "2026-11-02: #757 folding-server control: 0.32.2 lower-cases the statement before it matches, so a drop spelled in another case was refused there as well; the cells that fail there are the folding-server cells of the table spelled in another case; closes when the baseline moves past 0.32.2",
+    "the_same_statements_on_tables_the_export_does_not_capture_leave_the_stream_running_mysql":
+        "2026-11-02: #757 no-refusal control: statements on tables the export does not capture were met as before on 0.32.2, so it passes there; it guards the name compare from refusing what it must not; closes when the baseline moves past 0.32.2",
     "apply_forms_partition_like_run_mssql":
         "2026-11-02: #755 only moved the fixture into a helper; the apply forms partition like run on 0.32.2 too, and the cell that fails there is validate_reads_every_partition_mssql; closes when the baseline moves past 0.32.2",
     "apply_forms_partition_like_run_mysql":
