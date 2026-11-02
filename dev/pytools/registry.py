@@ -46,6 +46,11 @@ def _running_container(declared: str, url: str) -> str:
     return found[0] if len(found) == 1 else declared
 
 
+def gate_profiles() -> dict[str, dict]:
+    """Compose profile → {services, url} for every profile the release gate starts itself."""
+    return dict(load()["gate_profiles"])
+
+
 def warehouse() -> tuple[str, str, str]:
     """(BigQuery project, GCS bucket, BigQuery location) of the stand's warehouse."""
     r = load()
