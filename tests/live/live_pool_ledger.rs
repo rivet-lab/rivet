@@ -135,42 +135,7 @@ fn existing_tables(bq: &BqLive, names: &[&str]) -> Vec<String> {
     .collect()
 }
 
-/// A pooled load whose LEDGER IS CUT MID-RUN, then the run that finishes the job.
-///
-/// What is asserted is timing-INDEPENDENT and is the contract that matters: a
-/// load that loses its ledger fails LOUDLY, and the next run leaves every table
-/// holding exactly its rows — never a silently short or doubled warehouse.
-///
-/// What the kill point decides is only WHICH partial state you get, and that is
-/// printed, not asserted. Three were measured on this fixture, and the first two
-/// are recorded because they are the reason the third looks the way it does:
-///   * 5000 ms, 150 ms ledger toxic — lands AFTER the whole leg. All six loaded,
-///     the run passed: that draft proved only that loads are fast (the six-table
-///     leg is 2991 ms end to end by BigQuery's own job history).
-///   * 1200 ms / 2600 ms, same toxic — both land BEFORE any statement is issued,
-///     in planning and in per-export typing respectively ("reading its load spec
-///     from the state DB: connection closed", naming 4 of 6 exports). 0 tables,
-///     0 jobs, nothing to top up. The toxic itself was the cause: the ledger is
-///     read once per table at the FRONT of a load.
-///   * 1800 ms, NO toxic — aims at the window AFTER a `LOAD_DATA` statement
-///     succeeds and BEFORE `execute_load` writes `record_success` (the warehouse
-///     work runs first, the ledger row after it). A table durable in BigQuery
-///     with no ledger row is simply re-loaded next run — idempotent here, since
-///     `full` OVERWRITES. Under an APPEND mode (`incremental`, `cdc`) the same
-///     re-consumption would DOUBLE, which is why that case wants a guard rather
-///     than a retry.
-///
-/// Worth stating because it is the answer to "how do we top up what was half
-/// loaded": on every kill point reached so far, rivet did NOT half-load. It
-/// refused the whole run ("a table that cannot be typed must not silently
-/// not-load") and left the warehouse untouched, so the next run simply did all
-/// of it.
-///
-/// The job-history dump exists because the warehouse can answer independently of
-/// the ledger: rivet labels every job `managed_by=rivet` + `rivet_op` +
-/// `rivet_table` + `rivet_run`. It cannot replace the ledger — one `LOAD_DATA`
-/// consumes MANY source runs (`source_run_ids` is a Vec) and a label holds one
-/// scalar — so it answers "did this land", never "which runs were consumed".
+/// A pooled load whose ledger is cut mid-run, after every table's first successful load, fails loudly; the next run leaves every table holding the source's current rows.
 #[test]
 #[ignore = "live: requires postgres + postgres-state + toxiproxy + BigQuery creds"]
 fn a_ledger_cut_mid_load_fails_loudly_and_the_next_run_finishes_the_job() {
@@ -210,23 +175,21 @@ fn a_ledger_cut_mid_load_fails_loudly_and_the_next_run_finishes_the_job() {
         "the extract must succeed before the crash is staged:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    rig.load_ok(&["--pool", &TABLES.to_string()], &env);
+    pg.exec(&format!(
+        "INSERT INTO {t} (id, v) SELECT g, md5(g::text) FROM generate_series({}, {}) g",
+        ROWS + 1,
+        ROWS + 10
+    ));
+    let out = rig.run_args_env(&[], &env);
+    assert!(
+        out.status.success(),
+        "the second extract must succeed before the crash is staged:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    // NO latency toxic here, deliberately. The ledger is read once per table at
-    // the FRONT of a load — each export's load spec is typed from it — so slowing
-    // it stretches the preparation phase and pushes the warehouse statements PAST
-    // any kill point, which is what the two measurements above ran into.
-    // The KILLER goes to the background thread, not the load: `Rig` holds
-    // `RefCell`s and so is not `Sync`, and the killer needs nothing but the
-    // proxy name.
     let pool = TABLES.to_string();
-    // The cut is EVENT-driven: the killer watches the ledger directly (:5433, past the
-    // proxy) and cuts the proxy the moment this load's first `writing` marker lands —
-    // one load is then between its marker and its closing row, and the others are
-    // still ahead of their markers. A fixed sleep (1800 ms) landed after the whole leg
-    // had finished in gate run 9 and before any statement in others, so it graded the
-    // timer, not rivet.
     let watch = format!("%{t}%");
-    // The SAME ledger rivet writes (the gate gives each run its own state DB), past the proxy.
     let direct = postgres_state_toxi_url().replace(":15433/", ":5433/");
     let killer = std::thread::spawn(move || {
         let mut c =
@@ -264,7 +227,6 @@ fn a_ledger_cut_mid_load_fails_loudly_and_the_next_run_finishes_the_job() {
         String::from_utf8_lossy(&crashed.stderr)
     );
 
-    // The partial state, by BigQuery's own catalog.
     toxi_enable("postgres_state");
     toxi_reset_toxics("postgres_state");
     let after_crash = existing_tables(&bq, &tables);
@@ -273,12 +235,6 @@ fn a_ledger_cut_mid_load_fails_loudly_and_the_next_run_finishes_the_job() {
         after_crash.len(),
         tables.len()
     );
-    // The WAREHOUSE's own account of the same moment. rivet labels every job
-    // (`managed_by=rivet`, `rivet_op`, `rivet_table`, `rivet_run`), so the job
-    // history answers "did this table's load statement actually succeed?"
-    // independently of the ledger that just died — the signal a top-up could
-    // reconcile from. Printed, not asserted: this test documents the gap, it
-    // does not pin a contract rivet does not yet offer.
     eprintln!("--- BigQuery job history for the same tables ---");
     for r in bq.read_bq_rows(&format!(
         "SELECT l.value AS tbl, state, IFNULL(error_result.reason, '-') AS err \
@@ -296,7 +252,6 @@ fn a_ledger_cut_mid_load_fails_loudly_and_the_next_run_finishes_the_job() {
         );
     }
 
-    // The top-up run, on a healthy ledger.
     let topup = rig.load_args_env(&[], &env);
     let said = format!(
         "{}{}",

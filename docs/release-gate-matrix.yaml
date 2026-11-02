@@ -409,8 +409,8 @@ infra:
     # A row whose every declared cell skips on the stand for a reason it names (Snowflake, a stand profile) is
     # NOT-GRADED-HERE: listed, never a catch, and held under this count; one more is a FAIL.
     not_graded_here_ceiling: 7  # ratchet-pin: seeded-not-graded-here
-    # 2026-11-02: N/A rows are ledger rows held under a shrink-only count; 499 to 461 by moving 14 seeds onto the target and destination scopes; shrinks as cells are written.
-    na_ceiling: 461  # ratchet-pin: seeded-na
+    # 2026-11-02: shrink-only count of N/A ledger rows; 461 after #765 moved 14 seeds onto target/destination scopes, +12 structural N/A rows from #757's MySQL statement-seam seeds (no statement text on the other engines), which merged before #765 counted; shrinks as cells are written.
+    na_ceiling: 473  # ratchet-pin: seeded-na
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
