@@ -45,6 +45,20 @@ fn env_rs_endpoints_are_the_registry_endpoints() {
             "tests/common/env.rs disagrees with dev/stand/registry.yaml for `{source}`"
         );
     }
+    for (profile, hard_coded) in [
+        ("shard", env::MONGO_SHARD_URL),
+        ("tz", env::CLICKHOUSE_TZ_HTTP_URL),
+    ] {
+        assert_eq!(
+            registry::gate_profile_url(profile),
+            hard_coded,
+            "tests/common/env.rs disagrees with dev/stand/registry.yaml for gate profile `{profile}`"
+        );
+    }
+    assert!(
+        registry::gate_profile_url("tz").ends_with(&format!(":{}", env::CLICKHOUSE_TZ_PORT)),
+        "CLICKHOUSE_TZ_PORT disagrees with dev/stand/registry.yaml for gate profile `tz`"
+    );
     assert!(
         registry::stand_url("mongo_shard").contains(&format!(":{}/", env::MONGO_SHARD_PORT)),
         "MONGO_SHARD_PORT disagrees with dev/stand/registry.yaml for `mongo_shard`"
