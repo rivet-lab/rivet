@@ -91,7 +91,6 @@ code does not count.
   - server versions: every `clickhouse_load` gate cell is green on 24.8, 25.8, 26.3, 26.8 and 26.10 (`dev/clickhouse/version_matrix.py`, 2026-10-31); the gate runs the stand's 24.8;
   - `load.ca_file`: a load over `https://` to a server whose certificate a private CA signed is refused by its TLS cause without `ca_file` and lands with it (the stand serves HTTPS on 8443);
   - the named-collection pull from real GCS through an HMAC key: a live cell stages a CDC stream on a real bucket and ClickHouse reads its parts itself (`RIVET_TEST_GCS_HMAC_ID`/`_SECRET`; measured 2026-10-31);
-  - M8 (the reference page, [recipes/clickhouse-load.md](recipes/clickhouse-load.md), with its known limits).
+  - M8 (the reference page, [recipes/clickhouse-load.md](recipes/clickhouse-load.md), with its known limits; a driven run on 2026-11-02 followed it on ClickHouse 24.8 from PostgreSQL CDC into real GCS: init, run, load, an insert/update/delete cycle, a re-load, `compact`, the type report, the pull through an HMAC-key collection with and without its grant, a changed partition with and without new parts, all under exactly the grants the page lists. The source took `--tls disable`, because the stand's PostgreSQL has no TLS; the divergences it found are fixed in the page and the messages).
 - **Open for GA:**
-  - M8's driven run;
   - M9.

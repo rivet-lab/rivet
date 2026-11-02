@@ -754,14 +754,14 @@ fn changelog_conflict(
         .find_map(|p| engine.strip_prefix(p))
         .unwrap_or(engine);
     let restart = format!(
-        "Nothing was written. Drop it and `{view}`, then start the log over: an incremental \
+        "Drop `{changes}` and `{view}`, then start the log over: an incremental \
          export with `rivet state reset`; a CDC stream with its re-baseline. {}",
         crate::source::cdc::checkpoint_identity::RECOVER
     );
     if engine != want_engine {
         return Some(format!(
             "`{changes}` is a {engine}, but this load writes a {want_engine} change log \
-             (the export's mode changed; ADR-0035). {restart}"
+             (the export's mode changed; ADR-0035). Nothing was written. {restart}"
         ));
     }
     let sorting_key = sorting_key.trim();
@@ -777,7 +777,7 @@ fn changelog_conflict(
     if want_engine == "ReplacingMergeTree" && key != pk {
         return Some(format!(
             "`{changes}` collapses versions by ({}), but `load.pk` is now ({}): rows the old key \
-             already merged cannot be told apart again. {restart}",
+             already merged cannot be told apart again. Nothing was written. {restart}",
             key.join(", "),
             pk.join(", ")
         ));
@@ -793,7 +793,8 @@ fn changelog_conflict(
         };
         return Some(format!(
             "`{changes}` is partitioned by {existing}, but the load declares {declared}; \
-             ClickHouse cannot re-partition a table in place. Set `partition:` back, or: {restart}"
+             ClickHouse cannot re-partition a table in place. Nothing was written. Set \
+             `partition:` back to keep the log, or take the new partition: {restart}"
         ));
     }
     wanted.iter().find_map(|&(name, want)| {
@@ -801,9 +802,9 @@ fn changelog_conflict(
         (*have != want && !zone_less_of(have, want)).then(|| {
             format!(
                 "column `{name}` of `{changes}` is {have}, but the export now resolves it to {want}; \
-                 inserting would convert every value silently. Widen it with `ALTER TABLE \
+                 inserting would convert every value silently. Nothing was written. Widen it with `ALTER TABLE \
                  {changes} MODIFY COLUMN `{name}` {want}` (not possible for a key column). \
-                 Otherwise: {restart}"
+                 Or take the new type: {restart}"
             )
         })
     })
@@ -1393,7 +1394,9 @@ mod tests {
         let moved = conflict(Some(declared), "toYear(created_at)").expect("granularity changed");
         assert!(
             moved.contains("partitioned by toYear(created_at), but the load declares toYYYYMM")
-                && moved.contains("Nothing was written"),
+                && moved.contains("in place. Nothing was written. Set `partition:` back")
+                && moved.contains("Drop `d.t__changes` and `d.t`")
+                && !moved.contains(": Nothing"),
             "{moved}"
         );
         let added = conflict(Some(declared), "").expect("partition added to a flat log");
