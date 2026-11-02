@@ -464,10 +464,10 @@ fn every_gate_function_has_a_call_site() {
 
     let mut orphans: Vec<String> = Vec::new();
     for f in &defined {
-        let needle = format!("{f}(");
+        let needles = [format!("{f}("), format!(".{f},"), format!(".{f})")];
         let called = all
             .lines()
-            .filter(|l| l.contains(&needle))
+            .filter(|l| needles.iter().any(|n| l.contains(n.as_str())))
             .any(|l| !l.trim_start().starts_with("def "));
         if !called {
             orphans.push(f.clone());

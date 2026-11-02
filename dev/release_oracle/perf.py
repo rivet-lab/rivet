@@ -992,12 +992,13 @@ def verify_perf_regression(led: Ledger) -> None:
         return
     led.phase("Perf regression vs prev — batch paths and CDC drains: wall, CPU, RSS, source harm")
     root = Path(tempfile.mkdtemp(prefix="rivet-oracle-perf-"))
-    _aa(led, prev, root)
-    _batch(led, prev, root)
-    _off_happy_path(led, prev, root)
-    _cdc(led, prev)
-    _conns(led, prev)
-    _batch_conns(led, prev, root)
-    _load(led, prev, root)
-    _ch_load(led, prev, root)
-    _cdc20(led, prev, root)
+    sections = {
+        "aa": lambda: _aa(led, prev, root), "batch": lambda: _batch(led, prev, root),
+        "off happy path": lambda: _off_happy_path(led, prev, root), "cdc": lambda: _cdc(led, prev),
+        "conns": lambda: _conns(led, prev), "batch conns": lambda: _batch_conns(led, prev, root),
+        "load": lambda: _load(led, prev, root), "ch load": lambda: _ch_load(led, prev, root),
+        "cdc20": lambda: _cdc20(led, prev, root),
+    }
+    for name, run in sections.items():
+        with led.span(f"perf {name}"):
+            run()

@@ -41,7 +41,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 try:
     from ..pytools.shell import have, wait_until
@@ -316,12 +316,14 @@ class Ledger:
                 self.bad(msg)
                 self.add("-", "-", "known_red", "-", Status.FAIL, msg)
 
-    def close_matrix_rows(self, doc: dict | None = None) -> None:
-        """After a FULL run: every `test` row of docs/release-gate-matrix.yaml ran its stage, and the stage recorded a row."""
+    def close_matrix_rows(self, doc: dict | None = None, owned: Callable[[str], bool] = lambda fn: True) -> None:
+        """After a FULL run: every `test` row of docs/release-gate-matrix.yaml whose stage this run `owned` ran it, and the stage recorded a row."""
         if doc is None:
             import yaml
             doc = yaml.safe_load((ROOT / "docs/release-gate-matrix.yaml").read_text())
         for fn, row in sorted(matrix_test_stages(doc, STAGES_DEFINED).items()):
+            if not owned(fn):
+                continue
             rows = STAGES_RUN.get(fn)
             if rows is None:
                 why = f"{row} is `test` in docs/release-gate-matrix.yaml but {fn}() never ran this gate"
@@ -510,7 +512,8 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
     prev = None
     if path.exists():
         lines = [x for x in path.read_text().splitlines() if x.strip()]
-        prev = _json.loads(lines[-1]) if lines else None
+        same = [r for r in map(_json.loads, lines) if r.get("gate") == gate]
+        prev = same[-1] if same else None
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         f.write(_json.dumps(rec) + "\n")
