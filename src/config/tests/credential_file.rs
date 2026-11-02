@@ -36,7 +36,7 @@ fn a_named_credentials_file_that_is_no_key_stops_the_load() {
     std::fs::write(dir.path().join("empty.json"), b"").unwrap();
     std::fs::write(dir.path().join("broken.json"), b"{\"type\":").unwrap();
     std::fs::create_dir(dir.path().join("keydir")).unwrap();
-    for name in ["empty.json", "broken.json", "keydir"] {
+    for name in ["empty.json", "broken.json", "keydir", "empty.json/k.json"] {
         let err = Config::load(&config_beside(dir.path(), &format!("./{name}"))).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
         let shown = format!("{err:#}");
