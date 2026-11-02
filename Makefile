@@ -399,6 +399,13 @@ release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## 
 	@# the next run, and no test output stays billed in storage.
 	@$(MAKE) --no-print-directory sweep-test-db sweep-test-cloud
 
+release-oracle-island: release-oracle-prev-bin sweep-test-db  ## The measuring island alone (release regression, perf, source harm, previous-release differential, field symptom replay, scale memory, flat RSS) on the whole machine. Its green record for the tag's sha is what dev/pytools/release.py requires beside release-oracle-full; run it nightly on main.
+	@rm -rf target/package
+	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	 echo "  previous release: $${prev:-<none: the regression / differential / field-replay legs will FAIL; re-run release-oracle-prev-bin>}"; \
+	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --island $(ARGS)
+	@$(MAKE) --no-print-directory sweep-test-db
+
 release-oracle-bless: release-oracle-prev-bin  ## Re-capture the verdict + duckdb-type goldens. Deliberate: a golden must be written by rivet's own code, never edited by hand.
 	@rm -rf target/package
 	cargo build --release

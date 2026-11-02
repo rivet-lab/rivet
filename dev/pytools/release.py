@@ -24,6 +24,9 @@ Preconditions the script enforces, in order (1-5 unchanged from the bash):
 7. The seeded recall's run record (`recall-runs.jsonl` in the seeded state dir,
    or `--recall-record FILE`) holds a complete, green recall of exactly HEAD's
    commit from a clean tree.
+8. The same gate record (or `--island-record FILE`) holds a `release-oracle-island`
+   run of exactly HEAD's commit (the measured stages, `make release-oracle-island`)
+   under the same rules as 6.
 
 WHAT THIS SCRIPT DOES **NOT** CHECK (reported, not invented):
 
@@ -67,7 +70,7 @@ ROOT = shell.ROOT
 CARGO_TOML = ROOT / "Cargo.toml"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
-USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE]
+USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE] [--island-record FILE]
 
 Options:
   --dry-run     Validate only; do not create or push a tag
@@ -76,6 +79,7 @@ Options:
   --message     Annotated tag message (default: vX.Y.Z: <CHANGELOG subtitle>)
   --gate-record The gate's verdict lines (default: dev/release-oracle/timings.jsonl)
   --recall-record  The seeded recall's run lines (default: recall-runs.jsonl in the seeded state dir)
+  --island-record  The measured island's verdict lines (default: the gate record)
   --self-test   Check the gate-record precondition on fixtures; tags nothing
   -h, --help    Show this help"""
 
@@ -87,6 +91,8 @@ ACTIONS_URL = "https://github.com/rivet-lab/rivet/actions/workflows/release.yml"
 GATE_RECORD = ROOT / "dev" / "release-oracle" / "timings.jsonl"
 #: The only gate kind whose green verdict supports a tag (dev/release_oracle/core.py FULL_GATE).
 FULL_GATE = "release-oracle-full"
+#: The gate kind of the measured stages alone (`make release-oracle-island`): the other record a tag needs.
+ISLAND_GATE = "release-oracle-island"
 #: The configuration a full gate runs under: no bless mode, no tolerance override, both state backends graded.
 CANONICAL_CONFIG: dict = {"bless": [], "knobs": {}, "state": ["postgres", "sqlite"]}
 
@@ -105,6 +111,7 @@ class Args:
     message: str = ""
     gate_record: str = ""
     recall_record: str = ""
+    island_record: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -148,6 +155,12 @@ def parse_args(argv: list[str]) -> Args:
             if not value:
                 raise _Usage()
             a.recall_record = value
+            i += 2
+        elif arg == "--island-record":
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+            if not value:
+                raise _Usage()
+            a.island_record = value
             i += 2
         elif arg in ("-h", "--help"):
             raise _Usage()
@@ -243,11 +256,11 @@ def binary_is_tree(stamp: object, sha: str) -> bool:
     return isinstance(stamp, str) and stamp != "" and sha.startswith(stamp)
 
 
-def gate_refusal(sha: str, record: Path) -> str | None:
-    """Why `sha` may not be tagged by the gate record, or None when its latest full-gate run is RELEASE-READY on a clean tree with a binary built from `sha`, under the canonical configuration."""
+def gate_refusal(sha: str, record: Path, kind: str = FULL_GATE) -> str | None:
+    """Why `sha` may not be tagged by the `kind` runs in `record`, or None when the latest such run is RELEASE-READY on a clean tree with a binary built from `sha`, under the canonical configuration."""
     if not record.is_file():
         return f"no gate record at {record}"
-    runs, reduced = [], 0
+    runs, other = [], 0
     for line in record.read_text().splitlines():
         try:
             rec = json.loads(line)
@@ -255,25 +268,30 @@ def gate_refusal(sha: str, record: Path) -> str | None:
             continue
         if not isinstance(rec, dict) or rec.get("sha") != sha:
             continue
-        if rec.get("gate") == FULL_GATE:
+        if rec.get("gate") == kind:
             runs.append(rec)
         else:
-            reduced += 1
+            other += 1
     if not runs:
-        also = f" ({reduced} reduced run(s) of it, which cannot support a tag)" if reduced else ""
-        return f"no {FULL_GATE} run of {sha[:12]} in {record}{also}"
+        also = f" ({other} run(s) of other kinds, which cannot support a tag)" if other else ""
+        return f"no {kind} run of {sha[:12]} in {record}{also}"
     last = runs[-1]
     if last.get("dirty") is not False:
-        return f"the latest {FULL_GATE} run of {sha[:12]} ({last.get('at')}) graded a tree with uncommitted changes"
+        return f"the latest {kind} run of {sha[:12]} ({last.get('at')}) graded a tree with uncommitted changes"
     if last.get("verdict") != "RELEASE-READY":
-        return f"the latest {FULL_GATE} run of {sha[:12]} ({last.get('at')}) says {last.get('verdict')}"
+        return f"the latest {kind} run of {sha[:12]} ({last.get('at')}) says {last.get('verdict')}"
     if not binary_is_tree(last.get("binary"), sha):
-        return (f"the latest {FULL_GATE} run of {sha[:12]} ({last.get('at')}) graded a binary stamped "
+        return (f"the latest {kind} run of {sha[:12]} ({last.get('at')}) graded a binary stamped "
                 f"{last.get('binary')!r}, not this commit")
     if last.get("config") != CANONICAL_CONFIG:
-        return (f"the latest {FULL_GATE} run of {sha[:12]} ({last.get('at')}) ran under {last.get('config')!r}, "
+        return (f"the latest {kind} run of {sha[:12]} ({last.get('at')}) ran under {last.get('config')!r}, "
                 f"not the canonical configuration {CANONICAL_CONFIG!r}")
     return None
+
+
+def island_refusal(sha: str, record: Path) -> str | None:
+    """Why `sha` may not be tagged on the measured island's account: no clean, canonical, green `release-oracle-island` run of exactly this commit."""
+    return gate_refusal(sha, record, ISLAND_GATE)
 
 
 def recall_refusal(sha: str, record: Path | None) -> str | None:
@@ -285,8 +303,8 @@ def recall_refusal(sha: str, record: Path | None) -> str | None:
     return run_record.refusal(sha, record or run_record.seeded_dir() / run_record.RUNS_FILE)
 
 
-def tag_refusal(sha: str, gate: Path, recall: Path | None) -> tuple[str, str] | None:
-    """The first record precondition `sha` fails, as (why, hint), gate record before recall record; None when both hold."""
+def tag_refusal(sha: str, gate: Path, recall: Path | None, island: Path | None = None) -> tuple[str, str] | None:
+    """The first record precondition `sha` fails, as (why, hint), in the order gate record, recall record, island record; None when all hold."""
     why = gate_refusal(sha, gate)
     if why:
         return why, ("run `make release-oracle-full` on this commit and tag it once the gate says RELEASE-READY; "
@@ -295,6 +313,10 @@ def tag_refusal(sha: str, gate: Path, recall: Path | None) -> tuple[str, str] | 
     if why:
         return why, ("a tag needs a complete green seeded recall of this commit; "
                      "pass --recall-record FILE when it ran on another machine")
+    why = island_refusal(sha, island or gate)
+    if why:
+        return why, ("a tag needs the measured island green on this commit: run `make release-oracle-island`; "
+                     "pass --island-record FILE when it ran on another machine")
     return None
 
 
@@ -312,7 +334,7 @@ def self_test() -> int:
         ([], "no gate record"),
         ([rec(sha=other)], "no release-oracle-full run"),
         ([rec(sha=sha[:8])], "no release-oracle-full run"),
-        ([rec(gate="release-oracle")], "1 reduced run(s)"),
+        ([rec(gate="release-oracle")], "1 run(s) of other kinds"),
         ([rec(verdict="NOT RELEASABLE")], "says NOT RELEASABLE"),
         ([rec(verdict="NOT GRADED")], "says NOT GRADED"),
         ([rec(dirty=True)], "uncommitted changes"),
@@ -358,17 +380,42 @@ def self_test() -> int:
                 path.write_text("\n".join(lines) + "\n")
             got = recall_refusal(sha, path)
             assert (got is None) if want is None else (got is not None and want in got), (i, lines, got)
+    isl = lambda **kw: rec(gate=ISLAND_GATE, **kw)  # noqa: E731
+    island_cases = [
+        ([], "no gate record"),
+        ([isl(sha=other)], "no release-oracle-island run"),
+        ([rec()], "1 run(s) of other kinds"),
+        ([isl(verdict="NOT RELEASABLE")], "says NOT RELEASABLE"),
+        ([isl(), isl(verdict="NOT RELEASABLE")], "says NOT RELEASABLE"),
+        ([isl(dirty=True)], "uncommitted changes"),
+        ([isl(binary=other[:9])], "graded a binary stamped"),
+        ([isl(config={"bless": [], "knobs": {"RIVET_PERF_WALL_TOL": "10"}, "state": ["postgres", "sqlite"]})], "not the canonical configuration"),
+        ([rec(gate="release-oracle")], "1 run(s) of other kinds"),
+    ]
     with tempfile.TemporaryDirectory() as d:
         gate, good, bad = Path(d) / "gate.jsonl", Path(d) / "good.jsonl", Path(d) / "bad.jsonl"
         gate.write_text(rec() + "\n")
         good.write_text(run() + "\n")
         bad.write_text(run(complete=False) + "\n")
-        assert tag_refusal(sha, gate, good) is None
-        narrowed, ungated = tag_refusal(sha, gate, bad), tag_refusal(sha, Path(d) / "none.jsonl", good)
+        island = Path(d) / "island.jsonl"
+        island.write_text(rec(gate=ISLAND_GATE) + "\n")
+        assert tag_refusal(sha, gate, good, island) is None
+        gate.write_text(rec() + "\n" + rec(gate=ISLAND_GATE) + "\n")
+        assert tag_refusal(sha, gate, good) is None, "one record file holds both kinds"
+        gate.write_text(rec() + "\n")
+        narrowed, ungated = tag_refusal(sha, gate, bad, island), tag_refusal(sha, Path(d) / "none.jsonl", good, island)
         assert narrowed and "seeded recall" in narrowed[1], "a gate-green sha with a narrowed recall must be refused by the tag path"
         assert ungated and "release-oracle-full" in ungated[1], "a recall-green sha with no gate record must be refused by the tag path"
+        unmeasured = tag_refusal(sha, gate, good)
+        assert unmeasured and "release-oracle-island" in unmeasured[1], "a gate- and recall-green sha with no island run must be refused by the tag path"
+        for i, (lines, want) in enumerate(island_cases):
+            path = Path(d) / f"i{i}.jsonl"
+            if lines:
+                path.write_text("\n".join(lines) + "\n")
+            got = tag_refusal(sha, gate, good, path)
+            assert got is not None and want in got[0] and "release-oracle-island" in got[1], (i, lines, got)
     print(f"self-test ok: release gate record — {len(cases)} cases, only a clean green full-gate run of this commit tags; "
-          f"{len(recall_cases)} recall cases, only a complete green recall of it")
+          f"{len(recall_cases)} recall cases, only a complete green recall of it; {len(island_cases)} island cases")
     return 0
 
 
@@ -449,7 +496,8 @@ def main_cli(argv: list[str] | None = None) -> int:
 
     sha = _git("rev-parse", "HEAD").check("git rev-parse HEAD").stdout.strip()
     record = Path(args.gate_record) if args.gate_record else GATE_RECORD
-    refused = tag_refusal(sha, record, Path(args.recall_record) if args.recall_record else None)
+    refused = tag_refusal(sha, record, Path(args.recall_record) if args.recall_record else None,
+                          Path(args.island_record) if args.island_record else None)
     if refused:
         raise shell.Fail(f"error: {refused[0]}", hint=refused[1])
     head = sha[:8]
@@ -471,6 +519,7 @@ def main_cli(argv: list[str] | None = None) -> int:
   commit:  {head} ({branch})
   gate:    {FULL_GATE} RELEASE-READY ({record})
   recall:  complete green seeded recall of this commit
+  island:  {ISLAND_GATE} RELEASE-READY
   message: {message}
   push:    {"yes" if args.push else "no"}
   CI:      .github/workflows/release.yml (on tag push)"""
