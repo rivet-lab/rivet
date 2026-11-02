@@ -16,6 +16,7 @@ struct Engine {
 
 /// Every engine whose `rivet cdc` arm exists in this build.
 fn engines() -> Vec<Engine> {
+    #[cfg_attr(not(feature = "oracle"), allow(unused_mut))]
     let mut v = vec![
         Engine {
             ty: "mysql",

@@ -429,6 +429,7 @@ fn derived_capture_marker_set_is_pinned() {
         "cli(",
         "cli_cdc(",
         "cli_cdc_ndjson(",
+        "cli_cdc_raw(",
         "cli_env(",
         "cli_in_dir(",
         "drain_and_read(",
