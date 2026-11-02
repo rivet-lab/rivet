@@ -3656,6 +3656,197 @@ fn a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated(
     );
 }
 
+/// The source side of a re-baseline cell: SQL on the source, its `(id, v)` rows, a wait for capture, and the incident that loses the log.
+struct RebaselineSource<'a> {
+    table: String,
+    rig: Rig,
+    exec: &'a dyn Fn(&str),
+    rows: &'a dyn Fn() -> Vec<(i64, i64)>,
+    settle: &'a dyn Fn(i64),
+    lose_log: &'a dyn Fn(),
+}
+
+/// The `TRUNCATE TABLE ...` statement a refusal printed, without its `;`.
+fn printed_truncate(out: &std::process::Output) -> String {
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let at = said
+        .find("TRUNCATE TABLE ")
+        .unwrap_or_else(|| panic!("the refusal prints the TRUNCATE:\n{said}"));
+    said[at..].split(';').next().expect("statement").to_string()
+}
+
+/// A key deleted while the log was lost: the re-baseline is refused over the old log, and after the printed TRUNCATE the view is the source.
+fn a_re_baseline_after_a_lost_log_loads_only_after_the_printed_truncate(
+    src: RebaselineSource,
+    db: &Db,
+    prefix: &str,
+) {
+    let view = format!("{}.{}", db.0, src.table);
+    let t = &src.table;
+    src.rig.run_ok();
+    load(&src.rig);
+    clickhouse_rows_match_source(&view, (src.rows)(), "");
+    (src.exec)(&format!("UPDATE {t} SET v = 10 WHERE id = 1"));
+    (src.settle)(5);
+    src.rig.run_ok();
+    load(&src.rig);
+    clickhouse_rows_match_source(&view, (src.rows)(), "");
+    let streamed = clickhouse_rows(&format!(
+        "SELECT id, v FROM {view} WHERE NOT __is_deleted ORDER BY id FORMAT TSV"
+    ));
+
+    (src.lose_log)();
+    (src.exec)(&format!("UPDATE {t} SET v = 20 WHERE id = 1"));
+    (src.exec)(&format!("DELETE FROM {t} WHERE id = 2"));
+    (src.exec)(&format!("INSERT INTO {t} (id, v) VALUES (4, 4)"));
+    (src.settle)(9);
+    let _ = std::fs::remove_file(src.rig.checkpoint());
+    assert!(fake_gcs_delete_prefix(BUCKET, prefix) > 0);
+    assert!(
+        clear_cdc_snapshot(
+            &src.rig.config_path(),
+            src.rig.export_name(),
+            &format!("{BUCKET}/{prefix}")
+        ) > 0,
+        "fixture: the export had a `cdc_snapshot` row to clear"
+    );
+    src.rig.run_ok();
+
+    let refused = src
+        .rig
+        .load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert_refused(
+        &refused,
+        Refused::by_code("RIVET_LOAD_REBASELINE_OVER_CHANGES", 5),
+    );
+    assert_eq!(
+        clickhouse_rows(&format!(
+            "SELECT id, v FROM {view} WHERE NOT __is_deleted ORDER BY id FORMAT TSV"
+        )),
+        streamed,
+        "the refused load changed nothing"
+    );
+    ch(&printed_truncate(&refused));
+    load(&src.rig);
+    let want = (src.rows)();
+    assert_eq!(want, vec![(1, 20), (3, 3), (4, 4)]);
+    clickhouse_rows_match_source(&view, want, "");
+}
+
+/// MySQL: the re-baseline anchors past a delete it never streams; the load waits for the printed TRUNCATE.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mysql-cdc"]
+fn a_mysql_re_baseline_after_a_lost_log_loads_only_after_the_printed_truncate() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = seeded("rivet_ch_rebase", 3);
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chrebase");
+    let rig =
+        into_clickhouse(Rig::mysql_cdc(&tbl), &db).dest_gcs(BUCKET, &prefix, FAKE_GCS_ENDPOINT);
+    a_re_baseline_after_a_lost_log_loads_only_after_the_printed_truncate(
+        RebaselineSource {
+            table: tbl.clone(),
+            rig,
+            exec: &|sql| conn().query_drop(sql).expect("source change"),
+            rows: &|| source_rows(&tbl),
+            settle: &|_| {},
+            lose_log: &|| {},
+        },
+        &db,
+        &prefix,
+    );
+}
+
+/// PostgreSQL: the slot is dropped, a key is deleted while it is gone, and the re-baseline loads after the printed TRUNCATE.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres-cdc"]
+fn a_postgres_re_baseline_after_a_dropped_slot_loads_only_after_the_printed_truncate() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let tbl = unique_name("rivet_ch_pgrebase");
+    let slot = unique_name("rivet_ch_slot");
+    let _slot = Slot::new(slot.clone());
+    let pg = || postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+    pg().batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, v BIGINT); \
+         INSERT INTO {tbl} SELECT g, g FROM generate_series(1, 3) g"
+    ))
+    .expect("seed");
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chrebase");
+    let rig =
+        into_clickhouse(Rig::pg_cdc(&tbl, &slot), &db).dest_gcs(BUCKET, &prefix, FAKE_GCS_ENDPOINT);
+    a_re_baseline_after_a_lost_log_loads_only_after_the_printed_truncate(
+        RebaselineSource {
+            table: tbl.clone(),
+            rig,
+            exec: &|sql| pg().batch_execute(sql).expect("source change"),
+            rows: &|| pg_rows(&mut pg(), &tbl),
+            settle: &|_| {},
+            lose_log: &|| {
+                pg().execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+                    .expect("drop the slot");
+            },
+        },
+        &db,
+        &prefix,
+    );
+}
+
+/// SQL Server: the re-baseline anchors past a delete it never streams; the load waits for the printed TRUNCATE.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql-cdc with SQL Server Agent"]
+fn a_sql_server_re_baseline_after_a_lost_log_loads_only_after_the_printed_truncate() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = unique_name("rivet_ch_msrebase");
+    let ci = format!("dbo_{table}");
+    mssql_cdc_drop_table(&format!("dbo.{table}"));
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table}(id BIGINT PRIMARY KEY, v BIGINT)"
+    ));
+    enable_cdc(&table, &ci);
+    let _guard = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    mssql_cdc_exec(&format!("INSERT INTO dbo.{table} VALUES (1,1),(2,2),(3,3)"));
+    wait_for_capture(&ci, 3);
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chrebase");
+    let rig = into_clickhouse(Rig::mssql_cdc(&table, &ci).cdc("until_current: true"), &db)
+        .dest_gcs(BUCKET, &prefix, FAKE_GCS_ENDPOINT);
+    a_re_baseline_after_a_lost_log_loads_only_after_the_printed_truncate(
+        RebaselineSource {
+            table: table.clone(),
+            rig,
+            exec: &|sql| mssql_cdc_exec(&sql.replace(&table, &format!("dbo.{table}"))),
+            rows: &|| {
+                pairs(
+                    &mssql_cdc_query_strings(&format!(
+                        "SELECT CONCAT(id, CHAR(9), v) FROM dbo.{table} ORDER BY id"
+                    ))
+                    .join("\n"),
+                )
+            },
+            settle: &|n| wait_for_capture(&ci, n),
+            lose_log: &|| {},
+        },
+        &db,
+        &prefix,
+    );
+}
+
 fn require_mongo_shard_into_clickhouse() {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
