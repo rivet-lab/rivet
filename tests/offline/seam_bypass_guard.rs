@@ -201,6 +201,103 @@ fn pattern_tokens(pattern: &str) -> Vec<Tok> {
     lex(pattern).into_iter().map(|(t, _)| t).collect()
 }
 
+/// The text a char, byte or string literal token denotes, escapes decoded; `None` for any other token text.
+fn literal_value(lit: &str) -> Option<String> {
+    let body = lit
+        .strip_prefix('b')
+        .unwrap_or(lit)
+        .strip_prefix(['\'', '"'])?
+        .strip_suffix(['\'', '"'])?;
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let decoded = match chars.next()? {
+            'x' => {
+                let hex: String = chars.by_ref().take(2).collect();
+                char::from_u32(u32::from_str_radix(&hex, 16).ok()?)
+            }
+            'u' => {
+                let hex: String = chars.by_ref().skip(1).take_while(|c| *c != '}').collect();
+                char::from_u32(u32::from_str_radix(&hex, 16).ok()?)
+            }
+            'n' => Some('\n'),
+            't' => Some('\t'),
+            'r' => Some('\r'),
+            '0' => Some('\0'),
+            other => Some(other),
+        };
+        out.push(decoded?);
+    }
+    Some(out)
+}
+
+/// Whether the `(` at `open` starts a call's arguments: a name or a closing bracket before it, not a keyword or `!`.
+fn is_call_paren(t: &Toks, open: usize) -> bool {
+    const NOT_CALLS: &[&str] = &[
+        "if", "while", "match", "for", "in", "return", "let", "else", "loop", "mut", "ref", "move",
+        "as", "break", "continue", "unsafe", "impl", "where",
+    ];
+    open > 0
+        && match tok(t, open - 1) {
+            Some(Tok::Ident(name)) => !NOT_CALLS.contains(&name.as_str()),
+            Some(Tok::Punct(')' | ']')) => true,
+            _ => false,
+        }
+}
+
+/// Token indexes of the literals that denote `want` where text is searched or split: inside a call's arguments, or an operand of `=`, `==` or `!=`.
+fn literal_sites(t: &Toks, want: &str) -> Vec<usize> {
+    let punct = |i: Option<usize>| {
+        i.and_then(|i| tok(t, i)).and_then(|x| match x {
+            Tok::Punct(c) => Some(*c),
+            _ => None,
+        })
+    };
+    let (mut open, mut sites) = (Vec::<bool>::new(), Vec::new());
+    for (i, (x, _)) in t.iter().enumerate() {
+        match x {
+            Tok::Punct('(') => open.push(is_call_paren(t, i)),
+            Tok::Punct('[' | '{') => open.push(false),
+            Tok::Punct(')' | ']' | '}') => {
+                open.pop();
+            }
+            Tok::Lit(lit) if literal_value(lit).as_deref() == Some(want) => {
+                let (p1, p2) = (punct(i.checked_sub(1)), punct(i.checked_sub(2)));
+                let (n1, n2) = (punct(Some(i + 1)), punct(Some(i + 2)));
+                let assigned = p1 == Some('=') && !matches!(p2, Some('<' | '>'));
+                let compared =
+                    n1 == Some('=') && n2 == Some('=') || n1 == Some('!') && n2 == Some('=');
+                if open.contains(&true) || assigned || compared {
+                    sites.push(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    sites
+}
+
+/// Token indexes where `pat` matches in `toks`: a lone literal matches by its decoded value in a search or split position, anything else by token shape.
+fn pattern_sites(pat: &[Tok], toks: &Toks) -> Vec<usize> {
+    if let [Tok::Lit(lit)] = pat
+        && let Some(want) = literal_value(lit)
+    {
+        return literal_sites(toks, &want);
+    }
+    (0..toks.len())
+        .filter(|at| {
+            pat.iter()
+                .enumerate()
+                .all(|(k, want)| toks.get(at + k).is_some_and(|(have, _)| have == want))
+                && !(*at > 0 && ident_at(toks, at - 1) == Some("fn"))
+        })
+        .collect()
+}
+
 /// `file::fn` of every place `seam`'s patterns match in `files` outside the owner: a definition (`fn name`) never matches.
 fn found_bypasses(seam: &Seam, files: &[Product]) -> BTreeMap<String, usize> {
     let owner = seam.owner.split_once("::").map_or("", |(p, _)| p);
@@ -218,16 +315,9 @@ fn found_bypasses(seam: &Seam, files: &[Product]) -> BTreeMap<String, usize> {
         }
         let spans = fn_spans(&f.toks);
         for pat in patterns.iter().filter(|p| !p.is_empty()) {
-            for at in 0..f.toks.len() {
-                let hit = pat
-                    .iter()
-                    .enumerate()
-                    .all(|(k, want)| f.toks.get(at + k).is_some_and(|(have, _)| have == want));
-                let defined = at > 0 && ident_at(&f.toks, at - 1) == Some("fn");
-                if hit && !defined {
-                    let key = format!("{}::{}", f.rel, enclosing_fn(&spans, at));
-                    found.entry(key).or_insert(f.toks[at].1);
-                }
+            for at in pattern_sites(pat, &f.toks) {
+                let key = format!("{}::{}", f.rel, enclosing_fn(&spans, at));
+                found.entry(key).or_insert(f.toks[at].1);
             }
         }
     }
@@ -569,4 +659,71 @@ fn a_pattern_reads_literals_and_whole_token_shapes() {
     assert_eq!(found.keys().collect::<Vec<_>>(), ["src/other.rs::a"]);
     let none = found_bypasses(&registry(&[], "rfind ( '!' )").seams[0], &files);
     assert!(none.is_empty());
+}
+
+/// Whether the literal pattern `'@'` finds `body` as a bypass in a fn named `caller` outside the owner.
+fn at_hit(body: &str) -> bool {
+    let files = tree(&[OWNER, ("src/other.rs", body)]);
+    !found_bypasses(&registry(&[], "'@'").seams[0], &files).is_empty()
+}
+
+#[test]
+fn every_spelling_of_the_at_literal_in_a_search_or_split_is_a_bypass() {
+    let shapes = [
+        "fn caller(s: &str) { s.rsplit('@'); }",
+        "fn caller(s: &str) { s.splitn(2, '@'); }",
+        "fn caller(s: &str) { s.rsplitn(2, '@'); }",
+        "fn caller(s: &str) { s.matches('@').count(); }",
+        "fn caller(s: &str) { s.chars().position(|c| c == '@'); }",
+        "fn caller(s: &str) { s.bytes().position(|c| c == b'@'); }",
+        "fn caller(s: &str) { s.split(['/', '@']); }",
+        "fn caller(s: &str) { s.contains(\"@\"); }",
+        "fn caller(s: &str) { s.find(r\"@\"); }",
+        "fn caller(s: &str) { s.rfind(\"\\x40\"); }",
+        "fn caller(s: &str) { s.rsplit_once('\\x40'); }",
+        "fn caller(s: &str) { s.rsplit_once('\\u{40}'); }",
+        "fn caller(s: &str) { s.rsplit_once(b'\\x40'); }",
+        "fn caller(s: &str) { s.rsplit_once(char::from(b'@')); }",
+        "fn caller(s: &str) { let at = '@'; s.rsplit_once(at); }",
+        "fn caller(s: &str) { for c in s.chars() { if c == '@' {} } }",
+        "fn caller(s: &str) { for c in s.chars() { if '@' == c {} } }",
+        "fn caller(s: &str) { for c in s.chars() { if c != '@' {} } }",
+        "const AT: char = '@';\nfn caller(s: &str) { s.rsplit_once(AT); }",
+        "fn caller(s: &str) { s.rfind('@'); }",
+    ];
+    let missed: Vec<&str> = shapes.iter().copied().filter(|b| !at_hit(b)).collect();
+    assert_eq!(missed, Vec::<&str>::new(), "shapes the guard let through");
+}
+
+#[test]
+fn the_at_literal_outside_a_search_or_split_is_not_a_bypass() {
+    let quiet = [
+        "fn caller(c: char) -> bool { matches!(c, '@' | '!') }",
+        "fn caller(q: &str) -> bool { ![\"@\", \"x\"].iter().any(|k| q.contains(k)) }",
+        "fn caller(s: &str) { s.contains(\"user@host\"); }",
+        "fn caller(s: &str) { s.rfind('#'); s.split(\"\\x41\"); }",
+        "fn caller(n: u32) -> bool { n >= 64 && n <= 0x40 }",
+        "// s.rfind('@')\nfn caller() {}",
+        "fn caller() -> &'static str { \"@\" }",
+    ];
+    let flagged: Vec<&str> = quiet.iter().copied().filter(|b| at_hit(b)).collect();
+    assert_eq!(flagged, Vec::<&str>::new(), "shapes the guard flagged");
+}
+
+#[test]
+fn a_literal_value_is_read_through_every_escape() {
+    for lit in [
+        "'@'",
+        "b'@'",
+        "\"@\"",
+        "'\\x40'",
+        "'\\u{40}'",
+        "b'\\x40'",
+        "\"\\u{0040}\"",
+    ] {
+        assert_eq!(literal_value(lit).as_deref(), Some("@"), "{lit}");
+    }
+    for lit in ["'a'", "\"@@\"", "64", "0x40", "'\\x41'", "b"] {
+        assert_ne!(literal_value(lit).as_deref(), Some("@"), "{lit}");
+    }
 }
