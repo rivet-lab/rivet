@@ -75,7 +75,13 @@ one, a red one, one from a dirty tree and a missing record are each refused.
 | `STALE` | the patch no longer applies, or a declared cell names no test | FAIL |
 | `BROKEN` | the patched tree does not build, or cargo did not recompile it. A red build is not a catch. | FAIL |
 | `NO-CONTROL` | no declared cell is green on the unpatched tree, so the row grades nothing | FAIL |
-| `N/A` | the manifest says why the code path does not exist on this engine | none |
+| `ABORTED` | a control-green cell was stopped by nextest (TIMEOUT, ABORT, SIGKILL) instead of failing; only a failing assertion catches a seed, so a hang-class seed needs a watchdog test that fails | FAIL |
+| `N/A` | the manifest says why the code path does not exist on this engine | N/A row, counted under `na_ceiling` |
+
+Every `N/A` row is written to the ledger with its reason. Their count is held under
+`na_ceiling` in `docs/release-gate-matrix.yaml` (row `seeded_recall`); a new `na:` that
+does not lower another one fails the self-test and the gate until its cell is written or
+the ceiling is raised with a dated reason. A reason is at least 30 characters.
 
 A `MISSED` row is a harness finding. Close it with a cell on that engine; do not
 delete the row.
@@ -89,9 +95,11 @@ delete the row.
    If the code path is shared by every engine, write one patch,
    `dev/seeded/<seed-name>/shared.patch`, and set it as the seed-level `patch:`.
    Restore the source from a copy you took before the edit.
-3. Add the seed to `dev/seeded/seeds.yaml`. Use `scope: source` (postgres, mysql,
-   mssql, mongo, oracle) or `scope: state` (postgres-state, sqlite-state), and list
-   **every** engine in that scope:
+3. Add the seed to `dev/seeded/seeds.yaml`. Pick the scope of the axis the seed varies
+   and list **every** member of it. `source`, `target` and `destination` are read from the Rust
+   enums `SourceType`, `LoadTargetKind` and `DestinationType`, so a new variant is a new
+   required column; `state` is `postgres-state`, `sqlite-state`. A seed in the code of one
+   warehouse loader or one store belongs on `target` or `destination`, with `na:` for the others:
    - `cells: [test_fn, ...]` for the tests expected to catch the seed. Live tests are
      named bare; a unit test is written `lib:<fn>`.
    - `cells: []` where the code path exists but nothing covers it. That row records a
