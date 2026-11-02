@@ -249,29 +249,41 @@ def verify_flat_rss(led: Ledger) -> None:
 
     led.phase("Flat RSS (peak resident memory per engine against its ceiling)")
     for engine in ENGINES:
-        var = f"RIVET_ORACLE_{engine.upper()}_URL"
-        if not os.environ.get(var):
-            led.skipped(engine, "-", RSS_SCEN, "batch", f"flat-rss[{engine}/batch]: no {var}", "no url")
-            continue
-        peaks, n = settled(lambda: _batch_peaks(engine, os.environ[var]), lambda p: sum(batch_flaws(engine, p), []))
-        batch, capped = batch_flaws(engine, peaks)
-        _grade_rss(led, engine, "batch", peaks, batch, n)
-        if engine == "mongo":
-            continue
-        shown = _shown(peaks, n, "_capped/")
-        if capped:
-            led.failed(engine, "-", RSS_SCEN, CAPPED, f"flat-rss[{engine}/{CAPPED}]: target_row_group_mb={GROUP_CAP_MB} "
-                       f"did not level the run off: {'; '.join(capped)} ({shown})", shown)
-        else:
-            led.passed(engine, "-", RSS_SCEN, CAPPED, f"flat-rss[{engine}/{CAPPED}]: target_row_group_mb={GROUP_CAP_MB}, "
-                       f"within {FLAT_TOL}x from {SIZES[1]} to {SIZES[2]} rows: {shown}", shown)
+        with led.span(f"flat rss {engine} batch"):
+            _batch_rss(led, engine)
     for engine in CDC_ENGINES:
-        var = CDC_URL_VARS.get(engine, f"RIVET_CDC_{engine.upper()}_URL")
-        if not os.environ.get(var):
-            led.skipped(engine, "-", RSS_SCEN, "cdc", f"flat-rss[{engine}/cdc]: no {var}", "no url")
-            continue
-        peaks, n = settled(lambda: _cdc_peaks(engine, os.environ[var]), lambda p: cdc_flaws(engine, p))
-        _grade_rss(led, engine, "cdc", peaks, cdc_flaws(engine, peaks), n)
+        with led.span(f"flat rss {engine} cdc"):
+            _cdc_rss(led, engine, CDC_URL_VARS)
+
+
+def _batch_rss(led: Ledger, engine: str) -> None:
+    """One engine's batch peaks at three table sizes, graded plain and with the row-group cap."""
+    var = f"RIVET_ORACLE_{engine.upper()}_URL"
+    if not os.environ.get(var):
+        led.skipped(engine, "-", RSS_SCEN, "batch", f"flat-rss[{engine}/batch]: no {var}", "no url")
+        return
+    peaks, n = settled(lambda: _batch_peaks(engine, os.environ[var]), lambda p: sum(batch_flaws(engine, p), []))
+    batch, capped = batch_flaws(engine, peaks)
+    _grade_rss(led, engine, "batch", peaks, batch, n)
+    if engine == "mongo":
+        return
+    shown = _shown(peaks, n, "_capped/")
+    if capped:
+        led.failed(engine, "-", RSS_SCEN, CAPPED, f"flat-rss[{engine}/{CAPPED}]: target_row_group_mb={GROUP_CAP_MB} "
+                   f"did not level the run off: {'; '.join(capped)} ({shown})", shown)
+    else:
+        led.passed(engine, "-", RSS_SCEN, CAPPED, f"flat-rss[{engine}/{CAPPED}]: target_row_group_mb={GROUP_CAP_MB}, "
+                   f"within {FLAT_TOL}x from {SIZES[1]} to {SIZES[2]} rows: {shown}", shown)
+
+
+def _cdc_rss(led: Ledger, engine: str, url_vars: dict[str, str]) -> None:
+    """One engine's CDC peaks at two backlogs."""
+    var = url_vars.get(engine, f"RIVET_CDC_{engine.upper()}_URL")
+    if not os.environ.get(var):
+        led.skipped(engine, "-", RSS_SCEN, "cdc", f"flat-rss[{engine}/cdc]: no {var}", "no url")
+        return
+    peaks, n = settled(lambda: _cdc_peaks(engine, os.environ[var]), lambda p: cdc_flaws(engine, p))
+    _grade_rss(led, engine, "cdc", peaks, cdc_flaws(engine, peaks), n)
 
 
 def _part_digests(out: Path) -> list[str]:

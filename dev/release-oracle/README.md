@@ -326,6 +326,25 @@ RED-proven: corrupting a part the prev release wrote reddens the format check (c
 `validate` no longer PASSES); a genuinely slower binary (a debug build, ~1.5×) reddens
 the perf check below its slowdown.
 
+## The measuring island — its own entry, its own record
+
+The stages that hold the whole machine (release regression, perf, source harm, previous-release
+differential, field symptom replay, scale memory, flat RSS) are the island: the `measured(...)`
+entries in `gate_stages`, derived from the `ALONE` marking and never listed twice. About 57 of a
+327-minute gate. `make release-oracle-full` does not run them; it stays a canonical record.
+
+```
+make release-oracle-island        # python -m dev.release_oracle --island
+```
+
+It runs only the island and appends a `release-oracle-island` line (sha, binary stamp, verdict,
+dirty, canonical config) to `timings.jsonl`. `dev/pytools/release.py` refuses a tag unless the
+latest island line of exactly that sha is `RELEASE-READY`, clean, built from the tree and canonical,
+beside the full-gate and seeded-recall records (`--island-record FILE` when it ran elsewhere).
+Run it nightly on main. Each matrix `test` row is owed by the run that owns its stage, so neither
+run reports the other's rows as "never ran this gate". Perf and flat RSS record a span per section
+(`perf ...`, `flat rss <engine> ...`) in the timing breakdown.
+
 ## Final stage — BigQuery
 
 The only non-emulator stage, and the load goes through rivet on BOTH legs:
