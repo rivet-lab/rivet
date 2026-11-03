@@ -192,6 +192,10 @@ fn fill_keyset_page(
         last_run_at: None,
         cursor_column: None,
     });
+    let key_rest = match &plan.strategy {
+        ExtractionStrategy::Keyset(k) => k.key_rest.as_slice(),
+        _ => &[],
+    };
     let mut sink = ExportSink::new(plan)?;
     src.export(
         // `query` is the unwrapped base; the driver wraps it with the keyset
@@ -202,6 +206,7 @@ fn fill_keyset_page(
             .with_incremental(Some(key_plan))
             .with_cursor(cursor_state.as_ref())
             .with_upper_bound(upper)
+            .with_key_rest(key_rest)
             .with_page_limit(page_size),
         &mut sink,
     )?;
@@ -1927,6 +1932,66 @@ mod tests {
         ) -> Result<Vec<crate::types::TypeMapping>> {
             Ok(vec![])
         }
+    }
+
+    struct CompositePage(Vec<String>);
+    impl Source for CompositePage {
+        fn export(
+            &mut self,
+            request: &source::ExportRequest<'_>,
+            sink: &mut dyn source::BatchSink,
+        ) -> Result<()> {
+            use arrow::datatypes::{DataType, Field, Schema};
+            self.0 = request.key_rest.to_vec();
+            let schema = std::sync::Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("kind", DataType::Utf8, false),
+            ]));
+            sink.on_schema(schema.clone())?;
+            sink.on_batch(&arrow::record_batch::RecordBatch::try_new(
+                schema,
+                vec![
+                    std::sync::Arc::new(arrow::array::Int64Array::from(vec![1, 2])),
+                    std::sync::Arc::new(arrow::array::StringArray::from(vec!["a", "z"])),
+                ],
+            )?)
+        }
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(vec![])
+        }
+    }
+
+    /// A composite-key page asks the source for the rest of the key and stores the last row's key tuple.
+    #[test]
+    fn a_composite_key_page_reads_by_the_whole_key_and_stores_its_tuple() {
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.strategy = ExtractionStrategy::Keyset(KeysetPlan {
+            key_column: "id".into(),
+            chunk_size: 10,
+            checkpoint: true,
+            incremental: false,
+            parallel: 1,
+            key_rest: vec!["kind".into()],
+        });
+        let key = IncrementalCursorPlan {
+            primary_column: "id".into(),
+            fallback_column: None,
+            mode: IncrementalCursorMode::SingleColumn,
+            settle: None,
+        };
+        let mut src = CompositePage(Vec::new());
+        let sink = fill_keyset_page(&mut src, &plan, &key, 10, None, None)
+            .unwrap()
+            .expect("a page with rows");
+        assert_eq!(src.0, vec!["kind".to_string()]);
+        assert_eq!(sink.effective_cursor().as_deref(), Some(r#"["2","z"]"#));
     }
 
     /// A page the sink rotated hands back the part that landed before a later part failed.

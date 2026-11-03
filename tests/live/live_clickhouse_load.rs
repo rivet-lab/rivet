@@ -939,6 +939,38 @@ fn a_load_from_another_state_db_crosses_a_rolling_cdc_run(
 }
 
 #[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = seeded("rivet_ch_hdw1", 5);
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chload");
+    let loader = into_clickhouse_at(Rig::mysql_cdc(&tbl), &db, &prefix);
+    let runner = staged_at(
+        Rig::mysql_cdc(&tbl)
+            .export_named(loader.export_name())
+            .checkpoint_path(loader.checkpoint())
+            .cdc("rollover: 3"),
+        &prefix,
+    );
+    a_load_from_another_state_db_crosses_a_rolling_cdc_run(
+        loader,
+        runner,
+        &format!("{}.{tbl}", db.0),
+        || {
+            let mut c = conn();
+            for i in 6..=14 {
+                c.query_drop(format!("INSERT INTO {tbl} (id, v) VALUES ({i}, {i})"))
+                    .expect("the backlog");
+            }
+        },
+        || source_rows(&tbl),
+    );
+}
+
+#[test]
 #[ignore = "live+gate-only: open defect CDC-RUN-START; closes with fix/cdc-run-start-marker"]
 fn open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql() {
     require_alive(LiveService::ClickHouse);

@@ -926,7 +926,7 @@ fn config_keys_note(export: &crate::config::ExportConfig, file: &str) -> String 
     let mut keys: Vec<&str> = [
         ("cursor_column", export.cursor_column.as_deref()),
         ("chunk_column", export.chunk_column.as_deref()),
-        ("chunk_by_key", export.chunk_by_key.as_deref()),
+        ("chunk_by_key", export.chunk_key_lead()),
     ]
     .into_iter()
     .filter(|(_, v)| *v == Some(file))

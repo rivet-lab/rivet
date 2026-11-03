@@ -178,16 +178,15 @@ fn override_case_fail_oracle(
 
 /// The columns the export's strategy pages or tracks by, as written in the config.
 fn key_columns(export: &ExportConfig) -> Vec<&str> {
-    [
-        &export.chunk_column,
-        &export.chunk_by_key,
-        &export.cursor_column,
-        &export.cursor_fallback_column,
-    ]
-    .into_iter()
-    .flatten()
-    .map(String::as_str)
-    .collect()
+    let chunk_key = export.chunk_by_key.iter().flat_map(|k| k.columns());
+    export
+        .chunk_column
+        .iter()
+        .chain(chunk_key)
+        .chain(&export.cursor_column)
+        .chain(&export.cursor_fallback_column)
+        .map(String::as_str)
+        .collect()
 }
 
 /// A strategy column the result does not have is a loud error that says why, from the catalog.
