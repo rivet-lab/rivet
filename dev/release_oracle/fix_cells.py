@@ -18,8 +18,8 @@ there and is recorded SKIP with its reason.
 A fix commit that rewrote many cells mechanically (a port-env rename) credits
 every body it changed; FIX_SCOPE names, per commit, the one pattern of cells that
 commit is the fix for. A cell that fails on the previous release only because its
-stand was down (the `live test requires ... reachable on` panic) is NOT PROVEN,
-which fails the stage: bring the stand up and run it again.
+stand was down (the `live test requires ... reachable on` panic, or the stand watchdog's
+verdict over its run) is NOT PROVEN: INFRA, so the gate is NOT GRADED; bring the stand up and run it again.
 
 When the baseline moves to the next release, the tag moves with it: the set
 starts again from the fixes made after that release, and every GREEN_ON_PREV or
@@ -36,6 +36,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import stand_health
 from .core import ROOT, Ledger, SkipCause, run
 
 __all__ = ["verify_fix_cells", "GREEN_ON_PREV", "FIX_SCOPE"]
@@ -43,7 +44,6 @@ __all__ = ["verify_fix_cells", "GREEN_ON_PREV", "FIX_SCOPE"]
 SCEN = "fix_cells"
 GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else "git"
 FIX = re.compile(r"fix[(:!]")
-STAND_DOWN = re.compile(r"live test requires \w+ reachable on ")
 TEST = re.compile(r"^#\[test\]\n(?:#\[[^\n]*\n)*(?:pub )?fn (\w+)\(\) \{\n(.*?)^\}", re.M | re.S)
 #: Fix cells allowed to pass on the previous release, each with its reason. Shrink-only.
 GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-release strings
@@ -149,14 +149,17 @@ def stale_scope(seen: list[tuple[str, str, str]], scope: dict[str, tuple[str, st
 
 
 def grade(cells: dict[str, str], verdicts: dict[str, str], skipped: dict[str, str], allowed: dict[str, str],
-          tag: str, panics: dict[str, str] | None = None) -> list[tuple[str, str, str]]:
-    """(status, cell, line) per fix cell and per ledger entry; `verdicts` is bare name → nextest status on `tag`, `panics` its first panic line."""
+          tag: str, panics: dict[str, str] | None = None, stand: stand_health.StandVerdict = stand_health.ALIVE) -> list[tuple[str, str, str]]:
+    """(status, cell, line) per fix cell and per ledger entry; `verdicts` is bare name → nextest status on `tag`, `panics` its first panic line, `stand` the watchdog's verdict over the run."""
     panics = panics or {}
     rows = []
     for cell, why in sorted(cells.items()):
         verdict = verdicts.get(cell)
         if cell in skipped:
             rows.append(("SKIP", cell, f"NOT GRADED on {tag}: self-skipped there ({skipped[cell]})"))
+        elif verdict not in ("PASS", "LEAK") and not (seen := stand_health.classify([stand_health.from_text(panics.get(cell, "")), stand])).alive:
+            rows.append(("INFRA", cell, f"NOT PROVEN: red on {tag} only because its stand was {seen.kind.value} ({seen.reason}); "
+                         "bring the stand up and run it again"))
         elif verdict is None:
             rows.append(("FAIL", cell, f"NOT RUN on {tag}: nextest gave no verdict ({why})"))
         elif verdict in ("PASS", "LEAK"):
@@ -165,9 +168,6 @@ def grade(cells: dict[str, str], verdicts: dict[str, str], skipped: dict[str, st
             else:
                 rows.append(("FAIL", cell, f"VACUOUS FIX CELL: passes on {tag}, the release without the fix ({why}). "
                              "Make it fail there, or give its reason in fix_cells.GREEN_ON_PREV"))
-        elif STAND_DOWN.search(panics.get(cell, "")):
-            rows.append(("FAIL", cell, f"NOT PROVEN: red on {tag} only because its stand was down ({panics[cell]}); "
-                         "bring the stand up and run it again"))
         elif cell in allowed:
             rows.append(("FAIL", cell, f"STALE: red on {tag} and listed in GREEN_ON_PREV; remove the entry"))
         else:
@@ -200,6 +200,7 @@ def verify_fix_cells(led: Ledger, only: list[str] | None = None) -> None:
         led.passed("all", "-", SCEN, "-", f"fix cells: no fix commit among the {n} since {tag} adds or edits a live cell")
         verdicts, skipped, panics = {}, {}, {}
     else:
+        since = stand_health.BOOK.mark()
         verdicts, _, skipped, panics = nextest_live(
             work_dir() / "fix_cells_prev.log", "test(/::(" + "|".join(sorted(cells)) + ")$/)",
             env={"RIVET_BIN": str(prev), "RIVET_BIN_OVERRIDE": str(prev),
@@ -208,8 +209,9 @@ def verify_fix_cells(led: Ledger, only: list[str] | None = None) -> None:
         """nextest's `module::cell` keys as the bare cell name."""
         return {name.rsplit("::", 1)[-1]: v for name, v in d.items()}
 
-    record = {"PASS": led.passed, "FAIL": led.failed}
-    for status, cell, line in grade(cells, bare(verdicts), bare(skipped), allowed, tag, bare(panics)):
+    record = {"PASS": led.passed, "FAIL": led.failed, "INFRA": led.ungraded}
+    stand = stand_health.judge("", since) if cells else stand_health.ALIVE
+    for status, cell, line in grade(cells, bare(verdicts), bare(skipped), allowed, tag, bare(panics), stand):
         if status == "SKIP":
             led.skipped("all", "-", SCEN, cell, f"fix cell · {cell} — {line}", cause=SkipCause.ENV)
         else:
@@ -238,7 +240,14 @@ def _self_test() -> None:
     assert [(s, c, line.split(":")[0]) for s, c, line in stale] == [("FAIL", "red", "STALE"), ("FAIL", "old", "STALE")], stale
     down = {"red": "live test requires MongoShard reachable on 127.0.0.1:27991."}
     proof = {c: (s, line) for s, c, line in grade({"red": "a1 fix"}, {"red": "FAIL"}, {}, {}, "v1.2.3", down)}
-    assert proof["red"][0] == "FAIL" and proof["red"][1].startswith("NOT PROVEN: red on v1.2.3 only because its stand was down"), proof
+    assert proof["red"][0] == "INFRA" and proof["red"][1].startswith("NOT PROVEN: red on v1.2.3 only because its stand was DOWN"), proof
+    watched = stand_health.down("the state DB stopped answering")
+    gone = {c: (s, line) for s, c, line in grade({"red": "a1 fix", "ok": "a1 fix"}, {"red": "FAIL", "ok": "PASS"}, {}, {}, "v1.2.3", None, watched)}
+    assert gone["red"][0] == "INFRA" and "the state DB stopped answering" in gone["red"][1], "a red that ran while the watchdog said DOWN is the stand's"
+    assert gone["ok"][0] == "FAIL", "a pass is a pass, but a fix cell that passes on the previous release is still vacuous"
+    unread = grade({"red": "a1 fix"}, {"red": "FAIL"}, {}, {}, "v1.2.3", None, stand_health.unreadable("docker events exited 1"))
+    assert unread[0][0] == "INFRA" and "UNREADABLE" in unread[0][2], unread
+    assert grade({"red": "a1 fix"}, {}, {}, {}, "v1.2.3", None, watched)[0][0] == "INFRA", "no verdict while the stand is down is the stand's"
     real = {"red": "assertion `left == right` failed: delivered 6 of 10"}
     assert grade({"red": "a1 fix"}, {"red": "FAIL"}, {}, {}, "v1.2.3", real)[0][0] == "PASS"
     scope = {"ab12": (r"^sharded_", "r")}

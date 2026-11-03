@@ -1,4 +1,4 @@
-"""Free disk on the host and on the docker VM's data disk: a floor before the gate starts, a watchdog during it (the stand watchdog every probe of `stand_health` runs in).
+"""Free disk on the host and on the docker VM's data disk: a floor before the gate starts, and the reading the stand watchdog of `stand_health` takes mid-run.
 
 On 2026-10-22 a full gate filled the host disk; the docker VM's data disk shares it, so InnoDB
 stopped on "Disk is full", the Postgres state server crashed, and ~150 cells went red with no
@@ -13,15 +13,11 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-import threading
-import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 from .core import ROOT
 
-__all__ = ["START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low", "disk_reason", "Probe", "Watchdog"]
+__all__ = ["START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low", "disk_reason"]
 
 START_FLOOR_GIB = 150  # ratchet-pin: gate-start-free-disk-floor
 WATCH_FLOOR_GIB = 20  # ratchet-pin: gate-watchdog-free-disk-floor
@@ -85,59 +81,8 @@ def disk_reason() -> str:
     return low(free_gib())
 
 
-@dataclass(frozen=True)
-class Probe:
-    """One stand check: `read()` returns why the stand is no longer valid ("" = valid), run at most every `every` seconds."""
-
-    read: Callable[[], str]
-    every: float
-
-
-class Watchdog:
-    """Runs each probe on its own cadence; the first reason any probe gives is kept as `reason`."""
-
-    def __init__(self, probes: Sequence[Probe] | None = None, tick: float = 5.0,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self.reason = ""
-        self._probes = list(probes) if probes is not None else [Probe(disk_reason, 60.0)]
-        self._due = [0.0] * len(self._probes)
-        self._tick, self._clock = tick, clock
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-
-    def start(self) -> Watchdog:
-        self._thread.start()
-        return self
-
-    def poll(self, force: bool = False) -> None:
-        """One pass: every probe that is due (all of them when `force`) is read; the first reason is kept and said."""
-        now = self._clock()
-        for i, probe in enumerate(self._probes):
-            if not force and now < self._due[i]:
-                continue
-            self._due[i] = now + probe.every
-            why = probe.read()
-            if why and not self.reason:
-                self.reason = why
-                print(f"  ✗ STAND-INVALID: {why}; the reds from here on are the stand's, not the product's",
-                      flush=True)
-
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            self.poll()
-            self._stop.wait(self._tick)
-
-    def stop(self) -> str:
-        """Stop, after one last reading of every probe; the reason (empty when the stand held)."""
-        self._stop.set()
-        if self._thread.is_alive():
-            self._thread.join(timeout=5)
-        self.poll(force=True)
-        return self.reason
-
-
 def self_test() -> None:
-    """The floors decide on both disks, an unreadable one refuses the start, and the watchdog keeps the first low reading."""
+    """The floors decide on both disks and an unreadable VM disk refuses the start."""
     assert parse_df("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
                     "/dev/vdb1 412614656 226799616 185815040 55% /\n") == 185815040 * 1024 / GIB
     assert parse_df("") is None and parse_df("h\nx y z notanumber\n") is None
@@ -149,34 +94,6 @@ def self_test() -> None:
     assert low({"host": 21.0, "docker VM": 177.0}) == ""
     assert low({"host": 201.0, "docker VM": None}) == "", "an unreadable reading mid-run is not a verdict"
     assert low({"host": 19.0, "docker VM": 177.0}).startswith("host under 20 GiB")
-    readings = iter([{"host": 200.0, "docker VM": 100.0}, {"host": 200.0, "docker VM": 12.0},
-                     {"host": 5.0, "docker VM": 3.0}])
-    last = {"host": 200.0, "docker VM": 100.0}
-
-    def read() -> str:
-        nonlocal last
-        last = next(readings, last)
-        return low(last)
-
-    now = [0.0]
-    dog = Watchdog([Probe(read, 60.0)], clock=lambda: now[0])
-    dog.poll()
-    assert dog.reason == "", "a disk above the floor is not a reason"
-    now[0] = 30.0
-    dog.poll()
-    assert dog.reason == "", "a probe is not read before it is due"
-    now[0] = 61.0
-    dog.poll()
-    assert dog.reason.startswith("docker VM under 20 GiB free (host 200 GiB, docker VM 12 GiB)"), dog.reason
-    assert dog.stop().startswith("docker VM under 20 GiB free (host 200 GiB, docker VM 12 GiB)"), "the first reason is kept"
-    quick = Probe(lambda: "", 1.0)
-    slow = Probe(lambda: "state DB down", 600.0)
-    cadence = Watchdog([quick, slow], clock=lambda: now[0])
-    now[0] = 0.0
-    cadence.poll()
-    assert cadence.reason == "state DB down", "every probe is read on the first pass"
-    held = Watchdog([Probe(lambda: "", 1.0)])
-    assert held.start().stop() == ""
     print("stand_disk self-test: ok")
 
 
