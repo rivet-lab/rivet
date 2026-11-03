@@ -885,7 +885,8 @@ def verify_upgrade_continuity(led: Ledger) -> None:
     root = Path(tempfile.mkdtemp(prefix="rivet-oracle-upgrade-"))
     engine_legs(led, prev, _migration_carrier(led), root)
     if os.environ.get("RIVET_ORACLE_POSTGRES_URL"):
-        _load_leg(led, prev, root, os.environ["RIVET_ORACLE_POSTGRES_URL"])
+        with led.split("upgrade postgres load"):
+            _load_leg(led, prev, root, os.environ["RIVET_ORACLE_POSTGRES_URL"])
     else:
         led.skipped("postgres", "-", SCEN, "load", "upgrade[postgres/load]: no RIVET_ORACLE_POSTGRES_URL", "no url", cause=SkipCause.ENV)
     run_lanes(led, warehouse_lane_cells(prev, root))
@@ -895,7 +896,8 @@ def verify_upgrade_continuity(led: Ledger) -> None:
         if not curl:
             led.skipped(engine, "-", SCEN, "local", f"upgrade[{engine}/cdc]: no {cvar}", "no url", cause=SkipCause.ENV)
             continue
-        _cdc_leg(led, prev, engine, curl)
+        with led.split(f"upgrade cdc {engine}"):
+            _cdc_leg(led, prev, engine, curl)
 
 
 def engine_legs(led: Ledger, prev: Path, carrier: Path | None, root: Path) -> None:
@@ -920,7 +922,8 @@ def engine_legs(led: Ledger, prev: Path, carrier: Path | None, root: Path) -> No
                     led.failed(engine, "-", SCEN, "pg-state", f"upgrade[{engine}]: could not create "
                                "a fresh Postgres state DB for the older release", "no state db")
                     continue
-                leg(led, old, root, engine, url, fresh, **({"pinned": pin} if pin else {}))
+                with led.split(f"upgrade {engine} {'pg' if state_url else 'sqlite'} {leg.__name__.strip('_')}{' pinned' if pin else ''}"):
+                    leg(led, old, root, engine, url, fresh, **({"pinned": pin} if pin else {}))
 
 
 def _self_test() -> None:

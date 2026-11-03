@@ -71,12 +71,12 @@ def verify_live_modules(led: Ledger) -> None:
     env, again = live_modules_env(os.environ.get("RIVET_CDC_STATE_URL") or os.environ.get("RIVET_GATE_STATE_URL") or "")
     _run_live_modules(led, "live", "live modules",
                       f"every other live_suite module ({len(left)}), derived from tests/live_suite.rs",
-                      left, env=env, again=again,
+                      left, env=env, again=again, keep=True,
                       expr=f"({expr}) - test(/::({'|'.join(excl)})$/)" if excl else expr)
     if excl:
         # They restart a shared engine or hold a slot their neighbours flag: one at a time,
         # with nothing else running, which is the only way they grade anything.
         _run_live_modules(led, "live_modules", "live modules (exclusive)",
                           f"tests that need the stand to themselves ({len(excl)}), one at a time",
-                          left, env={**env, **EXCLUSIVE_ENV}, threads=1, again=again,
+                          left, env={**env, **EXCLUSIVE_ENV}, threads=1, again=again, keep=True,
                           expr=" | ".join(f"test(/::{n}$/)" for n in excl))

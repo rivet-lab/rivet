@@ -22,6 +22,7 @@ from pathlib import Path
 
 import yaml
 
+from dev.pytools import evidence
 from dev.release_oracle.core import Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, self_skipped
 from dev.release_oracle.live_modules import EXCLUSIVE_ENV, exclusive_tests, live_modules_env
 from dev.seeded import run_record
@@ -576,7 +577,7 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True) -> list[Verdi
 
     out = [verdicts.get(r) or grade(r, control, {}, control_skips) for r in rows]
     green = record(led, out)
-    dirty = bool(git(ROOT, "status", "--porcelain", "--untracked-files=no"))
+    dirty = evidence.tree_dirty(ROOT)
     run_record.append_run(base / run_record.RUNS_FILE, sha=sha, complete=complete, green=green, dirty=dirty)
     print(render(out))
     print(f"  seeded-defect recall took {(time.perf_counter() - t0) / 60:.1f} min; logs under {logs}")

@@ -32,7 +32,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-LEDGER = ROOT / "docs" / "evidence" / "last-green.yaml"
+LEDGER_REL = "docs/evidence/last-green.yaml"
+LEDGER = ROOT / LEDGER_REL
 DEFAULT_DAYS = 7
 SOURCES = ("local", "gate", "nightly", "ci")
 
@@ -44,6 +45,13 @@ HEADER = """# Last green run of every live cell: fn -> { green: date, by: local|
 """
 
 PASS_LINE = re.compile(r"^\s*(?:PASS|LEAK)\s+\[[^\]]*\]\s+\(\s*\d+/\d+\)\s+\S+\s+([A-Za-z0-9_]+)::([A-Za-z0-9_]+)\s*$")
+
+
+def tree_dirty(root: Path = ROOT) -> bool:
+    """Whether a tracked file under `root` differs from HEAD, the evidence ledger apart: every gate run rewrites it."""
+    out = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no", "--", ".", f":(exclude){LEDGER_REL}"],
+                         capture_output=True, text=True, check=True).stdout
+    return out.strip() != ""
 
 
 def parse_ledger(path: Path = LEDGER) -> tuple[int, dict[str, dict]]:

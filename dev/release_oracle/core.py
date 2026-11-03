@@ -200,6 +200,7 @@ class Ledger:
         # SEPARATE breakdown that is honest about the overlap — spans in different
         # engines run concurrently, so they are ranked, never summed into a total.
         self._spans: list[tuple[str, float]] = []
+        self._splits: list[tuple[str, float]] = []
         #: Why the stand stopped grading the product mid-run (a disk under its floor); set = STAND-INVALID.
         self.stand_invalid = ""
 
@@ -250,6 +251,19 @@ class Ledger:
         """Record a wall-clock measured by the caller (a step between two marks)."""
         self._spans.append((name, seconds))
 
+    @contextmanager
+    def split(self, name: str):
+        """Time one internal split of a stage into `_splits`, which the timings record keeps whole."""
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.record_split(name, time.perf_counter() - t0)
+
+    def record_split(self, name: str, seconds: float) -> None:
+        """Record a split's wall-clock measured by the caller."""
+        self._splits.append((name, seconds))
+
     def buffered_child(self) -> "Ledger":
         """A sub-ledger that BUFFERS output (for one parallel engine). Its cells +
         buffered lines are folded back with `flush_into` after the engine finishes."""
@@ -272,6 +286,7 @@ class Ledger:
         # the parent reports ranked, not summed, so overlap across engines is not
         # double-counted. This is the only window into the parallel matrix.
         parent._spans.extend(self._spans)
+        parent._splits.extend(self._splits)
 
     # ── recording ──
     def add(
@@ -484,6 +499,11 @@ class Ledger:
                     print(f"  {sum(ds) / 60.0:6.1f} min  {key:28} n={len(ds):<4} "
                           f"mean={sum(ds) / len(ds):5.1f}s  max={max(ds):5.1f}s")
                 print()
+        if self._splits:
+            self.phase("Timing - stage splits (concurrent, so ranked not summed)")
+            for name, minutes in split_minutes(self._splits).items():
+                print(f"  {minutes:6.1f} min  {name}")
+            print()
         verdict = self.verdict(gate)
         ungraded = self.ungraded_count(gate)
         if full:
@@ -491,7 +511,7 @@ class Ledger:
                 TIMINGS_HISTORY, timed, self._spans, verdict,
                 sum(c.status is Status.PASS for c in self.cells),
                 sum(c.status is Status.FAIL for c in self.cells),
-                self._phase_load, gate=gate, tree=tree, config=config,
+                self._phase_load, gate=gate, tree=tree, config=config, splits=self._splits,
                 skipped=sum(self.skip_counts().values()), skipped_env=self.env_skips(),
             )
         known = [c for c in self.cells if c.status is Status.KNOWN]
@@ -502,7 +522,7 @@ class Ledger:
                                   "Not a product verdict; re-run them."))
         if self.stand_invalid:
             print(self._c("1;35", f"  STAND-INVALID — {self.stand_invalid} during the run; its reds grade the stand, "
-                                  "not the product. Free the disk and run the gate again."))
+                                  "not the product. Restore the stand (disk, state DB, containers) and run the gate again."))
             return 1
         if self.red:
             print(self._c("1;31", "  NOT RELEASABLE — one or more cells failed (see ✗ above)."))
@@ -531,22 +551,42 @@ def first_error(text: str) -> str:
 
 #: One JSON line per full gate run (gitignored): where the wall-clock went, and the verdict `dev/pytools/release.py` reads.
 TIMINGS_HISTORY = ROOT / "dev" / "release-oracle" / "timings.jsonl"
+GATE_FAILURES = ROOT / "target" / "gate-failures"
 
 
-def tree_identity() -> tuple[str, bool]:
-    """HEAD's full commit and whether tracked files differ from it: taken at the gate's start, before the gate writes its own evidence."""
-    sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+def keep_failure_log(src: Path, name: str) -> Path:
+    """Copy `src` to `target/gate-failures/<name>`, outside the work dir the gate deletes; return the kept path."""
+    import shutil
+
+    GATE_FAILURES.mkdir(parents=True, exist_ok=True)
+    kept = GATE_FAILURES / name
+    shutil.copy2(src, kept)
+    return kept
+
+
+def tree_identity(root: Path = ROOT) -> tuple[str, bool]:
+    """HEAD's full commit and whether tracked files differ from it, the evidence ledger every gate run rewrites apart."""
+    from ..pytools import evidence
+
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
-                           capture_output=True, text=True).stdout.strip() != ""
-    return sha, dirty
+    return sha, evidence.tree_dirty(root)
+
+
+def split_minutes(splits: list[tuple[str, float]]) -> dict[str, float]:
+    """Minutes per split name, slowest first; a name recorded twice (two passes of one stage) is the sum."""
+    total: dict[str, float] = {}
+    for name, seconds in splits:
+        total[name] = total.get(name, 0.0) + seconds
+    return {n: round(d / 60.0, 2) for n, d in sorted(total.items(), key=lambda p: p[1], reverse=True)}
 
 
 def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tuple[str, float]],
                    verdict: str, passed: int, failed: int, loads: dict[str, tuple[float, float]] | None = None,
                    gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None, config: dict | None = None,
-                   skipped: int = 0, skipped_env: list[tuple[str, str, str]] | None = None) -> dict:
-    """Append this run's verdict (full commit, the graded binary's stamp, gate kind, the configuration it ran under, dirty tree, the skip count and every env-skipped cell), phase and span timings and load averages to `path`; print the phase deltas against the previous run."""
+                   splits: list[tuple[str, float]] | None = None, skipped: int = 0,
+                   skipped_env: list[tuple[str, str, str]] | None = None) -> dict:
+    """Append this run's verdict (full commit, the graded binary's stamp, gate kind, the configuration it ran under, dirty tree, the skip count and every env-skipped cell), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
     import datetime as _dt
     import json as _json
 
@@ -569,6 +609,7 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
         "phases_load1": {n.split(" — ")[0]: [round(x, 1) for x in v] for n, v in (loads or {}).items()},
         "cores": os.cpu_count(),
         "top_spans_min": {n: round(d / 60.0, 2) for n, d in sorted(spans, key=lambda p: p[1], reverse=True)[:40]},
+        "splits_min": split_minutes(splits or []),
     }
     prev = None
     if path.exists():
@@ -811,16 +852,21 @@ def run_lanes(led: "Ledger", cells: Sequence[tuple[object, Callable[["Ledger"], 
     for i, (lane, _) in enumerate(cells):
         lanes.setdefault(lane, []).append(i)
 
-    def _lane(idx: list[int]) -> BaseException | None:
+    def _lane(idx: list[int]) -> tuple[BaseException | None, float]:
+        t0 = time.perf_counter()
         for i in idx:
             try:
                 cells[i][1](subs[i])
             except (Exception, SystemExit) as e:  # noqa: BLE001 — re-raised below, after every row is flushed
-                return e
-        return None
+                return e, time.perf_counter() - t0
+        return None, time.perf_counter() - t0
 
     with ThreadPoolExecutor(max_workers=max(1, min(workers or len(lanes), len(lanes)))) as ex:
-        raised = [e for e in ex.map(_lane, lanes.values()) if e is not None]
+        done = list(ex.map(_lane, lanes.values()))
+    stage = (led._cur_phase or "").split(" — ")[0]
+    for lane, (_, seconds) in zip(lanes, done):
+        led.record_split(f"lane {stage or '-'} / {lane}", seconds)
+    raised = [e for e, _ in done if e is not None]
     for sub in subs:
         sub.flush_into(led)
     if raised:

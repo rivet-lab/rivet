@@ -213,11 +213,29 @@ pub(crate) fn not_the_refusal(cycles: &[&Said], want: Refused) -> Option<String>
         .map(|n| format!("cycle {} refused in other words than cycle 1", n + 1))
 }
 
-/// Whether two error lines say the same thing, the run ids they name (`<export>_<yyyymmddThhmmss.mmm>_<pid>`) apart: each run of an export has its own.
+/// An error line with its volatile tokens folded: the run id (`<export>_<yyyymmddThhmmss.mmm>_<pid>`) and the live SCN (`SCN <n>` or `SCN <n>..<m>`) differ per run.
+fn fold_volatile(line: &str) -> String {
+    static VOLATILE: std::sync::LazyLock<[(regex::Regex, &str); 2]> =
+        std::sync::LazyLock::new(|| {
+            [
+                (
+                    regex::Regex::new(r"_\d{8}T\d{6}\.\d{3}_\d+\b").unwrap(),
+                    "_<run>",
+                ),
+                (
+                    regex::Regex::new(r"\bSCN \d+(?:\.\.\d+)?").unwrap(),
+                    "SCN <n>",
+                ),
+            ]
+        });
+    VOLATILE.iter().fold(line.to_string(), |text, (re, to)| {
+        re.replace_all(&text, *to).into_owned()
+    })
+}
+
+/// Whether two error lines say the same thing, the tokens each run has of its own apart.
 pub(crate) fn same_words(a: &str, b: &str) -> bool {
-    static RUN_ID: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"_\d{8}T\d{6}\.\d{3}_\d+\b").unwrap());
-    RUN_ID.replace_all(a, "_<run>") == RUN_ID.replace_all(b, "_<run>")
+    fold_volatile(a) == fold_volatile(b)
 }
 
 /// Collapse every run of whitespace, so a wrapped message still holds its sentence.
@@ -522,6 +540,24 @@ mod tests {
     }
 
     const CODED: &str = "WARN something\nError: [RIVET_STATE_RUN_IN_PROGRESS] export 'x' is running. Wait for it, or run `rivet state reset-chunks`.\n";
+
+    #[test]
+    fn refusals_differing_only_in_the_live_scn_say_the_same_words() {
+        let gap = |end: u64| {
+            format!(
+                "oracle cdc: no redo log covers SCN 100..{end} \u{2014} the archived logs are gone"
+            )
+        };
+        assert!(same_words(&gap(500), &gap(900)));
+        assert!(!same_words(
+            &gap(500),
+            &gap(900).replace("are gone", "are kept")
+        ));
+        assert!(!same_words(
+            &gap(500),
+            &gap(500).replace("SCN 100", "LSN 100")
+        ));
+    }
 
     #[test]
     fn two_identical_coded_refusals_are_the_refusal() {

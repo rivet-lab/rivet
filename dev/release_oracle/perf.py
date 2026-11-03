@@ -1000,5 +1000,5 @@ def verify_perf_regression(led: Ledger) -> None:
         "cdc20": lambda: _cdc20(led, prev, root),
     }
     for name, run in sections.items():
-        with led.span(f"perf {name}"):
+        with led.split(f"perf {name}"):
             run()
