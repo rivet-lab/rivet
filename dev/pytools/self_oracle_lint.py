@@ -74,7 +74,6 @@ R_STATE = "listed 2026-11-03: a refusal on an unreachable state store; closes wh
 
 #: `file::test` → why a preflight verdict stands without its consequence today. Shrink-only.
 BLIND_PREFLIGHT: dict[str, str] = {  # ratchet-pin: blind-preflight-tests strings
-    "audit_column_validation.rs::audit_check_rejects_inapplicable_type_override": R_DISAGREES,
     "live_audit_suspects.rs::mssql_check_reports_a_row_estimate_for_a_read_only_login": R_DISAGREES,
     "audit_column_validation.rs::audit_type_report_flags_lossy_scale_reduction": R_DATA,
     "audit_doctor_fastfail.rs::audit_doctor_fastfails_against_unreachable_cloud_endpoint": R_MESSAGE,
