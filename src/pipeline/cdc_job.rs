@@ -784,7 +784,9 @@ fn run_cdc_inner(
             outputs,
             format: export.format,
             max_events: cdc.max_events,
-            rollover: cdc.rollover.unwrap_or(100_000),
+            rollover: cdc
+                .rollover
+                .unwrap_or(crate::config::quantity::DEFAULT_COUNT),
             rollover_memory_bytes: cdc_rollover_memory_bytes(cdc.rollover_memory_mb),
             run_id: run_id.to_string(),
             started_at: now,

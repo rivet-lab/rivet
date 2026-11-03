@@ -587,7 +587,7 @@ fn chunked_row_estimate(
 /// Inclusive because a chunk range is `[lo, hi]` on both ends — a single-ordinal
 /// table (`first.0 == last.1`) holds one row, not zero.
 fn chunked_key_span(first_lo: i64, last_hi: i64) -> i64 {
-    (last_hi - first_lo + 1).max(0)
+    crate::config::quantity::Knob::inclusive_count(first_lo, last_hi)
 }
 
 /// Compute the `ComputedPlanData` portion of the artifact.
@@ -1301,6 +1301,7 @@ mod tests {
         // A degenerate/empty detection must floor at zero, never report a
         // negative row estimate to the scheduler.
         assert_eq!(chunked_key_span(10, 5), 0);
+        assert_eq!(chunked_key_span(i64::MIN, i64::MAX), i64::MAX);
     }
 
     /// The "N measured, M estimated" label counts MEASUREMENTS — a failed

@@ -4,6 +4,7 @@
 //! logs sparsity diagnostics, and returns the final `Vec<(i64, i64)>` chunk list.
 
 use super::math::{generate_chunks, generate_chunks_checked, strip_simple_projection_from};
+use crate::config::quantity::Knob;
 use crate::error::Result;
 use crate::scalar::{parse_date_flexible, parse_scalar_i64};
 use crate::source::Source;
@@ -313,6 +314,11 @@ pub(crate) fn detect_and_generate_chunks(
     chunk_by_days: Option<u32>,
     source_type: crate::config::SourceType,
 ) -> Result<Vec<(i64, i64)>> {
+    if let Some(count) = chunk_count {
+        Knob::CHUNK_COUNT.validate_export(export_name, count)?;
+    } else if chunk_by_days.is_none() {
+        Knob::CHUNK_SIZE.validate_export(export_name, chunk_size)?;
+    }
     if let Some(days_per_chunk) = chunk_by_days {
         // NULL-keyed rows are excluded by the date predicate `>= start AND < end`
         // — refuse rather than drop them silently.
@@ -397,12 +403,8 @@ pub(crate) fn detect_and_generate_chunks(
             None => EMPTY_WINDOW,
         };
 
-    let effective_chunk_size = if let Some(count) = chunk_count {
-        let span = (max_val - min_val).max(0) as usize + 1;
-        span.div_ceil(count)
-    } else {
-        chunk_size
-    };
+    let effective_chunk_size =
+        Knob::window_size(chunk_size, chunk_count, Knob::key_span(min_val, max_val));
 
     log::info!(
         "export '{}': chunk_column `{}` range {} .. {} ({})",
@@ -420,14 +422,13 @@ pub(crate) fn detect_and_generate_chunks(
     // Checked variant: refuse an extreme-sparse plan (window count past the
     // ceiling) BEFORE the `Vec` allocates — the sparse guard below inspects
     // `chunks.len()` and so is structurally too late to stop the OOM itself.
-    let chunks =
-        generate_chunks_checked(min_val, max_val, effective_chunk_size as i64).map_err(|e| {
-            crate::error::recoded(
-                &e,
-                crate::error::codes::PLAN_CHUNK_KEY_SPARSE,
-                format!("export '{export_name}': {e}"),
-            )
-        })?;
+    let chunks = generate_chunks_checked(min_val, max_val, effective_chunk_size).map_err(|e| {
+        crate::error::recoded(
+            &e,
+            crate::error::codes::PLAN_CHUNK_KEY_SPARSE,
+            format!("export '{export_name}': {e}"),
+        )
+    })?;
 
     // Sparsity diagnostic from a SCAN-FREE row estimate (catalog stats), never a
     // full COUNT(*): a full count on a large production table is exactly the
@@ -691,6 +692,63 @@ mod tests {
         assert_eq!(chunks.len(), 10);
         assert_eq!(chunks[0], (1, 100));
         assert_eq!(chunks[9], (901, 1000));
+    }
+
+    fn detect_counted(
+        src: &mut dyn crate::source::Source,
+        chunk_size: usize,
+        chunk_count: Option<usize>,
+    ) -> Result<Vec<(i64, i64)>> {
+        detect_and_generate_chunks(
+            src,
+            "SELECT * FROM orders",
+            "id",
+            chunk_size,
+            chunk_count,
+            "orders",
+            None,
+            SourceType::Postgres,
+        )
+    }
+
+    #[test]
+    fn a_key_range_as_wide_as_i64_is_split_by_count_and_by_size_without_overflow() {
+        let wide = || {
+            ScriptedSource::new([
+                ok("-9223372036854775808"),
+                ok("9223372036854775807"),
+                ok("2"),
+            ])
+        };
+        let one = detect_counted(&mut wide(), 100_000, Some(1)).unwrap();
+        assert_eq!(one, vec![(i64::MIN, i64::MAX)]);
+        let two = detect_counted(&mut wide(), 100_000, Some(2)).unwrap();
+        assert_eq!(two, vec![(i64::MIN, -1), (0, i64::MAX)]);
+        let size = detect_counted(&mut wide(), i64::MAX as usize, None).unwrap();
+        assert_eq!(
+            size,
+            vec![(i64::MIN, -2), (-1, i64::MAX - 2), (i64::MAX - 1, i64::MAX)]
+        );
+    }
+
+    #[test]
+    fn a_sealed_plan_with_a_count_past_i64_is_refused_at_run_by_code() {
+        let past = i64::MAX as usize + 1;
+        for (size, count) in [(past, None), (0, None), (100, Some(past)), (100, Some(0))] {
+            let mut src = ScriptedSource::new([ok("1"), ok("1000"), ok("500")]);
+            let err = detect_counted(&mut src, size, count).expect_err("refused before any read");
+            assert!(
+                matches!(
+                    crate::error::error_code(&err),
+                    Some(
+                        "RIVET_CONFIG_VALUE_OUT_OF_RANGE"
+                            | "RIVET_CONFIG_MODE_SETTING_INVALID"
+                            | "RIVET_CONFIG_CHUNK_COUNT_INVALID"
+                    )
+                ),
+                "{err:#}"
+            );
+        }
     }
 
     /// An EMPTY table plans one empty window — the single legitimate zero, reached by a row count of 0.

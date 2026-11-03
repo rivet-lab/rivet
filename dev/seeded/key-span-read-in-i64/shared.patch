@@ -1,0 +1,12 @@
+diff --git a/src/config/quantity.rs b/src/config/quantity.rs
+--- a/src/config/quantity.rs
++++ b/src/config/quantity.rs
+@@ -102,7 +102,7 @@
+ 
+     /// The number of keys `min..=max` holds, 1 for an empty range, in a width no `i64` span can overflow.
+     pub fn key_span(min: i64, max: i64) -> u128 {
+-        (i128::from(max) - i128::from(min)).max(0) as u128 + 1
++        (max - min).max(0) as u128 + 1
+     }
+ 
+     /// The keys in `first..=last` as the `i64` an estimate is kept in: 0 for an empty range, `i64::MAX` at most.
