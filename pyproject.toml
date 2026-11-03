@@ -16,6 +16,8 @@ dependencies = [
     # scanner, and this shares no code with rivet's Rust `oracledb` driver.
     "oracledb==26.0.1",
     "pymongo>=4,<5",
+    # The MySQL server-position reader (SHOW BINARY LOGS), which DuckDB's mysql scanner cannot prepare.
+    "pymysql==1.1.1",
     "pytz==2025.2",
     "pyyaml>=6,<7",
     # The independent row-hash oracle. Absent, `row_hash` SKIPs rather than

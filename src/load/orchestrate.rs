@@ -3225,6 +3225,170 @@ mod load_ledger_tests {
         super::live_only_decisions::write_at(dir, &format!("p/{part}"), b"x");
     }
 
+    /// Stage CDC run `run` as a `Success` manifest holding exactly `parts`, the way each roll rewrites it.
+    fn stage_cdc_parts(dir: &tempfile::TempDir, run: &str, started_at: &str, parts: &[&str]) {
+        let mut m = super::live_only_decisions::success_manifest(run, parts[0]);
+        m.mode = "cdc".into();
+        m.started_at = started_at.into();
+        m.finished_at = started_at.into();
+        m.parts = parts
+            .iter()
+            .enumerate()
+            .map(|(i, path)| crate::manifest::ManifestPart {
+                part_id: i as u32,
+                path: (*path).into(),
+                rows: 1,
+                size_bytes: 1,
+                content_fingerprint: format!("xxh3:{i:016x}"),
+                content_md5: String::new(),
+                status: crate::manifest::PartStatus::Committed,
+            })
+            .collect();
+        m.part_count = parts.len() as u32;
+        m.row_count = parts.len() as i64;
+        for part in parts {
+            super::live_only_decisions::write_at(dir, &format!("p/{part}"), b"x");
+        }
+        super::live_only_decisions::write_at(
+            dir,
+            &format!("p/manifest-{run}.json"),
+            &serde_json::to_vec(&m).unwrap(),
+        );
+    }
+
+    /// One load cycle over the staged prefix: the part files it handed the warehouse.
+    fn delivered_by_cycle(
+        dir: &tempfile::TempDir,
+        state: &StateStore,
+        plan: &load::plan::LoadPlan,
+        load_id: &str,
+    ) -> std::collections::BTreeSet<String> {
+        let delivered = std::cell::RefCell::new(std::collections::BTreeSet::new());
+        let mut job = cdc_job(dir, state, plan);
+        job.load_id = load_id;
+        execute_load(
+            job,
+            |_| {},
+            |_, _, inputs, _| -> Result<(u64, ())> {
+                delivered.borrow_mut().extend(
+                    inputs
+                        .uris
+                        .iter()
+                        .map(|u| u.rsplit('/').next().unwrap().to_string()),
+                );
+                Ok((inputs.uris.len() as u64, ()))
+            },
+            |_, _| {},
+        )
+        .expect("the load cycle succeeds");
+        delivered.into_inner()
+    }
+
+    /// Where the ledger row of the CDC run `r-cdc` lives, if anywhere.
+    enum RowAt {
+        LoadState,
+        Nowhere,
+        OtherState,
+    }
+
+    /// A CDC run that rolls twice while a load overlaps it; the parts every cycle delivered, unioned.
+    fn parts_delivered_across_a_growing_run(table: &str, row: RowAt) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open_in_memory().unwrap();
+        let other = StateStore::open_in_memory().unwrap();
+        let plan = cdc_plan(&dir, table);
+        let begin = |s: &StateStore| {
+            s.begin_run_under_lease(
+                "r-cdc",
+                "orders",
+                "src",
+                "gs://b/p/",
+                "2026-08-21T00:00:00Z",
+            )
+            .unwrap()
+        };
+        match row {
+            RowAt::LoadState => begin(&state),
+            RowAt::OtherState => begin(&other),
+            RowAt::Nowhere => {}
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        stage_cdc_parts(&dir, "r-cdc", "2026-08-21T00:00:00Z", &["part-0.parquet"]);
+        seen.extend(delivered_by_cycle(&dir, &state, &plan, "L1"));
+        stage_cdc_parts(
+            &dir,
+            "r-cdc",
+            "2026-08-21T00:00:00Z",
+            &["part-0.parquet", "part-1.parquet"],
+        );
+        seen.extend(delivered_by_cycle(&dir, &state, &plan, "L2"));
+        if matches!(row, RowAt::LoadState) {
+            state
+                .finish_run("r-cdc", "success", "2026-08-21T00:05:00Z")
+                .unwrap();
+        }
+        seen.extend(delivered_by_cycle(&dir, &state, &plan, "L3"));
+        seen.into_iter().collect()
+    }
+
+    const BOTH_PARTS: [&str; 2] = ["part-0.parquet", "part-1.parquet"];
+
+    /// A load that overlaps a CDC run whose ledger row is in the load's state delivers every part the run wrote.
+    #[test]
+    fn a_load_overlapping_a_cdc_run_with_a_row_delivers_every_part() {
+        assert_eq!(
+            parts_delivered_across_a_growing_run("grow_row", RowAt::LoadState),
+            BOTH_PARTS
+        );
+    }
+
+    /// A load that overlaps a CDC run no ledger lists delivers every part the run wrote.
+    #[test]
+    #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+    fn open_defect_a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part() {
+        assert_eq!(
+            parts_delivered_across_a_growing_run("grow_no_row", RowAt::Nowhere),
+            BOTH_PARTS
+        );
+    }
+
+    /// A load from a second state database delivers every part of a CDC run whose row is in the first.
+    #[test]
+    #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+    fn open_defect_a_load_overlapping_a_cdc_run_over_a_foreign_state_delivers_every_part() {
+        assert_eq!(
+            parts_delivered_across_a_growing_run("grow_foreign", RowAt::OtherState),
+            BOTH_PARTS
+        );
+    }
+
+    /// With no row and a newer CDC run under the prefix, the older run is consumed and the newer stays retryable.
+    #[test]
+    #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+    fn open_defect_a_cdc_run_with_no_row_is_consumed_once_a_newer_run_exists_and_not_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open_in_memory().unwrap();
+        let plan = cdc_plan(&dir, "grow_newer");
+        stage_cdc_parts(&dir, "r-old", "2026-08-21T00:00:00Z", &["old-0.parquet"]);
+        stage_cdc_parts(&dir, "r-new", "2026-08-21T01:00:00Z", &["new-0.parquet"]);
+        let first = delivered_by_cycle(&dir, &state, &plan, "L1");
+        assert_eq!(
+            first.iter().cloned().collect::<Vec<_>>(),
+            ["new-0.parquet", "old-0.parquet"]
+        );
+        let loaded = state.loaded_source_run_ids("db.grow_newer").unwrap();
+        assert!(
+            loaded.contains("r-old"),
+            "the superseded run is consumed: {loaded:?}"
+        );
+        assert!(
+            !loaded.contains("r-new"),
+            "the newest run may still be writing and stays retryable: {loaded:?}"
+        );
+        let again = delivered_by_cycle(&dir, &state, &plan, "L2");
+        assert_eq!(again.iter().cloned().collect::<Vec<_>>(), ["new-0.parquet"]);
+    }
+
     /// The statuses the ledger holds for `target`, newest first.
     fn statuses(state: &StateStore, target: &str) -> Vec<String> {
         state
