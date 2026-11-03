@@ -939,6 +939,7 @@ fn a_load_from_another_state_db_crosses_a_rolling_cdc_run(
 }
 
 #[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mysql-cdc"]
 fn a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql() {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
