@@ -211,7 +211,7 @@ def verify_fix_cells(led: Ledger, only: list[str] | None = None) -> None:
     record = {"PASS": led.passed, "FAIL": led.failed}
     for status, cell, line in grade(cells, bare(verdicts), bare(skipped), allowed, tag, bare(panics)):
         if status == "SKIP":
-            led.skipped("all", "-", SCEN, "-", f"fix cell · {cell} — {line}", cause=SkipCause.ENV)
+            led.skipped("all", "-", SCEN, cell, f"fix cell · {cell} — {line}", cause=SkipCause.ENV)
         else:
             record[status]("all", "-", SCEN, "-", f"fix cell · {cell} — {line}")
     for known in [] if only else stale_scope(credited(tag), FIX_SCOPE):

@@ -19,15 +19,22 @@ class Excuse:
     expires: str  # YYYY-MM-DD
 
 
+FOLD_CELLS = (
+    "a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql",
+    "a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql",
+    "a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql",
+    "a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql",
+)
+
 EXCUSES: tuple[Excuse, ...] = (
     Excuse("coverage", "infra", "-",
            "2026-11-03: cargo-llvm-cov is not installed on the gate host (b0446717 gate log: `no llvm-cov`), so the live-only coverage adjudication does not run. "
            "Closes when `cargo install cargo-llvm-cov --locked` is run on the host",
            "2026-11-17"),
-    Excuse("fix_cells", "all", "-",
-           "2026-11-03: four MySQL fold cells self-skip on v0.32.2 (the stand's lower_case_table_names=0, b0446717 gate log), so they are not proven to fail there. "
-           "Closes when the stand runs a folding MySQL or the next release leaves them out of the fix window",
-           "2026-11-17"),
+    *(Excuse("fix_cells", "all", cell,
+             "2026-11-03: the cell self-skips on v0.32.2 (the stand's lower_case_table_names=0, b0446717 gate log), so it is not proven to fail there. "
+             "Closes when the stand runs a folding MySQL or the next release leaves it out of the fix window",
+             "2026-11-17") for cell in FOLD_CELLS),
 )
 
 

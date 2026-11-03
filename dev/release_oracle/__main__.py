@@ -440,6 +440,15 @@ def _skip_cause_self_test() -> None:
     finally:
         skip_allow.EXCUSES = kept
 
+    fifth = Ledger(colour=False)
+    fifth.passed("-", "-", "s", "-", "a graded cell")
+    fifth.skipped("all", "-", "fix_cells", "a_fifth_fix_cell_that_self_skips_mysql", "NOT GRADED: self-skipped there (lower_case_table_names=0)",
+                  cause=SkipCause.ENV)
+    assert fifth.verdict(core.FULL_GATE) == "NOT GRADED", "a new fix cell that self-skips for the folding text is not excused by the four named ones"
+    assert skip_allow.excused("fix_cells", "all", "a_fifth_fix_cell_that_self_skips_mysql", date(2026, 11, 3)) is None
+    assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 3)) for c in skip_allow.FOLD_CELLS) and len(skip_allow.FOLD_CELLS) == 4
+    assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 18)) is None for c in skip_allow.FOLD_CELLS), "an excuse ends on its day"
+
     parent, child = Ledger(colour=False), Ledger(colour=False)
     child._buf = []
     child.skipped("postgres", "-", "s", "-", "stand down", cause=SkipCause.ENV)
