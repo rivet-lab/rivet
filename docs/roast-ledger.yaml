@@ -65,3 +65,11 @@ entries:
     status: done
     verdict: "orphans re-checked with git grep; the derived step runs every script that handles --self-test"
     closes: "merged as #744"
+  - id: HCF-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: numeric config counts, spans and ratios are range-checked and converted in each reader instead of one table
+    copies: [src/pipeline/chunked/detect.rs:401, src/pipeline/chunked/detect.rs:424, src/pipeline/chunked/math.rs:31, src/preflight/analysis.rs:502, src/cli/dispatch.rs:454, src/plan/build.rs:438, src/quality.rs:269]
+    status: accepted-as-bugfix
+    verdict: "confirmed: chunk_size 2^63 plans 0 windows and exits 0 with 0 rows; chunk_count over a full key range panics in debug and names the knob already set in release; --rollover 0 is accepted where the config refuses it"
+    closes: "src/config/quantity.rs holds every count, span and ratio knob and every copy routes through it; HCF-8, HCF-4 and HCF-3 close with it"

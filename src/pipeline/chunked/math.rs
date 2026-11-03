@@ -20,60 +20,58 @@ pub(crate) use crate::sql::{strip_select_star_from, strip_simple_projection_from
 /// plan`/`run`).
 pub const MAX_CHUNK_WINDOWS: u128 = 50_000_000;
 
-/// Expected number of inclusive range windows for `min..=max` at `chunk_size`,
-/// computed on the span scalar with NO allocation. Returns 0 for an empty or
-/// invalid range (matching `generate_chunks`' empty-`Vec` case).
-pub fn expected_chunk_count(min: i64, max: i64, chunk_size: i64) -> u128 {
-    if max < min || chunk_size <= 0 {
+/// The number of inclusive windows of `window` keys that cover `min..=max`, with no allocation; 0 for an empty range or a zero window.
+pub fn expected_chunk_count(min: i64, max: i64, window: u128) -> u128 {
+    if max < min || window == 0 {
         return 0;
     }
-    // max >= min so the span is non-negative; ceil-divide by chunk_size.
-    let span = (max as i128 - min as i128) as u128;
-    span / chunk_size as u128 + 1
+    let span = (i128::from(max) - i128::from(min)) as u128;
+    span / window + 1
 }
 
-/// `generate_chunks`, but refuses a plan whose window count exceeds
-/// [`MAX_CHUNK_WINDOWS`] BEFORE allocating the `Vec` — so an extreme-sparse key
-/// bails loudly instead of OOMing. Both the runner (`detect`) and the planner
-/// (`plan_cmd`) go through this; the raw `generate_chunks` stays for tests and
-/// already-bounded callers.
+/// `generate_windows`, but refuses a plan past [`MAX_CHUNK_WINDOWS`] before the `Vec` allocates.
 pub fn generate_chunks_checked(
     min: i64,
     max: i64,
-    chunk_size: i64,
+    window: u128,
 ) -> anyhow::Result<Vec<(i64, i64)>> {
-    let expected = expected_chunk_count(min, max, chunk_size);
+    let expected = expected_chunk_count(min, max, window);
     if expected > MAX_CHUNK_WINDOWS {
         crate::rivet_bail!(
             crate::error::codes::PLAN_CHUNK_KEY_SPARSE,
             "chunk plan would generate {expected} windows (key span {min}..={max} ÷ chunk_size \
-             {chunk_size}), past the {MAX_CHUNK_WINDOWS}-window ceiling — the key is extremely \
+             {window}), past the {MAX_CHUNK_WINDOWS}-window ceiling — the key is extremely \
              sparse. Raise chunk_size:, set an explicit chunk_count:, or use mode: full."
         );
     }
-    Ok(generate_chunks(min, max, chunk_size))
+    Ok(generate_windows(min, max, window))
 }
 
-pub fn generate_chunks(min: i64, max: i64, chunk_size: i64) -> Vec<(i64, i64)> {
-    if max < min || chunk_size <= 0 {
+/// The inclusive windows of `window` keys that cover `min..=max`, in a width a full `i64` range cannot overflow.
+pub fn generate_windows(min: i64, max: i64, window: u128) -> Vec<(i64, i64)> {
+    if max < min || window == 0 {
         return vec![];
     }
+    let reach = (window - 1).min(u128::from(u64::MAX)) as i128;
     let mut chunks = Vec::new();
     let mut start = min;
     loop {
-        // Saturating arithmetic: when `start` is within `chunk_size` of i64::MAX
-        // the naive `start + chunk_size - 1` would overflow and panic. We clamp
-        // at i64::MAX and then `.min(max)` produces the correct inclusive end.
-        let end = start.saturating_add(chunk_size - 1).min(max);
+        let end = (i128::from(start) + reach).min(i128::from(max)) as i64;
         chunks.push((start, end));
-        // Two exit conditions: the chunk reached `max`, or `end` hit i64::MAX
-        // (next start would overflow). Either way no more chunks remain.
-        if end == max || end == i64::MAX {
+        if end == max {
             break;
         }
         start = end + 1;
     }
     chunks
+}
+
+/// The inclusive windows of `chunk_size` keys over `min..=max`; empty for a non-positive size.
+pub fn generate_chunks(min: i64, max: i64, chunk_size: i64) -> Vec<(i64, i64)> {
+    if chunk_size <= 0 {
+        return vec![];
+    }
+    generate_windows(min, max, chunk_size as u128)
 }
 
 /// The pieces of the inclusive `ranges` that no window of `windows` covers, in order; `windows` are inclusive, ordered by their first key and do not overlap.
@@ -220,7 +218,7 @@ mod tests {
     fn expected_chunk_count_matches_generated_len() {
         for (min, max, cs) in [(0, 100, 25), (1, 100, 25), (42, 42, 100), (10, 20, 10_000)] {
             assert_eq!(
-                expected_chunk_count(min, max, cs),
+                expected_chunk_count(min, max, cs as u128),
                 generate_chunks(min, max, cs).len() as u128,
                 "span {min}..={max} / {cs}"
             );
@@ -252,6 +250,21 @@ mod tests {
 
     // A legitimate plan (even a large one, well under the ceiling) still passes
     // through unchanged — the guard must not reject normal chunking.
+    #[test]
+    fn a_full_i64_range_is_planned_in_windows_without_overflow() {
+        let full = generate_windows(i64::MIN, i64::MAX, 1u128 << 64);
+        assert_eq!(full, vec![(i64::MIN, i64::MAX)]);
+        let halves = generate_windows(i64::MIN, i64::MAX, 1u128 << 63);
+        assert_eq!(halves, vec![(i64::MIN, -1), (0, i64::MAX)]);
+        assert_eq!(expected_chunk_count(i64::MIN, i64::MAX, 1u128 << 63), 2);
+        assert_eq!(
+            generate_windows(i64::MAX - 1, i64::MAX, u128::MAX),
+            vec![(i64::MAX - 1, i64::MAX)]
+        );
+        assert_eq!(generate_windows(5, 4, 3), vec![]);
+        assert_eq!(generate_windows(5, 5, 0), vec![]);
+    }
+
     #[test]
     fn generate_chunks_checked_allows_normal_plans() {
         let ok = generate_chunks_checked(1, 10_000_000, 100_000).expect("normal plan");

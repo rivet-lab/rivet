@@ -362,9 +362,9 @@ Rivet exports the WKT text as a `Utf8` (string) column. Downstream tools (DuckDB
 |-------|------|----------|---------|-------------|
 | `chunk_column` | string | yes* | — | Numeric or date/timestamp column to partition by. *Required unless `chunk_by_key` is set (mutually exclusive). |
 | `chunk_by_key` | string | yes* | — | Single index-backed UNIQUE NOT NULL column for **keyset (seek)** pagination — the source-safe shape for tables with no single-integer PK (UUID / string / composite). Requires the `table:` shortcut; mutually exclusive with `chunk_column`. See [chunked modes](../modes/chunked.md) and [ADR-0020](../adr/0020-pg-uuid-pk-chunking-asymmetry.md). |
-| `chunk_size` | integer | no | `100000` | Rows per chunk (numeric mode), or page size for keyset. Ignored when `chunk_count` is set. |
+| `chunk_size` | integer | no | `100000` | Rows per chunk (numeric mode), or page size for keyset. Ignored when `chunk_count` is set. Must be from 1 to 9223372036854775807 (`RIVET_CONFIG_MODE_SETTING_INVALID` for 0, `RIVET_CONFIG_VALUE_OUT_OF_RANGE` above). |
 | `chunk_size_memory_mb` | integer | no | — | Target memory budget per chunk in MB; `chunk_size` is derived from a per-engine row-size estimate, clamped to `[10000, 5000000]` rows. Works on **PostgreSQL, MySQL and SQL Server** (PG: `pg_relation_size / reltuples`; MySQL: `information_schema` `AVG_ROW_LENGTH` with InnoDB overflow correction; SQL Server: no estimate, falls back to 512 B/row with a warning). Requires the `table:` shortcut, mutually exclusive with an explicit non-default `chunk_size:`. |
-| `chunk_count` | integer | no | — | Divide the column range into exactly this many equal chunks. `chunk_size` is computed dynamically from `min`/`max`. Must be ≥ 1. Mutually exclusive with `chunk_by_days`. |
+| `chunk_count` | integer | no | — | Divide the column range into exactly this many equal chunks. `chunk_size` is computed dynamically from `min`/`max`. Must be from 1 to 9223372036854775807 (`RIVET_CONFIG_CHUNK_COUNT_INVALID` for 0, `RIVET_CONFIG_VALUE_OUT_OF_RANGE` above). Mutually exclusive with `chunk_by_days`. |
 | `chunk_by_days` | integer | no | — | Enable date chunking: window size in days. Mutually exclusive with `chunk_count`. |
 | `parallel` | integer | no | `1` | Concurrent chunk workers |
 | `chunk_dense` | boolean | no | `false` | **Removed.** `true` is refused at config load (it skipped or duplicated rows under concurrent writes); use `chunk_by_key` or `chunk_column`. |
@@ -408,7 +408,7 @@ Splits a `full`, `chunked` or `incremental` export's rows into Hive-style
 |-------|------|-------------|
 | `row_count_min` | integer | Fail if fewer rows exported |
 | `row_count_max` | integer | Fail if more rows exported |
-| `null_ratio_max` | map (column → float) | Fail if null ratio exceeds threshold |
+| `null_ratio_max` | map (column → float) | Fail if null ratio exceeds threshold; each threshold is a number from 0 to 1, else `RIVET_CONFIG_VALUE_OUT_OF_RANGE` |
 | `unique_columns` | list of strings | Fail if values are not unique |
 | `unique_max_entries` | integer | Cap on distinct values tracked per column during uniqueness checks. When reached, a `Warn` is emitted and checking stops for that column; duplicates already found before the cap still fail the run. Prevents unbounded memory growth on high-cardinality columns (UUIDs, email addresses, event IDs). |
 

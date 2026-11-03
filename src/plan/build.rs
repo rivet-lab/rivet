@@ -435,7 +435,7 @@ fn full_strategy(config: &Config, export: &ExportConfig) -> ExtractionStrategy {
     {
         return ExtractionStrategy::Keyset(KeysetPlan {
             key_column: "_id".to_string(),
-            chunk_size: page.max(1),
+            chunk_size: page,
             // Resume is opt-in: default keeps `mode: full` re-reading each run.
             checkpoint: mongo.resume,
             incremental: continued_key(config, export).is_some(),
@@ -534,13 +534,7 @@ fn resolve_chunked_strategy(
     // chunk_count / chunk_by_days mutual-exclusion is shared
     // between the introspected and non-introspected paths.
     if let Some(count) = export.chunk_count {
-        if count == 0 {
-            crate::rivet_bail!(
-                crate::error::codes::CONFIG_CHUNK_COUNT_INVALID,
-                "export '{}': chunk_count must be >= 1 (got 0)",
-                export.name
-            );
-        }
+        crate::config::quantity::Knob::CHUNK_COUNT.validate_export(&export.name, count)?;
         if export.chunk_by_days.is_some() {
             crate::rivet_bail!(
                 crate::error::codes::CONFIG_VALUE_OUT_OF_RANGE,
@@ -729,7 +723,8 @@ fn heavy_chunk_warning(
         return None;
     }
     let row_bytes = avg_row_bytes.filter(|b| *b > 0)?;
-    let bytes_per_chunk = (chunk_size as i64).saturating_mul(row_bytes);
+    let bytes_per_chunk =
+        crate::config::quantity::Knob::saturating_i64(chunk_size).saturating_mul(row_bytes);
     if bytes_per_chunk < HEAVY_CHUNK_BYTES {
         return None;
     }

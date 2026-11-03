@@ -245,27 +245,27 @@ fn chunk_count_over_a_narrow_range_is_unchanged(engine: SqlEngine) {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-1; closes with fix/config-knob-quantity-counts"]
-fn open_defect_chunk_size_past_i64_is_refused_postgres() {
+#[ignore = "live: requires docker compose postgres"]
+fn chunk_size_past_i64_is_refused_postgres() {
     chunk_size_past_i64_is_refused(SqlEngine::Pg);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-1; closes with fix/config-knob-quantity-counts"]
-fn open_defect_chunk_size_past_i64_is_refused_mysql() {
+#[ignore = "live: requires docker compose mysql"]
+fn chunk_size_past_i64_is_refused_mysql() {
     chunk_size_past_i64_is_refused(SqlEngine::Mysql);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-1; closes with fix/config-knob-quantity-counts"]
-fn open_defect_chunk_size_past_i64_is_refused_mssql() {
+#[ignore = "live: requires docker compose mssql"]
+fn chunk_size_past_i64_is_refused_mssql() {
     chunk_size_past_i64_is_refused(SqlEngine::Mssql);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
-#[ignore = "live+gate-only: open defect HCF-1; closes with fix/config-knob-quantity-counts"]
-fn open_defect_chunk_size_past_i64_is_refused_oracle() {
+#[ignore = "live: requires docker compose oracle"]
+fn chunk_size_past_i64_is_refused_oracle() {
     chunk_size_past_i64_is_refused(SqlEngine::Oracle);
 }
 
@@ -295,27 +295,27 @@ fn chunk_size_within_i64_delivers_the_source_ids_oracle() {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-8; closes with fix/config-knob-quantity-counts"]
-fn open_defect_wide_key_windows_plan_and_deliver_postgres() {
+#[ignore = "live: requires docker compose postgres"]
+fn wide_key_windows_plan_and_deliver_postgres() {
     wide_key_windows_plan_and_deliver(SqlEngine::Pg);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-8; closes with fix/config-knob-quantity-counts"]
-fn open_defect_wide_key_windows_plan_and_deliver_mysql() {
+#[ignore = "live: requires docker compose mysql"]
+fn wide_key_windows_plan_and_deliver_mysql() {
     wide_key_windows_plan_and_deliver(SqlEngine::Mysql);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-8; closes with fix/config-knob-quantity-counts"]
-fn open_defect_wide_key_windows_plan_and_deliver_mssql() {
+#[ignore = "live: requires docker compose mssql"]
+fn wide_key_windows_plan_and_deliver_mssql() {
     wide_key_windows_plan_and_deliver(SqlEngine::Mssql);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
-#[ignore = "live+gate-only: open defect HCF-8; closes with fix/config-knob-quantity-counts"]
-fn open_defect_wide_key_windows_plan_and_deliver_oracle() {
+#[ignore = "live: requires docker compose oracle"]
+fn wide_key_windows_plan_and_deliver_oracle() {
     wide_key_windows_plan_and_deliver(SqlEngine::Oracle);
 }
 
@@ -392,34 +392,34 @@ fn cdc_rollover_in_the_config_is_unchanged(scenario: CdcScenario) {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-4; closes with fix/config-knob-quantity-counts"]
-fn open_defect_cdc_rollover_zero_is_refused_on_the_flag_postgres() {
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn cdc_rollover_zero_is_refused_on_the_flag_postgres() {
     cdc_rollover_zero_is_refused_on_the_flag(pg_stream(plain));
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-4; closes with fix/config-knob-quantity-counts"]
-fn open_defect_cdc_rollover_zero_is_refused_on_the_flag_mysql() {
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn cdc_rollover_zero_is_refused_on_the_flag_mysql() {
     cdc_rollover_zero_is_refused_on_the_flag(mysql_stream(plain));
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-4; closes with fix/config-knob-quantity-counts"]
-fn open_defect_cdc_rollover_zero_is_refused_on_the_flag_mssql() {
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn cdc_rollover_zero_is_refused_on_the_flag_mssql() {
     let _serial = cross_process_serial("mssql_cdc");
     cdc_rollover_zero_is_refused_on_the_flag(mssql_stream(plain));
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-4; closes with fix/config-knob-quantity-counts"]
-fn open_defect_cdc_rollover_zero_is_refused_on_the_flag_mongo() {
+#[ignore = "live: requires docker compose mongo-rs"]
+fn cdc_rollover_zero_is_refused_on_the_flag_mongo() {
     cdc_rollover_zero_is_refused_on_the_flag(mongo_stream(plain));
 }
 
 #[cfg(feature = "oracle")]
 #[test]
-#[ignore = "live+gate-only: open defect HCF-4; closes with fix/config-knob-quantity-counts"]
-fn open_defect_cdc_rollover_zero_is_refused_on_the_flag_oracle() {
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn cdc_rollover_zero_is_refused_on_the_flag_oracle() {
     let _serial = cross_process_serial("oracle_cdc");
     cdc_rollover_zero_is_refused_on_the_flag(oracle_stream(plain));
 }
@@ -472,8 +472,8 @@ fn mongo_collection(tag: &str, n: i64) -> (String, MongoTest, MongoDbGuard) {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-4; closes with fix/config-knob-quantity-counts"]
-fn open_defect_mongo_page_size_zero_is_refused() {
+#[ignore = "live: requires docker compose mongo-rs"]
+fn mongo_page_size_zero_is_refused() {
     let (url, _m, _guard) = mongo_collection("hk_ps", ROWS);
     let rig = Rig::mongo_batch("t").source_url(&url).mongo("page_size: 0");
     let (mut gaps, mut probes) = (Vec::new(), 0);
@@ -551,8 +551,8 @@ fn quality_sources() -> (Vec<QualitySource>, Vec<Box<dyn std::any::Any>>) {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HCF-3; closes with fix/config-knob-quantity-counts"]
-fn open_defect_null_ratio_max_outside_the_unit_interval_is_refused() {
+#[ignore = "live: requires the SQL stand and mongo-rs"]
+fn null_ratio_max_outside_the_unit_interval_is_refused() {
     let (rigs, _guards) = quality_sources();
     let (mut gaps, mut probes) = (Vec::new(), 0);
     for (column, make) in &rigs {
