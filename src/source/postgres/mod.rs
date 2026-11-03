@@ -371,6 +371,7 @@ fn introspect_pg_on(
         row_estimate,
         avg_row_bytes,
         int_columns,
+        ..Default::default()
     })
 }
 
@@ -563,7 +564,7 @@ impl super::Source for PostgresSource {
         request: &super::ExportRequest<'_>,
         sink: &mut dyn super::BatchSink,
     ) -> Result<()> {
-        let built = build_export_query(request, SourceType::Postgres);
+        let built = build_export_query(request, SourceType::Postgres)?;
         debug_assert!(
             built.cursor_param.is_none(),
             "Postgres path inlines cursor values as E'…' literals — binding is unused"

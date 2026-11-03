@@ -2204,6 +2204,7 @@ mod tests {
             checkpoint: false,
             incremental: false,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         assert_eq!(super::one_pass_note(&chunked, Some(&keyset)), None);
     }

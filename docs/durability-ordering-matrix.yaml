@@ -137,3 +137,10 @@ scenarios:
     chunked:     { na: "no source-side acknowledgement" }
     keyset:      { na: "no source-side acknowledgement" }
     cdc:         { test: pg_cdc_a_failed_final_part_after_a_mid_window_roll_leaves_the_slot_behind_it }
+
+  - id: load_crosses_a_rolling_cdc_run
+    what: "a load from a state that holds no ledger row for a CDC run still rolling counts the run as possibly still writing, so the rolls that follow its first load are loaded by the next one; the warehouse read back by a second client equals the source (HDW-1)"
+    incremental: { na: "an incremental run writes one manifest, at its end" }
+    chunked:     { na: "a chunked run writes its manifest at its end" }
+    keyset:      { na: "a keyset run writes its manifest at its end" }
+    cdc:         { test: open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql }

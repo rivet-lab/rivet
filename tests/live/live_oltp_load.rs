@@ -133,6 +133,7 @@ fn pg_export_survives_concurrent_inserts() {
             page_limit: None,
             base_relation: None,
             upper_bound: None,
+            key_rest: &[],
         },
         &mut sink,
     );
@@ -193,6 +194,7 @@ fn pg_export_adaptive_under_write_pressure() {
             page_limit: None,
             base_relation: None,
             upper_bound: None,
+            key_rest: &[],
         },
         &mut sink,
     );
@@ -254,6 +256,7 @@ fn mysql_export_survives_concurrent_inserts() {
             page_limit: None,
             base_relation: None,
             upper_bound: None,
+            key_rest: &[],
         },
         &mut sink,
     );
@@ -311,6 +314,7 @@ fn mysql_export_adaptive_under_write_pressure() {
             page_limit: None,
             base_relation: None,
             upper_bound: None,
+            key_rest: &[],
         },
         &mut sink,
     );

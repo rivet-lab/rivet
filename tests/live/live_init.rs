@@ -12,6 +12,24 @@
 
 use crate::common::*;
 
+/// The schema-wide scaffold of `url`: `check` and `run` over its `table` export agree, and the run delivers.
+fn scaffold_that_runs(url: &str, table: &str) -> InitConfig {
+    let cfg = InitConfig::generate(url, &[]);
+    assert!(
+        cfg.init.status.success(),
+        "schema-wide rivet init must exit 0; stderr:\n{}",
+        String::from_utf8_lossy(&cfg.init.stderr)
+    );
+    let c = cfg.run_export_after_check(table);
+    assert!(
+        c.green && c.run.status.success(),
+        "the scaffold's `{table}` export must check and run; check:\n{}\nrun:\n{}",
+        String::from_utf8_lossy(&c.preflight.stderr),
+        String::from_utf8_lossy(&c.run.stderr)
+    );
+    cfg
+}
+
 // ─── I1: schema-wide Postgres → seeded table name appears in YAML ─────────────
 
 #[test]
@@ -21,15 +39,7 @@ fn init_pg_schema_wide_discovers_seeded_table() {
 
     let table = seed_pg_numeric_table(10);
 
-    let out = run_rivet(&["init", "--source", POSTGRES_URL]);
-
-    assert!(
-        out.status.success(),
-        "rivet init must exit 0; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let yaml = String::from_utf8_lossy(&out.stdout);
+    let yaml = scaffold_that_runs(POSTGRES_URL, table.name()).yaml();
     assert!(
         yaml.contains("type: postgres"),
         "emitted YAML must contain 'type: postgres'; got:\n{yaml}"
@@ -79,48 +89,32 @@ fn init_pg_single_table_emits_valid_config_that_passes_check() {
     require_alive(LiveService::Postgres);
 
     let table = seed_pg_numeric_table(20);
-    let cfg_dir = tempfile::tempdir().unwrap();
 
-    // ── Step 1: rivet init --table <seeded_table> ──────────────────────────
-    let out = run_rivet(&["init", "--source", POSTGRES_URL, "--table", table.name()]);
-
+    let cfg = InitConfig::generate(POSTGRES_URL, &["--table", table.name()]);
     assert!(
-        out.status.success(),
+        cfg.init.status.success(),
         "rivet init --table must exit 0; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&cfg.init.stderr)
     );
 
-    let yaml = String::from_utf8_lossy(&out.stdout);
-    // Must reference the seeded table in the query.
+    let yaml = cfg.yaml();
     assert!(
         yaml.contains(table.name()),
         "emitted YAML must reference table '{}'; got:\n{yaml}",
         table.name()
     );
-    // Must have exactly one export (single-table init).
     let export_count = yaml.matches("  - name:").count();
     assert_eq!(
         export_count, 1,
         "single-table init must emit exactly 1 export; got {export_count}"
     );
 
-    // ── Step 2: replace url_env with url so rivet check can connect ────────
-    // The emitted YAML uses `url_env: DATABASE_URL` by default. Swap in the
-    // literal URL so the check can run without the env var. Replace only the
-    // key=value; the trailing `# export ...` stays a valid YAML comment.
-    let yaml_with_url = yaml.replace("url_env: DATABASE_URL", &format!("url: \"{POSTGRES_URL}\""));
-
-    let cfg_path = cfg_dir.path().join("rivet.yaml");
-    std::fs::write(&cfg_path, &yaml_with_url).expect("write patched config");
-
-    // ── Step 3: rivet check against the emitted YAML ───────────────────────
-    let check = run_rivet(&["check", "--config", cfg_path.to_str().unwrap()]);
-
+    let c = cfg.run_after(&["check"], &[], Pairing::SameRefusal);
     assert!(
-        check.status.success(),
-        "rivet check on init-emitted YAML must exit 0; stderr:\n{}\nstdout:\n{}",
-        String::from_utf8_lossy(&check.stderr),
-        String::from_utf8_lossy(&check.stdout)
+        c.green && c.run.status.success(),
+        "rivet check on init-emitted YAML must exit 0 and its run deliver; stderr:\n{}\nstdout:\n{}",
+        String::from_utf8_lossy(&c.preflight.stderr),
+        String::from_utf8_lossy(&c.preflight.stdout)
     );
 }
 
@@ -188,15 +182,7 @@ fn init_mysql_schema_wide_discovers_seeded_table() {
 
     let table = seed_mysql_numeric_table(10);
 
-    let out = run_rivet(&["init", "--source", MYSQL_URL]);
-
-    assert!(
-        out.status.success(),
-        "rivet init (mysql) must exit 0; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let yaml = String::from_utf8_lossy(&out.stdout);
+    let yaml = scaffold_that_runs(MYSQL_URL, table.name()).yaml();
     assert!(
         yaml.contains("type: mysql"),
         "emitted YAML must contain 'type: mysql'; got:\n{yaml}"
@@ -287,13 +273,7 @@ fn init_mysql_schema_wide_survives_a_broken_view() {
     }
     let _cleanup = MysqlViewGuard(view.clone());
 
-    let out = run_rivet(&["init", "--source", MYSQL_URL]);
-    assert!(
-        out.status.success(),
-        "schema-wide init must SKIP the broken view, not abort the scan; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let yaml = String::from_utf8_lossy(&out.stdout);
+    let yaml = scaffold_that_runs(MYSQL_URL, table.name()).yaml();
     assert!(
         yaml.contains(table.name()),
         "the seeded table must still be discovered around the broken view; got:\n{yaml}"
@@ -334,13 +314,7 @@ fn init_mssql_schema_wide_discovers_seeded_table() {
 
     let table = seed_mssql_numeric_table(10);
 
-    let out = run_rivet(&["init", "--source", MSSQL_URL]);
-    assert!(
-        out.status.success(),
-        "schema-wide rivet init (mssql) must exit 0; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let yaml = String::from_utf8_lossy(&out.stdout);
+    let yaml = scaffold_that_runs(MSSQL_URL, table.name()).yaml();
     assert!(
         yaml.contains("type: mssql"),
         "emitted YAML must declare the mssql source; got:\n{yaml}"
@@ -485,13 +459,7 @@ fn init_mssql_schema_wide_leaves_out_the_tables_sql_server_ships() {
         table: table.clone(),
         ci: String::new(),
     };
-    let out = run_rivet(&["init", "--source", MSSQL_CDC_URL]);
-    let yaml = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let yaml = scaffold_that_runs(MSSQL_CDC_URL, &table).yaml();
     assert!(
         yaml.contains(&format!("  - name: {table}")),
         "the user table is scaffolded:\n{yaml}"

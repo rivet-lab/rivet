@@ -47,7 +47,13 @@ fn check_on_stdout_chunked_exits_nonzero() {
     let table = seed_pg_numeric_table(5);
     let rig = stdout_chunked_rig(table.name());
 
-    let result = rig.cli(&["check", "--export", table.name()]);
+    let result = rig
+        .run_after(
+            &["check", "--export", table.name()],
+            &["--export", table.name()],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     assert!(
         !result.status.success(),
@@ -69,7 +75,13 @@ fn check_on_stdout_chunked_names_the_rule() {
     let table = seed_pg_numeric_table(5);
     let rig = stdout_chunked_rig(table.name());
 
-    let result = rig.cli(&["check", "--export", table.name()]);
+    let result = rig
+        .run_after(
+            &["check", "--export", table.name()],
+            &["--export", table.name()],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     let combined = format!(
         "{}{}",
@@ -97,7 +109,13 @@ fn check_unknown_export_lists_available_names() {
 
     // A deliberate typo of the real export name (the table name).
     let typo = format!("{}_typo", table.name());
-    let result = rig.cli(&["check", "--export", &typo]);
+    let result = rig
+        .run_after(
+            &["check", "--export", &typo],
+            &["--export", &typo],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     let combined = format!(
         "{}{}",

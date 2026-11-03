@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 // 26 -> 27 (2026-10-29): the reserved-source-column cells load a `mode: full` remedy whose table holds a source column called `__is_deleted`; the warehouse oracle filters on that name, so the cell reads the rows through the second client.
 // 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
 // 28 -> 29 (2026-10-31, H1): the zone-less change-log cell loads into a log it altered off the ledger's DateTime64(6, 'UTC') on purpose; it reads instants and values through the second client; closes when the oracle grades a declared legacy type.
-const NO_ORACLE_CEILING: usize = 29; // ratchet-pin: no-oracle-opt-outs
+const NO_ORACLE_CEILING: usize = 30; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
@@ -45,7 +45,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 632 -> 628 (2026-10-30): four helper-call mentions left the prose comments of the reduced files; no call site moved.
 // 626 -> 624 (2026-11-01): live_batch_census rewrites parts through one Rig::rewrite_part; two helper calls left.
 // 628 -> 626 (2026-10-31): the unused duckdb_s3_parquet_rows helper left tests/common/duckdb.rs; no call site moved.
-const DUCKDB_HELPER_CEILING: usize = 624; // ratchet-pin: duckdb-helper-sites
+// 624 -> 626 (2026-11-03): #792 composite keyset cells read distinct (id, kind) tuples; row_census keys one column. Closes when row_census takes a key list.
+const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];
@@ -308,7 +309,7 @@ fn oracle_known_defects_are_a_named_set_that_only_shrinks() {
 }
 
 /// Hand-built spawns of the rivet binary in tests/live.
-const RAW_RIVET_CEILING: usize = 16; // ratchet-pin: raw-rivet-invocations
+const RAW_RIVET_CEILING: usize = 11; // ratchet-pin: raw-rivet-invocations
 
 /// `Command::new` of the rivet binary in `text`, in each spelling the suite uses.
 fn raw_rivet_sites(text: &str) -> usize {

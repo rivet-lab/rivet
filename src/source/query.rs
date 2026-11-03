@@ -226,8 +226,16 @@ fn settle_threshold(source_type: SourceType, after_secs: u64) -> String {
 pub(crate) fn build_export_query(
     request: &crate::source::ExportRequest<'_>,
     source_type: SourceType,
-) -> BuiltQuery {
-    match (request.page_limit, request.incremental) {
+) -> anyhow::Result<BuiltQuery> {
+    Ok(match (request.page_limit, request.incremental) {
+        (Some(limit), Some(plan)) if !request.key_rest.is_empty() => {
+            let key: Vec<&str> = std::iter::once(plan.primary_column.as_str())
+                .chain(request.key_rest.iter().map(String::as_str))
+                .collect();
+            let cursor = request.cursor.and_then(|c| c.last_cursor_value.as_deref());
+            let last = cursor.map(|c| key_tuple_values(c, key.len())).transpose()?;
+            build_tuple_keyset_query(request.query, &key, last.as_deref(), limit, source_type)
+        }
         (Some(limit), Some(plan)) => {
             let cursor = request.cursor.and_then(|c| c.last_cursor_value.as_deref());
             match request.upper_bound {
@@ -256,6 +264,57 @@ pub(crate) fn build_export_query(
             request.cursor,
             source_type,
         ),
+    })
+}
+
+/// The values of a stored composite-key cursor, refused unless it is a JSON array of `arity` strings.
+fn key_tuple_values(cursor: &str, arity: usize) -> anyhow::Result<Vec<String>> {
+    match serde_json::from_str::<Vec<String>>(cursor) {
+        Ok(values) if values.len() == arity => Ok(values),
+        _ => crate::rivet_bail!(
+            crate::error::codes::STATE_CURSOR_INCOMPARABLE,
+            "the stored keyset cursor `{cursor}` is not a value tuple of the {arity}-column \
+             `chunk_by_key`; nothing was read"
+        ),
+    }
+}
+
+/// One keyset page over a composite key: rows past the `last` tuple in key order.
+pub(crate) fn build_tuple_keyset_query(
+    base_query: &str,
+    key: &[&str],
+    last: Option<&[String]>,
+    limit: usize,
+    source_type: SourceType,
+) -> BuiltQuery {
+    let cols: Vec<String> = key.iter().map(|k| quote_ident(source_type, k)).collect();
+    let order = cols.join(", ");
+    let filter = match last {
+        Some(vals) => {
+            let lits: Vec<String> = vals
+                .iter()
+                .map(|v| inline_literal(source_type, v))
+                .collect();
+            format!(" WHERE {}", tuple_after(&cols, &lits))
+        }
+        None => String::new(),
+    };
+    BuiltQuery::without_param(format!(
+        "SELECT * FROM ({base}) {from_rivet}{filter} ORDER BY {order} {page}",
+        from_rivet = derived(source_type, "_rivet"),
+        base = base_query,
+        page = page_limit_clause(source_type, limit),
+    ))
+}
+
+/// `(c1, .., cn) > (v1, .., vn)` spelled so a leading-column index range bounds the scan on every engine.
+fn tuple_after(cols: &[String], lits: &[String]) -> String {
+    match (cols, lits) {
+        ([c], [v]) => format!("{c} > {v}"),
+        ([c, cs @ ..], [v, vs @ ..]) => {
+            format!("{c} >= {v} AND ({c} > {v} OR ({}))", tuple_after(cs, vs))
+        }
+        _ => unreachable!("tuple_after: key and cursor arity are checked by key_tuple_values"),
     }
 }
 
@@ -531,6 +590,67 @@ mod tests {
 
     use super::*;
 
+    /// A composite keyset page orders by every key column and seeks past the last tuple.
+    #[test]
+    fn a_composite_keyset_page_seeks_past_the_last_tuple() {
+        let first = build_tuple_keyset_query(
+            "SELECT * FROM t",
+            &["id", "kind"],
+            None,
+            10,
+            SourceType::Postgres,
+        );
+        assert_eq!(
+            first.sql,
+            r#"SELECT * FROM (SELECT * FROM t) AS _rivet ORDER BY "id", "kind" LIMIT 10"#
+        );
+        let last = ["5".to_string(), "b'x".to_string(), "9".to_string()];
+        let next = build_tuple_keyset_query(
+            "SELECT * FROM t",
+            &["a", "b", "c"],
+            Some(&last),
+            10,
+            SourceType::Postgres,
+        );
+        assert_eq!(
+            next.sql,
+            "SELECT * FROM (SELECT * FROM t) AS _rivet WHERE \"a\" >= E'5' AND (\"a\" > E'5' OR \
+             (\"b\" >= E'b\\'x' AND (\"b\" > E'b\\'x' OR (\"c\" > E'9')))) ORDER BY \"a\", \"b\", \"c\" LIMIT 10"
+        );
+    }
+
+    /// A request carrying the rest of a composite key builds the tuple page, not the single-column one.
+    #[test]
+    fn a_request_with_a_key_rest_builds_the_tuple_page() {
+        let tuning = crate::tuning::SourceTuning::from_config(None);
+        let overrides = crate::types::ColumnOverrides::default();
+        let rest = ["kind".to_string()];
+        let cursor = cursor_with(Some(r#"["7","b"]"#));
+        let key = single("id");
+        let request =
+            crate::source::ExportRequest::unwrapped("SELECT * FROM t", &tuning, &overrides)
+                .with_incremental(Some(&key))
+                .with_cursor(Some(&cursor))
+                .with_key_rest(&rest)
+                .with_page_limit(5);
+        let built = build_export_query(&request, SourceType::Postgres).unwrap();
+        assert!(
+            built.sql.contains(r#"ORDER BY "id", "kind""#) && built.cursor_param.is_none(),
+            "{}",
+            built.sql
+        );
+    }
+
+    /// A stored cursor that is not a tuple of the key's arity is refused as incomparable.
+    #[test]
+    fn a_composite_keyset_cursor_of_the_wrong_shape_is_refused() {
+        for bad in ["42", r#"["1"]"#, r#"["1","a","x"]"#, r#"[1,"a"]"#] {
+            let err = key_tuple_values(bad, 2).expect_err(bad);
+            crate::error::assert_coded(&err, "RIVET_STATE_CURSOR_INCOMPARABLE", 5);
+        }
+        assert_eq!(key_tuple_values(r#"["1","a"]"#, 2).unwrap(), vec!["1", "a"]);
+    }
+
     #[test]
     fn an_oracle_literal_is_varchar2_with_doubled_quotes() {
         assert_eq!(escape_oracle_literal("it's"), "'it''s'");
@@ -644,13 +764,15 @@ mod tests {
             page_limit,
             base_relation: None,
             upper_bound,
+            key_rest: &[],
         };
-        let page = build_export_query(&request(Some(100), None), SourceType::Postgres);
+        let page = build_export_query(&request(Some(100), None), SourceType::Postgres).unwrap();
         assert_eq!(
             page.sql,
             build_keyset_query("SELECT * FROM t", "id", None, 100, SourceType::Postgres).sql
         );
-        let bounded = build_export_query(&request(Some(100), Some("500")), SourceType::Postgres);
+        let bounded =
+            build_export_query(&request(Some(100), Some("500")), SourceType::Postgres).unwrap();
         assert_eq!(
             bounded.sql,
             build_keyset_query_bounded(
@@ -664,7 +786,7 @@ mod tests {
             .sql
         );
         assert_ne!(page.sql, bounded.sql);
-        let whole = build_export_query(&request(None, None), SourceType::Postgres);
+        let whole = build_export_query(&request(None, None), SourceType::Postgres).unwrap();
         assert_eq!(
             whole.sql,
             build_incremental_query("SELECT * FROM t", Some(&plan), None, SourceType::Postgres).sql
