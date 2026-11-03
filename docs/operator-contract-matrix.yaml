@@ -1,6 +1,6 @@
 # Operator-contract matrix. What rivet's exit code, refusal text and advice commands promise an
 # operator, from the 2026-10-07 CLI sweep by hand (RESULTS.md and the two sweep reports). Each
-# cell asserts the correct behaviour (tests/live/live_operator_contract.rs); an `open_defect_*`
+# cell asserts the correct behaviour (tests/live/live_operator_contract.rs); a
 # cell fails today and is acknowledged in dev/release_oracle/known_red.py with the symptom it shows.
 # Patterns: (a) exit 0 over a wrong destination, (b) a failure before the first write, (c) refusal
 # then remedy (Rig::refuses_twice_then), (d) the exit-code contract, (e) advice parity, (f) single rows.

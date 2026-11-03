@@ -1,7 +1,7 @@
 //! The operator contract, from the 2026-10-07 CLI sweep by hand (docs/operator-contract-matrix.yaml):
 //! what rivet's exit, its refusal text and its advice commands promise an operator, one generator
 //! per pattern and one cell per engine. A cell asserts the correct behaviour; one that fails today
-//! is an `open_defect_*` cell acknowledged in dev/release_oracle/known_red.py.
+//! is a cell acknowledged in dev/release_oracle/known_red.py.
 //!
 //! Oracles: the exit code and `Error:` line of the real binary, the destination re-read, the
 //! source, and the engine's own catalog. Refusals with a remedy go through `Rig::refuses_twice_then`;
