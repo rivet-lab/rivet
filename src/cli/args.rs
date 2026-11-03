@@ -175,7 +175,7 @@ pub enum Commands {
         /// Rows per output file (rollover) when `--output` is set. Larger ⇒ fewer,
         /// bigger files but more drain memory (the PostgreSQL peek reads a part's
         /// worth per batch: memory is O(rollover)). Turn it up/down per workload.
-        #[arg(long, value_name = "N", default_value_t = 100_000)]
+        #[arg(long, value_name = "N", default_value_t = crate::config::quantity::DEFAULT_COUNT)]
         rollover: usize,
         /// PostgreSQL logical slot name (CDC; created if absent).
         #[arg(long, value_name = "NAME", default_value = "rivet_slot")]

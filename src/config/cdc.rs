@@ -1,5 +1,6 @@
 //! CDC export config: the `cdc:` block's types, the baseline pairing, and every rule that validates a `mode: cdc` export.
 
+use super::quantity::Knob;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -668,21 +669,9 @@ impl Config {
 
         for e in self.exports.iter().filter(|e| e.mode == ExportMode::Cdc) {
             let cdc = e.cdc.as_ref();
-            // ZERO is refused for both rollover knobs, the same guard chunk_size
-            // has. `0` is not "disable": `buf >= 0` is always true, so a zero
-            // budget rolls a part on EVERY committed transaction — a file
-            // explosion (one parquet + one PUT per txn), silently, while the
-            // operator who typed 0 meant "no cap". `None` is the documented way
-            // to get row-count-only; absence gets the protective default.
             if let Some(c) = cdc {
-                if c.rollover == Some(0) {
-                    crate::config_bail!(
-                        crate::error::codes::CONFIG_CDC_ROLLOVER_INVALID,
-                        "export '{}': cdc.rollover must be >= 1 (got 0). A zero \
-                         rollover rolls a part on every committed transaction; \
-                         omit the field for the default (100000).",
-                        e.name
-                    );
+                if let Some(rows) = c.rollover {
+                    Knob::ROLLOVER.validate_export(&e.name, rows)?;
                 }
                 if c.rollover_memory_mb == Some(0) {
                     crate::config_bail!(

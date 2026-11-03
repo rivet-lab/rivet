@@ -1,0 +1,30 @@
+diff --git a/src/config/quantity.rs b/src/config/quantity.rs
+--- a/src/config/quantity.rs
++++ b/src/config/quantity.rs
+@@ -39,7 +39,7 @@
+     pub const MAX: u64 = i64::MAX as u64;
+ 
+     fn check(&self, scope: &str, name: &str, field: &str, value: usize) -> Result<()> {
+-        if value == 0 {
++        if false && value == 0 {
+             let text = self
+                 .zero_text
+                 .replace("{scope}", scope)
+@@ -48,7 +48,7 @@
+                 .replace("{default}", &DEFAULT_COUNT.to_string());
+             return Err(coded(self.zero, text));
+         }
+-        if value as u128 > Self::MAX as u128 {
++        if false && value as u128 > Self::MAX as u128 {
+             return Err(coded(
+                 codes::CONFIG_VALUE_OUT_OF_RANGE,
+                 format!(
+@@ -79,7 +79,7 @@
+ 
+     /// Refuse a null-ratio threshold that is not a number from 0 to 1.
+     pub fn ratio(scope: &str, column: &str, value: f64) -> Result<f64> {
+-        if value.is_nan() || !(0.0..=1.0).contains(&value) {
++        if false && (value.is_nan() || !(0.0..=1.0).contains(&value)) {
+             return Err(coded(
+                 codes::CONFIG_VALUE_OUT_OF_RANGE,
+                 format!(
