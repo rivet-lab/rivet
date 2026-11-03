@@ -406,7 +406,7 @@ def _verdict_scope_self_test() -> None:
 
 
 def _lanes_self_test() -> None:
-    """Lanes overlap, one lane's cells never do, rows flush in list order, a raise keeps every row; the upgrade
+    """Lanes overlap, one lane's cells never do, rows flush in list order, a raise leaves an INFRA row and the lane goes on; the upgrade
     cells sharing a source server share a lane; grading a load leaves the process environment alone."""
     import threading
 
@@ -441,7 +441,26 @@ def _lanes_self_test() -> None:
         pass
     else:
         raise AssertionError("a raising cell must reach the stage, which records it")
-    assert [c.detail for c in led.cells] == ["a1", "a2"], "rows recorded beside a raising cell were dropped"
+    assert [c.detail for c in led.cells] == ["a1", "run_lanes cell raised RuntimeError: cell blew up", "a2"], "rows recorded beside a raising cell were dropped"
+    assert led.cells[1].status is Status.INFRA and led.cells[1].scenario == "run_lanes" and led.cells[1].store == "b", led.cells[1]
+
+    def exits(sub: Ledger) -> None:
+        raise SystemExit("cell asked to stop\nsecond line")
+
+    led = Ledger(colour=False)
+    led._buf = []
+    try:
+        run_lanes(led, [("a", cell("a", 1)), ("a", exits, ("mysql", "-", "scn", "cdc")), ("a", cell("a", 2)),
+                        ("b", boom, ("oracle", "-", "scn", "batch"))])
+    except SystemExit as e:
+        assert "cell asked to stop" in str(e), "the first exception keeps its type and text"
+    else:
+        raise AssertionError("a SystemExit from a cell must reach the stage")
+    got = [(c.engine, c.scenario, c.store, c.status, c.detail) for c in led.cells]
+    assert got == [("-", "lanes", "a", Status.PASS, "a1"),
+                   ("mysql", "scn", "cdc", Status.INFRA, "scn cell raised SystemExit: cell asked to stop"),
+                   ("-", "lanes", "a", Status.PASS, "a2"),
+                   ("oracle", "scn", "batch", Status.INFRA, "scn cell raised RuntimeError: cell blew up")], got
 
     # The gate's own URLs (Makefile GATE_ENV): nine servers; Oracle's batch, resume-load and CDC cells share one.
     from . import upgrade_matrix
