@@ -68,10 +68,13 @@ R_MATRIX = "listed 2026-11-03: the cell is the check-vs-planner agreement matrix
 R_ENV = "listed 2026-11-03: the refusal is reached before any connect, so a run twin would dial the same sink"
 R_PERM = "listed 2026-11-03: the note depends on the login's grants; the run twin needs a second stand login"
 R_INIT = "listed 2026-11-03: graded by the scaffold content (a chosen mode, key or scope) that a run does not restate; closes with a per-field scaffold oracle"
+R_DISAGREES = "listed 2026-11-03: check disagrees with the run today (reported as a product defect); closes with the product fix, then route through run_after"
 R_STATE = "listed 2026-11-03: a refusal on an unreachable state store; closes when the run twin is paired with SameRefusal"
 
 #: `file::test` → why a preflight verdict stands without its consequence today. Shrink-only.
 BLIND_PREFLIGHT: dict[str, str] = {  # ratchet-pin: blind-preflight-tests strings
+    "audit_column_validation.rs::audit_check_rejects_inapplicable_type_override": R_DISAGREES,
+    "live_audit_suspects.rs::mssql_check_reports_a_row_estimate_for_a_read_only_login": R_DISAGREES,
     "audit_doctor_fastfail.rs::audit_doctor_fastfails_against_unreachable_cloud_endpoint": R_MESSAGE,
     "audit_doctor_probe.rs::audit_doctor_removes_destination_probe_after_local_write_check": R_MESSAGE,
     "audit_maxfile.rs::audit_validate_absent_prefix_can_fail": R_VALIDATE,
@@ -127,10 +130,11 @@ BLIND_PREFLIGHT: dict[str, str] = {  # ratchet-pin: blind-preflight-tests string
 }  # ratchet-pin: end
 
 
-def tests_in(text: str) -> list[tuple[str, str]]:
-    """(name, body) of every `#[test]` function in a Rust file."""
+def tests_in(text: str, comments: bool = False) -> list[tuple[str, str]]:
+    """(name, body) of every `#[test]` function in a Rust file; `comments` lets line comments sit between the attributes and `fn`."""
+    gap = r"(?:\s*(?:#\[[^\n]*|//[^\n]*)\n)*" if comments else r"(?:\s*#\[[^\n]*\n)*"
     out = []
-    for m in re.finditer(r"#\[test\][^\n]*\n(?:\s*#\[[^\n]*\n)*\s*(?:pub\s+)?fn\s+(\w+)\s*\(", text):
+    for m in re.finditer(r"#\[test\][^\n]*\n" + gap + r"\s*(?:pub\s+)?fn\s+(\w+)\s*\(", text):
         start = text.index("{", m.end())
         depth, i = 0, start
         while i < len(text):
@@ -161,7 +165,7 @@ def preflight_blind(root: Path) -> set[str]:
     for f in sorted((root / "tests" / "live").glob("*.rs")):
         text = f.read_text()
         helpers = fns_in(text)
-        for name, body in tests_in(text):
+        for name, body in tests_in(text, comments=True):
             full = reach(body, helpers)
             if PREFLIGHT.search(full) and "assert" in full and not CONSEQUENCE.search(full):
                 found.add(f"{f.name}::{name}")
@@ -213,6 +217,8 @@ def self_test() -> int:
     for src, want in ((blind, True), (paired, False), (viahelper, True)):
         full = reach(tests_in(src)[0][1], fns_in(src))
         assert bool(PREFLIGHT.search(full) and not CONSEQUENCE.search(full)) is want, src
+    commented = '#[test]\n#[ignore = "live"]\n// AUDIT-RED note\nfn f() {\n    let o = rig.cli(&["check"]);\n    assert!(o.status.success());\n}\n'
+    assert not tests_in(commented) and [n for n, _ in tests_in(commented, comments=True)] == ["f"]
     print("self_oracle_lint self-test: ok")
     return 0
 

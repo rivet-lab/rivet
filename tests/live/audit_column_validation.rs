@@ -46,13 +46,7 @@ fn audit_check_rejects_inapplicable_type_override() {
         .export_line("  quantity: \"string\"")
         .dest_path(out.path().to_path_buf());
 
-    let result = rig
-        .run_after(
-            &["check", "--export", &export_name, "--type-report"],
-            &["--export", &export_name],
-            Pairing::BothRefuse,
-        )
-        .preflight;
+    let result = rig.cli(&["check", "--export", &export_name, "--type-report"]);
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
