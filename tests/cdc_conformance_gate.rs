@@ -937,7 +937,8 @@ const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
 // cells read the warehouse back through `bq` / its HTTP client.
 // 119 -> 132 (2026-10-29, #719): the column-grants cells read the delivered parts with arrow; the rig oracle grades the runs it can.
 // 132 -> 133 (2026-10-31, #728): the dropped-database cell reads the parts of its stopped run and of the re-baseline with arrow; the stop itself is graded by its code.
-const PIN_SHARED_CODEC: usize = 133; // ratchet-pin: cdc-census-shared-codec
+// 133 -> 134 (2026-11-03, TF-2): the MySQL ENUM/SET label cell reads the stream and snapshot parts with arrow against the labels the test created; the rig oracle grades both legs against the source.
+const PIN_SHARED_CODEC: usize = 134; // ratchet-pin: cdc-census-shared-codec
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
