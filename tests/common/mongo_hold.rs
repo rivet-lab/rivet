@@ -1,5 +1,4 @@
 //! A wire proxy in front of the MongoDB stand that holds the commands of a live run until the test lets them go.
-#![allow(dead_code)]
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
