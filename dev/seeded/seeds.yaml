@@ -2603,6 +2603,22 @@ seeds:
         cells: [check_refuses_a_collection_that_does_not_exist_as_run_does_mongo]
       oracle:
         na: "a missing SQL table fails the query, read by the engine; the absent-collection guard is MongoDB's"
+  - name: mongo-empty-read-after-drop
+    class: "a read of a source that was dropped between the existence check and the read returns no rows and no error, and an empty page is read as the end of the range, so the run ends exit 0 with a marker over what it had"
+    history: "found 2026-11-03 by gate cell collection_dropped_under_it going red under load (a MongoDB `find` on a collection dropped after `listCollections` returns 0 documents); RED on main 904b8f21 3/3 (keyset, full scan and id-range runs exit 0, delivered 0 rows of 10000); fixed by one re-read of `listCollections` on every empty result, keyed by the collection UUID the run started on"
+    scope: source
+    patch: mongo-empty-read-after-drop/shared.patch
+    engines:
+      postgres:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the empty-read re-check is MongoDB's (a_table_dropped_under_a_live_run_delivers_or_fails_loudly_postgres)"
+      mysql:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the empty-read re-check is MongoDB's (a_table_dropped_under_a_live_run_delivers_or_fails_loudly_mysql)"
+      mssql:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the empty-read re-check is MongoDB's (a_table_dropped_under_a_live_run_delivers_or_fails_loudly_mssql)"
+      mongo:
+        cells: [a_collection_dropped_before_a_keyset_page_is_refused_by_code_mongo, a_collection_dropped_before_a_full_scan_is_refused_by_code_mongo, a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo]
+      oracle:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the empty-read re-check is MongoDB's (a_table_dropped_under_a_live_run_delivers_or_fails_loudly_oracle)"
   - name: dropped-source-table-uncoded
     class: "a verdict every engine types (the relation the export reads does not exist) is recognised by no path, so each path ends with the raw driver error or a generic query-failed code instead of the one refusal"
     history: "2026-10-16 - found by hand on the pilot client's shape (MySQL -> GCS -> BigQuery, cron): an export whose source table was dropped failed as `MySqlError { ERROR 1146 (42S02): Table 'rivet.drop_probe_b' doesn't exist }` with no RIVET_* code (PostgreSQL too), RIVET_SOURCE_QUERY_FAILED on SQL Server and Oracle, through 0.31.0; fixed by one `names_a_missing_relation` / `code_a_missing_relation` on every path that reads the table"

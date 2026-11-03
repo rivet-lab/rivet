@@ -205,7 +205,7 @@ scenarios:
     postgres: { test: a_dropped_source_table_is_refused_by_code_and_its_sibling_delivers_postgres }
     mysql:    { test: a_dropped_source_table_is_refused_by_code_and_its_sibling_delivers_mysql }
     mssql:    { test: a_dropped_source_table_is_refused_by_code_and_its_sibling_delivers_mssql }
-    mongo:    { na: "a MongoDB collection that does not exist is RIVET_SOURCE_COLLECTION_NOT_FOUND, the row above; a dropped collection is the same absence" }
+    mongo:    { na: "a MongoDB collection that does not exist is RIVET_SOURCE_COLLECTION_NOT_FOUND, the row above; a dropped collection is the same absence, also when it is dropped under a run (ddl_table_dropped_before_a_keyset_page, sabotage matrix)" }
     oracle:   { test: a_dropped_source_table_is_refused_by_code_and_its_sibling_delivers_oracle }
 
   - id: unusable_state_url

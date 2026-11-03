@@ -1,12 +1,12 @@
 --- a/src/source/mongo/mod.rs
 +++ b/src/source/mongo/mod.rs
-@@ -656,7 +656,8 @@
-                 .filter(doc! { "name": coll_name })
-                 .into_future(),
-         );
--        refuse_a_missing_collection(self.session.db(), coll_name, listed.ok())?;
-+        refuse_a_missing_collection(self.session.db(), coll_name, listed.ok())
-+            .map_err(|e| anyhow::anyhow!("{e}"))?;
-         let schema = blob_schema();
-         sink.on_schema(schema.clone())?;
- 
+@@ -725,7 +725,8 @@
+             coll_name,
+             listed.as_deref(),
+             self.started_as.get(coll_name).map(Vec::as_slice),
+-        )?;
++        )
++        .map_err(|e| anyhow::anyhow!("{e}"))?;
+         if let Some(uuid) = listed.as_deref().and_then(<[_]>::first) {
+             self.started_as
+                 .entry(coll_name.to_string())

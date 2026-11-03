@@ -171,34 +171,67 @@ fn default_server_selection_timeout(opts: &mut ClientOptions) {
         .get_or_insert(std::time::Duration::from_secs(10));
 }
 
-/// Refuse a collection the database does not list; a listing that was not allowed (a role without `listCollections`) refuses nothing.
+/// The UUIDs (empty for a view) the database lists under `collection`; `None` when the listing was not allowed (a role without `listCollections`).
+fn list_collection_uuids(session: &MongoSession, collection: &str) -> Option<Vec<Vec<u8>>> {
+    session.block_on(async {
+        let mut cursor = session
+            .client()
+            .database(session.db())
+            .list_collections()
+            .filter(doc! { "name": collection })
+            .await
+            .ok()?
+            .with_type::<Document>();
+        let mut uuids = Vec::new();
+        while let Some(listed) = cursor.try_next().await.ok()? {
+            let uuid = match listed.get_document("info").ok()?.get("uuid") {
+                Some(Bson::Binary(b)) => b.bytes.clone(),
+                _ => Vec::new(),
+            };
+            uuids.push(uuid);
+        }
+        Some(uuids)
+    })
+}
+
+/// Refuse a collection the database does not list, or lists under another UUID than the run `started` on; a listing that was not allowed refuses nothing.
 fn refuse_a_missing_collection(
     db: &str,
     collection: &str,
-    listed: Option<Vec<String>>,
+    listed: Option<&[Vec<u8>]>,
+    started: Option<&[u8]>,
 ) -> Result<()> {
-    if listed.is_some_and(|names| names.is_empty()) {
-        crate::rivet_bail!(
+    let Some(listed) = listed else {
+        return Ok(());
+    };
+    match (listed.first(), started) {
+        (None, None) => crate::rivet_bail!(
             crate::error::codes::SOURCE_COLLECTION_NOT_FOUND,
             "MongoDB collection `{db}.{collection}` does not exist — an export of it would \
              succeed with 0 rows and a full load would then empty the warehouse table. Check \
              the `table:` name (a dotted collection name is written whole)."
-        );
+        ),
+        (None, Some(_)) => crate::rivet_bail!(
+            crate::error::codes::SOURCE_COLLECTION_NOT_FOUND,
+            "MongoDB collection `{db}.{collection}` was dropped while the run read it — the \
+             documents read so far are not the collection, and a run that ended here would be \
+             marked complete. Create the collection again with its documents, then run again."
+        ),
+        (Some(now), Some(then)) if now.as_slice() != then => crate::rivet_bail!(
+            crate::error::codes::SOURCE_COLLECTION_NOT_FOUND,
+            "MongoDB collection `{db}.{collection}` was dropped and created again while the \
+             run read it — the documents read so far are not the collection it holds now. Run \
+             again."
+        ),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 impl MongoSession {
     /// Refuse a collection the database does not list, by the rule [`MongoSource::export`] refuses it by.
     pub(crate) fn require_collection(&self, collection: &str) -> Result<()> {
-        let listed = self.block_on(
-            self.client()
-                .database(self.db())
-                .list_collection_names()
-                .filter(doc! { "name": collection })
-                .into_future(),
-        );
-        refuse_a_missing_collection(self.db(), collection, listed.ok())
+        let listed = list_collection_uuids(self, collection);
+        refuse_a_missing_collection(self.db(), collection, listed.as_deref(), None)
     }
 }
 
@@ -227,6 +260,8 @@ pub struct MongoSource {
     /// let `resume: true` bypass it forever: an `_id` of a new BSON band inserted
     /// after run 1 was silently unreachable on every later run (bug-hunt find).
     id_guard_checked: std::collections::HashSet<String>,
+    /// The UUID each collection was listed under when this source first read it.
+    started_as: std::collections::HashMap<String, Vec<u8>>,
 }
 
 impl MongoSource {
@@ -251,6 +286,7 @@ impl MongoSource {
             no_cursor_timeout,
             id_range: None,
             id_guard_checked: std::collections::HashSet::new(),
+            started_as: std::collections::HashMap::new(),
         })
     }
 
@@ -683,12 +719,18 @@ impl Source for MongoSource {
             )
         })?;
         let db = self.session.client().database(self.session.db());
-        let listed = self.session.block_on(
-            db.list_collection_names()
-                .filter(doc! { "name": coll_name })
-                .into_future(),
-        );
-        refuse_a_missing_collection(self.session.db(), coll_name, listed.ok())?;
+        let listed = list_collection_uuids(&self.session, coll_name);
+        refuse_a_missing_collection(
+            self.session.db(),
+            coll_name,
+            listed.as_deref(),
+            self.started_as.get(coll_name).map(Vec::as_slice),
+        )?;
+        if let Some(uuid) = listed.as_deref().and_then(<[_]>::first) {
+            self.started_as
+                .entry(coll_name.to_string())
+                .or_insert_with(|| uuid.clone());
+        }
         let schema = blob_schema();
         sink.on_schema(schema.clone())?;
 
@@ -824,6 +866,15 @@ impl Source for MongoSource {
             }
             Ok::<usize, anyhow::Error>(total)
         })?;
+
+        if total == 0 {
+            refuse_a_missing_collection(
+                self.session.db(),
+                coll_name,
+                list_collection_uuids(&self.session, coll_name).as_deref(),
+                self.started_as.get(coll_name).map(Vec::as_slice),
+            )?;
+        }
 
         log::info!("total: {total} documents (collection '{coll_name}')");
         Ok(())
@@ -1059,7 +1110,7 @@ mod tests {
 
     #[test]
     fn only_a_collection_the_database_does_not_list_is_refused() {
-        let refusal = refuse_a_missing_collection("rivet", "orderz", Some(vec![]))
+        let refusal = refuse_a_missing_collection("rivet", "orderz", Some(&[]), None)
             .expect_err("an empty listing for the exact name means the collection is missing");
         assert_eq!(
             crate::error::error_code(&refusal),
@@ -1069,12 +1120,50 @@ mod tests {
             format!("{refusal:#}").contains("`rivet.orderz` does not exist"),
             "{refusal:#}"
         );
+        assert!(refuse_a_missing_collection("rivet", "orders", Some(&[vec![1]]), None).is_ok());
         assert!(
-            refuse_a_missing_collection("rivet", "orders", Some(vec!["orders".into()])).is_ok()
+            refuse_a_missing_collection("rivet", "orders", None, None).is_ok(),
+            "a role without listCollections is not evidence of absence"
+        );
+    }
+
+    #[test]
+    fn a_collection_gone_or_replaced_since_the_run_started_is_refused_by_code() {
+        let started: &[u8] = &[1, 2];
+        let dropped = refuse_a_missing_collection("rivet", "orders", Some(&[]), Some(started))
+            .expect_err("a collection the run started on, now unlisted, was dropped");
+        assert_eq!(
+            crate::error::error_code(&dropped),
+            Some("RIVET_SOURCE_COLLECTION_NOT_FOUND")
         );
         assert!(
-            refuse_a_missing_collection("rivet", "orders", None).is_ok(),
-            "a role without listCollections is not evidence of absence"
+            format!("{dropped:#}").contains("`rivet.orders` was dropped while the run read it"),
+            "{dropped:#}"
+        );
+        let replaced =
+            refuse_a_missing_collection("rivet", "orders", Some(&[vec![3, 4]]), Some(started))
+                .expect_err("another UUID under the same name is another collection");
+        assert_eq!(
+            crate::error::error_code(&replaced),
+            Some("RIVET_SOURCE_COLLECTION_NOT_FOUND")
+        );
+        assert!(
+            format!("{replaced:#}")
+                .contains("`rivet.orders` was dropped and created again while the run read it"),
+            "{replaced:#}"
+        );
+        assert!(
+            refuse_a_missing_collection("rivet", "orders", Some(&[vec![1, 2]]), Some(started))
+                .is_ok(),
+            "the same UUID is the same collection"
+        );
+        assert!(
+            refuse_a_missing_collection("rivet", "orders", None, Some(started)).is_ok(),
+            "a listing that was not allowed refuses nothing, started or not"
+        );
+        assert!(
+            refuse_a_missing_collection("rivet", "v", Some(&[vec![]]), Some(&[])).is_ok(),
+            "a view has no UUID and is the same view"
         );
     }
     use mongodb::bson::oid::ObjectId;

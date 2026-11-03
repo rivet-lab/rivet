@@ -2283,6 +2283,84 @@ fn collection_dropped_under_it() {
     recovers(&rig, &[]);
 }
 
+/// Documents of the collection a held read finds dropped.
+const HELD_READ_DOCS: i64 = 10_000;
+
+/// A MongoDB export of `HELD_READ_DOCS` documents delivered once, then run again with its collection dropped while a wire proxy holds the `parallel.unwrap_or(1)` reads `pick` accepts: the second run is refused by code and leaves the first run's marker and manifests as they were, and with the collection put back a run delivers the source.
+fn collection_dropped_before_a_read(
+    opts: Option<&str>,
+    parallel: Option<usize>,
+    pick: fn(&mongodb::bson::Document) -> bool,
+) {
+    require_alive(LiveService::Mongo);
+    let db = unique_name("sab_ddl_held");
+    let _guard = MongoDbGuard {
+        port: MONGO_PORT,
+        db: db.clone(),
+    };
+    let m = MongoTest::connect(MONGO_PORT, &db);
+    m.seed_int_id("t", HELD_READ_DOCS);
+    let hold = WireHold::holding(MONGO_PORT, pick);
+    let mut rig = Rig::mongo_batch("t").source_url(&MongoTest::url(hold.port(), &db));
+    if let Some(opts) = opts {
+        rig = rig.mongo(opts);
+    }
+    if let Some(workers) = parallel {
+        rig = rig.export_line(&format!("parallel: {workers}"));
+    }
+    let rig = stopped_mid_run(rig, &[]);
+    rig.run_ok();
+    let delivered = markers_and_manifests(&rig);
+    assert!(
+        !delivered.is_empty(),
+        "fixture: the first run left no marker or manifest"
+    );
+    hold.arm();
+    let met = rig.beside_a_live_run_over_a_source_taken(
+        &[],
+        |_| hold.holds(parallel.unwrap_or(1)),
+        |_| {
+            m.drop_collection("t");
+            hold.release();
+        },
+        |_, ()| m.seed_int_id("t", HELD_READ_DOCS),
+    );
+    let (run, ()) = met.answered_while_alive();
+    assert_refused(
+        &run,
+        Refused::by_code("RIVET_SOURCE_COLLECTION_NOT_FOUND", 1),
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("was dropped while the run read it"),
+        "the refusal names the drop:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        markers_and_manifests(&rig) == delivered,
+        "the run whose collection was dropped before a read changed the marker or manifests of the run before it"
+    );
+    m.seed_int_id("t", HELD_READ_DOCS);
+    recovers(&rig, &[]);
+}
+
+/// Every `_SUCCESS` marker and manifest under the rig's destination with its bytes.
+fn markers_and_manifests(rig: &Rig) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut found: Vec<_> = files_under(&rig.out_dir())
+        .into_iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "_SUCCESS" || n.starts_with("manifest"))
+        })
+        .map(|p| {
+            let bytes = std::fs::read(&p).expect("read a marker or manifest");
+            (p, bytes)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// The collection of a MongoDB export dropped only after its run has delivered and exited 0: the run is graded against the collection put back, never against the one that is gone.
 fn collection_dropped_after_the_run_ended() {
     const DOCS: i64 = 2_000;
@@ -5712,6 +5790,28 @@ fn a_table_dropped_under_a_live_run_delivers_or_fails_loudly_oracle() {
 #[ignore = "live: requires docker compose mongo"]
 fn a_table_dropped_under_a_live_run_delivers_or_fails_loudly_mongo() {
     collection_dropped_under_it();
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_dropped_before_a_keyset_page_is_refused_by_code_mongo() {
+    collection_dropped_before_a_read(
+        Some("page_size: 1000, resume: true"),
+        None,
+        a_later_keyset_page,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_dropped_before_a_full_scan_is_refused_by_code_mongo() {
+    collection_dropped_before_a_read(None, None, the_full_scan);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo() {
+    collection_dropped_before_a_read(Some("page_size: 1000"), Some(4), an_id_range_worker);
 }
 
 #[test]
