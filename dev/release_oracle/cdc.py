@@ -61,6 +61,7 @@ try:  # imported as part of the package
         container_for_port,
         docker_exec,
         note_invariant_violations,
+        mysql_client,
         port_of,
         rivet,
         rivet_bin,
@@ -79,6 +80,7 @@ except ImportError:  # run directly out of dev/release_oracle/
         container_for_port,
         docker_exec,
         note_invariant_violations,
+        mysql_client,
         port_of,
         rivet,
         rivet_bin,
@@ -193,7 +195,7 @@ def _mysql(url: str, sql: str) -> Proc:
     c = _container_for(url)
     if c is None:
         return _no_container(url)
-    return docker_exec(c, "mysql", "-urivet", "-privet", "rivet", stdin=sql)
+    return docker_exec(c, *mysql_client("rivet"), stdin=sql)
 
 
 def _sqlcmd(url: str, *, q: str | None = None, sql: str | None = None) -> Proc:

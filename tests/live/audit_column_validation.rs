@@ -90,7 +90,13 @@ fn audit_check_flags_missing_cursor_column() {
         .export_line("cursor_column: does_not_exist")
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["check", "--export", &export_name]);
+    let result = rig
+        .run_after(
+            &["check", "--export", &export_name],
+            &["--export", &export_name],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);

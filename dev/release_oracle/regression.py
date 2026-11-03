@@ -84,7 +84,7 @@ from ..pytools.field_replay import (
     STAND_RESTORED_MARKER as _FR_RESTORED,
     StandLock as _StandLock,
 )
-from ..pytools.shell import Fail as _ChildFail
+from ..pytools.shell import Fail as _ChildFail, mysql_client
 from .core import (
     Ledger, SkipCause,
     Proc,
@@ -1139,7 +1139,7 @@ def _stand_globals(container: str) -> dict[str, str] | None:
     docstring records reproducing exactly that).
     """
     sql = "SELECT CONCAT_WS(',', " + ", ".join(f"@@GLOBAL.{k}" for k in _FR_FLIP) + ");"
-    p = docker_exec(container, "mysql", "-uroot", "-privet", "-N", "rivet",
+    p = docker_exec(container, *mysql_client("-N", "rivet", user="root"),
                     stdin=sql, timeout=60)
     lines = [l for l in p.stdout.strip().splitlines() if "," in l]
     if not p.ok or not lines:
@@ -1288,7 +1288,7 @@ def _check_stand_under_lock(led: Ledger, p: Proc, container: str, said_so: bool,
     repaired = None
     if stuck:
         sql = "; ".join(f"SET GLOBAL {k} = DEFAULT" for k in stuck) + ";"
-        docker_exec(container, "mysql", "-uroot", "-privet", "-N", "rivet",
+        docker_exec(container, *mysql_client("-N", "rivet", user="root"),
                     stdin=sql, timeout=60)
         after = _stand_globals(container)
         repaired = after is not None and not any(after[k] == _FR_FLIP[k] for k in stuck)

@@ -597,6 +597,7 @@ fn minimal_sink() -> ExportSink {
         total_rows: 0,
         part_rows: 0,
         cursor_column: None,
+        cursor_rest: Vec::new(),
         override_columns: Vec::new(),
         settle_columns: Vec::new(),
         last_cursor_value: None,

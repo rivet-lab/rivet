@@ -29,7 +29,7 @@ TABLE = "harm_my"
 
 def my(sql: str) -> str:
     return subprocess.run(
-        ["docker", "exec", "-i", MYC, "mysql", "-urivet", "-privet", "-N", "-e", sql],
+        ["docker", "exec", "-i", MYC, "mysql", "-urivet", "-privet", "--default-character-set=utf8mb4", "-N", "-e", sql],
         capture_output=True, text=True,
     ).stdout.strip()
 
@@ -57,7 +57,7 @@ class Writer:
 
     def _run(self):
         p = subprocess.Popen(
-            ["docker", "exec", "-i", MYC, "mysql", "-urivet", "-privet", "rivet"],
+            ["docker", "exec", "-i", MYC, "mysql", "-urivet", "-privet", "--default-character-set=utf8mb4", "rivet"],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True,
         )
         while not self.stop.is_set():

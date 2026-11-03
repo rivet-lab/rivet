@@ -456,14 +456,7 @@ MY_CONTAINER_DEFAULT = "rivet-mysql-1"
 
 _PG_COUNT = ("psql", "-U", "rivet", "-d", "rivet", "-tAc", "SELECT COUNT(*) FROM pa_audit;")
 # No database argument: the count is fully qualified, exactly as in the shell.
-_MY_COUNT = (
-    "mysql",
-    "-urivet",
-    "-privet",
-    "-BN",
-    "-e",
-    "SELECT COUNT(*) FROM rivet.pa_audit;",
-)
+_MY_COUNT = tuple(shell.mysql_client("-BN", "-e", "SELECT COUNT(*) FROM rivet.pa_audit;"))
 
 
 def _load_pg_fixture(container: str, sql: str, *, what: str) -> None:
@@ -480,7 +473,7 @@ def _pg_count(container: str, *, what: str) -> str:
 
 
 def _load_mysql_fixture(container: str, sql: str, *, what: str) -> None:
-    docker_exec(container, "mysql", "-urivet", "-privet", "rivet", stdin=sql).check(what)
+    docker_exec(container, *shell.mysql_client("rivet"), stdin=sql).check(what)
 
 
 def _mysql_insert_rows(container: str, n: int, *, what: str) -> None:
@@ -495,12 +488,7 @@ def _mysql_insert_rows(container: str, n: int, *, what: str) -> None:
     for i in range(1, n + 1):
         docker_exec(
             container,
-            "mysql",
-            "-urivet",
-            "-privet",
-            "rivet",
-            "-e",
-            f"INSERT INTO pa_audit (id, name) VALUES ({i}, 'row_{i}');",
+            *shell.mysql_client("rivet", "-e", f"INSERT INTO pa_audit (id, name) VALUES ({i}, 'row_{i}');"),
         ).check(f"{what} (row {i})")
 
 
@@ -594,7 +582,7 @@ def _pg_reachable(container: str) -> bool:
 
 
 def _mysql_reachable(container: str) -> bool:
-    return docker_exec(container, "mysql", "-urivet", "-privet", "rivet", "-e", "SELECT 1").ok
+    return docker_exec(container, *shell.mysql_client("rivet", "-e", "SELECT 1")).ok
 
 
 def _seed_all_pg(container: str, label: str) -> bool:

@@ -83,7 +83,7 @@ class Engine:
         if self.name == "pg":
             argv = ["psql", "-U", "rivet", "-d", "rivet", "-v", "ON_ERROR_STOP=1", "-qtA", "-f", "-"]
         elif self.name == "mysql":
-            argv = ["mysql", "-urivet", "-privet", "--default-character-set=utf8mb4", "rivet", "-N", "-B"]
+            argv = shell.mysql_client("rivet", "-N", "-B")
         elif self.name == "mssql":
             argv = [cdc_stand.SQLCMD, "-C", "-S", "localhost", "-U", "sa", "-P", SA_PW, "-d", "rivet",
                     "-b", "-f", "65001", "-h", "-1", "-W"]

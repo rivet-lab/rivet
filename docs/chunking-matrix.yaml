@@ -47,6 +47,22 @@ scenarios:
     mongo:    { test: mongo_batch_resume_reads_only_new_since_last_run }
     oracle:   { test: keyset_checkpoint_resume_second_run_captures_only_new_keys_oracle }
 
+  - id: keyset_composite_primary_key
+    what: "chunk_by_key: [a, b] on a composite PRIMARY KEY pages by the key tuple in key order; the union reads every row exactly once (DuckDB count + distinct key count)."
+    postgres: { test: composite_key_pages_every_row_once_postgres }
+    mysql:    { test: composite_key_pages_every_row_once_mysql }
+    mssql:    { test: composite_key_pages_every_row_once_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: composite_key_pages_every_row_once_oracle }
+
+  - id: keyset_composite_resume_after_crash
+    what: "chunk_by_key: [a, b] + chunk_checkpoint: a run killed mid-stream resumes past the stored key tuple; the destination holds every row exactly once."
+    postgres: { test: composite_key_resume_after_a_crash_is_exact_postgres }
+    mysql:    { test: composite_key_resume_after_a_crash_is_exact_mysql }
+    mssql:    { test: composite_key_resume_after_a_crash_is_exact_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: composite_key_resume_after_a_crash_is_exact_oracle }
+
   - id: keyset_parallel_fanout
     what: "chunk_by_key + parallel: N → N ROW-percentile-range workers seek concurrently (feat/parallel-keyset — a DISTINCT chunking strategy: nth-row percentile range sampling, sparse-key immune). Union reads every row exactly once AND the run fans to ≥2 workers (no silent collapse to a single serial worker)."
     postgres: { test: parallel_keyset_parity_postgres }

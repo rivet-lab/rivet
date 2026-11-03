@@ -14,7 +14,9 @@ fn check_rejects_missing_table(base: Rig) {
         .export_named("probe")
         .query("SELECT * FROM definitely_not_a_real_table_xyzzy")
         .with_format("csv");
-    let out = rig.cli(&["check"]);
+    let out = rig
+        .run_after(&["check"], &[], Pairing::SameRefusal)
+        .preflight;
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_TABLE_NOT_FOUND", 1));
 }
 

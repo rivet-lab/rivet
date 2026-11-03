@@ -531,7 +531,7 @@ impl OracleSource {
             query: &projection.sql,
             ..*request
         };
-        let built = build_export_query(&reprojected, crate::config::SourceType::Oracle);
+        let built = build_export_query(&reprojected, crate::config::SourceType::Oracle)?;
         let mut ctl =
             AdaptiveBatchController::new(request.tuning, request.tuning.batch_size.max(1));
         let stmt_timeout = (request.tuning.statement_timeout_s > 0)
@@ -868,6 +868,7 @@ fn introspect_oracle_on(
         row_estimate,
         avg_row_bytes: None,
         int_columns,
+        ..Default::default()
     })
 }
 

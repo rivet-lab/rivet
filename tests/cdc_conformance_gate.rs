@@ -434,11 +434,13 @@ fn derived_capture_marker_set_is_pinned() {
         "cli_in_dir(",
         "drain_and_read(",
         "run(",
-        "run_after_doctor(",
+        "run_after(",
+        "run_after_env(",
         "run_and_read(",
         "run_args(",
         "run_args_env(",
         "run_expect_fail(",
+        "run_export_after_check(",
         // `Rig::run_in_dir` — the working-directory seam added for the relative
         // `cdc.checkpoint:` contract (a relative path must follow the CONFIG, not the
         // process CWD). It spawns rivet, so it is a capture marker like its siblings.
@@ -937,7 +939,8 @@ const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
 // cells read the warehouse back through `bq` / its HTTP client.
 // 119 -> 132 (2026-10-29, #719): the column-grants cells read the delivered parts with arrow; the rig oracle grades the runs it can.
 // 132 -> 133 (2026-10-31, #728): the dropped-database cell reads the parts of its stopped run and of the re-baseline with arrow; the stop itself is graded by its code.
-const PIN_SHARED_CODEC: usize = 133; // ratchet-pin: cdc-census-shared-codec
+// 133 -> 134 (2026-11-03, TF-2): the MySQL ENUM/SET label cell reads the stream and snapshot parts with arrow against the labels the test created; the rig oracle grades both legs against the source.
+const PIN_SHARED_CODEC: usize = 134; // ratchet-pin: cdc-census-shared-codec
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
@@ -1235,6 +1238,7 @@ fn every_live_cdc_test_asserts_an_outcome() {
                 // print a verdict and exit 0 with no column table at all).
                 || chunk.contains("\"check\",")
                 || chunk.contains("cli(&[\"check\"")
+                || chunk.contains("Pairing::")
                 // External-warehouse oracles (the strongest read-back in the
                 // suite): the CDC parquet is loaded and queried by another engine.
                 || chunk.contains("duckdb_run_sql_json(")

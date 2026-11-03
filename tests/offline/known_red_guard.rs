@@ -21,8 +21,10 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 4 -> 8 (2026-10-22): perf[mysql/cdc], cdc-spill, cdc-resume, cdc-snapshot: Handler_read_rnd_next counts the
 // performance_schema scan of two `SHOW GLOBAL VARIABLES` per run (#661, #684), no user table; issue #694.
 // 8 -> 4 (2026-10-27): the four perf[mysql/cdc*] rows matched no failure in the 0.32.2 gate; issue #694 keeps the reading.
-// 4 -> 19 (2026-11-03): the 15 open_defect_ cells of the config count knobs HCF-1/3/4/8 (harness/open-defect-config-knob-counts); fix/config-knob-quantity-counts lowers it back to 4.
-const ENTRY_CEILING: usize = 19; // ratchet-pin: known-red-entries
+// 4 -> 10 (2026-11-03): five CDC-begin contract cells and the load-across-a-rolling-run cell, open defect HDW-1 (fix/run-closing-cdc-begin).
+// 10 -> 11 (2026-11-03): the MySQL CDC ENUM/SET label cell (TF-2, closes with fix/mysql-enum-label-escapes).
+// 11 -> 26 (2026-11-03): the 15 open_defect_ cells of the config count knobs HCF-1/3/4/8 (harness/open-defect-config-knob-counts); fix/config-knob-quantity-counts lowers it back.
+const ENTRY_CEILING: usize = 26; // ratchet-pin: known-red-entries
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it

@@ -1,6 +1,6 @@
 -- Full type-matrix for MySQL — replay into existing volumes.
 --
---   docker compose exec -T mysql mysql -urivet -privet rivet \
+--   docker compose exec -T mysql mysql -urivet -privet --default-character-set=utf8mb4 rivet \
 --     < dev/sql/rivet_type_matrix_full_mysql.sql
 --
 DROP TABLE IF EXISTS rivet_type_matrix_full;

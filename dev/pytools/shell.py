@@ -186,6 +186,11 @@ def docker_exec(container: str, *args: str, stdin: str | None = None, **kw) -> P
     return docker("exec", *flags, container, *args, stdin=stdin, **kw)
 
 
+def mysql_client(*extra: str, user: str = "rivet") -> list[str]:
+    """The stand `mysql` client argv, utf8mb4 so a non-ASCII literal reaches the server as written."""
+    return ["mysql", f"-u{user}", "-privet", "--default-character-set=utf8mb4", *extra]
+
+
 def capture(
     argv: Sequence[str], env: dict[str, str] | None = None, timeout: float | None = 900
 ) -> subprocess.CompletedProcess:
