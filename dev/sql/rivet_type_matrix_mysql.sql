@@ -2,7 +2,7 @@
 --
 -- From repo root (stdin is interpreted on the host, then streamed into mysql):
 --
---   docker compose exec -T mysql mysql -urivet -privet rivet \
+--   docker compose exec -T mysql mysql -urivet -privet --default-character-set=utf8mb4 rivet \
 --     < dev/sql/rivet_type_matrix_mysql.sql
 --
 DROP TABLE IF EXISTS rivet_type_matrix;

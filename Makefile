@@ -224,7 +224,7 @@ seed-garbage-postgres:
 	docker compose exec -T postgres psql -U rivet -d rivet -v ON_ERROR_STOP=1 -f - < dev/garbage/postgres.sql
 
 seed-garbage-mysql:
-	docker compose exec -T mysql mysql -urivet -privet rivet < dev/garbage/mysql.sql
+	docker compose exec -T mysql mysql -urivet -privet --default-character-set=utf8mb4 rivet < dev/garbage/mysql.sql
 
 seed-garbage-mssql:
 	docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -d rivet -b -i /dev/stdin < dev/garbage/mssql.sql

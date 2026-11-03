@@ -77,7 +77,7 @@ def seed() -> bool:
     ]).returncode == 0
     rows = ",".join(f"({i},'mysql')" for i in range(10_001, 10_001 + N))
     ok2 = subprocess.run(
-        ["docker", "exec", "-i", "rivet-mysql-1", "mysql", "-urivet", "-privet", "rivet"],
+        ["docker", "exec", "-i", "rivet-mysql-1", "mysql", "-urivet", "-privet", "--default-character-set=utf8mb4", "rivet"],
         input=f"DROP TABLE IF EXISTS {TABLE}; CREATE TABLE {TABLE}(id INT PRIMARY KEY, src TEXT); "
               f"INSERT INTO {TABLE} VALUES {rows};",
         capture_output=True, text=True, timeout=300,
