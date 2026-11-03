@@ -409,6 +409,13 @@ exclude_re = [
     # it fails plan_refuses_a_collection_that_does_not_exist_mongo and
     # check_refuses_a_collection_that_does_not_exist_as_run_does_mongo.
     "replace MongoSession::require_collection -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    # list_collection_uuids lists the database's collections: it needs a live
+    # MongoDB, so its whole-fn `None` / `Some(vec![])` / `Some(vec![vec![]])` stubs are unkillable under
+    # `--lib --bins`. Its row parsing is unit-tested (uuid_of_listing) and its
+    # decision in a_collection_gone_or_replaced_since_the_run_started_is_refused_by_code.
+    "replace list_collection_uuids -> Option<Vec<Vec<u8>>> with None",
+    "replace list_collection_uuids -> Option<Vec<Vec<u8>>> with Some\\(vec!\\[\\]\\)",
+    "replace list_collection_uuids -> Option<Vec<Vec<u8>>> with Some\\(vec!\\[vec!\\[\\]\\]\\)",
     # NOTE the `$`: cargo-mutants names a mutant `<path>:<line>:<col>: <what> in
     # <fn>`, so an UNANCHORED `in check` also matches every `check_*` function.
     # Written without it, this entry removed 13 further mutants in six unrelated

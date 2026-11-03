@@ -184,14 +184,18 @@ fn list_collection_uuids(session: &MongoSession, collection: &str) -> Option<Vec
             .with_type::<Document>();
         let mut uuids = Vec::new();
         while let Some(listed) = cursor.try_next().await.ok()? {
-            let uuid = match listed.get_document("info").ok()?.get("uuid") {
-                Some(Bson::Binary(b)) => b.bytes.clone(),
-                _ => Vec::new(),
-            };
-            uuids.push(uuid);
+            uuids.push(uuid_of_listing(&listed)?);
         }
         Some(uuids)
     })
+}
+
+/// The UUID bytes a `listCollections` row carries in `info.uuid` (empty for a view); `None` when the row has no `info`.
+fn uuid_of_listing(listed: &Document) -> Option<Vec<u8>> {
+    match listed.get_document("info").ok()?.get("uuid") {
+        Some(Bson::Binary(b)) => Some(b.bytes.clone()),
+        _ => Some(Vec::new()),
+    }
 }
 
 /// Refuse a collection the database does not list, or lists under another UUID than the run `started` on; a listing that was not allowed refuses nothing.
@@ -1125,6 +1129,25 @@ mod tests {
             refuse_a_missing_collection("rivet", "orders", None, None).is_ok(),
             "a role without listCollections is not evidence of absence"
         );
+    }
+
+    #[test]
+    fn a_listing_row_carries_its_uuid_and_a_view_has_none() {
+        use mongodb::bson::{Binary, spec::BinarySubtype};
+        let uuid = Binary {
+            subtype: BinarySubtype::Uuid,
+            bytes: vec![7, 8, 9],
+        };
+        assert_eq!(
+            uuid_of_listing(&doc! { "name": "t", "info": { "uuid": uuid } }),
+            Some(vec![7, 8, 9])
+        );
+        assert_eq!(
+            uuid_of_listing(&doc! { "name": "v", "info": { "readOnly": true } }),
+            Some(Vec::new()),
+            "a view lists no uuid"
+        );
+        assert_eq!(uuid_of_listing(&doc! { "name": "t" }), None);
     }
 
     #[test]
