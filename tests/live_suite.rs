@@ -53,6 +53,8 @@ mod audit_state;
 mod audit_target_typo;
 #[path = "live/batch_memory_policy.rs"]
 mod batch_memory_policy;
+#[path = "live/check_override_wire.rs"]
+mod check_override_wire;
 #[path = "live/chunking_stand.rs"]
 mod chunking_stand;
 #[path = "live/gate_tls_failures.rs"]
@@ -124,6 +126,8 @@ mod live_chunked_recovery;
 mod live_cli_flags;
 #[path = "live/live_clickhouse_load.rs"]
 mod live_clickhouse_load;
+#[path = "live/live_config_knob_counts.rs"]
+mod live_config_knob_counts;
 #[path = "live/live_content_load.rs"]
 mod live_content_load;
 #[path = "live/live_continued_key_load.rs"]

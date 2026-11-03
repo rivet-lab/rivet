@@ -1,11 +1,8 @@
-//! AUDIT-RED — cluster `column-applicability` (findings #11, #31, #32, #33).
+//! AUDIT-RED — cluster `column-applicability` (findings #31, #32, #33).
 //!
 //! Type / quality references to columns are validated too late or not at all.
 //! A live config/flow audit (real binary against the docker stack) confirmed:
 //!
-//! - #11: `columns: {quantity: string}` on an int4 column is accepted by parse,
-//!   plan, AND `check --type-report` (which reports 'exact'!). Only `run` fails
-//!   mid-extraction. `check` should reject it pre-flight.
 //! - #31: `cursor_column: does_not_exist` — `check` exits 0; only `run` hits
 //!   "column does not exist". `check` should flag the missing cursor column.
 //! - #32: `columns: {price: decimal(20,0)}` on numeric(10,2) — `check
@@ -27,51 +24,6 @@
 
 use crate::common::*;
 
-// ─── #11: inapplicable type override must be rejected by `check` ──────────────
-
-#[test]
-#[ignore = "live: postgres"]
-// AUDIT-RED column-applicability: `columns:{quantity:string}` on an int4 column is accepted by `check --type-report` (reports 'exact'); only `run` fails. Asserts CORRECT behavior; expected to FAIL until fixed.
-fn audit_check_rejects_inapplicable_type_override() {
-    require_alive(LiveService::Postgres);
-
-    let export_name = unique_name("audit_inapplicable_override");
-    let out = tempfile::tempdir().unwrap();
-    // quantity is int4 in the seeded `orders` table; declaring it `string`
-    // is an inapplicable override that the run rejects mid-extraction.
-    let rig = Rig::pg_batch(&export_name)
-        .query("SELECT id, quantity, price, status FROM orders")
-        .mode("full")
-        .export_line("columns:")
-        .export_line("  quantity: \"string\"")
-        .dest_path(out.path().to_path_buf());
-
-    let result = rig.cli(&["check", "--export", &export_name, "--type-report"]);
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    let combined = format!("{stdout}{stderr}");
-
-    // CORRECT behavior: check must surface the int4→string conflict pre-flight,
-    // either by exiting non-zero OR by naming the conflict in its output.
-    // Today check exits 0 and the quantity column is reported with fidelity
-    // 'exact' — the failure is deferred to `run`.
-    let flagged = !result.status.success()
-        || combined.contains("quantity")
-            && (combined.contains("conflict")
-                || combined.contains("incompatible")
-                || combined.contains("inapplicable")
-                || combined.contains("cannot")
-                || combined.contains("mismatch"));
-    assert!(
-        flagged,
-        "check must reject the int4->string override on `quantity` pre-flight \
-         (non-zero exit or a named conflict), not defer it to run. \
-         exit={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-        result.status.code()
-    );
-}
-
 // ─── #31: missing cursor column must be flagged by `check` ────────────────────
 
 #[test]
@@ -90,7 +42,13 @@ fn audit_check_flags_missing_cursor_column() {
         .export_line("cursor_column: does_not_exist")
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["check", "--export", &export_name]);
+    let result = rig
+        .run_after(
+            &["check", "--export", &export_name],
+            &["--export", &export_name],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);

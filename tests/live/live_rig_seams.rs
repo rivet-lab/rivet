@@ -1,4 +1,4 @@
-//! The Rig's cross-command seams, each on a state green on main: `run_after_doctor` (doctor and
+//! The Rig's cross-command seams, each on a state green on main: `run_after` (doctor and
 //! the run it predicts agree) on every CDC engine, and `pg_cdc_standby` + `run_nudged` taking an
 //! `initial: snapshot` stream from the cdc-standby replica. Oracles: the rig oracle on every run
 //! (source against the declared parts), the manifests, and the standby's own catalog.
@@ -7,7 +7,8 @@ use crate::common::*;
 
 /// Doctor is green on a fresh stream and the run it predicts succeeds (its rows graded by the rig oracle).
 fn doctor_green_then_run_ok(rig: &Rig) {
-    let (green, run) = rig.run_after_doctor();
+    let c = rig.run_after(&["doctor", "--json"], &[], Pairing::GreenOnly);
+    let (green, run) = (c.green, c.run);
     assert!(
         green && run.status.success(),
         "a fresh stream: doctor all_ok={green}, run ok={}:\n{}",

@@ -6,9 +6,6 @@
 //! | L1a | whole-schema dumped everything | `init … --exclude 'bench_*'` omits every `bench_*` object from the scaffold. |
 //! | L1b | (same) | `init … --include 'orders'` yields exactly the `orders` export. |
 //!
-//! Harness mirrors `tests/live_init.rs`: gate on `require_alive`, drive the
-//! `RIVET_BIN` built for this test, swap `url_env:` for a literal `url:` so
-//! `rivet check` can connect without an env var.
 
 use crate::common::*;
 
@@ -18,8 +15,6 @@ use crate::common::*;
 #[ignore = "live: mssql"]
 fn init_mssql_single_table_emits_valid_config_that_passes_check() {
     require_alive(LiveService::Mssql);
-
-    let cfg_dir = tempfile::tempdir().unwrap();
 
     // FIXTURE precondition, and the table is DELIBERATELY the one that a plain
     // `docker compose up -d mssql` provisions.
@@ -48,25 +43,14 @@ fn init_mssql_single_table_emits_valid_config_that_passes_check() {
          -U sa -P 'Rivet_Passw0rd!' -d rivet -i /dev/stdin < dev/mssql/init.sql"
     );
 
-    // ── init --table dbo.planning_probe ────────────────────────────────────
-    let out = std::process::Command::new(RIVET_BIN)
-        .args([
-            "init",
-            "--source",
-            MSSQL_URL,
-            "--table",
-            "dbo.planning_probe",
-        ])
-        .output()
-        .expect("spawn rivet init (mssql)");
-
+    let cfg = InitConfig::generate(MSSQL_URL, &["--table", "dbo.planning_probe"]);
     assert!(
-        out.status.success(),
+        cfg.init.status.success(),
         "rivet init --table dbo.planning_probe must exit 0; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&cfg.init.stderr)
     );
 
-    let yaml = String::from_utf8_lossy(&out.stdout);
+    let yaml = cfg.yaml();
     // SQL Server scaffold: `type: mssql`, schema-qualified `FROM dbo.planning_probe`.
     assert!(
         yaml.contains("type: mssql"),
@@ -94,24 +78,12 @@ fn init_mssql_single_table_emits_valid_config_that_passes_check() {
         "DECIMAL(12,2) must scaffold with its catalog precision/scale; got:\n{yaml}"
     );
 
-    // ── swap url_env → literal url so `rivet check` can connect ─────────────
-    // Replace only the key=value; the trailing `# export ...` stays a valid
-    // YAML comment, so this is robust to the scaffold's comment wording.
-    let yaml_with_url = yaml.replace("url_env: DATABASE_URL", &format!("url: \"{MSSQL_URL}\""));
-    let cfg_path = cfg_dir.path().join("rivet.yaml");
-    std::fs::write(&cfg_path, &yaml_with_url).expect("write patched config");
-
-    // ── rivet check on the init-emitted YAML must pass ─────────────────────
-    let check = std::process::Command::new(RIVET_BIN)
-        .args(["check", "--config", cfg_path.to_str().unwrap()])
-        .output()
-        .expect("spawn rivet check");
-
+    let c = cfg.run_after(&["check"], &[], Pairing::SameRefusal);
     assert!(
-        check.status.success(),
-        "rivet check on init-emitted mssql YAML must exit 0; stderr:\n{}\nstdout:\n{}",
-        String::from_utf8_lossy(&check.stderr),
-        String::from_utf8_lossy(&check.stdout)
+        c.green && c.run.status.success(),
+        "rivet check on init-emitted mssql YAML must exit 0 and its run deliver; stderr:\n{}\nstdout:\n{}",
+        String::from_utf8_lossy(&c.preflight.stderr),
+        String::from_utf8_lossy(&c.preflight.stdout)
     );
 }
 
@@ -122,19 +94,20 @@ fn init_mssql_single_table_emits_valid_config_that_passes_check() {
 fn init_pg_include_glob_keeps_only_matching_table() {
     require_alive(LiveService::Postgres);
 
-    // The seeded `public.orders` table is always present (docker-compose seed).
-    let out = std::process::Command::new(RIVET_BIN)
-        .args(["init", "--source", POSTGRES_URL, "--include", "orders"])
-        .output()
-        .expect("spawn rivet init --include");
-
+    let cfg = InitConfig::generate(POSTGRES_URL, &["--include", "orders"]);
     assert!(
-        out.status.success(),
+        cfg.init.status.success(),
         "rivet init --include 'orders' must exit 0; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&cfg.init.stderr)
     );
 
-    let yaml = String::from_utf8_lossy(&out.stdout);
+    let yaml = cfg.yaml();
+    let c = cfg.run_export_after_check("orders");
+    assert!(
+        c.green && c.run.status.success(),
+        "the `orders` export must check and run; run:\n{}",
+        String::from_utf8_lossy(&c.run.stderr)
+    );
     // The glob `orders` is an exact (anchored) match, so sibling tables like
     // `orders_sparse` / `orders_coalesce` are excluded — exactly one export.
     let export_count = yaml.matches("  - name:").count();
@@ -155,18 +128,20 @@ fn init_pg_include_glob_keeps_only_matching_table() {
 fn init_pg_exclude_glob_drops_bench_tables() {
     require_alive(LiveService::Postgres);
 
-    let out = std::process::Command::new(RIVET_BIN)
-        .args(["init", "--source", POSTGRES_URL, "--exclude", "bench_*"])
-        .output()
-        .expect("spawn rivet init --exclude");
-
+    let cfg = InitConfig::generate(POSTGRES_URL, &["--exclude", "bench_*"]);
     assert!(
-        out.status.success(),
+        cfg.init.status.success(),
         "rivet init --exclude 'bench_*' must exit 0; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&cfg.init.stderr)
     );
 
-    let yaml = String::from_utf8_lossy(&out.stdout);
+    let yaml = cfg.yaml();
+    let c = cfg.run_export_after_check("orders");
+    assert!(
+        c.green && c.run.status.success(),
+        "the `orders` export must check and run; run:\n{}",
+        String::from_utf8_lossy(&c.run.stderr)
+    );
     // No `bench_*` export survives the exclude glob. Export headers are the
     // authoritative signal (`  - name: bench_…`); a bare `bench_` substring
     // could otherwise appear in an unrelated comment.

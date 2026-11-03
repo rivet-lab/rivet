@@ -309,7 +309,7 @@ fn oracle_known_defects_are_a_named_set_that_only_shrinks() {
 }
 
 /// Hand-built spawns of the rivet binary in tests/live.
-const RAW_RIVET_CEILING: usize = 16; // ratchet-pin: raw-rivet-invocations
+const RAW_RIVET_CEILING: usize = 11; // ratchet-pin: raw-rivet-invocations
 
 /// `Command::new` of the rivet binary in `text`, in each spelling the suite uses.
 fn raw_rivet_sites(text: &str) -> usize {

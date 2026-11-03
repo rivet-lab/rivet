@@ -6,6 +6,8 @@
 
 The lock lives on the open file, which CMD inherits across exec: the slot frees when the
 last process holding it exits, however it dies (SIGKILL included). No pid files.
+A holder exports RIVET_LIVE_SLOT, so a nested call under it (make test-live wraps its own
+nextest run) reuses the held slot instead of waiting for a second one.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / ".cache" / "rivet" / "live-slots"
+ENV = "RIVET_LIVE_SLOT"
 
 
 def try_lock(path: Path) -> int | None:
@@ -34,28 +37,33 @@ def try_lock(path: Path) -> int | None:
         return None
 
 
-def acquire(slots: int, take_all: bool, root: Path) -> tuple[list[int], str]:
-    """Lock one free slot (polling), or every slot in order; return the fds and which slots."""
+def held_above(root: Path) -> list[Path]:
+    """The slot files under `root` an enclosing live_slot in this process tree already holds."""
+    return [p for p in (Path(s) for s in os.environ.get(ENV, "").split(os.pathsep) if s) if p.parent == root]
+
+
+def acquire(slots: int, take_all: bool, root: Path, held: list[Path]) -> tuple[list[int], list[Path], str]:
+    """Lock one free slot (polling), or every slot not already held; return fds, paths and which slots."""
     root.mkdir(parents=True, exist_ok=True)
     paths = [root / f"slot-{i}.lock" for i in range(slots)]
     if take_all:
-        paths = sorted(set(paths) | set(root.glob("slot-*.lock")))
+        paths = sorted((set(paths) | set(root.glob("slot-*.lock"))) - set(held))
         fds = []
         for p in paths:
             fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o644)
             fcntl.flock(fd, fcntl.LOCK_EX)
             fds.append(fd)
-        return fds, f"all {len(paths)} slots"
+        return fds, paths, f"all {len(paths) + len(held)} slots"
     while True:
         for i, p in enumerate(paths):
             fd = try_lock(p)
             if fd is not None:
-                return [fd], f"slot {i + 1}/{slots}"
+                return [fd], [p], f"slot {i + 1}/{slots}"
         time.sleep(1)
 
 
 def run(argv: list[str]) -> int:
-    """Take the slot(s), say how long that took, and exec the command."""
+    """Take the slot(s) the enclosing holder does not already hold, say how long that took, and exec the command."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--slots", type=int, default=2, help="machine-wide live slots (default 2)")
     ap.add_argument("--all", action="store_true", help="take every slot (the timed release gate)")
@@ -65,17 +73,23 @@ def run(argv: list[str]) -> int:
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
     if not cmd or a.slots < 1:
         ap.error("usage: live_slot.py [--slots N] [--all] -- CMD ...")
+    root = a.dir.resolve()
+    held = held_above(root)
+    if held and not a.all:
+        print(f"live-slot: nested under {held[0].name}, taking no second slot: {' '.join(cmd)}", file=sys.stderr, flush=True)
+        os.execvp(cmd[0], cmd)
     t0 = time.monotonic()
-    fds, which = acquire(a.slots, a.all, a.dir)
+    fds, paths, which = acquire(a.slots, a.all, root, held)
     print(f"live-slot: holding {which} after waiting {time.monotonic() - t0:.1f}s: {' '.join(cmd)}",
           file=sys.stderr, flush=True)
     for fd in fds:
         os.set_inheritable(fd, True)
+    os.environ[ENV] = os.pathsep.join(str(p) for p in [*held, *paths])
     os.execvp(cmd[0], cmd)
 
 
 def self_test() -> int:
-    """Two holders block a third; SIGKILL of a holder frees its slot; --all waits for every slot."""
+    """Two holders block a third; SIGKILL frees a slot; --all waits for every slot; a nested call takes no second slot."""
     me = [sys.executable, str(Path(__file__).resolve())]
     procs: list[subprocess.Popen] = []
     with tempfile.TemporaryDirectory() as d:
@@ -83,6 +97,7 @@ def self_test() -> int:
             p = subprocess.Popen([*me, "--slots", "2", "--dir", d, *extra], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             procs.append(p)
             return p
+        nested = [*me, "--slots", "2", "--dir", d]
         try:
             a, b = start("--", "sleep", "60"), start("--", "sleep", "60")
             time.sleep(1.5)
@@ -92,12 +107,22 @@ def self_test() -> int:
             os.kill(a.pid, signal.SIGKILL)
             a.wait()
             assert third.wait(timeout=10) == 0, "killing a holder did not free its slot"
+            inner = start("--", *nested, "--", *nested, "--", "true")
+            assert inner.wait(timeout=10) == 0, "a nested call waited for a second slot while one was held"
             gate = start("--all", "--", "true")
             time.sleep(2)
             assert gate.poll() is None, "--all ran while a slot was held"
             b.kill()
             b.wait()
             assert gate.wait(timeout=10) == 0, "--all did not run once every slot was free"
+            c = start("--", "sleep", "60")
+            time.sleep(1.5)
+            nested_gate = start("--", *nested, "--all", "--", "true")
+            time.sleep(2.5)
+            assert nested_gate.poll() is None, "a nested --all ran while another holder kept a slot"
+            c.kill()
+            c.wait()
+            assert nested_gate.wait(timeout=10) == 0, "a nested --all did not run once the other slot was free"
         finally:
             for p in procs:
                 p.kill()

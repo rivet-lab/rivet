@@ -145,3 +145,28 @@ scenarios:
     what: "a Snowflake `load:` that still names a `snow` CLI connection (`connection: my_conn`): rivet no longer drives the CLI and signs in with a key pair, so the line would be read by nothing. Refused at config load with `RIVET_CONFIG_LOAD_BLOCK_INVALID`, printing the `account` / `user` / `private_key_path` / `role` fragment that replaces it; a Snowflake block with the new fields loads, a non-Snowflake target never meets the refusal."
     rejected_wrong_mode: { test: a_snowflake_load_that_names_a_snow_cli_connection_is_refused_with_the_fields_that_replace_it }
     valid_form_accepted: { test: a_snowflake_block_carries_a_key_pair_login_and_an_optional_role }
+
+  - id: chunk_size_past_i64
+    what: "a `chunk_size` of 2^63 or more (HCF-1): the window size is an i64, the value wrapped to 0 or less, no window was planned and the run ended exit 0 with 0 rows. Open defect: validate, plan and run on `query:` and `table:` + `chunk_checkpoint` must refuse with RIVET_CONFIG_VALUE_OUT_OF_RANGE on every SQL engine; a size inside i64 delivers every row."
+    rejected_wrong_mode: { test: open_defect_chunk_size_past_i64_is_refused_postgres }
+    valid_form_accepted: { test: chunk_size_within_i64_delivers_the_source_ids_postgres }
+
+  - id: wide_key_windows
+    what: "windows over a key range as wide as i64, sized by `chunk_count` or a `chunk_size` near i64::MAX (HCF-8): the span overflowed i64 and plan and run panicked in debug. Open defect: they must plan and deliver every row. `chunk_count: 0` keeps its refusal."
+    rejected_wrong_mode: { na: "a wide key range is a valid input and nothing in it is refused; chunk_count 0 keeps RIVET_CONFIG_CHUNK_COUNT_INVALID, held by chunk_count_over_a_narrow_range_is_unchanged_postgres" }
+    valid_form_accepted: { test: open_defect_wide_key_windows_plan_and_deliver_postgres }
+
+  - id: cdc_rollover_flag
+    what: "`rivet cdc --rollover 0` (HCF-4): accepted and run while `cdc.rollover: 0` is refused RIVET_CONFIG_CDC_ROLLOVER_INVALID. Open defect: the flag is refused alike on every CDC engine before the stream is read."
+    rejected_wrong_mode: { test: open_defect_cdc_rollover_zero_is_refused_on_the_flag_postgres }
+    valid_form_accepted: { test: pg_cdc_cli_rollover_1_delivers_the_pending_changes }
+
+  - id: mongo_page_size_zero
+    what: "Mongo `source.mongo.page_size: 0` (HCF-4): clamped to 1 and the run succeeded, where every other count knob refuses 0. Open defect: validate, plan and run refuse with RIVET_CONFIG_VALUE_OUT_OF_RANGE."
+    rejected_wrong_mode: { test: open_defect_mongo_page_size_zero_is_refused }
+    valid_form_accepted: { test: mongo_page_size_above_zero_delivers_every_document }
+
+  - id: quality_null_ratio_outside_unit_interval
+    what: "`quality.null_ratio_max` of NaN, infinity, above 1 or below 0 (HCF-3): accepted although no column can reach it. Open defect: validate and run refuse with RIVET_CONFIG_VALUE_OUT_OF_RANGE on every engine; 0, 0.5 and 1 run."
+    rejected_wrong_mode: { test: open_defect_null_ratio_max_outside_the_unit_interval_is_refused }
+    valid_form_accepted: { test: null_ratio_max_inside_the_unit_interval_is_accepted_postgres }
