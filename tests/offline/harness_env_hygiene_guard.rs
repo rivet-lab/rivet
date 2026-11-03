@@ -95,7 +95,7 @@ fn gate_allow_list(core: &str, name: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Every `RIVET_*` the gate, the Rust harness and the Makefile's GATE_ENV read from the shell.
+/// Every `RIVET_*` the gate, its live-slot wrapper, the Rust harness and the Makefile's GATE_ENV read from the shell.
 fn harness_reads() -> BTreeSet<(String, String)> {
     let py =
         regex::Regex::new(r#"(?:environ(?:\.get)?\(?\[?|getenv\()"(RIVET_[A-Z0-9_]+)""#).unwrap();
@@ -119,6 +119,7 @@ fn harness_reads() -> BTreeSet<(String, String)> {
             scan(&rs, &f);
         }
     }
+    scan(&py, &root().join("dev/pytools/live_slot.py"));
     scan(&mk, &root().join("Makefile"));
     reads
 }

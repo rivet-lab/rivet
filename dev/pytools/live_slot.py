@@ -23,7 +23,6 @@ import time
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / ".cache" / "rivet" / "live-slots"
-ENV = "RIVET_LIVE_SLOT"
 
 
 def try_lock(path: Path) -> int | None:
@@ -39,7 +38,7 @@ def try_lock(path: Path) -> int | None:
 
 def held_above(root: Path) -> list[Path]:
     """The slot files under `root` an enclosing live_slot in this process tree already holds."""
-    return [p for p in (Path(s) for s in os.environ.get(ENV, "").split(os.pathsep) if s) if p.parent == root]
+    return [p for p in (Path(s) for s in os.environ.get("RIVET_LIVE_SLOT", "").split(os.pathsep) if s) if p.parent == root]
 
 
 def acquire(slots: int, take_all: bool, root: Path, held: list[Path]) -> tuple[list[int], list[Path], str]:
@@ -84,7 +83,7 @@ def run(argv: list[str]) -> int:
           file=sys.stderr, flush=True)
     for fd in fds:
         os.set_inheritable(fd, True)
-    os.environ[ENV] = os.pathsep.join(str(p) for p in [*held, *paths])
+    os.environ["RIVET_LIVE_SLOT"] = os.pathsep.join(str(p) for p in [*held, *paths])
     os.execvp(cmd[0], cmd)
 
 
