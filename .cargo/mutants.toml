@@ -413,15 +413,11 @@ exclude_re = [
     # MongoDB, so its whole-fn `None` / `Some(vec![])` / `Some(vec![vec![]])` stubs are unkillable under
     # `--lib --bins`. Its row parsing is unit-tested (uuid_of_listing) and its
     # decision in a_collection_gone_or_replaced_since_the_run_started_is_refused_by_code.
-    # MongoSource::export reads a live MongoDB: its whole-fn `Ok(())` stub and the only `==` in it (the
-    # empty-read check) are live-only. Proven live-killed 2026-11-03 (each stub applied, cells run, source
-    # restored): the five list_collection_uuids stubs and the export stub fail the three
-    # a_collection_dropped_before_* mongo cells; `total != 0` fails the keyset, full-scan and id-range cells.
+    # Proven live-killed 2026-11-03 (each stub applied, cells run, source restored): the five stubs fail the three
+    # a_collection_dropped_before_* mongo cells.
     "replace list_collection_uuids -> Option<Vec<Vec<u8>>> with None",
     "replace list_collection_uuids -> Option<Vec<Vec<u8>>> with Some\\(vec!\\[\\]\\)",
     "replace list_collection_uuids -> Option<Vec<Vec<u8>>> with Some\\(vec!\\[vec!\\[[01]?\\]\\]\\)",
-    "replace <impl Source for MongoSource>::export -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
-    "replace == with != in <impl Source for MongoSource>::export$",
     # NOTE the `$`: cargo-mutants names a mutant `<path>:<line>:<col>: <what> in
     # <fn>`, so an UNANCHORED `in check` also matches every `check_*` function.
     # Written without it, this entry removed 13 further mutants in six unrelated
