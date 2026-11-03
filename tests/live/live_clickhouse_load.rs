@@ -117,13 +117,22 @@ fn pairs(tsv: &str) -> Vec<(i64, i64)> {
 
 /// `rig` exporting to the fake-gcs bucket and loading into ClickHouse database `db`.
 fn into_clickhouse(rig: Rig, db: &Db) -> Rig {
-    rig.cdc("initial: snapshot")
-        .dest_gcs(BUCKET, &unique_name("chload"), FAKE_GCS_ENDPOINT)
-        .top_line(&format!(
-            "load: {{ target: clickhouse, url: \"{}\", database: {}, \
+    into_clickhouse_at(rig, db, &unique_name("chload"))
+}
+
+/// [`into_clickhouse`] staging under `prefix`.
+fn into_clickhouse_at(rig: Rig, db: &Db, prefix: &str) -> Rig {
+    staged_at(rig, prefix).top_line(&format!(
+        "load: {{ target: clickhouse, url: \"{}\", database: {}, \
              user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: [id] }}",
-            db.1, db.0
-        ))
+        db.1, db.0
+    ))
+}
+
+/// `rig` staging its snapshot and changes under `prefix` of the fake-gcs bucket, with no `load:` block.
+fn staged_at(rig: Rig, prefix: &str) -> Rig {
+    rig.cdc("initial: snapshot")
+        .dest_gcs(BUCKET, prefix, FAKE_GCS_ENDPOINT)
 }
 
 fn load(rig: &Rig) {
@@ -859,6 +868,105 @@ fn a_cdc_load_from_another_state_db_refuses_rivets_own_view_and_log_every_cycle(
                 ))
                 .expect("changes");
         },
+    );
+}
+
+/// HDW-1: a load from a state DB that never saw a CDC run crosses it between two rolls; once the run ends, the warehouse holds every row of the source.
+fn a_load_from_another_state_db_crosses_a_rolling_cdc_run(
+    loader: Rig,
+    runner: Rig,
+    view: &str,
+    insert: impl FnOnce(),
+    source: impl Fn() -> Vec<(i64, i64)>,
+) {
+    let envs = [(PASSWORD_ENV, CLICKHOUSE_PASSWORD), OWN_SQLITE_STATE];
+    let ungraded = [
+        (PASSWORD_ENV, CLICKHOUSE_PASSWORD),
+        OWN_SQLITE_STATE,
+        (
+            "RIVET_TEST_NO_ORACLE",
+            "a second client reads the warehouse back against the source",
+        ),
+    ];
+    let pin = loader.run_with_envs(&[OWN_SQLITE_STATE]);
+    assert!(
+        pin.status.success(),
+        "the pin run:\n{}",
+        String::from_utf8_lossy(&pin.stderr)
+    );
+    loader.load_ok(&[], &envs);
+    insert();
+    let parked = tempfile::tempdir().expect("marker directory");
+    let marker = parked.path().join("rolled.paused");
+    let marker_env = marker.display().to_string();
+    let mut run = runner.spawn_args_env(
+        &[],
+        &[
+            OWN_SQLITE_STATE,
+            ("RIVET_TEST_PAUSE_AT", "cdc_after_parts_before_ack:8000"),
+            ("RIVET_TEST_PAUSE_MARKER", &marker_env),
+        ],
+    );
+    let mut crossings = 0;
+    let began = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = run.try_wait().expect("try_wait") {
+            break status;
+        }
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(180),
+            "the rolling run never ended"
+        );
+        if marker.is_file() {
+            std::fs::remove_file(&marker).expect("clear the park marker");
+            let mid = loader.load_args_env(&[], &ungraded);
+            assert!(
+                mid.status.success(),
+                "the load beside the rolling run:\n{}",
+                String::from_utf8_lossy(&mid.stderr)
+            );
+            crossings += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(status.success(), "the rolling run ends clean: {status}");
+    assert!(
+        crossings >= 2,
+        "fixture: the load crossed the run between {crossings} rolls, not two or more"
+    );
+    loader.load_ok(&[], &ungraded);
+    clickhouse_rows_match_source(view, source(), "");
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = seeded("rivet_ch_hdw1", 5);
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chload");
+    let loader = into_clickhouse_at(Rig::mysql_cdc(&tbl), &db, &prefix);
+    let runner = staged_at(
+        Rig::mysql_cdc(&tbl)
+            .export_named(loader.export_name())
+            .checkpoint_path(loader.checkpoint())
+            .cdc("rollover: 3"),
+        &prefix,
+    );
+    a_load_from_another_state_db_crosses_a_rolling_cdc_run(
+        loader,
+        runner,
+        &format!("{}.{tbl}", db.0),
+        || {
+            let mut c = conn();
+            for i in 6..=14 {
+                c.query_drop(format!("INSERT INTO {tbl} (id, v) VALUES ({i}, {i})"))
+                    .expect("the backlog");
+            }
+        },
+        || source_rows(&tbl),
     );
 }
 

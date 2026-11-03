@@ -96,19 +96,20 @@ fn init_schema_flag_filters_to_schema() {
 
     let table = seed_pg_numeric_table(5);
 
-    // --schema public is the default but passing it explicitly must still work.
-    let result = std::process::Command::new(RIVET_BIN)
-        .args(["init", "--source", POSTGRES_URL, "--schema", "public"])
-        .output()
-        .expect("spawn rivet init --schema public");
-
+    let cfg = InitConfig::generate(POSTGRES_URL, &["--schema", "public"]);
     assert!(
-        result.status.success(),
+        cfg.init.status.success(),
         "init --schema public must exit 0; stderr:\n{}",
-        String::from_utf8_lossy(&result.stderr)
+        String::from_utf8_lossy(&cfg.init.stderr)
+    );
+    let c = cfg.run_export_after_check(table.name());
+    assert!(
+        c.green && c.run.status.success(),
+        "the scaffold's export must check and run; run:\n{}",
+        String::from_utf8_lossy(&c.run.stderr)
     );
 
-    let yaml = String::from_utf8_lossy(&result.stdout);
+    let yaml = cfg.yaml();
     assert!(
         yaml.contains("exports:"),
         "schema-scoped init must produce exports section; got:\n{yaml}"

@@ -18,7 +18,7 @@ pub(crate) fn derive_strategy_resolved(export: &ExportConfig, auto_pk: Option<&s
     // (plan::build) turns it into ExtractionStrategy::Keyset, so the diagnostic
     // must label it keyset — not `chunked(?, …)`, whose `?` is the absent
     // chunk_column that keyset does not use.
-    if let Some(key) = export.chunk_by_key.as_deref() {
+    if let Some(key) = export.chunk_by_key.as_ref() {
         if export.parallel > 1 {
             return format!(
                 "keyset-parallel({}, size={}, p={})",
@@ -84,7 +84,7 @@ pub(crate) fn preflight_range_col(export: &ExportConfig) -> Option<&str> {
     export
         .chunk_column
         .as_deref()
-        .or(export.chunk_by_key.as_deref())
+        .or(export.chunk_key_lead())
         .or(export.cursor_column.as_deref())
         .or(export.time_column.as_deref())
 }
@@ -402,7 +402,7 @@ pub(crate) fn diagnose_mode_str(export: &ExportConfig) -> String {
     // Keyset (chunk_by_key) is its own read strategy — surface the actual seek
     // key + page size, not `chunked (column: ?, …)` (the `?` = the unused
     // chunk_column). Mirrors the derive_strategy keyset branch above.
-    if let Some(key) = export.chunk_by_key.as_deref() {
+    if let Some(key) = export.chunk_by_key.as_ref() {
         if export.parallel > 1 {
             return format!(
                 "keyset (key: {}, size: {}, parallel: {})",
@@ -991,7 +991,7 @@ pub(crate) fn build_suggestion(
                     let col = export
                         .chunk_column
                         .as_deref()
-                        .or(export.chunk_by_key.as_deref())
+                        .or(export.chunk_key_lead())
                         .unwrap_or("chunk_column");
                     parts.push(format!(
                         "Create an index on '{}' to speed up range scans.",
@@ -1030,7 +1030,7 @@ pub(crate) fn build_suggestion(
                     let col = export
                         .chunk_column
                         .as_deref()
-                        .or(export.chunk_by_key.as_deref())
+                        .or(export.chunk_key_lead())
                         .unwrap_or("chunk_column");
                     // Keyset is sequential; only range chunking benefits from
                     // "add parallel workers", so tailor the fix to the strategy.

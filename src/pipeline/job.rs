@@ -2030,6 +2030,7 @@ mod tests {
             checkpoint: true,
             incremental,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         plan
     }
@@ -2466,6 +2467,7 @@ mod tests {
                 checkpoint: true,
                 incremental,
                 parallel: 1,
+                key_rest: Vec::new(),
             })
         };
         let incremental = ExtractionStrategy::Incremental(IncrementalCursorPlan {
@@ -3170,6 +3172,7 @@ mod tests {
             checkpoint: true,
             incremental: false,
             parallel: 2,
+            key_rest: Vec::new(),
         });
         let state = crate::state::StateStore::open_in_memory().unwrap();
         let (key, name) = (plan.progress_key(), plan.export_name.as_str());
@@ -3604,6 +3607,7 @@ mod tests {
             checkpoint: false,
             incremental: false,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         assert_eq!(strategy_key_column(&plan), Some(("keyset", "order_no")));
         plan.strategy = ExtractionStrategy::Incremental(IncrementalCursorPlan {
@@ -3638,6 +3642,7 @@ mod tests {
                 checkpoint: false,
                 incremental: false,
                 parallel,
+                key_rest: Vec::new(),
             });
             build_metric_row(
                 &RunSummary::stub_for_testing("run-keyset", "orders"),

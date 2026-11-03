@@ -527,6 +527,8 @@ Preflight analysis: diagnose source health, estimate row counts, check indexes, 
 
 The `Strategy:` and `Mode:` lines (and `strategy` / `mode` under `--json`) describe the plan `rivet run` builds for the export, from the same planner: the chunk column it resolved from the primary key, and `full-scan` for a `mode: chunked` export whose table fits one chunk, which runs as one unchunked pass. On MongoDB, `check` fails on a collection that does not exist (`RIVET_SOURCE_COLLECTION_NOT_FOUND`, exit 1), as `run` does.
 
+For an export that declares `columns:`, `check` reads the first row of the export through the same converter `rivet run` uses and ends with `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) when the run would refuse a declared type; this costs one extra one-row query per such export, and an empty source passes as it passes the run.
+
 ```bash
 rivet check --config <PATH> [OPTIONS]
 ```

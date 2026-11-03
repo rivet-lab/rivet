@@ -1019,6 +1019,114 @@ fn cdc_unicode_enum_labels_survive_end_to_end() {
     );
 }
 
+/// MySQL CDC ENUM and SET labels holding a backslash, LF, CR, NUL, a quote and non-ASCII text are the stored labels on the stream leg as on the snapshot leg.
+#[test]
+#[ignore = "live+gate-only: open defect TF-2; closes with fix/mysql-enum-label-escapes"]
+fn open_defect_mysql_cdc_enum_set_labels_match_the_snapshot() {
+    use arrow::array::StringArray;
+    let enum_labels = [
+        "C:\\temp",
+        "a\nb",
+        "c\rd",
+        "n\0z",
+        "it's",
+        "\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}",
+        "lit\\n",
+    ];
+    let set_labels = ["p\\q", "r\ns", "t\ru", "v\0w", "y'z", "üñ", "e\\"];
+    let sql_lit = |l: &str| {
+        l.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\0', "\\0")
+            .replace('\'', "''")
+    };
+    let decl = |ls: &[&str]| {
+        ls.iter()
+            .map(|l| format!("'{}'", sql_lit(l)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let tbl = unique_name("cdc_elab");
+    let mut c = mysql::Pool::new(MYSQL_CDC_URL).unwrap().get_conn().unwrap();
+    c.query_drop(format!("DROP TABLE IF EXISTS {tbl}")).unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {tbl} (id INT PRIMARY KEY, e ENUM({}), s SET({})) DEFAULT CHARSET=utf8mb4",
+        decl(&enum_labels),
+        decl(&set_labels)
+    ))
+    .unwrap();
+    let _guard = Table(tbl.clone());
+    let rig = Rig::mysql_cdc(&tbl);
+    rig.run_ok();
+    let mut want = Vec::new();
+    for (k, e) in enum_labels.iter().enumerate() {
+        let s = format!(
+            "{},{}",
+            set_labels[k],
+            set_labels[(k + 1) % set_labels.len()]
+        );
+        c.exec_drop(
+            format!("INSERT INTO {tbl} VALUES (?, ?, ?)"),
+            (k as i64 + 1, *e, s.as_str()),
+        )
+        .unwrap();
+        want.push((k as i64 + 1, e.to_string(), s));
+    }
+    rig.run_ok();
+    let batch = Rig::mysql_batch(&tbl)
+        .export_named(&format!("{tbl}_batch"))
+        .source_url(MYSQL_CDC_URL);
+    batch.run_ok();
+
+    let read = |dir: &std::path::Path| {
+        let mut rows = std::collections::BTreeMap::new();
+        for b in read_all_parts(dir) {
+            let id = arrow::compute::cast(
+                b.column(b.schema().index_of("id").unwrap()),
+                &arrow::datatypes::DataType::Int64,
+            )
+            .unwrap();
+            let id = id.as_any().downcast_ref::<Int64Array>().unwrap().clone();
+            let text = |n: &str| {
+                b.column(b.schema().index_of(n).unwrap())
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .clone()
+            };
+            let (e, s) = (text("e"), text("s"));
+            for r in 0..b.num_rows() {
+                rows.insert(
+                    id.value(r),
+                    (e.value(r).to_string(), s.value(r).to_string()),
+                );
+            }
+        }
+        rows
+    };
+    let legs = [
+        ("snapshot", read(&batch.out_dir())),
+        ("stream", read(&rig.out_dir())),
+    ];
+    let mut bad = Vec::new();
+    for (id, e, s) in &want {
+        for (leg, rows) in &legs {
+            let got = rows.get(id);
+            if got != Some(&(e.clone(), s.clone())) {
+                bad.push(format!("{leg} id {id}: want {:?}, got {got:?}", (e, s)));
+            }
+        }
+    }
+    assert_eq!(
+        bad,
+        Vec::<String>::new(),
+        "stream labels differ from the stored labels: {} of {} legs",
+        bad.len(),
+        2 * want.len()
+    );
+}
+
 // Negative family #4 — the environment revokes rights mid-life: a DBA drops
 // the REPLICATION grants between scheduler cycles. The next run must fail
 // LOUDLY with the grants hint (never a 0-row success), the checkpoint must

@@ -135,6 +135,14 @@ scenarios:
     mongo:    { na: "no SET type" }
     oracle:   { na: "Oracle has no SET type" }
 
+  - id: type_enum_set_label_text
+    what: "ENUM and SET labels holding a backslash, LF, CR, NUL, a quote and non-ASCII text are the stored labels on the stream leg as on the snapshot leg"
+    postgres: { na: "PostgreSQL sends an enum value as its label text; no label is parsed from a catalog rendering" }
+    mysql:    { test: open_defect_mysql_cdc_enum_set_labels_match_the_snapshot, oracle: independent }
+    mssql:    { na: "SQL Server has no ENUM or SET type" }
+    mongo:    { na: "no enum or SET type; a string rides the document blob" }
+    oracle:   { na: "Oracle has no ENUM or SET type" }
+
   - id: type_bit
     what: "BIT(n) through CDC — BIT(1) boolean, BIT(n>1) integer; a BIT(64) with bit 63 set fails loud, never a silent NULL (finding #4)"
     postgres: { na: "PG bit/varbit is not in the CDC type fixture; covered as a follow-up" }

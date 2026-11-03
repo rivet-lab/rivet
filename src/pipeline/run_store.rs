@@ -212,6 +212,7 @@ mod tests {
             checkpoint: true,
             incremental: false,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         let key = plan.progress_key();
         assert_eq!(key.column.as_deref(), Some("id"));

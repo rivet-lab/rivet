@@ -86,7 +86,7 @@ pub(crate) fn splittable_key(export: &ExportConfig) -> Option<String> {
         return None;
     }
     if let Some(key) = &export.chunk_by_key {
-        return Some(key.clone()); // keyset (non-incremental) — resumable in any mode
+        return (!key.is_composite()).then(|| key.lead().to_string());
     }
     if export.mode == ExportMode::Chunked
         && let Some(col) = &export.chunk_column

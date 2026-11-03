@@ -60,6 +60,7 @@ fn read(source: &mut dyn Source, query: &str, relation: Option<&str>) -> Collect
         page_limit: None,
         base_relation: relation,
         upper_bound: None,
+        key_rest: &[],
     };
     source.export(&request, &mut sink).expect("export");
     sink

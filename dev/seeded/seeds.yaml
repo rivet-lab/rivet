@@ -4630,3 +4630,20 @@ seeds:
         cells: [cdc_rollover_zero_is_refused_on_the_flag_oracle]
       mongo:
         cells: [cdc_rollover_zero_is_refused_on_the_flag_mongo]
+
+  - name: check-override-wire-not-refused
+    class: "rivet check reads a columns: override through the run's converter but drops the wire-mismatch refusal, so check exits 0 on a config the run refuses with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"
+    history: "audit defect 11, 2026-11-03: check and check --type-report accepted an int4 column declared string on PostgreSQL while run refused it, on all four SQL engines"
+    scope: source
+    patch: check-override-wire-not-refused/shared.patch
+    engines:
+      postgres:
+        cells: [check_refuses_an_int4_column_declared_string_postgres]
+      mysql:
+        cells: [check_refuses_a_text_value_declared_uuid_mysql]
+      mssql:
+        cells: [check_refuses_an_int_column_declared_string_mssql]
+      oracle:
+        cells: [check_refuses_a_timestamp_with_a_time_declared_date_oracle]
+      mongo:
+        na: "a document source has no declared column wire type: the probe returns before it reads a row (source_type == Mongo)"

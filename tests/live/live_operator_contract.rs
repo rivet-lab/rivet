@@ -275,6 +275,56 @@ fn read_only_state_on(mut rig: Rig) {
     }
 }
 
+/// HDW-1: a CDC run whose ledger row cannot be written is refused by code before it reads its stream, and the run that follows the remedy delivers every change.
+fn cdc_run_over_a_state_that_refuses_its_ledger_row(mut s: CdcScenario) {
+    s.rig.run_ok();
+    for id in 1..=3 {
+        s.insert(id);
+    }
+    s.settle();
+    let state = rusqlite::Connection::open(s.rig.config_path().with_file_name(".rivet_state.db"))
+        .expect("the SQLite state beside the config");
+    state
+        .execute_batch(
+            "CREATE TRIGGER oc_no_run_status BEFORE INSERT ON run_status \
+             BEGIN SELECT RAISE(ABORT, 'run_status is frozen'); END;",
+        )
+        .expect("freeze run_status");
+    let before = files_under(&s.rig.out_dir());
+    let out = s.rig.run_with_envs(SQLITE_STATE);
+    assert_refused(&out, Refused::by_code("RIVET_STATE_NOT_WRITABLE", 1));
+    assert!(
+        text(&out).contains("run_status is frozen"),
+        "the refusal names its cause\n{}",
+        text(&out)
+    );
+    assert_eq!(
+        files_under(&s.rig.out_dir()),
+        before,
+        "a refused run writes nothing"
+    );
+    state
+        .execute_batch("DROP TRIGGER oc_no_run_status")
+        .expect("unfreeze run_status");
+    s.rig.run_ok();
+    assert!(
+        files_under(&s.rig.out_dir()).len() > before.len(),
+        "the run after the remedy delivers the changes the refused run left in the stream"
+    );
+}
+
+/// Sorted names of every file under `dir`.
+fn files_under(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 /// Sorted `id` values of every part under `out`, whatever the column's integer width (Oracle delivers NUMBER(19) as a decimal).
 fn delivered_ids(out: &std::path::Path) -> Vec<i64> {
     use arrow::array::{Array, Int64Array};
@@ -1433,7 +1483,9 @@ fn doctor_agrees_on_a_server_without_logical_wal() {
     let slot = unique_name("oc_nowal_slot");
     let _slot = Slot::new(slot.clone());
     let rig = Rig::pg_cdc(&table, &slot).source_url(POSTGRES_URL);
-    let (_, run) = rig.run_after_doctor();
+    let run = rig
+        .run_after(&["doctor", "--json"], &[], Pairing::GreenOnly)
+        .run;
     assert!(
         !run.status.success(),
         "fixture: the batch stand runs wal_level=replica, which CDC refuses"
@@ -1843,7 +1895,9 @@ fn mysql_binlogs_purged_past_the_checkpoint(after_a_changes_run: bool) {
 
 /// Both reports, E/I: `doctor` is not green for a CDC export whose prerequisite the run then refuses.
 fn doctor_agrees_where_the_stream_is_refused(rig: Rig) {
-    let (_, run) = rig.run_after_doctor();
+    let run = rig
+        .run_after(&["doctor", "--json"], &[], Pairing::GreenOnly)
+        .run;
     assert!(
         !run.status.success(),
         "fixture: the stream lacks its prerequisite, so the run refuses"
@@ -1887,9 +1941,9 @@ fn init_config(url: &str, table: &str, mode: &str) -> InitConfig {
     cfg
 }
 
-/// The generated config runs as written; the default oracle grades what it delivered.
+/// The generated config runs as written, and `check` over it agrees with that run; the default oracle grades what it delivered.
 fn generated_config_runs(cfg: &InitConfig) {
-    let out = cfg.cli(&["run"]);
+    let out = cfg.run_after(&["check"], &[], Pairing::SameRefusal).run;
     assert!(
         out.status.success(),
         "the config `rivet init` wrote does not run (exit {:?})\n{}\n--- config ---\n{}",
@@ -1948,8 +2002,13 @@ fn check_names_the_strategy_run_uses(engine: SqlEngine) {
 
 /// What `check` printed for `rig`, then how many range-chunk parts its `run` wrote (0 for one unchunked pass).
 fn check_then_run(rig: Rig) -> (String, usize) {
-    let check = text(&rig.cli(&["check"]));
-    rig.run_ok();
+    let c = rig.run_after(&["check"], &[], Pairing::SameRefusal);
+    let check = text(&c.preflight);
+    assert!(
+        c.run.status.success(),
+        "`run` after a green `check` failed:\n{}",
+        text(&c.run)
+    );
     let parts: Vec<String> = files_below(&rig.out_dir())
         .iter()
         .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
@@ -3874,4 +3933,44 @@ fn an_oplog_rolled_past_the_checkpoint_before_the_first_changes_run_is_refused_b
 #[ignore = "live+gate-only: docker (a throwaway mongo replica set, `mongosh` in the image)"]
 fn an_oplog_rolled_past_the_checkpoint_after_a_changes_run_is_refused_by_code_mongo() {
     mongo_oplog_rolled_past_the_checkpoint(true);
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mysql(
+        "oc_hdw1",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+    ));
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::pg(
+        "oc_hdw1",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+    ));
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mssql(
+        "oc_hdw1",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+    ));
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::oracle_with("oc_hdw1", |r, _| r));
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mongo_with("oc_hdw1", |r, _| r));
 }

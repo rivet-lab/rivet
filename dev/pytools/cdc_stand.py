@@ -147,7 +147,7 @@ def psql_argv(query: str, *, db: str | None = "rivet") -> list[str]:
 def mysql_argv(query: str, *, db: str | None = "rivet") -> list[str]:
     """`-N` drops the column headers; the db is positional and ABSENT in the
     readiness probe (`SELECT @@binlog_format` needs no database). utf8mb4 so a non-ASCII name lists and drops as itself."""
-    argv = ["mysql", "-urivet", "-privet", "--default-character-set=utf8mb4"]
+    argv = shell.mysql_client()
     if db:
         argv.append(db)
     return [*argv, "-N", "-e", query]

@@ -1602,6 +1602,7 @@ mod tests {
             checkpoint: true,
             incremental: false,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         let s = RunSummary::new(&plan);
         let snap = s.journal.plan_snapshot().expect("PlanResolved recorded");
