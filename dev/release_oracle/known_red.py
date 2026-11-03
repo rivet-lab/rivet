@@ -40,6 +40,13 @@ def _open(cell: str, symptom: str, reason: str) -> KnownRed:
     """The entry of one `open_defect_*` live cell: its test path and the first line of its panic."""
     return KnownRed(f"{cell} — {symptom}", reason, _EXPIRES)
 
+_HDW1_CONTRACT = (
+    "HDW-1 (seam run-closing, 2026-11-03): a CDC run begins its run-status row warn-only, so over a state that refuses the row it reads its stream and writes anyway; closes with fix/run-closing-cdc-begin, which opens the row through ledger_begin_run and refuses by code"
+)
+_HDW1_LOAD = (
+    "HDW-1 (seam run-still-writing, 2026-11-03): a load from a state that holds no ledger row for a CDC run in flight counts the run finished, loads the parts of one roll and records the run consumed, so the rolls that follow are never loaded; closes with fix/run-closing-cdc-begin, where still_writing owns the CDC no-row rule"
+)
+
 
 KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("upgrade[oracle/cdc-load]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
@@ -54,6 +61,24 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("sentinels[rivet_sent_ts9/keyset]: SUCCEEDED WITH A CHANGED VALUE: `V` differs at ID=('num', '1'): source ' 2024-01-01 00:00:00.000000001' vs warehouse datetime.datetime(2024, 1, 1, 0, 0)",
              _TS9,
              _EXPIRES),
+    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres",
+          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
+          _HDW1_CONTRACT),
+    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql",
+          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
+          _HDW1_CONTRACT),
+    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql",
+          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
+          _HDW1_CONTRACT),
+    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo",
+          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
+          _HDW1_CONTRACT),
+    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle",
+          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
+          _HDW1_CONTRACT),
+    _open("live_clickhouse_load::open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql",
+          "assertion `left == right` failed: the view's live rows must equal the source",
+          _HDW1_LOAD),
 )
 
 
