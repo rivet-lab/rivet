@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .core import Ledger, Proc, checked_exports, isolate_state_db, rivet_bin, run, run_lanes, server_of, strategy_lines
+from .core import Ledger, SkipCause, Proc, checked_exports, isolate_state_db, rivet_bin, run, run_lanes, server_of, strategy_lines
 
 __all__ = ["verify_upgrade_from_field_state", "COMPATIBILITY_FLOOR", "ACCEPTED_DIFFERENCES"]
 
@@ -222,7 +222,7 @@ def lacks(led: Ledger, row: tuple, name: str, ver: str, key: tuple[str, str], p:
     if a is None or _key(ver) >= _key(a.since):
         return False
     if not p.ok and re.search(a.says, p.out):
-        led.skipped(*row, f"{name}: v{ver} has no {a.what} (it arrives in v{a.since}): {p.why}", f"absent {key[1]}")
+        led.skipped(*row, f"{name}: v{ver} has no {a.what} (it arrives in v{a.since}): {p.why}", f"absent {key[1]}", cause=SkipCause.DESIGN)
     else:
         led.failed(*row, f"{name}: stale exclusion — ABSENT says v{ver} has no {a.what}, and its own answer is not /{a.says}/: "
                          f"{p.why if not p.ok else 'the step succeeded'}", "stale exclusion")
@@ -254,7 +254,7 @@ def old_releases(led: Ledger) -> list[tuple[str, Path]]:
     for v in want:
         b, note = binary_in(field_cache(prev), v), absent_note(field_cache(prev), v)
         if note.is_file():
-            led.skipped("all", "-", SCEN, "-", f"{what}: v{v} is not upgraded from on {triple()}: {note.read_text().strip()}", "no asset")
+            led.skipped("all", "-", SCEN, "-", f"{what}: v{v} is not upgraded from on {triple()}: {note.read_text().strip()}", "no asset", cause=SkipCause.DESIGN)
         elif not (b.is_file() and os.access(b, os.X_OK)):
             absent_release_binary(led, "all", "-", SCEN, "-", what, f"the v{v} release binary is not at {b}")
         elif prev_tag(b) != f"v{v}":
@@ -564,7 +564,7 @@ def way_back(led: Ledger, row: tuple, name: str, e, prev: Path, before: int, aft
 
     gap = f"{name} way back"
     if before == after:
-        return led.skipped(*row, f"{gap}: this build left the state at schema v{after}, the previous release's own", "same schema")
+        return led.skipped(*row, f"{gap}: this build left the state at schema v{after}, the previous release's own", "same schema", cause=SkipCause.DESIGN)
     held = _part_stats(out)
     p = e.rivet(prev, "run", "-c", "c.yaml")
     if p.returncode == 5 and "[RIVET_STATE_SCHEMA_NEWER]" in p.stderr and _part_stats(out) == held:
@@ -705,7 +705,7 @@ def stream_cell(led: Ledger, olds: list[tuple[str, Path]], root: Path, engine: s
     variant, kill = f"stream-{baseline}{'/' + how if how else ''}", "baseline" if how == "killed-baseline" else "change"
     row, name = (engine, "-", SCEN, store), f"field[{_who(olds)}][{engine}/{variant}/{store}]"
     if not store_up("gcs") or not _bucket():
-        return led.skipped(*row, f"{name}: the GCS emulator on :4443 is down", "no fake-gcs")
+        return led.skipped(*row, f"{name}: the GCS emulator on :4443 is down", "no fake-gcs", cause=SkipCause.ENV)
     tag = f"{engine[:2]}{_tag(olds)}{baseline[0]}{(how or 'as-run')[0]}{store[:2]}{os.getpid()}"
     if state_url:
         state_url = isolate_state_db(state_url, tag) or ""
@@ -989,7 +989,7 @@ def contract_cell(led: Ledger, releases: list[tuple[str, Path]], root: Path, url
     row = ("mysql", "-", SCEN, f"contract-{target}")
     down = _warehouse_down(target)
     if down:
-        return led.skipped(*row, f"field[contract/mysql/{target}]: {down}", down)
+        return led.skipped(*row, f"field[contract/mysql/{target}]: {down}", down, cause=SkipCause.ENV)
     tag = f"ct{target[:2]}{os.getpid()}"
     src = MySQL(url, None, tag)
     tables = [src.name(0), src.name(1)]
@@ -1076,7 +1076,7 @@ def empty_table_cell(led: Ledger, releases: list[tuple[str, Path]], root: Path, 
     row = ("mysql", "-", SCEN, f"empty-{target}")
     down = _warehouse_down(target)
     if down:
-        return led.skipped(*row, f"field[mysql/empty-at-baseline/{target}]: {down}", down)
+        return led.skipped(*row, f"field[mysql/empty-at-baseline/{target}]: {down}", down, cause=SkipCause.ENV)
     tag = f"em{target[:2]}{os.getpid()}"
     src = MySQL(url, None, tag)
     kept, empty = src.name(0), src.name(1)
@@ -1155,7 +1155,7 @@ def cells(releases: list[tuple[str, Path]], root: Path, states: list[str]) -> li
         if len(ladder) < 2 <= len(releases):
             n = f"field[ladder][{engine}/{kind}]"
             out.append((None, n, lambda led: led.skipped(engine, "-", SCEN, "-", f"{n}: {len(ladder)} of the {len(releases)} "
-                                                         f"releases can build it (ABSENT) — no ladder to climb", "no ladder")))
+                                                         f"releases can build it (ABSENT) — no ladder to climb", "no ladder", cause=SkipCause.DESIGN)))
         return [[r] for r in releases] + ([ladder] if len(ladder) > 1 else [])
 
     for engine in ENGINES:
@@ -1163,7 +1163,7 @@ def cells(releases: list[tuple[str, Path]], root: Path, states: list[str]) -> li
         url = os.environ.get(var, "")
         if not url:
             out.append((None, f"field[{engine}/batch]", lambda led, e=engine, v=var: led.skipped(
-                e, "-", SCEN, "-", f"field[{e}/batch]: no {v}", "no url")))
+                e, "-", SCEN, "-", f"field[{e}/batch]: no {v}", "no url", cause=SkipCause.ENV)))
             continue
         for olds in sides(engine, "batch", (engine, "source")):
             for shape in SHAPES:
@@ -1176,7 +1176,7 @@ def cells(releases: list[tuple[str, Path]], root: Path, states: list[str]) -> li
     for engine, (_, envs, _) in CDC_LOAD_ENGINES.items():
         if not all(os.environ.get(v) for v in envs):
             out.append((None, f"field[{engine}/stream]", lambda led, e=engine, envs=envs: led.skipped(
-                e, "-", SCEN, "-", f"field[{e}/stream]: no {' / '.join(envs)}", "no url")))
+                e, "-", SCEN, "-", f"field[{e}/stream]: no {' / '.join(envs)}", "no url", cause=SkipCause.ENV)))
             continue
         url = os.environ[envs[0]]
         recipes = [("recipes", "cleaned"), ("recipes", ""), ("recipes", "killed-baseline")] if engine in RECIPE_ENGINES else []
@@ -1196,7 +1196,7 @@ def cells(releases: list[tuple[str, Path]], root: Path, states: list[str]) -> li
             name = f"field[{what}/mysql/{target}]"
             if not mysql_cdc:
                 out.append((None, name, lambda led, n=name, t=target, w=what: led.skipped(
-                    "mysql", "-", SCEN, f"{w.split('-')[0]}-{t}", f"{n}: no RIVET_CDC_MYSQL_URL", "no url")))
+                    "mysql", "-", SCEN, f"{w.split('-')[0]}-{t}", f"{n}: no RIVET_CDC_MYSQL_URL", "no url", cause=SkipCause.ENV)))
                 continue
             out.append((server_of(mysql_cdc), name, lambda led, c=cell, t=target: c(led, releases, root, mysql_cdc, t)))
     for ver, old in releases[:-1]:
@@ -1305,7 +1305,7 @@ def _self_test() -> None:
         def __init__(self):
             self.got: list[tuple[str, str]] = []
 
-        def skipped(self, *a):
+        def skipped(self, *a, **_):
             self.got.append(("skip", a[4]))
 
         def failed(self, *a):

@@ -42,11 +42,11 @@ import subprocess
 from pathlib import Path
 
 try:
-    from .core import Ledger, Status, have, rivet, run
+    from .core import Ledger, SkipCause, Status, have, rivet, run
     from .scenarios import NO_TIMEOUT, _duckdb_list, _failed, _passed, _skipped, Scope, cell_export, work_dir
     from ..pytools.duckcli import ARGV as DUCKDB
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
-    from core import Ledger, Status, have, rivet, run  # type: ignore
+    from core import Ledger, SkipCause, Status, have, rivet, run  # type: ignore
     from scenarios import NO_TIMEOUT, _duckdb_list, _failed, _passed, _skipped, Scope, cell_export, work_dir  # type: ignore
     DUCKDB = [__import__("sys").executable, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "pytools" / "duckcli.py")]
 
@@ -178,6 +178,7 @@ def verify_row_hash(led: Ledger, engine: str, tag: str, url: str) -> None:
             led, engine, tag, "row_hash", "-",
             f"row_hash: no probe table for {engine} (the golden seed is SQL-engine only)",
             "no probe",
+            cause=SkipCause.DESIGN,
         )
         return
     try:
@@ -188,10 +189,11 @@ def verify_row_hash(led: Ledger, engine: str, tag: str, url: str) -> None:
             "row_hash: the independent implementation needs the `xxhash` package "
             "(pip install xxhash) — SKIP rather than compare rivet against itself",
             "no xxhash",
+            cause=SkipCause.ENV,
         )
         return
     if not have("duckdb"):
-        _skipped(led, engine, tag, "row_hash", "-", "row_hash: duckdb absent", "no duckdb")
+        _skipped(led, engine, tag, "row_hash", "-", "row_hash: duckdb absent", "no duckdb", cause=SkipCause.ENV)
         return
 
     base = Scope(engine, tag).dir("rh")
@@ -217,6 +219,7 @@ def verify_row_hash(led: Ledger, engine: str, tag: str, url: str) -> None:
             f"implements {KNOWN_RENDER!r} — re-derive it from the new spec rather than "
             f"compare different bytes",
             "render moved",
+            cause=SkipCause.ENV,
         )
         return
 

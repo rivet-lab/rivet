@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
@@ -72,6 +72,15 @@ class Status(str, Enum):
     NA = "N/A"
 
 
+class SkipCause(str, Enum):
+    """Why a cell did not run: only ENV can hide a broken stand, so only ENV is graded in a full gate."""
+
+    ENV = "ENV"
+    DESIGN = "DESIGN"
+    REDUCED = "REDUCED"
+    DOWNSTREAM = "DOWNSTREAM"
+
+
 @dataclass(frozen=True)
 class Cell:
     engine: str
@@ -80,6 +89,19 @@ class Cell:
     store: str
     status: Status
     detail: str = ""
+    cause: SkipCause | None = None
+
+    def __post_init__(self) -> None:
+        """A SKIP names its cause (coerced to the one enum), and no other status carries one."""
+        if self.cause is not None:
+            object.__setattr__(self, "cause", SkipCause(self.cause))
+        if (self.status is Status.SKIP) != (self.cause is not None):
+            raise TypeError(f"{self.scenario}: a SKIP row names its SkipCause and no other row does ({self.status}, {self.cause})")
+
+    @property
+    def skip_id(self) -> tuple[str, str, str]:
+        """The key `skip_allow` and the timings record name a skipped cell by."""
+        return (self.scenario, self.engine, self.store)
 
 
 #: Stage function name -> ledger rows it recorded this run (filled by `record_stage_runs` wrappers).
@@ -275,8 +297,9 @@ class Ledger:
         store: str,
         status: Status,
         detail: str = "",
+        cause: SkipCause | None = None,
     ) -> None:
-        self.cells.append(Cell(engine, version, scenario, store, status, detail))
+        self.cells.append(Cell(engine, version, scenario, store, status, detail, cause))
 
     def passed(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str = "") -> None:
         """Print the ✓ AND record the row — one call, so the two cannot diverge."""
@@ -355,9 +378,11 @@ class Ledger:
         self._emit(self._c("1;35", f"  ⚠ ORACLE INFRA (the cell graded nothing; re-run it) — {msg}"))
         self.add(engine, version, scenario, store, Status.INFRA, detail or msg)
 
-    def skipped(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str = "") -> None:
+    def skipped(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str = "", *,
+                cause: SkipCause) -> None:
+        """Print the ⊘ AND record a SKIP row that names why it did not run."""
         self.skip(msg)
-        self.add(engine, version, scenario, store, Status.SKIP, detail or msg)
+        self.add(engine, version, scenario, store, Status.SKIP, detail or msg, cause=cause)
 
     def not_applicable(self, engine: str, version: str, scenario: str, store: str, reason: str) -> None:
         """Record a declared N/A row with its reason; it neither passes nor fails."""
@@ -368,15 +393,37 @@ class Ledger:
     def red(self) -> bool:
         return any(c.status is Status.FAIL for c in self.cells)
 
-    @property
-    def ungraded_cells(self) -> int:
-        return sum(c.status is Status.INFRA for c in self.cells)
+    def grade(self, cell: Cell, gate: str) -> Cell:
+        """The cell as the verdict reads it: an ENV skip in the full gate is INFRA unless `skip_allow` excuses it today."""
+        if gate != FULL_GATE or cell.cause != SkipCause.ENV:
+            return cell
+        from . import skip_allow
+        if skip_allow.excused(*cell.skip_id) is not None:
+            return cell
+        return replace(cell, status=Status.INFRA, cause=None,
+                       detail=f"{cell.detail} [env skip, not excused in skip_allow.py: a full gate does not pass on a stand that was not there]")
 
-    def verdict(self) -> str:
+    def graded(self, gate: str) -> list[Cell]:
+        """Every row as the verdict reads it."""
+        return [self.grade(c, gate) for c in self.cells]
+
+    def ungraded_count(self, gate: str = REDUCED_GATE) -> int:
+        """How many rows grade nothing: the oracle's own failures and the unexcused env skips of a full gate."""
+        return sum(c.status is Status.INFRA for c in self.graded(gate))
+
+    def skip_counts(self) -> dict[str, int]:
+        """SKIP rows per cause."""
+        return {k.value: n for k in SkipCause if (n := sum(c.cause == k for c in self.cells))}
+
+    def env_skips(self) -> list[tuple[str, str, str]]:
+        """Every env-skipped cell's id, excused or not: the tag re-reads them against the ledger as it is then."""
+        return sorted({c.skip_id for c in self.cells if c.cause == SkipCause.ENV})
+
+    def verdict(self, gate: str = REDUCED_GATE) -> str:
         """The run's verdict, derived from the rows: a stand that failed mid-run outranks a product FAIL, which outranks an ungraded cell."""
         if self.stand_invalid:
             return "STAND-INVALID"
-        return "NOT RELEASABLE" if self.red else "NOT GRADED" if self.ungraded_cells else "RELEASE-READY"
+        return "NOT RELEASABLE" if self.red else "NOT GRADED" if self.ungraded_count(gate) else "RELEASE-READY"
 
     def report(self, *, full: bool = False, gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None,
                config: dict | None = None) -> int:
@@ -385,12 +432,15 @@ class Ledger:
         print()
         self.phase("Release Oracle result")
         print(f"  {'ENGINE':<10} {'VER':<6} {'SCENARIO':<16} {'STORE':<8} STATUS")
-        for c in self.cells:
+        for c in self.graded(gate):
             print(
                 f"  {c.engine:<10} {c.version:<6} {c.scenario:<16} {c.store:<8} "
                 f"{c.status.value} {c.detail}"
             )
         print()
+        if skips := self.skip_counts():
+            print("  SKIPPED " + sum_line(skips))
+            print()
         # Wall-clock breakdown — the phases that actually cost the 30–60 min,
         # slowest first. `phase("Release Oracle result")` above closed the last
         # real phase, so `_phase_times` now holds every phase but this report line.
@@ -454,19 +504,21 @@ class Ledger:
             for name, minutes in split_minutes(self._splits).items():
                 print(f"  {minutes:6.1f} min  {name}")
             print()
-        verdict = self.verdict()
+        verdict = self.verdict(gate)
+        ungraded = self.ungraded_count(gate)
         if full:
             record_timings(
                 TIMINGS_HISTORY, timed, self._spans, verdict,
                 sum(c.status is Status.PASS for c in self.cells),
                 sum(c.status is Status.FAIL for c in self.cells),
                 self._phase_load, gate=gate, tree=tree, config=config, splits=self._splits,
+                skipped=sum(self.skip_counts().values()), skipped_env=self.env_skips(),
             )
         known = [c for c in self.cells if c.status is Status.KNOWN]
         if known:
             print(self._c("1;33", f"  {len(known)} KNOWN RED cell(s), each recorded in known_red.py with a reason and an expiry."))
-        if self.ungraded_cells:
-            print(self._c("1;35", f"  {self.ungraded_cells} cell(s) NOT GRADED: the oracle's own read failed (see ⚠ above). "
+        if ungraded:
+            print(self._c("1;35", f"  {ungraded} cell(s) NOT GRADED: the oracle's own read failed (see ⚠ above). "
                                   "Not a product verdict; re-run them."))
         if self.stand_invalid:
             print(self._c("1;35", f"  STAND-INVALID — {self.stand_invalid} during the run; its reds grade the stand, "
@@ -475,15 +527,20 @@ class Ledger:
         if self.red:
             print(self._c("1;31", "  NOT RELEASABLE — one or more cells failed (see ✗ above)."))
             return 1
-        if self.ungraded_cells:
+        if ungraded:
             print(self._c("1;35", "  NOT GRADED — no cell failed, and the cells above were never graded."))
             return 1
         if not full:
             print(self._c("1;33", f"  PARTIAL RUN — the {len(self.cells)} row(s) selected carry no failure. Not a gate "
                                   "verdict, and no timings line was written."))
             return 0
-        print(self._c("1;32", "  RELEASE-READY — every non-skipped cell is green."))
+        print(self._c("1;32", "  RELEASE-READY — every non-skipped cell is green, and no skip is an env skip the gate has not excused."))
         return 0
+
+
+def sum_line(counts: dict[str, int]) -> str:
+    """`N rows (CAUSE n, ...)` for a per-cause count."""
+    return f"{sum(counts.values())} row(s): " + ", ".join(f"{k} {n}" for k, n in counts.items())
 
 
 def first_error(text: str) -> str:
@@ -527,8 +584,9 @@ def split_minutes(splits: list[tuple[str, float]]) -> dict[str, float]:
 def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tuple[str, float]],
                    verdict: str, passed: int, failed: int, loads: dict[str, tuple[float, float]] | None = None,
                    gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None, config: dict | None = None,
-                   splits: list[tuple[str, float]] | None = None) -> dict:
-    """Append this run's verdict (full commit, the graded binary's stamp, gate kind, the configuration it ran under, dirty tree), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
+                   splits: list[tuple[str, float]] | None = None, skipped: int = 0,
+                   skipped_env: list[tuple[str, str, str]] | None = None) -> dict:
+    """Append this run's verdict (full commit, the graded binary's stamp, gate kind, the configuration it ran under, dirty tree, the skip count and every env-skipped cell), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
     import datetime as _dt
     import json as _json
 
@@ -544,6 +602,8 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
         "verdict": verdict,
         "passed": passed,
         "failed": failed,
+        "skipped": skipped,
+        "skipped_env": [list(i) for i in skipped_env or []],
         "total_min": round(sum(d for _, d in phases) / 60.0, 1),
         "phases_min": {n.split(" — ")[0]: round(d / 60.0, 2) for n, d in phases},
         "phases_load1": {n.split(" — ")[0]: [round(x, 1) for x in v] for n, v in (loads or {}).items()},

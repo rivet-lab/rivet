@@ -41,11 +41,11 @@ from pathlib import Path
 
 try:
     from . import state_parity_duckdb
-    from .core import Ledger, rivet, run, state_db_name
+    from .core import Ledger, SkipCause, rivet, run, state_db_name
     from .scenarios import NO_TIMEOUT, _failed, _passed, _skipped, work_dir
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
     import state_parity_duckdb  # type: ignore
-    from core import Ledger, rivet, run, state_db_name  # type: ignore
+    from core import Ledger, SkipCause, rivet, run, state_db_name  # type: ignore
     from scenarios import NO_TIMEOUT, _failed, _passed, _skipped, work_dir  # type: ignore
 
 __all__ = ["verify_state_backend_parity"]
@@ -190,11 +190,12 @@ def verify_state_backend_parity(
             "state-parity: no Postgres state URL — there is only one backend to compare, so the "
             "cell would be comparing SQLite to itself",
             "no state url",
+            cause=SkipCause.ENV,
         )
         return
     if not _seed(src_container):
         _skipped(led, "-", "-", "state_backend_parity", "-",
-                 "state-parity: could not seed the probe table", "no seed")
+                 "state-parity: could not seed the probe table", "no seed", cause=SkipCause.ENV)
         return
 
     work = work_dir() / "state_parity"

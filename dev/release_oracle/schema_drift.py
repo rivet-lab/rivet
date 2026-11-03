@@ -28,10 +28,10 @@ import shutil
 from pathlib import Path
 
 try:
-    from .core import Ledger, have, rivet, run
+    from .core import Ledger, SkipCause, have, rivet, run
     from .scenarios import NO_TIMEOUT, _failed, _passed, _skipped, Scope, cell_export, work_dir
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
-    from core import Ledger, have, rivet, run  # type: ignore
+    from core import Ledger, SkipCause, have, rivet, run  # type: ignore
     from scenarios import NO_TIMEOUT, _failed, _passed, _skipped, Scope, cell_export, work_dir  # type: ignore
 
 __all__ = ["verify_schema_fingerprint_moves_with_the_schema"]
@@ -69,6 +69,7 @@ def verify_schema_fingerprint_moves_with_the_schema(
             "schema-fingerprint: postgres only — the property is the fingerprint's, not an "
             "engine's, and one engine's DDL exercises it",
             "one engine",
+            cause=SkipCause.DESIGN,
         )
         return
     if not have("psql"):
@@ -109,6 +110,7 @@ def verify_schema_fingerprint_moves_with_the_schema(
         _skipped(
             led, engine, tag, "schema_fingerprint_moves_with_the_schema", "-",
             "schema-fingerprint: could not seed the probe", "no seed",
+            cause=SkipCause.ENV,
         )
         return
 

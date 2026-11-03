@@ -20,7 +20,7 @@ import os
 import re
 from pathlib import Path
 
-from .core import Ledger, Proc, rivet_bin, run, run_lanes, server_of
+from .core import Ledger, SkipCause, Proc, rivet_bin, run, run_lanes, server_of
 
 SCEN = "upgrade_continuity"
 CDC_TABLES = 3
@@ -431,7 +431,7 @@ def cdc_load_leg(led: Ledger, prev: Path, root: Path, engine: str, url: str, tz:
     target, bucket = bq_target(), os.environ.get("BQ_ORACLE_BUCKET", "")
     if target is None or not bucket:
         led.skipped(engine, "-", SCEN, "cdc-load", f"{name}: no {BQ_PROJECT_ENV} / {BQ_DATASET_ENV} "
-                    "/ BQ_ORACLE_BUCKET", "no bigquery")
+                    "/ BQ_ORACLE_BUCKET", "no bigquery", cause=SkipCause.ENV)
         return
     proj = target[0]
     tag = f"{engine[:2]}{'tz' if tz else ''}{'n' if init_this else ''}{'e' if empty else ''}_{os.getpid()}"
@@ -574,7 +574,7 @@ def cdc_load_lane_cells(prev: Path, root: Path) -> list[tuple[object, object]]:
     for e, (_, envs, tz) in CDC_LOAD_ENGINES.items():
         if not all(os.environ.get(v) for v in envs):
             skips.append((None, lambda led, e=e, envs=envs: led.skipped(
-                e, "-", SCEN, "cdc-load", f"upgrade[{e}/cdc-load]: no {' / '.join(envs)}", "no url")))
+                e, "-", SCEN, "cdc-load", f"upgrade[{e}/cdc-load]: no {' / '.join(envs)}", "no url", cause=SkipCause.ENV)))
             continue
         url = os.environ[envs[0]]
         for z, init_this in ((None, False), *(((tz, False),) if tz else ()), (None, True)):

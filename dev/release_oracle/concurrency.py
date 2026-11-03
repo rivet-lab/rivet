@@ -48,11 +48,11 @@ from typing import Callable
 from pathlib import Path
 
 try:
-    from .core import Ledger, have, note_invariant_violations, rivet_bin, run, state_db_name
+    from .core import Ledger, SkipCause, have, note_invariant_violations, rivet_bin, run, state_db_name
     from .scenarios import NO_TIMEOUT, _failed, _passed, _skipped, work_dir
     from ..pytools.duckcli import ARGV as DUCKDB
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
-    from core import Ledger, have, note_invariant_violations, rivet_bin, run, state_db_name  # type: ignore
+    from core import Ledger, SkipCause, have, note_invariant_violations, rivet_bin, run, state_db_name  # type: ignore
     from scenarios import NO_TIMEOUT, _failed, _passed, _skipped, work_dir  # type: ignore
     DUCKDB = [sys.executable, str(Path(__file__).resolve().parents[1] / "pytools" / "duckcli.py")]
 
@@ -304,7 +304,7 @@ def verify_concurrent_writers_share_a_prefix(
         return
     if not _seed(src_container):
         _skipped(led, "-", "-", "concurrent_writers_share_a_prefix", "-",
-                 "concurrent-writers: could not seed the probe table", "no seed")
+                 "concurrent-writers: could not seed the probe table", "no seed", cause=SkipCause.ENV)
         return
 
     # Date + PID, not a bare %H%M%S: the export_prefix scopes the aggregates on the
@@ -345,7 +345,7 @@ def verify_concurrent_writers_share_a_prefix(
         )
     else:
         _skipped(led, "-", "-", "concurrent_writers_share_a_prefix", "sqlite-shared",
-                 "concurrent-writers[sqlite-shared]: sqlite3 CLI absent", "no sqlite3")
+                 "concurrent-writers[sqlite-shared]: sqlite3 CLI absent", "no sqlite3", cause=SkipCause.ENV)
 
     if not state_url:
         _skipped(
@@ -353,6 +353,7 @@ def verify_concurrent_writers_share_a_prefix(
             "concurrent-writers[postgres]: no shared Postgres state URL — the SQLite-shared leg "
             "ran; pass --state-url to also race the writers on one Postgres backend",
             "no state url",
+            cause=SkipCause.ENV,
         )
         return
 
@@ -389,11 +390,12 @@ def verify_concurrent_writers_share_a_prefix(
             "concurrent-writers[gcs]: no bucket — the local leg proves the naming, the cloud leg "
             "proves it over a FLAT namespace with no rename, which is where writers actually race",
             "no bucket",
+            cause=SkipCause.ENV,
         )
         return
     if not have("gsutil"):
         _skipped(led, "-", "-", "concurrent_writers_share_a_prefix", "gcs",
-                 "concurrent-writers[gcs]: gsutil absent", "no gsutil")
+                 "concurrent-writers[gcs]: gsutil absent", "no gsutil", cause=SkipCause.ENV)
         return
 
     pfx = f"conc-{stamp}"
@@ -435,7 +437,7 @@ def verify_concurrent_writers_share_a_prefix(
         _skipped(led, "-", "-", "concurrent_writers_share_a_prefix", "gcs-rows",
                  "concurrent-writers[gcs]: row count NOT verified — "
                  + ("duckdb absent or unreadable" if pulled.ok else "gsutil cp failed"),
-                 "no row oracle")
+                 "no row oracle", cause=SkipCause.ENV)
     _judge(
         led, "gcs",
         exits=exits,
