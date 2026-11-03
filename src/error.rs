@@ -1660,7 +1660,7 @@ pub mod codes {
     /// A chunked export on a table with no key the planner can range-chunk or keyset-page.
     pub const PLAN_CHUNK_KEY_UNUSABLE: Code = usage(
         "RIVET_PLAN_CHUNK_KEY_UNUSABLE",
-        "set `chunk_column:` (integer) or `chunk_by_key:` (a single-column NOT NULL unique key of a supported type), add such an index, or use `mode: full`",
+        "set `chunk_column:` (integer) or `chunk_by_key:` (a NOT NULL unique column of a supported type, or the primary key's columns in order), add such an index, or use `mode: full`",
     );
     /// The state database did not take a statement: a connection, a migration step or a claim failed.
     pub const STATE_BACKEND_FAILED: Code = environment(

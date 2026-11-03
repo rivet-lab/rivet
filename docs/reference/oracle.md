@@ -56,7 +56,7 @@ trigger that makes the session linguistic).
 | `full` | any table, view or `query:` |
 | `incremental` | cursor bound as text through the pinned masks |
 | `chunked` range | `chunk_column` must be an integer `NUMBER(p ≤ 18, 0)` |
-| `chunked` keyset (`chunk_by_key`) | single-column unique NOT NULL key: integer `NUMBER` of any precision, bare `NUMBER`, `VARCHAR2`/`CHAR`, `DATE`, `TIMESTAMP(0..6)`; also `parallel > 1` |
+| `chunked` keyset (`chunk_by_key`) | single-column unique NOT NULL key: integer `NUMBER` of any precision, bare `NUMBER`, `VARCHAR2`/`CHAR`, `DATE`, `TIMESTAMP(0..6)`; also `parallel > 1`; or the primary key's columns in order (`chunk_by_key: [a, b]`, sequential) |
 | `time_window`, `partition_by` | ANSI `TIMESTAMP '…'` / `DATE '…'` bounds |
 
 `TIMESTAMP(7..9)` is not a keyset key (rivet reads it at microseconds, so a page

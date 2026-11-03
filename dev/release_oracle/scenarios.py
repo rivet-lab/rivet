@@ -51,7 +51,7 @@ from tempfile import mkdtemp
 
 try:  # importable both as a package module and as a plain sibling file
     from .core import (GREEN_CELLS, HERE, blessing, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, SKIP_ALLOWED, self_skipped, Ledger, SkipCause, Proc, Status, container_for_port, docker, docker_exec, have,
-                       keep_failure_log, nextest_filter, nextest_outcomes, nextest_panics, nextest_passed, nextest_started, port_of, release_bin_env,
+                       keep_failure_log, mysql_client, nextest_filter, nextest_outcomes, nextest_panics, nextest_passed, nextest_started, port_of, release_bin_env,
                        rivet, rivet_bin, run, sqlcmd, test_passed)
     from ..pytools.duckcli import ARGV as DUCKDB
     from . import state_lib
@@ -72,6 +72,7 @@ except ImportError:  # pragma: no cover - depends on how the driver is invoked
         docker_exec,
         have,
         keep_failure_log,
+        mysql_client,
         nextest_filter,
         nextest_outcomes,
         nextest_panics,
@@ -658,7 +659,7 @@ def source_query(engine: str, url: str, query: str) -> str:
     if engine == "postgres":
         argv = ["psql", "-U", "rivet", "-d", "rivet", "-tA", "-c", query]
     elif engine == "mysql":
-        argv = ["mysql", "-urivet", "-privet", "rivet", "-N", "-e", query]
+        argv = mysql_client("rivet", "-N", "-e", query)
     elif engine == "mssql":
         argv = [*sqlcmd(container), "-S", "localhost", "-U", "sa",
                 "-P", "Rivet_Passw0rd!", "-d", "rivet", "-h", "-1", "-W",

@@ -47,7 +47,8 @@ from pathlib import Path
 
 from .core import GATE_FAILURES, Ledger, SkipCause, Status, binary_stamp, keep_failure_log, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
 from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
-from ..pytools.shell import find_keg_tools
+from ..pytools.shell import find_keg_tools, mysql_client
+from . import seed_charset
 from . import (
     bigquery,
     blessed_flow,
@@ -534,7 +535,7 @@ def _skip_site_guard_self_test() -> None:
 
 
 def _lanes_self_test() -> None:
-    """Lanes overlap, one lane's cells never do, rows flush in list order, a raise keeps every row; the upgrade
+    """Lanes overlap, one lane's cells never do, rows flush in list order, a raise leaves an INFRA row and the lane goes on; the upgrade
     cells sharing a source server share a lane; grading a load leaves the process environment alone."""
     import threading
 
@@ -569,7 +570,26 @@ def _lanes_self_test() -> None:
         pass
     else:
         raise AssertionError("a raising cell must reach the stage, which records it")
-    assert [c.detail for c in led.cells] == ["a1", "a2"], "rows recorded beside a raising cell were dropped"
+    assert [c.detail for c in led.cells] == ["a1", "run_lanes cell raised RuntimeError: cell blew up", "a2"], "rows recorded beside a raising cell were dropped"
+    assert led.cells[1].status is Status.INFRA and led.cells[1].scenario == "run_lanes" and led.cells[1].store == "b", led.cells[1]
+
+    def exits(sub: Ledger) -> None:
+        raise SystemExit("cell asked to stop\nsecond line")
+
+    led = Ledger(colour=False)
+    led._buf = []
+    try:
+        run_lanes(led, [("a", cell("a", 1)), ("a", exits, ("mysql", "-", "scn", "cdc")), ("a", cell("a", 2)),
+                        ("b", boom, ("oracle", "-", "scn", "batch"))])
+    except SystemExit as e:
+        assert "cell asked to stop" in str(e), "the first exception keeps its type and text"
+    else:
+        raise AssertionError("a SystemExit from a cell must reach the stage")
+    got = [(c.engine, c.scenario, c.store, c.status, c.detail) for c in led.cells]
+    assert got == [("-", "lanes", "a", Status.PASS, "a1"),
+                   ("mysql", "scn", "cdc", Status.INFRA, "scn cell raised SystemExit: cell asked to stop"),
+                   ("-", "lanes", "a", Status.PASS, "a2"),
+                   ("oracle", "scn", "batch", Status.INFRA, "scn cell raised RuntimeError: cell blew up")], got
 
     # The gate's own URLs (Makefile GATE_ENV): nine servers; Oracle's batch, resume-load and CDC cells share one.
     from . import upgrade_matrix
@@ -797,6 +817,7 @@ def _self_test() -> int:
     guarantees.self_test()
     _oracle_restart_self_test()
     cdc.self_test()
+    seed_charset.self_test()
     import contextlib
     import io
 
@@ -1742,7 +1763,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
     # the entrypoint has created `MYSQL_DATABASE`.
     probes: list[list[str]] = {
         "postgres": [["psql", "-U", "rivet", "-d", "rivet", "-tAc", "select 1"]],
-        "mysql": [["mysql", "-urivet", "-privet", "rivet", "-e", "select 1"]],
+        "mysql": [mysql_client("rivet", "-e", "select 1")],
         # tools18 is the 2022 image's path; the 2019 image ships plain
         # `mssql-tools`. A hardcoded path made the older version unrunnable and
         # the matrix recorded that as a coverage GAP — so the fix is one
@@ -1824,22 +1845,25 @@ def seed_engine(engine: str, tag: str, url: str) -> str:
 
     name = engine_container(engine, tag)
     seed = ROOT / scenarios.cfg("seed", engine)
-    body = seed.read_text() if engine != "mongo" else ""
+    body = seed.read_text(encoding="utf-8") if engine != "mongo" else ""
     if engine == "oracle":
-        # The gate's own TIMESTAMP WITH TIME ZONE fixture, in the gate's own container only.
         body += "\n" + (ROOT / "dev" / "release-oracle" / "oracle_tz_probe.sql").read_text()
+    lits = seed_charset.literals(body) if engine != "mongo" else []
+    body += seed_charset.statements(engine, lits) if lits else ""
 
     if engine == "postgres":
         p = docker_exec(name, "psql", "-U", "rivet", "-d", "rivet", "-q",
                         "-v", "ON_ERROR_STOP=1", stdin=body, timeout=900)
     elif engine == "mysql":
-        p = docker_exec(name, "mysql", "-urivet", "-privet", "rivet", stdin=body, timeout=900)
+        p = docker_exec(name, *mysql_client("rivet"), stdin=body, timeout=900)
     elif engine == "oracle":
         p = docker_exec(name, "sqlplus", "-s", "-L", "rivet/rivet@localhost/FREEPDB1",
                         stdin=body, timeout=900)
     elif engine == "mssql":
-        docker("cp", str(seed), f"{name}:/tmp/s.sql")
-        p = docker_exec(name, *sqlcmd(name), "-S", "localhost", "-U", "sa",
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "s.sql").write_text(body, encoding="utf-8")
+            docker("cp", str(Path(tmp) / "s.sql"), f"{name}:/tmp/s.sql")
+        p = docker_exec(name, *sqlcmd(name), "-S", "localhost", "-U", "sa", "-w", "2000",
                         "-P", "Rivet_Passw0rd!", "-d", "rivet", "-i", "/tmp/s.sql", timeout=900)
     else:  # mongo — from the host
         p = run(["python3", str(seed)], timeout=1800,
@@ -1847,11 +1871,8 @@ def seed_engine(engine: str, tag: str, url: str) -> str:
 
     hay = p.out.lower()
     hits = [ln for ln in p.out.splitlines() if "error" in ln.lower() or "msg " in ln.lower()][:3]
-    # The exit status is the primary signal; the grep only supplies detail. The
-    # bash decided purely on the grep, so a seed that failed silently (non-zero,
-    # no "error" in the text) read as seeded.
     if p.ok and not hits:
-        return ""
+        return seed_charset.verify(engine, lits, p.out) if lits else ""
     return "; ".join(hits) or f"exit {p.returncode}"
 
 

@@ -88,12 +88,15 @@ fn refuse_hidden_read_columns(
         ("cursor_column", &export.cursor_column),
         ("cursor_fallback_column", &export.cursor_fallback_column),
         ("chunk_column", &export.chunk_column),
-        ("chunk_by_key", &export.chunk_by_key),
         ("time_column", &export.time_column),
         ("partition_by", &export.partition_by),
     ];
+    let key = export.chunk_by_key.iter().flat_map(|k| k.columns());
+    let named = named
+        .into_iter()
+        .filter_map(|(setting, column)| column.as_deref().map(|c| (setting, c)))
+        .chain(key.map(|c| ("chunk_by_key", c.as_str())));
     for (setting, column) in named {
-        let Some(column) = column else { continue };
         if !readable.iter().any(|c| c.eq_ignore_ascii_case(column)) {
             crate::rivet_bail!(
                 crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
@@ -383,7 +386,8 @@ pub(crate) fn export_as_planned(
         }
         ExtractionStrategy::Keyset(keyset) => {
             planned.chunk_column = None;
-            planned.chunk_by_key = Some(keyset.key_column.clone());
+            planned.chunk_by_key =
+                crate::config::ChunkKey::new(keyset.columns().map(str::to_string).collect());
             planned.chunk_size = keyset.chunk_size;
         }
         ExtractionStrategy::Snapshot => {
@@ -418,8 +422,7 @@ pub(crate) fn continued_key<'a>(config: &'a Config, export: &'a ExportConfig) ->
 /// The key a `keyset_incremental` export continues past: the config-free half of [`continued_key`].
 fn keyset_continued_key(export: &ExportConfig) -> Option<&str> {
     export
-        .chunk_by_key
-        .as_deref()
+        .chunk_key_lead()
         .filter(|_| export.keyset_incremental)
 }
 
@@ -441,6 +444,7 @@ fn full_strategy(config: &Config, export: &ExportConfig) -> ExtractionStrategy {
             incremental: continued_key(config, export).is_some(),
             // `parallel: N` fans N `_id`-range workers (Mongo reader only).
             parallel: export.parallel,
+            key_rest: Vec::new(),
         });
     }
     // #dogfood LOW: `parallel: N` fans out ONLY the Mongo `_id`-range reader, which
@@ -525,6 +529,28 @@ pub(crate) fn chunked_without_table_error(export: &ExportConfig) -> Option<Strin
     ))
 }
 
+/// The chunk planner's catalog probe, plus the primary key and column types a composite `chunk_by_key` is checked against.
+fn introspect_table(
+    src: &mut dyn crate::source::Source,
+    tbl: &str,
+    export: &ExportConfig,
+) -> Result<crate::source::TableIntrospection> {
+    let mut introspection = src.introspect_for_chunking(tbl)?;
+    if export
+        .chunk_by_key
+        .as_ref()
+        .is_some_and(crate::config::ChunkKey::is_composite)
+    {
+        let base = export
+            .table_select
+            .clone()
+            .unwrap_or_else(|| format!("SELECT * FROM {tbl}"));
+        let overrides = parse_column_overrides(&export.columns, &export.name)?;
+        introspection.read_composite_key(src, tbl, &base, &overrides)?;
+    }
+    Ok(introspection)
+}
+
 fn resolve_chunked_strategy(
     probe: Option<&mut dyn crate::source::Source>,
     config: &Config,
@@ -553,11 +579,20 @@ fn resolve_chunked_strategy(
     // Keyset (OPT-4) is its own shape — incompatible with the range /
     // date / count knobs. Validated up front so the conflict is reported
     // regardless of which downstream path runs.
-    if export.chunk_by_key.is_some() {
+    if let Some(key) = &export.chunk_by_key {
+        let composite = key.is_composite();
         for (conflict, name) in [
             (export.chunk_column.is_some(), "chunk_column"),
             (export.chunk_by_days.is_some(), "chunk_by_days"),
             (export.chunk_count.is_some(), "chunk_count"),
+            (
+                composite && export.parallel > 1,
+                "parallel > 1 on a composite key",
+            ),
+            (
+                composite && export.keyset_incremental,
+                "keyset_incremental on a composite key",
+            ),
         ] {
             if conflict {
                 crate::rivet_bail!(
@@ -639,14 +674,14 @@ fn resolve_chunked_strategy(
         )
     })?;
     let introspection_result = match probe {
-        Some(src) => src.introspect_for_chunking(tbl),
+        Some(src) => introspect_table(src, tbl, export),
         None => crate::source::connect(
             config.source.source_type,
             &url,
             config.source.tls.as_ref(),
             config.source.mongo.as_ref(),
         )
-        .and_then(|mut src| src.introspect_for_chunking(tbl)),
+        .and_then(|mut src| introspect_table(src.as_mut(), tbl, export)),
     };
     let introspection = match introspection_result {
         Ok(i) => i,
@@ -963,8 +998,24 @@ fn chunked_strategy_from_introspection(
     // (2) Explicit keyset key (OPT-4): page by a single index-backed unique key.
     // Validate it is a usable keyset key (single-column, NOT NULL, UNIQUE/PK);
     // refuse otherwise rather than emit a full-scan + filesort `ORDER BY` query.
-    if let Some(key) = export.chunk_by_key.as_deref() {
-        if !introspection.is_usable_keyset_key(key) {
+    if let Some(chunk_key) = export.chunk_by_key.as_ref() {
+        let key = chunk_key.lead();
+        if chunk_key.is_composite() {
+            if !introspection.is_usable_composite_key(chunk_key.columns()) {
+                crate::rivet_bail!(
+                    crate::error::codes::PLAN_CHUNK_KEY_UNUSABLE,
+                    "export '{}': chunk_by_key {} is not a usable composite keyset key on {} — a \
+                     list must be the table's PRIMARY KEY columns in key order (the primary key is \
+                     [{}]), each of an integer / string / date / timestamp without time zone / uuid \
+                     type. Name the primary key's columns in order, key on a single unique column, \
+                     or use `mode: full`.",
+                    export.name,
+                    chunk_key,
+                    tbl,
+                    introspection.primary_key.join(", ")
+                );
+            }
+        } else if !introspection.is_usable_keyset_key(key) {
             crate::rivet_bail!(
                 crate::error::codes::PLAN_CHUNK_KEY_UNUSABLE,
                 "export '{}': chunk_by_key '{}' is not a usable keyset key on {} — it must be a \
@@ -984,10 +1035,12 @@ fn chunked_strategy_from_introspection(
         log::info!(
             "export '{}': keyset (seek) pagination on '{}' (chunk_size={})",
             export.name,
-            key,
+            chunk_key,
             chunk_size
         );
-        refuse_mysql_uuid_keyset_key(source_type, export, key)?;
+        for column in chunk_key.columns() {
+            refuse_mysql_uuid_keyset_key(source_type, export, column)?;
+        }
         let (checkpoint, incremental) = keyset_recovery(export);
         return Ok((
             ExtractionStrategy::Keyset(KeysetPlan {
@@ -1000,6 +1053,7 @@ fn chunked_strategy_from_introspection(
                 // seeks each disjoint `(lo, hi]` range concurrently; recovery flags come
                 // from `keyset_recovery`, the same as sequential.
                 parallel: export.parallel,
+                key_rest: chunk_key.rest().to_vec(),
             }),
             None,
         ));
@@ -1073,6 +1127,7 @@ fn chunked_strategy_from_introspection(
                     checkpoint,
                     incremental,
                     parallel: export.parallel,
+                    key_rest: Vec::new(),
                 }),
                 None,
             ));
@@ -2151,6 +2206,7 @@ mod tests {
             row_estimate,
             avg_row_bytes,
             int_columns: int_columns.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 
@@ -2232,6 +2288,104 @@ mod tests {
             resolve(SourceType::Postgres, &e, &i).expect_err("PG must not auto-keyset (ADR-0020)");
         assert!(err.to_string().contains("no safe shape"));
         crate::error::assert_coded(&err, "RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1);
+    }
+
+    /// A composite chunk_by_key keysets only on the primary key in order, each column of a tuple-cursor type.
+    #[test]
+    fn a_composite_chunk_by_key_keysets_only_on_the_primary_key_in_order() {
+        use crate::config::{ChunkKey, SourceType};
+        let key = |cols: &[&str]| ChunkKey::new(cols.iter().map(|c| c.to_string()).collect());
+        let table = |pk: &[&str], readable: &[&str]| crate::source::TableIntrospection {
+            row_estimate: 1_000_000,
+            avg_row_bytes: Some(100),
+            primary_key: pk.iter().map(|c| c.to_string()).collect(),
+            tuple_cursor_columns: readable.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut e = chunked_export();
+        e.chunk_column = None;
+        e.chunk_by_key = key(&["id", "kind"]);
+        let usable = table(&["id", "kind"], &["id", "kind"]);
+        match chunked_strategy_from_introspection(SourceType::Postgres, &e, "public.t", 3, &usable)
+            .unwrap()
+            .0
+        {
+            ExtractionStrategy::Keyset(k) => {
+                assert_eq!(k.key_column, "id");
+                assert_eq!(k.key_rest, vec!["kind".to_string()]);
+                assert_eq!(k.cursor_identity(), "tuple(id,kind)");
+            }
+            other => panic!("composite primary key must keyset, got {other:?}"),
+        }
+        for (cols, i) in [
+            (&["kind", "id"][..], table(&["id", "kind"], &["id", "kind"])),
+            (
+                &["id", "kind"][..],
+                table(&["id", "kind", "n"], &["id", "kind", "n"]),
+            ),
+            (&["id", "kind"][..], table(&[], &["id", "kind"])),
+            (&["id", "kind"][..], table(&["id", "kind"], &["id"])),
+        ] {
+            e.chunk_by_key = key(cols);
+            let err =
+                chunked_strategy_from_introspection(SourceType::Postgres, &e, "public.t", 3, &i)
+                    .expect_err("a composite key that is not the readable primary key must refuse");
+            assert!(err.to_string().contains("composite keyset key"), "{err}");
+            crate::error::assert_coded(&err, "RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1);
+        }
+    }
+
+    /// A composite chunk_by_key refuses parallel workers and keyset_incremental before any probe.
+    #[test]
+    fn a_composite_chunk_by_key_refuses_parallel_and_keyset_incremental() {
+        for (parallel, incremental) in [(4, false), (1, true)] {
+            let mut export = minimal_export();
+            export.mode = ExportMode::Chunked;
+            export.chunk_by_key = crate::config::ChunkKey::new(vec!["id".into(), "kind".into()]);
+            export.parallel = parallel;
+            export.keyset_incremental = incremental;
+            let err = build_plan(
+                &minimal_config(),
+                &export,
+                Path::new("."),
+                false,
+                false,
+                false,
+                None,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("mutually exclusive"), "{err:#}");
+            crate::error::assert_coded(&err, "RIVET_CONFIG_VALUE_OUT_OF_RANGE", 1);
+        }
+        for (key, parallel, incremental) in [
+            (vec!["id".to_string(), "kind".to_string()], 1, false),
+            (vec!["id".to_string()], 4, false),
+            (vec!["id".to_string()], 1, true),
+        ] {
+            let mut export = minimal_export();
+            export.mode = ExportMode::Chunked;
+            export.chunk_by_key = crate::config::ChunkKey::new(key);
+            export.parallel = parallel;
+            export.keyset_incremental = incremental;
+            let refused = build_plan(
+                &minimal_config(),
+                &export,
+                Path::new("."),
+                false,
+                false,
+                false,
+                None,
+            )
+            .err()
+            .map(|e| format!("{e:#}"));
+            assert!(
+                !refused
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("on a composite key"),
+                "{refused:?}"
+            );
+        }
     }
 
     #[test]
@@ -2673,9 +2827,10 @@ mod tests {
             checkpoint: false,
             incremental: false,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         let planned = export_as_planned(&ranged, &keyset);
-        assert_eq!(planned.chunk_by_key.as_deref(), Some("ref"));
+        assert_eq!(planned.chunk_key_lead(), Some("ref"));
         assert_eq!(planned.chunk_column, None);
         assert_eq!(planned.chunk_size, 700);
 
