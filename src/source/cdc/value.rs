@@ -833,7 +833,7 @@ fn parse_enum_labels(native: &str) -> Labels {
         return Ok(Vec::new());
     };
     let end = native.rfind(')').unwrap_or(native.len());
-    let Some(inner) = native.get(start + 1..end.max(start + 1)) else {
+    let Some(inner) = native.get(start..end) else {
         return Ok(Vec::new());
     };
     let mut labels = Vec::new();
@@ -942,10 +942,9 @@ impl MysqlCellFix {
             }
             (MysqlCellFix::SetLabels(labels), V::Bytes(b)) if b.len() <= 8 => {
                 // Little-endian storage: byte 0 carries members 1..=8.
-                let mask = b
-                    .iter()
-                    .enumerate()
-                    .fold(0u64, |acc, (i, x)| acc | ((*x as u64) << (8 * i)));
+                let mut word = [0u8; 8];
+                word.iter_mut().zip(b).for_each(|(d, s)| *d = *s);
+                let mask = u64::from_le_bytes(word);
                 set_labels(readable(labels)?, mask)
             }
             (MysqlCellFix::SetLabels(labels), V::Int(i)) => {
@@ -1207,11 +1206,31 @@ mod tests {
     }
 
     #[test]
+    fn a_set_of_more_than_eight_members_reads_its_second_byte() {
+        let native = "set('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10')";
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+        match fix.apply(&RivetValue::Bytes(vec![0x01, 0x02])).unwrap() {
+            RivetValue::Bytes(b) => assert_eq!(String::from_utf8(b).unwrap(), "m1,m10"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn a_hex_label_is_its_text_and_one_that_is_not_utf8_is_refused() {
         assert_eq!(enum_text("enum(x'c3a9','a')", 1).unwrap(), "\u{e9}");
         assert_eq!(enum_text("enum(x'c3a9','a')", 2).unwrap(), "a");
         let err = enum_text("enum(x'e9','a')", 1).unwrap_err();
         assert!(err.reason.contains("not UTF-8 text"), "{err:?}");
+        let second = enum_text("enum('a',x'e9')", 1).unwrap_err();
+        assert_eq!(
+            second.reason,
+            "cannot be read: the column declares label 2 as the hex literal x'e9', which is not UTF-8 text"
+        );
+        let raw = enum_text(r"enum(x'4\\0')", 1).unwrap_err();
+        assert_eq!(
+            raw.reason,
+            r"cannot be read: the column declares label 1 as the hex literal x'4\\0', which is not UTF-8 text"
+        );
         let msg = format!(
             "{:#}",
             CellRefusal {
