@@ -551,6 +551,57 @@ pub fn connect(
     })
 }
 
+/// The marker a [`FirstBatchProbe`] ends the export with once a batch has been built.
+#[derive(Debug)]
+struct ProbeDone;
+
+impl std::fmt::Display for ProbeDone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("first batch built")
+    }
+}
+
+impl std::error::Error for ProbeDone {}
+
+/// A sink that ends the export after the first converted batch.
+struct FirstBatchProbe;
+
+impl BatchSink for FirstBatchProbe {
+    fn on_schema(&mut self, _schema: SchemaRef) -> Result<()> {
+        Ok(())
+    }
+
+    fn on_batch(&mut self, _batch: &RecordBatch) -> Result<()> {
+        Err(anyhow::Error::new(ProbeDone))
+    }
+}
+
+/// Reads the first row of `base_query` through the run's own converter and returns the run's refusal for a `columns:` override it rejects.
+pub(crate) fn refuse_override_wire_mismatch(
+    src: &mut dyn Source,
+    source_type: crate::config::SourceType,
+    base_query: &str,
+    column_overrides: &ColumnOverrides,
+) -> Result<()> {
+    if column_overrides.is_empty() || source_type == crate::config::SourceType::Mongo {
+        return Ok(());
+    }
+    let probe = query::first_row_probe_sql(source_type, base_query);
+    let tuning = SourceTuning::from_config(None);
+    let request = ExportRequest::wrapped(&probe, base_query, &tuning, column_overrides);
+    let err = match src.export(&request, &mut FirstBatchProbe) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    let refused = crate::error::code_of(&err)
+        .is_some_and(|c| c.id == crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id);
+    if refused {
+        return Err(err);
+    }
+    log::debug!("override probe ended without a wire verdict: {err:#}");
+    Ok(())
+}
+
 /// Pre-allocation per-value size guard, shared by every engine's
 /// `arrow_convert`. The sink-side `check_value_ceiling`
 /// (`pipeline::sink::mod`) scans the *already-built* Arrow batch, so an

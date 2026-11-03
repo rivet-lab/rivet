@@ -395,6 +395,17 @@ fn page_limit_clause(source_type: SourceType, limit: usize) -> String {
     }
 }
 
+/// `base` limited to its first row, as a derived table every dialect accepts.
+pub(crate) fn first_row_probe_sql(source_type: SourceType, base: &str) -> String {
+    match source_type {
+        SourceType::Mssql => format!("SELECT TOP (1) * FROM ({base}) rivet_probe"),
+        other => format!(
+            "SELECT * FROM ({base}) rivet_probe {}",
+            page_limit_clause(other, 1)
+        ),
+    }
+}
+
 /// Produce the `>` right-hand side for the cursor predicate plus any bind value.
 ///
 /// * MySQL → `("?", Some(val))`: bind parameter, no escaping needed.
@@ -497,6 +508,27 @@ pub(crate) fn escape_pg_literal(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn first_row_probe_sql_limits_each_dialect_to_one_row() {
+        let q = "SELECT 1 AS a";
+        assert_eq!(
+            first_row_probe_sql(SourceType::Postgres, q),
+            "SELECT * FROM (SELECT 1 AS a) rivet_probe LIMIT 1"
+        );
+        assert_eq!(
+            first_row_probe_sql(SourceType::Mysql, q),
+            "SELECT * FROM (SELECT 1 AS a) rivet_probe LIMIT 1"
+        );
+        assert_eq!(
+            first_row_probe_sql(SourceType::Mssql, q),
+            "SELECT TOP (1) * FROM (SELECT 1 AS a) rivet_probe"
+        );
+        assert_eq!(
+            first_row_probe_sql(SourceType::Oracle, q),
+            "SELECT * FROM (SELECT 1 AS a) rivet_probe FETCH FIRST 1 ROWS ONLY"
+        );
+    }
+
     use super::*;
 
     #[test]

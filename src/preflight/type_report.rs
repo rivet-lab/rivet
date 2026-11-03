@@ -119,6 +119,31 @@ fn report_units(
     }
 }
 
+/// Refuses an export whose `columns:` overrides the run's converter refuses on the first row of a unit.
+pub(crate) fn refuse_override_wire_mismatch(
+    config: &Config,
+    export: &ExportConfig,
+    column_overrides: &ColumnOverrides,
+    config_dir: &std::path::Path,
+    params: Option<&std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    if column_overrides.is_empty() || export.mode == crate::config::ExportMode::Cdc {
+        return Ok(());
+    }
+    let url = config.source.resolve_url()?;
+    let mut src = connect_source(config, &url, config.source.tls.as_ref())?;
+    for (table, query) in report_units(export, config_dir, params)? {
+        let overrides = unit_overrides(export, table.as_deref(), column_overrides);
+        source::refuse_override_wire_mismatch(
+            src.as_mut(),
+            config.source.source_type,
+            &query,
+            &overrides,
+        )?;
+    }
+    Ok(())
+}
+
 /// The `columns:` overrides that apply to ONE resolver unit.
 ///
 /// Extracted from [`collect_reports`] so the rule is observable WITHOUT a live
