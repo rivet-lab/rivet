@@ -62,7 +62,7 @@ def _pg_sql(q):
 
 def _my_sql(q):  # root — perf_schema / data_locks need it; tools connect as rivet
     return sh(["docker", "exec", "rivet-mongo-mysql-1", "mysql", "-uroot", "-privet",
-               "rivet_bench", "-N", "-e", q], input="").stdout.strip()
+               "--default-character-set=utf8mb4", "rivet_bench", "-N", "-e", q], input="").stdout.strip()
 
 
 PG_ENGINE = {
@@ -160,7 +160,7 @@ MY_ENGINE = {
     # baseline carries the same docker overhead, so the ratio isolates the DB.
     "probe_mode": "perquery",
     "probe_cmd": ["docker", "exec", "rivet-mongo-mysql-1", "mysql", "-urivet",
-                  "-privet", "rivet_bench", "-NB", "-e",
+                  "-privet", "--default-character-set=utf8mb4", "rivet_bench", "-NB", "-e",
                   "SELECT v FROM bench_probe WHERE id={i}"],
     "container": "rivet-mongo-mysql-1",
     "url": lambda tool: "mysql://rivet:rivet@localhost:3306/rivet_bench",

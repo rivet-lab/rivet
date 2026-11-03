@@ -44,10 +44,10 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 try:
-    from ..pytools.shell import have, wait_until
+    from ..pytools.shell import have, mysql_client, wait_until
 except ImportError:  # loaded as a top-level module by rowhash.py
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pytools"))
-    from shell import have, wait_until  # type: ignore
+    from shell import have, mysql_client, wait_until  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent

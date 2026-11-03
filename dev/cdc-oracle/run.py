@@ -30,7 +30,7 @@ PG_EXEC = ["docker", "exec", os.environ.get("CDC_ORACLE_PG_CONTAINER", "rivet-po
 MYSQL_HOST_IN_NET = os.environ.get("CDC_ORACLE_MYSQL_HOST", "mysql-cdc")
 MYSQL_URL = os.environ.get("MYSQL_CDC_URL", "mysql://rivet:rivet@127.0.0.1:3307/rivet")
 MYSQL_EXEC = ["docker", "exec", os.environ.get("CDC_ORACLE_MYSQL_CONTAINER", "rivet-mysql-cdc-1"),
-              "mysql", "-uroot", "-privet", "rivet", "-N", "-e"]
+              "mysql", "-uroot", "-privet", "--default-character-set=utf8mb4", "rivet", "-N", "-e"]
 # The mysql DIFFERENTIAL runs against a FRESH, DEDICATED source by default.
 # Measured 2026-08-29 on the shared mysql-cdc (weeks of accumulated tables,
 # 8MB binlogs): Debezium's attach-to-first-row-delivered warmup ranged from
@@ -75,7 +75,7 @@ def fresh_mysql_source(net: str) -> None:
     # "Can't connect … through socket" (measured 2026-08-29). The same
     # readiness-signal-is-not-the-thing class as Debezium's attach-vs-delivery.
     probe = ["docker", "exec", MYSQL_FRESH_NAME, "mysql", "-h", "127.0.0.1",
-             "--protocol=tcp", "-uroot", "-privet", "-N", "-e"]
+             "--protocol=tcp", "-uroot", "-privet", "--default-character-set=utf8mb4", "-N", "-e"]
     for _ in range(90):
         if subprocess.run(probe + ["SELECT 1"], capture_output=True).returncode == 0:
             break
@@ -91,7 +91,7 @@ def fresh_mysql_source(net: str) -> None:
     MYSQL_HOST_IN_NET = MYSQL_FRESH_NAME
     MYSQL_URL = f"mysql://rivet:rivet@127.0.0.1:{MYSQL_FRESH_PORT}/rivet"
     MYSQL_EXEC = ["docker", "exec", MYSQL_FRESH_NAME, "mysql", "-h", "127.0.0.1",
-                  "--protocol=tcp", "-uroot", "-privet", "rivet", "-N", "-e"]
+                  "--protocol=tcp", "-uroot", "-privet", "--default-character-set=utf8mb4", "rivet", "-N", "-e"]
 
 
 MSSQL_HOST_IN_NET = os.environ.get("CDC_ORACLE_MSSQL_HOST", "mssql-cdc")
