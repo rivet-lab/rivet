@@ -519,12 +519,31 @@ fn with_null_ratio(rig: Rig, column: &str, ratio: &str) -> Rig {
         .export_line(&format!("    {column}: {ratio}"))
 }
 
-type QualitySource = (&'static str, Box<dyn Fn() -> Rig>);
+type QualitySource = (
+    &'static str,
+    Box<dyn Fn() -> Rig>,
+    Vec<Box<dyn std::any::Any>>,
+);
 
-/// Per engine: a column an export of it produces, a constructor of a batch rig over a table of rows, and the drop guards.
-fn quality_sources() -> (Vec<QualitySource>, Vec<Box<dyn std::any::Any>>) {
-    let (mut rigs, mut guards): (Vec<QualitySource>, Vec<Box<dyn std::any::Any>>) =
-        (Vec::new(), Vec::new());
+/// A column an export of the engine produces, a constructor of a batch rig over a table of rows, and the drop guards.
+fn quality_source(engine: SqlEngine) -> QualitySource {
+    let (table, guard) = keyed_table(engine, "hk_q", false);
+    insert_ids(engine, &table, &(1..=ROWS).collect::<Vec<_>>());
+    ("v", Box::new(move || engine.rig(&table)), vec![guard])
+}
+
+/// The same for a Mongo collection of rows.
+fn quality_source_mongo() -> QualitySource {
+    let (url, mongo, guard) = mongo_collection("hk_q", ROWS);
+    (
+        "_id",
+        Box::new(move || Rig::mongo_batch("t").source_url(&url)),
+        vec![Box::new(mongo), Box::new(guard)],
+    )
+}
+
+/// Every engine's quality source.
+fn quality_sources() -> Vec<QualitySource> {
     #[cfg(feature = "oracle")]
     let engines = [
         SqlEngine::Pg,
@@ -534,28 +553,17 @@ fn quality_sources() -> (Vec<QualitySource>, Vec<Box<dyn std::any::Any>>) {
     ];
     #[cfg(not(feature = "oracle"))]
     let engines = [SqlEngine::Pg, SqlEngine::Mysql, SqlEngine::Mssql];
-    for engine in engines {
-        let (table, guard) = keyed_table(engine, "hk_q", false);
-        insert_ids(engine, &table, &(1..=ROWS).collect::<Vec<_>>());
-        guards.push(guard);
-        rigs.push(("v", Box::new(move || engine.rig(&table))));
-    }
-    let (url, mongo, guard) = mongo_collection("hk_q", ROWS);
-    guards.push(Box::new(mongo));
-    guards.push(Box::new(guard));
-    rigs.push((
-        "_id",
-        Box::new(move || Rig::mongo_batch("t").source_url(&url)),
-    ));
-    (rigs, guards)
+    let mut sources: Vec<QualitySource> = engines.into_iter().map(quality_source).collect();
+    sources.push(quality_source_mongo());
+    sources
 }
 
 #[test]
 #[ignore = "live+gate-only: open defect HCF-3; closes with fix/config-knob-quantity-counts"]
 fn open_defect_null_ratio_max_outside_the_unit_interval_is_refused() {
-    let (rigs, _guards) = quality_sources();
+    let rigs = quality_sources();
     let (mut gaps, mut probes) = (Vec::new(), 0);
-    for (column, make) in &rigs {
+    for (column, make, _guards) in &rigs {
         for ratio in [".nan", ".inf", "-.inf", "5", "1.5", "-0.1"] {
             let rig = with_null_ratio(make(), column, ratio);
             for command in ["validate", "run"] {
@@ -575,24 +583,50 @@ fn open_defect_null_ratio_max_outside_the_unit_interval_is_refused() {
     );
 }
 
-#[test]
-#[ignore = "live: requires the SQL stand and mongo-rs"]
-fn null_ratio_max_inside_the_unit_interval_is_accepted() {
-    let (rigs, _guards) = quality_sources();
-    for (column, make) in &rigs {
-        for ratio in ["0", "0.5", "1"] {
-            let rig = with_null_ratio(make(), column, ratio);
-            let out = rig.run();
-            assert!(
-                out.status.success(),
-                "null_ratio_max {ratio}: {}",
-                said(&out)
-            );
-            let rows: usize = read_all_parts(&rig.out_dir())
-                .iter()
-                .map(|b| b.num_rows())
-                .sum();
-            assert_eq!(rows, ROWS as usize, "null_ratio_max {ratio}");
-        }
+fn null_ratio_max_inside_the_unit_interval_is_accepted((column, make, _guards): QualitySource) {
+    for ratio in ["0", "0.5", "1"] {
+        let rig = with_null_ratio(make(), column, ratio);
+        let out = rig.run();
+        assert!(
+            out.status.success(),
+            "null_ratio_max {ratio}: {}",
+            said(&out)
+        );
+        let rows: usize = read_all_parts(&rig.out_dir())
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, ROWS as usize, "null_ratio_max {ratio}");
     }
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn null_ratio_max_inside_the_unit_interval_is_accepted_postgres() {
+    null_ratio_max_inside_the_unit_interval_is_accepted(quality_source(SqlEngine::Pg));
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn null_ratio_max_inside_the_unit_interval_is_accepted_mysql() {
+    null_ratio_max_inside_the_unit_interval_is_accepted(quality_source(SqlEngine::Mysql));
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn null_ratio_max_inside_the_unit_interval_is_accepted_mssql() {
+    null_ratio_max_inside_the_unit_interval_is_accepted(quality_source(SqlEngine::Mssql));
+}
+
+#[test]
+#[cfg(feature = "oracle")]
+#[ignore = "live: requires docker compose oracle"]
+fn null_ratio_max_inside_the_unit_interval_is_accepted_oracle() {
+    null_ratio_max_inside_the_unit_interval_is_accepted(quality_source(SqlEngine::Oracle));
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo-rs"]
+fn null_ratio_max_inside_the_unit_interval_is_accepted_mongo() {
+    null_ratio_max_inside_the_unit_interval_is_accepted(quality_source_mongo());
 }

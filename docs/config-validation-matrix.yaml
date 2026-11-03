@@ -169,4 +169,4 @@ scenarios:
   - id: quality_null_ratio_outside_unit_interval
     what: "`quality.null_ratio_max` of NaN, infinity, above 1 or below 0 (HCF-3): accepted although no column can reach it. Open defect: validate and run refuse with RIVET_CONFIG_VALUE_OUT_OF_RANGE on every engine; 0, 0.5 and 1 run."
     rejected_wrong_mode: { test: open_defect_null_ratio_max_outside_the_unit_interval_is_refused }
-    valid_form_accepted: { test: null_ratio_max_inside_the_unit_interval_is_accepted }
+    valid_form_accepted: { test: null_ratio_max_inside_the_unit_interval_is_accepted_postgres }
