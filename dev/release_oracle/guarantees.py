@@ -25,12 +25,14 @@ import tempfile
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from .core import Ledger, SkipCause, rivet_bin, run
+from .core import Ledger, SkipCause, rivet_bin, run, run_lanes
 
 __all__ = ["verify_flat_rss", "verify_byte_identical_parts"]
 
 RSS_SCEN, BYTES_SCEN = "flat_rss", "byte_identical_parts"
 ENGINES = ("postgres", "mysql", "mssql", "oracle", "mongo")
+#: Engines measured side by side: one process's peak RSS does not depend on a neighbour's CPU.
+RSS_WORKERS = len(ENGINES)
 #: Table sizes: below one batch, past a keyset page, and five times that.
 SIZES = (10_000, 1_000_000, 5_000_000)
 #: Change sets (of perf.CDC_CHANGES changes each) waiting when a drain starts; both exceed the default `rollover`.
@@ -247,13 +249,16 @@ def verify_flat_rss(led: Ledger) -> None:
     """Peak RSS per engine under its ceiling and flat past the buffer: batch at three table sizes, CDC at two backlogs."""
     from .upgrade import CDC_ENGINES, CDC_URL_VARS
 
+    def timed(split: str, fn: Callable[..., None], *args: object) -> Callable[[Ledger], None]:
+        def run_cell(sub: Ledger) -> None:
+            with sub.split(split):
+                fn(sub, *args)
+        return run_cell
+
     led.phase("Flat RSS (peak resident memory per engine against its ceiling)")
-    for engine in ENGINES:
-        with led.split(f"flat rss {engine} batch"):
-            _batch_rss(led, engine)
-    for engine in CDC_ENGINES:
-        with led.split(f"flat rss {engine} cdc"):
-            _cdc_rss(led, engine, CDC_URL_VARS)
+    run_lanes(led, [*((e, timed(f"flat rss {e} batch", _batch_rss, e), (e, "-", RSS_SCEN, "batch")) for e in ENGINES),
+                    *((e, timed(f"flat rss {e} cdc", _cdc_rss, e, CDC_URL_VARS), (e, "-", RSS_SCEN, "cdc")) for e in CDC_ENGINES)],
+              workers=RSS_WORKERS)
 
 
 def _batch_rss(led: Ledger, engine: str) -> None:
@@ -500,6 +505,55 @@ def _settled_self_test() -> None:
     assert len(cdc_flaws("postgres", cdc)) == 2, "a drain that grows with its backlog, and passes the ceiling, is two findings"
 
 
+def _rss_lanes_self_test() -> None:
+    """Three fake engines through `verify_flat_rss`: the lanes record the serial run's rows and splits in its order, and cost one cell's wall."""
+    import time
+    from unittest import mock
+
+    from . import upgrade
+
+    real = run_lanes
+
+    def fake(path: str, naps: dict[str, float]) -> Callable[..., None]:
+        def measure(led: Ledger, engine: str, *rest: object) -> None:
+            time.sleep(naps[engine])
+            led.passed(engine, "-", RSS_SCEN, path, f"flat-rss[{engine}/{path}]: {engine}")
+        return measure
+
+    def stage(engines: tuple[str, ...], cdc: tuple[str, ...], naps: dict[str, float], one_lane: bool = False) -> tuple[Ledger, float]:
+        led = Ledger(colour=False)
+        led._buf = []
+
+        def one(target: Ledger, cells: list[tuple], *, workers: int | None = None) -> None:
+            real(target, [("all", *c[1:]) for c in cells], workers=workers)
+
+        with mock.patch.object(sys.modules[__name__], "ENGINES", engines), \
+                mock.patch.object(upgrade, "CDC_ENGINES", cdc), \
+                mock.patch.object(sys.modules[__name__], "_batch_rss", fake("batch", naps)), \
+                mock.patch.object(sys.modules[__name__], "_cdc_rss", fake("cdc", naps)), \
+                mock.patch.object(sys.modules[__name__], "run_lanes", one if one_lane else real):
+            t0 = time.perf_counter()
+            verify_flat_rss(led)
+            return led, time.perf_counter() - t0
+
+    engines = ("postgres", "mysql", "mssql")
+    naps = {"postgres": 0.15, "mysql": 0.05, "mssql": 0.0}
+
+    def rows(led: Ledger) -> list[tuple]:
+        return [(c.engine, c.version, c.scenario, c.store, c.status, c.detail) for c in led.cells]
+
+    def splits(led: Ledger) -> list[str]:
+        return [n for n, _ in led._splits if n.startswith("flat rss ")]
+
+    serial, _ = stage(engines, engines, naps, one_lane=True)
+    lanes, _ = stage(engines, engines, naps)
+    assert [r[0] for r in rows(serial)] == [*engines, *engines] and [r[3] for r in rows(serial)] == ["batch"] * 3 + ["cdc"] * 3, rows(serial)
+    assert rows(lanes) == rows(serial), "lanes must record the serial run's rows in the serial run's order"
+    assert splits(lanes) == splits(serial) and len(splits(lanes)) == 6, lanes._splits
+    side_by_side, wall = stage(engines, (), {e: 0.3 for e in engines})
+    assert len(side_by_side.cells) == 3 and wall < 0.6, f"three 0.3 s engines took {wall:.2f} s: they did not run side by side"
+
+
 def self_test() -> None:
     """The verdicts on hand-made inputs."""
     assert over_ceiling({"full/10000": 40 * MIB, "full/1000000": 41 * MIB}, 41) == []
@@ -526,6 +580,7 @@ def self_test() -> None:
     assert parts_differ([], []) == "no declared part (previous 0, this 0)"
     _stamped_self_test()
     _settled_self_test()
+    _rss_lanes_self_test()
     for path, per_engine in RSS_CEILING_MIB.items():
         assert all(v > 0 for v in per_engine.values()), f"a {path} ceiling of 0 fails every run"
     print("self-test ok: a peak over its ceiling, a missing measurement or growth past the buffer fails flat-rss, capped or not; "
