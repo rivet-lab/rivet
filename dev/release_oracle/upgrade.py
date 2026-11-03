@@ -72,7 +72,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from .core import (ROOT, Ledger, Proc, container_for_port, docker_exec, first_error, isolate_state_db, rivet_bin, run,
+from .core import (ROOT, Ledger, SkipCause, Proc, container_for_port, docker_exec, first_error, isolate_state_db, rivet_bin, run,
                    run_lanes, server_of, strategy_lines)
 from .engines import sql as _sql
 from .fix_cells import prev_tag
@@ -381,7 +381,7 @@ def _nothing_migrates(led: Ledger, engine: str, store: str, tag: str, prev: Path
                    "nothing migrates; pin a release from before the last migration (MIGRATION_CARRIER_TAG)", "stale carrier")
     else:
         led.skipped(engine, "-", SCEN, store, f"{tag}: the previous release and this binary both write state schema "
-                    f"v{now}: nothing migrates, so no copy is left to restore", "same schema")
+                    f"v{now}: nothing migrates, so no copy is left to restore", "same schema", cause=SkipCause.DESIGN)
     return True
 
 
@@ -633,7 +633,7 @@ def _load_leg(led: Ledger, prev: Path, root: Path, url: str) -> None:
     proj, bucket = os.environ.get("BQ_ORACLE_PROJECT", ""), os.environ.get("BQ_ORACLE_BUCKET", "")
     if not proj or not bucket:
         led.skipped("postgres", "-", SCEN, "load", "upgrade[postgres/load]: no BQ_ORACLE_PROJECT / "
-                    "BQ_ORACLE_BUCKET", "no bigquery")
+                    "BQ_ORACLE_BUCKET", "no bigquery", cause=SkipCause.ENV)
         return
     table = f"upg_load_{os.getpid()}"
     dset = bq_tmp(f"upg_{os.getpid()}")
@@ -762,7 +762,7 @@ def _continued_key_load_lane_cells(prev: Path, root: Path) -> list[tuple[object,
         why = "no BQ_ORACLE_PROJECT / BQ_ORACLE_BUCKET" if not (proj and bucket) else f"no {var}" if not url else ""
         if why:
             cells.append((None, lambda led, e=engine, why=why: led.skipped(
-                e, "-", SCEN, "resume-load", f"upgrade[{e}/resume-load]: {why}", why)))
+                e, "-", SCEN, "resume-load", f"upgrade[{e}/resume-load]: {why}", why, cause=SkipCause.ENV)))
             continue
         cells.append((server_of(url), lambda led, e=engine, u=url: _continued_key_load_leg(
             led, prev, root, e, u, proj, bucket)))
@@ -791,7 +791,7 @@ def _continued_key_load_leg(led: Ledger, prev: Path, root: Path, engine: str, ur
             try:
                 src = held.enter_context(_MongoKeys(url, name))
             except ImportError:
-                led.skipped(*row, f"{tag}: pymongo absent", "no pymongo")
+                led.skipped(*row, f"{tag}: pymongo absent", "no pymongo", cause=SkipCause.ENV)
                 return
         else:
             src = _SqlKeys(engine, url, name)
@@ -888,13 +888,13 @@ def verify_upgrade_continuity(led: Ledger) -> None:
         with led.split("upgrade postgres load"):
             _load_leg(led, prev, root, os.environ["RIVET_ORACLE_POSTGRES_URL"])
     else:
-        led.skipped("postgres", "-", SCEN, "load", "upgrade[postgres/load]: no RIVET_ORACLE_POSTGRES_URL", "no url")
+        led.skipped("postgres", "-", SCEN, "load", "upgrade[postgres/load]: no RIVET_ORACLE_POSTGRES_URL", "no url", cause=SkipCause.ENV)
     run_lanes(led, warehouse_lane_cells(prev, root))
     for engine in CDC_ENGINES:
         cvar = CDC_URL_VARS.get(engine, f"RIVET_CDC_{engine.upper()}_URL")
         curl = os.environ.get(cvar, "")
         if not curl:
-            led.skipped(engine, "-", SCEN, "local", f"upgrade[{engine}/cdc]: no {cvar}", "no url")
+            led.skipped(engine, "-", SCEN, "local", f"upgrade[{engine}/cdc]: no {cvar}", "no url", cause=SkipCause.ENV)
             continue
         with led.split(f"upgrade cdc {engine}"):
             _cdc_leg(led, prev, engine, curl)
@@ -908,7 +908,7 @@ def engine_legs(led: Ledger, prev: Path, carrier: Path | None, root: Path) -> No
         uvar = f"RIVET_ORACLE_{engine.upper()}_URL"
         url = os.environ.get(uvar, "")
         if not url:
-            led.skipped(engine, "-", SCEN, "local", f"upgrade[{engine}]: no {uvar}", "no url")
+            led.skipped(engine, "-", SCEN, "local", f"upgrade[{engine}]: no {uvar}", "no url", cause=SkipCause.ENV)
             continue
         for state_url in states:
             runs = [(leg, prev, "") for leg in (_cursor_leg, _crash_leg, _way_back_leg, _no_way_back_leg)]
@@ -944,6 +944,6 @@ if __name__ == "__main__":
             _load_leg(_led, _prev, _root, os.environ["RIVET_ORACLE_POSTGRES_URL"])
         else:
             _led.skipped("postgres", "-", SCEN, "load", "upgrade[postgres/load]: no RIVET_ORACLE_POSTGRES_URL",
-                         "no url")
+                         "no url", cause=SkipCause.ENV)
         run_lanes(_led, [*_continued_key_load_lane_cells(_prev, _root), *cdc_load_lane_cells(_prev, _root)])
     raise SystemExit(_led.report())

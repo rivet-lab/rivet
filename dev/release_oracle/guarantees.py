@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from .core import Ledger, rivet_bin, run
+from .core import Ledger, SkipCause, rivet_bin, run
 
 __all__ = ["verify_flat_rss", "verify_byte_identical_parts"]
 
@@ -260,7 +260,7 @@ def _batch_rss(led: Ledger, engine: str) -> None:
     """One engine's batch peaks at three table sizes, graded plain and with the row-group cap."""
     var = f"RIVET_ORACLE_{engine.upper()}_URL"
     if not os.environ.get(var):
-        led.skipped(engine, "-", RSS_SCEN, "batch", f"flat-rss[{engine}/batch]: no {var}", "no url")
+        led.skipped(engine, "-", RSS_SCEN, "batch", f"flat-rss[{engine}/batch]: no {var}", "no url", cause=SkipCause.ENV)
         return
     peaks, n = settled(lambda: _batch_peaks(engine, os.environ[var]), lambda p: sum(batch_flaws(engine, p), []))
     batch, capped = batch_flaws(engine, peaks)
@@ -280,7 +280,7 @@ def _cdc_rss(led: Ledger, engine: str, url_vars: dict[str, str]) -> None:
     """One engine's CDC peaks at two backlogs."""
     var = url_vars.get(engine, f"RIVET_CDC_{engine.upper()}_URL")
     if not os.environ.get(var):
-        led.skipped(engine, "-", RSS_SCEN, "cdc", f"flat-rss[{engine}/cdc]: no {var}", "no url")
+        led.skipped(engine, "-", RSS_SCEN, "cdc", f"flat-rss[{engine}/cdc]: no {var}", "no url", cause=SkipCause.ENV)
         return
     peaks, n = settled(lambda: _cdc_peaks(engine, os.environ[var]), lambda p: cdc_flaws(engine, p))
     _grade_rss(led, engine, "cdc", peaks, cdc_flaws(engine, peaks), n)
@@ -409,7 +409,7 @@ def verify_byte_identical_parts(led: Ledger) -> None:
         var = f"RIVET_ORACLE_{engine.upper()}_URL"
         url = os.environ.get(var, "")
         if not url:
-            led.skipped(engine, "-", BYTES_SCEN, "local", f"byte-identical[{engine}]: no {var}", "no url")
+            led.skipped(engine, "-", BYTES_SCEN, "local", f"byte-identical[{engine}]: no {var}", "no url", cause=SkipCause.ENV)
             continue
         table = f"bytes_{engine[:2]}_{os.getpid()}"
         try:

@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import engines
-from .core import Ledger
+from .core import Ledger, SkipCause
 
 SCEN = "sentinels"
 
@@ -249,7 +249,7 @@ def sc_sentinels(led: Ledger, engine: str, tag: str, url: str) -> None:
 
     tables = TABLES.get(engine)
     if tables is None:
-        _skipped(led, engine, tag, SCEN, "-", f"sentinels: no sentinel set for {engine}", "no set")
+        _skipped(led, engine, tag, SCEN, "-", f"sentinels: no sentinel set for {engine}", "no set", cause=SkipCause.DESIGN)
         return
     scope = Scope(engine, tag)
     for t in tables:

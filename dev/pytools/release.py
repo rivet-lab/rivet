@@ -287,7 +287,21 @@ def gate_refusal(sha: str, record: Path, kind: str = FULL_GATE) -> str | None:
     if last.get("config") != CANONICAL_CONFIG:
         return (f"the latest {kind} run of {sha[:12]} ({last.get('at')}) ran under {last.get('config')!r}, "
                 f"not the canonical configuration {CANONICAL_CONFIG!r}")
+    if kind == FULL_GATE and (why := env_skip_refusal(last.get("skipped_env"))):
+        return f"the latest {kind} run of {sha[:12]} ({last.get('at')}) {why}"
     return None
+
+
+def env_skip_refusal(ids: object) -> str | None:
+    """Why a run's recorded env skips bar a tag: no record of them, or a cell no excuse in skip_allow.py covers today."""
+    if not (isinstance(ids, list) and all(isinstance(i, list) and len(i) == 3 and all(isinstance(x, str) for x in i) for i in ids)):
+        return "recorded no skipped_env list, so its env skips cannot be checked: run the gate again"
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from dev.release_oracle import skip_allow
+
+    open_ = ["/".join(i) for i in ids if skip_allow.excused(*i) is None]
+    return f"skipped {len(open_)} cell(s) for the environment with no excuse in skip_allow.py: {', '.join(open_)}" if open_ else None
 
 
 def island_refusal(sha: str, record: Path) -> str | None:
@@ -328,7 +342,7 @@ def self_test() -> int:
     sha, other = "a" * 40, "b" * 40
 
     def rec(**kw) -> str:
-        base = {"at": "t", "sha": sha, "binary": sha[:9], "gate": FULL_GATE, "config": CANONICAL_CONFIG, "dirty": False, "verdict": "RELEASE-READY"}
+        base = {"at": "t", "sha": sha, "binary": sha[:9], "gate": FULL_GATE, "config": CANONICAL_CONFIG, "dirty": False, "verdict": "RELEASE-READY", "skipped_env": []}
         return json.dumps({**base, **kw})
 
     cases = [
@@ -352,7 +366,23 @@ def self_test() -> int:
         ([rec(), rec(verdict="NOT RELEASABLE")], "says NOT RELEASABLE"),
         (["not json", rec()], None),
         ([rec(verdict="NOT RELEASABLE"), rec(), rec(gate="release-oracle", verdict="NOT RELEASABLE")], None),
+        ([rec(skipped_env=[["load", "mongo", "gcs"]])], "no excuse in skip_allow.py: load/mongo/gcs"),
+        ([rec(skipped_env=[["load", "mongo", "gcs"], ["x", "pg", "-"]])], "skipped 2 cell(s)"),
+        ([rec(skipped_env=[["fixture", "pg", "-"]])], None),
+        ([rec(skipped_env=[["expired", "pg", "-"]])], "no excuse in skip_allow.py: expired/pg/-"),
+        ([rec(skipped_env=None)], "no skipped_env list"),
+        ([rec(skipped_env=[["a", "b"]])], "no skipped_env list"),
+        ([rec(skipped_env="load/mongo/gcs")], "no skipped_env list"),
+        ([rec(skipped_env=[["a", "b", 3]])], "no skipped_env list"),
     ]
+    sys.path.insert(0, str(ROOT))
+    from dev.release_oracle import skip_allow
+
+    kept = skip_allow.EXCUSES
+    skip_allow.EXCUSES = (
+        skip_allow.Excuse("fixture", "*", "*", "self-test fixture", "2999-01-01"),
+        skip_allow.Excuse("expired", "*", "*", "self-test fixture", "2000-01-01"),
+    )
     with tempfile.TemporaryDirectory() as d:
         for i, (lines, want) in enumerate(cases):
             path = Path(d) / f"{i}.jsonl"
@@ -360,6 +390,8 @@ def self_test() -> int:
                 path.write_text("\n".join(lines) + "\n")
             got = gate_refusal(sha, path)
             assert (got is None) if want is None else (got is not None and want in got), (i, lines, got)
+    skip_allow.EXCUSES = kept
+
     def run(**kw) -> str:
         base = {"sha": sha, "complete": True, "green": True, "dirty": False}
         return json.dumps({**base, **kw})

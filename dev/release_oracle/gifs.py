@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from .core import Ledger, ROOT, have, rivet, run
+from .core import Ledger, SkipCause, ROOT, have, rivet, run
 
 GIF_DIR = ROOT / "docs" / "gifs"
 LOCK = GIF_DIR / "surface.lock.json"
@@ -204,12 +204,12 @@ def verify_gif_currency(led: Ledger, *, bless: bool | Sequence[str] = False) -> 
     led.phase("Instructional GIFs — do they still show what this binary prints?")
 
     if not GIF_DIR.is_dir():
-        led.skipped("gifs", "-", "currency", "-", "gifs: docs/gifs absent", "no dir")
+        led.skipped("gifs", "-", "currency", "-", "gifs: docs/gifs absent", "no dir", cause=SkipCause.ENV)
         return
 
     tapes = read_tapes()
     if not tapes:
-        led.skipped("gifs", "-", "currency", "-", "gifs: no tapes found", "no tapes")
+        led.skipped("gifs", "-", "currency", "-", "gifs: no tapes found", "no tapes", cause=SkipCause.ENV)
         return
 
     lock: dict[str, str] = {}
@@ -297,7 +297,7 @@ def verify_gif_currency(led: Ledger, *, bless: bool | Sequence[str] = False) -> 
         led.skipped("gifs", "-", "currency", "-",
                     f"gifs: {len(unlocked)} tape(s) have no recorded surface digest "
                     f"({', '.join(unlocked)}) — run with --bless-gifs after a render",
-                    f"{len(unlocked)} unlocked")
+                    f"{len(unlocked)} unlocked", cause=SkipCause.ENV)
     if not broken and not stale and not unlocked:
         led.passed("gifs", "-", "currency", "-",
                    f"gifs: all {len(tapes)} tapes' commands exist and their output surface "

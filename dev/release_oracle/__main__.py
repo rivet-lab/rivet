@@ -45,7 +45,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .core import GATE_FAILURES, Ledger, Status, binary_stamp, keep_failure_log, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
+from .core import GATE_FAILURES, Ledger, SkipCause, Status, binary_stamp, keep_failure_log, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
 from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
 from ..pytools.shell import find_keg_tools
 from . import (
@@ -183,7 +183,7 @@ def verify_seeded_recall(led: Ledger, enabled: bool) -> None:
     if not enabled:
         led.skipped("-", "harness", "seeded_recall", "-",
                     "seeded-defect recall: not run (--with-seeded-recall, on in release-oracle-full); "
-                    "this run is a reduced gate and cannot support a tag")
+                    "this run is a reduced gate and cannot support a tag", cause=SkipCause.REDUCED)
         return
     import yaml
 
@@ -405,6 +405,134 @@ def _verdict_scope_self_test() -> None:
           "rows keep the first error line; blessed-path cells have distinct export names")
 
 
+def _skip_cause_self_test() -> None:
+    """A full gate grades an unexcused env skip INFRA and its tag is refused; a design skip, a reduced gate and an excused skip are unchanged; the cause is required and survives a flush."""
+    import contextlib
+    import io
+    import json as _json
+    from datetime import date, timedelta
+
+    from . import core, skip_allow
+    from ..pytools.release import gate_refusal
+
+    sha = "c" * 40
+
+    def run_gate(led: Ledger, gate: str) -> tuple[int, str, dict, str | None]:
+        out, saved = io.StringIO(), core.TIMINGS_HISTORY
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(out):
+            core.TIMINGS_HISTORY = Path(tmp) / "timings.jsonl"
+            try:
+                rc = led.report(full=True, gate=gate, tree=(sha, False), config=CANONICAL_CONFIG)
+                line = {**_json.loads(core.TIMINGS_HISTORY.read_text().splitlines()[-1]), "binary": sha[:9]}
+                core.TIMINGS_HISTORY.write_text(_json.dumps(line) + "\n")
+                refusal = gate_refusal(sha, core.TIMINGS_HISTORY)
+            finally:
+                core.TIMINGS_HISTORY = saved
+        return rc, out.getvalue(), line, refusal
+
+    def stage_down() -> Ledger:
+        led = Ledger(colour=False)
+        led.passed("-", "-", "verify_failed_run_tail", "-", "the one stage that ran")
+        for eng in ("postgres", "mongo", "mongo"):
+            led.skipped(eng, "-", "verify_failed_run_tail", "-", "stand down", cause=SkipCause.ENV)
+        return led
+
+    rc, said, line, refusal = run_gate(stage_down(), core.FULL_GATE)
+    assert rc == 1 and line["verdict"] == "NOT GRADED" and "NOT GRADED" in said and "RELEASE-READY" not in said, (rc, said)
+    assert "INFRA" in said and "ENV 3" in said and line["skipped"] == 3, (said, line)
+    assert line["skipped_env"] == [["verify_failed_run_tail", "mongo", "-"], ["verify_failed_run_tail", "postgres", "-"]], line
+    assert refusal is not None and "NOT GRADED" in refusal, refusal
+
+    forged = {**line, "verdict": "RELEASE-READY"}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "timings.jsonl"
+        path.write_text(_json.dumps(forged) + "\n")
+        refusal = gate_refusal(sha, path)
+        assert refusal is not None and "no excuse in skip_allow.py" in refusal, refusal
+        path.write_text(_json.dumps({k: v for k, v in forged.items() if k != "skipped_env"}) + "\n")
+        refusal = gate_refusal(sha, path)
+        assert refusal is not None and "no skipped_env list" in refusal, refusal
+
+    design = Ledger(colour=False)
+    design.passed("-", "-", "s", "-", "a graded cell")
+    design.skipped("mysql", "-", "s", "-", "no such feature", cause=SkipCause.DESIGN)
+    design.skipped("mysql", "-", "s", "-", "no downstream", cause=SkipCause.DOWNSTREAM)
+    design.skipped("mysql", "-", "s", "-", "reduced by flag", cause=SkipCause.REDUCED)
+    rc, said, line, refusal = run_gate(design, core.FULL_GATE)
+    assert rc == 0 and line["verdict"] == "RELEASE-READY" and line["skipped"] == 3 and line["skipped_env"] == [], (rc, line)
+    assert refusal is None and "DESIGN 1" in said and "DOWNSTREAM 1" in said and "REDUCED 1" in said, (refusal, said)
+
+    rc, said, line, _ = run_gate(stage_down(), core.REDUCED_GATE)
+    assert rc == 0 and line["verdict"] == "RELEASE-READY" and "INFRA" not in said and line["skipped"] == 3, (rc, said, line)
+    rc, said, line, refusal = run_gate(stage_down(), ISLAND_GATE)
+    assert rc == 0 and line["verdict"] == "RELEASE-READY" and refusal is not None, "an island run is not a full gate"
+
+    kept = skip_allow.EXCUSES
+    far = (date.today() + timedelta(days=30)).isoformat()
+    try:
+        skip_allow.EXCUSES = (skip_allow.Excuse("verify_failed_run_tail", "*", "-", "self-test fixture", far),)
+        rc, _, line, refusal = run_gate(stage_down(), core.FULL_GATE)
+        assert rc == 0 and line["verdict"] == "RELEASE-READY" and refusal is None, (rc, line, refusal)
+        skip_allow.EXCUSES = (skip_allow.Excuse("verify_failed_run_tail", "*", "-", "self-test fixture", "2000-01-01"),)
+        rc, _, line, refusal = run_gate(stage_down(), core.FULL_GATE)
+        assert rc == 1 and line["verdict"] == "NOT GRADED" and refusal is not None, "an expired excuse stops excusing"
+    finally:
+        skip_allow.EXCUSES = kept
+
+    fifth = Ledger(colour=False)
+    fifth.passed("-", "-", "s", "-", "a graded cell")
+    fifth.skipped("all", "-", "fix_cells", "a_fifth_fix_cell_that_self_skips_mysql", "NOT GRADED: self-skipped there (lower_case_table_names=0)",
+                  cause=SkipCause.ENV)
+    assert fifth.verdict(core.FULL_GATE) == "NOT GRADED", "a new fix cell that self-skips for the folding text is not excused by the four named ones"
+    assert skip_allow.excused("fix_cells", "all", "a_fifth_fix_cell_that_self_skips_mysql", date(2026, 11, 3)) is None
+    assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 3)) for c in skip_allow.FOLD_CELLS) and len(skip_allow.FOLD_CELLS) == 4
+    assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 18)) is None for c in skip_allow.FOLD_CELLS), "an excuse ends on its day"
+
+    parent, child = Ledger(colour=False), Ledger(colour=False)
+    child._buf = []
+    child.skipped("postgres", "-", "s", "-", "stand down", cause=SkipCause.ENV)
+    child.flush_into(parent)
+    assert [c.cause for c in parent.cells] == [SkipCause.ENV] and parent.verdict(core.FULL_GATE) == "NOT GRADED", parent.cells
+    assert parent.verdict(core.REDUCED_GATE) == "RELEASE-READY"
+
+    for build in (lambda: getattr(parent, "skipped")("pg", "-", "s", "-", "m"),
+                  lambda: core.Cell("pg", "-", "s", "-", Status.SKIP, "m"),
+                  lambda: core.Cell("pg", "-", "s", "-", Status.PASS, "m", SkipCause.ENV)):
+        try:
+            build()
+        except TypeError:
+            continue
+        raise AssertionError("a SKIP without a cause, or a cause on a non-SKIP, must be refused")
+    print("self-test ok: an unexcused env skip is NOT GRADED in a full gate and its tag is refused; design skips, "
+          "a reduced gate and a dated excuse are unchanged; the cause is required and survives a flush")
+
+
+def _skip_site_guard_self_test() -> None:
+    """Every SKIP call under dev/release_oracle and dev/seeded names its cause; a planted call without one is found."""
+    import ast
+
+    def bare(source: str) -> list[int]:
+        found = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+            skip_add = name == "add" and any(isinstance(a, ast.Attribute) and a.attr == "SKIP" for a in node.args)
+            if (name in ("skipped", "_skipped") or skip_add) and not any(k.arg == "cause" for k in node.keywords):
+                found.append(node.lineno)
+        return found
+
+    assert bare("led.skipped('a', 'b', 'c', 'd', 'm')") == [1] and bare("_skipped(led, 'a', 'b', 'c', 'd', 'm')") == [1]
+    assert bare("led.add('a', 'b', 'c', 'd', Status.SKIP, 'm')") == [1]
+    assert bare("led.skipped('a', 'b', 'c', 'd', 'm', cause=SkipCause.ENV)") == [] and bare("led.add('a', 'b', 'c', 'd', Status.PASS, 'm')") == []
+    sources = [*HERE.glob("*.py"), *(ROOT / "dev" / "seeded").glob("*.py")]
+    assert len(sources) > 30, sources
+    loose = [f"{p.relative_to(ROOT)}:{n}" for p in sources for n in bare(p.read_text())]
+    assert not loose, f"a SKIP with no cause: {loose}"
+    print(f"self-test ok: all {len(sources)} harness modules name a cause on every SKIP call; a planted call without one is found")
+
+
 def _lanes_self_test() -> None:
     """Lanes overlap, one lane's cells never do, rows flush in list order, a raise keeps every row; the upgrade
     cells sharing a source server share a lane; grading a load leaves the process environment alone."""
@@ -571,6 +699,8 @@ def _stages_self_test() -> None:
     assert STAGES_RUN["verify_a"] == 2, "re-recording must not wrap the wrapper"
     _raising_stage_self_test()
     _verdict_scope_self_test()
+    _skip_cause_self_test()
+    _skip_site_guard_self_test()
     _tree_identity_self_test()
     _gate_kind_self_test()
     release_path.hygiene_self_test()
@@ -1581,7 +1711,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
                  "-v", f"{ROOT / 'dev' / 'oracle' / 'init'}:/container-entrypoint-initdb.d:ro",
                  "-p", f"{port}:1521"]
     else:
-        led.skipped(engine, tag, "all", "-", f"{engine}:{tag} unknown engine kind")
+        led.skipped(engine, tag, "all", "-", f"{engine}:{tag} unknown engine kind", cause=SkipCause.ENV)
         return None
 
     started = docker(*args, image, *cmd)
@@ -1758,7 +1888,7 @@ def _run_one_engine(led: Ledger, ns: argparse.Namespace, engine: str) -> None:
         version_lines = [l for l in version_lines if l.split()[0] in want]
         if dropped:
             led.add(engine, "-", "other-versions", "-", Status.SKIP,
-                    f"--versions: {dropped} other {engine} version(s) not run this pass")
+                    f"--versions: {dropped} other {engine} version(s) not run this pass", cause=SkipCause.REDUCED)
     # --latest-only: keep just the last version of the family (the newest,
     # matrix.yaml lists them ascending). Cuts the dev-loop wall roughly in
     # proportion to the version count (postgres 4→1, mongo 5→1) while every
@@ -1768,7 +1898,7 @@ def _run_one_engine(led: Ledger, ns: argparse.Namespace, engine: str) -> None:
         version_lines = version_lines[-1:]
         if skipped:
             led.add(engine, "-", "older-versions", "-", Status.SKIP,
-                    f"--latest-only: {skipped} older {engine} version(s) not run")
+                    f"--latest-only: {skipped} older {engine} version(s) not run", cause=SkipCause.REDUCED)
     cap = max(1, getattr(ns, "version_parallel", 1))
     if cap == 1 or len(version_lines) <= 1:
         for line in version_lines:

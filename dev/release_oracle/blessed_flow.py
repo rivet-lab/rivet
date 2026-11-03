@@ -70,7 +70,7 @@ from pathlib import Path
 from . import blessed_path, cdc, gcp, scenarios
 from ..pytools import registry
 from .core import (
-    Ledger,
+    Ledger, SkipCause,
     ROOT,
     cell_gate,
     cell_parallel,
@@ -477,7 +477,7 @@ def _unreached(led: Ledger, cell: Cell, tag: str, after: str) -> None:
     for s in steps[steps.index(after) + 1:]:
         led.skipped(cell.engine, tag, f"flow:{s}", cell.store,
                     f"{cell.engine} {cell.label} · {s} — not reached ({after} failed)",
-                    f"unreached after {after}")
+                    f"unreached after {after}", cause=SkipCause.DOWNSTREAM)
 
 
 def _config(cell: Cell, work: Path, src_block: str, dest_block: str,
@@ -710,7 +710,7 @@ def run_cell(led: Ledger, cell: Cell, url: str, state_url: str, tag: str = "live
         spec = cdc._ENGINES.get(cell.engine)
         if spec is None:
             led.skipped(cell.engine, tag, "flow:chain", cell.store,
-                        f"{cell.engine} {cell.label} — no cdc engine spec")
+                        f"{cell.engine} {cell.label} — no cdc engine spec", cause=SkipCause.DESIGN)
             return
         # Retried: SQL Server's fixture disables and re-enables CDC on the table,
         # and `sp_cdc_enable_table` can fail while the previous capture job is
@@ -778,7 +778,7 @@ def _run_chain(led: Ledger, cell: Cell, url: str, state_url: str, work: Path,
     if cell.state == "postgres":
         if not state_url:
             led.skipped(cell.engine, tag, "flow:chain", cell.store,
-                        f"{cell.engine} {cell.label} — postgres backend needs --state-url")
+                        f"{cell.engine} {cell.label} — postgres backend needs --state-url", cause=SkipCause.ENV)
             return
         env["RIVET_STATE_URL"] = state_url
         mark = _state_watermark(cell, work, state_url)
@@ -839,7 +839,7 @@ def _run_chain(led: Ledger, cell: Cell, url: str, state_url: str, work: Path,
     db = _dest_block(cell, dest_dir, prefix)
     if db is None:
         led.skipped(cell.engine, tag, "flow:chain", cell.store,
-                    f"{cell.engine} {cell.label} — no destination block for {cell.store}")
+                    f"{cell.engine} {cell.label} — no destination block for {cell.store}", cause=SkipCause.ENV)
         return
     tls = "\n  tls: {accept_invalid_certs: true}" if cell.engine == "mssql" else ""
     src = f"source:\n  type: {cell.engine}\n  url_env: ORACLE_URL{tls}"
@@ -1016,14 +1016,14 @@ def _run_chain(led: Ledger, cell: Cell, url: str, state_url: str, work: Path,
     # ── oracle: DuckDB, and only DuckDB ──────────────────────────────────────
     if not have("duckdb"):
         led.skipped(cell.engine, tag, "flow:oracle", cell.store,
-                    f"{cell.engine} {cell.label} · oracle — no duckdb")
+                    f"{cell.engine} {cell.label} · oracle — no duckdb", cause=SkipCause.ENV)
     else:
         duck = _readback(cell, dest_dir, prefix, work)
         if cell.pipeline == "batch":
             want = blessed_path._source_rows(cell.engine, url, cell.table)
             if want < 0:
                 led.skipped(cell.engine, tag, "flow:oracle", cell.store,
-                            f"{cell.engine} {cell.label} · oracle — source unreachable for a count")
+                            f"{cell.engine} {cell.label} · oracle — source unreachable for a count", cause=SkipCause.ENV)
             else:
                 # `repeat` writes the same table twice into one prefix, so the
                 # readable dataset is the UNION: 2x. That is the assertion — a
@@ -1128,19 +1128,19 @@ def _load_leg(led: Ledger, cell: Cell, tag: str, work: Path, env: dict, url: str
         led.skipped(cell.engine, tag, "flow:load", cell.store,
                     f"{cell.engine} {cell.label} · load — the warehouse leg runs on the "
                     "batch/gcs cells; a change stream has no batch load and the other "
-                    "stores are covered by their own readback")
+                    "stores are covered by their own readback", cause=SkipCause.DESIGN)
         return
     if cell.lifecycle != "clean":
         led.skipped(cell.engine, tag, "flow:load", cell.store,
                     f"{cell.engine} {cell.label} · load — graded on the clean cell: this leg "
                     "exports and loads one fresh run, so a repeat/resume copy would grade the "
-                    "same thing again (loading a two-run or resumed prefix is not covered)")
+                    "same thing again (loading a two-run or resumed prefix is not covered)", cause=SkipCause.DESIGN)
         return
     if not have("gcloud") or not proj:
         led.skipped(cell.engine, tag, "flow:load", cell.store,
                     f"{cell.engine} {cell.label} · load — no `gcloud` (the REST token) or no project "
                     "(set BQ_ORACLE_PROJECT); the emulator cannot stand in, a warehouse "
-                    "must read the real bucket")
+                    "must read the real bucket", cause=SkipCause.ENV)
         return
 
     tbl = cell.table.split(".")[-1]
@@ -1343,30 +1343,30 @@ def sc_blessed_flow(led: Ledger, engine: str, tag: str, url: str,
         why = cell.na_reason()
         if why:
             led.skipped(cell.engine, tag, f"flow:{cell.pipeline}/{cell.lifecycle}",
-                        cell.store, f"{cell.engine} {cell.label} — na: {why}", "na")
+                        cell.store, f"{cell.engine} {cell.label} — na: {why}", "na", cause=SkipCause.DESIGN)
             continue
         if only is not None and key not in only:
             led.skipped(cell.engine, tag, "flow:chain", cell.store,
-                        f"{cell.engine} {cell.label} — not in this re-run's cell set")
+                        f"{cell.engine} {cell.label} — not in this re-run's cell set", cause=SkipCause.REDUCED)
             continue
         u = cdc_url if cell.pipeline == "cdc" else url
         if cell.pipeline == "cdc" and u and cdc_tag != tag:
             led.skipped(cell.engine, tag, "flow:chain", cell.store,
                         f"{cell.engine} {cell.label} — graded under {engine} {cdc_tag}: CDC "
-                        f"cells run against the one CDC stand, not this version's container")
+                        f"cells run against the one CDC stand, not this version's container", cause=SkipCause.DESIGN)
             continue
         if not u:
             led.skipped(cell.engine, tag, "flow:chain", cell.store,
                         f"{cell.engine} {cell.label} — no RIVET_CDC_{engine.upper()}_URL "
-                        "(the batch stand has no logical-decoding/CDC setup)")
+                        "(the batch stand has no logical-decoding/CDC setup)", cause=SkipCause.ENV)
             continue
         if cell.state == "postgres" and not state_url:
             led.skipped(cell.engine, tag, "flow:chain", cell.store,
-                        f"{cell.engine} {cell.label} — postgres ledger needs --state-url")
+                        f"{cell.engine} {cell.label} — postgres ledger needs --state-url", cause=SkipCause.ENV)
             continue
         if cell.store != "local" and not scenarios.store_up(cell.store):
             led.skipped(cell.engine, tag, "flow:chain", cell.store,
-                        f"{cell.engine} {cell.label} — {cell.store} store not up")
+                        f"{cell.engine} {cell.label} — {cell.store} store not up", cause=SkipCause.ENV)
             continue
         tasks.append((cell, key, u))
 
@@ -1663,6 +1663,7 @@ def verify_flag_surface(led: Ledger) -> None:
             "their flags is graded here: "
             + ", ".join(f"{c}({n})" for c, n in sorted(ungraded.items())),
             ",".join(outside),
+            cause=SkipCause.DESIGN,
         )
 
     for cmd in chain:
@@ -1816,7 +1817,7 @@ def sc_not_inert(led: Ledger, engine: str, url: str, state_url: str, tag: str = 
         # false alarm. The `oracle` stage one layer up already SKIPs on this;
         # the probe must too.
         led.skipped(engine, "flow", "flow:inert", "local",
-                    f"inertness · {engine} — source count unreadable, cannot grade sensitivity")
+                    f"inertness · {engine} — source count unreadable, cannot grade sensitivity", cause=SkipCause.ENV)
         victim.write_bytes(keep)
         return
     _bit(led, engine, got == want,
@@ -1899,7 +1900,7 @@ def main(argv: list[str] | None = None) -> int:
         url = os.environ.get(f"RIVET_ORACLE_{eng.upper()}_URL", "")
         if not url:
             led.skipped(eng, "flow", "flow:chain", "-",
-                        f"{eng} — no RIVET_ORACLE_{eng.upper()}_URL")
+                        f"{eng} — no RIVET_ORACLE_{eng.upper()}_URL", cause=SkipCause.ENV)
             continue
         sc_blessed_flow(led, eng, "live", url, state_url=ns.state_url, only=only)
         if only is None:

@@ -20,7 +20,7 @@ from typing import Callable
 
 from . import gcp, scenarios
 from .core import (
-    Ledger,
+    Ledger, SkipCause,
     docker,
     docker_exec,
     engine_container,
@@ -66,7 +66,7 @@ def _grade_against_source(led: Ledger, engine: str, url: str, dset: str, table: 
     if bq_target() is None:
         led.skipped("bigquery", engine, "golden", "-",
                     "BigQuery: the DuckDB oracle needs BQ_ORACLE_PROJECT and BQ_ORACLE_DATASET",
-                    "no creds")
+                    "no creds", cause=SkipCause.ENV)
         return
     try:
         rows, diffs = compare_to_bigquery(engine, url, dset, table)
@@ -177,7 +177,7 @@ def verify_load_pool(led: Ledger, *, proj: str, dset: str, bucket: str, work: Pa
     """
     if not (have("bq") and have("gcloud")):
         led.skipped(engine, "-", "load_pool", "-",
-                    "load_pool: needs the `bq` and `gcloud` CLIs", "no cli")
+                    "load_pool: needs the `bq` and `gcloud` CLIs", "no cli", cause=SkipCause.ENV)
         return
 
     pool_dset = f"{dset}_{engine}_pool"
@@ -198,7 +198,7 @@ def verify_load_pool(led: Ledger, *, proj: str, dset: str, bucket: str, work: Pa
     if not seeded.ok:
         led.skipped(engine, "-", "load_pool", "-",
                     f"load_pool: seeding {_POOL_TABLES} tables failed — "
-                    f"{(seeded.out or '').strip()[-200:]}", "seed")
+                    f"{(seeded.out or '').strip()[-200:]}", "seed", cause=SkipCause.ENV)
         return
 
     # A leftover prefix from an earlier gate run would be loaded alongside this
@@ -249,7 +249,7 @@ def verify_load_pool(led: Ledger, *, proj: str, dset: str, bucket: str, work: Pa
     since_rows = _bq_json(proj, "SELECT UNIX_MILLIS(CURRENT_TIMESTAMP()) AS t")
     if not since_rows:
         led.skipped(engine, "-", "load_pool", "-",
-                    "load_pool: BigQuery would not answer for its own clock", "no clock")
+                    "load_pool: BigQuery would not answer for its own clock", "no clock", cause=SkipCause.ENV)
         return
     since = int(since_rows[0]["t"])
 
@@ -373,7 +373,7 @@ def verify_gc_survival(led: Ledger, *, bucket: str, pfx: str, cfg_text: str,
     if not parts or not manifests:
         led.skipped(engine, "-", "gc_survival", "-",
                     f"gc_survival[{engine}]: prefix has no part/manifest to work from",
-                    "no fixture")
+                    "no fixture", cause=SkipCause.ENV)
         return
 
     real_part, real_manifest = parts[0], manifests[0]
@@ -524,7 +524,7 @@ def _bq_one_engine(
         return None
     if seed(engine, _TAG, url):
         led.skipped("bigquery", engine, "golden", "-",
-                    f"BigQuery[{engine}]: seed errors", "seed")
+                    f"BigQuery[{engine}]: seed errors", "seed", cause=SkipCause.ENV)
         if not keep:
             docker("rm", "-fv", engine_container(engine, _TAG))
         return None
@@ -640,12 +640,12 @@ def run_bigquery_golden(
     # An absent tool and an absent credential are both SKIP, and are reported
     # separately so the reader knows which one to go fix.
     if not have("bq"):
-        led.skipped("bigquery", "-", "golden", "-", "BigQuery: bq CLI absent", "no bq")
+        led.skipped("bigquery", "-", "golden", "-", "BigQuery: bq CLI absent", "no bq", cause=SkipCause.ENV)
         return
     if not proj or not dset:
         led.skipped("bigquery", "-", "golden", "-",
                     f"BigQuery: set {proj_env} and {dset_env} to run the cloud oracle",
-                    "no creds")
+                    "no creds", cause=SkipCause.ENV)
         return
 
     led.phase(f"BigQuery golden stage ({proj}.{dset}_<engine>) — one dataset PER SOURCE")

@@ -38,7 +38,7 @@ from pathlib import Path
 from .cdc import _mysql, _psql
 from ..pytools import registry
 from . import gcp
-from .core import Ledger, have, rivet
+from .core import Ledger, SkipCause, have, rivet
 from .scenarios import NO_TIMEOUT, work_dir
 
 # Per-invocation TABLE names, so a concurrent invocation's `DROP TABLE` cannot hit
@@ -149,13 +149,13 @@ def verify_partner_shape(led: Ledger) -> None:
     proj, bucket = os.environ.get("BQ_ORACLE_PROJECT", ""), os.environ.get("BQ_ORACLE_BUCKET", "")
     if not have("gcloud") or not proj:
         led.skipped("-", "partner", "shape", "gcs",
-                    "partner shape: no `gcloud` (the REST token) or no project (set BQ_ORACLE_PROJECT)", "no gcloud")
+                    "partner shape: no `gcloud` (the REST token) or no project (set BQ_ORACLE_PROJECT)", "no gcloud", cause=SkipCause.ENV)
         return
     for engine in ("mysql", "postgres"):
         uvar = f"RIVET_CDC_{engine.upper()}_URL"
         url = os.environ.get(uvar, "")
         if not url:
-            led.skipped(engine, "partner", "shape", "gcs", f"partner[{engine}]: no {uvar}", "no url")
+            led.skipped(engine, "partner", "shape", "gcs", f"partner[{engine}]: no {uvar}", "no url", cause=SkipCause.ENV)
             continue
         try:
             _one_engine(led, engine, url, proj, bucket)

@@ -49,7 +49,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from .core import Ledger, have, run
+from .core import Ledger, SkipCause, have, run
 from ..pytools.duckcli import ARGV as DUCKDB
 
 # Written by the STORE, not by a run — the migration bookkeeping table is
@@ -175,16 +175,16 @@ def verify_state_parity_independent(
         led.skipped("-", "-", "state_parity_independent", "-",
                     "state-parity[independent]: no duckdb — the whole point of this cell "
                     "is the neutral reader, so there is nothing to degrade to",
-                    "no duckdb")
+                    "no duckdb", cause=SkipCause.ENV)
         return
     if not sqlite_db or not sqlite_db.is_file():
         led.skipped("-", "-", "state_parity_independent", "-",
                     f"state-parity[independent]: no SQLite state DB at {sqlite_db}",
-                    "no sqlite db")
+                    "no sqlite db", cause=SkipCause.ENV)
         return
     if not pg_url:
         led.skipped("-", "-", "state_parity_independent", "-",
-                    "state-parity[independent]: no Postgres state URL", "no pg url")
+                    "state-parity[independent]: no Postgres state URL", "no pg url", cause=SkipCause.ENV)
         return
 
     # Read a COPY: `READ_ONLY` still needs to open the -wal sidecar, and a live
