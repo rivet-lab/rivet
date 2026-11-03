@@ -1007,3 +1007,110 @@ mod missing_relation_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod override_probe_tests {
+    use super::*;
+    use crate::config::SourceType;
+    use crate::error::{CodedError, codes};
+    use crate::types::RivetType;
+    use arrow::datatypes::Schema;
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct Scripted {
+        fail: Option<crate::error::Code>,
+        seen: Vec<(String, Option<String>)>,
+        sink_stopped: Option<bool>,
+    }
+
+    impl Source for Scripted {
+        fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
+            self.seen.push((
+                request.query.to_string(),
+                request.catalog_hint_query.map(str::to_string),
+            ));
+            if let Some(code) = self.fail {
+                return Err(anyhow::Error::new(CodedError::new(code, "scripted")));
+            }
+            let batch = RecordBatch::new_empty(Arc::new(Schema::empty()));
+            let stopped = sink.on_batch(&batch);
+            self.sink_stopped = Some(stopped.is_err());
+            stopped
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn type_mappings(&mut self, _q: &str, _o: &ColumnOverrides) -> Result<Vec<TypeMapping>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn overrides() -> ColumnOverrides {
+        ColumnOverrides::from([("a".to_string(), RivetType::String)])
+    }
+
+    #[test]
+    fn the_runs_wire_refusal_is_returned_with_its_code() {
+        let mut src = Scripted {
+            fail: Some(codes::SOURCE_OVERRIDE_WIRE_MISMATCH),
+            ..Default::default()
+        };
+        let err =
+            refuse_override_wire_mismatch(&mut src, SourceType::Postgres, "SELECT 1", &overrides())
+                .unwrap_err();
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id)
+        );
+    }
+
+    #[test]
+    fn any_other_failure_of_the_probe_is_no_verdict() {
+        let mut src = Scripted {
+            fail: Some(codes::SOURCE_QUERY_FAILED),
+            ..Default::default()
+        };
+        refuse_override_wire_mismatch(&mut src, SourceType::Postgres, "SELECT 1", &overrides())
+            .unwrap();
+    }
+
+    #[test]
+    fn the_probe_reads_one_row_of_the_export_query_and_stops_after_the_first_batch() {
+        let mut src = Scripted::default();
+        refuse_override_wire_mismatch(&mut src, SourceType::Postgres, "SELECT 1", &overrides())
+            .unwrap();
+        assert_eq!(
+            src.seen,
+            vec![(
+                query::first_row_probe_sql(SourceType::Postgres, "SELECT 1"),
+                Some("SELECT 1".to_string())
+            )]
+        );
+        assert_eq!(src.sink_stopped, Some(true));
+    }
+
+    #[test]
+    fn no_override_or_a_document_source_reads_nothing() {
+        let mut src = Scripted {
+            fail: Some(codes::SOURCE_OVERRIDE_WIRE_MISMATCH),
+            ..Default::default()
+        };
+        refuse_override_wire_mismatch(
+            &mut src,
+            SourceType::Postgres,
+            "SELECT 1",
+            &ColumnOverrides::new(),
+        )
+        .unwrap();
+        refuse_override_wire_mismatch(&mut src, SourceType::Mongo, "{}", &overrides()).unwrap();
+        assert!(src.seen.is_empty());
+    }
+
+    #[test]
+    fn the_probe_marker_names_itself() {
+        assert_eq!(ProbeDone.to_string(), "first batch built");
+    }
+}
