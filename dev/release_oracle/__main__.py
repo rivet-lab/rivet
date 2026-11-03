@@ -311,6 +311,16 @@ def _tree_identity_self_test() -> None:
     from . import core
     from ..pytools import evidence
 
+    inherited = {k: os.environ.pop(k) for k in [k for k in os.environ if k.startswith("GIT_")]}
+    try:
+        _tree_identity_checks(core, evidence)
+    finally:
+        os.environ.update(inherited)
+    print("self-test ok: the evidence ledger is exempt from the dirty-tree check, nothing else is")
+
+
+def _tree_identity_checks(core, evidence) -> None:  # noqa: ANN001
+    """The cases of `_tree_identity_self_test`, in a scratch repository outside any git hook's environment."""
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         git = lambda *a: run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *a])  # noqa: E731
@@ -333,7 +343,6 @@ def _tree_identity_self_test() -> None:
         (root / "docs/evidence/other.yaml").write_text("x: 1\n")
         git("add", "-A")
         assert core.tree_identity(root) == (head, True), "only the ledger's exact path is exempt"
-    print("self-test ok: the evidence ledger is exempt from the dirty-tree check, nothing else is")
 
 
 def _verdict_scope_self_test() -> None:
