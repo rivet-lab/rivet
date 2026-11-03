@@ -50,7 +50,7 @@ from pathlib import Path
 from tempfile import mkdtemp
 
 try:  # importable both as a package module and as a plain sibling file
-    from .core import (GREEN_CELLS, HERE, blessing, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, SKIP_ALLOWED, self_skipped, Ledger, Proc, Status, container_for_port, docker, docker_exec, have,
+    from .core import (GREEN_CELLS, HERE, blessing, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, SKIP_ALLOWED, self_skipped, Ledger, SkipCause, Proc, Status, container_for_port, docker, docker_exec, have,
                        nextest_filter, nextest_outcomes, nextest_panics, nextest_passed, nextest_started, port_of, release_bin_env,
                        rivet, rivet_bin, run, sqlcmd, test_passed)
     from ..pytools.duckcli import ARGV as DUCKDB
@@ -64,7 +64,7 @@ except ImportError:  # pragma: no cover - depends on how the driver is invoked
         SKIP_ALLOWED,
         self_skipped,
         ROOT,
-        Ledger,
+        Ledger, SkipCause,
         Proc,
         Status,
         container_for_port,
@@ -213,9 +213,10 @@ def _failed(led: Ledger, eng: str, ver: str, scenario: str, store: str, msg: str
     led.failed(eng, ver, scenario, store, msg, detail)
 
 
-def _skipped(led: Ledger, eng: str, ver: str, scenario: str, store: str, msg: str, detail: str = "") -> None:
+def _skipped(led: Ledger, eng: str, ver: str, scenario: str, store: str, msg: str, detail: str = "", *,
+             cause: SkipCause) -> None:
     led.skip(msg)
-    led.add(eng, ver, scenario, store, Status.SKIP, detail)
+    led.add(eng, ver, scenario, store, Status.SKIP, detail, cause=cause)
 
 
 # ── small shared helpers ─────────────────────────────────────────────────────
@@ -849,7 +850,7 @@ def sc_verdicts(led: Ledger, engine: str, tag: str, url: str) -> None:
     if engine == "mongo":
         c = _init_cfg("mongo", url, "")
         if c is None:
-            _skipped(led, "mongo", tag, "verdicts", "-", "mongo init failed", "init")
+            _failed(led, "mongo", tag, "verdicts", "-", "mongo init failed", "init")
             return
         checks = [c]
     else:
@@ -859,7 +860,7 @@ def sc_verdicts(led: Ledger, engine: str, tag: str, url: str) -> None:
         schema = {"postgres": "public", "mssql": "dbo"}.get(engine, "")
         sc = _init_cfg(engine, url, schema)
         if sc is None:
-            _skipped(led, engine, tag, "verdicts", "-", f"{engine} init failed", "init")
+            _failed(led, engine, tag, "verdicts", "-", f"{engine} init failed", "init")
             return
         checks = [sc]
         # pg/mssql keep the garbage tables in schema `ext` (a separate init);
@@ -1056,6 +1057,7 @@ def sc_keyset_parallel(led: Ledger, engine: str, tag: str, url: str) -> None:
             led, engine, tag, "keyset_parallel", "-",
             "keyset_parallel[mongo]: graded by the mongo_keyset cell (page_size + parallel -> mongo_parallel)",
             "mongo na",
+            cause=SkipCause.DESIGN,
         )
         return
     out = Scope(engine, tag).dir("kp")
@@ -1099,7 +1101,7 @@ def sc_keyset_parallel(led: Ledger, engine: str, tag: str, url: str) -> None:
 # ── load: export TO the object store, then read it back INDEPENDENTLY ────────
 def sc_load(led: Ledger, engine: str, tag: str, url: str, store: str) -> None:
     if not store_up(store):
-        _skipped(led, engine, tag, "load", store, f"{store} emulator down", "emulator down")
+        _skipped(led, engine, tag, "load", store, f"{store} emulator down", "emulator down", cause=SkipCause.ENV)
         return
     # A run-UNIQUE prefix (this run's mktemp token). Part names are run-unique by
     # design, so they never clobber a prior run's — which means a STABLE prefix
@@ -1110,7 +1112,7 @@ def sc_load(led: Ledger, engine: str, tag: str, url: str, store: str) -> None:
     prefix = Scope(engine, tag).prefix("oracle", store)
     dest = store_dest(store, bucket, prefix)
     if dest is None:
-        _skipped(led, engine, tag, "load", store, f"{store}: no dest config", "no dest")
+        _skipped(led, engine, tag, "load", store, f"{store}: no dest config", "no dest", cause=SkipCause.ENV)
         return
     yaml_path = Scope(engine, tag).dir("load", store).with_suffix(".yaml")
     tls_block = "\n  tls: {accept_invalid_certs: true}" if engine == "mssql" else ""
@@ -1171,7 +1173,7 @@ def sc_load(led: Ledger, engine: str, tag: str, url: str, store: str) -> None:
                     f"load→{store} delivered 0 rows (source {scnt}) — empty destination after a "
                     f"0-exit run", "empty-destination")
         else:
-            _skipped(led, engine, tag, "load", store, f"{store} readback tool unavailable", "no readback tool")
+            _skipped(led, engine, tag, "load", store, f"{store} readback tool unavailable", "no readback tool", cause=SkipCause.ENV)
     else:
         _failed(
             led, engine, tag, "load", store,
@@ -1192,6 +1194,7 @@ def sc_gc_survival(led: Ledger, engine: str, tag: str, url: str) -> None:
         led, engine, tag, "gc_survival", "-",
         "gc_survival runs in the BigQuery stage (needs a warehouse load target)",
         "covered in BQ stage",
+        cause=SkipCause.DESIGN,
     )
 
 
@@ -1209,6 +1212,7 @@ def sc_load_pool(led: Ledger, engine: str, tag: str, url: str) -> None:
         led, engine, tag, "load_pool", "-",
         "load_pool runs in the BigQuery stage (needs a warehouse load target)",
         "covered in BQ stage",
+        cause=SkipCause.DESIGN,
     )
 
 
@@ -1220,7 +1224,7 @@ def run_scenarios(led: Ledger, engine: str, tag: str, url: str) -> None:
         if not oracle_available():
             _skipped(led, engine, tag, "all", "-",
                      "oracle: python-oracledb (the source oracle) is not importable — run through `uv run`",
-                     "no python-oracledb")
+                     "no python-oracledb", cause=SkipCause.ENV)
             return
     sc_verdicts(led, engine, tag, url)
     sc_integrity_types(led, engine, tag, url)
@@ -1245,7 +1249,7 @@ def run_scenarios(led: Ledger, engine: str, tag: str, url: str) -> None:
     if engine == "oracle":
         _skipped(led, engine, tag, "row_hash", "-",
                  "row_hash[oracle]: the probe's rows 3 and 4 are one row on Oracle ('' is NULL), "
-                 "so its injectivity pair cannot be expressed", "fixture")
+                 "so its injectivity pair cannot be expressed", "fixture", cause=SkipCause.DESIGN)
     else:
         rowhash.verify_row_hash(led, engine, tag, url)
     # The NEGATIVE half: does verification fail when the data is wrong?
@@ -1254,7 +1258,7 @@ def run_scenarios(led: Ledger, engine: str, tag: str, url: str) -> None:
     # detects corruption says nothing about this one.
     if engine == "oracle":
         _skipped(led, engine, tag, "cdc_corruption_is_detected", "-",
-                 "cdc-corruption[oracle]: n/a — `mode: cdc` is refused for Oracle (batch-only source)", "na")
+                 "cdc-corruption[oracle]: n/a — `mode: cdc` is refused for Oracle (batch-only source)", "na", cause=SkipCause.DESIGN)
     else:
         corruption.verify_cdc_corruption_is_detected(led, engine, tag, url)
     # reconcile and validate check DIFFERENT sides; the pair is the claim.
@@ -1342,6 +1346,7 @@ def verify_state_migrations(led: Ledger) -> None:
             led, "state", "migrations", "parity", "-",
             "state-migration parity: no Postgres STATE url (set RIVET_TEST_STATE_URL)",
             "no state url",
+            cause=SkipCause.ENV,
         )
         return
     # The url MUST be postgres. The underlying tests self-skip (plain `return`) on
@@ -1352,6 +1357,7 @@ def verify_state_migrations(led: Ledger) -> None:
             led, "state", "migrations", "parity", "-",
             "state-migration parity: RIVET_TEST_STATE_URL is not a postgres url",
             "non-postgres url",
+            cause=SkipCause.ENV,
         )
         return
     # The docstring promises a SKIP when the state db is absent, but a URL string
@@ -1365,16 +1371,18 @@ def verify_state_migrations(led: Ledger) -> None:
             f"state-migration parity: state Postgres {_su.hostname or '127.0.0.1'}:"
             f"{_su.port or 5432} unreachable (is the dev stand up?)",
             "state pg down",
+            cause=SkipCause.ENV,
         )
         return
     if not have("cargo"):
-        _skipped(led, "state", "migrations", "parity", "-", "state-migration parity: cargo absent", "no cargo")
+        _skipped(led, "state", "migrations", "parity", "-", "state-migration parity: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     # The parity fixtures seed a source table on :5432.
     if not _tcp_open("127.0.0.1", 5432):
         _skipped(
             led, "state", "migrations", "parity", "-",
             "state-migration parity: source Postgres :5432 down", "no source pg",
+            cause=SkipCause.ENV,
         )
         return
     led.phase("State-migration parity (SQLite vs Postgres state, RED-proven, release binary)")
@@ -1506,13 +1514,14 @@ def verify_network_faults(led: Ledger) -> None:
     proxy, and the CDC binlog cut that must fail loud then recover without a
     gap. SKIP (never silent) when toxiproxy's admin port is down."""
     if not have("cargo"):
-        _skipped(led, "infra", "network", "faults", "-", "network-faults: cargo absent", "no cargo")
+        _skipped(led, "infra", "network", "faults", "-", "network-faults: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     if not _tcp_open("127.0.0.1", 8474):
         _skipped(
             led, "infra", "network", "faults", "-",
             "network-faults: toxiproxy admin :8474 unreachable (docker compose up -d toxiproxy)",
             "toxiproxy down",
+            cause=SkipCause.ENV,
         )
         return
     _drive_live_tests(
@@ -1540,11 +1549,11 @@ def verify_tls_required(led: Ledger) -> None:
     URL. The residual (a real TLS handshake against a verified cert) still
     needs a TLS-provisioned service and stays named in the matrix row."""
     if not have("cargo"):
-        _skipped(led, "infra", "tls", "policy", "-", "tls-policy: cargo absent", "no cargo")
+        _skipped(led, "infra", "tls", "policy", "-", "tls-policy: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     if not _tcp_open("127.0.0.1", 5432):
         _skipped(led, "infra", "tls", "policy", "-",
-                 "tls-policy: source Postgres :5432 down", "no source pg")
+                 "tls-policy: source Postgres :5432 down", "no source pg", cause=SkipCause.ENV)
         return
     _drive_live_tests(
         led, "infra", "tls", "policy",
@@ -1565,13 +1574,14 @@ def verify_auth(led: Ledger) -> None:
     fails the run), and a WRONG password fails loud naming authentication with
     zero parquet written. x509 cert auth stays the named residual."""
     if not have("cargo"):
-        _skipped(led, "infra", "mongo", "auth", "-", "mongo-auth: cargo absent", "no cargo")
+        _skipped(led, "infra", "mongo", "auth", "-", "mongo-auth: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     if not _tcp_open("127.0.0.1", 27020):
         _skipped(
             led, "infra", "mongo", "auth", "-",
             "mongo-auth: :27020 unreachable (docker compose up -d mongo-auth)",
             "mongo-auth down",
+            cause=SkipCause.ENV,
         )
         return
     _drive_live_tests(
@@ -1594,7 +1604,7 @@ def verify_cdc_standby(led: Ledger) -> None:
     running the test and reading its self-skip as green (the vacuous-skip class
     the state-parity leg documents)."""
     if not have("cargo"):
-        _skipped(led, "infra", "pg", "cdc-standby", "-", "cdc-standby: cargo absent", "no cargo")
+        _skipped(led, "infra", "pg", "cdc-standby", "-", "cdc-standby: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     RAN_LIVE_TESTS.add(CDC_STANDBY_TEST)
     if not _tcp_open("127.0.0.1", 5436):
@@ -1619,7 +1629,7 @@ def verify_live_only_coverage(led: Ledger) -> None:
     — the exclusion hides gradable mutants). Fails on any contradiction.
     SKIP when cargo-llvm-cov is absent — never a vacuous pass."""
     if not have("cargo"):
-        _skipped(led, "infra", "live-only", "coverage", "-", "live-only-cov: cargo absent", "no cargo")
+        _skipped(led, "infra", "live-only", "coverage", "-", "live-only-cov: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     probe = run(["cargo", "llvm-cov", "--version"], timeout=60)
     if not probe.ok:
@@ -1629,6 +1639,7 @@ def verify_live_only_coverage(led: Ledger) -> None:
             led, "infra", "live-only", "coverage", "-",
             "live-only-cov: cargo-llvm-cov not installed (cargo install cargo-llvm-cov)",
             "no llvm-cov",
+            cause=SkipCause.ENV,
         )
         skip_log = work_dir() / "offline_battery.skips"
         skip_log.write_text("")
@@ -1718,7 +1729,7 @@ def verify_coverage_matrices(led: Ledger) -> None:
     on a rotted ledger, not just CI. A drifted matrix means the coverage claims a
     release rests on are stale → NOT RELEASABLE. SKIP when cargo is absent."""
     if not have("cargo"):
-        _skipped(led, "coverage", "matrices", "ledger", "-", "coverage matrices: cargo absent", "no cargo")
+        _skipped(led, "coverage", "matrices", "ledger", "-", "coverage matrices: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     led.phase("Coverage-ledger drift-guards (all docs/*-matrix.yaml)")
     log_path = work_dir() / "matrices.log"
@@ -1750,7 +1761,7 @@ def verify_replica_read(led: Ledger) -> None:
     :3309); FAIL when it is down unless given up by `--without-replica-topologies`.
     """
     if not have("cargo"):
-        _skipped(led, "replica", "read", "-", "-", "replica read: cargo absent", "no cargo")
+        _skipped(led, "replica", "read", "-", "-", "replica read: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     # Registered up front, whatever the ports say: these rows are the verdict on their
     # tests, so the derived live-modules cell must not run them a second time.
@@ -1842,7 +1853,7 @@ def _replica_down(led: Ledger, label: str, what: str, hint: str) -> None:
         _skipped(led, "replica", label, "-", "-",
                  f"replica {label}: {what} — GIVEN UP on purpose by {_REPLICA_ESCAPE_FLAG} "
                  f"({hint}). This run does NOT grade the replica topologies and cannot support a tag.",
-                 f"no replica (given up by {_REPLICA_ESCAPE_FLAG}: NOT release-graded)")
+                 f"no replica (given up by {_REPLICA_ESCAPE_FLAG}: NOT release-graded)", cause=SkipCause.REDUCED)
         return
     _failed(led, "replica", label, "-", "-",
             f"replica {label}: {what} — the release gate is the ONLY runner of this topology "
@@ -1921,13 +1932,14 @@ def verify_pool_e2e(led: Ledger) -> None:
     Needs toxiproxy (:8474) and the main postgres (:5432); SKIP when down.
     """
     if not have("cargo"):
-        _skipped(led, "pool", "e2e", "-", "-", "pool e2e: cargo absent", "no cargo")
+        _skipped(led, "pool", "e2e", "-", "-", "pool e2e: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     if not _tcp_open("127.0.0.1", 8474):
         _skipped(
             led, "pool", "e2e", "-", "-",
             "pool e2e: no toxiproxy :8474 (docker compose up -d toxiproxy)",
             "no toxiproxy",
+            cause=SkipCause.ENV,
         )
         return
     _run_pool_module(
@@ -2011,7 +2023,7 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
     `again` is (an env var, the env that sets it): a test whose self-skip names the var runs a second time under that env, and that leg is its verdict."""
     led.phase(f"{label} · {phase}")
     if not have("cargo"):
-        _skipped(led, scenario, "batch", "-", "-", f"{label}: cargo absent", "no cargo")
+        _skipped(led, scenario, "batch", "-", "-", f"{label}: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     RAN_LIVE_MODULES.update(modules)
     log_path = work_dir() / f"{scenario}_{'_'.join(modules)[:120]}.log"
@@ -2039,7 +2051,7 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
         if verdict in ("PASS", "LEAK") and name in skipped:
             why = SKIP_ALLOWED.get(name)
             if why:
-                _skipped(led, scenario, "batch", "-", "-", f"{label} · {name} SKIPPED — {why}", "allowed skip")
+                _skipped(led, scenario, "batch", "-", "-", f"{label} · {name} SKIPPED — {why}", "allowed skip", cause=SkipCause.DESIGN)
             else:
                 _failed(led, scenario, "batch", "-", "-", f"{label} · {name} SELF-SKIPPED "
                         f"({skipped[name]}) — counted green by libtest; allow it in "
@@ -2073,12 +2085,12 @@ def verify_pool_split(led: Ledger) -> None:
     (:5432); SKIP when down.
     """
     if not have("cargo"):
-        _skipped(led, "pool", "split", "-", "-", "pool split: cargo absent", "no cargo")
+        _skipped(led, "pool", "split", "-", "-", "pool split: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
     for port, what in ((8474, "toxiproxy"), (5432, "source postgres")):
         if not _tcp_open("127.0.0.1", port):
             _skipped(led, "pool", "split", "-", "-",
-                     f"pool split: no {what} :{port} (docker compose up -d)", f"no {what}")
+                     f"pool split: no {what} :{port} (docker compose up -d)", f"no {what}", cause=SkipCause.ENV)
             return
     _run_pool_module(
         led,

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from dev.release_oracle.core import Ledger, isolate_state_db, nextest_filter, nextest_outcomes, self_skipped
+from dev.release_oracle.core import Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, self_skipped
 from dev.release_oracle.live_modules import EXCLUSIVE_ENV, exclusive_tests, live_modules_env
 from dev.seeded import run_record
 
@@ -394,7 +394,7 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceili
         if v.status == CAUGHT:
             led.passed(v.row.engine, "seeded", v.row.seed, "-", msg)
         elif v.status == NOT_GRADED_HERE:
-            led.skipped(v.row.engine, "seeded", v.row.seed, "-", msg)
+            led.skipped(v.row.engine, "seeded", v.row.seed, "-", msg, cause=SkipCause.ENV)
             here.append(f"{v.row.seed} × {v.row.engine}")
         elif v.status == NA:
             led.not_applicable(v.row.engine, "seeded", v.row.seed, "-", msg)

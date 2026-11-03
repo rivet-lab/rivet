@@ -28,7 +28,7 @@ import tempfile
 from pathlib import Path
 from collections.abc import Callable
 
-from .core import GREEN_CELLS, RAN_LIVE_TESTS, SKIP_ALLOWED, Ledger, self_skipped, ROOT, have, nextest_filter, nextest_passed, rivet_bin, run, test_passed
+from .core import GREEN_CELLS, RAN_LIVE_TESTS, SKIP_ALLOWED, Ledger, SkipCause, self_skipped, ROOT, have, nextest_filter, nextest_passed, rivet_bin, run, test_passed
 
 TESTS = (
     "same_named_configs_share_a_postgres_state_cdc_cycle",
@@ -67,7 +67,7 @@ def run_rig_tests(led: Ledger, scenario: str, tests: tuple[str, ...],
     if missing:
         led.skipped("-", scenario, "rig", "postgres",
                     f"{scenario}: cannot run — missing {', '.join(missing)}",
-                    f"prereq: {', '.join(missing)}")
+                    f"prereq: {', '.join(missing)}", cause=SkipCause.ENV)
         return
     # nextest, not plain `cargo test`: tests/live_suite.rs's own header says the
     # per-test process isolation this consolidated suite depends on is GONE under

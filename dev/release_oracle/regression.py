@@ -86,7 +86,7 @@ from ..pytools.field_replay import (
 )
 from ..pytools.shell import Fail as _ChildFail
 from .core import (
-    Ledger,
+    Ledger, SkipCause,
     Proc,
     ROOT,
     Status,
@@ -605,6 +605,7 @@ def absent_release_binary(
             "This run does NOT grade the release against the binary users are "
             "running and cannot support a tag.",
             "no prev binary (escape: NOT release-graded)",
+            cause=SkipCause.REDUCED,
         )
         return None
     led.failed(
@@ -633,6 +634,7 @@ def verify_release_regression(led: Ledger) -> None:
         led.skipped(
             _R_ENGINE, _R_VERSION, _R_SCENARIO, _R_STORE,
             "release regression: no RIVET_REGRESSION_SOURCE_URL", "no source",
+            cause=SkipCause.ENV,
         )
         return
 
@@ -759,7 +761,7 @@ def verify_scale_memory(led: Ledger) -> None:
         url = os.environ.get(uvar, "")
         if not url:
             led.skipped(engine, _S_VERSION, _S_SCENARIO, _S_STORE,
-                        f"scale[{engine}]: no {uvar}", "no url")
+                        f"scale[{engine}]: no {uvar}", "no url", cause=SkipCause.ENV)
             continue
         small = os.environ.get(f"RIVET_SCALE_{up}_SMALL") or "users"
         large = os.environ.get(f"RIVET_SCALE_{up}_LARGE") or "events"
@@ -1223,6 +1225,7 @@ def _verify_stand_restored(led: Ledger, p: Proc) -> None:
                 "and reading or repairing the globals now would grade — and break — the "
                 "OTHER run's live flip.",
                 "stand busy — not checked",
+                cause=SkipCause.ENV,
             )
         else:
             led.failed(
@@ -1259,6 +1262,7 @@ def _check_stand_under_lock(led: Ledger, p: Proc, container: str, said_so: bool,
                 f"verified restore — so nothing here is evidence of a mutated stand "
                 f"(exit {p.returncode}).",
                 "stand unreadable (transcript says clean)",
+                cause=SkipCause.ENV,
             )
             return
         led.failed(
@@ -1407,6 +1411,7 @@ def verify_field_symptom_replay(led: Ledger) -> None:
                 "never activated (criterion 1 FAILED) — this grades air, not the "
                 "fix",
                 "vacuous (fixture dead)",
+                cause=SkipCause.ENV,
             )
         elif status == "PASS":
             led.passed(_R_ENGINE, _FR_VERSION, cell, _FR_STORE,
@@ -1833,7 +1838,7 @@ def verify_harm_regression(led: Ledger) -> None:
         uvar = f"RIVET_ORACLE_{engine.upper()}_URL"
         url = os.environ.get(uvar, "")
         if not url:
-            led.skipped(engine, "-", scen, "local", f"harm[{engine}]: no {uvar}", "no url")
+            led.skipped(engine, "-", scen, "local", f"harm[{engine}]: no {uvar}", "no url", cause=SkipCause.ENV)
             continue
         if not _harm_seed(engine, url):
             led.failed(engine, "-", scen, "local",
@@ -1877,7 +1882,7 @@ def verify_harm_regression(led: Ledger) -> None:
             led.skipped(engine, "-", scen, "local",
                         f"harm[{engine}]: the previous release records none of "
                         f"{', '.join(HARM_GRADED[engine])} — baseline taken, compared from the "
-                        f"next release on (cur {mins['cur']})", "no prev counter")
+                        f"next release on (cur {mins['cur']})", "no prev counter", cause=SkipCause.DESIGN)
         else:
             led.passed(engine, "-", scen, "local",
                        f"harm[{engine}]: cur/prev min of 3 runs — {shown} (≤ ×{tol}+{slack})",

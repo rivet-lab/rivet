@@ -18,7 +18,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .core import ROOT, Ledger, rivet_bin, run, run_lanes, server_of
+from .core import ROOT, Ledger, SkipCause, rivet_bin, run, run_lanes, server_of
 from .engines import sql as _sql
 
 SCEN = "upgrade_continuity"
@@ -40,6 +40,14 @@ NOT_HERE = {
            "no ClickHouse CDC upgrade cell exists)",
     "TimeWindow": "a time_window load holds the run's clock window and the oracle grades whole tables",
 }
+
+
+#: The shapes an older release's `init` refuses an arm it predates or its engine lacks in: a named SKIP, any other refusal a FAIL.
+INIT_REFUSES = (
+    r"unexpected argument '--(?:clickhouse|bigquery)-[\w-]+' found",
+    r"RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED|source type '\w+' supports",
+    r"Unsupported source URL scheme",
+)
 
 
 def load_mode_arms(src: str) -> list[tuple[str, str, str]]:
@@ -169,14 +177,14 @@ def cell(led: Ledger, prev: Path, root: Path, engine: str, url: str, family: tup
     name = f"{label}[{engine}/{mode}{'+' + guard if guard else ''}->{load_mode}/{target}]"
     store = f"load-{target}"
     if mode in NOT_HERE:
-        return led.skipped(engine, "-", scen, store, f"{name}: {NOT_HERE[mode]}", "not here")
+        return led.skipped(engine, "-", scen, store, f"{name}: {NOT_HERE[mode]}", "not here", cause=SkipCause.DESIGN)
     if guard and (mode, guard) not in OPT_IN:
         return led.failed(engine, "-", scen, store, f"{name}: load_mode_of has an arm this matrix cannot "
                           "build — add its shape to upgrade_matrix.OPT_IN", "unmapped arm")
     line = OPT_IN.get((mode, guard)) if guard else ""
     if line is None:
         return led.skipped(engine, "-", scen, store, f"{name}: `rivet init` scaffolds no line for this "
-                           "arm's guard, so no generated config reaches it", "no init line")
+                           "arm's guard, so no generated config reaches it", "no init line", cause=SkipCause.DESIGN)
     proj, bucket, location = _warehouse()
     tag = f"{engine[:2]}{mode[:2].lower()}{'k' if guard else ''}{target[:2]}_{os.getpid()}"
     from .upgrade import _case
@@ -192,7 +200,7 @@ def cell(led: Ledger, prev: Path, root: Path, engine: str, url: str, family: tup
             return led.failed(engine, "-", scen, store, f"{name}: seed failed", "seed")
         if target == "clickhouse":
             if _ch(f"CREATE DATABASE IF NOT EXISTS {db}") is None:
-                return led.skipped(engine, "-", scen, store, f"{name}: ClickHouse on :8123 is down", "no clickhouse")
+                return led.skipped(engine, "-", scen, store, f"{name}: ClickHouse on :8123 is down", "no clickhouse", cause=SkipCause.ENV)
             wh = ["--clickhouse-url", CH_URL, "--clickhouse-database", db, "--clickhouse-user", CH_USER]
         else:
             gcp.bq_ensure_dataset(proj, db, location)
@@ -200,15 +208,18 @@ def cell(led: Ledger, prev: Path, root: Path, engine: str, url: str, family: tup
         init = run([str(prev), "init", "--source-env", "RIVET_UPG_URL", "--table", table, "--mode",
                     mode.lower(), "--gcs-bucket", bucket, *wh,
                     "-o", "c.yaml"], env=env, cwd=d)
+        if not init.ok and not any(re.search(p, init.why) for p in INIT_REFUSES):
+            return led.failed(engine, "-", scen, store, f"{name}: the previous release's init failed in a shape "
+                              f"no arm declares: {init.why}", "init failed")
         if not init.ok:
             return led.skipped(engine, "-", scen, store, f"{name}: the previous release's init refuses it: "
-                               f"{init.why}", "init refused")
+                               f"{init.why}", "init refused", cause=SkipCause.DESIGN)
         cfg_path = d / "c.yaml"
         if line:
             text = opt_in(cfg_path.read_text(), line)
             if text is None:
                 return led.skipped(engine, "-", scen, store, f"{name}: the previous release's init scaffolds "
-                                   f"no `# {line}` here", "no init line")
+                                   f"no `# {line}` here", "no init line", cause=SkipCause.DESIGN)
             cfg_path.write_text(text)
         for binary, step in ((prev, "run"), (prev, "load"), (None, "change"), (rivet_bin(), "run"),
                              (rivet_bin(), "load")):
@@ -219,7 +230,7 @@ def cell(led: Ledger, prev: Path, root: Path, engine: str, url: str, family: tup
             p = run([str(binary), step, "-c", "c.yaml"], env=env, cwd=d, timeout=None)
             if not p.ok and binary == prev and own_refusal_skips and "Error: config file" in p.stderr:
                 return led.skipped(engine, "-", scen, store, f"{name}: the old release refuses the config its own init "
-                                   f"wrote: {p.why}", "own config refused")
+                                   f"wrote: {p.why}", "own config refused", cause=SkipCause.DESIGN)
             if not p.ok:
                 who = "previous" if binary == prev else "this"
                 return led.failed(engine, "-", scen, store, f"{name}: {step} by {who} failed: "
@@ -237,8 +248,9 @@ def cell(led: Ledger, prev: Path, root: Path, engine: str, url: str, family: tup
         except Exception as e:  # noqa: BLE001 — an oracle error is a FAIL, never a pass
             return led.failed(engine, "-", scen, store, f"{name}: oracle error: {type(e).__name__}: {str(e)[:300]}",
                               "oracle error")
-        {"skip": led.skipped, "fail": led.failed, "pass": led.passed}[status](
-            engine, "-", scen, store, f"{name}: {detail}", status)
+        if status == "skip":
+            return led.skipped(engine, "-", scen, store, f"{name}: {detail}", status, cause=SkipCause.ENV)
+        {"fail": led.failed, "pass": led.passed}[status](engine, "-", scen, store, f"{name}: {detail}", status)
     finally:
         _drop(engine, url, table)
         if target == "clickhouse":
@@ -262,7 +274,7 @@ def matrix_lane_cells(prev: Path, root: Path, engines: tuple[str, ...] = ENGINES
             for target in targets:
                 if not url:
                     cells.append((None, lambda led, e=engine, f=family, t=target, v=uvar: led.skipped(
-                        e, "-", scen, f"load-{t}", f"{label}[{e}/{f[0]}]: no {v}", "no url")))
+                        e, "-", scen, f"load-{t}", f"{label}[{e}/{f[0]}]: no {v}", "no url", cause=SkipCause.ENV)))
                     continue
                 cells.append((server_of(url), lambda led, e=engine, u=url, f=family, t=target: cell(
                     led, prev, root, e, u, f, t, scen, label, own_refusal_skips)))

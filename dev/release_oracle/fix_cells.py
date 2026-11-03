@@ -36,7 +36,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .core import ROOT, Ledger, run
+from .core import ROOT, Ledger, SkipCause, run
 
 __all__ = ["verify_fix_cells", "GREEN_ON_PREV", "FIX_SCOPE"]
 
@@ -208,9 +208,12 @@ def verify_fix_cells(led: Ledger, only: list[str] | None = None) -> None:
         """nextest's `module::cell` keys as the bare cell name."""
         return {name.rsplit("::", 1)[-1]: v for name, v in d.items()}
 
-    record = {"PASS": led.passed, "FAIL": led.failed, "SKIP": led.skipped}
+    record = {"PASS": led.passed, "FAIL": led.failed}
     for status, cell, line in grade(cells, bare(verdicts), bare(skipped), allowed, tag, bare(panics)):
-        record[status]("all", "-", SCEN, "-", f"fix cell · {cell} — {line}")
+        if status == "SKIP":
+            led.skipped("all", "-", SCEN, "-", f"fix cell · {cell} — {line}", cause=SkipCause.ENV)
+        else:
+            record[status]("all", "-", SCEN, "-", f"fix cell · {cell} — {line}")
     for known in [] if only else stale_scope(credited(tag), FIX_SCOPE):
         led.failed("all", "-", SCEN, "-", f"fix scope · {known} — STALE: its commit is not among the fixes since {tag}, "
                    "or its pattern no longer separates the cells it credits; remove it from FIX_SCOPE")

@@ -55,7 +55,7 @@ from pathlib import Path
 
 import yaml
 
-from .core import Ledger, port_of, rivet_bin, run
+from .core import Ledger, SkipCause, port_of, rivet_bin, run
 from .regression import (
     HARM_GRADED,
     _TIME_BIN,
@@ -324,7 +324,7 @@ def _batch(led: Ledger, prev: Path, root: Path) -> None:
     for engine in ("postgres", "mysql", "mssql"):
         url = os.environ.get(f"RIVET_ORACLE_{engine.upper()}_URL", "")
         if not url:
-            led.skipped(engine, "-", SCEN, "batch", f"perf[{engine}]: no RIVET_ORACLE_{engine.upper()}_URL", "no url")
+            led.skipped(engine, "-", SCEN, "batch", f"perf[{engine}]: no RIVET_ORACLE_{engine.upper()}_URL", "no url", cause=SkipCause.ENV)
             continue
         for path, mode in (("full", "full"), ("keyset", "chunked"), ("incremental", "incremental"),
                            ("resume", "chunked")):
@@ -452,7 +452,7 @@ def _load(led: Ledger, prev: Path, root: Path) -> None:
     url = os.environ.get("RIVET_ORACLE_POSTGRES_URL", "")
     if not url or not os.environ.get("BQ_ORACLE_PROJECT") or not os.environ.get("BQ_ORACLE_BUCKET"):
         led.skipped("bigquery", "-", SCEN, "load", "perf[bigquery/load]: no postgres URL or "
-                    "BQ_ORACLE_PROJECT / BQ_ORACLE_BUCKET", "no bigquery")
+                    "BQ_ORACLE_PROJECT / BQ_ORACLE_BUCKET", "no bigquery", cause=SkipCause.ENV)
         return
     p, c = _load_side(prev, prev, root, url, "prev"), _load_side(rivet_bin(), prev, root, url, "cur")
     wt = _tolerance(os.environ.get("RIVET_PERF_BQ_WALL_TOL") or "2.0")
@@ -676,7 +676,7 @@ def _conns(led: Ledger, prev: Path) -> None:
         url = os.environ.get(f"RIVET_CDC_{engine.upper()}_URL", "")
         if not url:
             led.skipped(engine, "-", SCEN, "cdc-conns", f"perf[{engine}/cdc-conns]: no "
-                        f"RIVET_CDC_{engine.upper()}_URL", "no url")
+                        f"RIVET_CDC_{engine.upper()}_URL", "no url", cause=SkipCause.ENV)
             continue
         p, c = _conns_side(prev, engine, url), _conns_side(rivet_bin(), engine, url)
         if p is None or c is None:
@@ -734,7 +734,7 @@ def _batch_conns(led: Ledger, prev: Path, root: Path) -> None:
         url = os.environ.get(f"RIVET_ORACLE_{engine.upper()}_URL", "")
         if not url:
             led.skipped(engine, "-", SCEN, "batch-conns", f"perf[{engine}/batch-conns]: no "
-                        f"RIVET_ORACLE_{engine.upper()}_URL", "no url")
+                        f"RIVET_ORACLE_{engine.upper()}_URL", "no url", cause=SkipCause.ENV)
             continue
         for mode, ceiling in BATCH_CONN_CEILING.items():
             label = f"batch-conns-{mode}"
@@ -842,7 +842,7 @@ def _cdc20(led: Ledger, prev: Path, root: Path) -> None:
     """A multiplex CDC stream over twenty PostgreSQL tables, as the previous init generates it."""
     url = os.environ.get("RIVET_CDC_POSTGRES_URL", "")
     if not url:
-        led.skipped("postgres", "-", SCEN, "cdc-20", "perf[postgres/cdc-20]: no RIVET_CDC_POSTGRES_URL", "no url")
+        led.skipped("postgres", "-", SCEN, "cdc-20", "perf[postgres/cdc-20]: no RIVET_CDC_POSTGRES_URL", "no url", cause=SkipCause.ENV)
         return
     _grade(led, "postgres", "cdc-20-tables", _cdc20_side(prev, prev, root, url, "prev"),
            _cdc20_side(rivet_bin(), prev, root, url, "cur"))
@@ -852,7 +852,7 @@ def _cdc(led: Ledger, prev: Path) -> None:
     for engine in ("postgres", "mysql", "mssql", "mongo"):
         url = os.environ.get(f"RIVET_CDC_{engine.upper()}_URL", "")
         if not url:
-            led.skipped(engine, "-", SCEN, "cdc", f"perf[{engine}/cdc]: no RIVET_CDC_{engine.upper()}_URL", "no url")
+            led.skipped(engine, "-", SCEN, "cdc", f"perf[{engine}/cdc]: no RIVET_CDC_{engine.upper()}_URL", "no url", cause=SkipCause.ENV)
             continue
         # MongoDB has no transaction buffer, so there is nothing for it to spill.
         for path in ("cdc", "cdc-resume") if engine == "mongo" else ("cdc", "cdc-spill", "cdc-resume"):
@@ -871,7 +871,7 @@ def _aa(led: Ledger, prev: Path, root: Path) -> None:
     url = os.environ.get("RIVET_ORACLE_POSTGRES_URL", "")
     cdc_url = os.environ.get("RIVET_CDC_POSTGRES_URL", "")
     if not url or not cdc_url:
-        led.skipped("postgres", "-", SCEN, "a/a", "perf A/A: no postgres URLs", "no url")
+        led.skipped("postgres", "-", SCEN, "a/a", "perf A/A: no postgres URLs", "no url", cause=SkipCause.ENV)
         return
     table = f"perf_aa_{os.getpid()}"
     if not _seed("postgres", url, table, ROWS, with_cursor=True):
@@ -966,7 +966,7 @@ def _ch_load(led: Ledger, prev: Path, root: Path) -> None:
     url = os.environ.get("RIVET_ORACLE_POSTGRES_URL", "")
     if not url or not os.environ.get("BQ_ORACLE_BUCKET") or _ch("SELECT 1") is None:
         led.skipped("clickhouse", "-", SCEN, "load", "perf[clickhouse/load]: no postgres URL, "
-                    "BQ_ORACLE_BUCKET or ClickHouse on :8123", "no clickhouse")
+                    "BQ_ORACLE_BUCKET or ClickHouse on :8123", "no clickhouse", cause=SkipCause.ENV)
         return
     p, c = _ch_load_side(prev, prev, root, url, "prev"), _ch_load_side(rivet_bin(), prev, root, url, "cur")
     wt = _tolerance(os.environ.get("RIVET_PERF_BQ_WALL_TOL") or "2.0")

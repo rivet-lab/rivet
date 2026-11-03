@@ -84,7 +84,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..pytools import registry
-from .core import (Ledger, cell_gate, cell_parallel, container_for_port, docker_exec,
+from .core import (Ledger, SkipCause, cell_gate, cell_parallel, container_for_port, docker_exec,
                    have, port_of, run, rivet)
 from . import scenarios
 
@@ -329,6 +329,7 @@ def _downstream_unreached(led: Ledger, engine: str, tag: str, store: str, after:
             engine, tag, f"blessed:{s}", store,
             f"{engine} {tag} {store} · {s} — not reached ({after} failed)",
             f"unreached after {after}",
+            cause=SkipCause.DOWNSTREAM,
         )
 
 
@@ -498,7 +499,7 @@ def sc_blessed_path(
         # CDC leg and blessed_flow already carry.
         raw = scenarios.store_dest(store, _bucket(store), cloud_prefix(engine, tag, table, scenario))
         if not raw:
-            led.skipped(engine, tag, "blessed:init", store, f"{store} — no destination block")
+            led.skipped(engine, tag, "blessed:init", store, f"{store} — no destination block", cause=SkipCause.ENV)
             _downstream_unreached(led, engine, tag, store, "init")
             return
         # `store_dest` returns the CONTENT under `destination:`, already
@@ -643,7 +644,7 @@ def sc_blessed_path(
 
     # ── independent oracle ────────────────────────────────────────────────────
     if not _duckdb_ok():
-        led.skipped(engine, tag, "blessed:oracle", store, f"{engine} {tag} {store} · oracle — no duckdb")
+        led.skipped(engine, tag, "blessed:oracle", store, f"{engine} {tag} {store} · oracle — no duckdb", cause=SkipCause.ENV)
     else:
         want = _source_rows(engine, url, table)
         if store == "local":
@@ -662,6 +663,7 @@ def sc_blessed_path(
             led.skipped(
                 engine, tag, "blessed:oracle", store,
                 f"{engine} {tag} {store} · oracle — source unreachable (source={want})",
+                cause=SkipCause.ENV,
             )
         else:
             # want>=0 and duckdb works (checked above): a duck_rows<0 here is an
@@ -743,7 +745,7 @@ def sc_bq_cycle(led: Ledger, engine: str, tag: str, url: str, table: str) -> Non
     bucket = os.environ.get("BQ_ORACLE_BUCKET", "")
     if not have("bq") or not proj:
         led.skipped(engine, tag, "blessed:bq", "bigquery",
-                    f"{engine} {tag} · bigquery — no bq CLI or project", "no creds")
+                    f"{engine} {tag} · bigquery — no bq CLI or project", "no creds", cause=SkipCause.ENV)
         return
 
     work = scenarios.Scope(engine, tag).dir("bq", table)
@@ -825,7 +827,7 @@ def verify_blessed_path(
         for name, sc in SCENARIOS.items():
             if not sc["applies"](t, engine):
                 led.skipped(engine, tag, f"blessed:{name}", "local",
-                            f"{engine} {tag} {t} · {name} — not applicable to this table/engine")
+                            f"{engine} {tag} {t} · {name} — not applicable to this table/engine", cause=SkipCause.DESIGN)
                 continue
             tasks.append((t, name, "local", "", "local/sq"))
     if state_url:
@@ -837,6 +839,7 @@ def verify_blessed_path(
         led.skipped(
             engine, tag, "blessed:backend", "postgres",
             f"{engine} {tag} · postgres state backend — no --state-url given",
+            cause=SkipCause.ENV,
         )
     if scenarios.store_up("gcs"):
         for t in tables:
@@ -844,7 +847,7 @@ def verify_blessed_path(
                 if sc["applies"](t, engine):
                     tasks.append((t, name, "gcs", "", "gcs/sq"))
     else:
-        led.skipped(engine, tag, "blessed:store", "gcs", f"{engine} {tag} · gcs — store not up")
+        led.skipped(engine, tag, "blessed:store", "gcs", f"{engine} {tag} · gcs — store not up", cause=SkipCause.ENV)
 
     # The warehouse cycle runs on ONE table per engine, deliberately: it costs a
     # real GCS round-trip and a BigQuery job, and what it proves — that a foreign

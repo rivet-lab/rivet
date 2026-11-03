@@ -33,12 +33,12 @@ import shutil
 from pathlib import Path
 
 try:
-    from .core import Ledger, have, rivet, run
+    from .core import Ledger, SkipCause, have, rivet, run
     from .duck import Oracle
     from .scenarios import NO_TIMEOUT, _declared_read, _failed, _passed, _skipped, Scope, cell_export, work_dir
     from ..pytools.duckcli import ARGV as DUCKDB
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
-    from core import Ledger, have, rivet, run  # type: ignore
+    from core import Ledger, SkipCause, have, rivet, run  # type: ignore
     from duck import Oracle  # type: ignore
     from scenarios import NO_TIMEOUT, _declared_read, _failed, _passed, _skipped, Scope, cell_export, work_dir  # type: ignore
     DUCKDB = [__import__("sys").executable, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "pytools" / "duckcli.py")]
@@ -112,10 +112,11 @@ def verify_corruption_is_detected(led: Ledger, engine: str, tag: str, url: str) 
             led, engine, tag, "corruption_is_detected", "-",
             f"corruption-detected: no probe table for {engine} (the golden seed is SQL-engine only)",
             "no probe",
+            cause=SkipCause.DESIGN,
         )
         return
     if not have("duckdb"):
-        _skipped(led, engine, tag, "corruption_is_detected", "-", "corruption-detected: duckdb absent", "no duckdb")
+        _skipped(led, engine, tag, "corruption_is_detected", "-", "corruption-detected: duckdb absent", "no duckdb", cause=SkipCause.ENV)
         return
 
     dest = Scope(engine, tag).dir("corrupt")
@@ -278,6 +279,7 @@ def _cdc_corruption_locked(led: Ledger, engine: str, tag: str, url: str, cdc_mod
             led, engine, tag, "cdc_corruption_is_detected", "-",
             f"cdc-corruption[{engine}]: no {uvar} (the CDC stand is opt-in, like the e2e cell)",
             "no url",
+            cause=SkipCause.ENV,
         )
         return
 
@@ -408,6 +410,7 @@ def _cdc_corruption_locked(led: Ledger, engine: str, tag: str, url: str, cdc_mod
                 f"reader at all — neither a changed value nor an unreadable file. A mutation that "
                 f"changes nothing cannot grade `validate`, so SKIP rather than pass",
                 "no observable flip",
+                cause=SkipCause.DESIGN,
             )
             return
         if target.stat().st_size != size_before:
@@ -488,6 +491,7 @@ def verify_reconcile_and_validate_cover_both_sides(led: Ledger, engine: str, tag
             f"reconcile-coverage: runs on postgres only — the property is command-level, not "
             f"engine-level, and one engine's chunked export exercises it",
             "one engine",
+            cause=SkipCause.DESIGN,
         )
         return
 
