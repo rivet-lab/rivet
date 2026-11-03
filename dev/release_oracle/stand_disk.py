@@ -1,4 +1,4 @@
-"""Free disk on the host and on the docker VM's data disk: a floor before the gate starts, a watchdog during it.
+"""Free disk on the host and on the docker VM's data disk: a floor before the gate starts, a watchdog during it (the stand watchdog every probe of `stand_health` runs in).
 
 On 2026-10-22 a full gate filled the host disk; the docker VM's data disk shares it, so InnoDB
 stopped on "Disk is full", the Postgres state server crashed, and ~150 cells went red with no
@@ -15,12 +15,13 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from .core import ROOT
 
-__all__ = ["START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low", "Watchdog"]
+__all__ = ["START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low", "disk_reason", "Probe", "Watchdog"]
 
 START_FLOOR_GIB = 150  # ratchet-pin: gate-start-free-disk-floor
 WATCH_FLOOR_GIB = 20  # ratchet-pin: gate-watchdog-free-disk-floor
@@ -79,13 +80,28 @@ def low(free: dict[str, float | None], floor: float = WATCH_FLOOR_GIB) -> str:
     return f"{', '.join(short)} under {floor:.0f} GiB free ({shown(free)})" if short else ""
 
 
-class Watchdog:
-    """Reads both disks every `every` seconds; the first reading under the floor is kept as `reason`."""
+def disk_reason() -> str:
+    """Why the stand's disks no longer grade the product ("" = they do)."""
+    return low(free_gib())
 
-    def __init__(self, read: Callable[[], dict[str, float | None]] = free_gib, every: float = 60.0,
-                 floor: float = WATCH_FLOOR_GIB) -> None:
+
+@dataclass(frozen=True)
+class Probe:
+    """One stand check: `read()` returns why the stand is no longer valid ("" = valid), run at most every `every` seconds."""
+
+    read: Callable[[], str]
+    every: float
+
+
+class Watchdog:
+    """Runs each probe on its own cadence; the first reason any probe gives is kept as `reason`."""
+
+    def __init__(self, probes: Sequence[Probe] | None = None, tick: float = 5.0,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.reason = ""
-        self._read, self._every, self._floor = read, every, floor
+        self._probes = list(probes) if probes is not None else [Probe(disk_reason, 60.0)]
+        self._due = [0.0] * len(self._probes)
+        self._tick, self._clock = tick, clock
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -93,22 +109,30 @@ class Watchdog:
         self._thread.start()
         return self
 
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            why = low(self._read(), self._floor)
+    def poll(self, force: bool = False) -> None:
+        """One pass: every probe that is due (all of them when `force`) is read; the first reason is kept and said."""
+        now = self._clock()
+        for i, probe in enumerate(self._probes):
+            if not force and now < self._due[i]:
+                continue
+            self._due[i] = now + probe.every
+            why = probe.read()
             if why and not self.reason:
                 self.reason = why
                 print(f"  ✗ STAND-INVALID: {why}; the reds from here on are the stand's, not the product's",
                       flush=True)
-            self._stop.wait(self._every)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self.poll()
+            self._stop.wait(self._tick)
 
     def stop(self) -> str:
-        """Stop, after one last reading; the reason (empty when the disks held)."""
+        """Stop, after one last reading of every probe; the reason (empty when the stand held)."""
         self._stop.set()
-        self._thread.join(timeout=5)
-        why = low(self._read(), self._floor)
-        if why and not self.reason:
-            self.reason = why
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)
+        self.poll(force=True)
         return self.reason
 
 
@@ -129,17 +153,30 @@ def self_test() -> None:
                      {"host": 5.0, "docker VM": 3.0}])
     last = {"host": 200.0, "docker VM": 100.0}
 
-    def read() -> dict[str, float | None]:
+    def read() -> str:
         nonlocal last
         last = next(readings, last)
-        return last
+        return low(last)
 
-    dog = Watchdog(read, every=0.01).start()
-    while not dog.reason:
-        time.sleep(0.001)
-    assert dog.stop().startswith("docker VM under 20 GiB free (host 200 GiB, docker VM 12 GiB)"), dog.reason
-    held = Watchdog(lambda: {"host": 200.0, "docker VM": 100.0}, every=0.01).start()
-    assert held.stop() == ""
+    now = [0.0]
+    dog = Watchdog([Probe(read, 60.0)], clock=lambda: now[0])
+    dog.poll()
+    assert dog.reason == "", "a disk above the floor is not a reason"
+    now[0] = 30.0
+    dog.poll()
+    assert dog.reason == "", "a probe is not read before it is due"
+    now[0] = 61.0
+    dog.poll()
+    assert dog.reason.startswith("docker VM under 20 GiB free (host 200 GiB, docker VM 12 GiB)"), dog.reason
+    assert dog.stop().startswith("docker VM under 20 GiB free (host 200 GiB, docker VM 12 GiB)"), "the first reason is kept"
+    quick = Probe(lambda: "", 1.0)
+    slow = Probe(lambda: "state DB down", 600.0)
+    cadence = Watchdog([quick, slow], clock=lambda: now[0])
+    now[0] = 0.0
+    cadence.poll()
+    assert cadence.reason == "state DB down", "every probe is read on the first pass"
+    held = Watchdog([Probe(lambda: "", 1.0)])
+    assert held.start().stop() == ""
     print("stand_disk self-test: ok")
 
 

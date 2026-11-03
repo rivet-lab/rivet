@@ -450,7 +450,7 @@ class Ledger:
                                   "Not a product verdict; re-run them."))
         if self.stand_invalid:
             print(self._c("1;35", f"  STAND-INVALID — {self.stand_invalid} during the run; its reds grade the stand, "
-                                  "not the product. Free the disk and run the gate again."))
+                                  "not the product. Restore the stand (disk, state DB, containers) and run the gate again."))
             return 1
         if self.red:
             print(self._c("1;31", "  NOT RELEASABLE — one or more cells failed (see ✗ above)."))
@@ -476,13 +476,13 @@ def first_error(text: str) -> str:
 TIMINGS_HISTORY = ROOT / "dev" / "release-oracle" / "timings.jsonl"
 
 
-def tree_identity() -> tuple[str, bool]:
-    """HEAD's full commit and whether tracked files differ from it: taken at the gate's start, before the gate writes its own evidence."""
-    sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+def tree_identity(root: Path = ROOT) -> tuple[str, bool]:
+    """HEAD's full commit and whether tracked files differ from it, the evidence ledger every gate run rewrites apart."""
+    from ..pytools import evidence
+
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
-                           capture_output=True, text=True).stdout.strip() != ""
-    return sha, dirty
+    return sha, evidence.tree_dirty(root)
 
 
 def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tuple[str, float]],

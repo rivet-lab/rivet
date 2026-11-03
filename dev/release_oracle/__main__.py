@@ -306,6 +306,36 @@ def _raising_stage_self_test() -> None:
     print("self-test ok: a stage that raises is one FAIL row naming it; the gate still reports and exits 1")
 
 
+def _tree_identity_self_test() -> None:
+    """The evidence ledger every gate run rewrites does not dirty the tree the next run records; an edited source file still does."""
+    from . import core
+    from ..pytools import evidence
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        git = lambda *a: run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *a])  # noqa: E731
+        (root / "docs/evidence").mkdir(parents=True)
+        (root / "src").mkdir()
+        (root / "docs/evidence/last-green.yaml").write_text("cells: {}\n")
+        (root / "src/main.rs").write_text("fn main() {}\n")
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-q", "-m", "base")
+        head = git("rev-parse", "HEAD").stdout.strip()
+        assert core.tree_identity(root) == (head, False)
+        (root / evidence.LEDGER_REL).write_text("cells: {m: {green: 2026-11-03}}\n")
+        assert core.tree_identity(root) == (head, False), "a gate run's own ledger rewrite must not make the next run dirty"
+        git("add", "-A")
+        assert core.tree_identity(root) == (head, False), "a staged ledger must not either"
+        (root / "src/main.rs").write_text("fn main() { panic!() }\n")
+        assert core.tree_identity(root) == (head, True), "an edited source file must still be dirty"
+        git("checkout", "-q", "--", "src/main.rs")
+        (root / "docs/evidence/other.yaml").write_text("x: 1\n")
+        git("add", "-A")
+        assert core.tree_identity(root) == (head, True), "only the ledger's exact path is exempt"
+    print("self-test ok: the evidence ledger is exempt from the dirty-tree check, nothing else is")
+
+
 def _verdict_scope_self_test() -> None:
     """A partial run writes no timings line and never prints RELEASE-READY; an ungraded cell blocks without reading as a product failure."""
     import contextlib
@@ -532,6 +562,7 @@ def _stages_self_test() -> None:
     assert STAGES_RUN["verify_a"] == 2, "re-recording must not wrap the wrapper"
     _raising_stage_self_test()
     _verdict_scope_self_test()
+    _tree_identity_self_test()
     _gate_kind_self_test()
     release_path.hygiene_self_test()
     doc = {
@@ -635,9 +666,10 @@ def _self_test() -> int:
     from .partner_shape import init_slot
     assert init_slot("    cdc:\n      slot: rivet_rivet_public_cdc  # logical slot\n") == "rivet_rivet_public_cdc"
     assert init_slot("mode: cdc\n") is None, "a config naming no slot names none"
-    from . import stand_disk, stand_memory, stand_profiles
+    from . import stand_disk, stand_health, stand_memory, stand_profiles
     failure.self_test()
     stand_disk.self_test()
+    stand_health.self_test()
     stand_memory.self_test()
     stand_profiles.self_test()
     sunk = Ledger(colour=False)
@@ -649,6 +681,17 @@ def _self_test() -> int:
         rc = sunk.report()
     assert rc == 1 and sunk.verdict() == "STAND-INVALID" and "STAND-INVALID" in said.getvalue() \
         and "NOT RELEASABLE" not in said.getvalue(), "a run whose disk filled reports the stand, not product reds"
+    import inspect
+    assert "stand_health.watchdog(state_url)" in inspect.getsource(main), "the gate runs the stand watchdog with the run's state URL"
+    for answer, expect in (("57P03 recovery", "STAND-INVALID"), ("", "NOT RELEASABLE")):
+        led = Ledger(colour=False)
+        led._buf = []
+        led.failed("postgres", "16", "bq-load", "-", "state(pg): connect failed: the database system is in recovery mode")
+        down = stand_disk.Watchdog([stand_disk.Probe(lambda: stand_health.state_reason("postgresql://u@127.0.0.1:1/s", lambda *a: answer, lambda s: None), 1.0)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            led.stand_invalid = down.stop()
+            led.report()
+        assert led.verdict() == expect, (answer, led.verdict())
     off = Ledger(colour=False)
     off._buf = []
     verify_seeded_recall(off, False)
@@ -1869,7 +1912,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
     config = gate_config(ns)
-    from . import stand_disk
+    from . import stand_disk, stand_health
     refused = stand_disk.start_refusal(stand_disk.free_gib())
     if refused:
         print(refused, file=sys.stderr)
@@ -1991,7 +2034,7 @@ def main(argv: list[str] | None = None) -> int:
         for line in banner:
             print(line)
 
-        dog = stand_disk.Watchdog().start()
+        dog = stand_health.watchdog(state_url).start()
         built: dict = {}
         run_stages(led, build_stages(ns, built))
         if not ns.no_clean and not built.get("ok"):
