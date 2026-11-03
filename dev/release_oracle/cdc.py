@@ -56,7 +56,7 @@ try:  # imported as part of the package
         state_db_name,
         HERE,
         ROOT,
-        Ledger,
+        Ledger, SkipCause,
         Proc,
         container_for_port,
         docker_exec,
@@ -74,7 +74,7 @@ except ImportError:  # run directly out of dev/release_oracle/
         state_db_name,
         HERE,
         ROOT,
-        Ledger,
+        Ledger, SkipCause,
         Proc,
         container_for_port,
         docker_exec,
@@ -700,13 +700,13 @@ def verify_cdc_e2e(led: Ledger) -> None:
         uvar = f"RIVET_CDC_{eng.upper()}_URL"
         url = os.environ.get(uvar, "")
         if not url:
-            led.skipped(eng, "cdc", "e2e", "-", f"cdc[{eng}]: no {uvar}", "no url")
+            led.skipped(eng, "cdc", "e2e", "-", f"cdc[{eng}]: no {uvar}", "no url", cause=SkipCause.ENV)
             continue
         any_engine = True
         down = _cdc_engine_down(eng, url)
         if down is not None:
             for cell in ("e2e", "resume-exact", "large-tx-atomic"):
-                led.skipped(eng, "cdc", cell, "-", f"cdc[{eng}]: CDC service down — {down}", "service down")
+                led.skipped(eng, "cdc", cell, "-", f"cdc[{eng}]: CDC service down — {down}", "service down", cause=SkipCause.ENV)
             continue
         led.phase(
             f"CDC end-to-end [{eng}] (anchor → typed changes → capture → store → "
@@ -722,7 +722,7 @@ def verify_cdc_e2e(led: Ledger) -> None:
             continue
         cap = _cdc_write_cfg(eng, url, work, "s3", cdc_block)
         if cap is None:
-            led.skipped(eng, "cdc", "e2e", "s3", f"cdc[{eng}]: no s3 dest", "no dest")
+            led.skipped(eng, "cdc", "e2e", "s3", f"cdc[{eng}]: no s3 dest", "no dest", cause=SkipCause.ENV)
             continue
 
         # 1. clean capture: anchor (A) → changes → capture (B)
@@ -790,7 +790,7 @@ def verify_cdc_e2e(led: Ledger) -> None:
         _cdc_pg_starvation_and_churn(led, pg)
     else:
         for cell in ("pg-starvation", "pg-ddl-churn"):
-            led.skipped("postgres", "cdc", cell, "-", "cdc: no RIVET_CDC_POSTGRES_URL or its CDC service is down", "no pg cdc")
+            led.skipped("postgres", "cdc", cell, "-", "cdc: no RIVET_CDC_POSTGRES_URL or its CDC service is down", "no pg cdc", cause=SkipCause.ENV)
     _cdc_state_parity(led)
 
 
@@ -1050,7 +1050,7 @@ def _cdc_pg_starvation_and_churn(led: Ledger, url: str) -> None:
     dburl = urllib.parse.urlunsplit(u._replace(path=f"/{db}"))
     c = _container_for(url)
     if c is None:
-        led.skipped("postgres", "cdc", "pg-starvation", "-", f"cdc pg-starvation: {_no_container(url).stderr}", "down")
+        led.skipped("postgres", "cdc", "pg-starvation", "-", f"cdc pg-starvation: {_no_container(url).stderr}", "down", cause=SkipCause.ENV)
         return
 
     def q(sql: str) -> Proc:
@@ -1128,6 +1128,7 @@ def _cdc_state_parity(led: Ledger) -> None:
             "-",
             "cdc state-parity: no RIVET_CDC_POSTGRES_URL",
             "no pg cdc url",
+            cause=SkipCause.ENV,
         )
         return
     # Self-contained store creds — this leg also runs standalone under --bless-cdc,
@@ -1143,7 +1144,7 @@ def _cdc_state_parity(led: Ledger) -> None:
     if cap1 is None:
         # The bash had no guard here: it ran rivet against a config that was never
         # written and blamed the missing snapshot on the state backend.
-        led.skipped("postgres", "cdc", "state-parity", "-", "cdc state-parity: source setup failed", "setup")
+        led.skipped("postgres", "cdc", "state-parity", "-", "cdc state-parity: source setup failed", "setup", cause=SkipCause.ENV)
         return
     # The SQLite half must actually USE SQLite. This leg exists to compare the two
     # backends, so it cannot inherit whichever one the gate is pointed at: with
@@ -1164,7 +1165,7 @@ def _cdc_state_parity(led: Ledger) -> None:
         # non-green — but only one of them means rivet did something wrong.
         _cdc_postgres_cleanup(url, w1)
         led.skipped("postgres", "cdc", "state-parity", "-",
-                    f"cdc state-parity: state db unreadable ({e})", "unreadable")
+                    f"cdc state-parity: state db unreadable ({e})", "unreadable", cause=SkipCause.ENV)
         return
     _cdc_postgres_cleanup(url, w1)
 
@@ -1194,7 +1195,7 @@ def _cdc_state_parity(led: Ledger) -> None:
                 # here would blame rivet for the gate's own connectivity.
                 _cdc_postgres_cleanup(url, w2)
                 led.skipped("postgres", "cdc", "state-parity", "-",
-                            f"cdc state-parity: pg state db unreadable ({e})", "unreadable")
+                            f"cdc state-parity: pg state db unreadable ({e})", "unreadable", cause=SkipCause.ENV)
                 return
         _cdc_postgres_cleanup(url, w2)
 
@@ -1408,11 +1409,11 @@ def verify_cdc_differential(led: "Ledger") -> None:
     runner = root / "dev" / "cdc-oracle" / "run.py"
     if not runner.is_file():
         led.skipped("-", "cdc", "differential", "-",
-                    f"differential: {runner} absent", "no harness")
+                    f"differential: {runner} absent", "no harness", cause=SkipCause.ENV)
         return
     if shutil.which("docker") is None:
         led.skipped("-", "cdc", "differential", "-",
-                    "differential: docker unavailable on this runner", "no docker")
+                    "differential: docker unavailable on this runner", "no docker", cause=SkipCause.ENV)
         return
 
     led.phase("CDC differential [rivet vs Debezium] (same window, compared in DuckDB)")

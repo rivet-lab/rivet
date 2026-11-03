@@ -38,7 +38,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .core import ROOT, Ledger, Proc, docker, have, run
+from .core import ROOT, Ledger, SkipCause, Proc, docker, have, run
 
 # ── scratch dir ────────────────────────────────────────────────────────────────
 # The bash driver owned a single `$WORK=$(mktemp -d)` for the whole run and this
@@ -78,7 +78,7 @@ def _cargo(*args: str, timeout: float | None = None) -> Proc:
 def verify_release_build_path(led: Ledger) -> None:
     if not have("cargo"):
         led.skipped(_ENGINE, _VERSION, _SCENARIO, _STORE,
-                    "release build path: cargo absent", "no cargo")
+                    "release build path: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
 
     led.phase(

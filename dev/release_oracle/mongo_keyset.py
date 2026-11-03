@@ -12,11 +12,11 @@ import shutil
 from pathlib import Path
 
 try:
-    from .core import Ledger, rivet
+    from .core import Ledger, SkipCause, rivet
     from .duck import Oracle
     from .scenarios import NO_TIMEOUT, Scope, _declared_read, _failed, _passed, _skipped
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
-    from core import Ledger, rivet  # type: ignore
+    from core import Ledger, SkipCause, rivet  # type: ignore
     from duck import Oracle  # type: ignore
     from scenarios import NO_TIMEOUT, Scope, _declared_read, _failed, _passed, _skipped  # type: ignore
 
@@ -50,7 +50,7 @@ def sc_mongo_keyset(led: Ledger, engine: str, tag: str, url: str) -> None:
     try:
         import pymongo
     except ImportError:
-        _skipped(led, engine, tag, SCEN, "-", "mongo-keyset: pymongo absent", "no pymongo")
+        _skipped(led, engine, tag, SCEN, "-", "mongo-keyset: pymongo absent", "no pymongo", cause=SkipCause.ENV)
         return
     sc = Scope(engine, tag)
     uniform, mixed = sc.name("mk", str(os.getpid())), sc.name("mkh", str(os.getpid()))
@@ -64,7 +64,7 @@ def sc_mongo_keyset(led: Ledger, engine: str, tag: str, url: str) -> None:
                 db[mixed].insert_many([{"_id": i, "v": "n"} for i in range(1, 51)]
                                       + [{"_id": f"s{i:03d}", "v": "s"} for i in range(50)])
             except pymongo.errors.PyMongoError as e:
-                _skipped(led, engine, tag, SCEN, "-", f"mongo-keyset: cannot seed ({e})", "seed")
+                _skipped(led, engine, tag, SCEN, "-", f"mongo-keyset: cannot seed ({e})", "seed", cause=SkipCause.ENV)
                 return
             src = f"{db[uniform].count_documents({})} {len(db[uniform].distinct('_id'))}"
             fails, counts = [], {}
