@@ -3465,7 +3465,7 @@ mod tests {
         assert_eq!(paired, vec!["audit", "orders"]);
         let recipe = |t: &str| crate::config::backfill_recipe_for(&pairs, t).expect("paired above");
         assert_eq!(
-            recipe("orders").chunk_by_key.as_deref(),
+            recipe("orders").chunk_key_lead(),
             Some("id"),
             "a single-column PK reads by keyset, as init would scaffold the batch export"
         );

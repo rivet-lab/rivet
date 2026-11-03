@@ -6,7 +6,7 @@
 
 mod cursor;
 mod pipelined;
-pub(crate) use cursor::{extract_first_cursor_value, extract_last_cursor_value};
+pub(crate) use cursor::{extract_first_cursor_value, extract_key_tuple, extract_last_cursor_value};
 pub(crate) use pipelined::PipelinedSink;
 
 use std::io::BufWriter;
@@ -51,6 +51,8 @@ pub(crate) struct ExportSink {
     /// When `Some`, `on_batch` extracts the last cursor value inline so we never
     /// hold a full batch in memory just for post-run cursor commit.
     pub(in crate::pipeline) cursor_column: Option<String>,
+    /// The composite key's columns after `cursor_column`; when non-empty the cursor is a JSON tuple.
+    pub(in crate::pipeline) cursor_rest: Vec<String>,
     /// The `columns:` override keys, checked against the result's spelling at `on_schema`.
     override_columns: Vec<String>,
     /// Columns the settle window compares; must be date/timestamp.
@@ -436,6 +438,10 @@ impl ExportSink {
             parts_landed: std::sync::Arc::clone(&plan.parts_landed),
             part_rows: 0,
             cursor_column: plan.strategy.cursor_extract_column().map(str::to_string),
+            cursor_rest: match &plan.strategy {
+                ExtractionStrategy::Keyset(k) => k.key_rest.clone(),
+                _ => Vec::new(),
+            },
             override_columns: plan.column_overrides.keys().cloned().collect(),
             settle_columns: plan
                 .strategy
@@ -893,7 +899,7 @@ impl BatchSink for ExportSink {
             _ => schema.clone(),
         };
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        if let Some(c) = &self.cursor_column {
+        for c in self.cursor_column.iter().chain(&self.cursor_rest) {
             crate::types::refuse_cursor_case_miss(c, &names)?;
         }
         refuse_override_case_miss(&self.override_columns, &names)?;
@@ -1023,7 +1029,19 @@ impl BatchSink for ExportSink {
 
         // Extract cursor value inline so the batch can be freed immediately after
         // on_batch returns — avoids holding one full batch in memory for the rest of the run.
-        if let (Some(col), Some(schema)) = (&self.cursor_column, &self.schema) {
+        if let (Some(col), Some(schema)) = (&self.cursor_column, &self.schema)
+            && !self.cursor_rest.is_empty()
+        {
+            let columns: Vec<&str> = std::iter::once(col.as_str())
+                .chain(self.cursor_rest.iter().map(String::as_str))
+                .collect();
+            if self.first_cursor_value.is_none() {
+                self.first_cursor_value = extract_key_tuple(batch, &columns, schema, false);
+            }
+            if let Some(v) = extract_key_tuple(batch, &columns, schema, true) {
+                self.last_cursor_value = Some(v);
+            }
+        } else if let (Some(col), Some(schema)) = (&self.cursor_column, &self.schema) {
             // Only ADVANCE the mark, never erase it. A batch with no readable
             // cursor value (every row NULL) says nothing about progress; the
             // unconditional assignment let it overwrite the good mark

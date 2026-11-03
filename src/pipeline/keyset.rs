@@ -192,6 +192,10 @@ fn fill_keyset_page(
         last_run_at: None,
         cursor_column: None,
     });
+    let key_rest = match &plan.strategy {
+        ExtractionStrategy::Keyset(k) => k.key_rest.as_slice(),
+        _ => &[],
+    };
     let mut sink = ExportSink::new(plan)?;
     src.export(
         // `query` is the unwrapped base; the driver wraps it with the keyset
@@ -202,6 +206,7 @@ fn fill_keyset_page(
             .with_incremental(Some(key_plan))
             .with_cursor(cursor_state.as_ref())
             .with_upper_bound(upper)
+            .with_key_rest(key_rest)
             .with_page_limit(page_size),
         &mut sink,
     )?;
