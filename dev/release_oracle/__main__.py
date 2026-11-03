@@ -45,7 +45,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .core import Ledger, Status, binary_stamp, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
+from .core import GATE_FAILURES, Ledger, Status, binary_stamp, keep_failure_log, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
 from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
 from ..pytools.shell import find_keg_tools
 from . import (
@@ -1060,6 +1060,9 @@ def _self_test() -> int:
         assert _json.loads(lines[0])["total_min"] == 3.0 and second["total_min"] == 5.0, lines
         assert second["phases_min"] == {"A": 3.0, "B": 2.0} and second["failed"] == 1, second
     print("self-test ok: gate timings append one history line per run, with each phase's load average")
+    from . import split_timers
+
+    split_timers._self_test()
     _stage_table_self_test()
     from . import sentinels
 
@@ -1745,7 +1748,7 @@ def _run_one_version(led: Ledger, ns: argparse.Namespace, engine: str, line: str
     tag, image, port = parts[0], parts[1], int(parts[2])
     led.phase(f"{engine} {tag} ({image})")
     from . import stand_memory
-    with led.span(f"{engine}: bring-up"), stand_memory.admitted(engine, led.ok):
+    with led.split(f"{engine} {tag}: bring-up"), stand_memory.admitted(engine, led.ok):
         url = bring_up(led, engine, tag, image, port)
     if not url:
         led.add(engine, tag, "all", "-", Status.FAIL, "bring-up failed")
@@ -1754,7 +1757,7 @@ def _run_one_version(led: Ledger, ns: argparse.Namespace, engine: str, line: str
     # failure is retried: a fresh container under load can drop the seed
     # connection mid-stream, and crying wolf on that is worse than a retry.
     err = ""
-    with led.span(f"{engine}: seed"):
+    with led.split(f"{engine} {tag}: seed"):
       for attempt in range(3):
         err = seed_engine(engine, tag, url)
         if not err:
@@ -2005,11 +2008,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         table = gate_stages(ns)
         run_stages(led, selected_stages(ns, table))
-        # Kept outside the work dir the gate deletes: a census row must name a log that still exists.
-        kept = ROOT / "target" / "gate-failures" / f"rivet-oracle-{os.getpid()}.log"
-        kept.parent.mkdir(parents=True, exist_ok=True)
+        kept = GATE_FAILURES / f"rivet-oracle-{os.getpid()}.log"
         if (work / "rivet-oracle.log").is_file():
-            shutil.copy2(work / "rivet-oracle.log", kept)
+            keep_failure_log(work / "rivet-oracle.log", kept.name)
         if not ns.island:
             skip_census.verify_oracle_verdict_census(led, kept)
             verify_seeded_recall(led, ns.with_seeded_recall)

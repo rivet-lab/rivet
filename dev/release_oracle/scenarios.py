@@ -51,7 +51,7 @@ from tempfile import mkdtemp
 
 try:  # importable both as a package module and as a plain sibling file
     from .core import (GREEN_CELLS, HERE, blessing, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, SKIP_ALLOWED, self_skipped, Ledger, Proc, Status, container_for_port, docker, docker_exec, have,
-                       nextest_filter, nextest_outcomes, nextest_panics, nextest_passed, nextest_started, port_of, release_bin_env,
+                       keep_failure_log, nextest_filter, nextest_outcomes, nextest_panics, nextest_passed, nextest_started, port_of, release_bin_env,
                        rivet, rivet_bin, run, sqlcmd, test_passed)
     from ..pytools.duckcli import ARGV as DUCKDB
     from . import state_lib
@@ -71,6 +71,7 @@ except ImportError:  # pragma: no cover - depends on how the driver is invoked
         docker,
         docker_exec,
         have,
+        keep_failure_log,
         nextest_filter,
         nextest_outcomes,
         nextest_panics,
@@ -1222,8 +1223,9 @@ def run_scenarios(led: Ledger, engine: str, tag: str, url: str) -> None:
                      "oracle: python-oracledb (the source oracle) is not importable — run through `uv run`",
                      "no python-oracledb")
             return
-    sc_verdicts(led, engine, tag, url)
-    sc_integrity_types(led, engine, tag, url)
+    with led.split(f"{engine} {tag}: golden"):
+        sc_verdicts(led, engine, tag, url)
+        sc_integrity_types(led, engine, tag, url)
     from .sentinels import sc_sentinels
 
     with led.span(f"{engine}: sentinels"):
@@ -2005,18 +2007,29 @@ def nextest_live(log_path: Path, expr: str, env: dict[str, str] | None = None,
 def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
                       modules: list[str], env: dict[str, str] | None = None,
                       expr: str | None = None, threads: int | None = None,
-                      again: tuple[str, dict[str, str]] | None = None) -> None:
+                      again: tuple[str, dict[str, str]] | None = None, keep: bool = False) -> None:
     """Run live_suite `modules` (or the nextest filter `expr`) through the gate binary; one ledger row per test case.
 
-    `again` is (an env var, the env that sets it): a test whose self-skip names the var runs a second time under that env, and that leg is its verdict."""
+    `again` is (an env var, the env that sets it): a test whose self-skip names the var runs a second time under that env, and that leg is its verdict.
+    `keep` copies each nextest log into target/gate-failures; every nextest leg is timed as a split."""
     led.phase(f"{label} · {phase}")
     if not have("cargo"):
         _skipped(led, scenario, "batch", "-", "-", f"{label}: cargo absent", "no cargo")
         return
     RAN_LIVE_MODULES.update(modules)
     log_path = work_dir() / f"{scenario}_{'_'.join(modules)[:120]}.log"
-    verdicts, started, skipped, panics = nextest_live(
-        log_path, expr or " | ".join(f"test(/^{m}::/)" for m in modules), env, threads)
+
+    def leg(path: Path, leg_expr: str, leg_env: dict[str, str] | None, split: str):
+        """One nextest leg, timed as `split` and its log kept when `keep`."""
+        try:
+            with led.split(split):
+                return nextest_live(path, leg_expr, leg_env, threads)
+        finally:
+            if keep and path.is_file():
+                keep_failure_log(path, f"{os.getpid()}-{path.name}")
+
+    verdicts, started, skipped, panics = leg(
+        log_path, expr or " | ".join(f"test(/^{m}::/)" for m in modules), env, f"nextest {label}")
     if started is not None and len(verdicts) != started:
         _failed(led, scenario, "batch", "-", "-",
                 f"{label}: graded {len(verdicts)} of the {started} tests nextest ran — the rest "
@@ -2029,7 +2042,8 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
                   and n not in SKIP_ALLOWED)
     if owed:
         log_path = Path(f"{log_path}.{again[0].lower()}")
-        v2, _, s2, p2 = nextest_live(log_path, " | ".join(f"test(={n})" for n in owed), {**(env or {}), **again[1]}, threads)
+        v2, _, s2, p2 = leg(log_path, " | ".join(f"test(={n})" for n in owed), {**(env or {}), **again[1]},
+                            f"nextest {label} again")
         for n in owed:
             verdicts[n] = v2.get(n, "NOT RUN")
             skipped.pop(n)

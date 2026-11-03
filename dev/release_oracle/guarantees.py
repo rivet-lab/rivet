@@ -249,10 +249,10 @@ def verify_flat_rss(led: Ledger) -> None:
 
     led.phase("Flat RSS (peak resident memory per engine against its ceiling)")
     for engine in ENGINES:
-        with led.span(f"flat rss {engine} batch"):
+        with led.split(f"flat rss {engine} batch"):
             _batch_rss(led, engine)
     for engine in CDC_ENGINES:
-        with led.span(f"flat rss {engine} cdc"):
+        with led.split(f"flat rss {engine} cdc"):
             _cdc_rss(led, engine, CDC_URL_VARS)
 
 
