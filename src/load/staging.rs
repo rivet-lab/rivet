@@ -65,22 +65,27 @@ fn unlisted_cdc_runs(state: Option<&StateStore>, keyed: &Keyed) -> RunIds {
         return RunIds::new();
     };
     let census = crate::manifest::census::ManifestCensus::new(keyed);
+    let started =
+        |m: &crate::manifest::RunManifest| chrono::DateTime::parse_from_rfc3339(&m.started_at).ok();
     let cdc: Vec<_> = census
         .runs()
         .iter()
         .filter(|r| r.manifest.mode == "cdc")
+        .map(|r| (r, started(r.manifest)))
         .collect();
-    let started =
-        |m: &crate::manifest::RunManifest| chrono::DateTime::parse_from_rfc3339(&m.started_at).ok();
+    let mut newest = std::collections::HashMap::new();
+    for (r, at) in &cdc {
+        if let Some(at) = at {
+            let slot = newest.entry(r.family()).or_insert(*at);
+            *slot = (*slot).max(*at);
+        }
+    }
     cdc.iter()
-        .filter(|r| {
-            let followed = cdc.iter().any(|n| {
-                n.family() == r.family()
-                    && matches!((started(n.manifest), started(r.manifest)), (Some(n), Some(r)) if n > r)
-            });
+        .filter(|(r, at)| {
+            let followed = at.is_some_and(|at| newest.get(r.family()).is_some_and(|n| *n > at));
             !followed && !matches!(state.run_status_of(&r.manifest.run_id), Ok(Some(_)))
         })
-        .map(|r| r.manifest.run_id.clone())
+        .map(|(r, _)| r.manifest.run_id.clone())
         .collect()
 }
 
@@ -175,7 +180,7 @@ pub(super) fn prefix_has_active_run(
         return true;
     }
     let manifest_active = match load::reconcile::fetch_manifests_keyed(store, prefix) {
-        Ok(keyed) => load::reconcile::has_active_running_manifest(&keyed),
+        Ok(keyed) => !bucket_writers(state, &keyed).is_empty(),
         // Cannot read the manifests → cannot rule a live run out. Spare.
         Err(_) => true,
     };
@@ -438,10 +443,7 @@ pub(super) fn maybe_gc_orphans(
     // A query ERROR stays conservative (assume active → spare); a clean `false`
     // (no running row) lets the manifest signal decide.
     let ledger_active = ledger_says_writing(state, &plan.gcs_prefix);
-    let active = prefix_is_active(
-        ledger_active,
-        load::reconcile::has_active_running_manifest(&keyed),
-    );
+    let active = prefix_is_active(ledger_active, !bucket_writers(state, &keyed).is_empty());
     // Which `running` MARKERS the ledger already knows are dead (`state
     // finish-run`, the split ceased-ordinal stamp): their run_id has a
     // TERMINAL row, so the sweep may retire the marker even though no Success

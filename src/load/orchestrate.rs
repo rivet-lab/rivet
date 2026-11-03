@@ -1083,8 +1083,11 @@ fn active_run_note(active_runs: usize, prefix: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "  note: {active_runs} source run(s) still writing into {prefix} — loaded now, kept \
-         retryable so their later parts are not skipped"
+        "  note: {active_runs} source run(s) in {prefix} cannot be shown finished from this \
+         state (still writing, or finished with no run-status row here) — loaded now, kept \
+         retryable so their later parts are not skipped, and read again every cycle until a \
+         newer run exists; if no extract is running, point the load at the state DB the \
+         extract writes"
     ))
 }
 
@@ -6334,6 +6337,124 @@ mod live_only_decisions {
         );
     }
 
+    fn cdc_manifest_at(
+        dir: &tempfile::TempDir,
+        run: &str,
+        started: &str,
+        family: &str,
+        mode: &str,
+    ) {
+        let mut m = success_manifest(run, "base/kept.parquet");
+        m.started_at = started.into();
+        m.export_family = family.into();
+        m.export_name = family.into();
+        m.mode = mode.into();
+        write_at(dir, "base/kept.parquet", b"rows");
+        write_at(
+            dir,
+            &format!("base/manifest-{run}.json"),
+            &serde_json::to_vec(&m).unwrap(),
+        );
+    }
+
+    #[test]
+    fn gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for() {
+        let prefix = "gs://b/base";
+        let orphan = "base/part-000009.parquet";
+        let dir = tempfile::tempdir().unwrap();
+        cdc_manifest_at(&dir, "cdc-rolling", "2026-08-21T00:00:00Z", "orders", "cdc");
+        write_at(&dir, orphan, b"rows");
+        let foreign = StateStore::open_in_memory().unwrap();
+
+        assert!(
+            prefix_has_active_run(&fs_store(&dir), prefix, Some(&foreign)),
+            "a CDC run with a manifest and no ledger row may still be writing: the prefix gate must say so"
+        );
+        maybe_gc_orphans(
+            &fs_store(&dir),
+            &plan_at(LoadMode::Full, prefix),
+            Some(&foreign),
+        );
+        assert!(
+            dir.path().join(orphan).exists(),
+            "gc must spare an unmanifested part beside a CDC run no ledger row accounts for"
+        );
+
+        foreign
+            .begin_run_under_lease(
+                "cdc-rolling",
+                "orders",
+                "src",
+                "gs://b/base/",
+                "2026-08-21T00:00:00Z",
+            )
+            .unwrap();
+        foreign
+            .finish_run("cdc-rolling", "success", "2026-08-21T00:05:00Z")
+            .unwrap();
+        assert!(!prefix_has_active_run(
+            &fs_store(&dir),
+            prefix,
+            Some(&foreign)
+        ));
+        maybe_gc_orphans(
+            &fs_store(&dir),
+            &plan_at(LoadMode::Full, prefix),
+            Some(&foreign),
+        );
+        assert!(
+            !dir.path().join(orphan).exists(),
+            "with the run's terminal ledger row, the part is crash debris and is collected"
+        );
+    }
+
+    #[test]
+    fn gc_and_the_prefix_gate_treat_a_batch_manifest_without_a_row_as_idle() {
+        let prefix = "gs://b/base";
+        let orphan = "base/part-000009.parquet";
+        let dir = tempfile::tempdir().unwrap();
+        cdc_manifest_at(
+            &dir,
+            "batch-done",
+            "2026-08-21T00:00:00Z",
+            "orders",
+            "batch",
+        );
+        write_at(&dir, orphan, b"rows");
+        let foreign = StateStore::open_in_memory().unwrap();
+        assert!(!prefix_has_active_run(
+            &fs_store(&dir),
+            prefix,
+            Some(&foreign)
+        ));
+        maybe_gc_orphans(
+            &fs_store(&dir),
+            &plan_at(LoadMode::Full, prefix),
+            Some(&foreign),
+        );
+        assert!(!dir.path().join(orphan).exists());
+    }
+
+    #[test]
+    fn only_the_newest_cdc_run_of_a_family_counts_as_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        cdc_manifest_at(&dir, "old", "2026-08-21T00:00:00Z", "orders", "cdc");
+        cdc_manifest_at(&dir, "new", "2026-08-22T00:00:00Z", "orders", "cdc");
+        cdc_manifest_at(&dir, "other", "2026-08-20T00:00:00Z", "items", "cdc");
+        cdc_manifest_at(&dir, "tie-a", "2026-08-23T00:00:00Z", "tied", "cdc");
+        cdc_manifest_at(&dir, "tie-b", "2026-08-23T00:00:00Z", "tied", "cdc");
+        cdc_manifest_at(&dir, "bad-time", "not-a-time", "bad", "cdc");
+        let keyed =
+            crate::load::reconcile::fetch_manifests_keyed(&fs_store(&dir), "gs://b/base").unwrap();
+        let state = StateStore::open_in_memory().unwrap();
+        let mut got: Vec<String> = crate::load::staging::bucket_writers(Some(&state), &keyed)
+            .into_iter()
+            .collect();
+        got.sort();
+        assert_eq!(got, ["bad-time", "new", "other", "tie-a", "tie-b"]);
+        assert!(crate::load::staging::bucket_writers(None, &keyed).is_empty());
+    }
+
     #[test]
     fn gc_retires_a_running_marker_whose_run_the_ledger_says_is_over() {
         let dir = tempfile::tempdir().unwrap();
@@ -6464,7 +6585,11 @@ mod live_only_decisions {
         assert_eq!(active_run_note(0, "gs://b/base"), None);
         let note = active_run_note(2, "gs://b/base").expect("two active runs must be announced");
         assert!(note.contains('2') && note.contains("gs://b/base"), "{note}");
-        assert!(note.contains("still writing"), "{note}");
+        assert!(note.contains("cannot be shown finished"), "{note}");
+        assert!(
+            note.contains("point the load at the state DB the extract writes"),
+            "{note}"
+        );
     }
 
     /// The up-to-date line names the right load. Kills `replace == with != in

@@ -4617,3 +4617,20 @@ seeds:
         cells: ["lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part", "lib:a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists"]
       oracle:
         cells: ["lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part", "lib:a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists"]
+
+  - name: gc-and-cleanup-spare-unlisted-cdc-run
+    class: "a load's orphan sweep and its source-cleanup gate read only running markers, so a CDC run no ledger row accounts for loses a part it uploaded and has not manifested yet"
+    history: "found 2026-11-03 by the verifier of PR 801 (HDW-1 rework): maybe_gc_orphans and prefix_has_active_run read has_active_running_manifest while the load's own guards read bucket_writers; RED 2026-11-03 (the foreign-state load with gc_orphans removed the part and the warehouse lacked the run's rows)"
+    scope: source
+    patch: gc-and-cleanup-spare-unlisted-cdc-run/shared.patch
+    engines:
+      postgres:
+        cells: [a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_postgres, "lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
+      mysql:
+        cells: [a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_mysql, "lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
+      mssql:
+        cells: ["lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
+      mongo:
+        cells: ["lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
+      oracle:
+        cells: ["lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 // 26 -> 27 (2026-10-29): the reserved-source-column cells load a `mode: full` remedy whose table holds a source column called `__is_deleted`; the warehouse oracle filters on that name, so the cell reads the rows through the second client.
 // 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
 // 28 -> 29 (2026-10-31, H1): the zone-less change-log cell loads into a log it altered off the ledger's DateTime64(6, 'UTC') on purpose; it reads instants and values through the second client; closes when the oracle grades a declared legacy type.
+// 29 -> 30 (2026-11-03, #798): the ClickHouse cell a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql loads beside a live MySQL CDC run, which the oracle cannot grade against the source mid-run; it reads the current-state view through the second client; closes when the oracle grades a load taken during a CDC run.
 const NO_ORACLE_CEILING: usize = 30; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave.

@@ -58,7 +58,7 @@ seams:
       - "begin_run_under_lease ("
     exceptions: []
   - id: run-still-writing
-    owner: src/load/staging.rs::still_writing
+    owner: src/load/staging.rs::bucket_writers
     reads: "which runs may still be writing into an export prefix: ledger rows, running markers, and a CDC run the ledger does not know"
     scope: [src/load/]
     bypass:
