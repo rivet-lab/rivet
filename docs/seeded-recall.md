@@ -35,13 +35,17 @@ What it does, in order:
 2. **Scratch tree.** A git worktree of `HEAD` at `target/seeded/tree` with its own
    target dir `target/seeded/target`. Both are kept between runs, so later builds are
    incremental. Only `HEAD` is graded; uncommitted work is not. Override the location
-   with `RIVET_SEEDED_DIR`.
+   with `RIVET_SEEDED_DIR`. Two more trees, `target/seeded/w1` and `w2`, each with its own
+   target dir, build the next patches while the first tree's cells run (`POOL` in
+   `dev/seeded/recall.py`); their first build is a cold one, about 7 GB of target each.
 3. **STALE check.** `git apply --check` for every patch. If a patch no longer
    applies, the row fails with `seed <name> no longer applies to <file>: update the
    patch`. It is never skipped.
 4. **CONTROL.** The union of all declared cells runs once on the unpatched tree. A
    cell that is red, self-skipped or absent here proves nothing, so it is not graded.
-5. **One pass per patch.** The runner snapshots the files the patch touches, applies
+5. **One pass per patch.** Patches are graded one at a time in sorted order, cell runs never
+   overlap, and only the compiles of later patches overlap a run (up to `POOL` trees; the
+   grading and the rows are those of a serial run). The runner snapshots the files the patch touches, applies
    it and builds. The build must say `Compiling rivet-cli`, because a `Fresh` build
    would grade the unpatched binary. Then it runs that patch's control-green cells
    and restores the files from the snapshot (never with `git checkout`), and it

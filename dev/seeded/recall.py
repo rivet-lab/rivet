@@ -14,9 +14,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -65,6 +66,7 @@ NOT_GRADED_HERE = "NOT-GRADED-HERE"
 #: The gate matrix row whose `not_graded_here_ceiling` bounds the NOT-GRADED-HERE rows.
 GATE_MATRIX = ROOT / "docs" / "release-gate-matrix.yaml"
 LIB = "lib:"
+POOL = 3
 CELL_VERDICTS = ("PASS", "FAIL", "SKIP", "ABSENT")
 
 
@@ -421,6 +423,115 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceili
     return green
 
 
+@dataclass(eq=False)
+class Job:
+    """One patch's turn: the rows it grades, the cells it runs, and what its worker parked for the grader."""
+
+    patch: str
+    name: str
+    cells: list[str]
+    group: list[Row]
+    cargo: Cargo | None = None
+    snap: dict[Path, bytes] | None = None
+    build: subprocess.CompletedProcess | None = None
+    error: BaseException | None = None
+    done: bool = False
+    ready: threading.Event = field(default_factory=threading.Event)
+    released: threading.Event = field(default_factory=threading.Event)
+
+
+class BuildPool:
+    """Applies and builds patches ahead of the grader, one patch per worker tree; a tree is held until its patch is released."""
+
+    def __init__(self, cargos: list[Cargo], jobs: list[Job], logs: Path, apply=None, undo=None) -> None:
+        assert cargos, "a pool needs at least one worker tree"
+        self.logs, self.todo, self.taken = logs, list(jobs), []
+        self.apply, self.undo = apply or apply_seed, undo or restore
+        self.lock, self.stopped = threading.Lock(), False
+        self.threads = [threading.Thread(target=self._work, args=(c,), daemon=True) for c in cargos]
+        for t in self.threads:
+            t.start()
+
+    def _next(self) -> Job | None:
+        """The next patch in order, or None once the pool is stopped or drained."""
+        with self.lock:
+            if self.stopped or not self.todo:
+                return None
+            self.taken.append(self.todo.pop(0))
+            return self.taken[-1]
+
+    def _work(self, cargo: Cargo) -> None:
+        """Apply and build patch after patch in this worker's own tree, parking each result until it is released."""
+        while (job := self._next()) is not None:
+            job.cargo = cargo
+            try:
+                job.snap = self.apply(cargo.tree, HERE / job.patch)
+                job.build = cargo.build(job.cells, self.logs / f"{job.name}.build.log")
+            except BaseException as e:
+                job.error = e
+            job.ready.set()
+            job.released.wait()
+
+    def take(self, job: Job) -> Job:
+        """Wait for this patch's build."""
+        job.ready.wait()
+        return job
+
+    def release(self, job: Job) -> None:
+        """Restore the job's tree and free its worker for the next patch."""
+        job.done = True
+        try:
+            if job.snap is not None:
+                self.undo(job.cargo.tree, job.snap)
+        finally:
+            job.released.set()
+
+    def close(self) -> None:
+        """Stop taking patches, restore every tree still holding a seed, and join the workers."""
+        with self.lock:
+            self.stopped = True
+            held = list(self.taken)
+        for job in held:
+            job.ready.wait()
+            if not job.done:
+                self.release(job)
+        for t in self.threads:
+            t.join()
+
+
+def grade_seeds(led: Ledger, live: list[Row], control: dict[str, str], control_skips: dict[str, str],
+                cargos: list[Cargo], logs: Path, apply=None, undo=None) -> dict[Row, Verdict]:
+    """Grade each patch in sorted order: its build comes from a worker tree ahead of time, its cells run here, one patch at a time."""
+    jobs = []
+    for patch in sorted({r.patch for r in live}):
+        group = [r for r in live if r.patch == patch]
+        cells = sorted({c for r in group for c in r.cells if control.get(c) == "PASS"})
+        jobs.append(Job(patch, patch.replace("/", "__").removesuffix(".patch"), cells, group))
+    verdicts: dict[Row, Verdict] = {}
+    pool = BuildPool(cargos, jobs, logs, apply, undo)
+    try:
+        for job in jobs:
+            led.phase(f"SEED {job.patch} — {', '.join(r.engine for r in job.group)} ({len(job.cells)} control-green cell(s))")
+            pool.take(job)
+            try:
+                if job.error is not None:
+                    raise job.error
+                b = job.build
+                if b.returncode != 0 or not recompiled(b.stdout):
+                    why = "build failed" if b.returncode != 0 else "cargo did not recompile rivet-cli"
+                    led.bad(f"{why} (see {logs / f'{job.name}.build.log'})")
+                    seeded = None
+                else:
+                    seeded = job.cargo.run(job.cells, logs / f"{job.name}.log") if job.cells else {}
+            finally:
+                pool.release(job)
+            for r in job.group:
+                verdicts[r] = grade(r, control, seeded, control_skips)
+    finally:
+        pool.close()
+    return verdicts
+
+
 def recall(led: Ledger, rows: list[Row], *, complete: bool = True) -> list[Verdict]:
     """Grade every row: STALE check, one CONTROL run on the unpatched tree, then one build+run per patch; appends the run to the record."""
     t0 = time.perf_counter()
@@ -445,6 +556,8 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True) -> list[Verdi
             if p.returncode != 0:
                 verdicts[r] = Verdict(r, STALE, stale_message(r.seed, text, p.stdout))
     live = [r for r in rows if r not in verdicts and not r.na]
+    workers = [cargo] + [Cargo(prepare_tree(base / f"w{k}")[0], base / f"w{k}", state_url)
+                         for k in range(1, min(POOL, len({r.patch for r in live})))]
     control_cells = sorted({c for r in live for c in r.cells})
     control: dict[str, str] = {}
     control_skips: dict[str, str] = {}
@@ -459,24 +572,7 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True) -> list[Verdi
             for c, v in control.items():
                 (led.ok if v == "PASS" else led.bad)(f"control {c}: {v}")
 
-    for patch in sorted({r.patch for r in live}):
-        group = [r for r in live if r.patch == patch]
-        cells = sorted({c for r in group for c in r.cells if control.get(c) == "PASS"})
-        name = patch.replace("/", "__").removesuffix(".patch")
-        led.phase(f"SEED {patch} — {', '.join(r.engine for r in group)} ({len(cells)} control-green cell(s))")
-        snap = apply_seed(tree, HERE / patch)
-        try:
-            b = cargo.build(cells, logs / f"{name}.build.log")
-            if b.returncode != 0 or not recompiled(b.stdout):
-                why = "build failed" if b.returncode != 0 else "cargo did not recompile rivet-cli"
-                led.bad(f"{why} (see {logs / f'{name}.build.log'})")
-                seeded = None
-            else:
-                seeded = cargo.run(cells, logs / f"{name}.log") if cells else {}
-        finally:
-            restore(tree, snap)
-        for r in group:
-            verdicts[r] = grade(r, control, seeded, control_skips)
+    verdicts.update(grade_seeds(led, live, control, control_skips, workers, logs))
 
     out = [verdicts.get(r) or grade(r, control, {}, control_skips) for r in rows]
     green = record(led, out)
@@ -514,6 +610,103 @@ def select(rows: list[Row], seeds: str, engines: str) -> list[Row]:
             raise SystemExit(f"unknown {what}(s): {unknown}; the manifest has {sorted(have)}")
     return [r for r in rows
             if (not seeds or r.seed in seeds.split(",")) and (not engines or r.engine in engines.split(","))]
+
+
+def pool_self_test() -> None:
+    """Pooled grading equals serial grading: same verdicts, same phase lines, every seed run in the tree it was applied to."""
+
+    class World:
+        def __init__(self) -> None:
+            self.lock, self.applied, self.applied_in = threading.Lock(), {}, {}
+            self.building = self.max_building = self.running = 0
+            self.ran: list[tuple[str | None, Path]] = []
+
+    class Fake:
+        def __init__(self, tree: Path, world: World) -> None:
+            self.tree, self.world, self.skipped = tree, world, {}
+
+        def build(self, cells, log):
+            w = self.world
+            with w.lock:
+                w.building += 1
+                w.max_building = max(w.max_building, w.building)
+                patch = w.applied[self.tree]
+            time.sleep(DELAY[patch])
+            with w.lock:
+                w.building -= 1
+            return subprocess.CompletedProcess([], 1 if patch == "p2.patch" else 0, "Fresh" if patch == "p4.patch" else "Compiling rivet-cli")
+
+        def run(self, cells, log):
+            w = self.world
+            with w.lock:
+                assert w.running == 0, "two cell runs overlapped"
+                w.running += 1
+                patch = w.applied[self.tree]
+                w.ran.append((patch, self.tree))
+            time.sleep(0.01)
+            with w.lock:
+                w.running -= 1
+            return {c: "FAIL" if c in CATCH.get(patch, ()) else "PASS" for c in cells}
+
+    class Spy(Ledger):
+        def __init__(self) -> None:
+            super().__init__(colour=False)
+            self.lines: list[str] = []
+
+        def phase(self, msg: str) -> None:
+            self.lines.append(msg)
+
+        def bad(self, msg: str) -> None:
+            self.lines.append("bad " + msg.split(" (see")[0])
+
+    names = [f"p{i}.patch" for i in range(8)]
+    DELAY = {n: 0.02 * (8 - i) for i, n in enumerate(names)}
+    CATCH = {"p0.patch": {"t0"}, "p1.patch": {"t1", "t9"}, "p3.patch": {"lib:u3"}, "p5.patch": {"t5"}, "p7.patch": {"t7"}}
+    live = [Row(f"s{i}", e, n, cells) for i, n in enumerate(names)
+            for e, cells in (("postgres", (f"t{i}", "t9")), ("mysql", (f"lib:u{i}",)))]
+    control = {c: "PASS" for r in live for c in r.cells}
+
+    def drive(k: int, fail: str | None = None):
+        w = World()
+
+        def apply(tree, patch):
+            with w.lock:
+                assert w.applied.get(tree) is None, f"{patch.name} applied over {w.applied[tree]} in {tree}"
+                if patch.name == fail:
+                    raise RuntimeError("does not apply")
+                w.applied[tree], w.applied_in[patch.name] = patch.name, tree
+            return {tree: patch.name}
+
+        def undo(tree, snap):
+            with w.lock:
+                assert w.applied[tree] == snap[tree], "restored a tree that holds another seed"
+                w.applied[tree] = None
+
+        trees = [Path(f"/t{i}") for i in range(k)]
+        for t in trees:
+            w.applied[t] = None
+        led = Spy()
+        try:
+            got = grade_seeds(led, list(live), control, {}, [Fake(t, w) for t in trees], Path("/logs"), apply, undo)
+        except RuntimeError:
+            got = None
+        assert all(v is None for v in w.applied.values()), ("a tree still holds a seed", w.applied)
+        return w, led, got
+
+    serial, pooled = drive(1), drive(POOL)
+    assert serial[0].max_building == 1 and pooled[0].max_building > 1, (serial[0].max_building, pooled[0].max_building)
+    assert pooled[1].lines == serial[1].lines and len(pooled[1].lines) > len(names), (pooled[1].lines, serial[1].lines)
+    status = lambda got: [(r.seed, r.engine, v.status, v.detail) for r, v in got.items()]
+    assert status(pooled[2]) == status(serial[2]), (status(pooled[2]), status(serial[2]))
+    by = {(r.seed, r.engine): v.status for r, v in pooled[2].items()}
+    assert by[("s3", "mysql")] == CAUGHT and by[("s2", "mysql")] == BROKEN and by[("s4", "mysql")] == BROKEN, by
+    assert by[("s6", "mysql")] == MISSED and by[("s0", "postgres")] == CAUGHT, by
+    for w, _, _ in (serial, pooled):
+        assert [p for p, _ in w.ran] == [n for n in names if n not in ("p2.patch", "p4.patch")], w.ran
+        assert all(w.applied_in[p] == t for p, t in w.ran), ("a seed ran in a tree it was not applied to", w.ran, w.applied_in)
+    assert len({t for _, t in pooled[0].ran}) == POOL
+    for k in (1, POOL):
+        assert drive(k, fail="p5.patch")[2] is None, "an apply failure must stop the run, with every tree restored"
 
 
 def self_test() -> int:
@@ -703,7 +896,8 @@ def self_test() -> int:
         assert "no seeded-recall record" in run_record.refusal("a" * 40, rec)
         run_record.append_run(rec, sha="a" * 40, complete=True, green=True, dirty=False)
         assert run_record.refusal("a" * 40, rec) is None and run_record.refusal("b" * 40, rec) is not None, "a written run must be the one the tag rule reads"
-    print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, stale and build checks, run record")
+    pool_self_test()
+    print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, build pool, stale and build checks, run record")
     return 0
 
 
