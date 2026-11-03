@@ -1246,7 +1246,7 @@ fn rivet_cdc_is_refused_the_checkpoint_an_export_owns(mut s: CdcScenario) {
     let held = std::fs::read(&ckpt).expect("the export wrote its checkpoint");
     let refused = Refused::by_code("RIVET_SOURCE_CDC_CHECKPOINT_SHARED", 5);
     for _ in 0..2 {
-        let out = s.rig.cli_cdc_raw(true);
+        let out = s.rig.cli_cdc_raw(true, &[]);
         assert_refused(&out, refused);
         assert!(
             String::from_utf8_lossy(&out.stderr).contains("Nothing was read"),
@@ -1261,7 +1261,7 @@ fn rivet_cdc_is_refused_the_checkpoint_an_export_owns(mut s: CdcScenario) {
     }
     s.rig.run_ok();
     std::fs::remove_file(&ckpt).expect("lose the checkpoint file");
-    assert_refused(&s.rig.cli_cdc_raw(true), refused);
+    assert_refused(&s.rig.cli_cdc_raw(true, &[]), refused);
     assert!(!ckpt.exists(), "the refusal does not recreate the file");
 }
 
