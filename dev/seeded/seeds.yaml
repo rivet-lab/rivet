@@ -4587,15 +4587,15 @@ seeds:
     patch: config-knob-range-unchecked/shared.patch
     engines:
       postgres:
-        cells: [chunk_size_past_i64_is_refused_postgres, cdc_rollover_zero_is_refused_on_the_flag_postgres, null_ratio_max_outside_the_unit_interval_is_refused, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+        cells: [chunk_size_past_i64_is_refused_postgres, cdc_rollover_zero_is_refused_on_the_flag_postgres, null_ratio_max_outside_the_unit_interval_is_refused_postgres, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
       mysql:
-        cells: [chunk_size_past_i64_is_refused_mysql, cdc_rollover_zero_is_refused_on_the_flag_mysql, null_ratio_max_outside_the_unit_interval_is_refused, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+        cells: [chunk_size_past_i64_is_refused_mysql, cdc_rollover_zero_is_refused_on_the_flag_mysql, null_ratio_max_outside_the_unit_interval_is_refused_mysql, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
       mssql:
-        cells: [chunk_size_past_i64_is_refused_mssql, cdc_rollover_zero_is_refused_on_the_flag_mssql, null_ratio_max_outside_the_unit_interval_is_refused, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+        cells: [chunk_size_past_i64_is_refused_mssql, cdc_rollover_zero_is_refused_on_the_flag_mssql, null_ratio_max_outside_the_unit_interval_is_refused_mssql, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
       oracle:
-        cells: [chunk_size_past_i64_is_refused_oracle, cdc_rollover_zero_is_refused_on_the_flag_oracle, null_ratio_max_outside_the_unit_interval_is_refused, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+        cells: [chunk_size_past_i64_is_refused_oracle, cdc_rollover_zero_is_refused_on_the_flag_oracle, null_ratio_max_outside_the_unit_interval_is_refused_oracle, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
       mongo:
-        cells: [mongo_page_size_zero_is_refused, cdc_rollover_zero_is_refused_on_the_flag_mongo, null_ratio_max_outside_the_unit_interval_is_refused, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+        cells: [mongo_page_size_zero_is_refused, cdc_rollover_zero_is_refused_on_the_flag_mongo, null_ratio_max_outside_the_unit_interval_is_refused_mongo, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
 
   - name: key-span-read-in-i64
     class: "the span of a key range and the window over it are computed in 64-bit signed arithmetic, so a `chunk_count` (or a `chunk_size` near i64::MAX) over a key range as wide as bigint overflows: a panic in debug, a refusal that blames a knob already set in release"
