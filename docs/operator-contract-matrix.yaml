@@ -34,11 +34,11 @@ scenarios:
 
   - id: cdc_run_ledger_row
     what: "RESULTS 3 (HDW-1): a CDC run over a state that refuses its run-status row is refused before it reads its stream (RIVET_STATE_NOT_WRITABLE, exit 1, nothing written), and delivers every change once the state is writable"
-    postgres: { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres }
-    mysql:    { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql }
-    mssql:    { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql }
-    mongo:    { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo }
-    oracle:   { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle }
+    postgres: { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres }
+    mysql:    { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql }
+    mssql:    { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql }
+    mongo:    { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo }
+    oracle:   { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle }
 
   - id: cursor_write_fails
     what: "RESULTS 3 (the write after the manifest): a run whose cursor write fails delivers its rows once, keeps the stored cursor and exits 1 (RIVET_STATE_CURSOR_NOT_STORED)"

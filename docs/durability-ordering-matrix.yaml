@@ -143,4 +143,4 @@ scenarios:
     incremental: { na: "an incremental run writes one manifest, at its end" }
     chunked:     { na: "a chunked run writes its manifest at its end" }
     keyset:      { na: "a keyset run writes its manifest at its end" }
-    cdc:         { test: open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql }
+    cdc:         { test: a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql }

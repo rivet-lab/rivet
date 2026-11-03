@@ -20,7 +20,10 @@ use crate::load::ledger::{closing_status, ledger_load_id, ownership_of};
 use crate::load::partition_budget::{budgeted_uris, partition_budget_ok, partition_label};
 use crate::load::pin::{late_runs_stop, pin_plan_to_its_run};
 use crate::load::result::{TableDone, Work};
-use crate::load::staging::{cleanup_target_leased, ledger_writers, maybe_gc_orphans};
+use crate::load::staging::{
+    bucket_writers, cleanup_target_leased, maybe_gc_orphans, still_writing, writers_at_record,
+    writers_before_fetch,
+};
 use crate::state::LoadStatus;
 use crate::state::{LoadRecord, StateRef, StateStore};
 use anyhow::Context as _;
@@ -805,24 +808,7 @@ fn prepare_load(
     target_fqtn: &str,
     allow_source_drift: bool,
 ) -> Result<Option<LoadInputs>> {
-    // Sampled BEFORE the manifests are read, deliberately: a run that finishes
-    // between this sample and the fetch stays in the set and is merely
-    // re-appended next cycle (at-least-once, absorbed by the current-state
-    // view). The reverse order — sample after fetch — reopens the TOCTOU this
-    // exists to close: finish-then-fetch would read the run as consumable
-    // against a manifest snapshot older than its last parts.
-    let active_at_fetch = ledger_writers(state, &plan.gcs_prefix).and_then(|r| match r {
-        Ok(a) => Some(a),
-        Err(e) => {
-            log::warn!(
-                "load: cannot tell which runs are writing into {} at fetch time ({e:#}) — \
-                 this cycle will not record any run as consumed, so nothing they write \
-                 later is stranded",
-                plan.gcs_prefix
-            );
-            None
-        }
-    });
+    let active_at_fetch = writers_before_fetch(state, &plan.gcs_prefix);
     let (keyed, foreign) = load::reconcile::own_manifests(
         load::reconcile::fetch_manifests_keyed(store, &plan.gcs_prefix)?,
         &plan.gcs_prefix,
@@ -832,19 +818,7 @@ fn prepare_load(
     if let Some(note) = foreign {
         eprintln!("{note}");
     }
-    // The bucket's own liveness markers, at run-id granularity. The ledger sample
-    // above fails SAFE on `Err` — it consumes nothing — but it cannot fail safe on
-    // `Ok({})`, and an EMPTY answer is what a load on a FOREIGN HOST gets: `StateStore
-    // ::open` creates a fresh state DB beside the LOAD's config, which has never seen
-    // the extract's runs. Empty then excludes nothing, every in-flight run is recorded
-    // consumed, and every part it writes afterwards is skipped for ever.
-    //
-    // `gc_orphans` — the DELETE path — has consulted both signals since it was
-    // written, for exactly this case. Consuming is the more permanent decision of the
-    // two (a consumed run is never read again; a spared orphan is collected next
-    // cycle), and it had the weaker guard. Union, never replace: the ledger stays the
-    // precise signal where it can answer.
-    let marker_active = load::reconcile::active_running_run_ids(&keyed);
+    let marker_active = bucket_writers(state, &keyed);
     let active_at_fetch = active_at_fetch.map(|mut s| {
         s.extend(marker_active.iter().cloned());
         s
@@ -1099,22 +1073,6 @@ fn cleanable_runs(
         .collect()
 }
 
-/// The runs that may still be writing into the prefix, or `None` when a stateful load could not tell.
-fn still_writing(
-    active_at_fetch: &Option<std::collections::HashSet<String>>,
-    marker_active: &std::collections::HashSet<String>,
-    stateful: bool,
-) -> Option<std::collections::HashSet<String>> {
-    match (active_at_fetch, stateful) {
-        (None, true) => None,
-        (at_fetch, _) => {
-            let mut writing = at_fetch.clone().unwrap_or_default();
-            writing.extend(marker_active.iter().cloned());
-            Some(writing)
-        }
-    }
-}
-
 /// The operator note for source runs still writing into the prefix — `None` when
 /// there are none, so the caller prints nothing rather than a note about zero
 /// runs. Pure: the `is_empty` guard lives in a body (`LoadCtx::record`) whose
@@ -1144,52 +1102,13 @@ impl LoadCtx<'_> {
     /// One ledger row; the error is the caller's to judge.
     fn try_record(&self, source_run_ids: &[String], rows_loaded: i64, status: &str) -> Result<()> {
         let Some(s) = self.state else { return Ok(()) };
-        // A run still ACTIVE on this prefix can still GROW its manifest: the CDC
-        // sink rewrites a `Success` superset at every commit-boundary roll under
-        // ONE run_id, and `list_manifest_keys` deliberately prefers that
-        // run-unique copy. The skip set is keyed on the run_id ALONE, so
-        // recording an in-flight run as consumed strands every part it writes
-        // afterwards — permanently, and silently: the next load prints
-        // "up to date". With `until_current: false` the id never rotates, so the
-        // loss is unbounded.
-        //
-        // Excluding exactly the active runs leaves them retryable while every
-        // terminal run is still recorded (so a completed run is never
-        // re-loaded). Their parts ARE loaded now — re-appending them next cycle
-        // is at-least-once, which the current-state view absorbs: it keeps
-        // ROW_NUMBER() … = 1 per pk, so a duplicated change row cannot change
-        // what the view reports.
-        //
-        // A stateless or foreign-host load has no ledger to ask (`self.state` is
-        // None above, or the query fails) — see `warn_if_racing_an_active_run`,
-        // which tells that operator to load AFTER the extract instead.
-        // A query failure must fail SAFE, and "safe" here is the opposite of the
-        // default: an empty set excludes nothing, so every in-flight run gets
-        // recorded as consumed and every part it writes afterwards is skipped
-        // forever — the harm the comment above describes. Treating the answer as
-        // "assume they are all active" records none of them, and the next cycle
-        // re-evaluates: at-least-once, which the current-state view absorbs.
-        let mut active = match ledger_writers(self.state, self.source_prefix) {
-            // `Ok` is not the safe answer it looks like: an EMPTY set excludes
-            // nothing, and empty-without-error is exactly what a FOREIGN-HOST load
-            // gets — `StateStore::open` makes a fresh DB beside the load's own
-            // config, which never saw the extract's runs. The `Err` arm below fails
-            // safe; this one could not, so the BUCKET's markers are unioned in.
-            // Union, never replace: the ledger stays authoritative where it answers.
-            Some(Ok(mut a)) => {
-                a.extend(self.marker_active.iter().cloned());
-                a
-            }
-            None => return Ok(()),
-            Some(Err(e)) => {
-                log::warn!(
-                    "load: cannot tell which runs are still writing into {} ({e:#}) — not \
-                     recording any run as consumed this cycle, so nothing they write later is \
-                     stranded. The next load re-evaluates them.",
-                    self.source_prefix
-                );
-                source_run_ids.iter().cloned().collect()
-            }
+        let Some(mut active) = writers_at_record(
+            self.state,
+            self.source_prefix,
+            &self.marker_active,
+            source_run_ids,
+        ) else {
+            return Ok(());
         };
         // UNION with the fetch-time sample: this method runs AFTER the warehouse
         // copy, so a run that finished (or was resumed and finished) during the
@@ -2871,6 +2790,16 @@ mod load_ledger_tests {
         }
     }
 
+    /// The closed ledger row every finished run leaves behind.
+    fn finished_row(state: &StateStore, run: &str) {
+        state
+            .begin_run_under_lease(run, "orders", "src", "gs://b/p/", "2026-08-21T00:00:00Z")
+            .unwrap();
+        state
+            .finish_run(run, "success", "2026-08-21T00:05:00Z")
+            .unwrap();
+    }
+
     /// A CDC load plan for `table` whose prefix `gs://b/p/` is the `p/` directory under `dir`.
     /// Each test names its own table: the in-memory state's lease is a process-wide flock per table.
     fn cdc_plan(dir: &tempfile::TempDir, table: &str) -> load::plan::LoadPlan {
@@ -3057,6 +2986,7 @@ mod load_ledger_tests {
         let state = StateStore::open_in_memory().unwrap();
         let plan = cdc_plan(&dir, "orders_idle");
         for run in ["r-idle-1", "r-idle-2"] {
+            finished_row(&state, run);
             let mut m = super::live_only_decisions::success_manifest(run, "unused.parquet");
             m.parts.clear();
             m.part_count = 0;
@@ -3344,7 +3274,6 @@ mod load_ledger_tests {
 
     /// A load that overlaps a CDC run no ledger lists delivers every part the run wrote.
     #[test]
-    #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
     fn a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part() {
         assert_eq!(
             parts_delivered_across_a_growing_run("grow_no_row", RowAt::Nowhere),
@@ -3354,7 +3283,6 @@ mod load_ledger_tests {
 
     /// A load from a second state database delivers every part of a CDC run whose row is in the first.
     #[test]
-    #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
     fn a_load_overlapping_a_cdc_run_over_a_foreign_state_delivers_every_part() {
         assert_eq!(
             parts_delivered_across_a_growing_run("grow_foreign", RowAt::OtherState),
@@ -3364,7 +3292,6 @@ mod load_ledger_tests {
 
     /// With no row and a newer CDC run under the prefix, the older run is consumed and the newer stays retryable.
     #[test]
-    #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
     fn a_cdc_run_with_no_row_is_consumed_once_a_newer_run_exists_and_not_before() {
         let dir = tempfile::tempdir().unwrap();
         let state = StateStore::open_in_memory().unwrap();
@@ -3387,6 +3314,110 @@ mod load_ledger_tests {
         );
         let again = delivered_by_cycle(&dir, &state, &plan, "L2");
         assert_eq!(again.iter().cloned().collect::<Vec<_>>(), ["new-0.parquet"]);
+    }
+
+    /// A manifest of `mode` for `run` in `family`, started at `started_at`, keyed as the bucket lists it.
+    fn listed(
+        run: &str,
+        mode: &str,
+        family: &str,
+        started_at: &str,
+        status: crate::manifest::ManifestStatus,
+    ) -> (String, crate::manifest::RunManifest) {
+        let mut m = super::live_only_decisions::success_manifest(run, "part.parquet");
+        m.mode = mode.into();
+        m.export_family = family.into();
+        m.started_at = started_at.into();
+        m.status = status;
+        (format!("p/manifest-{run}.json"), m)
+    }
+
+    fn ids(set: &std::collections::HashSet<String>) -> Vec<&str> {
+        let mut ids: Vec<&str> = set.iter().map(String::as_str).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// A CDC run no ledger row accounts for is writing unless a newer CDC run of its family exists; a row, another family, and a tie decide as stated.
+    #[test]
+    fn a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists() {
+        use crate::manifest::ManifestStatus::Success;
+        let state = StateStore::open_in_memory().unwrap();
+        let at = |run, family, started| listed(run, "cdc", family, started, Success);
+        let two = [
+            at("r-old", "orders", "2026-08-21T00:00:00Z"),
+            at("r-new", "orders", "2026-08-21T01:00:00Z"),
+        ];
+        assert_eq!(ids(&bucket_writers(Some(&state), &two)), ["r-new"]);
+        let tie = [
+            at("r-a", "orders", "2026-08-21T00:00:00Z"),
+            at("r-b", "orders", "2026-08-21T00:00:00Z"),
+        ];
+        assert_eq!(ids(&bucket_writers(Some(&state), &tie)), ["r-a", "r-b"]);
+        let families = [
+            at("r-a", "orders", "2026-08-21T00:00:00Z"),
+            at("r-b", "items", "2026-08-21T01:00:00Z"),
+        ];
+        assert_eq!(
+            ids(&bucket_writers(Some(&state), &families)),
+            ["r-a", "r-b"]
+        );
+        finished_row(&state, "r-new");
+        assert!(bucket_writers(Some(&state), &two).is_empty());
+        state
+            .begin_run_under_lease(
+                "r-old",
+                "orders",
+                "src",
+                "gs://b/p/",
+                "2026-08-21T00:00:00Z",
+            )
+            .unwrap();
+        assert!(
+            bucket_writers(Some(&state), &two).is_empty(),
+            "a running row is the ledger's to report, not the bucket's"
+        );
+    }
+
+    /// Everything but a CDC run without a row reads as before: batch runs, running markers, terminal rows and a stateless load.
+    #[test]
+    fn the_bucket_writers_of_every_other_run_are_the_running_markers() {
+        use crate::manifest::ManifestStatus::{Running, Success};
+        let state = StateStore::open_in_memory().unwrap();
+        let batch = [
+            listed(
+                "r-batch",
+                "batch",
+                "orders",
+                "2026-08-21T00:00:00Z",
+                Success,
+            ),
+            listed("r-mark", "batch", "orders", "2026-08-21T01:00:00Z", Running),
+        ];
+        assert_eq!(ids(&bucket_writers(Some(&state), &batch)), ["r-mark"]);
+        let cdc = [listed(
+            "r-cdc",
+            "cdc",
+            "orders",
+            "2026-08-21T00:00:00Z",
+            Success,
+        )];
+        assert!(
+            bucket_writers(None, &cdc).is_empty(),
+            "a stateless load has no ledger to ask and keeps its documented degradation"
+        );
+        let marker = [listed(
+            "r-cdc",
+            "cdc",
+            "orders",
+            "2026-08-21T00:00:00Z",
+            Running,
+        )];
+        assert_eq!(ids(&bucket_writers(Some(&state), &marker)), ["r-cdc"]);
+        assert_eq!(
+            bucket_writers(None, &marker),
+            load::reconcile::active_running_run_ids(&marker)
+        );
     }
 
     /// The statuses the ledger holds for `target`, newest first.
@@ -4687,6 +4718,7 @@ mod load_ledger_tests {
         plan.load.cleanup_source = true;
         plan.specs = load::tests::spec_ok();
         let prefix = dir.path().join("p");
+        finished_row(&state, "r1");
         commit_run(&prefix, "r1", "a.parquet");
         let racing = prefix.clone();
         let armed = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -5849,8 +5881,13 @@ mod live_only_decisions {
                 &serde_json::to_vec(&m).unwrap(),
             );
         }
-        let state = state_with_active_run(prefix); // r-live is WRITING at fetch time
-        // …under the run_id the manifests carry:
+        let state = state_with_active_run(prefix);
+        state
+            .begin_run("r-done", "orders", prefix, "2026-08-21T00:00:00Z")
+            .unwrap();
+        state
+            .finish_run("r-done", "success", "2026-08-21T00:01:00Z")
+            .unwrap();
         let plan = plan_at(LoadMode::Cdc, prefix);
         let inputs = prepare_load(&store, &plan, Some(&state), "p.d.orders", false)
             .unwrap()

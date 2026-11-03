@@ -939,8 +939,7 @@ fn a_load_from_another_state_db_crosses_a_rolling_cdc_run(
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-fn open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql() {
+fn a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql() {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(BUCKET);

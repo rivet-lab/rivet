@@ -6,12 +6,98 @@ use crate::error::Result;
 use crate::load;
 use crate::state::StateStore;
 
+type RunIds = std::collections::HashSet<String>;
+type Keyed = [(String, crate::manifest::RunManifest)];
+
 /// The runs the run-status ledger says are writing into `prefix`: `None` when stateless, `Some(Err)` when the query failed.
-pub(super) fn ledger_writers(
+fn ledger_writers(state: Option<&StateStore>, prefix: &str) -> Option<Result<RunIds>> {
+    state.map(|s| s.active_run_ids_on_prefix(prefix))
+}
+
+/// The ledger's writers sampled before the manifests are read; `None` when stateless or unanswered, so the cycle records nothing consumed.
+pub(super) fn writers_before_fetch(state: Option<&StateStore>, prefix: &str) -> Option<RunIds> {
+    ledger_writers(state, prefix).and_then(|r| match r {
+        Ok(a) => Some(a),
+        Err(e) => {
+            log::warn!(
+                "load: cannot tell which runs are writing into {prefix} at fetch time ({e:#}) — \
+                 this cycle will not record any run as consumed, so nothing they write \
+                 later is stranded"
+            );
+            None
+        }
+    })
+}
+
+/// The writers at record time: ledger plus bucket, every selected run when the ledger cannot answer, `None` when stateless.
+pub(super) fn writers_at_record(
     state: Option<&StateStore>,
     prefix: &str,
-) -> Option<Result<std::collections::HashSet<String>>> {
-    state.map(|s| s.active_run_ids_on_prefix(prefix))
+    bucket: &RunIds,
+    selected: &[String],
+) -> Option<RunIds> {
+    match ledger_writers(state, prefix)? {
+        Ok(mut a) => {
+            a.extend(bucket.iter().cloned());
+            Some(a)
+        }
+        Err(e) => {
+            log::warn!(
+                "load: cannot tell which runs are still writing into {prefix} ({e:#}) — not \
+                 recording any run as consumed this cycle, so nothing they write later is \
+                 stranded. The next load re-evaluates them."
+            );
+            Some(selected.iter().cloned().collect())
+        }
+    }
+}
+
+/// The runs the bucket says may be writing: live `running` markers, and the CDC runs no ledger row accounts for.
+pub(super) fn bucket_writers(state: Option<&StateStore>, keyed: &Keyed) -> RunIds {
+    let mut writers = load::reconcile::active_running_run_ids(keyed);
+    writers.extend(unlisted_cdc_runs(state, keyed));
+    writers
+}
+
+/// CDC runs with a manifest under the prefix, no ledger row, and no newer CDC run of their family.
+fn unlisted_cdc_runs(state: Option<&StateStore>, keyed: &Keyed) -> RunIds {
+    let Some(state) = state else {
+        return RunIds::new();
+    };
+    let census = crate::manifest::census::ManifestCensus::new(keyed);
+    let cdc: Vec<_> = census
+        .runs()
+        .iter()
+        .filter(|r| r.manifest.mode == "cdc")
+        .collect();
+    let started =
+        |m: &crate::manifest::RunManifest| chrono::DateTime::parse_from_rfc3339(&m.started_at).ok();
+    cdc.iter()
+        .filter(|r| {
+            let followed = cdc.iter().any(|n| {
+                n.family() == r.family()
+                    && matches!((started(n.manifest), started(r.manifest)), (Some(n), Some(r)) if n > r)
+            });
+            !followed && !matches!(state.run_status_of(&r.manifest.run_id), Ok(Some(_)))
+        })
+        .map(|r| r.manifest.run_id.clone())
+        .collect()
+}
+
+/// The runs that may still be writing into the prefix, or `None` when a stateful load could not tell.
+pub(super) fn still_writing(
+    active_at_fetch: &Option<RunIds>,
+    bucket: &RunIds,
+    stateful: bool,
+) -> Option<RunIds> {
+    match (active_at_fetch, stateful) {
+        (None, true) => None,
+        (at_fetch, _) => {
+            let mut writing = at_fetch.clone().unwrap_or_default();
+            writing.extend(bucket.iter().cloned());
+            Some(writing)
+        }
+    }
 }
 
 /// Whether the run-status ledger says any run is writing into `prefix`, folded for the delete guards by [`ledger_says_active`].

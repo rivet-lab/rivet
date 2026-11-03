@@ -867,24 +867,36 @@ fn anchor_holds_a_part(state: &StateStore, progress: &ProgressClaim<'_>) -> bool
     }
 }
 
-/// Mark a run `running` at its START.
-fn ledger_begin_run(
+/// Open the run-status row of a run at its START, refused by code when the state does not take it; returns the start time.
+pub(super) fn ledger_begin_run(
+    state: &StateStore,
+    export_name: &str,
+    source_key: &str,
+    destination: &crate::config::DestinationConfig,
+    run_id: &str,
+) -> Result<String> {
+    let prefix = super::finalize::destination_uri_for_manifest(destination);
+    let started_at = chrono::Utc::now().to_rfc3339();
+    state
+        .begin_run_under_lease(run_id, export_name, source_key, &prefix, &started_at)
+        .map_err(|e| state_not_writable(export_name, &e))?;
+    Ok(started_at)
+}
+
+/// Mark a batch run `running` at its START: its ledger row, then its running marker.
+fn begin_batch_run(
     state: &StateStore,
     plan: &ResolvedRunPlan,
     export_family: &str,
     run_id: &str,
 ) -> Result<()> {
-    let prefix = super::finalize::destination_uri_for_manifest(&plan.destination);
-    let started_at = chrono::Utc::now().to_rfc3339();
-    state
-        .begin_run_under_lease(
-            run_id,
-            &plan.export_name,
-            &plan.source.state_key(),
-            &prefix,
-            &started_at,
-        )
-        .map_err(|e| state_not_writable(&plan.export_name, &e))?;
+    let started_at = ledger_begin_run(
+        state,
+        &plan.export_name,
+        &plan.source.state_key(),
+        &plan.destination,
+        run_id,
+    )?;
     super::finalize::write_running_manifest(plan, export_family, run_id, &started_at);
     Ok(())
 }
@@ -1110,7 +1122,7 @@ fn execute_resolved_plan(
     let rss_sampler = crate::resource::RssPeakSampler::start(rss_before, 100);
     let mut summary = RunSummary::new(plan);
     summary.apply_context = tail.apply_context;
-    if let Err(e) = ledger_begin_run(state, plan, tail.family, &summary.run_id) {
+    if let Err(e) = begin_batch_run(state, plan, tail.family, &summary.run_id) {
         rss_sampler.stop();
         let summary = synthetic_failed_summary(&plan.export_name, &e);
         return (Err(e), summary);
@@ -2703,8 +2715,8 @@ mod tests {
     fn a_run_that_begins_closes_the_running_rows_of_the_runs_that_died_before_it() {
         let state = crate::state::StateStore::open_in_memory().unwrap();
         let plan = chunked_plan_with_quality(None);
-        ledger_begin_run(&state, &plan, "orders", "run_dead").expect("a writable state");
-        ledger_begin_run(&state, &plan, "orders", "run_next").expect("a writable state");
+        begin_batch_run(&state, &plan, "orders", "run_dead").expect("a writable state");
+        begin_batch_run(&state, &plan, "orders", "run_next").expect("a writable state");
         let rows = state.recent_run_status(10, false).unwrap();
         let mut seen: Vec<(String, String)> =
             rows.into_iter().map(|r| (r.run_id, r.status)).collect();
@@ -2725,7 +2737,7 @@ mod tests {
         let state = crate::state::StateStore::open_at_path(&db).expect("a state DB");
         let plan = chunked_plan_with_quality(None);
         let prefix = crate::pipeline::finalize::destination_uri_for_manifest(&plan.destination);
-        ledger_begin_run(&state, &plan, "orders", "run_ok").expect("a writable state");
+        begin_batch_run(&state, &plan, "orders", "run_ok").expect("a writable state");
         let open_runs = || {
             let mut ids: Vec<String> = state
                 .active_run_ids_on_prefix(&prefix)
@@ -2748,7 +2760,7 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'the state is not writable'); END;",
             )
             .unwrap();
-        let err = ledger_begin_run(&state, &plan, "orders", "run_refused").unwrap_err();
+        let err = begin_batch_run(&state, &plan, "orders", "run_refused").unwrap_err();
         assert_eq!(
             crate::error::error_code(&err),
             Some("RIVET_STATE_NOT_WRITABLE")

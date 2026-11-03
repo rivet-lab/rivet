@@ -65,3 +65,11 @@ entries:
     status: done
     verdict: "orphans re-checked with git grep; the derived step runs every script that handles --self-test"
     closes: "merged as #744"
+  - id: HDW-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: a CDC run may write without a ledger row, and a load consumes any run the ledger does not list
+    copies: [src/pipeline/cdc_job.rs:116, src/pipeline/job.rs:871, src/load/reconcile.rs:493, src/load/orchestrate.rs:814, src/load/orchestrate.rs:1103, src/load/orchestrate.rs:1172, src/load/staging.rs:80]
+    status: accepted-as-bugfix
+    verdict: "confirmed by the load_ledger_tests probe: with no running row the second load of a grown CDC run selects [] and records it consumed"
+    closes: "CDC begins through the ledger half of ledger_begin_run and still_writing owns the CDC no-row rule; the CDC-begin half of RHS-1 closes here; run-closing and run-still-writing land with no exceptions"
