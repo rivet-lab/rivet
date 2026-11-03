@@ -1106,7 +1106,7 @@ mod override_probe_tests {
         )
         .unwrap();
         refuse_override_wire_mismatch(&mut src, SourceType::Mongo, "{}", &overrides()).unwrap();
-        assert!(src.seen.is_empty());
+        assert_eq!(src.seen.len(), 0);
     }
 
     #[test]
