@@ -109,7 +109,7 @@ import sys
 import time
 from pathlib import Path
 
-from .shell import Fail, have, main as shell_main, run, tcp_open
+from .shell import Fail, have, main as shell_main, mysql_client, run, tcp_open
 
 MYSQL = os.environ.get("RIVET_FIELD_MYSQL_URL", "mysql://rivet:rivet@127.0.0.1:3306/rivet")
 MYSQL_CONTAINER = os.environ.get("RIVET_FIELD_MYSQL_CONTAINER", "rivet-mysql-1")
@@ -189,8 +189,8 @@ def mysql_root(sql: str, *, what: str = "mysql") -> str:
     failed seed, a failed flip and a failed RESTORE were all indistinguishable
     from success — and the restore is the one that leaves the stand poisoned.
     """
-    p = run(["docker", "exec", "-i", MYSQL_CONTAINER, "mysql", "-uroot", "-privet",
-             "-N", "rivet"], stdin=sql, timeout=MYSQL_ROOT_TIMEOUT)
+    p = run(["docker", "exec", "-i", MYSQL_CONTAINER, *mysql_client("-N", "rivet", user="root")],
+         stdin=sql, timeout=MYSQL_ROOT_TIMEOUT)
     if not p.ok:
         tail = [ln for ln in (p.stderr or "").splitlines() if "Using a password" not in ln]
         raise Fail(f"{what}: mysql root command failed on {MYSQL_CONTAINER}: "
@@ -639,15 +639,15 @@ def preflight(old_raw: str, new_raw: str) -> tuple[Path, Path]:
             # Up is not ready: a MySQL still recovering accepts `docker exec` and
             # answers nothing, which used to surface as an empty prior-globals
             # read half-way through the flip.
-            probe = run(["docker", "exec", "-i", MYSQL_CONTAINER, "mysql", "-uroot", "-privet",
-                         "-N", "rivet"], stdin="SELECT 1;", timeout=60)
+            probe = run(["docker", "exec", "-i", MYSQL_CONTAINER, *mysql_client("-N", "rivet", user="root")],
+                        stdin="SELECT 1;", timeout=60)
             if probe.stdout.strip() != "1":
                 problems.append(f"{MYSQL_CONTAINER} is up but not answering as root yet "
                                 f"({(probe.stderr or probe.stdout).strip().splitlines()[-1:]})")
             else:
                 missing = [v for v in _GLOBALS if not run(
-                    ["docker", "exec", "-i", MYSQL_CONTAINER, "mysql", "-uroot", "-privet",
-                     "-N", "rivet"], stdin=f"SELECT @@GLOBAL.{v};", timeout=60).ok]
+                    ["docker", "exec", "-i", MYSQL_CONTAINER, *mysql_client("-N", "rivet", user="root")],
+                    stdin=f"SELECT @@GLOBAL.{v};", timeout=60).ok]
                 if missing:
                     problems.append(f"{MYSQL_CONTAINER} has no {', '.join(missing)} — the spill "
                                     "fixture cannot be armed on this MySQL version")

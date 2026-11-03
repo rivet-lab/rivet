@@ -85,6 +85,10 @@ pub struct TableIntrospection {
     /// between two integer window boundaries. Empty when the engine does not
     /// populate it (e.g. Mongo, which does not SQL-range-chunk).
     pub int_columns: Vec<String>,
+    /// The primary key's columns in key order; filled only when a composite `chunk_by_key` is checked.
+    pub primary_key: Vec<String>,
+    /// Columns whose type a composite keyset cursor reads; filled only when a composite `chunk_by_key` is checked.
+    pub tuple_cursor_columns: Vec<String>,
 }
 
 impl TableIntrospection {
@@ -98,6 +102,20 @@ impl TableIntrospection {
     /// index-backed). Used to validate an explicit `chunk_by_key`.
     pub fn is_usable_keyset_key(&self, col: &str) -> bool {
         self.keyset_keys.iter().any(|k| k == col)
+    }
+
+    /// Whether `key` is the table's primary key in order with every column of a type the tuple cursor reads.
+    pub fn is_usable_composite_key(&self, key: &[String]) -> bool {
+        key.len() == self.primary_key.len()
+            && key
+                .iter()
+                .zip(&self.primary_key)
+                .all(|(k, pk)| k.eq_ignore_ascii_case(pk))
+            && key.iter().all(|k| {
+                self.tuple_cursor_columns
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(k))
+            })
     }
 
     /// Whether `col` is a known integer-family column — the safety precondition
@@ -124,6 +142,41 @@ impl TableIntrospection {
         // outweighs guarding this exotic PG shape.
         self.int_columns.iter().any(|c| c.eq_ignore_ascii_case(col))
     }
+}
+
+impl TableIntrospection {
+    /// Fill the primary key and the tuple-cursor-readable columns of `base` a composite `chunk_by_key` is checked against.
+    pub fn read_composite_key(
+        &mut self,
+        src: &mut dyn Source,
+        table: &str,
+        base: &str,
+        column_overrides: &ColumnOverrides,
+    ) -> Result<()> {
+        self.primary_key = src.primary_key(table)?.unwrap_or_default();
+        self.tuple_cursor_columns = src
+            .type_mappings(base, column_overrides)?
+            .into_iter()
+            .filter(|m| m.arrow_type.as_ref().is_some_and(is_tuple_cursor_type))
+            .map(|m| m.column_name)
+            .collect();
+        Ok(())
+    }
+}
+
+/// Whether a composite keyset cursor reads and re-binds a value of this type exactly on every engine.
+fn is_tuple_cursor_type(t: &arrow::datatypes::DataType) -> bool {
+    matches!(
+        t,
+        arrow::datatypes::DataType::Int16
+            | arrow::datatypes::DataType::Int32
+            | arrow::datatypes::DataType::Int64
+            | arrow::datatypes::DataType::UInt64
+            | arrow::datatypes::DataType::Utf8
+            | arrow::datatypes::DataType::Date32
+            | arrow::datatypes::DataType::FixedSizeBinary(16)
+            | arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
+    )
 }
 
 /// Receives schema and batches from a source, one at a time.
@@ -185,6 +238,8 @@ pub struct ExportRequest<'a> {
     /// parallel-keyset). Inlined, so it never consumes the cursor bind slot.
     /// `None` (the default) = the sequential single-worker page, unbounded above.
     pub upper_bound: Option<&'a str>,
+    /// The composite keyset key's columns after `incremental.primary_column`; empty for a single key.
+    pub key_rest: &'a [String],
 }
 
 impl<'a> ExportRequest<'a> {
@@ -210,6 +265,7 @@ impl<'a> ExportRequest<'a> {
             // `table:` shortcut) is visible directly in it.
             base_relation: crate::sql::strip_select_star_from(query),
             upper_bound: None,
+            key_rest: &[],
         }
     }
 
@@ -236,6 +292,7 @@ impl<'a> ExportRequest<'a> {
             // `query` is a table-hiding wrapper; the relation lives in `base`.
             base_relation: crate::sql::strip_select_star_from(base),
             upper_bound: None,
+            key_rest: &[],
         }
     }
 
@@ -273,6 +330,12 @@ impl<'a> ExportRequest<'a> {
     /// (the sequential single-worker page).
     pub fn with_upper_bound(mut self, upper: Option<&'a str>) -> Self {
         self.upper_bound = upper;
+        self
+    }
+
+    /// Page a composite keyset key: the columns after the lead.
+    pub fn with_key_rest(mut self, key_rest: &'a [String]) -> Self {
+        self.key_rest = key_rest;
         self
     }
 }

@@ -41,7 +41,9 @@ existing adds the keys its pending changes name); a stream anchored before any r
 oracle saw is `partial`, never a plain pass; a keyless CDC relation is a SKIP. Mongo
 grades `_id` only, reported as `partial`. Oracle is read through python-oracledb (DuckDB has
 no scanner), so its TYPE check sees text and grades a NUMBER from its catalog type. The CDC
-checkpoint is not graded.
+checkpoint of PostgreSQL, MySQL and SQL Server is graded against the server's own position by
+`cdc_position` (not behind this run's events, not ahead of the server, the engine's own
+acknowledgement); Oracle's and Mongo's is not.
 """
 
 from __future__ import annotations
@@ -57,6 +59,8 @@ import subprocess
 import sys
 import time
 from collections import Counter
+
+from .cdc_position import READERS, MysqlReader, position_findings
 
 META = ("__op", "__pos", "__seq")
 
@@ -1351,6 +1355,10 @@ def grade(spec: dict) -> dict:
             legs = [_meta_leg(ora, changes, engine, False, fmt)] if changes else []
             legs += [_meta_leg(ora, snaps, engine, True, fmt)] if snaps else []
             kl = ", ".join(_qi(k) for k in key)
+            fresh = changes if fmt == "ndjson" else declared_parts(out_dir, spec["new_manifests"])
+            if fresh:
+                ora.db.sql("CREATE OR REPLACE TEMP TABLE ev_new AS " + _meta_leg(ora, fresh, engine, False, fmt))
+            extra += position_findings(ora, spec, "ev_new" if fresh else None, pos_order(engine), partial)
             if legs:
                 ora.db.sql("CREATE OR REPLACE TEMP TABLE ev AS " + " UNION ALL BY NAME ".join(f"({x})" for x in legs))
                 ora.db.sql(
@@ -1951,6 +1959,7 @@ def _self_test() -> None:
     assert canon(oracle_ds_iso(one_day)) != canon("PT93784.000005S"), "a day is not folded into seconds"
     _ns_self_test()
     _anchor_self_test()
+    _position_self_test()
     _compare_self_test()
     _layout_self_test()
     _ndjson_self_test()
@@ -2186,6 +2195,73 @@ def _anchor_self_test() -> None:
         write_keys([("1",), ("2",)], ["id"], p)
         with _Mem() as ora:
             assert ora.rows(f"SELECT id FROM read_parquet({_lit(p)}) ORDER BY id") == [("1",), ("2",)]
+
+
+class _ServerMem(_Mem):
+    """`_Mem` whose scanner calls answer from `answers` (keyed by a fragment of the scanner's SQL)."""
+
+    def __init__(self, answers: dict[str, list]) -> None:
+        super().__init__()
+        self.answers = answers
+
+    def rows(self, sql: str) -> list:
+        """The canned answer whose key the SQL contains, else the real DuckDB result."""
+        for frag, rows in self.answers.items():
+            if frag in sql:
+                return rows
+        return super().rows(sql)
+
+
+def _position_self_test() -> None:
+    """The checkpoint is graded against the server: behind this run's events, ahead of the head, the engine's own refusals, a missing file."""
+    import tempfile
+
+    def grade_at(engine: str, ckpt: dict | None, events: dict | None, answers: dict, **spec) -> tuple[list[str], list[str]]:
+        """(findings, partial) of `position_findings` over a checkpoint file holding `ckpt` and one delivered event at `events`."""
+        with tempfile.TemporaryDirectory() as d, _ServerMem(answers) as ora:
+            path = os.path.join(d, "ck.json")
+            if ckpt is not None:
+                with open(path, "w") as f:
+                    json.dump(ckpt, f)
+            if events is not None:
+                ora.db.sql(f"CREATE TABLE ev_new AS SELECT {pos_order(engine)} AS __ord FROM (SELECT {_lit(json.dumps(events))} AS __pos)")
+            partial: list[str] = []
+            readers = {**READERS, "mysql": MysqlReader(lambda _url: logs)}
+            return position_findings(ora, {"engine": engine, "checkpoint": path, "url": "u", **spec}, "ev_new" if events is not None else None, pos_order(engine), partial, readers), partial
+
+    pg = {"pg_current_wal_insert_lsn": [("0/5000000",)], "pg_replication_slots": [("0/4000000",)]}
+    ck = {"lsn": "0/4000000", "confirmed_first": True}
+    assert grade_at("postgres", ck, {"lsn": "0/3000000"}, pg, slot="s") == ([], [])
+    assert grade_at("postgres", ck, None, pg, slot="s") == ([], []), "an idle drained run owes no event"
+    found, _ = grade_at("postgres", {**ck, "lsn": "0/2000000"}, {"lsn": "0/3000000"}, pg, slot="s")
+    assert len(found) == 2 and "behind an event" in found[0] and "confirmed_flush_lsn" in found[1], found
+    found, _ = grade_at("postgres", {**ck, "lsn": "0/6000000"}, {"lsn": "0/3000000"}, pg, slot="s")
+    assert len(found) == 1 and "ahead of the server" in found[0], found
+    found, part = grade_at("postgres", {"lsn": "0/2000000"}, None, pg, slot="s")
+    assert found == [] and "confirmed_first" in part[0], "an unmarked checkpoint is a named partial, not a finding"
+    assert grade_at("postgres", None, {"lsn": "0/3000000"}, pg, slot="s")[0][0].startswith("CHECKPOINT: the run delivered events but"), "no file after events"
+    assert grade_at("postgres", None, None, pg, slot="s") == ([], []), "no file and no events owes nothing"
+    assert position_findings(None, {"engine": "oracle", "checkpoint": "x"}, None, "", []) == [], "an engine without a reader is not graded"
+
+    logs = [("binlog.000001", 500), ("binlog.000002", 300)]
+    my: dict = {}
+    at = lambda f, p: {"file": f, "pos": p}  # noqa: E731
+    assert grade_at("mysql", at("binlog.000002", 200), at("binlog.000002", 150), my) == ([], [])
+    assert "behind an event" in grade_at("mysql", at("binlog.000001", 400), at("binlog.000002", 150), my)[0][0]
+    found, _ = grade_at("mysql", at("binlog.000002", 400), at("binlog.000002", 150), my)
+    assert any("ahead of the server" in f for f in found) and any("past the end" in f for f in found), found
+    found, _ = grade_at("mysql", at("binlog.000003", 4), None, my)
+    assert any("does not hold" in f for f in found) and any("ahead of the server" in f for f in found), found
+    logs = [("binlog.000009", 100), ("binlog.000010", 4)]
+    assert grade_at("mysql", at("binlog.000010", 4), None, my) == ([], []), "file ordinals compare as numbers"
+
+    ms = {"fn_cdc_get_max_lsn": [("0000002a0000010c0003",)], "max(start_lsn)": [(None,)]}
+    assert grade_at("mssql", {"lsn": "0000002a0000010c0003"}, {"lsn": "0000002a000000f00001"}, ms) == ([], [])
+    assert "ahead of the server" in grade_at("mssql", {"lsn": "0000002a0000010c0004"}, None, ms)[0][0]
+    assert "behind an event" in grade_at("mssql", {"lsn": "0000002a000000e00001"}, {"lsn": "0000002a000000f00001"}, ms)[0][0]
+    young = {**ms, "max(start_lsn)": [("0000002a0000020c0001",)]}
+    assert grade_at("mssql", {"lsn": "0000002a0000020c0000"}, None, young) == ([], []), "an anchor below a young instance's start is above the max LSN and fine"
+    assert "ahead of the server" in grade_at("mssql", {"lsn": "0000002a0000020c0002"}, None, young)[0][0]
 
 
 def _layout_self_test() -> None:

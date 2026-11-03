@@ -731,6 +731,7 @@ mod tests {
             checkpoint: true,
             incremental,
             parallel: 1,
+            key_rest: Vec::new(),
         })
     }
 

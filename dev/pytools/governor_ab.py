@@ -96,7 +96,7 @@ PROFILES = {
 def mysql_root(sql: str) -> str:
     """Run SQL as root inside the dev MySQL container, return raw stdout."""
     out = subprocess.run(
-        ["docker", "exec", "-i", MYSQL_CONTAINER, "mysql", "-uroot", "-privet", "rivet", "-N", "-e", sql],
+        ["docker", "exec", "-i", MYSQL_CONTAINER, "mysql", "-uroot", "-privet", "--default-character-set=utf8mb4", "rivet", "-N", "-e", sql],
         capture_output=True,
         text=True,
         check=True,

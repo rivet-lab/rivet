@@ -275,6 +275,56 @@ fn read_only_state_on(mut rig: Rig) {
     }
 }
 
+/// HDW-1: a CDC run whose ledger row cannot be written is refused by code before it reads its stream, and the run that follows the remedy delivers every change.
+fn cdc_run_over_a_state_that_refuses_its_ledger_row(mut s: CdcScenario) {
+    s.rig.run_ok();
+    for id in 1..=3 {
+        s.insert(id);
+    }
+    s.settle();
+    let state = rusqlite::Connection::open(s.rig.config_path().with_file_name(".rivet_state.db"))
+        .expect("the SQLite state beside the config");
+    state
+        .execute_batch(
+            "CREATE TRIGGER oc_no_run_status BEFORE INSERT ON run_status \
+             BEGIN SELECT RAISE(ABORT, 'run_status is frozen'); END;",
+        )
+        .expect("freeze run_status");
+    let before = files_under(&s.rig.out_dir());
+    let out = s.rig.run_with_envs(SQLITE_STATE);
+    assert_refused(&out, Refused::by_code("RIVET_STATE_NOT_WRITABLE", 1));
+    assert!(
+        text(&out).contains("run_status is frozen"),
+        "the refusal names its cause\n{}",
+        text(&out)
+    );
+    assert_eq!(
+        files_under(&s.rig.out_dir()),
+        before,
+        "a refused run writes nothing"
+    );
+    state
+        .execute_batch("DROP TRIGGER oc_no_run_status")
+        .expect("unfreeze run_status");
+    s.rig.run_ok();
+    assert!(
+        files_under(&s.rig.out_dir()).len() > before.len(),
+        "the run after the remedy delivers the changes the refused run left in the stream"
+    );
+}
+
+/// Sorted names of every file under `dir`.
+fn files_under(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 /// Sorted `id` values of every part under `out`, whatever the column's integer width (Oracle delivers NUMBER(19) as a decimal).
 fn delivered_ids(out: &std::path::Path) -> Vec<i64> {
     use arrow::array::{Array, Int64Array};
@@ -3883,4 +3933,44 @@ fn an_oplog_rolled_past_the_checkpoint_before_the_first_changes_run_is_refused_b
 #[ignore = "live+gate-only: docker (a throwaway mongo replica set, `mongosh` in the image)"]
 fn an_oplog_rolled_past_the_checkpoint_after_a_changes_run_is_refused_by_code_mongo() {
     mongo_oplog_rolled_past_the_checkpoint(true);
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mysql(
+        "oc_hdw1",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+    ));
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::pg(
+        "oc_hdw1",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+    ));
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mssql(
+        "oc_hdw1",
+        "id BIGINT PRIMARY KEY, v BIGINT",
+    ));
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::oracle_with("oc_hdw1", |r, _| r));
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
+fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo() {
+    cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mongo_with("oc_hdw1", |r, _| r));
 }
