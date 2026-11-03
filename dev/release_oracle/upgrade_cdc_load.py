@@ -20,7 +20,7 @@ import os
 import re
 from pathlib import Path
 
-from .core import Ledger, SkipCause, Proc, rivet_bin, run, run_lanes, server_of
+from .core import Ledger, SkipCause, Proc, mysql_client, rivet_bin, run, run_lanes, server_of
 
 SCEN = "upgrade_continuity"
 CDC_TABLES = 3
@@ -118,7 +118,7 @@ class MySQL(Src):
         from .cdc import _container_for, _no_container
         from .core import docker_exec
         c = _container_for(self.url)
-        return docker_exec(c, "mysql", "-uroot", "-privet", "-N", stdin=q) if c else _no_container(self.url)
+        return docker_exec(c, *mysql_client("-N", user="root"), stdin=q) if c else _no_container(self.url)
 
     def __enter__(self):
         from .cdc import _mysql

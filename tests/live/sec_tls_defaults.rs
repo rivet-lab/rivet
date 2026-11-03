@@ -162,7 +162,14 @@ fn sec_loopback_plaintext_pg_is_allowed() {
     // case the secure policy explicitly permits.
     let rig = pg_no_tls_rig(POSTGRES_URL, &out);
 
-    let result = rig.cli_env(&["doctor"], &[("RUST_LOG", "warn")]);
+    let result = rig
+        .run_after_env(
+            &["doctor"],
+            &[],
+            &[("RUST_LOG", "warn")],
+            Pairing::GreenOnly,
+        )
+        .preflight;
     let stderr = String::from_utf8_lossy(&result.stderr);
 
     assert!(

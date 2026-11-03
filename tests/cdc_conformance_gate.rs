@@ -434,11 +434,13 @@ fn derived_capture_marker_set_is_pinned() {
         "cli_in_dir(",
         "drain_and_read(",
         "run(",
-        "run_after_doctor(",
+        "run_after(",
+        "run_after_env(",
         "run_and_read(",
         "run_args(",
         "run_args_env(",
         "run_expect_fail(",
+        "run_export_after_check(",
         // `Rig::run_in_dir` — the working-directory seam added for the relative
         // `cdc.checkpoint:` contract (a relative path must follow the CONFIG, not the
         // process CWD). It spawns rivet, so it is a capture marker like its siblings.
@@ -1236,6 +1238,7 @@ fn every_live_cdc_test_asserts_an_outcome() {
                 // print a verdict and exit 0 with no column table at all).
                 || chunk.contains("\"check\",")
                 || chunk.contains("cli(&[\"check\"")
+                || chunk.contains("Pairing::")
                 // External-warehouse oracles (the strongest read-back in the
                 // suite): the CDC parquet is loaded and queried by another engine.
                 || chunk.contains("duckdb_run_sql_json(")

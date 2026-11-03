@@ -341,7 +341,7 @@ def pg_db(container: str = PG_CONTAINER) -> Db:
 
 
 def mysql_db(container: str = MYSQL_CONTAINER) -> Db:
-    return Db("mysql", container, ("mysql", "-urivet", "-privet", "rivet", "-N", "-e"))
+    return Db("mysql", container, tuple(shell.mysql_client("rivet", "-N", "-e")))
 
 
 def mssql_db(container: str = MSSQL_CONTAINER) -> Db:
