@@ -3345,7 +3345,7 @@ mod load_ledger_tests {
     /// A load that overlaps a CDC run no ledger lists delivers every part the run wrote.
     #[test]
     #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-    fn a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part() {
+    fn open_defect_a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part() {
         assert_eq!(
             parts_delivered_across_a_growing_run("grow_no_row", RowAt::Nowhere),
             BOTH_PARTS
@@ -3355,7 +3355,7 @@ mod load_ledger_tests {
     /// A load from a second state database delivers every part of a CDC run whose row is in the first.
     #[test]
     #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-    fn a_load_overlapping_a_cdc_run_over_a_foreign_state_delivers_every_part() {
+    fn open_defect_a_load_overlapping_a_cdc_run_over_a_foreign_state_delivers_every_part() {
         assert_eq!(
             parts_delivered_across_a_growing_run("grow_foreign", RowAt::OtherState),
             BOTH_PARTS
@@ -3365,7 +3365,7 @@ mod load_ledger_tests {
     /// With no row and a newer CDC run under the prefix, the older run is consumed and the newer stays retryable.
     #[test]
     #[ignore = "open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-    fn a_cdc_run_with_no_row_is_consumed_once_a_newer_run_exists_and_not_before() {
+    fn open_defect_a_cdc_run_with_no_row_is_consumed_once_a_newer_run_exists_and_not_before() {
         let dir = tempfile::tempdir().unwrap();
         let state = StateStore::open_in_memory().unwrap();
         let plan = cdc_plan(&dir, "grow_newer");
