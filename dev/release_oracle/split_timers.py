@@ -168,6 +168,20 @@ def _live_modules_self_test() -> None:
     assert len(calls) == 2 and all(c.get("keep") for c in calls), calls
 
 
+def _coverage_self_test() -> None:
+    """The llvm-cov battery and the classification of its lcov are two splits of the live-only coverage stage."""
+    from . import scenarios
+
+    led = Ledger(colour=False)
+    led._buf = []
+    with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
+        st.enter_context(mock.patch.object(scenarios, "_WORK", Path(tmp)))
+        st.enter_context(mock.patch.object(scenarios, "have", lambda tool: True))
+        st.enter_context(mock.patch.object(scenarios, "run", lambda argv, **k: core.Proc(list(argv), 0, "confirmed 1", "")))
+        scenarios.verify_live_only_coverage(led)
+    assert _names(led) == ["live-only coverage llvm-cov battery", "live-only coverage classify"], led._splits
+
+
 def _self_test() -> None:
     """Splits are recorded by every timed stage site, and the timings line keeps them."""
     _record_self_test()
@@ -176,4 +190,5 @@ def _self_test() -> None:
     _upgrade_self_test()
     _engine_self_test()
     _live_modules_self_test()
-    print("self-test ok: perf sections, flat-RSS engines, lanes, upgrade legs, engine bring-up/seed/golden and nextest legs each record a split")
+    _coverage_self_test()
+    print("self-test ok: perf sections, flat-RSS engines, lanes, upgrade legs, engine bring-up/seed/golden, nextest legs and the live-only coverage battery each record a split")

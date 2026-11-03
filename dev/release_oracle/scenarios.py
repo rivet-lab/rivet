@@ -1668,12 +1668,13 @@ def verify_live_only_coverage(led: Ledger) -> None:
     # offline battery, so the state overrides are stripped for this leg only.
     skip_log = work_dir() / "offline_battery.skips"
     skip_log.write_text("")
-    build = run(
-        ["env", "-u", "RIVET_STATE_URL", "-u", "RIVET_GATE_STATE_URL", "-u", "RIVET_TEST_STATE_URL",
-         "cargo", "llvm-cov", "nextest", "--lcov", "--output-path", str(lcov)],
-        env={"RIVET_SKIP_LOG": str(skip_log)},
-        timeout=NO_TIMEOUT,
-    )
+    with led.split("live-only coverage llvm-cov battery"):
+        build = run(
+            ["env", "-u", "RIVET_STATE_URL", "-u", "RIVET_GATE_STATE_URL", "-u", "RIVET_TEST_STATE_URL",
+             "cargo", "llvm-cov", "nextest", "--lcov", "--output-path", str(lcov)],
+            env={"RIVET_SKIP_LOG": str(skip_log)},
+            timeout=NO_TIMEOUT,
+        )
     # Kept outside the run's work dir, which the gate deletes — the message must name a file that exists.
     log = ROOT / "target" / "gate-failures" / f"live_only_cov-{os.getpid()}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -1695,10 +1696,11 @@ def verify_live_only_coverage(led: Ledger) -> None:
             "vacuous self-skip",
         )
         return
-    verdict = run(
-        [sys.executable, str(ROOT / "dev/pytools/live_only_cov.py"), str(lcov)],
-        timeout=600,
-    )
+    with led.split("live-only coverage classify"):
+        verdict = run(
+            [sys.executable, str(ROOT / "dev/pytools/live_only_cov.py"), str(lcov)],
+            timeout=600,
+        )
     if verdict.ok:
         _passed(
             led, "infra", "live-only", "coverage", "-",
