@@ -1483,7 +1483,9 @@ fn doctor_agrees_on_a_server_without_logical_wal() {
     let slot = unique_name("oc_nowal_slot");
     let _slot = Slot::new(slot.clone());
     let rig = Rig::pg_cdc(&table, &slot).source_url(POSTGRES_URL);
-    let (_, run) = rig.run_after_doctor();
+    let run = rig
+        .run_after(&["doctor", "--json"], &[], Pairing::GreenOnly)
+        .run;
     assert!(
         !run.status.success(),
         "fixture: the batch stand runs wal_level=replica, which CDC refuses"
@@ -1893,7 +1895,9 @@ fn mysql_binlogs_purged_past_the_checkpoint(after_a_changes_run: bool) {
 
 /// Both reports, E/I: `doctor` is not green for a CDC export whose prerequisite the run then refuses.
 fn doctor_agrees_where_the_stream_is_refused(rig: Rig) {
-    let (_, run) = rig.run_after_doctor();
+    let run = rig
+        .run_after(&["doctor", "--json"], &[], Pairing::GreenOnly)
+        .run;
     assert!(
         !run.status.success(),
         "fixture: the stream lacks its prerequisite, so the run refuses"
@@ -1937,9 +1941,9 @@ fn init_config(url: &str, table: &str, mode: &str) -> InitConfig {
     cfg
 }
 
-/// The generated config runs as written; the default oracle grades what it delivered.
+/// The generated config runs as written, and `check` over it agrees with that run; the default oracle grades what it delivered.
 fn generated_config_runs(cfg: &InitConfig) {
-    let out = cfg.cli(&["run"]);
+    let out = cfg.run_after(&["check"], &[], Pairing::SameRefusal).run;
     assert!(
         out.status.success(),
         "the config `rivet init` wrote does not run (exit {:?})\n{}\n--- config ---\n{}",
@@ -1998,8 +2002,13 @@ fn check_names_the_strategy_run_uses(engine: SqlEngine) {
 
 /// What `check` printed for `rig`, then how many range-chunk parts its `run` wrote (0 for one unchunked pass).
 fn check_then_run(rig: Rig) -> (String, usize) {
-    let check = text(&rig.cli(&["check"]));
-    rig.run_ok();
+    let c = rig.run_after(&["check"], &[], Pairing::SameRefusal);
+    let check = text(&c.preflight);
+    assert!(
+        c.run.status.success(),
+        "`run` after a green `check` failed:\n{}",
+        text(&c.run)
+    );
     let parts: Vec<String> = files_below(&rig.out_dir())
         .iter()
         .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
