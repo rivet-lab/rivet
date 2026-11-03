@@ -842,24 +842,26 @@ def server_of(url: str) -> str:
     return f"{'127.0.0.1' if host == 'localhost' else host}:{u.port}"
 
 
-def run_lanes(led: "Ledger", cells: Sequence[tuple[object, Callable[["Ledger"], None]]], *,
-              workers: int | None = None) -> None:
-    """Run `(lane, fn)` cells: one lane's cells in list order, lanes side by side; every cell's rows are buffered and flushed in list order."""
+def run_lanes(led: "Ledger", cells: Sequence[tuple], *, workers: int | None = None) -> None:
+    """Run `(lane, fn[, (engine, version, scenario, store)])` cells: a lane's cells in list order, lanes side by side, rows flushed in list order; a raising cell leaves one INFRA row, its lane goes on, and the first exception is re-raised after the flush."""
     from concurrent.futures import ThreadPoolExecutor
 
     subs = [led.buffered_child() for _ in cells]
     lanes: dict[object, list[int]] = {}
-    for i, (lane, _) in enumerate(cells):
-        lanes.setdefault(lane, []).append(i)
+    for i, cell in enumerate(cells):
+        lanes.setdefault(cell[0], []).append(i)
 
     def _lane(idx: list[int]) -> tuple[BaseException | None, float]:
-        t0 = time.perf_counter()
+        t0, first = time.perf_counter(), None
         for i in idx:
             try:
                 cells[i][1](subs[i])
-            except (Exception, SystemExit) as e:  # noqa: BLE001 — re-raised below, after every row is flushed
-                return e, time.perf_counter() - t0
-        return None, time.perf_counter() - t0
+            except (Exception, SystemExit) as e:  # noqa: BLE001
+                engine, version, scenario, store = cells[i][2] if len(cells[i]) > 2 else ("-", "-", "run_lanes", str(cells[i][0]))
+                why = f"{type(e).__name__}: {next((ln for ln in str(e).splitlines() if ln.strip()), '')}"
+                subs[i].ungraded(engine, version, scenario, store, f"{scenario} cell raised {why}")
+                first = e if first is None else first
+        return first, time.perf_counter() - t0
 
     with ThreadPoolExecutor(max_workers=max(1, min(workers or len(lanes), len(lanes)))) as ex:
         done = list(ex.map(_lane, lanes.values()))
