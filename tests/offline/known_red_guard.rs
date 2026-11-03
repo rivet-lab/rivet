@@ -24,7 +24,8 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 4 -> 10 (2026-11-03): five CDC-begin contract cells and the load-across-a-rolling-run cell, open defect HDW-1 (fix/run-closing-cdc-begin).
 // 10 -> 11 (2026-11-03): the MySQL CDC ENUM/SET label cell (TF-2, closes with fix/mysql-enum-label-escapes).
 // 11 -> 26 -> 11 (2026-11-03): the 15 open_defect_ cells of the config count knobs HCF-1/3/4/8 opened and closed (fix/config-knob-quantity-counts).
-const ENTRY_CEILING: usize = 11; // ratchet-pin: known-red-entries
+// 11 -> 13 (2026-11-03): the gc_orphans-beside-a-CDC-run's-first-roll cells on MySQL and PostgreSQL, open defect CDC-RUN-START (fix/cdc-run-start-marker).
+const ENTRY_CEILING: usize = 13; // ratchet-pin: known-red-entries
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it

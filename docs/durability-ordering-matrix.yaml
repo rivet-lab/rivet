@@ -144,3 +144,17 @@ scenarios:
     chunked:     { na: "a chunked run writes its manifest at its end" }
     keyset:      { na: "a keyset run writes its manifest at its end" }
     cdc:         { test: open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql }
+
+  - id: gc_spares_a_cdc_runs_first_part_mysql
+    what: "a load with gc_orphans from a state that holds no ledger row for a MySQL CDC run, taken between the run's first upload and its first manifest, spares the first part; the warehouse read back by a second client equals the source (CDC-RUN-START)"
+    incremental: { na: "an incremental run writes one manifest, at its end" }
+    chunked:     { na: "a chunked run writes its manifest at its end" }
+    keyset:      { na: "a keyset run writes its manifest at its end" }
+    cdc:         { test: open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql }
+
+  - id: gc_spares_a_cdc_runs_first_part_postgres
+    what: "the same cycle over a PostgreSQL CDC run (CDC-RUN-START)"
+    incremental: { na: "an incremental run writes one manifest, at its end" }
+    chunked:     { na: "a chunked run writes its manifest at its end" }
+    keyset:      { na: "a keyset run writes its manifest at its end" }
+    cdc:         { test: open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres }

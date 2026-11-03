@@ -47,6 +47,10 @@ _HDW1_LOAD = (
     "HDW-1 (seam run-still-writing, 2026-11-03): a load from a state that holds no ledger row for a CDC run in flight counts the run finished, loads the parts of one roll and records the run consumed, so the rolls that follow are never loaded; closes with fix/run-closing-cdc-begin, where still_writing owns the CDC no-row rule"
 )
 
+_CDC_START = (
+    "CDC-RUN-START (seam run-still-writing, 2026-11-03): a CDC run writes no running marker and no manifest before its first roll, so a load from another state DB with gc_orphans removes the part the run uploaded and has not manifested yet; closes with fix/cdc-run-start-marker, which writes a running manifest under the run's own key at start"
+)
+
 
 KNOWN_RED: tuple[KnownRed, ...] = (
     _open("live_cdc_mbt::open_defect_mysql_cdc_enum_set_labels_match_the_snapshot",
@@ -82,6 +86,12 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     _open("live_clickhouse_load::open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql",
           "assertion `left == right` failed: the view's live rows must equal the source",
           _HDW1_LOAD),
+    _open("live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql",
+          "the load beside the rolling run:",
+          _CDC_START),
+    _open("live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres",
+          "the load beside the rolling run:",
+          _CDC_START),
 )
 
 
