@@ -34,7 +34,7 @@ docker compose exec -T postgres psql -U rivet -d rivet -v ON_ERROR_STOP=1 \
 MySQL (same idea — init lives only inside the image):
 
 ```bash
-docker compose exec -T mysql mysql -urivet -privet rivet \
+docker compose exec -T mysql mysql -urivet -privet --default-character-set=utf8mb4 rivet \
   < dev/sql/rivet_type_matrix_mysql.sql
 ```
 

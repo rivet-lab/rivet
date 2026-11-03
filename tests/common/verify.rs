@@ -141,6 +141,7 @@ fn cdc_cli_config(
         ndjson: output.is_none(),
     };
     let images = image_dir();
+    let named = one("--checkpoint").is_some();
     let checkpoint = one("--checkpoint").unwrap_or_else(|| {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -166,6 +167,7 @@ fn cdc_cli_config(
                 "cdc": {
                     "slot": one("--slot").unwrap_or_else(|| "rivet_slot".into()),
                     "checkpoint": checkpoint,
+                    "checkpoint_named": named,
                     "capture_instance": one("--capture-instance"),
                 },
                 "destination": {"type": "local", "path": dest},
@@ -821,6 +823,11 @@ impl Case {
                 "anchor_keys": with_ext(&self.image(e, "anchor-keys"), "parquet"),
                 "cursor_record": with_ext(&self.image(e, "cursor"), "json"),
                 "ndjson": with_ext(&self.image(e, "events"), "jsonl"),
+                "slot": e.get("cdc").and_then(|c| s(c, "slot")),
+                "checkpoint": self
+                    .checkpoint(e)
+                    .filter(|_| e.get("cdc").and_then(|c| c.get("checkpoint_named")).and_then(|v| v.as_bool()) != Some(false))
+                    .map(|p| p.display().to_string()),
             })
             .as_object()
             .expect("an object")

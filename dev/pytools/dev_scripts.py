@@ -206,7 +206,7 @@ def _mysql(sql: str) -> shell.Proc:
     needs no ON_ERROR_STOP equivalent — `.check()` at the call site is enough.
     """
     return shell.compose(
-        "exec", "-T", "mysql", "mysql", "-uroot", "-privet", "rivet", "-q",
+        "exec", "-T", "mysql", *shell.mysql_client("rivet", "-q", user="root"),
         stdin=sql,
         cwd=ROOT,
     )

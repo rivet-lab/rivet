@@ -411,6 +411,7 @@ fn introspect_mysql_on(
         row_estimate,
         avg_row_bytes,
         int_columns,
+        ..Default::default()
     })
 }
 
@@ -949,7 +950,7 @@ impl super::Source for MysqlSource {
         request: &super::ExportRequest<'_>,
         sink: &mut dyn super::BatchSink,
     ) -> Result<()> {
-        let built = build_export_query(request, SourceType::Mysql);
+        let built = build_export_query(request, SourceType::Mysql)?;
         log::debug!(
             "executing query (connection={}): {}",
             self.proxy_kind.log_label(),

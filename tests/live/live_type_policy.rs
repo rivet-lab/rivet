@@ -147,24 +147,27 @@ fn check_strict_and_run_strict_refuse_the_same_config_with_the_same_code() {
     let out = d.path().join("out");
     let rig = Rig::oracle_batch(t.name()).dest_path(out.clone());
 
-    let check = rig.cli(&["check", "--type-report", "--strict"]);
-    let run = rig.run_args(&["--strict"]);
-    let check_err = String::from_utf8_lossy(&check.stderr);
-    let run_err = String::from_utf8_lossy(&run.stderr);
-    assert!(!check.status.success(), "check --strict:\n{check_err}");
-    assert!(!run.status.success(), "run --strict:\n{run_err}");
-    assert_eq!(check.status.code(), run.status.code(), "one exit class");
+    let c = rig.run_after(
+        &["check", "--type-report", "--strict"],
+        &["--strict"],
+        Pairing::SameRefusal,
+    );
+    let check_err = String::from_utf8_lossy(&c.preflight.stderr);
+    let run_err = String::from_utf8_lossy(&c.run.stderr);
+    assert!(
+        !c.preflight.status.success(),
+        "check --strict:\n{check_err}"
+    );
     for (who, err) in [("check", &check_err), ("run", &run_err)] {
         assert!(err.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{who}: {err}");
         assert!(err.contains("column 'TS9'"), "{who}: {err}");
     }
     assert_eq!(parquet_parts(&out), 0, "run --strict wrote a part");
 
-    // And both accept it without --strict.
-    let check = rig.cli(&["check", "--type-report"]);
+    let lax = rig.run_after(&["check", "--type-report"], &[], Pairing::SameRefusal);
     assert!(
-        check.status.success(),
+        lax.green,
         "{}",
-        String::from_utf8_lossy(&check.stderr)
+        String::from_utf8_lossy(&lax.preflight.stderr)
     );
 }

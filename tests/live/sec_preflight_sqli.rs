@@ -58,10 +58,16 @@ struct CheckOutput {
     stderr: String,
 }
 
-/// Run the rig's `rivet check --export <name>` and capture stdout/stderr.
+/// Run the rig's `rivet check --export <name>` and the run after it, and capture the check's stdout/stderr.
 /// Does not assert exit status — see `CheckOutput`.
 fn run_check(rig: &Rig, export_name: &str) -> CheckOutput {
-    let out = rig.cli(&["check", "--export", export_name]);
+    let out = rig
+        .run_after(
+            &["check", "--export", export_name],
+            &["--export", export_name],
+            Pairing::BothRefuse,
+        )
+        .preflight;
     CheckOutput {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),

@@ -46,7 +46,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 632 -> 628 (2026-10-30): four helper-call mentions left the prose comments of the reduced files; no call site moved.
 // 626 -> 624 (2026-11-01): live_batch_census rewrites parts through one Rig::rewrite_part; two helper calls left.
 // 628 -> 626 (2026-10-31): the unused duckdb_s3_parquet_rows helper left tests/common/duckdb.rs; no call site moved.
-const DUCKDB_HELPER_CEILING: usize = 624; // ratchet-pin: duckdb-helper-sites
+// 624 -> 626 (2026-11-03): #792 composite keyset cells read distinct (id, kind) tuples; row_census keys one column. Closes when row_census takes a key list.
+const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];
@@ -309,7 +310,7 @@ fn oracle_known_defects_are_a_named_set_that_only_shrinks() {
 }
 
 /// Hand-built spawns of the rivet binary in tests/live.
-const RAW_RIVET_CEILING: usize = 16; // ratchet-pin: raw-rivet-invocations
+const RAW_RIVET_CEILING: usize = 11; // ratchet-pin: raw-rivet-invocations
 
 /// `Command::new` of the rivet binary in `text`, in each spelling the suite uses.
 fn raw_rivet_sites(text: &str) -> usize {

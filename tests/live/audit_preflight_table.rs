@@ -32,10 +32,14 @@ const SEEDED_ROWS: i64 = 2500;
 /// and return captured stdout. `check` exits 0 on a successful diagnostic, so
 /// we assert success and surface stderr on failure.
 fn run_check(rig: &Rig, export_name: &str) -> String {
-    let out = rig.cli_env(
-        &["check", "--export", export_name],
-        &[("DATABASE_URL", POSTGRES_URL)],
-    );
+    let out = rig
+        .run_after_env(
+            &["check", "--export", export_name],
+            &["--export", export_name],
+            &[("DATABASE_URL", POSTGRES_URL)],
+            Pairing::SameRefusal,
+        )
+        .preflight;
 
     assert!(
         out.status.success(),

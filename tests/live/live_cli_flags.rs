@@ -698,7 +698,13 @@ fn check_type_report_shows_column_table() {
     let out = tempfile::tempdir().unwrap();
     let rig = simple_rig(table.name(), out.path());
 
-    let result = rig.cli(&["check", "--export", table.name(), "--type-report"]);
+    let result = rig
+        .run_after(
+            &["check", "--export", table.name(), "--type-report"],
+            &["--export", table.name()],
+            Pairing::SameRefusal,
+        )
+        .preflight;
 
     assert!(
         result.status.success(),
@@ -736,7 +742,13 @@ fn check_strict_exits_zero_for_safe_types() {
         .query(&format!("SELECT id, name FROM {name}", name = table.name()))
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["check", "--export", table.name(), "--strict"]);
+    let result = rig
+        .run_after(
+            &["check", "--export", table.name(), "--strict"],
+            &["--export", table.name(), "--strict"],
+            Pairing::SameRefusal,
+        )
+        .preflight;
 
     assert!(
         result.status.success(),
@@ -780,7 +792,13 @@ fn check_strict_exits_nonzero_for_unsafe_type() {
         .query(&format!("SELECT id, val FROM {name}"))
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["check", "--export", &name, "--strict"]);
+    let result = rig
+        .run_after(
+            &["check", "--export", &name, "--strict"],
+            &["--export", &name, "--strict"],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     assert!(
         !result.status.success(),
@@ -817,7 +835,13 @@ fn check_json_flag_outputs_type_report_as_json() {
     let out = tempfile::tempdir().unwrap();
     let rig = simple_rig(table.name(), out.path());
 
-    let result = rig.cli(&["check", "--export", table.name(), "--json"]);
+    let result = rig
+        .run_after(
+            &["check", "--export", table.name(), "--json"],
+            &["--export", table.name()],
+            Pairing::SameRefusal,
+        )
+        .preflight;
 
     assert!(
         result.status.success(),
@@ -871,7 +895,13 @@ fn check_target_flag_accepts_bigquery_target() {
     let out = tempfile::tempdir().unwrap();
     let rig = simple_rig(table.name(), out.path());
 
-    let result = rig.cli(&["check", "--export", table.name(), "--target", "bigquery"]);
+    let result = rig
+        .run_after(
+            &["check", "--export", table.name(), "--target", "bigquery"],
+            &["--export", table.name()],
+            Pairing::SameRefusal,
+        )
+        .preflight;
 
     // Exit 0 expected — our seeded table has int/text columns with no
     // BigQuery incompatibilities.
@@ -897,14 +927,20 @@ fn check_param_flag_substitutes_in_query() {
         ))
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&[
-        "check",
-        "--export",
-        table.name(),
-        "--param",
-        "upper=100",
-        "--json",
-    ]);
+    let result = rig
+        .run_after(
+            &[
+                "check",
+                "--export",
+                table.name(),
+                "--param",
+                "upper=100",
+                "--json",
+            ],
+            &["--export", table.name(), "--param", "upper=100"],
+            Pairing::SameRefusal,
+        )
+        .preflight;
 
     assert!(
         result.status.success(),
@@ -950,7 +986,9 @@ fn doctor_exits_zero_when_source_reachable() {
     let out = tempfile::tempdir().unwrap();
     let rig = simple_rig(table.name(), out.path());
 
-    let result = rig.cli(&["doctor"]);
+    let result = rig
+        .run_after(&["doctor"], &[], Pairing::GreenOnly)
+        .preflight;
 
     assert!(
         result.status.success(),
@@ -1577,7 +1615,9 @@ fn doctor_exits_zero_when_mysql_source_reachable() {
         .query(&format!("SELECT id, name FROM {}", table.name()))
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["doctor"]);
+    let result = rig
+        .run_after(&["doctor"], &[], Pairing::GreenOnly)
+        .preflight;
 
     assert!(
         result.status.success(),
@@ -1604,7 +1644,13 @@ fn check_mysql_basic_exits_zero() {
         .query(&format!("SELECT id, name FROM {}", table.name()))
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["check", "--export", table.name()]);
+    let result = rig
+        .run_after(
+            &["check", "--export", table.name()],
+            &["--export", table.name()],
+            Pairing::SameRefusal,
+        )
+        .preflight;
 
     assert!(
         result.status.success(),
@@ -2026,22 +2072,27 @@ fn check_strict_flags_csv_unserializable_column_consistently_with_run() {
     };
     let csv_rig = mk("csv");
 
-    // CSV: `check --strict` flags the list column, AND the run fails the same way.
-    let chk = csv_rig.cli(&["check", "--export", &name, "--strict"]);
+    let chk = csv_rig
+        .run_after(
+            &["check", "--export", &name, "--strict"],
+            &["--export", &name],
+            Pairing::BothRefuse,
+        )
+        .preflight;
     assert!(
         !chk.status.success(),
         "check --strict must flag an int[] column under CSV format; stderr:\n{}",
         String::from_utf8_lossy(&chk.stderr)
     );
-    let run = csv_rig.run_args(&["--export", &name]);
-    assert!(
-        !run.status.success(),
-        "the CSV run of the same export must also fail (consistency)"
-    );
 
-    // Parquet: the SAME column is fine — the flag is format-specific.
     let pq_rig = mk("parquet");
-    let chk_pq = pq_rig.cli(&["check", "--export", &name, "--strict"]);
+    let chk_pq = pq_rig
+        .run_after(
+            &["check", "--export", &name, "--strict"],
+            &["--export", &name],
+            Pairing::BothRefuse,
+        )
+        .preflight;
     assert!(
         chk_pq.status.success(),
         "check --strict must pass the same int[] column under Parquet; stderr:\n{}",

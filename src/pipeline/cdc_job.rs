@@ -1339,7 +1339,7 @@ mod tests {
             leg.tuning.is_some(),
             "a recipe without `tuning:` must not erase the CDC export's budget"
         );
-        assert_eq!(leg.chunk_by_key.as_deref(), Some("id"));
+        assert_eq!(leg.chunk_key_lead(), Some("id"));
         assert_eq!(leg.chunk_size, 250_000);
         assert_eq!(leg.parallel, 4);
         assert!(leg.chunk_checkpoint, "the baseline must be resumable");
