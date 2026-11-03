@@ -65,3 +65,11 @@ entries:
     status: done
     verdict: "orphans re-checked with git grep; the derived step runs every script that handles --self-test"
     closes: "merged as #744"
+  - id: TF-2
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: MySQL CDC unescapes only doubled quotes in ENUM and SET labels read from COLUMN_TYPE
+    copies: [src/source/cdc/value.rs:832]
+    status: accepted-as-bugfix
+    verdict: "confirmed against rivet code and the MySQL 8.0 and 8.4 append_unescaped source: a label with a backslash, LF, CR or NUL differs between stream and snapshot"
+    closes: "parse_enum_labels reverses every append_unescaped escape; the stream label equals the snapshot label"

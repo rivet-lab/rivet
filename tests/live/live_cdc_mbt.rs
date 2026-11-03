@@ -1021,8 +1021,8 @@ fn cdc_unicode_enum_labels_survive_end_to_end() {
 
 /// MySQL CDC ENUM and SET labels holding a backslash, LF, CR, NUL, a quote and non-ASCII text are the stored labels on the stream leg as on the snapshot leg.
 #[test]
-#[ignore = "live+gate-only: open defect TF-2; closes with fix/mysql-enum-label-escapes"]
-fn open_defect_mysql_cdc_enum_set_labels_match_the_snapshot() {
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn mysql_cdc_enum_set_labels_match_the_snapshot() {
     use arrow::array::StringArray;
     let enum_labels = [
         "C:\\temp",
@@ -1061,11 +1061,11 @@ fn open_defect_mysql_cdc_enum_set_labels_match_the_snapshot() {
     rig.run_ok();
     let mut want = Vec::new();
     for (k, e) in enum_labels.iter().enumerate() {
-        let s = format!(
-            "{},{}",
-            set_labels[k],
-            set_labels[(k + 1) % set_labels.len()]
+        let (lo, hi) = (
+            k.min((k + 1) % set_labels.len()),
+            k.max((k + 1) % set_labels.len()),
         );
+        let s = format!("{},{}", set_labels[lo], set_labels[hi]);
         c.exec_drop(
             format!("INSERT INTO {tbl} VALUES (?, ?, ?)"),
             (k as i64 + 1, *e, s.as_str()),

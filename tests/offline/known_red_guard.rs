@@ -22,7 +22,8 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // performance_schema scan of two `SHOW GLOBAL VARIABLES` per run (#661, #684), no user table; issue #694.
 // 8 -> 4 (2026-10-27): the four perf[mysql/cdc*] rows matched no failure in the 0.32.2 gate; issue #694 keeps the reading.
 // 4 -> 5 (2026-11-03): the MySQL CDC ENUM/SET label cell (TF-2, closes with fix/mysql-enum-label-escapes).
-const ENTRY_CEILING: usize = 5; // ratchet-pin: known-red-entries
+// 5 -> 4 (2026-11-03): the TF-2 cell is green on fix/mysql-enum-label-escapes and its entry is deleted.
+const ENTRY_CEILING: usize = 4; // ratchet-pin: known-red-entries
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
