@@ -119,6 +119,31 @@ fn report_units(
     }
 }
 
+/// Refuses an export whose `columns:` overrides the run's converter refuses on the first row of a unit.
+pub(crate) fn refuse_override_wire_mismatch(
+    config: &Config,
+    export: &ExportConfig,
+    column_overrides: &ColumnOverrides,
+    config_dir: &std::path::Path,
+    params: Option<&std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    if column_overrides.is_empty() || export.mode == crate::config::ExportMode::Cdc {
+        return Ok(());
+    }
+    let url = config.source.resolve_url()?;
+    let mut src = connect_source(config, &url, config.source.tls.as_ref())?;
+    for (table, query) in report_units(export, config_dir, params)? {
+        let overrides = unit_overrides(export, table.as_deref(), column_overrides);
+        source::refuse_override_wire_mismatch(
+            src.as_mut(),
+            config.source.source_type,
+            &query,
+            &overrides,
+        )?;
+    }
+    Ok(())
+}
+
 /// The `columns:` overrides that apply to ONE resolver unit.
 ///
 /// Extracted from [`collect_reports`] so the rule is observable WITHOUT a live
@@ -1058,6 +1083,57 @@ mod tests {
 
     fn cfg_from(yaml: &str) -> Config {
         Config::from_yaml(yaml).unwrap()
+    }
+
+    const OVERRIDE_PROBE_CFG: &str = r#"
+source:
+  type: postgres
+  url: "postgresql://rivet:rivet@127.0.0.1:1/none"
+exports:
+  - name: batch
+    query: "SELECT 1 AS a"
+    mode: full
+    format: parquet
+    columns:
+      a: "string"
+    destination:
+      type: local
+      path: /tmp/x
+  - name: stream
+    tables: [orders]
+    mode: cdc
+    format: parquet
+    columns:
+      a: "string"
+    cdc:
+      checkpoint: ./cdc.ckpt
+    destination:
+      type: local
+      path: /tmp/x
+"#;
+
+    fn probe(config: &Config, export: &ExportConfig, overrides: &ColumnOverrides) -> Result<()> {
+        refuse_override_wire_mismatch(config, export, overrides, std::path::Path::new("."), None)
+    }
+
+    #[test]
+    fn the_override_probe_connects_only_for_a_batch_export_with_overrides() {
+        let config = cfg_from(OVERRIDE_PROBE_CFG);
+        let with =
+            crate::plan::parse_column_overrides_pub(&config.exports[0].columns, "batch").unwrap();
+        assert!(!with.is_empty());
+        assert!(
+            probe(&config, &config.exports[0], &with).is_err(),
+            "a batch export with overrides opens the source, which is unreachable here"
+        );
+        assert!(
+            probe(&config, &config.exports[0], &ColumnOverrides::new()).is_ok(),
+            "no override, nothing to read"
+        );
+        assert!(
+            probe(&config, &config.exports[1], &with).is_ok(),
+            "a CDC export is graded by its capture, not by a row read"
+        );
     }
 
     /// A multiplex `tables:` CDC export must resolve ONE unit per captured table.
