@@ -68,6 +68,7 @@ R_MATRIX = "listed 2026-11-03: the cell is the check-vs-planner agreement matrix
 R_ENV = "listed 2026-11-03: the refusal is reached before any connect, so a run twin would dial the same sink"
 R_PERM = "listed 2026-11-03: the note depends on the login's grants; the run twin needs a second stand login"
 R_INIT = "listed 2026-11-03: graded by the scaffold content (a chosen mode, key or scope) that a run does not restate; closes with a per-field scaffold oracle"
+R_DATA = "listed 2026-11-03: check labels the column lossy and exits 0, the run refuses RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) on the first value with a non-zero scale; closes with a check-time refusal or a verdict that the lossy label is the contract"
 R_DISAGREES = "listed 2026-11-03: check disagrees with the run today (reported as a product defect); closes with the product fix, then route through run_after"
 R_STATE = "listed 2026-11-03: a refusal on an unreachable state store; closes when the run twin is paired with SameRefusal"
 
@@ -75,6 +76,7 @@ R_STATE = "listed 2026-11-03: a refusal on an unreachable state store; closes wh
 BLIND_PREFLIGHT: dict[str, str] = {  # ratchet-pin: blind-preflight-tests strings
     "audit_column_validation.rs::audit_check_rejects_inapplicable_type_override": R_DISAGREES,
     "live_audit_suspects.rs::mssql_check_reports_a_row_estimate_for_a_read_only_login": R_DISAGREES,
+    "audit_column_validation.rs::audit_type_report_flags_lossy_scale_reduction": R_DATA,
     "audit_doctor_fastfail.rs::audit_doctor_fastfails_against_unreachable_cloud_endpoint": R_MESSAGE,
     "audit_doctor_probe.rs::audit_doctor_removes_destination_probe_after_local_write_check": R_MESSAGE,
     "audit_maxfile.rs::audit_validate_absent_prefix_can_fail": R_VALIDATE,

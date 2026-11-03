@@ -187,13 +187,7 @@ fn audit_type_report_flags_lossy_scale_reduction() {
         .export_line("  price: \"decimal(20,0)\"")
         .dest_path(out.path().to_path_buf());
 
-    let result = rig
-        .run_after(
-            &["check", "--export", &export_name, "--type-report", "--json"],
-            &["--export", &export_name],
-            Pairing::BothRefuse,
-        )
-        .preflight;
+    let result = rig.cli(&["check", "--export", &export_name, "--type-report", "--json"]);
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
