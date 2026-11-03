@@ -380,7 +380,10 @@ class Ledger:
 
     def incident(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str, target: str) -> bool:
         """When `target` answered earlier in this run it went away mid-run: record INFRA (a stand incident) and return True."""
-        from . import stand_health
+        try:
+            from . import stand_health
+        except ImportError:  # pragma: no cover - bare sys.path entry
+            import stand_health  # type: ignore
         if not (target and stand_health.BOOK.seen_up(target)):
             return False
         self.ungraded(engine, version, scenario, store, f"{msg} [stand incident: {target} answered earlier in this run]", detail or msg)

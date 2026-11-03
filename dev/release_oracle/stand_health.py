@@ -27,7 +27,10 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
-from .stand_disk import disk_reason
+try:
+    from .stand_disk import disk_reason
+except ImportError:  # pragma: no cover - bare sys.path entry
+    from stand_disk import disk_reason  # type: ignore
 
 __all__ = ["Kind", "StandVerdict", "ALIVE", "classify", "judge", "ready", "Probe", "Watchdog", "watchdog", "BringUpError"]
 

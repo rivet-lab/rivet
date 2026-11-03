@@ -15,7 +15,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .core import ROOT
+try:
+    from .core import ROOT
+except ImportError:  # pragma: no cover - bare sys.path entry
+    from core import ROOT  # type: ignore
 
 __all__ = ["START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low", "disk_reason"]
 
