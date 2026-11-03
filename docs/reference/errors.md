@@ -219,7 +219,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_LOAD_SPEC_MISSING` | refusal | 5 | run `rivet run` for the export the message names so its column types are recorded, then load again |
 | `RIVET_MCP_REQUEST_INVALID` | usage | 1 | send a method and tool name `tools/list` advertises, with `params` |
 | `RIVET_PLAN_ARTIFACT_INVALID` | usage | 1 | pass a plan file `rivet plan` wrote, unedited; run `rivet plan` again to regenerate it |
-| `RIVET_PLAN_CHUNK_KEY_UNUSABLE` | usage | 1 | set `chunk_column:` (integer) or `chunk_by_key:` (a single-column NOT NULL unique key of a supported type), add such an index, or use `mode: full` |
+| `RIVET_PLAN_CHUNK_KEY_UNUSABLE` | usage | 1 | set `chunk_column:` (integer) or `chunk_by_key:` (a NOT NULL unique column of a supported type, or the primary key's columns in order), add such an index, or use `mode: full` |
 | `RIVET_STATE_BACKEND_FAILED` | environment | 2 if transient, else 1 | check the state database (the SQLite file, or the `RIVET_STATE_URL` server and the role's rights), then run again |
 | `RIVET_STATE_FILE_CORRUPT` | environment | 2 if transient, else 1 | move the state file aside (rivet rebuilds it; cursors and skip-ledgers start fresh), or restore it from a backup |
 | `RIVET_STATE_COPY_SOURCE_EMPTY` | usage | 1 | name the config whose `.rivet_state.db` holds the state, or its `RIVET_STATE_URL=sqlite:<path>` |

@@ -72,7 +72,33 @@ fn extract_cursor_value_at(
     } else {
         (0..batch.num_rows()).find(|&i| !array.is_null(i))?
     };
+    render_cursor_value(array, last_row)
+}
 
+/// The last (or first) row's composite key as a JSON array of its column values; `None` when any is unreadable.
+pub(crate) fn extract_key_tuple(
+    batch: &RecordBatch,
+    columns: &[&str],
+    schema: &SchemaRef,
+    from_end: bool,
+) -> Option<String> {
+    let row = if from_end {
+        batch.num_rows().checked_sub(1)?
+    } else {
+        (batch.num_rows() > 0).then_some(0)?
+    };
+    let values = columns
+        .iter()
+        .map(|c| {
+            let array = batch.column(schema.index_of(c).ok()?);
+            (!array.is_null(row)).then(|| render_cursor_value(array, row))?
+        })
+        .collect::<Option<Vec<String>>>()?;
+    serde_json::to_string(&values).ok()
+}
+
+/// The value at `last_row` of a cursor-typed array as a normalized string; `None` for an unsupported type.
+fn render_cursor_value(array: &arrow::array::ArrayRef, last_row: usize) -> Option<String> {
     match array.data_type() {
         DataType::Int16 => Some(
             array
@@ -240,6 +266,51 @@ mod tests {
     use arrow::array::*;
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use std::sync::Arc;
+
+    /// A composite key cursor is the JSON tuple of the last (or first) row, and absent on a null.
+    #[test]
+    fn key_tuple_is_the_json_tuple_of_one_row() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("kind", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec![Some("a\"b"), Some("z")])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            extract_key_tuple(&batch, &["id", "kind"], &schema, true),
+            Some(r#"["2","z"]"#.into())
+        );
+        assert_eq!(
+            extract_key_tuple(&batch, &["id", "kind"], &schema, false),
+            Some(r#"["1","a\"b"]"#.into())
+        );
+        let nulls = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            extract_key_tuple(&nulls, &["id", "kind"], &schema, true),
+            None
+        );
+        assert_eq!(
+            extract_key_tuple(&batch.slice(0, 0), &["id", "kind"], &schema, true),
+            None
+        );
+        assert_eq!(
+            extract_key_tuple(&batch.slice(0, 0), &["id", "kind"], &schema, false),
+            None
+        );
+    }
 
     #[test]
     fn cursor_int64() {

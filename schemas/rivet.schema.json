@@ -647,10 +647,14 @@
           "minimum": 0
         },
         "chunk_by_key": {
-          "description": "Keyset (seek) pagination on this single index-backed unique key — the\nsource-safe shape for tables without a single-integer PK (OPT-4). The\ncolumn MUST be backed by a usable index (PK or unique); the planner\nrefuses a non-indexed key rather than emit a full-scan + filesort query.",
-          "type": [
-            "string",
-            "null"
+          "description": "Keyset (seek) pagination on an index-backed unique key: one column, or the primary key's columns in order.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChunkKey"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "parallel": {
@@ -1046,6 +1050,21 @@
       "additionalProperties": false,
       "required": [
         "after"
+      ]
+    },
+    "ChunkKey": {
+      "description": "One key column, or the primary key's columns in order",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
       ]
     },
     "TimeColumnType": {

@@ -56,6 +56,25 @@ pub struct KeysetPlan {
     /// it. `#[serde(default)]` ⇒ absent/0 reads with a single cursor (`.max(1)`).
     #[serde(default)]
     pub parallel: usize,
+    /// The key columns after `key_column` for a composite key, empty for a single-column key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_rest: Vec<String>,
+}
+
+impl KeysetPlan {
+    /// Every key column in seek order.
+    pub fn columns(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.key_column.as_str()).chain(self.key_rest.iter().map(String::as_str))
+    }
+
+    /// What the persisted keyset cursor refers to: the key column, or `tuple(a,b,..)` for a composite key.
+    pub fn cursor_identity(&self) -> String {
+        if self.key_rest.is_empty() {
+            self.key_column.clone()
+        } else {
+            format!("tuple({})", self.columns().collect::<Vec<_>>().join(","))
+        }
+    }
 }
 
 /// Fully resolved execution plan for a single export.
@@ -371,7 +390,7 @@ impl ExtractionStrategy {
     pub fn cursor_identity(&self) -> Option<String> {
         match self {
             ExtractionStrategy::Incremental(p) => Some(p.cursor_identity()),
-            ExtractionStrategy::Keyset(k) => Some(k.key_column.clone()),
+            ExtractionStrategy::Keyset(k) => Some(k.cursor_identity()),
             _ => None,
         }
     }
@@ -561,6 +580,7 @@ mod tests {
                 checkpoint: true,
                 incremental,
                 parallel: 1,
+                key_rest: Vec::new(),
             })
         };
         let incremental = ExtractionStrategy::Incremental(IncrementalCursorPlan {
@@ -591,6 +611,7 @@ mod tests {
                 checkpoint: true,
                 incremental,
                 parallel: 1,
+                key_rest: Vec::new(),
             })
         };
         assert!(
