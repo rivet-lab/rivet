@@ -124,7 +124,7 @@ def _cdc_sql(eng: str, sql: str) -> shell.Proc:
     if eng == "postgres":
         return shell.run(["docker", "exec", c, "psql", "-U", "rivet", "-d", "rivet", "-c", sql], timeout=300)
     if eng == "mysql":
-        return shell.run(["docker", "exec", c, "mysql", "-urivet", "-privet", "rivet", "-e", sql], timeout=300)
+        return shell.run(["docker", "exec", c, *shell.mysql_client("rivet", "-e", sql)], timeout=300)
     return shell.run(
         ["docker", "exec", c, "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost",
          "-U", "sa", "-P", "Rivet_Passw0rd!", "-C", "-d", "rivet", "-Q", sql],

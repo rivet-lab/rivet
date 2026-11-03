@@ -997,8 +997,7 @@ def pg_tuple(label: str, port: int) -> Cell:
 
 
 def mysql_tuple(label: str, port: int) -> Cell:
-    p = run(["mysql", "-h", "127.0.0.1", "-P", str(port), "-urivet", "-privet", "rivet",
-             "-N", "-B", "-e", MYSQL_SQL], timeout=300)
+    p = run(shell.mysql_client("-h", "127.0.0.1", "-P", str(port), "rivet", "-N", "-B", "-e", MYSQL_SQL), timeout=300)
     return Cell(label, _first_line(p.stdout).replace("\t", "|"), _tail(p) if not p.ok else "")
 
 

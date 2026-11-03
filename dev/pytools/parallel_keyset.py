@@ -358,7 +358,7 @@ def _devbox_body(golden: Path, binary: str) -> int:
     golden_run("postgres", PG18_URL, GOLDEN_TABLE)
 
     _banner("MySQL80 signed seed")
-    _seed("MySQL80 signed", MY80_C, ("mysql", "-urivet", "-privet", "rivet"),
+    _seed("MySQL80 signed", MY80_C, tuple(shell.mysql_client("rivet")),
           golden / "fixture_mysql.sql", 2)
     _banner("MySQL80 signed verify")
     golden_run("mysql", MY80_URL, GOLDEN_TABLE)
@@ -368,7 +368,7 @@ def _devbox_body(golden: Path, binary: str) -> int:
     # broke unsigned keyset in the field. Same golden: keyset pages by row, so the
     # magnitude cannot change the counts, but the boundary literals and the paging
     # cursor must round-trip as u64.
-    _seed("MySQL80 unsigned", MY80_C, ("mysql", "-urivet", "-privet", "rivet"),
+    _seed("MySQL80 unsigned", MY80_C, tuple(shell.mysql_client("rivet")),
           golden / "fixture_mysql_unsigned.sql", 2)
     _banner("MySQL80 unsigned verify")
     golden_run("mysql", MY80_URL, "keyset_sparse_unsigned")
@@ -520,7 +520,7 @@ def fixture(*, container: str = PK_CONTAINER, port: int = PK_PORT) -> int:
 
     def ready() -> bool:
         return shell.docker_exec(
-            container, "mysql", "-urivet", "-privet", "bench", "-e", "SELECT 1", timeout=60
+            container, *shell.mysql_client("bench", "-e", "SELECT 1"), timeout=60
         ).ok
 
     if not shell.wait_until(ready, tries=45, delay=3.0, what="mysql ready"):
@@ -532,7 +532,7 @@ def fixture(*, container: str = PK_CONTAINER, port: int = PK_PORT) -> int:
         )
 
     seeded = shell.docker_exec(
-        container, "mysql", "-urivet", "-privet", "bench", stdin=PK_SQL, timeout=None
+        container, *shell.mysql_client("bench"), stdin=PK_SQL, timeout=None
     )
     sys.stdout.write(seeded.stdout)
     sys.stdout.flush()
