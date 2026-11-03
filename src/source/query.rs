@@ -587,6 +587,28 @@ mod tests {
         );
     }
 
+    /// A request carrying the rest of a composite key builds the tuple page, not the single-column one.
+    #[test]
+    fn a_request_with_a_key_rest_builds_the_tuple_page() {
+        let tuning = crate::tuning::SourceTuning::from_config(None);
+        let overrides = crate::types::ColumnOverrides::default();
+        let rest = ["kind".to_string()];
+        let cursor = cursor_with(Some(r#"["7","b"]"#));
+        let key = single("id");
+        let request =
+            crate::source::ExportRequest::unwrapped("SELECT * FROM t", &tuning, &overrides)
+                .with_incremental(Some(&key))
+                .with_cursor(Some(&cursor))
+                .with_key_rest(&rest)
+                .with_page_limit(5);
+        let built = build_export_query(&request, SourceType::Postgres).unwrap();
+        assert!(
+            built.sql.contains(r#"ORDER BY "id", "kind""#) && built.cursor_param.is_none(),
+            "{}",
+            built.sql
+        );
+    }
+
     /// A stored cursor that is not a tuple of the key's arity is refused as incomparable.
     #[test]
     fn a_composite_keyset_cursor_of_the_wrong_shape_is_refused() {

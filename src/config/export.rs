@@ -1090,6 +1090,16 @@ pub(crate) fn sample_export(name: &str) -> ExportConfig {
 mod tests {
     use super::*;
 
+    /// The config schema accepts chunk_by_key as a column name or a non-empty list of names.
+    #[test]
+    fn chunk_key_schema_is_a_string_or_a_non_empty_list() {
+        let schema = serde_json::to_value(schemars::schema_for!(ChunkKey)).unwrap();
+        let any_of = schema["anyOf"].as_array().expect("anyOf");
+        assert_eq!(any_of[0]["type"], "string");
+        assert_eq!(any_of[1]["type"], "array");
+        assert_eq!(any_of[1]["minItems"], 1);
+    }
+
     /// chunk_by_key reads a column or a non-empty list and writes back the same shape.
     #[test]
     fn chunk_key_is_a_column_or_a_non_empty_list() {

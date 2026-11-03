@@ -306,6 +306,10 @@ mod tests {
             extract_key_tuple(&batch.slice(0, 0), &["id", "kind"], &schema, true),
             None
         );
+        assert_eq!(
+            extract_key_tuple(&batch.slice(0, 0), &["id", "kind"], &schema, false),
+            None
+        );
     }
 
     #[test]

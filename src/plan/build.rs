@@ -2357,6 +2357,35 @@ mod tests {
             assert!(format!("{err:#}").contains("mutually exclusive"), "{err:#}");
             crate::error::assert_coded(&err, "RIVET_CONFIG_VALUE_OUT_OF_RANGE", 1);
         }
+        for (key, parallel, incremental) in [
+            (vec!["id".to_string(), "kind".to_string()], 1, false),
+            (vec!["id".to_string()], 4, false),
+            (vec!["id".to_string()], 1, true),
+        ] {
+            let mut export = minimal_export();
+            export.mode = ExportMode::Chunked;
+            export.chunk_by_key = crate::config::ChunkKey::new(key);
+            export.parallel = parallel;
+            export.keyset_incremental = incremental;
+            let refused = build_plan(
+                &minimal_config(),
+                &export,
+                Path::new("."),
+                false,
+                false,
+                false,
+                None,
+            )
+            .err()
+            .map(|e| format!("{e:#}"));
+            assert!(
+                !refused
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("on a composite key"),
+                "{refused:?}"
+            );
+        }
     }
 
     #[test]
