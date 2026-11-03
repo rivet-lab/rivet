@@ -61,9 +61,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 if __package__:
-    from . import shell
+    from . import evidence, shell
 else:  # executed as a plain script: `python3 dev/pytools/release.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import evidence  # type: ignore[no-redef]
     import shell  # type: ignore[no-redef]
 
 ROOT = shell.ROOT
@@ -437,10 +438,8 @@ def tag_exists(tag: str) -> bool:
 
 
 def worktree_dirty() -> bool:
-    """Unstaged or staged changes. Untracked files are NOT considered dirty —
-    same as the bash, and defensible (nothing untracked ends up in the tag), but
-    worth knowing: a new-but-unadded source file will not block a release."""
-    return not _git("diff", "--quiet").ok or not _git("diff", "--cached", "--quiet").ok
+    """A tracked file differs from HEAD, staged or not, the evidence ledger apart; untracked files do not count."""
+    return evidence.tree_dirty(ROOT)
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
