@@ -807,7 +807,8 @@ fn check_refuses_a_key_column_in_the_wrong_case() {
     let check = Rig::oracle_batch(t.name())
         .mode("chunked")
         .export_line("chunk_column: id")
-        .cli(&["check"]);
+        .run_after(&["check"], &[], Pairing::BothRefuse)
+        .preflight;
     assert!(
         !check.status.success(),
         "a key column the result lacks must fail check"
@@ -1376,7 +1377,9 @@ fn oracle_doctor_stdout(url: &str, table: &str) -> String {
         .query(&format!("SELECT ID FROM RIVET.{table}"))
         .source_url(url)
         .dest_path(out.path().to_path_buf());
-    let run = rig.cli(&["doctor"]);
+    let run = rig
+        .run_after(&["doctor"], &[], Pairing::GreenOnly)
+        .preflight;
     let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
     assert!(
         stdout.contains("Source auth"),
@@ -1676,8 +1679,12 @@ fn a_collection_column_is_refused_by_name_and_fails_strict_check() {
     ora_exec(&format!("INSERT INTO {} VALUES (1, {ty}(1, 2))", t.name()));
     let out = tempfile::tempdir().unwrap();
     let rig = Rig::oracle_batch(t.name()).dest_path(out.path().to_path_buf());
-    let run = rig.run_args(&[]);
-    let check = rig.cli(&["check", "--type-report", "--strict"]);
+    let c = rig.run_after(
+        &["check", "--type-report", "--strict"],
+        &[],
+        Pairing::BothRefuse,
+    );
+    let (run, check) = (c.run, c.preflight);
     drop(t);
     ora_exec(&format!("DROP TYPE {ty}"));
     assert!(!run.status.success(), "a VARRAY column must be refused");
@@ -1704,7 +1711,8 @@ fn check_names_an_invisible_key_column() {
     let check = Rig::oracle_batch(t.name())
         .mode("chunked")
         .export_line("chunk_by_key: K")
-        .cli(&["check"]);
+        .run_after(&["check"], &[], Pairing::BothRefuse)
+        .preflight;
     assert!(!check.status.success());
     let err = String::from_utf8_lossy(&check.stderr);
     assert!(
@@ -1725,7 +1733,8 @@ fn check_suggests_the_real_spelling_of_a_quoted_lowercase_column() {
     let check = Rig::oracle_batch(t.name())
         .mode("incremental")
         .export_line("cursor_column: UPDATED_AT")
-        .cli(&["check"]);
+        .run_after(&["check"], &[], Pairing::BothRefuse)
+        .preflight;
     assert!(!check.status.success());
     let err = String::from_utf8_lossy(&check.stderr);
     assert!(
@@ -1747,7 +1756,8 @@ fn check_reads_a_query_cursor_range_from_the_query() {
         ))
         .mode("incremental")
         .export_line("cursor_column: ID")
-        .cli(&["check", "--json"]);
+        .run_after(&["check", "--json"], &[], Pairing::SameRefusal)
+        .preflight;
     assert!(
         check.status.success(),
         "stderr:\n{}",
@@ -1979,34 +1989,20 @@ fn parallel_keyset_over_a_date_key_reads_every_row_once() {
 #[ignore = "live: requires docker compose oracle"]
 fn check_on_an_init_scaffold_finds_the_cursor_index() {
     require_alive(LiveService::Oracle);
-    let dir = tempfile::tempdir().unwrap();
-    let env = [("ORACLE_URL", ORACLE_URL)];
-    let init = run_rivet_in_dir(
-        dir.path(),
-        &[
-            "init",
-            "--source-env",
-            "ORACLE_URL",
-            "--table",
-            "ORDERS",
-            "--mode",
-            "incremental",
-            "-o",
-            "rivet.yaml",
-        ],
-        &env,
-    );
+    let cfg = InitConfig::generate(ORACLE_URL, &["--table", "ORDERS", "--mode", "incremental"]);
     assert!(
-        init.status.success(),
+        cfg.init.status.success(),
         "init:\n{}",
-        String::from_utf8_lossy(&init.stderr)
+        String::from_utf8_lossy(&cfg.init.stderr)
     );
-    let yaml = std::fs::read_to_string(dir.path().join("rivet.yaml")).unwrap();
     assert!(
-        yaml.contains("query:"),
-        "init writes a column-list query:\n{yaml}"
+        cfg.yaml().contains("query:"),
+        "init writes a column-list query:\n{}",
+        cfg.yaml()
     );
-    let check = run_rivet_in_dir(dir.path(), &["check", "-c", "rivet.yaml", "--json"], &env);
+    let check = cfg
+        .run_after(&["check", "--json"], &[], Pairing::SameRefusal)
+        .preflight;
     assert!(
         check.status.success(),
         "check:\n{}",
@@ -2025,7 +2021,13 @@ fn the_type_report_marks_a_timestamp_9_column_lossy() {
         "ora_ts9r",
         "id NUMBER(10) PRIMARY KEY, t9 TIMESTAMP(9), t6 TIMESTAMP(6)",
     );
-    let check = Rig::oracle_batch(t.name()).cli(&["check", "--type-report", "--json"]);
+    let check = Rig::oracle_batch(t.name())
+        .run_after(
+            &["check", "--type-report", "--json"],
+            &[],
+            Pairing::SameRefusal,
+        )
+        .preflight;
     assert!(
         check.status.success(),
         "stderr:\n{}",
@@ -2283,7 +2285,9 @@ fn check_refuses_a_column_override_key_in_the_wrong_case() {
     require_alive(LiveService::Oracle);
     let t = seed_oracle_numeric_table(5);
     let wrong = Rig::oracle_batch(t.name()).export_line("columns: {amount: \"decimal(12,2)\"}");
-    let check = wrong.cli(&["check"]);
+    let check = wrong
+        .run_after(&["check"], &[], Pairing::SameRefusal)
+        .preflight;
     assert!(!check.status.success(), "a case-only key must fail check");
     let err = String::from_utf8_lossy(&check.stderr);
     assert!(
@@ -2291,7 +2295,9 @@ fn check_refuses_a_column_override_key_in_the_wrong_case() {
         "stderr:\n{err}"
     );
     let right = Rig::oracle_batch(t.name()).export_line("columns: {AMOUNT: \"decimal(12,2)\"}");
-    let check = right.cli(&["check"]);
+    let check = right
+        .run_after(&["check"], &[], Pairing::SameRefusal)
+        .preflight;
     assert!(
         check.status.success(),
         "the exact key passes; stderr:\n{}",

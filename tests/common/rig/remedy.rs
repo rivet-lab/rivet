@@ -177,7 +177,7 @@ fn error_code(line: &str) -> Option<String> {
 }
 
 /// How an invocation ended, for a verdict line.
-fn ended(s: &Said) -> String {
+pub(crate) fn ended(s: &Said) -> String {
     let exit = s
         .exit
         .map_or("a signal".to_string(), |c| format!("exit {c}"));

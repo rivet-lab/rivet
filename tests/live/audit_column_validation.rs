@@ -46,7 +46,13 @@ fn audit_check_rejects_inapplicable_type_override() {
         .export_line("  quantity: \"string\"")
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["check", "--export", &export_name, "--type-report"]);
+    let result = rig
+        .run_after(
+            &["check", "--export", &export_name, "--type-report"],
+            &["--export", &export_name],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -90,7 +96,13 @@ fn audit_check_flags_missing_cursor_column() {
         .export_line("cursor_column: does_not_exist")
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["check", "--export", &export_name]);
+    let result = rig
+        .run_after(
+            &["check", "--export", &export_name],
+            &["--export", &export_name],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -181,7 +193,13 @@ fn audit_type_report_flags_lossy_scale_reduction() {
         .export_line("  price: \"decimal(20,0)\"")
         .dest_path(out.path().to_path_buf());
 
-    let result = rig.cli(&["check", "--export", &export_name, "--type-report", "--json"]);
+    let result = rig
+        .run_after(
+            &["check", "--export", &export_name, "--type-report", "--json"],
+            &["--export", &export_name],
+            Pairing::BothRefuse,
+        )
+        .preflight;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);

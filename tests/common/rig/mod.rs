@@ -18,6 +18,8 @@ use super::runner::RIVET_BIN;
 /// prevent).
 mod beside;
 pub use beside::{Local, Met, ReadOnly, TinyVolume};
+mod consequence;
+pub use consequence::{Consequence, Pairing};
 mod init;
 pub use init::InitConfig;
 mod invoke;

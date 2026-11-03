@@ -539,20 +539,6 @@ impl Rig {
             .map(str::to_string)
             .collect()
     }
-
-    /// `rivet doctor --json`, then the run it predicts: panics when doctor reported all_ok and the run refused; returns (doctor's all_ok, the run).
-    pub fn run_after_doctor(&self) -> (bool, std::process::Output) {
-        let doctor = self.cli(&["doctor", "--json"]);
-        let run = self.run();
-        match doctor_agrees_with_run(&doctor.stdout, run.status.success()) {
-            Ok(green) => (green, run),
-            Err(why) => panic!(
-                "{why} — rig '{}', run stderr:\n{}",
-                self.name,
-                String::from_utf8_lossy(&run.stderr)
-            ),
-        }
-    }
 }
 
 /// `argv` of `rivet cdc --source <url> …` with the inline pair replaced by `source` (when given) and `extra` appended.
@@ -577,41 +563,6 @@ fn a_source_form_replaces_the_inline_source_pair() {
         ["cdc", "--source-env", "V", "--table", "t", "--output", "d"]
     );
     assert_eq!(with_source_form(inline(), None, &[]), inline());
-}
-
-/// Doctor's all_ok when the run after it agrees, else why not (all_ok, then a refused run); an unreadable report is an error.
-pub(crate) fn doctor_agrees_with_run(report: &[u8], run_ok: bool) -> Result<bool, String> {
-    let v: serde_json::Value = serde_json::from_slice(report).unwrap_or_else(|e| {
-        panic!(
-            "`rivet doctor --json` printed no JSON report ({e}):\n{}",
-            String::from_utf8_lossy(report)
-        )
-    });
-    let green = v["all_ok"]
-        .as_bool()
-        .unwrap_or_else(|| panic!("the doctor report has no `all_ok` bool: {v}"));
-    if green && !run_ok {
-        return Err(format!(
-            "doctor and run disagree: doctor reported all_ok, the run refused; doctor: {v}"
-        ));
-    }
-    Ok(green)
-}
-
-#[test]
-fn a_green_doctor_followed_by_a_refused_run_is_a_disagreement() {
-    let green = br#"{"all_ok": true, "checks": []}"#;
-    let red = br#"{"all_ok": false, "checks": []}"#;
-    assert!(doctor_agrees_with_run(green, false).is_err());
-    assert_eq!(doctor_agrees_with_run(green, true), Ok(true));
-    assert_eq!(doctor_agrees_with_run(red, false), Ok(false));
-    assert_eq!(doctor_agrees_with_run(red, true), Ok(false));
-}
-
-#[test]
-#[should_panic(expected = "no `all_ok` bool")]
-fn a_doctor_report_without_all_ok_is_an_error_not_agreement() {
-    let _ = doctor_agrees_with_run(br#"{"ok": true}"#, false);
 }
 
 /// A live `rivet run` child of [`Rig::spawn_args_env`]: a `Child` (by deref) whose reaping grades the run by its exit.

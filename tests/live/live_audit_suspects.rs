@@ -890,7 +890,9 @@ fn mssql_check_reports_a_row_estimate_for_a_read_only_login() {
         .source_url(&format!("sqlserver://{login}:{pw}@127.0.0.1:1433/rivet"))
         .mode("chunked")
         .export_line("chunk_column: id");
-    let out = rig.cli(&["check"]);
+    let out = rig
+        .run_after(&["check"], &[], Pairing::SameRefusal)
+        .preflight;
     let said = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
