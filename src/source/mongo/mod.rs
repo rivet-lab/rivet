@@ -49,8 +49,6 @@ use crate::source::{BatchSink, ExportRequest, Source};
 use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
 
 pub(crate) mod cdc;
-#[cfg(test)]
-mod fake_server;
 
 /// The byte budget at which a document batch flushes. The `document` column is an
 /// Arrow `Utf8` (i32 offsets): a batch accumulating > 2 GiB panics ("byte array
@@ -1102,6 +1100,9 @@ pub(crate) fn estimated_count(url: &str, tls: Option<&TlsConfig>, collection: &s
         i64::try_from(n).ok()
     })
 }
+
+#[cfg(test)]
+mod fake_server;
 
 #[cfg(test)]
 mod tests {
