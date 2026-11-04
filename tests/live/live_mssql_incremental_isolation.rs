@@ -21,7 +21,7 @@ fn snapshot_db() {
 }
 
 /// T-SQL that loops until `cond` holds, or THROWs `what` after `secs` (needs `DECLARE @deadline DATETIME2`).
-fn server_wait(cond: &str, secs: u32, what: &str) -> String {
+pub(crate) fn server_wait(cond: &str, secs: u32, what: &str) -> String {
     format!(
         "SET @deadline = DATEADD(SECOND, {secs}, SYSDATETIME());\n\
          WHILE NOT ({cond})\nBEGIN\n\
@@ -32,7 +32,7 @@ fn server_wait(cond: &str, secs: u32, what: &str) -> String {
 }
 
 /// Poll (NOLOCK) until `sql` counts a row, panicking with the elapsed time after 60 s.
-fn wait_visible(sql: &str, what: &str) {
+pub(crate) fn wait_visible(sql: &str, what: &str) {
     let t0 = std::time::Instant::now();
     while mssql_query_i64(sql) == 0 {
         assert!(
