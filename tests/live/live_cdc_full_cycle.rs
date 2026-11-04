@@ -384,8 +384,8 @@ fn a_slot_another_config_advanced_is_refused_instead_of_losing_its_changes() {
 }
 
 /// A PostgreSQL stream the pinned older release (`RIVET_LEASE_CARRIER_BIN`, from before #649) left with its
-/// slot past its checkpoint: a change-free transaction on another table between its runs made it
-/// release the empty span by advancing the slot before saving the checkpoint.
+/// slot past its checkpoint, as its release of an empty span did: the fixture moves the slot over a logged
+/// message itself, because any traffic on the server decides whether that release leaves a gap.
 /// This binary's first run takes the slot's position once (a warning names both), delivers, and
 /// writes the checkpoint in its own form; a later advance by a real foreign reader is refused
 /// RIVET_SOURCE_CDC_LOG_GAP on every run (main: refused on the first upgraded run already).
@@ -414,15 +414,17 @@ fn an_upgraded_stream_whose_old_release_advanced_its_slot_past_the_checkpoint_co
     c.batch_execute(&format!("INSERT INTO {tbl} VALUES (1, 1)"))
         .unwrap();
     old.run_ok();
-    // A captured change followed by a transaction the stream does not capture: the run that
-    // yields the change acks it, and the next one releases the trailing empty span by advancing
-    // the slot without saving the checkpoint (measured on the pinned release).
     c.batch_execute(&format!(
         "INSERT INTO {tbl} VALUES (10, 10); INSERT INTO {other} VALUES (1)"
     ))
     .unwrap();
     old.run_ok();
     old.run_ok();
+    c.execute(
+        "SELECT pg_replication_slot_advance($1, pg_logical_emit_message(false, 'rivet-test', 'past'))",
+        &[&slot],
+    )
+    .unwrap();
     let lsn = |c: &mut postgres::Client| -> (String, String) {
         let slot_at: String = c
             .query_one(
