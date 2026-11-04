@@ -518,7 +518,9 @@ fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle() {
 fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql() {
     let case = MSSQL_DT2_7_NS_OVERRIDE;
     let (table, _guard) = seeded(SqlEngine::Mssql, &case, "ks_ns");
-    let rig = keyset_rig(SqlEngine::Mssql, &table, &case, SMALL_PAGE);
+    let rig = keyset_rig(SqlEngine::Mssql, &table, &case, SMALL_PAGE).no_oracle(
+        "the oracle reads a datetime2(7) source at microsecond precision, so every 700 ns tick the run delivers differs from its source row",
+    );
     let out = rig.run();
     assert!(
         out.status.success(),
