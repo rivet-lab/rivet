@@ -4579,6 +4579,23 @@ seeds:
       mongo:
         na: "the change stream carries no statement text: this path is never reached"
 
+  - name: mysql-enum-label-escapes-unread
+    class: "an ENUM or SET label read from the catalog's COLUMN_TYPE keeps the escapes MySQL's append_unescaped wrote (a doubled backslash, a backslash-n for LF, backslash-r for CR, backslash-0 for NUL), so the CDC stream delivers a label that differs from the stored label the snapshot delivers, exit 0"
+    history: "TF-2, seam packaging 2026-11-03 - RED on main 2026-11-03 (the rig oracle: 6 source rows not delivered, differing columns e and s, delivered labels with doubled backslashes)"
+    scope: source
+    engines:
+      mysql:
+        patch: mysql-enum-label-escapes-unread/mysql.patch
+        cells: [mysql_cdc_enum_set_labels_match_the_snapshot, "lib:every_append_unescaped_escape_is_reversed_in_an_enum_label", "lib:every_append_unescaped_escape_is_reversed_in_a_set_member"]
+      postgres:
+        na: "an enum label arrives in the logical stream as stored text, with no catalog escaping to reverse: this path is never reached"
+      mssql:
+        na: "SQL Server has no ENUM or SET type: this path is never reached"
+      oracle:
+        na: "Oracle has no ENUM or SET type: this path is never reached"
+      mongo:
+        na: "a MongoDB document carries no ENUM or SET column: this path is never reached"
+
   - name: manifest-census-reads-unfiltered
     class: "a reader of the run manifests under one prefix counts a Failed attempt or a foreign export's unit, so validate --depth full fails a healthy prefix on parts gc collected, and a foreign unit tiles a gap a split export still has"
     history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: a Failed unit manifest whose parts gc had collected made validate --depth full exit 1 (could not verify), and completed_units_tile counted a foreign family's unit; closed 2026-11-01 by routing the readers through ManifestCensus::succeeded / completed / completed_split_units"
