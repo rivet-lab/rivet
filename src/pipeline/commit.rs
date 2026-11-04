@@ -952,7 +952,7 @@ pub(crate) mod tests {
             Err(e) => assert!(
                 e.to_string().contains("transit")
                     && crate::error::error_code(&e) == Some("RIVET_DEST_UPLOAD_CORRUPTED")
-                    && crate::error::classify_exit(&e) == 1,
+                    && crate::error::classify_exit(&e) == 2,
                 "expected a coded transit-corruption error, got: {e}"
             ),
         }

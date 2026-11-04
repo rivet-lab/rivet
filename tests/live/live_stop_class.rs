@@ -1,7 +1,6 @@
 //! The exit class of a stop (docs/operator-contract-matrix.yaml, seam stop-class): a coded stop exits by its
 //! code and by the typed verdict of its cause, never by a word in a table name or in a message. A cell
-//! asserts the correct behaviour; one that fails today is an `open_defect_*` cell acknowledged in
-//! dev/release_oracle/known_red.py.
+//! asserts the correct behaviour.
 //!
 //! Oracles: the exit and `Error:` line of the real binary; the relation names are the operator's.
 
@@ -92,21 +91,21 @@ fn a_missing_relation_exits_by_its_code_whatever_its_name_holds_mysql() {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect VP-8; closes with fix/stop-class-by-code"]
-fn open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql() {
+#[ignore = "live: requires docker compose mssql"]
+fn a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql() {
     missing_relation_exits_by_its_code(SqlEngine::Mssql, &NAMED_FOR_A_FAILURE);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
-#[ignore = "live+gate-only: open defect VP-8; closes with fix/stop-class-by-code"]
-fn open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle() {
+#[ignore = "live: requires docker compose oracle"]
+fn a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle() {
     missing_relation_exits_by_its_code(SqlEngine::Oracle, &NAMED_FOR_A_FAILURE);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect VP-8; closes with fix/stop-class-by-code"]
-fn open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo() {
+#[ignore = "live: requires docker compose mongo"]
+fn a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo() {
     missing_collection_exits_by_its_code(&NAMED_FOR_A_FAILURE);
 }
 
@@ -142,8 +141,8 @@ fn a_missing_collection_named_plainly_exits_by_its_code_mongo() {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect MT-F-F; closes with fix/stop-class-by-code"]
-fn open_defect_an_mssql_read_blocked_past_its_lock_timeout_exits_retryable() {
+#[ignore = "live: requires docker compose mssql"]
+fn an_mssql_read_blocked_past_its_lock_timeout_exits_retryable() {
     let table = format!("rivet.dbo.{}", unique_name("sc_lock"));
     mssql_exec(&format!(
         "CREATE TABLE {table} (id BIGINT PRIMARY KEY, v BIGINT NOT NULL);\nINSERT INTO {table} VALUES (1,1);"

@@ -64,6 +64,11 @@ fn restore_or_recover() -> String {
     )
 }
 
+/// The text and typed verdict of the error a probe stopped at.
+fn probe_verdict(e: &anyhow::Error) -> (String, crate::error::retry::RetryClass) {
+    (format!("{e:#}"), crate::error::retry::classify_error(e))
+}
+
 fn probe_failed(e: &anyhow::Error) -> DoctorCheck {
     check(
         "CDC health probe".into(),
@@ -80,18 +85,24 @@ fn probe_failed(e: &anyhow::Error) -> DoctorCheck {
 /// Entry point: every CDC health check for the config, or empty when the
 /// config has no `mode: cdc` exports. A connection failure becomes a single
 /// failed check rather than aborting doctor.
-pub(super) fn collect(config: &Config, config_dir: &std::path::Path) -> Vec<DoctorCheck> {
+pub(super) fn collect(
+    config: &Config,
+    config_dir: &std::path::Path,
+) -> (
+    Vec<DoctorCheck>,
+    Option<(String, crate::error::retry::RetryClass)>,
+) {
     let cdc: Vec<&ExportConfig> = config
         .exports
         .iter()
         .filter(|e| e.mode == ExportMode::Cdc)
         .collect();
     if cdc.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let url = match config.source.resolve_url() {
         Ok(u) => u,
-        Err(e) => return vec![probe_failed(&e)],
+        Err(e) => return (vec![probe_failed(&e)], Some(probe_verdict(&e))),
     };
     let tls = config.source.tls.as_ref();
     // The engines APPEND to one vec rather than returning their own, so a probe that
@@ -115,11 +126,15 @@ pub(super) fn collect(config: &Config, config_dir: &std::path::Path) -> Vec<Doct
         #[cfg(not(feature = "oracle"))]
         SourceType::Oracle => Err(crate::source::oracle_feature_missing()),
     };
+    let mut probe = None;
     match result {
-        Err(e) => checks.push(probe_failed(&e)),
+        Err(e) => {
+            checks.push(probe_failed(&e));
+            probe = Some(probe_verdict(&e));
+        }
         Ok(()) => checks.extend(run_refusals(config, &cdc, &url)),
     }
-    checks
+    (checks, probe)
 }
 
 /// One failed check per CDC export whose prerequisites the run itself would refuse, asked through the run's own function.
@@ -1054,8 +1069,8 @@ mod tests {
             .expect("a config")
         };
         let dir = std::path::Path::new(".");
-        assert!(collect(&cfg("full"), dir).is_empty());
-        let checks = collect(&cfg("cdc"), dir);
+        assert!(collect(&cfg("full"), dir).0.is_empty());
+        let checks = collect(&cfg("cdc"), dir).0;
         assert_eq!(checks.len(), 1, "{checks:?}");
         assert!(
             !checks[0].ok && checks[0].name == "CDC health probe",

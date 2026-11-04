@@ -65,10 +65,14 @@ fn emit_check(checks: &mut Vec<DoctorCheck>, json: bool, mut check: DoctorCheck)
     checks.push(check);
 }
 
-/// Keep the first transient failure's text in `slot`, so the doctor's exit stays retryable.
-fn keep_first_transient(slot: &mut Option<String>, e: &anyhow::Error) {
-    if slot.is_none() && crate::error::retry::classify_error(e).is_transient() {
-        *slot = Some(format!("{e:#}"));
+/// The first transient failure a doctor probe met: its text and the typed verdict that made it transient.
+type Transient = (String, crate::error::retry::RetryClass);
+
+/// Keep the first transient failure of `e` in `slot`, so the doctor's exit stays retryable.
+fn keep_first_transient(slot: &mut Option<Transient>, e: &anyhow::Error) {
+    let class = crate::error::retry::classify_error(e);
+    if slot.is_none() && class.is_transient() {
+        *slot = Some((format!("{e:#}"), class));
     }
 }
 
@@ -82,15 +86,42 @@ mod transient_tests {
         super::keep_first_transient(&mut slot, &permanent);
         assert_eq!(slot, None);
         super::keep_first_transient(&mut slot, &transient);
-        assert!(slot.as_deref().is_some_and(|s| s.contains("refused")));
+        assert!(slot.as_ref().is_some_and(|(s, _)| s.contains("refused")));
         super::keep_first_transient(
             &mut slot,
             &anyhow::anyhow!("timed out, then connection reset"),
         );
         assert!(
-            slot.as_deref().is_some_and(|s| s.contains("refused")),
+            slot.as_ref().is_some_and(|(s, _)| s.contains("refused")),
             "the first is kept"
         );
+    }
+
+    #[test]
+    fn a_probe_failure_is_kept_by_its_typed_verdict_not_by_its_words() {
+        use crate::error::{coded_over, codes, retry};
+        let server = |code: u16| {
+            anyhow::Error::new(mysql::Error::MySqlError(mysql::error::MySqlError {
+                state: "HY000".to_string(),
+                message: "x".to_string(),
+                code,
+            }))
+        };
+        let shutdown = server(1053);
+        let transient = coded_over(codes::SOURCE_QUERY_FAILED, "permission denied", &shutdown);
+        let mut slot = None;
+        super::keep_first_transient(&mut slot, &transient);
+        assert!(slot.as_ref().is_some_and(|(_, c)| c.is_transient()));
+        let denied = server(1045);
+        let permanent = coded_over(
+            codes::SOURCE_QUERY_FAILED,
+            "login timeout, connection reset, dns",
+            &denied,
+        );
+        assert!(!retry::classify_error(&permanent).is_transient());
+        let mut slot = None;
+        super::keep_first_transient(&mut slot, &permanent);
+        assert!(slot.is_none());
     }
 }
 
@@ -139,12 +170,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
     };
 
     let mut all_ok = true;
-    // A transient/connectivity probe failure (connection refused/reset/timeout)
-    // must exit Retryable (2) like `check`/`run`, not Generic (1) — doctor used
-    // to stringify+drop the typed error and re-bail generically, so classify_exit
-    // could no longer see it was transient (dogfood LOW). Carry the original
-    // transient message so the final bail stays classifiable.
-    let mut transient_detail: Option<String> = None;
+    let mut transient: Option<Transient> = None;
 
     // The state every run of this config opens: a run that cannot open it fails before
     // reading a row, so a doctor that skipped it was green over a config no run could use.
@@ -161,7 +187,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
         ),
         Err(e) => {
             all_ok = false;
-            keep_first_transient(&mut transient_detail, &e);
+            keep_first_transient(&mut transient, &e);
             emit_check(
                 &mut checks,
                 json,
@@ -196,11 +222,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
         }
         Err(e) => {
             all_ok = false;
-            if crate::error::retry::classify_error(&e).is_transient() {
-                // Keep the FULL chain (not trim_probe_error) so the transient
-                // keyword survives into the final bail for classify_exit.
-                transient_detail = Some(format!("{e:#}"));
-            }
+            keep_first_transient(&mut transient, &e);
             let category = categorize_source_error(&e);
             let hint =
                 source_error_hint(category, &e, &config.source.source_type).map(|h| h.to_string());
@@ -280,16 +302,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
             }
             Err(e) => {
                 all_ok = false;
-                // #15 bughunt: a TRANSIENT destination failure (S3 timeout, network
-                // blip) must exit Retryable (2), same as a transient SOURCE failure
-                // — the typed signal was set only in the source arm, so a healthy
-                // source + transiently-down destination exited Generic (1). Preserve
-                // the first transient detail (source-first) so classify_exit sees it.
-                if transient_detail.is_none()
-                    && crate::error::retry::classify_error(&e).is_transient()
-                {
-                    transient_detail = Some(format!("{e:#}"));
-                }
+                keep_first_transient(&mut transient, &e);
                 let category = categorize_dest_error(&e, &expanded_dest);
                 let hint = destination_error_hint(category, &expanded_dest).map(|h| h.to_string());
                 emit_check(
@@ -317,20 +330,16 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
     let config_dir = std::path::Path::new(config_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    for c in super::cdc_health::collect(&config, config_dir) {
+    let (cdc_checks, cdc_probe) = super::cdc_health::collect(&config, config_dir);
+    if let Some((detail, class)) = cdc_probe
+        && class.is_transient()
+        && transient.is_none()
+    {
+        transient = Some((detail, class));
+    }
+    for c in cdc_checks {
         if !c.ok {
             all_ok = false;
-            // #15 bughunt: a transient CDC-health failure should also drive
-            // Retryable (2). These checks arrive pre-stringified, so classify the
-            // detail text (best-effort) rather than a typed error. First transient
-            // signal wins (source/destination arms run before this).
-            if transient_detail.is_none()
-                && let Some(detail) = &c.detail
-                && crate::error::retry::classify_error(&anyhow::Error::msg(detail.clone()))
-                    .is_transient()
-            {
-                transient_detail = Some(detail.clone());
-            }
         }
         emit_check(&mut checks, json, c);
     }
@@ -351,20 +360,21 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
     if all_ok {
         Ok(())
     } else {
-        Err(doctor_failure_error(transient_detail))
+        Err(doctor_failure_error(transient))
     }
 }
 
-/// The doctor's terminal error when a check failed. When a probe failed
-/// transiently, the original transient text is PRESERVED so `classify_exit`
-/// (string-based) returns Retryable (2), matching `check`/`run` on the same
-/// connection failure — doctor used to re-bail generically and drop the signal,
-/// exiting Generic (1) (dogfood LOW).
-fn doctor_failure_error(transient_detail: Option<String>) -> anyhow::Error {
-    match transient_detail {
-        Some(detail) => crate::error::coded(
-            crate::error::codes::CLI_PREFLIGHT_UNVERIFIED,
-            format!("doctor: preflight failed on a transient error (see output above): {detail}"),
+/// The doctor's terminal error when a check failed: retryable only when a probe's typed verdict was transient.
+fn doctor_failure_error(transient: Option<Transient>) -> anyhow::Error {
+    match transient {
+        Some((detail, class)) => anyhow::Error::new(
+            crate::error::CodedError::new(
+                crate::error::codes::CLI_PREFLIGHT_UNVERIFIED,
+                format!(
+                    "doctor: preflight failed on a transient error (see output above): {detail}"
+                ),
+            )
+            .over(class),
         ),
         None => crate::error::coded(
             crate::error::codes::CLI_PREFLIGHT_FAILED,
@@ -957,11 +967,21 @@ mod tests {
         );
     }
 
+    fn transient_probe(detail: &str) -> Transient {
+        (
+            detail.to_string(),
+            crate::error::retry::RetryClass::Transient {
+                needs_reconnect: true,
+                extra_delay_ms: 0,
+            },
+        )
+    }
+
     #[test]
     fn doctor_stops_carry_their_codes() {
         let err = doctor_failure_error(None);
         crate::error::assert_coded(&err, "RIVET_CLI_PREFLIGHT_FAILED", 1);
-        let err = doctor_failure_error(Some("connection refused (os error 61)".to_string()));
+        let err = doctor_failure_error(Some(transient_probe("connection refused (os error 61)")));
         crate::error::assert_coded(&err, "RIVET_CLI_PREFLIGHT_UNVERIFIED", 2);
         // A config that does not load keeps the config error's own code.
         let err = doctor("/nonexistent/rivet-doctor-test.yaml", false).unwrap_err();
@@ -970,12 +990,8 @@ mod tests {
 
     #[test]
     fn doctor_transient_failure_classifies_as_retryable_exit_2() {
-        // #dogfood LOW: doctor stringified+dropped the typed transient error and
-        // re-bailed generically, so classify_exit could no longer see it was
-        // transient — it exited 1 (Generic) while check/run exited 2 (Retryable)
-        // on the SAME connection failure. Preserving the transient text keeps it
-        // classifiable.
-        let transient = doctor_failure_error(Some("connection refused (os error 61)".to_string()));
+        let transient =
+            doctor_failure_error(Some(transient_probe("connection refused (os error 61)")));
         assert!(
             crate::error::retry::classify_error(&transient).is_transient(),
             "a transient probe failure must classify Retryable (exit 2): {transient:#}"
@@ -1629,7 +1645,7 @@ exports:
         let config_path = dir.path().join("rivet.yaml");
         std::fs::write(&config_path, yaml).unwrap();
         let config = Config::load(config_path.to_str().unwrap()).expect("the config loads");
-        let cdc = crate::preflight::cdc_health::collect(&config, dir.path());
+        let (cdc, _) = crate::preflight::cdc_health::collect(&config, dir.path());
         assert!(
             cdc.iter().any(|c| !c.ok && c.detail.is_some()),
             "fixture: a failed CDC health check with a detail: {cdc:?}"

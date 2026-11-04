@@ -896,9 +896,10 @@ impl MysqlChangeStream {
             "SET SESSION net_write_timeout = {DUMP_WRITE_TIMEOUT_SECS}"
         ))
         .map_err(|e| {
-            crate::error::coded(
+            crate::error::coded_driver(
                 crate::error::codes::SOURCE_QUERY_FAILED,
-                format!("mysql cdc: raising net_write_timeout on the binlog connection: {e}"),
+                "mysql cdc: raising net_write_timeout on the binlog connection",
+                e,
             )
         })?;
         let mut req = BinlogRequest::new(server_id)
@@ -945,9 +946,10 @@ impl MysqlChangeStream {
         let said: Option<i64> = conn
             .query_first("SELECT @@global.lower_case_table_names")
             .map_err(|e| {
-                crate::error::coded(
+                crate::error::coded_driver(
                     crate::error::codes::SOURCE_QUERY_FAILED,
-                    format!("mysql cdc: reading lower_case_table_names: {e}"),
+                    "mysql cdc: reading lower_case_table_names",
+                    e,
                 )
             })?;
         let said = said.ok_or_else(|| {

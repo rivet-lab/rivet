@@ -51,8 +51,8 @@ impl RetryClass {
 
 // Shorthand internal constructors — the older code passed naked tuples and
 // these keep the matchers below short without losing type safety.
-const PERMANENT: RetryClass = RetryClass::Permanent;
-const TRANSIENT_RECONNECT: RetryClass = RetryClass::Transient {
+pub(crate) const PERMANENT: RetryClass = RetryClass::Permanent;
+pub(crate) const TRANSIENT_RECONNECT: RetryClass = RetryClass::Transient {
     needs_reconnect: true,
     extra_delay_ms: 0,
 };
@@ -119,6 +119,9 @@ fn classify_io_kind(kind: std::io::ErrorKind) -> Option<RetryClass> {
 }
 
 pub fn classify_error(err: &anyhow::Error) -> RetryClass {
+    if let Some(kept) = crate::error::kept_verdict(err) {
+        return kept;
+    }
     // A typed stop (drift, integrity, a non-environment code) is permanent, whatever its text says.
     if crate::error::stop_class(err).is_some() {
         return PERMANENT;
@@ -162,6 +165,15 @@ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
         .and_then(classify_mysql_error)
     {
         return result;
+    }
+
+    // --- SQL Server: the server's own number, before any word of its text ---
+    if let Some(class) = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<tiberius::error::Error>())
+        .and_then(classify_mssql_error)
+    {
+        return class;
     }
 
     // --- MongoDB: network / server-selection / retryable-read command codes ---
@@ -305,6 +317,16 @@ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
 
     // Not transient
     PERMANENT
+}
+
+/// SQL Server numbers that clear on their own: 1205 (deadlock victim) and 1222 (lock request time out); any other answer is left to the text.
+fn classify_mssql_error(err: &tiberius::error::Error) -> Option<RetryClass> {
+    match err {
+        tiberius::error::Error::Server(token) if matches!(token.code(), 1205 | 1222) => {
+            Some(TRANSIENT_SAME_CONN)
+        }
+        _ => None,
+    }
 }
 
 /// The opendal error one link of an error chain is, or the one an `io::Error` from opendal's std writer wraps.
@@ -1017,19 +1039,25 @@ mod tests {
     }
 
     #[test]
-    fn a_coded_refusal_is_permanent_but_a_coded_environment_error_still_reads_its_text() {
-        let refused: anyhow::Error = crate::error::CodedError::new(
+    fn a_coded_stop_is_decided_by_its_code_and_only_a_wrapper_without_a_kept_cause_reads_its_text()
+    {
+        let permanent = |code, text: &str| {
+            !classify_error(&crate::error::CodedError::new(code, text).into()).is_transient()
+        };
+        assert!(permanent(
             crate::error::codes::STATE_CURSOR_OWNER_MISMATCH,
-            "connection reset while the cursor is owned elsewhere",
-        )
-        .into();
-        assert!(!classify_error(&refused).is_transient());
-        let env: anyhow::Error = crate::error::CodedError::new(
+            "connection reset while the cursor is owned elsewhere"
+        ));
+        assert!(permanent(
             crate::error::codes::SOURCE_STATEMENT_TIMEOUT,
+            "connection reset by peer"
+        ));
+        let wrapper: anyhow::Error = crate::error::CodedError::new(
+            crate::error::codes::STATE_NOT_WRITABLE,
             "connection reset by peer",
         )
         .into();
-        assert!(classify_error(&env).is_transient());
+        assert!(classify_error(&wrapper).is_transient());
     }
 
     /// Each credential needle classifies PERMANENT on its own, even beside a transient one.
