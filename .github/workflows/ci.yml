@@ -282,7 +282,7 @@ jobs:
           key: mutants-outcomes-v2-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
       # Prebuilt binaries: `cargo install` compiled cargo-mutants from source
       # on every cold cache (68s on PR #314).
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@v2.87.30
         if: steps.scope.outputs.code == 'true'
         with:
           tool: cargo-mutants,cargo-llvm-cov
@@ -547,7 +547,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: mutants
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@v2.87.30
         with:
           tool: cargo-mutants
       - uses: actions/download-artifact@v8
@@ -829,7 +829,7 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         with:
           key: mutants
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@v2.87.30
         if: steps.scope.outputs.code == 'true'
         with:
           tool: cargo-mutants
@@ -1240,7 +1240,7 @@ jobs:
       - name: The release oracle's env-flag grammar is one grammar
         run: python3 -m dev.release_oracle --self-test
       # uv: the rig oracle's self-test writes and reads parquet through the pinned duckdb/pyarrow.
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@v2.87.30
         with:
           tool: uv
       - name: The value canon and the rig oracle's graders self-test
@@ -1377,7 +1377,7 @@ jobs:
         with:
           # One cache for this job and the `pre` leg below, saved here only.
           shared-key: e2e-debug
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@v2.87.30
         with:
           tool: cargo-nextest
       - name: Build rivet and every test binary (debug), once
@@ -1483,7 +1483,7 @@ jobs:
           shared-key: e2e-debug
           save-if: false
       # uv runs the rig's default oracle (dev/release_oracle/rig_oracle.py, pinned by uv.lock).
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@v2.87.30
         with:
           tool: cargo-nextest,uv
 
@@ -1920,7 +1920,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny check
