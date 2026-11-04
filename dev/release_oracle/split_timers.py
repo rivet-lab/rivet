@@ -163,7 +163,7 @@ def _live_modules_self_test() -> None:
     calls = []
     with ExitStack() as st:
         st.enter_context(mock.patch.object(live_modules, "_run_live_modules", lambda *a, **k: calls.append(k)))
-        st.enter_context(mock.patch.object(live_modules, "exclusive_tests", lambda: ["a_test"]))
+        st.enter_context(mock.patch.object(live_modules, "exclusive_tests", lambda modules=None: ["a_test"]))
         live_modules.verify_live_modules(Ledger(colour=False))
     assert len(calls) == 2 and all(c.get("keep") for c in calls), calls
 
