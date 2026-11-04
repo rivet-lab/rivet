@@ -414,7 +414,8 @@ infra:
     # 2026-11-02: +4 structural N/A rows from named-profile-falls-back (local, gcs, azure, stdout name no AWS profile).
     # 2026-11-03: +1 structural N/A row from key-span-read-in-i64 (a Mongo collection has no range chunking).
     # 2026-11-03: +1 structural N/A row from check-override-wire-not-refused (MongoDB declares no column wire type, so its check has no probe).
-    na_ceiling: 483  # ratchet-pin: seeded-na
+    # 2026-11-04: +4 structural N/A rows from mysql-binlog-negative-time-fraction (PostgreSQL, SQL Server, MongoDB and Oracle have no MySQL binlog TIME decoder).
+    na_ceiling: 487  # ratchet-pin: seeded-na
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
