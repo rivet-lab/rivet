@@ -79,6 +79,38 @@ scenarios:
     mongo:    { na: "Mongo incremental is the `_id`-range reader's `resume`, not SQL keyset_incremental (covered by the mongo resume scenario above)" }
     oracle:   { test: parallel_keyset_incremental_oracle }
 
+  - id: keyset_key_type_admission
+    what: "a keyset key (explicit chunk_by_key, or MySQL's auto-picked unique key) is accepted only when the cursor reader can advance it: over several pages a MySQL BINARY/TIME/TINYINT(1)/ENUM, PG bytea/time and MSSQL varbinary/time key is refused at check, plan and run by RIVET_PLAN_CHUNK_KEY_UNUSABLE with nothing written (RED until fix/seam-keyset-key-type: the run writes page 0 then stops with exit 5, or skips rows)"
+    postgres: { test: open_defect_keyset_key_is_refused_postgres_bytea_unique_key }
+    mysql:    { test: open_defect_keyset_key_is_refused_mysql_binary16_primary_key }
+    mssql:    { test: open_defect_keyset_key_is_refused_mssql_varbinary_unique_key }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_timestamp_9_keyset_key_stays_refused_oracle }
+
+  - id: keyset_key_type_readable_types
+    what: "the key types the cursor reads (integer, text, date, timestamp up to microseconds, uuid, and a sub-microsecond key under its timestamp_ns override) deliver the source's ids exactly once over several pages; the neighbour of keyset_key_type_admission that must not change"
+    postgres: { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_postgres }
+    mysql:    { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_mysql }
+    mssql:    { test: a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle }
+
+  - id: keyset_sub_microsecond_key
+    what: "a keyset key finer than the microsecond the default batch keeps (MSSQL datetime2(7)/datetimeoffset(7)) is refused at check, plan and run by RIVET_PLAN_CHUNK_KEY_UNUSABLE, whether the rows sit a tick past each microsecond or all inside one (RED until fix/seam-keyset-key-type: the seek re-reads the row at the end of every page, exit 0); the same key under its timestamp_ns override delivers every row once"
+    postgres: { na: "PostgreSQL timestamps stop at microseconds, which the batch keeps exactly" }
+    mysql:    { na: "MySQL DATETIME/TIMESTAMP stop at microseconds, which the batch keeps exactly" }
+    mssql:    { test: open_defect_keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_timestamp_9_keyset_key_stays_refused_oracle }
+
+  - id: keyset_unusable_key_on_a_one_chunk_table
+    what: "owner decision Q11 (2026-11-03): under mode: chunked a key the cursor cannot advance is refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE even when the table fits one chunk, as a large table is (RED until fix/seam-keyset-key-type: a MySQL auto-picked key downgrades to a snapshot, an explicit chunk_by_key reads one short page, both exit 0)"
+    postgres: { test: open_defect_keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key }
+    mysql:    { test: open_defect_keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key }
+    mssql:    { test: open_defect_keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { na: "the explicit chunk_by_key check precedes the small-table escape and Oracle's probe drops the key, so the refusal does not depend on the table's size; pinned by a_timestamp_9_keyset_key_stays_refused_oracle" }
+
   - id: keyset_init_generates_for_pk
     what: "rivet init on a single-column-PK table scaffolds chunk_by_key (keyset), not range chunk_column"
     postgres: { test: generate_config_chunked_single_pk_uses_keyset }
