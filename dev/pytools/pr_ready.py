@@ -21,6 +21,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+if __package__:
+    from . import lint_tools
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lint_tools  # type: ignore[no-redef]
+
 ROOT = Path(__file__).resolve().parents[2]
 GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else (shutil.which("git") or "git")
 CARGO = str(Path.home() / ".cargo/bin/cargo")
@@ -414,6 +420,7 @@ def run_local(args: argparse.Namespace) -> int:
     else:
         print("pr-ready: mutants in-diff ...", file=sys.stderr, flush=True)
         rows.append(("mutants in-diff", *mutants(out, args.base, args.jobs)))
+    rows += [(name, *lint_tools.run(name)) for name in lint_tools.tools("pr")]
     rows += branch_rows(args.base, body)
     sha = git("rev-parse", "--short", "HEAD").strip()
     print_rows(f"make pr-ready @ {sha} (base {args.base}){' --fast' if args.fast else ''}; logs {out}", rows)
