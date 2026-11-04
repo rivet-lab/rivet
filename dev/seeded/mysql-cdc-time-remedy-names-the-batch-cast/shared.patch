@@ -40,7 +40,7 @@ index 96202555..6e1e8740 100644
          use RivetValue as V;
          Ok(match (self, v) {
 @@ -913,13 +907,7 @@ impl MysqlCellFix {
-             (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(labels, *u),
+             (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(readable(labels)?, *u),
              (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
                  return Err(FixRefusal {
 -                    reason: format!(

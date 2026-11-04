@@ -3507,6 +3507,30 @@ fn a_time_past_a_day_in_a_stream_is_refused_by_code_and_both_remedies_deliver_my
     );
 }
 
+/// MySQL: a binary-charset ENUM whose label is bytes MySQL writes as the hex literal `x'f09f9a80'` (no zero padding, so no bytes to recover) is refused as `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` (exit 5) on every run, with or without a `columns:` override of the column; the checkpoint deleted alone is refused under the baseline, and the column dropped at the source with the re-baseline recipe delivers the source.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_hex_enum_label_in_a_stream_is_refused_by_code_with_or_without_an_override_mysql() {
+    let s = CdcScenario::mysql_with(
+        "oc_enum_hex",
+        "id BIGINT PRIMARY KEY, v BIGINT, e ENUM(0xF09F9A80) CHARACTER SET binary",
+        |r, _| r.cdc("initial: snapshot"),
+    );
+    let table = s.table.clone();
+    let hostile = format!("INSERT INTO {table} VALUES (3, 3, 1)");
+    a_captured_cell_is_refused_by_code_and_walked_out(
+        s,
+        &hostile,
+        Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
+        vec![Remedy::wrong(
+            "declare the column `string` in `columns:`",
+            Then::Refuses(Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5)),
+            |r| r.rebuilt(|rig| rig.export_line("columns: { e: string }")),
+        )],
+        move || mysql_cdc_drop_column(&table, "e"),
+    );
+}
+
 /// SQL Server: a `MONEY` past the f64-exact range (1e12, which tiberius delivers rounded) is refused as `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` (exit 5) on every run; the checkpoint deleted alone is refused under the baseline; the column dropped at the source and the re-baseline recipe deliver the source.
 #[test]
 #[ignore = "live: requires docker compose mssql (CDC)"]
