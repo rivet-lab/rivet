@@ -577,13 +577,15 @@ Deliberately **N/A** (not gaps):
   load before it writes anything (`RIVET_LOAD_CDC_POSITION_UNORDERABLE`, exit 5):
   delete the checkpoint, move the export's parts and `cdc_snapshot` rows aside,
   and run again, as the message prints.
-- **A collection dropped while a run reads it stops the run.** A read of a
-  dropped collection returns no documents and no error, so rivet re-reads the
-  collection list whenever a page, a full scan or an `_id` window comes back
-  empty: a collection that is gone, or is a different one than the run started
-  on (dropped and created again), ends the run `RIVET_SOURCE_COLLECTION_NOT_FOUND`
-  (exit 1, a `parallel` run too) and writes no `_SUCCESS`. Create the collection again with
-  its documents and run again.
+- **A collection dropped, or created again, while a run reads it stops the run.** A read of
+  a dropped collection returns no documents and no error, so rivet lists the collections
+  before and after every read (every keyset page, the full scan, every `_id` window) and
+  pins the collection's UUID the first time it lists it: a collection that is gone, or is
+  listed under another UUID than the run's (dropped and created again, even with the same
+  documents), ends the run `RIVET_SOURCE_COLLECTION_NOT_FOUND` (exit 1) and writes no
+  `_SUCCESS`. A `parallel` run pins the UUID before it samples the `_id` ranges and hands it
+  to every worker. Create the collection again with its documents and run again; a role
+  that may not run `listCollections` is not checked.
 - **Keyset needs a single `_id` type.** Keyset paging (and `parallel`) seeks with
   `$gt`, which MongoDB **type-brackets** — it cannot cross from one BSON `_id`
   type to another (a numeric cursor never matches a string `_id`, even though

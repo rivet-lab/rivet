@@ -1418,6 +1418,38 @@ scenarios:
     mongo:    { test: a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo }
     oracle:   { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
 
+  - id: ddl_table_created_again_under_a_keyset_page
+    what: "a MongoDB keyset export whose collection is dropped and created again with the same documents (a new UUID) while a wire proxy holds a later page: the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the change although the page returned documents"
+    postgres: { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mysql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mssql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mongo:    { test: a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+
+  - id: ddl_table_created_again_under_a_full_scan
+    what: "a MongoDB full-scan export whose collection is dropped and created again with the same documents while a wire proxy holds the find: the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the change, leaves the previous marker and manifests as they were"
+    postgres: { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mysql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mssql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mongo:    { test: a_collection_created_again_under_a_full_scan_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+
+  - id: ddl_table_created_again_under_an_id_range_read
+    what: "a parallel MongoDB export whose collection is dropped and created again while a wire proxy holds every worker's `_id`-range find: the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the change, leaves the previous marker and manifests as they were"
+    postgres: { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mysql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mssql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mongo:    { test: a_collection_created_again_under_an_id_range_read_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+
+  - id: ddl_table_created_again_before_the_workers_connect
+    what: "a parallel MongoDB export whose collection is dropped and created again while a wire proxy holds the run's `$sample` of `_id` boundaries: every worker reads under the UUID the run pinned, so the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND instead of a worker pinning the new collection"
+    postgres: { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mysql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mssql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mongo:    { test: a_collection_created_again_before_the_workers_connect_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+
   - id: hostile_text
     what: "text with a NUL (where the engine stores one: not PostgreSQL), control characters, quotes and a backslash, characters outside the basic plane, right-to-left text and the empty string; each value alone in a table of its own, exported whole twice: both runs deliver it as the source holds it (the default oracle compares the value) and `validate` passes, or both fail loudly"
     postgres: { test: hostile_text_is_delivered_or_fails_loudly_postgres }

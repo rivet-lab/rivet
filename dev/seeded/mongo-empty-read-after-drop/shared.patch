@@ -1,17 +1,10 @@
 --- a/src/source/mongo/mod.rs
 +++ b/src/source/mongo/mod.rs
-@@ -867,15 +867,6 @@
+@@ -893,8 +893,6 @@ impl Source for MongoSource {
              Ok::<usize, anyhow::Error>(total)
          })?;
  
--        if total == 0 {
--            refuse_a_missing_collection(
--                self.session.db(),
--                coll_name,
--                list_collection_uuids(&self.session, coll_name).as_deref(),
--                self.started_as.get(coll_name).map(Vec::as_slice),
--            )?;
--        }
+-        self.confirm_collection(coll_name)?;
 -
          log::info!("total: {total} documents (collection '{coll_name}')");
          Ok(())

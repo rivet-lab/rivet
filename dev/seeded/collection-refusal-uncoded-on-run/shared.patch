@@ -1,12 +1,12 @@
 --- a/src/source/mongo/mod.rs
 +++ b/src/source/mongo/mod.rs
-@@ -725,7 +725,8 @@
-             coll_name,
+@@ -304,7 +304,8 @@ impl MongoSource {
+             collection,
              listed.as_deref(),
-             self.started_as.get(coll_name).map(Vec::as_slice),
+             self.started_as.get(collection).map(Vec::as_slice),
 -        )?;
 +        )
 +        .map_err(|e| anyhow::anyhow!("{e}"))?;
          if let Some(uuid) = listed.as_deref().and_then(<[_]>::first) {
              self.started_as
-                 .entry(coll_name.to_string())
+                 .entry(collection.to_string())
