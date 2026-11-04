@@ -48,7 +48,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 626 -> 624 (2026-11-01): live_batch_census rewrites parts through one Rig::rewrite_part; two helper calls left.
 // 628 -> 626 (2026-10-31): the unused duckdb_s3_parquet_rows helper left tests/common/duckdb.rs; no call site moved.
 // 624 -> 626 (2026-11-03): #792 composite keyset cells read distinct (id, kind) tuples; row_census keys one column. Closes when row_census takes a key list.
-const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites
+// 626 -> 628 (2026-11-03): #792 parallel composite keyset cells, same tuple read. Closes with the line above.
+const DUCKDB_HELPER_CEILING: usize = 628; // ratchet-pin: duckdb-helper-sites
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];
