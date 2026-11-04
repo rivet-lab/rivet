@@ -13,6 +13,9 @@ cannot fail when rivet miscounts, only when rivet stops counting. Every such tes
 must also call an independent reader (DuckDB over the declared parts, the source's
 own count) in the same function.
 
+Helpers the test calls (same file or tests/common, one level) are classified once as EXTERNAL, SELF or
+NEUTRAL, and the caller inherits: see Tree.klass.
+
 The rule is a ratchet: SELF_ONLY lists the tests that break it today, each with the
 date it was listed; a new offender fails, and a listed one that has since gained an
 independent reader must be removed (the list only shrinks).
@@ -24,20 +27,30 @@ independent reader must be removed (the list only shrinks).
 from __future__ import annotations
 
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
 SELF_REPORT = re.compile(r"manifest_rows\(|\.total_rows\b|\.files_committed\b|export_harm|rows_written")
-INDEPENDENT = re.compile(
+READERS = (
     r"duckdb_|pg_count\(|mysql_count|mssql_count|mongo_count|source_count|dir_manifest_copy_id_set|"
-    r"read_parquet|count_rows\(|query_i64\(|query_bigints|query_strings|\.query_one\(|\.query\(|"
+    r"read_parquet|count_rows\(|query_i64\(|query_bigints|query_strings|"
     r"SELECT count|parquet_ids|parquet_rows|parquet_i64|parquet_id_set|parquet_distinct|"
     r"read_cdc_changes|cdc_id_ops|read_mongo_cdc_changes|read_ids|read_all_parts|read_declared_parts|"
     r"read_bq_|row_census|census_oracle|count_field_present|ora_text_rows|\.count_documents|"
-    # the test's OWN counters: a sink it wrote, the files it lists on disk
-    r"CountingSink|files_with_extension"
+    r"CountingSink|files_with_extension|current_state_i64|clickhouse_run_sql_json|deduped_current_sum|source_sql|ids_of\(|ids_and_rows"
+)
+INDEPENDENT = re.compile(READERS + r"|\.query_one\(|\.query\(")
+HELPER_READER = re.compile(READERS)
+PY_REF = re.compile(r"dev[./](?:release_oracle|pytools)[./](\w+)")
+PY_READER = re.compile(r"\bduckdb\b|psycopg|pymysql|oracledb|pymongo|pyodbc|xxhash|from \.duck\b")
+GENERIC = frozenset(
+    "read write kind load of shape count ids rows run new get set open close wait path url name take diff start stop "
+    "query exec seed drop table create insert update delete client conn connect pool cli out env config dest source "
+    "label key spec line lines list file files dir build".split()
 )
 
 #: `file::test` → why it is allowed today. Shrink-only.
@@ -48,7 +61,10 @@ SELF_ONLY: dict[str, str] = {  # ratchet-pin: self-only-tests strings
     "live_cdc.rs::pg_cdc_vanished_slot_with_checkpoint_fails_loudly_not_recreates": "listed 2026-09-27",
     "live_cdc.rs::pg_initial_snapshot_vanished_slot_fails_loudly_not_recreates": "listed 2026-09-27",
     "live_cdc_golden.rs::cdc_golden_fixture_tables_calculated_metrics": "listed 2026-09-27",
-    "live_keyset_parallel.rs::parallel_keyset_midrange_error_counts_pre_failure_page_parts_postgres": "listed 2026-09-27",
+    "live_metrics_persist.rs::mssql_run_persists_source_harm_rows": "listed 2026-11-04: delegated self-oracle via assert_harm_contract",
+    "live_metrics_persist.rs::mysql_keyset_pages_create_no_tmp_disk_tables": "listed 2026-11-04: delegated self-oracle via harm_rows",
+    "live_metrics_persist.rs::mysql_run_persists_source_harm_rows": "listed 2026-11-04: delegated self-oracle via assert_harm_contract",
+    "live_metrics_persist.rs::pg_run_persists_source_harm_rows": "listed 2026-11-04: delegated self-oracle via assert_harm_contract",
     "live_pg_state.rs::pg_metrics_record_and_query": "listed 2026-09-27",
 }  # ratchet-pin: end
 
@@ -71,6 +87,7 @@ R_INIT = "listed 2026-11-03: graded by the scaffold content (a chosen mode, key 
 R_DATA = "listed 2026-11-03: check labels the column lossy and exits 0, the run refuses RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) on the first value with a non-zero scale; closes with a check-time refusal or a verdict that the lossy label is the contract"
 R_DISAGREES = "listed 2026-11-03: check disagrees with the run today (reported as a product defect); closes with the product fix, then route through run_after"
 R_STATE = "listed 2026-11-03: a refusal on an unreachable state store; closes when the run twin is paired with SameRefusal"
+R_DELEGATED = "listed 2026-11-04: delegated self-oracle via InitConfig::generate; the scaffold is the only reader, closes with a per-field scaffold oracle"
 
 #: `file::test` → why a preflight verdict stands without its consequence today. Shrink-only.
 BLIND_PREFLIGHT: dict[str, str] = {  # ratchet-pin: blind-preflight-tests strings
@@ -123,6 +140,7 @@ BLIND_PREFLIGHT: dict[str, str] = {  # ratchet-pin: blind-preflight-tests string
     "live_operator_contract.rs::validate_reads_an_empty_prefix_of_an_existing_bucket_as_legacy_gcs": R_VALIDATE,
     "live_operator_contract.rs::validate_reads_an_empty_prefix_of_an_existing_bucket_as_legacy_s3": R_VALIDATE,
     "live_oracle.rs::init_discover_names_the_oracle_table_scope": R_INIT,
+    "live_oracle.rs::init_scaffolds_every_distilled_field_shape_oracle": R_DELEGATED,
     "live_oracle.rs::init_oracle_schema_wide_discovers_seeded_table": R_INIT,
     "live_pg_state.rs::check_doctor_and_init_refuse_a_state_that_does_not_answer": R_STATE,
     "preflight_target_fail_note.rs::check_target_fail_with_strict_gates_exit_nonzero": R_TARGET,
@@ -150,29 +168,6 @@ def tests_in(text: str, comments: bool = False) -> list[tuple[str, str]]:
     return out
 
 
-def offenders(root: Path) -> set[str]:
-    """`file::test` for every live test that reads rivet's report and nothing independent."""
-    found = set()
-    for f in sorted((root / "tests" / "live").glob("*.rs")):
-        for name, body in tests_in(f.read_text()):
-            if SELF_REPORT.search(body) and "assert" in body and not INDEPENDENT.search(body):
-                found.add(f"{f.name}::{name}")
-    return found
-
-
-def preflight_blind(root: Path) -> set[str]:
-    """`file::test` for every live test that asserts on a preflight verb and never runs its consequence."""
-    found = set()
-    for f in sorted((root / "tests" / "live").glob("*.rs")):
-        text = f.read_text()
-        helpers = fns_in(text)
-        for name, body in tests_in(text, comments=True):
-            full = reach(body, helpers)
-            if PREFLIGHT.search(full) and "assert" in full and not CONSEQUENCE.search(full):
-                found.add(f"{f.name}::{name}")
-    return found
-
-
 def fns_in(text: str) -> dict[str, str]:
     """name → body of every function in a Rust file."""
     out = {}
@@ -190,23 +185,80 @@ def fns_in(text: str) -> dict[str, str]:
     return out
 
 
-def reach(body: str, helpers: dict[str, str]) -> str:
-    """The test body plus the bodies of the same-file helpers it calls, two levels deep."""
-    seen, texts, frontier = set(), [body], [body]
-    for _ in range(2):
+def calls(body: str, scope: dict[str, str], depth: int) -> list[tuple[str, str]]:
+    """(name, body) of every helper in `scope` that `body` calls, `depth` calls deep."""
+    seen, out, frontier = set(), [], [body]
+    for _ in range(depth):
         nxt = []
         for b in frontier:
             for h in re.findall(r"\b(\w+)\s*\(", b):
-                if h in helpers and h not in seen:
+                if h in scope and h not in seen:
                     seen.add(h)
-                    texts.append(helpers[h])
-                    nxt.append(helpers[h])
+                    out.append((h, scope[h]))
+                    nxt.append(scope[h])
         frontier = nxt
-    return "\n".join(texts)
+    return out
+
+
+class Tree:
+    """The tests/common helpers and the Python oracle modules, each file read once."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.common: dict[str, str] = {}
+        for f in sorted((root / "tests" / "common").rglob("*.rs")):
+            for name, body in fns_in(f.read_text()).items():
+                if name not in GENERIC and len(name) >= 5:
+                    self.common[name] = self.common.get(name, "") + "\n" + body
+        self.py: dict[str, bool] = {}
+
+    def python_reads(self, text: str) -> bool:
+        """True when `text` names a Python oracle module that reads a server or a spec."""
+        for stem in PY_REF.findall(text):
+            if stem not in self.py:
+                mod = next((m for d in ("release_oracle", "pytools") if (m := self.root / "dev" / d / f"{stem}.py").exists()), None)
+                self.py[stem] = bool(mod and PY_READER.search(mod.read_text()))
+        return any(self.py[stem] for stem in PY_REF.findall(text))
+
+    def klass(self, helper: str) -> str:
+        """EXTERNAL, SELF or NEUTRAL: what one helper grades by, decided once from its own body."""
+        if HELPER_READER.search(helper) or self.python_reads(helper):
+            return "EXTERNAL"
+        return "SELF" if SELF_REPORT.search(helper) else "NEUTRAL"
+
+
+def grade(root: Path) -> tuple[dict[str, str], set[str]]:
+    """({`file::test`: delegating helper or ""} for self-only live tests, `file::test` set of preflight-blind ones)."""
+    tree = Tree(root)
+    self_only, blind = {}, set()
+    for f in sorted((root / "tests" / "live").glob("*.rs")):
+        text = f.read_text()
+        scope = {**tree.common, **fns_in(text)}
+        for name, body in tests_in(text, comments=True):
+            key = f"{f.name}::{name}"
+            near = calls(body, scope, 1)
+            classes = {h: tree.klass(t) for h, t in near}
+            reads = SELF_REPORT.search(body) or "SELF" in classes.values()
+            lifted = INDEPENDENT.search(body) or tree.python_reads(body) or "EXTERNAL" in classes.values()
+            if reads and not lifted and "assert" in body + "".join(t for _, t in near):
+                self_only[key] = "" if SELF_REPORT.search(body) else next(h for h, c in classes.items() if c == "SELF")
+            full = "\n".join([body] + [t for _, t in calls(body, scope, 2)])
+            if PREFLIGHT.search(full) and "assert" in full and not CONSEQUENCE.search(full):
+                blind.add(key)
+    return self_only, blind
+
+
+def fixture(files: dict[str, str]) -> Path:
+    """A throwaway tree holding exactly `files`."""
+    root = Path(tempfile.mkdtemp(prefix="self_oracle_lint_"))
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    return root
 
 
 def self_test() -> int:
-    """The scanner finds a self-only test, spares one with an independent reader."""
+    """The scanner finds a self-only test, spares one with an independent reader, and follows helpers."""
     bad = '#[test]\nfn a() {\n    let n = manifest_rows(&o);\n    assert_eq!(n, 5);\n}\n'
     good = '#[test]\nfn b() {\n    assert_eq!(manifest_rows(&o), duckdb_declared_dir_scalar(&o, "count(*)"));\n}\n'
     assert [n for n, _ in tests_in(bad)] == ["a"]
@@ -216,10 +268,31 @@ def self_test() -> int:
     paired = '#[test]\nfn d() {\n    let c = rig.run_after(&["check"], &[], Pairing::SameRefusal);\n    assert!(c.green);\n}\n'
     viahelper = 'fn go(r: &Rig) -> Output { r.cli(&["doctor"]) }\n#[test]\nfn e() {\n    let o = go(&rig);\n    assert!(o.status.success());\n}\n'
     for src, want in ((blind, True), (paired, False), (viahelper, True)):
-        full = reach(tests_in(src)[0][1], fns_in(src))
+        full = "\n".join([tests_in(src)[0][1]] + [t for _, t in calls(tests_in(src)[0][1], fns_in(src), 2)])
         assert bool(PREFLIGHT.search(full) and not CONSEQUENCE.search(full)) is want, src
     commented = '#[test]\n#[ignore = "live"]\n// AUDIT-RED note\nfn f() {\n    let o = rig.cli(&["check"]);\n    assert!(o.status.success());\n}\n'
     assert not tests_in(commented) and [n for n, _ in tests_in(commented, comments=True)] == ["f"]
+
+    def case(common: str, test: str, modules: dict[str, str] | None = None) -> tuple[dict[str, str], set[str]]:
+        files = {"tests/common/h.rs": common, "tests/live/t.rs": test}
+        files |= {f"dev/release_oracle/{k}.py": v for k, v in (modules or {}).items()}
+        root = fixture(files)
+        try:
+            return grade(root)
+        finally:
+            shutil.rmtree(root)
+
+    call = '#[test]\nfn t() {\n    let n = %s(&o);\n    assert_eq!(n, 5);\n}\n'
+    self_helper = "pub fn recorded_total(o: &Out) -> i64 { manifest_rows(o) }\n"
+    server_helper = "pub fn source_total(o: &Out) -> i64 { pg_count(o) + manifest_rows(o) }\n"
+    setup_helper = 'pub fn recorded_total(o: &Out) -> i64 { rig.query("SELECT 1"); manifest_rows(o) }\n'
+    python_helper = 'pub fn recorded_total(o: &Out) -> i64 { run("dev/release_oracle/%s.py"); manifest_rows(o) }\n'
+    assert case(self_helper, call % "recorded_total")[0] == {"t.rs::t": "recorded_total"}
+    assert case(server_helper, call % "source_total")[0] == {}
+    assert case(setup_helper, call % "recorded_total")[0] == {"t.rs::t": "recorded_total"}
+    assert case(python_helper % "ext", call % "recorded_total", {"ext": "import duckdb"})[0] == {}
+    assert case(python_helper % "selfy", call % "recorded_total", {"selfy": "print(1)"})[0] == {"t.rs::t": "recorded_total"}
+    assert case("pub fn scaffold(c: &Cfg) { cli(&[\"init\"]); }\n", '#[test]\nfn t() {\n    scaffold(&c);\n    assert!(ok);\n}\n')[1] == {"t.rs::t"}
     print("self_oracle_lint self-test: ok")
     return 0
 
@@ -227,14 +300,14 @@ def self_test() -> int:
 def main(argv: list[str]) -> int:
     if "--self-test" in argv:
         return self_test()
-    found = offenders(ROOT)
-    new = sorted(found - set(SELF_ONLY))
-    stale = sorted(set(SELF_ONLY) - found)
+    found, blind = grade(ROOT)
+    new = sorted(set(found) - set(SELF_ONLY))
+    stale = sorted(set(SELF_ONLY) - set(found))
     for t in new:
-        print(f"SELF-ORACLE: {t} asserts on rivet's own report with no independent reader in the test")
+        via = f" (delegated via {found[t]})" if found[t] else ""
+        print(f"SELF-ORACLE: {t} asserts on rivet's own report with no independent reader in the test{via}")
     for t in stale:
         print(f"STALE: {t} no longer offends — remove it from SELF_ONLY (the list only shrinks)")
-    blind = preflight_blind(ROOT)
     blind_new = sorted(blind - set(BLIND_PREFLIGHT))
     blind_stale = sorted(set(BLIND_PREFLIGHT) - blind)
     for t in blind_new:

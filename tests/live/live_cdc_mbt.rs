@@ -1127,6 +1127,229 @@ fn open_defect_mysql_cdc_enum_set_labels_match_the_snapshot() {
     );
 }
 
+/// The stream legs of a TIME-column table against the source: a `string` column carries MySQL's own text, a default column refuses with the sentence the batch export prints.
+fn time_stream_legs_disagree(
+    tbl: &str,
+    cols: &[&str],
+    rows: &[(i64, Vec<&str>)],
+    refused_value: Option<&str>,
+) -> Vec<String> {
+    use arrow::array::StringArray;
+    let ids: Vec<String> = rows.iter().map(|r| r.0.to_string()).collect();
+    let mut c = mysql::Pool::new(MYSQL_CDC_URL).unwrap().get_conn().unwrap();
+    let decl = cols
+        .iter()
+        .map(|n| format!("{n}: string"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stream = |leg: &str| {
+        Rig::mysql_cdc(tbl)
+            .export_named(&format!("{tbl}_{leg}"))
+            .no_oracle("TF-1: the stream run may crash in the dependency; graded by MySQL's CAST text and the batch refusal")
+    };
+    let text = stream("text").export_line(&format!("columns: {{ {decl} }}"));
+    let refuse = stream("refuse");
+    text.pin_binlog_here();
+    if refused_value.is_some() {
+        refuse.pin_binlog_here();
+    }
+    for (id, vals) in rows {
+        let lits = vals
+            .iter()
+            .map(|v| format!("'{v}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        c.query_drop(format!("INSERT INTO {tbl} VALUES ({id}, {lits})"))
+            .unwrap();
+    }
+    let norm = |t: String| match t.split_once('.') {
+        Some((a, f)) => format!("{a}.{f:0<6}"),
+        None => format!("{t}.000000"),
+    };
+    let sel = cols
+        .iter()
+        .map(|n| format!("CAST({n} AS CHAR)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut want = std::collections::BTreeMap::new();
+    for id in &ids {
+        let r: mysql::Row = c
+            .query_first(format!("SELECT {sel} FROM {tbl} WHERE id = {id}"))
+            .unwrap()
+            .unwrap();
+        let cells: Vec<String> = (0..cols.len())
+            .map(|i| norm(r.get::<String, _>(i).unwrap()))
+            .collect();
+        want.insert(id.parse::<i64>().unwrap(), cells);
+    }
+    let mut bad = Vec::new();
+    let out = text.run();
+    if !out.status.success() {
+        bad.push(format!(
+            "string columns: the stream run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .find(|l| l.contains("panicked") || l.contains("Error"))
+                .unwrap_or("")
+        ));
+    } else {
+        let mut got = std::collections::BTreeMap::new();
+        for b in read_all_parts(&text.out_dir()) {
+            let id = arrow::compute::cast(
+                b.column(b.schema().index_of("id").unwrap()),
+                &arrow::datatypes::DataType::Int64,
+            )
+            .unwrap();
+            let id = id.as_any().downcast_ref::<Int64Array>().unwrap().clone();
+            let cells: Vec<StringArray> = cols
+                .iter()
+                .map(|n| {
+                    b.column(b.schema().index_of(n).unwrap())
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap()
+                        .clone()
+                })
+                .collect();
+            for r in 0..b.num_rows() {
+                got.insert(
+                    id.value(r),
+                    cells
+                        .iter()
+                        .map(|a| a.value(r).to_string())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        for (id, w) in &want {
+            if got.get(id) != Some(w) {
+                bad.push(format!(
+                    "string columns id {id}: source {w:?}, stream {:?}",
+                    got.get(id)
+                ));
+            }
+        }
+    }
+    if let Some(value) = refused_value {
+        let batch = Rig::mysql_batch(tbl)
+            .export_named(&format!("{tbl}_batch"))
+            .source_url(MYSQL_CDC_URL)
+            .run_expect_fail();
+        let sentence = batch
+            .find("mysql: TIME ")
+            .and_then(|i| {
+                batch[i..]
+                    .find(" Cast it in a query")
+                    .map(|j| &batch[i..i + j])
+            })
+            .unwrap_or("");
+        let out = refuse.run();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if sentence.is_empty()
+            || !sentence.contains(value)
+            || out.status.success()
+            || !said.contains(sentence)
+            || !said.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
+        {
+            bad.push(format!(
+                "default column: the snapshot refuses {sentence:?}; the stream said {}",
+                said.lines()
+                    .find(|l| l.contains("TIME") || l.contains("panicked"))
+                    .unwrap_or("nothing about the value")
+            ));
+        }
+    }
+    bad
+}
+
+/// A negative MySQL TIME(1) or TIME(2) with a fraction is the stored duration on the stream leg: MySQL's own text in a `string` column, the snapshot's refusal in a default one.
+#[test]
+#[ignore = "live+gate-only: open defect TF-1; closes with fix/mysql-binlog-time-fraction"]
+fn open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot() {
+    let _serial = cross_process_serial("mysql_cdc_time_fraction");
+    let tbl = unique_name("cdc_tfrac");
+    let mut c = mysql::Pool::new(MYSQL_CDC_URL).unwrap().get_conn().unwrap();
+    c.query_drop(format!("DROP TABLE IF EXISTS {tbl}")).unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {tbl} (id INT PRIMARY KEY, t1 TIME(1), t2 TIME(2))"
+    ))
+    .unwrap();
+    let _guard = Table(tbl.clone());
+    let rows = vec![
+        (1, vec!["-00:00:00.5", "-00:00:00.50"]),
+        (2, vec!["-00:00:01.2", "-00:00:01.25"]),
+        (3, vec!["-12:00:00.9", "-12:00:00.99"]),
+        (4, vec!["-00:00:00.1", "-00:00:00.01"]),
+        (5, vec!["-838:59:58.9", "-838:59:58.99"]),
+    ];
+    let bad = time_stream_legs_disagree(&tbl, &["t1", "t2"], &rows, Some("TIME -0:00:00.500000"));
+    assert_eq!(
+        bad,
+        Vec::<String>::new(),
+        "stream differs from the source on negative TIME(1)/TIME(2) with a fraction"
+    );
+}
+
+/// The TIME values next to the negative TIME(1)/(2) fraction decode alike on the stream and in the source: positive TIME(1)/(2), a whole negative second, and negative TIME(3)/(4)/(6) with a fraction.
+#[test]
+#[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
+fn mysql_cdc_time_values_beside_a_negative_fraction_match_the_source() {
+    let _serial = cross_process_serial("mysql_cdc_time_fraction");
+    let tbl = unique_name("cdc_tnear");
+    let mut c = mysql::Pool::new(MYSQL_CDC_URL).unwrap().get_conn().unwrap();
+    c.query_drop(format!("DROP TABLE IF EXISTS {tbl}")).unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {tbl} (id INT PRIMARY KEY, a TIME(1), b TIME(2), c TIME(3), d TIME(4), e TIME(6), f TIME)"
+    ))
+    .unwrap();
+    let _guard = Table(tbl.clone());
+    let rows = vec![
+        (
+            1,
+            vec![
+                "00:00:00.5",
+                "00:00:00.50",
+                "-00:00:00.500",
+                "-00:00:00.5000",
+                "-00:00:00.500000",
+                "-00:00:01",
+            ],
+        ),
+        (
+            2,
+            vec![
+                "12:34:56.7",
+                "12:34:56.78",
+                "-12:34:56.789",
+                "-12:34:56.7891",
+                "-12:34:56.789123",
+                "-838:59:59",
+            ],
+        ),
+        (
+            3,
+            vec![
+                "-01:00:00",
+                "-00:00:02",
+                "-00:00:00.001",
+                "-00:00:00.0001",
+                "-00:00:00.000001",
+                "00:00:00",
+            ],
+        ),
+    ];
+    let bad = time_stream_legs_disagree(&tbl, &["a", "b", "c", "d", "e", "f"], &rows, None);
+    assert_eq!(
+        bad,
+        Vec::<String>::new(),
+        "stream differs from the source beside a negative TIME(1)/(2) fraction"
+    );
+}
+
 // Negative family #4 — the environment revokes rights mid-life: a DBA drops
 // the REPLICATION grants between scheduler cycles. The next run must fail
 // LOUDLY with the grants hint (never a 0-row success), the checkpoint must
