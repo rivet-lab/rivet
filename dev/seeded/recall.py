@@ -23,7 +23,8 @@ from pathlib import Path
 import yaml
 
 from dev.pytools import evidence
-from dev.release_oracle.core import Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, self_skipped
+from dev.release_oracle import stand_health
+from dev.release_oracle.core import Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, nextest_panics, self_skipped
 from dev.release_oracle.live_modules import EXCLUSIVE_ENV, exclusive_tests, live_modules_env
 from dev.seeded import run_record
 
@@ -64,6 +65,10 @@ CAUGHT, MISSED, STALE, BROKEN, NO_CONTROL, NA = "CAUGHT", "MISSED", "STALE", "BR
 ABORTED = "ABORTED"
 #: Every declared cell skipped on this stand for a reason it named: reported, never a catch, held under a ceiling.
 NOT_GRADED_HERE = "NOT-GRADED-HERE"
+#: A row whose cells ran while the stand was down or unreadable: neither a catch nor a miss, and the run is NOT GRADED.
+STAND_DOWN = "STAND-DOWN"
+#: A cell whose red is the stand's own panic, not an assertion about the product.
+STAND = "STAND"
 #: The gate matrix row whose `not_graded_here_ceiling` bounds the NOT-GRADED-HERE rows.
 GATE_MATRIX = ROOT / "docs" / "release-gate-matrix.yaml"
 LIB = "lib:"
@@ -157,17 +162,20 @@ def stale_message(seed: str, patch_text: str, git_out: str) -> str:
 
 
 def cell_outcomes(out: str, skipped: dict[str, str], cells: tuple[str, ...]) -> dict[str, str]:
-    """Each cell's verdict in one nextest run: PASS, FAIL (a failed test), SKIP (self-skipped), ABSENT, or the raw status of a test nextest stopped (TIMEOUT, ABORT, ...)."""
+    """Each cell's verdict in one nextest run: PASS, FAIL (a failed test), STAND (every failure is the stand's own panic), SKIP (self-skipped), ABSENT, or the raw status of a test nextest stopped (TIMEOUT, ABORT, ...)."""
     final = nextest_outcomes(out)
+    panics = nextest_panics(out)
     skip_names = {k.split("::")[-1] for k in skipped}
     res: dict[str, str] = {}
     for c in cells:
         bare = c.removeprefix(LIB)
-        seen = [s for n, s in final.items() if n == bare or n.endswith("::" + bare)]
+        named = [(n, s) for n, s in final.items() if n == bare or n.endswith("::" + bare)]
+        seen = [s for _, s in named]
+        failed = [n for n, s in named if s == "FAIL" or s.startswith("FAIL ")]
         if not seen:
             res[c] = "ABSENT"
-        elif any(s == "FAIL" or s.startswith("FAIL ") for s in seen):
-            res[c] = "FAIL"
+        elif failed:
+            res[c] = STAND if all(not stand_health.from_text(panics.get(n, "")).alive for n in failed) else "FAIL"
         elif any(s not in ("PASS", "LEAK") for s in seen):
             res[c] = next(s for s in seen if s not in ("PASS", "LEAK"))
         else:
@@ -176,8 +184,8 @@ def cell_outcomes(out: str, skipped: dict[str, str], cells: tuple[str, ...]) -> 
 
 
 def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
-          skipped: dict[str, str] | None = None) -> Verdict:
-    """CAUGHT iff a cell green on the unpatched tree is red on the patched one; `seeded=None` = the patched tree did not build; `skipped` = each control cell's own skip reason."""
+          skipped: dict[str, str] | None = None, stand: stand_health.StandVerdict = stand_health.ALIVE) -> Verdict:
+    """CAUGHT iff a cell green on the unpatched tree is red on the patched one; `seeded=None` = the patched tree did not build; `skipped` = each control cell's own skip reason; `stand` = how the stand read while the cells ran (down or unreadable grades nothing)."""
     if row.na:
         return Verdict(row, NA, row.na)
     if seeded is None:
@@ -185,13 +193,18 @@ def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
     if not row.cells:
         return Verdict(row, MISSED, "no cell catches this class on this engine")
     green = [c for c in row.cells if control.get(c) == "PASS"]
+    if not stand.alive:
+        return Verdict(row, STAND_DOWN, f"the stand was {stand.kind.value} while the cells ran, so no catch or miss is read ({stand.reason})")
+    red = [c for c in green if seeded.get(c) == "FAIL"]
+    hit = [c for c in row.cells if STAND in (control.get(c), seeded.get(c))]
+    if hit and not red:
+        return Verdict(row, STAND_DOWN, f"cell(s) {', '.join(hit)} failed on the stand's own panic, so no catch or miss is read")
     if not green and all(control.get(c) == "SKIP" for c in row.cells):
         why = "; ".join(f"{c}: {(skipped or {}).get(c, 'skipped')}" for c in row.cells)
         return Verdict(row, NOT_GRADED_HERE, f"every declared cell skipped on this stand ({why})")
     if not green:
         said = ", ".join(f"{c}={control.get(c, 'ABSENT')}" for c in row.cells)
         return Verdict(row, NO_CONTROL, f"no declared cell is green on the unpatched tree ({said})")
-    red = [c for c in green if seeded.get(c) == "FAIL"]
     if red:
         return Verdict(row, CAUGHT, ", ".join(red))
     stopped = [f"{c}={seeded[c]}" for c in green if seeded.get(c) not in (None, *CELL_VERDICTS)]
@@ -388,7 +401,7 @@ def gate_ceiling(key: str, matrix: Path = GATE_MATRIX) -> int:
 
 
 def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceiling: int | None = None) -> bool:
-    """One ledger row per verdict: CAUGHT passes, N/A is a counted N/A row held under `na_ceiling`, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), anything else (MISSED, STALE, BROKEN, NO-CONTROL, ABORTED) fails the gate; True when no row failed."""
+    """One ledger row per verdict: CAUGHT passes, STAND-DOWN is an INFRA row (the run is NOT GRADED), N/A is a counted N/A row held under `na_ceiling`, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), anything else (MISSED, STALE, BROKEN, NO-CONTROL, ABORTED) fails the gate; True when no row failed."""
     here, nas, green = [], 0, True
     for v in out:
         msg = f"seeded {v.row.seed} × {v.row.engine}: {v.status} — {v.detail}"
@@ -400,6 +413,9 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceili
         elif v.status == NA:
             led.not_applicable(v.row.engine, "seeded", v.row.seed, "-", msg)
             nas += 1
+        elif v.status == STAND_DOWN:
+            led.ungraded(v.row.engine, "seeded", v.row.seed, "-", msg)
+            green = False
         else:
             led.failed(v.row.engine, "seeded", v.row.seed, "-", msg)
             green = False
@@ -501,8 +517,10 @@ class BuildPool:
 
 
 def grade_seeds(led: Ledger, live: list[Row], control: dict[str, str], control_skips: dict[str, str],
-                cargos: list[Cargo], logs: Path, apply=None, undo=None) -> dict[Row, Verdict]:
-    """Grade each patch in sorted order: its build comes from a worker tree ahead of time, its cells run here, one patch at a time."""
+                cargos: list[Cargo], logs: Path, apply=None, undo=None, book: stand_health.Book | None = None,
+                control_stand: stand_health.StandVerdict = stand_health.ALIVE) -> dict[Row, Verdict]:
+    """Grade each patch in sorted order: its build comes from a worker tree ahead of time, its cells run here, one patch at a time; a patch whose cells ran while the stand was down (or the control did) grades nothing."""
+    book = book or stand_health.BOOK
     jobs = []
     for patch in sorted({r.patch for r in live}):
         group = [r for r in live if r.patch == patch]
@@ -514,6 +532,7 @@ def grade_seeds(led: Ledger, live: list[Row], control: dict[str, str], control_s
         for job in jobs:
             led.phase(f"SEED {job.patch} — {', '.join(r.engine for r in job.group)} ({len(job.cells)} control-green cell(s))")
             pool.take(job)
+            stand = control_stand
             try:
                 if job.error is not None:
                     raise job.error
@@ -523,11 +542,13 @@ def grade_seeds(led: Ledger, live: list[Row], control: dict[str, str], control_s
                     led.bad(f"{why} (see {logs / f'{job.name}.build.log'})")
                     seeded = None
                 else:
+                    since = book.mark()
                     seeded = job.cargo.run(job.cells, logs / f"{job.name}.log") if job.cells else {}
+                    stand = stand_health.classify([control_stand, book.judge("", since)])
             finally:
                 pool.release(job)
             for r in job.group:
-                verdicts[r] = grade(r, control, seeded, control_skips)
+                verdicts[r] = grade(r, control, seeded, control_skips, stand)
     finally:
         pool.close()
     return verdicts
@@ -562,20 +583,23 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True) -> list[Verdi
     control_cells = sorted({c for r in live for c in r.cells})
     control: dict[str, str] = {}
     control_skips: dict[str, str] = {}
+    control_stand = stand_health.ALIVE
     if control_cells:
         led.phase(f"CONTROL — {len(control_cells)} cell(s) on the unpatched tree")
         b = cargo.build(control_cells, logs / "control.build.log")
         if b.returncode != 0:
             led.bad(f"the unpatched tree does not build (see {logs / 'control.build.log'})")
         else:
+            since = stand_health.BOOK.mark()
             control = cargo.run(control_cells, logs / "control.log")
+            control_stand = stand_health.judge("", since)
             control_skips = dict(cargo.skipped)
             for c, v in control.items():
                 (led.ok if v == "PASS" else led.bad)(f"control {c}: {v}")
 
-    verdicts.update(grade_seeds(led, live, control, control_skips, workers, logs))
+    verdicts.update(grade_seeds(led, live, control, control_skips, workers, logs, control_stand=control_stand))
 
-    out = [verdicts.get(r) or grade(r, control, {}, control_skips) for r in rows]
+    out = [verdicts.get(r) or grade(r, control, {}, control_skips, control_stand) for r in rows]
     green = record(led, out)
     dirty = evidence.tree_dirty(ROOT)
     run_record.append_run(base / run_record.RUNS_FILE, sha=sha, complete=complete, green=green, dirty=dirty)
@@ -621,6 +645,7 @@ def pool_self_test() -> None:
             self.lock, self.applied, self.applied_in = threading.Lock(), {}, {}
             self.building = self.max_building = self.running = 0
             self.ran: list[tuple[str | None, Path]] = []
+            self.on_run = None
 
     class Fake:
         def __init__(self, tree: Path, world: World) -> None:
@@ -645,6 +670,8 @@ def pool_self_test() -> None:
                 patch = w.applied[self.tree]
                 w.ran.append((patch, self.tree))
             time.sleep(0.01)
+            if w.on_run:
+                w.on_run()
             with w.lock:
                 w.running -= 1
             return {c: "FAIL" if c in CATCH.get(patch, ()) else "PASS" for c in cells}
@@ -667,8 +694,10 @@ def pool_self_test() -> None:
             for e, cells in (("postgres", (f"t{i}", "t9")), ("mysql", (f"lib:u{i}",)))]
     control = {c: "PASS" for r in live for c in r.cells}
 
-    def drive(k: int, fail: str | None = None):
+    def drive(k: int, fail: str | None = None, book: stand_health.Book | None = None, control_stand=stand_health.ALIVE):
         w = World()
+        if book is not None:
+            w.on_run = lambda: book.note(stand_health.WATCH + "x", stand_health.down("the stand died"))
 
         def apply(tree, patch):
             with w.lock:
@@ -688,7 +717,7 @@ def pool_self_test() -> None:
             w.applied[t] = None
         led = Spy()
         try:
-            got = grade_seeds(led, list(live), control, {}, [Fake(t, w) for t in trees], Path("/logs"), apply, undo)
+            got = grade_seeds(led, list(live), control, {}, [Fake(t, w) for t in trees], Path("/logs"), apply, undo, book, control_stand)
         except RuntimeError:
             got = None
         assert all(v is None for v in w.applied.values()), ("a tree still holds a seed", w.applied)
@@ -706,6 +735,10 @@ def pool_self_test() -> None:
         assert [p for p, _ in w.ran] == [n for n in names if n not in ("p2.patch", "p4.patch")], w.ran
         assert all(w.applied_in[p] == t for p, t in w.ran), ("a seed ran in a tree it was not applied to", w.ran, w.applied_in)
     assert len({t for _, t in pooled[0].ran}) == POOL
+    for k in (1, POOL):
+        died = drive(k, book=stand_health.Book())[2]
+        assert {v.status for r, v in died.items() if r.seed in ("s0", "s1", "s3")} == {STAND_DOWN}, "a patch whose cells ran while the stand was down is not a catch"
+    assert {v.status for v in drive(1, control_stand=stand_health.down("control died"))[2].values() if v.status != BROKEN} == {STAND_DOWN}, "a control that ran on a dead stand grades no patch"
     for k in (1, POOL):
         assert drive(k, fail="p5.patch")[2] is None, "an apply failure must stop the run, with every tree restored"
 
@@ -829,6 +862,23 @@ def self_test() -> int:
     assert grade(skip, {"t1": "SKIP", "t2": "FAIL"}, {}).status == NO_CONTROL, "a red control is not a stand skip"
     assert grade(skip, {"t1": "SKIP", "t2": "PASS"}, {"t2": "SKIP"}).status == MISSED, \
         "a green control the seed made skip is no catch"
+    dead = stand_health.down("the state DB stopped answering")
+    both = {"t1": "PASS", "t2": "PASS"}
+    assert grade(pg, both, {"t1": "PASS", "t2": "FAIL"}, stand=dead).status == STAND_DOWN, "a red seen while the watchdog had the stand down is no catch"
+    assert grade(pg, {"t1": STAND, "t2": "PASS"}, {"t2": "PASS"}).status == STAND_DOWN, "a control that died on the stand is no missing control"
+    assert grade(pg, both, {"t1": "PASS", "t2": STAND}).status == STAND_DOWN, "a seeded cell that died on the stand is no miss"
+    assert grade(pg, {"t1": "PASS", "t2": "PASS"}, {"t1": STAND, "t2": "FAIL"}).status == CAUGHT, "a real failure beside a stand panic still catches"
+    assert grade(pg, {"t1": "PASS", "t2": "PASS"}, {"t1": "PASS", "t2": "PASS"}, stand=stand_health.unreadable("docker events exited 1")).status == STAND_DOWN, \
+        "an unreadable stand grades neither a catch nor a miss"
+    stood = ("        FAIL [   0.2s] (1/2) rivet-cli::live_suite live_a::t1\n"
+             "        FAIL [   0.2s] (2/2) rivet-cli::live_suite live_a::t2\n"
+             "  stderr ───\n\n    thread 'live_a::t1' panicked at tests/common/env.rs:1:1:\n"
+             "    live test requires Postgres reachable on 127.0.0.1:5433.\n\n"
+             "    thread 'live_a::t2' panicked at tests/x.rs:2:2:\n    assertion `left == right` failed\n")
+    assert cell_outcomes(stood, {}, ("t1", "t2")) == {"t1": STAND, "t2": "FAIL"}, cell_outcomes(stood, {}, ("t1", "t2"))
+    led = Ledger(colour=False)
+    assert not record(led, [Verdict(pg, STAND_DOWN, "dead")], ceiling=0) and not led.red and [c.status.name for c in led.cells] == ["INFRA"], \
+        "a stand-down row is INFRA: the run is NOT GRADED, not red and not green"
     limit = gate_ceiling("not_graded_here_ceiling")
     for n, red in ((limit, False), (limit + 1, True)):
         rows = [Verdict(Row(f"s{i}", "mysql", "p", ("t1",)), NOT_GRADED_HERE, "skipped") for i in range(n)]

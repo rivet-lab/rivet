@@ -41,12 +41,9 @@ import re
 import threading
 import time
 import shutil
-import socket
 import sys
 import tempfile
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from tempfile import mkdtemp
 
@@ -55,7 +52,7 @@ try:  # importable both as a package module and as a plain sibling file
                        keep_failure_log, mysql_client, nextest_filter, nextest_outcomes, nextest_panics, nextest_passed, nextest_started, port_of, release_bin_env,
                        rivet, rivet_bin, run, sqlcmd, test_passed)
     from ..pytools.duckcli import ARGV as DUCKDB
-    from . import state_lib
+    from . import stand_health, state_lib
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
     from core import (  # type: ignore
         HERE,
@@ -88,6 +85,7 @@ except ImportError:  # pragma: no cover - depends on how the driver is invoked
         test_passed,
     )
     DUCKDB = [sys.executable, str(Path(__file__).resolve().parents[1] / "pytools" / "duckcli.py")]
+    import stand_health  # type: ignore
     import state_lib  # type: ignore
 
 __all__ = [
@@ -217,9 +215,9 @@ def _failed(led: Ledger, eng: str, ver: str, scenario: str, store: str, msg: str
 
 
 def _skipped(led: Ledger, eng: str, ver: str, scenario: str, store: str, msg: str, detail: str = "", *,
-             cause: SkipCause) -> None:
-    led.skip(msg)
-    led.add(eng, ver, scenario, store, Status.SKIP, detail, cause=cause)
+             cause: SkipCause, target: str = "") -> None:
+    """`Ledger.skipped`, for the stages that pass the ledger first."""
+    led.skipped(eng, ver, scenario, store, msg, detail, cause=cause, target=target)
 
 
 # ── small shared helpers ─────────────────────────────────────────────────────
@@ -261,45 +259,9 @@ def matrix_reader_self_test() -> None:
     print("self-test ok: matrix.yaml versions rows are read in any key order and an unreadable row stops the run")
 
 
-PROBE_TIMEOUT = 10.0
-PROBE_TRIES = 4
-PROBE_PAUSE = 1.0
-
-
-def _answered(probe, tries: int, pause: float) -> bool:
-    """True when `probe()` succeeds within `tries` attempts; one slow or refused answer is not a down service."""
-    for i in range(tries):
-        if probe():
-            return True
-        if i + 1 < tries:
-            time.sleep(pause)
-    return False
-
-
-def _tcp_open(host: str, port: int, timeout: float = PROBE_TIMEOUT, tries: int = PROBE_TRIES, pause: float = PROBE_PAUSE) -> bool:
-    """Can we connect at all, retrying a connect that timed out or was refused."""
-    def once() -> bool:
-        try:
-            with socket.create_connection((host, port), timeout=timeout):
-                return True
-        except OSError:
-            return False
-
-    return _answered(once, tries, pause)
-
-
-def _http_reachable(url: str, timeout: float = PROBE_TIMEOUT, tries: int = PROBE_TRIES, pause: float = PROBE_PAUSE) -> bool:
-    """True when the service answers with ANY HTTP status (a 4xx is up); a timeout or refused connection is retried, then down."""
-    def once() -> bool:
-        try:
-            with urllib.request.urlopen(url, timeout=timeout):
-                return True
-        except urllib.error.HTTPError:
-            return True
-        except (urllib.error.URLError, OSError):
-            return False
-
-    return _answered(once, tries, pause)
+def _tcp_open(host: str, port: int) -> bool:
+    """Does host:port accept a connection within the readiness deadline (`stand_health.ready`)."""
+    return stand_health.reach_tcp(host, port)
 
 
 def _first_match(text: str, pattern: str) -> str:
@@ -527,9 +489,10 @@ def docker_names() -> list[str]:
 
 # ── object stores ────────────────────────────────────────────────────────────
 def store_probe_self_test() -> None:
-    """A slow first answer is retried, not read as a down store; a failed fake-gcs list raises instead of reading as 0 rows."""
+    """A slow fake-gcs list is retried; a failed list or download raises instead of reading as 0 rows."""
     import importlib.util
     import json as _json
+    import socket
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     spec = importlib.util.spec_from_file_location("gcs_pull_under_test", _asset("lib/gcs_pull.py"))
@@ -578,14 +541,9 @@ def store_probe_self_test() -> None:
     media = "/download/storage/v1/b/b/o/p%2Fa.parquet"
     one = _json.dumps({"items": [{"name": "p/a.parquet"}]}).encode()
     kw = {"timeout": 0.5, "attempts": 3, "pause": 0.0}
-    with Fake({"/health": [(1.2, 200, b"ok"), (0, 200, b"ok")]}) as f:
-        assert _http_reachable(f.url + "/health", timeout=0.5, tries=3, pause=0.0), "a slow first answer is retried"
-    with Fake({"/health": [(2.0, 200, b"")]}) as f:
-        assert not _http_reachable(f.url + "/health", timeout=0.3, tries=2, pause=0.0), "an answer that never comes is down"
     with socket.socket() as s0:
         s0.bind(("127.0.0.1", 0))
         closed = s0.getsockname()[1]
-    assert not _tcp_open("127.0.0.1", closed, timeout=0.3, tries=2, pause=0.0), "a refused port is down"
     with tempfile.TemporaryDirectory() as d:
         with Fake({listing: [(1.2, 200, one), (0, 200, one)], media: [(0, 500, b""), (0, 200, b"PAR1")]}) as f:
             assert gp.pull(f.url, "b", "p/", d, **kw) == 1, "a list slower than the timeout is retried and delivers"
@@ -617,21 +575,20 @@ def store_probe_self_test() -> None:
             pass
         else:
             raise AssertionError("a pull that failed must raise StoreReadError through the wrapper")
-    print("self-test ok: a slow store probe is retried; a failed fake-gcs list or download raises, never reads as 0 rows")
+    print("self-test ok: a slow fake-gcs list is retried; a failed list or download raises, never reads as 0 rows")
 
 
-def store_up(store: str) -> bool:
-    """Health probe per store. A down emulator makes the cell SKIP, never PASS."""
-    if store == "s3":
-        return _http_reachable("http://127.0.0.1:9000/minio/health/live")
-    if store == "gcs":
-        return _http_reachable("http://127.0.0.1:4443/storage/v1/b")
-    if store == "azure":
-        return _http_reachable("http://127.0.0.1:10000/devstoreaccount1?comp=list")
-    # Unreachable with matrix.yaml's three stores. The bash `case` fell through
-    # to exit 0 here — i.e. an unknown store read as UP without probing anything,
-    # the exact silent-pass shape this gate forbids. False is the honest answer.
-    return False
+STORE_HEALTH = {
+    "s3": "http://127.0.0.1:9000/minio/health/live",
+    "gcs": "http://127.0.0.1:4443/storage/v1/b",
+    "azure": "http://127.0.0.1:10000/devstoreaccount1?comp=list",
+}
+
+
+def store_up(store: str, deadline: float = stand_health.HTTP_DEADLINE) -> bool:
+    """Is the object store's emulator ready within `deadline`; an unknown store is not up."""
+    url = STORE_HEALTH.get(store)
+    return url is not None and stand_health.reach_http(store, url, deadline)
 
 
 def store_readback(store: str, bucket: str, prefix: str, work: Path) -> str:
@@ -1216,7 +1173,8 @@ def sc_keyset_parallel(led: Ledger, engine: str, tag: str, url: str) -> None:
 # ── load: export TO the object store, then read it back INDEPENDENTLY ────────
 def sc_load(led: Ledger, engine: str, tag: str, url: str, store: str) -> None:
     if not store_up(store):
-        _skipped(led, engine, tag, "load", store, f"{store} emulator down", "emulator down", cause=SkipCause.ENV)
+        _skipped(led, engine, tag, "load", store, f"{store} emulator down", "emulator down", cause=SkipCause.ENV,
+                 target=stand_health.store_target(store))
         return
     # A run-UNIQUE prefix (this run's mktemp token). Part names are run-unique by
     # design, so they never clobber a prior run's — which means a STABLE prefix
@@ -1487,7 +1445,7 @@ def verify_state_migrations(led: Ledger) -> None:
             f"state-migration parity: state Postgres {_su.hostname or '127.0.0.1'}:"
             f"{_su.port or 5432} unreachable (is the dev stand up?)",
             "state pg down",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target(_su.hostname or "127.0.0.1", _su.port or 5432),
         )
         return
     if not have("cargo"):
@@ -1498,7 +1456,7 @@ def verify_state_migrations(led: Ledger) -> None:
         _skipped(
             led, "state", "migrations", "parity", "-",
             "state-migration parity: source Postgres :5432 down", "no source pg",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 5432),
         )
         return
     led.phase("State-migration parity (SQLite vs Postgres state, RED-proven, release binary)")
@@ -1637,7 +1595,7 @@ def verify_network_faults(led: Ledger) -> None:
             led, "infra", "network", "faults", "-",
             "network-faults: toxiproxy admin :8474 unreachable (docker compose up -d toxiproxy)",
             "toxiproxy down",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 8474),
         )
         return
     _drive_live_tests(
@@ -1669,7 +1627,8 @@ def verify_tls_required(led: Ledger) -> None:
         return
     if not _tcp_open("127.0.0.1", 5432):
         _skipped(led, "infra", "tls", "policy", "-",
-                 "tls-policy: source Postgres :5432 down", "no source pg", cause=SkipCause.ENV)
+                 "tls-policy: source Postgres :5432 down", "no source pg", cause=SkipCause.ENV,
+                 target=stand_health.tcp_target("127.0.0.1", 5432))
         return
     _drive_live_tests(
         led, "infra", "tls", "policy",
@@ -1697,7 +1656,7 @@ def verify_auth(led: Ledger) -> None:
             led, "infra", "mongo", "auth", "-",
             "mongo-auth: :27020 unreachable (docker compose up -d mongo-auth)",
             "mongo-auth down",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 27020),
         )
         return
     _drive_live_tests(
@@ -1724,7 +1683,7 @@ def verify_cdc_standby(led: Ledger) -> None:
         return
     RAN_LIVE_TESTS.add(CDC_STANDBY_TEST)
     if not _tcp_open("127.0.0.1", 5436):
-        _replica_down(led, "cdc-standby", ":5436 unreachable", "python3 -m dev.pytools.cdc_stand standby")
+        _replica_down(led, "cdc-standby", ":5436 unreachable", "python3 -m dev.pytools.cdc_stand standby", 5436)
         return
     _drive_live_tests(
         led, "infra", "pg", "cdc-standby",
@@ -1886,7 +1845,7 @@ def verify_replica_read(led: Ledger) -> None:
     RAN_LIVE_TESTS.update([REPLICA_READ_TEST, *(test for _, _, test, _ in REPLICA_CELLS)])
     if not _tcp_open("127.0.0.1", 3309):
         _replica_down(led, "read", "no mysql-replica :3309",
-                      "docker compose --profile replica up -d mysql-primary mysql-replica")
+                      "docker compose --profile replica up -d mysql-primary mysql-replica", 3309)
         return
     led.phase(
         "Replica read (rivet captures a read-replica's re-logged binlog — "
@@ -1921,7 +1880,7 @@ def verify_replica_read(led: Ledger) -> None:
     for label, ports, test, hint in REPLICA_CELLS:
         down = [port for port in ports if not _tcp_open("127.0.0.1", port)]
         if down:
-            _replica_down(led, label, "port(s) " + ", ".join(f":{p}" for p in down) + " closed", hint)
+            _replica_down(led, label, "port(s) " + ", ".join(f":{p}" for p in down) + " closed", hint, down[0])
             continue
         cell_log = work_dir() / f"replica_{label}.log"
         p = run(
@@ -1965,8 +1924,10 @@ def set_without_replica_topologies(on: bool) -> None:
         os.environ.pop(_REPLICA_ESCAPE_ENV, None)
 
 
-def _replica_down(led: Ledger, label: str, what: str, hint: str) -> None:
-    """A replica topology that is down FAILS its row — SKIP only under the named escape."""
+def _replica_down(led: Ledger, label: str, what: str, hint: str, port: int = 0) -> None:
+    """A replica topology that is down FAILS its row (INFRA when its port answered earlier in this run) — SKIP only under the named escape."""
+    if port and led.incident("replica", label, "-", "-", f"replica {label}: {what}", "replica stand down", stand_health.tcp_target("127.0.0.1", port)):
+        return
     if without_replica_topologies():
         _skipped(led, "replica", label, "-", "-",
                  f"replica {label}: {what} — GIVEN UP on purpose by {_REPLICA_ESCAPE_FLAG} "
@@ -2057,7 +2018,7 @@ def verify_pool_e2e(led: Ledger) -> None:
             led, "pool", "e2e", "-", "-",
             "pool e2e: no toxiproxy :8474 (docker compose up -d toxiproxy)",
             "no toxiproxy",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 8474),
         )
         return
     _run_pool_module(
@@ -2132,6 +2093,15 @@ def nextest_live(log_path: Path, expr: str, env: dict[str, str] | None = None,
     return nextest_outcomes(p.out), nextest_started(p.out), self_skipped(skip_log), nextest_panics(p.out)
 
 
+def _module_red(led: Ledger, scenario: str, label: str, name: str, why: str, log_path: Path, since: float) -> None:
+    """A live test that did not pass: FAIL with its panic, or INFRA when the stand was down or unreadable while it ran."""
+    seen = stand_health.judge(why, since)
+    if seen.alive:
+        _failed(led, scenario, "batch", "-", "-", f"{label} FAILED · {name} — {why} (see {log_path})")
+    else:
+        led.ungraded(scenario, "batch", "-", "-", f"{label} · {name} ran while the stand was {seen.kind.value} ({seen.reason}) — {why} (see {log_path})")
+
+
 def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
                       modules: list[str], env: dict[str, str] | None = None,
                       expr: str | None = None, threads: int | None = None,
@@ -2156,6 +2126,7 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
             if keep and path.is_file():
                 keep_failure_log(path, f"{os.getpid()}-{path.name}")
 
+    since = stand_health.BOOK.mark()
     verdicts, started, skipped, panics = leg(
         log_path, expr or " | ".join(f"test(/^{m}::/)" for m in modules), env, f"nextest {label}")
     if started is not None and len(verdicts) != started:
@@ -2191,8 +2162,7 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
             GREEN_CELLS.add(name)
             _passed(led, scenario, "batch", "-", "-", f"{label} · {name}{f' (run again with {again[0]})' if name in owed else ''}")
         else:
-            why = panics.get(name, "no panic line read")
-            _failed(led, scenario, "batch", "-", "-", f"{label} FAILED · {name} — {why} (see {log_path})")
+            _module_red(led, scenario, label, name, panics.get(name, "no panic line read"), log_path, since)
 
 
 def verify_pool_split(led: Ledger) -> None:
@@ -2220,7 +2190,8 @@ def verify_pool_split(led: Ledger) -> None:
     for port, what in ((8474, "toxiproxy"), (5432, "source postgres")):
         if not _tcp_open("127.0.0.1", port):
             _skipped(led, "pool", "split", "-", "-",
-                     f"pool split: no {what} :{port} (docker compose up -d)", f"no {what}", cause=SkipCause.ENV)
+                     f"pool split: no {what} :{port} (docker compose up -d)", f"no {what}", cause=SkipCause.ENV,
+                     target=stand_health.tcp_target("127.0.0.1", port))
             return
     _run_pool_module(
         led,
