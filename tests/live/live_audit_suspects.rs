@@ -612,12 +612,10 @@ fn mongo_cdc_dropping_another_collection_does_not_stop_capture() {
     );
 }
 
-/// Keyset over a DATETIME2(7) primary key (100 ns ticks, finer than the microsecond the
-/// seek cursor keeps) either reads every row once or refuses — it must not loop or
-/// re-read a page.
+/// Keyset over a DATETIME2(7) primary key (100 ns ticks, finer than the microsecond the seek cursor keeps) is refused by code before any read.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn keyset_over_an_mssql_datetime2_7_key_reads_every_row_once_or_refuses() {
+fn keyset_over_an_mssql_datetime2_7_key_is_refused_before_any_read() {
     let table = unique_name("dt2_key");
     mssql_exec(&format!(
         "IF OBJECT_ID('dbo.{table}') IS NOT NULL DROP TABLE dbo.{table}; \
@@ -627,41 +625,19 @@ fn keyset_over_an_mssql_datetime2_7_key_reads_every_row_once_or_refuses() {
            ('2024-01-01 00:00:03.1234567', 4)"
     ));
     let rig = Rig::mssql_batch(&table)
-        .duckdb_oracle()
         .mode("chunked")
-        .a_failed_run_may_leave(
-            &[Leftover::OrphanPart, Leftover::FileLog],
-            "the keyset run refuses once the seek cannot advance, after two pages are written; they carry no manifest",
-        )
         .export_line("chunk_by_key: ts")
         .export_line("chunk_size: 1");
-    let out = rig
-        .run_with_envs_bounded(&[], std::time::Duration::from_secs(60))
-        .expect("a keyset run over four rows must finish, not loop");
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
-    let refused = !out.status.success();
-    let got = if refused {
-        None
-    } else {
-        Some(duckdb_distinct_i64_set(rig.oracle_dir(), "id"))
-    };
-    let rows = if refused {
-        0
-    } else {
-        duckdb_parquet_rows(rig.oracle_dir())
-    };
+    let out = rig.run();
+    let parts = files_with_extension(&rig.out_dir(), "parquet").len();
     mssql_exec(&format!("DROP TABLE dbo.{table}"));
-    match got {
-        None => assert!(
-            said.contains("ended on the same 'ts' value it started after")
-                && said.contains("the seek cannot advance"),
-            "the refusal says why the seek cannot advance:\n{said}"
-        ),
-        Some(ids) => {
-            assert_eq!(ids, (1..=4).collect(), "every row");
-            assert_eq!(rows, 4, "exactly once");
-        }
-    }
+    assert_refused(&out, Refused::by_code("RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1));
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("more than 6 fractional-second digits"),
+        "the refusal names the cause:\n{said}"
+    );
+    assert_eq!(parts, 0, "nothing is written before the refusal");
 }
 
 /// Keyset over a `varchar` key under SQL Server's default SQL collation: the page is

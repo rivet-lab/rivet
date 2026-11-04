@@ -291,14 +291,26 @@ than the snapshot it replaces. Rivet **refuses** a `chunk_by_key` that is not a
 single-column, NOT NULL, `UNIQUE`/`PRIMARY` key rather than emit such a query:
 
 ```
-chunk_by_key 'payload' is not a usable keyset key on app.events — it must be a
+export 'events': chunk_by_key 'payload' is not a usable keyset key on app.events — it must be a
 single-column, NOT NULL, UNIQUE or PRIMARY key WHOSE TYPE the keyset cursor can
-read (integer / float / string / timestamp / date / uuid). A `decimal`/`numeric`
-key is excluded: the cursor cannot advance past it (it would fail mid-run after
-a partial write). Without a usable key, `ORDER BY payload LIMIT n` would also
-full-scan + filesort. Add a unique index of a supported type, pick another key,
-use a range `chunk_column:` (integer), or `mode: full`.
+read (integer / float / string / timestamp / date / uuid). Column 'payload' is
+binary, which the cursor cannot render. Without a usable key, `ORDER BY payload
+LIMIT n` would also full-scan + filesort. Key the keyset on an integer, text,
+uuid, date or timestamp column (a timestamp finer than a microsecond needs the
+`timestamp_ns` / `timestamp_tz_ns` column override), range-chunk an integer
+`chunk_column:`, or use `mode: full`.
 ```
+
+One seam decides which delivered types can key a keyset, for every engine and
+for the explicit key, the key MySQL picks by itself and a composite key alike.
+The cause is named after the column. Refused: `decimal`/`numeric` (except an
+Oracle `NUMBER`), binary, boolean (`TINYINT(1)`, `BIT(1)`), a time of day, JSON,
+an interval, an array, a MySQL `ENUM`/`SET` (it sorts by member position, not by
+the label the cursor binds), a column delivered as text, and a SQL Server
+`datetime2`/`datetimeoffset` finer than a microsecond unless the
+`timestamp_ns` / `timestamp_tz_ns` override delivers it in nanoseconds. The
+refusal comes at plan time, so a table that fits in one chunk is refused too
+instead of running as a snapshot.
 
 With `parallel:` the planner also reads the key's boundaries (and, with
 `keyset_incremental: true`, its current maximum) through a scalar probe. On

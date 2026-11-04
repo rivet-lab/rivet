@@ -4647,3 +4647,20 @@ seeds:
         cells: [check_refuses_a_timestamp_with_a_time_declared_date_oracle]
       mongo:
         na: "a document source has no declared column wire type: the probe returns before it reads a row (source_type == Mongo)"
+
+  - name: keyset-key-type-unchecked
+    class: "the planner accepts a keyset key by a type list kept apart from what the cursor reader can advance: a MySQL BINARY(16), TIME or TINYINT(1) unique key is auto-picked and stops the run with exit 5 after page 0 (exit 0 as a snapshot on one chunk), a PostgreSQL bytea or time and a SQL Server varbinary or time chunk_by_key are accepted, and an MSSQL datetime2(7) chunk_by_key reads microseconds from 100 ns ticks and delivers duplicates with exit 0"
+    history: "2026-11-03 - found by the seam packaging (ER-1, ER-3, ER-6, RHS-3): the MSSQL datetime2(7) key re-read the row at the end of every page; fixed by src/source/keyset_key.rs::keyset_key_refusal; owner decision Q11: a one-chunk table is refused too"
+    scope: source
+    patch: keyset-key-type-unchecked/shared.patch
+    engines:
+      postgres:
+        cells: [keyset_key_is_refused_postgres_bytea_unique_key, keyset_key_is_refused_postgres_time_unique_key, keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key, "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size"]
+      mysql:
+        cells: [keyset_key_is_refused_mysql_binary16_primary_key, keyset_key_is_refused_mysql_time_unique_key, keyset_key_is_refused_mysql_tinyint1_unique_key, keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key, "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size"]
+      mssql:
+        cells: [keyset_key_is_refused_mssql_varbinary_unique_key, keyset_key_is_refused_mssql_time_unique_key, keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds, keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond, keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds, keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key, "lib:a_sub_microsecond_mssql_key_is_refused_until_it_is_delivered_in_nanoseconds", "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders"]
+      oracle:
+        cells: ["lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size"]
+      mongo:
+        na: "Mongo always pages by _id; there is no user chunk_by_key knob and no keyset key to type"

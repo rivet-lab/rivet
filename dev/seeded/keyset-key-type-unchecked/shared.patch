@@ -1,0 +1,23 @@
+diff --git a/src/source/keyset_key.rs b/src/source/keyset_key.rs
+--- a/src/source/keyset_key.rs
++++ b/src/source/keyset_key.rs
+@@ -33,7 +33,7 @@
+         RivetType::Timestamp {
+             unit: TimeUnit::Microsecond,
+             ..
+-        } if finer_than_microsecond => Some(
++        } if false && finer_than_microsecond => Some(
+             "carries more than 6 fractional-second digits, which the microsecond cursor truncates",
+         ),
+         RivetType::Timestamp {
+@@ -45,9 +45,7 @@
+             "is an ENUM or SET, which sorts by member position, not by the label the cursor binds",
+         ),
+         RivetType::Enum => None,
+-        RivetType::Bool => Some("is a boolean, which the cursor cannot render"),
+-        RivetType::Time { .. } => Some("is a time of day, which the cursor cannot render"),
+-        RivetType::Binary => Some("is binary, which the cursor cannot render"),
++        RivetType::Bool | RivetType::Time { .. } | RivetType::Binary => None,
+         RivetType::Json => Some("is JSON, which does not sort as text"),
+         RivetType::Interval => Some("is an interval, which does not sort as text"),
+         RivetType::List { .. } => Some("is an array, which the cursor cannot render"),

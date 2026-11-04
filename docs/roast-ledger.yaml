@@ -81,3 +81,11 @@ entries:
     status: deferred-past-gate
     verdict: "confirmed live: a gc_orphans load between the first roll's upload and its manifest removed 1 orphan part (HDW-1 rework run, MySQL CDC); open_defect cells on MySQL and PostgreSQL"
     closes: "fix/cdc-run-start-marker: the CDC sink writes a running manifest under the run's own key at start, the first Success rewrite supersedes it, a stale one is closed by state finish-run; bucket_writers then sees the run from its first byte"
+  - id: RHS3
+    date: 2026-11-04
+    lens: seam packaging 2026-11-03
+    title: the planner admits a keyset key by a type list kept in each engine's catalog probe, which is not what the cursor reader can advance
+    copies: [src/pipeline/sink/cursor.rs:101, src/source/oracle/mod.rs:790, src/init/mod.rs:504]
+    status: done
+    verdict: "confirmed: a MySQL BINARY(16), TIME, TINYINT(1) or ENUM unique key is auto-picked and stops the run with exit 5 after page 0 (exit 0 as a snapshot on one chunk); an MSSQL datetime2(7) chunk_by_key delivers duplicates with exit 0"
+    closes: "src/source/keyset_key.rs::keyset_key_refusal decides from the delivered type at plan time for the explicit key, MySQL's auto-picked key and the composite key; ER-1, ER-3, ER-6 and RHS-3 close with it"

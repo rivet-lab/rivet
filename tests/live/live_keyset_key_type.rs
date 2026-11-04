@@ -1,8 +1,6 @@
 //! Keyset key type and precision (docs/chunking-matrix.yaml, keyset_key_type_admission and
 //! keyset_sub_microsecond_key): the planner accepts a keyset key only when the cursor reader can
-//! advance it, so a key it cannot advance is refused by code before any read. A cell asserts the
-//! correct behaviour; one that fails today is an `open_defect_*` cell acknowledged in
-//! dev/release_oracle/known_red.py.
+//! advance it, so a key it cannot advance is refused by code before any read.
 //!
 //! Oracles: the exit and `Error:` line of the real binary, the parts under the destination, and the
 //! ids the destination holds against the ids the source holds.
@@ -353,86 +351,86 @@ fn a_refused_key_stays_refused(engine: SqlEngine, case: Case) {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mysql_binary16_primary_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_mysql_binary16_primary_key() {
     refused_over_several_pages(SqlEngine::Mysql, MYSQL_BINARY16);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mysql_time_unique_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_mysql_time_unique_key() {
     refused_over_several_pages(SqlEngine::Mysql, MYSQL_TIME);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mysql_tinyint1_unique_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_mysql_tinyint1_unique_key() {
     refused_over_several_pages(SqlEngine::Mysql, MYSQL_TINYINT1);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-6; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mysql_enum_unique_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_mysql_enum_unique_key() {
     refused_over_several_pages(SqlEngine::Mysql, MYSQL_ENUM_KEY);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_postgres_bytea_unique_key() {
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_is_refused_postgres_bytea_unique_key() {
     refused_over_several_pages(SqlEngine::Pg, PG_BYTEA);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_postgres_time_unique_key() {
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_is_refused_postgres_time_unique_key() {
     refused_over_several_pages(SqlEngine::Pg, PG_TIME);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_varbinary_unique_key() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_varbinary_unique_key() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_VARBINARY);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_time_unique_key() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_time_unique_key() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_TIME);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-1; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_DT2_7_DISTINCT_US);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-1; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_DT2_7_ONE_US);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-1; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_DTO_7);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect RHS-3 (owner decision Q11); closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key() {
     refused_on_a_table_that_fits_one_chunk(SqlEngine::Mysql, MYSQL_BINARY16);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect RHS-3 (owner decision Q11); closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key() {
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key() {
     refused_on_a_table_that_fits_one_chunk(SqlEngine::Pg, PG_BYTEA);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect RHS-3 (owner decision Q11); closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key() {
     refused_on_a_table_that_fits_one_chunk(SqlEngine::Mssql, MSSQL_DT2_7_DISTINCT_US);
 }
 

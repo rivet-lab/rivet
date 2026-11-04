@@ -14,6 +14,11 @@ use super::contract::{
 pub use crate::types::parse_column_overrides as parse_column_overrides_pub;
 use crate::types::parse_column_overrides;
 
+/// The remedy every keyset key refusal ends with.
+const KEYSET_KEY_REMEDY: &str = "Key the keyset on an integer, text, uuid, date or timestamp column \
+     (a timestamp finer than a microsecond needs the `timestamp_ns` / `timestamp_tz_ns` \
+     column override), range-chunk an integer `chunk_column:`, or use `mode: full`.";
+
 /// Build a [`ResolvedRunPlan`] from config and CLI flags.
 ///
 /// This is the only place where raw `ExportConfig` fields and CLI flags
@@ -529,26 +534,46 @@ pub(crate) fn chunked_without_table_error(export: &ExportConfig) -> Option<Strin
     ))
 }
 
-/// The chunk planner's catalog probe, plus the primary key and column types a composite `chunk_by_key` is checked against.
+/// The chunk planner's catalog probe, with the keyset keys narrowed to the types the cursor advances and the primary key and column types a composite `chunk_by_key` is checked against.
 fn introspect_table(
     src: &mut dyn crate::source::Source,
+    source_type: crate::config::SourceType,
     tbl: &str,
     export: &ExportConfig,
 ) -> Result<crate::source::TableIntrospection> {
     let mut introspection = src.introspect_for_chunking(tbl)?;
-    if export
+    let composite = export
         .chunk_by_key
         .as_ref()
-        .is_some_and(crate::config::ChunkKey::is_composite)
-    {
-        let base = export
-            .table_select
-            .clone()
-            .unwrap_or_else(|| format!("SELECT * FROM {tbl}"));
+        .is_some_and(crate::config::ChunkKey::is_composite);
+    let pages_by_key = export.chunk_by_key.is_some()
+        || (export.chunk_column.is_none()
+            && introspection.single_int_pk.is_none()
+            && source_type == crate::config::SourceType::Mysql);
+    if !composite && pages_by_key && !introspection.keyset_keys.is_empty() {
         let overrides = parse_column_overrides(&export.columns, &export.name)?;
-        introspection.read_composite_key(src, tbl, &base, &overrides)?;
+        let mappings = src.type_mappings(&key_base_query(export, tbl), &overrides)?;
+        introspection.admit_keyset_keys(source_type, &mappings);
+    }
+    if composite {
+        let overrides = parse_column_overrides(&export.columns, &export.name)?;
+        introspection.read_composite_key(
+            source_type,
+            src,
+            tbl,
+            &key_base_query(export, tbl),
+            &overrides,
+        )?;
     }
     Ok(introspection)
+}
+
+/// The query whose delivered columns a keyset key is checked against.
+fn key_base_query(export: &ExportConfig, tbl: &str) -> String {
+    export
+        .table_select
+        .clone()
+        .unwrap_or_else(|| format!("SELECT * FROM {tbl}"))
 }
 
 fn resolve_chunked_strategy(
@@ -668,14 +693,14 @@ fn resolve_chunked_strategy(
         )
     })?;
     let introspection_result = match probe {
-        Some(src) => introspect_table(src, tbl, export),
+        Some(src) => introspect_table(src, config.source.source_type, tbl, export),
         None => crate::source::connect(
             config.source.source_type,
             &url,
             config.source.tls.as_ref(),
             config.source.mongo.as_ref(),
         )
-        .and_then(|mut src| introspect_table(src.as_mut(), tbl, export)),
+        .and_then(|mut src| introspect_table(src.as_mut(), config.source.source_type, tbl, export)),
     };
     let introspection = match introspection_result {
         Ok(i) => i,
@@ -925,15 +950,22 @@ fn validated_implicit_key<'a>(
             Ok(ImplicitKey::UniqueKey(key))
         }
         Some(key) => Ok(key),
-        None => crate::rivet_bail!(
-            crate::error::codes::PLAN_CHUNK_KEY_UNUSABLE,
-            "export '{}': chunked mode found no safe shape on {} — no single-integer PK \
-             to range-chunk and no single-column UNIQUE/PRIMARY key to keyset-page. \
-             Set `chunk_column:` (integer) or `chunk_by_key:` (unique key) explicitly, \
-             add a unique index, or use `mode: full` to accept one long snapshot query.",
-            export.name,
-            tbl
-        ),
+        None => {
+            let refused: String = introspection
+                .refused_keyset_keys
+                .iter()
+                .map(|(col, cause)| format!(" Unique key '{col}' {cause}."))
+                .collect();
+            crate::rivet_bail!(
+                crate::error::codes::PLAN_CHUNK_KEY_UNUSABLE,
+                "export '{}': chunked mode found no safe shape on {} — no single-integer PK \
+                 to range-chunk and no single-column UNIQUE/PRIMARY key to keyset-page.{refused} \
+                 Set `chunk_column:` (integer) or `chunk_by_key:` (unique key) explicitly, \
+                 add a unique index, or use `mode: full` to accept one long snapshot query.",
+                export.name,
+                tbl
+            )
+        }
     }
 }
 
@@ -1011,20 +1043,22 @@ fn chunked_strategy_from_introspection(
                 );
             }
         } else if !introspection.is_usable_keyset_key(key) {
+            let cause = introspection
+                .refused_keyset_key(key)
+                .map(|c| format!(" Column '{key}' {c}."))
+                .unwrap_or_default();
             crate::rivet_bail!(
                 crate::error::codes::PLAN_CHUNK_KEY_UNUSABLE,
                 "export '{}': chunk_by_key '{}' is not a usable keyset key on {} — it must be a \
                  single-column, NOT NULL, UNIQUE or PRIMARY key WHOSE TYPE the keyset cursor can \
-                 read ({}). A `decimal`/`numeric` \
-                 key is excluded: the cursor cannot advance past it (it would fail mid-run after a \
-                 partial write). Without a usable key, `ORDER BY {} LIMIT n` would also full-scan + \
-                 filesort. Add a unique index of a supported type, pick another key, use a range \
-                 `chunk_column:` (integer), or `mode: full`.",
+                 read ({}).{cause} Without a usable key, `ORDER BY {} LIMIT n` would also \
+                 full-scan + filesort. {}",
                 export.name,
                 key,
                 tbl,
                 keyset_key_types(source_type),
-                key
+                key,
+                KEYSET_KEY_REMEDY
             );
         }
         log::info!(
@@ -1589,7 +1623,275 @@ mod tests {
             _query: &str,
             _column_overrides: &crate::types::ColumnOverrides,
         ) -> Result<Vec<crate::types::TypeMapping>> {
-            unimplemented!("the planner reads no types")
+            Ok(vec![crate::types::TypeMapping::from_source(
+                &crate::types::SourceColumn::simple("id", "int8", false),
+                crate::types::RivetType::Int64,
+            )])
+        }
+    }
+
+    /// A held connection whose catalog offers one unique key `k` of the delivered type under test.
+    struct KeyedCatalog {
+        mapping: crate::types::TypeMapping,
+        single_int_pk: Option<String>,
+        finer: bool,
+        row_estimate: i64,
+    }
+
+    impl KeyedCatalog {
+        fn of(rivet_type: crate::types::RivetType, row_estimate: i64) -> Self {
+            Self {
+                mapping: crate::types::TypeMapping::from_source(
+                    &crate::types::SourceColumn::simple("k", "native", false),
+                    rivet_type,
+                ),
+                single_int_pk: None,
+                finer: false,
+                row_estimate,
+            }
+        }
+    }
+
+    impl crate::source::Source for KeyedCatalog {
+        fn introspect_for_chunking(
+            &mut self,
+            _qualified_table: &str,
+        ) -> Result<crate::source::TableIntrospection> {
+            Ok(crate::source::TableIntrospection {
+                keyset_keys: vec!["k".into()],
+                single_int_pk: self.single_int_pk.clone(),
+                finer_than_microsecond: if self.finer { vec!["k".into()] } else { vec![] },
+                row_estimate: self.row_estimate,
+                ..Default::default()
+            })
+        }
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            unimplemented!("the planner only probes the catalog")
+        }
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unimplemented!("the planner reads no rows")
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _column_overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(vec![self.mapping.clone()])
+        }
+    }
+
+    fn plan_keyed(
+        source_type: SourceType,
+        mut catalog: KeyedCatalog,
+        explicit_key: bool,
+    ) -> Result<ResolvedRunPlan> {
+        let mut export = minimal_export();
+        export.mode = ExportMode::Chunked;
+        export.query = None;
+        export.table = Some("t".into());
+        export.chunk_column = None;
+        export.chunk_by_key = explicit_key.then(|| "k".into());
+        let mut cfg = minimal_config();
+        cfg.source.source_type = source_type;
+        cfg.source.url = Some(
+            match source_type {
+                SourceType::Postgres => "postgresql://u@127.0.0.1:1/db",
+                SourceType::Mysql => "mysql://u@127.0.0.1:1/db",
+                SourceType::Mssql => "mssql://u@127.0.0.1:1/db",
+                _ => "oracle://u@127.0.0.1:1/db",
+            }
+            .into(),
+        );
+        build_plan_on(
+            Some(&mut catalog),
+            &cfg,
+            &export,
+            Path::new("."),
+            false,
+            false,
+            false,
+            None,
+        )
+    }
+
+    fn keyset_key_of(plan: &ResolvedRunPlan) -> Option<String> {
+        match &plan.strategy {
+            ExtractionStrategy::Keyset(k) => Some(format!("{}:{}", k.key_column, k.chunk_size)),
+            _ => None,
+        }
+    }
+
+    /// A keyset key the reader cannot advance is refused by code on one chunk and on many, auto-picked or named.
+    #[test]
+    fn a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size() {
+        use crate::types::{RivetType, TimeUnit};
+        let unusable = [
+            (SourceType::Mysql, RivetType::Binary, "is binary"),
+            (SourceType::Mysql, RivetType::Bool, "is a boolean"),
+            (SourceType::Mysql, RivetType::Enum, "is an ENUM or SET"),
+            (
+                SourceType::Mysql,
+                RivetType::Time {
+                    unit: TimeUnit::Microsecond,
+                },
+                "is a time of day",
+            ),
+            (
+                SourceType::Mysql,
+                RivetType::Decimal {
+                    precision: 18,
+                    scale: 2,
+                },
+                "is a decimal",
+            ),
+            (SourceType::Postgres, RivetType::Binary, "is binary"),
+            (SourceType::Postgres, RivetType::Json, "is JSON"),
+            (SourceType::Mssql, RivetType::Bool, "is a boolean"),
+        ];
+        for (source, t, cause) in unusable {
+            for rows in [10, 5_000_000] {
+                for explicit in [true, false] {
+                    if !explicit && source != SourceType::Mysql {
+                        continue;
+                    }
+                    let err = plan_keyed(source, KeyedCatalog::of(t.clone(), rows), explicit)
+                        .expect_err(&format!("{source:?} {t:?} rows={rows} explicit={explicit}"));
+                    crate::error::assert_coded(&err, "RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1);
+                    let text = format!("{err:#}");
+                    assert!(text.contains(cause), "{text}");
+                    assert!(text.contains("or use `mode: full`"), "{text}");
+                    if explicit {
+                        assert!(text.contains(super::KEYSET_KEY_REMEDY), "{text}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The refusal shown in `docs/modes/chunked.md` is the text the planner prints.
+    #[test]
+    fn the_documented_keyset_key_refusal_is_the_one_the_planner_prints() {
+        use crate::types::RivetType;
+        let mut introspection = crate::source::TableIntrospection {
+            keyset_keys: vec!["payload".into()],
+            row_estimate: 10,
+            ..Default::default()
+        };
+        introspection.admit_keyset_keys(
+            SourceType::Postgres,
+            &[crate::types::TypeMapping::from_source(
+                &crate::types::SourceColumn::simple("payload", "bytea", false),
+                RivetType::Binary,
+            )],
+        );
+        let mut export = minimal_export();
+        export.name = "events".into();
+        export.mode = ExportMode::Chunked;
+        export.chunk_column = None;
+        export.chunk_by_key = Some("payload".into());
+        let err = chunked_strategy_from_introspection(
+            SourceType::Postgres,
+            &export,
+            "app.events",
+            3,
+            &introspection,
+        )
+        .unwrap_err();
+        let squash = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+        let docs = squash(include_str!("../../docs/modes/chunked.md"));
+        assert!(docs.contains(&squash(&err.to_string())), "{err}");
+    }
+
+    /// A datetime2(7) key is refused unless the `timestamp_ns` override delivers it in nanoseconds.
+    #[test]
+    fn a_sub_microsecond_mssql_key_is_refused_until_it_is_delivered_in_nanoseconds() {
+        use crate::types::{RivetType, TimeUnit};
+        let micro = || RivetType::Timestamp {
+            unit: TimeUnit::Microsecond,
+            timezone: None,
+        };
+        let mut catalog = KeyedCatalog::of(micro(), 5_000_000);
+        catalog.finer = true;
+        let err = plan_keyed(SourceType::Mssql, catalog, true).expect_err("datetime2(7) refused");
+        crate::error::assert_coded(&err, "RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1);
+        assert!(
+            format!("{err:#}").contains("more than 6 fractional-second digits"),
+            "{err:#}"
+        );
+
+        let mut catalog = KeyedCatalog::of(
+            RivetType::Timestamp {
+                unit: TimeUnit::Nanosecond,
+                timezone: None,
+            },
+            5_000_000,
+        );
+        catalog.finer = true;
+        let plan = plan_keyed(SourceType::Mssql, catalog, true).expect("ns override admitted");
+        assert_eq!(keyset_key_of(&plan).as_deref(), Some("k:100000"));
+
+        let mut catalog = KeyedCatalog::of(micro(), 5_000_000);
+        catalog.finer = false;
+        let plan = plan_keyed(SourceType::Mssql, catalog, true).expect("datetime2(6) admitted");
+        assert_eq!(keyset_key_of(&plan).as_deref(), Some("k:100000"));
+    }
+
+    /// The keys the reader already advances plan exactly as they did before the seam.
+    #[test]
+    fn the_keys_the_cursor_advances_plan_the_keyset_they_always_did() {
+        use crate::types::{RivetType, TimeUnit};
+        let ts = |unit| RivetType::Timestamp {
+            unit,
+            timezone: None,
+        };
+        let admitted = [
+            (SourceType::Postgres, RivetType::Int32),
+            (SourceType::Postgres, RivetType::Int64),
+            (SourceType::Postgres, RivetType::String),
+            (SourceType::Postgres, RivetType::Uuid),
+            (SourceType::Postgres, RivetType::Date),
+            (SourceType::Postgres, RivetType::Enum),
+            (SourceType::Postgres, ts(TimeUnit::Microsecond)),
+            (SourceType::Mysql, RivetType::Int16),
+            (SourceType::Mysql, RivetType::UInt64),
+            (SourceType::Mysql, RivetType::String),
+            (SourceType::Mysql, RivetType::Date),
+            (SourceType::Mysql, ts(TimeUnit::Microsecond)),
+            (SourceType::Mssql, RivetType::Int64),
+            (SourceType::Mssql, RivetType::Uuid),
+            (SourceType::Mssql, ts(TimeUnit::Microsecond)),
+            (
+                SourceType::Oracle,
+                RivetType::Decimal {
+                    precision: 30,
+                    scale: 0,
+                },
+            ),
+        ];
+        for (source, t) in admitted {
+            for rows in [10, 5_000_000] {
+                for explicit in [true, false] {
+                    if !explicit && source != SourceType::Mysql {
+                        continue;
+                    }
+                    let plan = plan_keyed(source, KeyedCatalog::of(t.clone(), rows), explicit)
+                        .unwrap_or_else(|e| panic!("{source:?} {t:?} rows={rows}: {e:#}"));
+                    let expected = if explicit || rows > 100_000 {
+                        Some("k:100000")
+                    } else {
+                        None
+                    };
+                    assert_eq!(
+                        keyset_key_of(&plan).as_deref(),
+                        expected,
+                        "{source:?} {t:?} rows={rows} explicit={explicit}"
+                    );
+                }
+            }
         }
     }
 

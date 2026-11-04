@@ -117,7 +117,8 @@ const BASELINE: &[(&str, usize, usize, usize, usize)] = &[
     ("src/pipeline/keyset.rs::run_keyset_parallel", 3, 0, 1, 2),
     // Excluded 2026-09-27 at their existing decisions (catalog-row parsing, the
     // statement-timeout arm), not grown by the exclusion; shrink as they are extracted.
-    ("src/source/mssql/mod.rs::introspect_mssql_on", 0, 0, 2, 0),
+    // 2026-11-04: the CHAR(31) list parse extracted into `split_char31` (fix/seam-keyset-key-type); not 2 -> 1.
+    ("src/source/mssql/mod.rs::introspect_mssql_on", 0, 0, 1, 0),
     ("src/source/oracle/mod.rs::export_within_budget", 2, 0, 2, 2),
     // Excluded 2026-10-06 (its Ok(vec![]) stub only) at its existing per-column refusals; shrink as they are extracted.
     // 2026-10-15: the three LogMiner-capability refusals extracted into `mineable` (a pure predicate).

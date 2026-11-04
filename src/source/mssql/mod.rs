@@ -1178,7 +1178,7 @@ fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
     }
 }
 
-/// SQL for the CHAR(31)-joined single-column, NOT NULL, non-decimal UNIQUE keys of `schema.table`, PK first.
+/// SQL for the CHAR(31)-joined single-column, NOT NULL UNIQUE keys of `schema.table`, PK first.
 pub(crate) fn keyset_keys_sql(schema: &str, table: &str) -> String {
     format!(
         "SELECT STRING_AGG(CONVERT(nvarchar(max), col), CHAR(31)) WITHIN GROUP (ORDER BY is_pk DESC, col) FROM ( \
@@ -1187,19 +1187,41 @@ pub(crate) fn keyset_keys_sql(schema: &str, table: &str) -> String {
              FROM sys.indexes i \
              JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0 \
              JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
-             JOIN sys.types kt ON kt.user_type_id = c.user_type_id \
              JOIN sys.objects o ON o.object_id = i.object_id \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
              WHERE i.is_unique = 1 AND i.has_filter = 0 AND i.is_disabled = 0 \
                AND s.name = N'{}' AND o.name = N'{}' \
              GROUP BY i.object_id, i.index_id \
              HAVING COUNT(*) = 1 AND MAX(CONVERT(int, c.is_nullable)) = 0 \
-               AND MAX(CASE WHEN kt.name IN ('decimal', 'numeric') THEN 1 ELSE 0 END) = 0 \
            ) per_index GROUP BY col \
          ) deduped",
         schema.replace('\'', "''"),
         table.replace('\'', "''")
     )
+}
+
+/// SQL for the CHAR(31)-joined `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond.
+pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT STRING_AGG(CONVERT(nvarchar(max), c.name), CHAR(31)) FROM sys.columns c \
+         JOIN sys.types t ON t.user_type_id = c.user_type_id \
+         JOIN sys.objects o ON o.object_id = c.object_id \
+         JOIN sys.schemas s ON s.schema_id = o.schema_id \
+         WHERE s.name = N'{}' AND o.name = N'{}' \
+           AND t.name IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
+        schema.replace('\'', "''"),
+        table.replace('\'', "''"),
+        crate::source::keyset_key::MICROSECOND_DIGITS
+    )
+}
+
+/// Splits a CHAR(31)-joined catalog list into its non-empty members.
+fn split_char31(joined: &str) -> Vec<String> {
+    joined
+        .split('\u{1f}')
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// SQL for the column of `schema.table`'s primary key when that key is exactly one integer-family column.
@@ -1244,12 +1266,12 @@ fn introspect_mssql_on(src: &mut MssqlSource, qualified_table: &str) -> Result<T
     let keyset_sql = keyset_keys_sql(&schema, &table);
     let keyset_keys: Vec<String> = src
         .query_scalar(&keyset_sql)?
-        .map(|s| {
-            s.split('\u{1f}')
-                .filter(|c| !c.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|s| split_char31(&s))
+        .unwrap_or_default();
+
+    let finer_than_microsecond: Vec<String> = src
+        .query_scalar(&finer_than_microsecond_sql(&schema, &table))?
+        .map(|s| split_char31(&s))
         .unwrap_or_default();
 
     // Single-column integer PK → range chunking.
@@ -1286,6 +1308,7 @@ fn introspect_mssql_on(src: &mut MssqlSource, qualified_table: &str) -> Result<T
         row_estimate,
         avg_row_bytes: None,
         int_columns,
+        finer_than_microsecond,
         ..Default::default()
     })
 }
@@ -1637,7 +1660,14 @@ mod tests {
 
 #[cfg(test)]
 mod key_probe_sql_tests {
-    use super::{keyset_keys_sql, single_int_pk_sql};
+    use super::{keyset_keys_sql, single_int_pk_sql, split_char31};
+
+    /// A catalog list splits on its separator and drops empty members.
+    #[test]
+    fn a_char31_list_splits_into_its_non_empty_members() {
+        assert_eq!(split_char31("a\u{1f}b\u{1f}"), vec!["a", "b"]);
+        assert!(split_char31("").is_empty());
+    }
 
     /// The text between the per-index WHERE and its GROUP BY — the rows a HAVING COUNT(*) sees.
     fn where_clause(sql: &str) -> &str {
@@ -1655,10 +1685,7 @@ mod key_probe_sql_tests {
         assert!(!w.contains("is_nullable"), "nullable filter in WHERE: {w}");
         assert!(!w.contains("kt.name"), "type filter in WHERE: {w}");
         assert!(
-            sql.contains(
-                "HAVING COUNT(*) = 1 AND MAX(CONVERT(int, c.is_nullable)) = 0 \
-                 AND MAX(CASE WHEN kt.name IN ('decimal', 'numeric') THEN 1 ELSE 0 END) = 0"
-            ),
+            sql.contains("HAVING COUNT(*) = 1 AND MAX(CONVERT(int, c.is_nullable)) = 0"),
             "{sql}"
         );
     }

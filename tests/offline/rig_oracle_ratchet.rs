@@ -33,7 +33,8 @@ const NO_ORACLE_CEILING: usize = 30; // ratchet-pin: no-oracle-opt-outs
 // 47 -> 51 (2026-10-29, #719): four column-grants cells whose failed run leaves its parts, rows and checkpoint for the re-run by design.
 // 51 -> 52 (2026-10-29, #719 follow-up): the same helper; a refused run leaves its parts, rows and checkpoint for the re-run by design.
 // 52 -> 53 (2026-11-02): a BigQuery first load whose lease is lost mid-write (a_first_load_whose_lease_is_taken_during_the_write_*): the unowned table and its failed load_run row stay for the refusal the cell then asserts.
-const FAILED_RUN_LEFTOVER_CEILING: usize = 53; // ratchet-pin: failed-run-leftover-declarations
+// 53 -> 52 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); one leftover declaration left.
+const FAILED_RUN_LEFTOVER_CEILING: usize = 52; // ratchet-pin: failed-run-leftover-declarations
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).
 // 2 -> 1 (2026-10-08): a run that fails before its first write leaves the prefix alone, so a failed manifest before a write is a failure, no longer an excuse.
@@ -46,7 +47,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 626 -> 624 (2026-11-01): live_batch_census rewrites parts through one Rig::rewrite_part; two helper calls left.
 // 628 -> 626 (2026-10-31): the unused duckdb_s3_parquet_rows helper left tests/common/duckdb.rs; no call site moved.
 // 624 -> 626 (2026-11-03): #792 composite keyset cells read distinct (id, kind) tuples; row_census keys one column. Closes when row_census takes a key list.
-const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites
+// 626 -> 621 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); five helper calls left.
+const DUCKDB_HELPER_CEILING: usize = 621; // ratchet-pin: duckdb-helper-sites
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];
