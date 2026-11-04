@@ -928,6 +928,9 @@ def _self_test() -> int:
     stand_health.self_test()
     stand_memory.self_test()
     stand_profiles.self_test()
+    import inspect
+    assert "stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))" in inspect.getsource(main), \
+        "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
     _stand_down_self_test()
     sunk = Ledger(colour=False)
     sunk._buf = []
@@ -2188,7 +2191,7 @@ def main(argv: list[str] | None = None) -> int:
     from . import stand_profiles, stand_sweep
     for line in stand_sweep.sweep():
         print(f"  {line}")
-    refused = stand_profiles.refusal(stand_profiles.bring_up())
+    refused = stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))
     if refused:
         print(refused, file=sys.stderr)
         return 3
