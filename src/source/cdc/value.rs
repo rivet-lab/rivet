@@ -763,14 +763,10 @@ pub(crate) enum MysqlCellFix {
     /// Signed MEDIUMINT arrives WITHOUT 24-bit sign extension (the binlog
     /// stores 3 bytes; 0x800000 decodes as +8388608 instead of −8388608).
     MediumIntSign,
-    /// ENUM arrives as its 1-based INDEX — map to the label (from the native
-    /// type's `enum('a','b',…)` declaration); index 0 is MySQL's invalid-value
-    /// sentinel → empty string, matching the server's own rendering.
-    EnumLabels(Vec<String>),
-    /// SET arrives as its BITMASK (little-endian raw bytes, one bit per member)
-    /// — render the set members comma-joined in declaration order, exactly as
-    /// the server's own text form ("x,z").
-    SetLabels(Vec<String>),
+    /// ENUM arrives as its 1-based index; mapped to the label the declaration holds, 0 is the empty string.
+    EnumLabels(Labels),
+    /// SET arrives as its little-endian bitmask; rendered as the members comma-joined in declaration order.
+    SetLabels(Labels),
     /// BINARY(n): the driver right-trims trailing NULs — pad back to width n
     /// (the batch export carries the full padded value).
     BinaryPad(usize),
@@ -824,25 +820,27 @@ pub(crate) fn mysql_cell_fix(
     None
 }
 
-/// Labels from `enum('a','b','it''s')`, in declaration (index) order.
-/// TOTAL over arbitrary input (finding #39: the byte-sliced version panicked
-/// on a trailing `(` and on multibyte boundaries), and CHAR-wise (#39b: the
-/// `byte as char` loop mojibake'd every non-ASCII label — `ENUM('привет')`
-/// would have written garbled labels into the capture, silently).
-fn parse_enum_labels(native: &str) -> Vec<String> {
+/// The labels of an ENUM or SET declaration, or why one is unreadable.
+type Labels = Result<Vec<String>, String>;
+
+/// Labels from `enum('a','b','it''s')` as `append_unescaped` writes them, in declaration order; a hex literal `x'..'` is refused, total over any input.
+fn parse_enum_labels(native: &str) -> Labels {
     let Some(start) = native.find('(') else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let end = native.rfind(')').unwrap_or(native.len());
-    let Some(inner) = native.get(start + 1..end.max(start + 1)) else {
-        return Vec::new();
+    let Some(inner) = native.get(start..end) else {
+        return Ok(Vec::new());
     };
     let mut labels = Vec::new();
     let mut chars = inner.chars().peekable();
+    let mut prev = ',';
     while let Some(c) = chars.next() {
         if c != '\'' {
+            prev = c;
             continue;
         }
+        let hex = prev == 'x';
         let mut label = String::new();
         loop {
             match chars.next() {
@@ -851,12 +849,41 @@ fn parse_enum_labels(native: &str) -> Vec<String> {
                     label.push('\'');
                 }
                 Some('\'') | None => break,
+                Some('\\') => match chars.peek() {
+                    Some('\\') => {
+                        chars.next();
+                        label.push('\\');
+                    }
+                    Some('n') => {
+                        chars.next();
+                        label.push('\n');
+                    }
+                    Some('r') => {
+                        chars.next();
+                        label.push('\r');
+                    }
+                    Some('0') => {
+                        chars.next();
+                        label.push('\0');
+                    }
+                    _ => label.push('\\'),
+                },
                 Some(other) => label.push(other),
             }
         }
+        if hex {
+            return Err(hex_refusal(labels.len() + 1, &label));
+        }
         labels.push(label);
     }
-    labels
+    Ok(labels)
+}
+
+/// Why label `n`, written by MySQL as the hex literal `x'digits'`, has no reading.
+fn hex_refusal(n: usize, digits: &str) -> String {
+    format!(
+        "cannot be read: the column declares label {n} as the hex literal x'{digits}', which MySQL writes without zero padding, so the label's bytes cannot be recovered from the catalog"
+    )
 }
 
 impl MysqlCellFix {
@@ -872,7 +899,6 @@ impl MysqlCellFix {
         Ok(match (self, v) {
             (_, V::Null) => V::Null,
             (MysqlCellFix::TimestampEpoch, V::Bytes(b)) => match epoch_text(b) {
-                // '0000-00-00 00:00:00' arrives as epoch 0, which no real TIMESTAMP holds: NULL, as batch.
                 Some((0, 0)) => V::Null,
                 Some((secs, micros)) => chrono::DateTime::from_timestamp(secs, micros * 1_000)
                     .map(|dt| V::DateTime(dt.naive_utc()))
@@ -897,20 +923,20 @@ impl MysqlCellFix {
                 let i = *u as i64;
                 V::Int(if i >= (1 << 23) { i - (1 << 24) } else { i })
             }
-            (MysqlCellFix::EnumLabels(labels), V::Int(i)) => enum_label(labels, *i)?,
+            (MysqlCellFix::EnumLabels(labels), V::Int(i)) => enum_label(readable(labels)?, *i)?,
             (MysqlCellFix::EnumLabels(labels), V::UInt(u)) => {
-                enum_label(labels, i64::try_from(*u).unwrap_or(i64::MAX))?
+                enum_label(readable(labels)?, i64::try_from(*u).unwrap_or(i64::MAX))?
             }
             (MysqlCellFix::SetLabels(labels), V::Bytes(b)) if b.len() <= 8 => {
-                // Little-endian storage: byte 0 carries members 1..=8.
-                let mask = b
-                    .iter()
-                    .enumerate()
-                    .fold(0u64, |acc, (i, x)| acc | ((*x as u64) << (8 * i)));
-                set_labels(labels, mask)
+                let mut word = [0u8; 8];
+                word.iter_mut().zip(b).for_each(|(d, s)| *d = *s);
+                let mask = u64::from_le_bytes(word);
+                set_labels(readable(labels)?, mask)
             }
-            (MysqlCellFix::SetLabels(labels), V::Int(i)) => set_labels(labels, *i as u64),
-            (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(labels, *u),
+            (MysqlCellFix::SetLabels(labels), V::Int(i)) => {
+                set_labels(readable(labels)?, *i as u64)
+            }
+            (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(readable(labels)?, *u),
             (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
                 return Err(FixRefusal {
                     reason: format!(
@@ -945,6 +971,23 @@ fn epoch_text(b: &[u8]) -> Option<(i64, u32)> {
     Some((sec.parse().ok()?, micros))
 }
 
+/// The cell refusal of an ENUM or SET label that has no reading, coded and with the remedy no `columns:` override can replace.
+fn label_refusal(why: impl Into<String>) -> FixRefusal {
+    FixRefusal {
+        reason: format!(
+            "{}. A `columns:` override does not carry the label either: leave the column out of the capture, then: {}",
+            why.into(),
+            crate::source::cdc::checkpoint_identity::RECOVER
+        ),
+        code: Some(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED),
+    }
+}
+
+/// The labels, or the refusal for a declaration that has none.
+fn readable(labels: &Labels) -> Result<&[String], FixRefusal> {
+    labels.as_deref().map_err(|why| label_refusal(why.as_str()))
+}
+
 fn set_labels(labels: &[String], mask: u64) -> RivetValue {
     let joined = labels
         .iter()
@@ -957,14 +1000,14 @@ fn set_labels(labels: &[String], mask: u64) -> RivetValue {
 }
 
 /// The label of 1-based ENUM index `idx`; 0 is MySQL's invalid-value sentinel `''`, past the list is refused.
-fn enum_label(labels: &[String], idx: i64) -> Result<RivetValue, String> {
+fn enum_label(labels: &[String], idx: i64) -> Result<RivetValue, FixRefusal> {
     if idx <= 0 {
         return Ok(RivetValue::Bytes(Vec::new()));
     }
     labels
         .get(idx as usize - 1)
         .map(|l| RivetValue::Bytes(l.clone().into_bytes()))
-        .ok_or_else(|| format!("is past the column's {} ENUM labels", labels.len()))
+        .ok_or_else(|| label_refusal(format!("is past the column's {} ENUM labels", labels.len())))
 }
 
 /// Render `Bytes` to a string LOSSLESSLY: verbatim when the bytes are valid UTF-8
@@ -1068,16 +1111,186 @@ mod tests {
     #[test]
     fn enum_labels_unicode_and_escapes_parse_exactly() {
         assert_eq!(
-            parse_enum_labels("enum('привет','мир')"),
-            vec!["привет".to_string(), "мир".to_string()]
+            parse_enum_labels(
+                "enum('\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}','\u{43c}\u{438}\u{440}')"
+            )
+            .unwrap(),
+            vec![
+                "\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}".to_string(),
+                "\u{43c}\u{438}\u{440}".to_string()
+            ]
         );
         assert_eq!(
-            parse_enum_labels("enum('it''s','a')"),
+            parse_enum_labels("enum('it''s','a')").unwrap(),
             vec!["it's".to_string(), "a".to_string()]
         );
-        assert_eq!(parse_enum_labels("enum("), Vec::<String>::new());
-        assert_eq!(parse_enum_labels("enum('ok'"), vec!["ok".to_string()]);
-        assert_eq!(parse_enum_labels("garbage"), Vec::<String>::new());
+        assert_eq!(parse_enum_labels("enum(").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_enum_labels("enum('ok'").unwrap(),
+            vec!["ok".to_string()]
+        );
+        assert_eq!(parse_enum_labels("garbage").unwrap(), Vec::<String>::new());
+    }
+
+    /// The text `native`'s ENUM label `idx` (1-based) is written as, or the refusal.
+    fn enum_text(native: &str, idx: i64) -> Result<String, FixRefusal> {
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+        match fix.apply(&RivetValue::Int(idx))? {
+            RivetValue::Bytes(b) => Ok(String::from_utf8(b).unwrap()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The text `native`'s SET members in `mask` are written as.
+    fn set_text(native: &str, mask: u64) -> String {
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+        match fix.apply(&RivetValue::UInt(mask)).unwrap() {
+            RivetValue::Bytes(b) => String::from_utf8(b).unwrap(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_append_unescaped_escape_is_reversed_in_an_enum_label() {
+        let native = r"enum('C:\\temp','a\nb','c\rd','n\0z','it''s','lit\\n','e\\','\\\\','\\''x')";
+        let want = [
+            "C:\\temp", "a\nb", "c\rd", "n\0z", "it's", "lit\\n", "e\\", "\\\\", "\\'x",
+        ];
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(
+                enum_text(native, i as i64 + 1).unwrap(),
+                *w,
+                "label {}",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn every_append_unescaped_escape_is_reversed_in_a_set_member() {
+        let native = r"set('p\\q','r\ns','t\ru','v\0w','y''z')";
+        assert_eq!(set_text(native, 0b00001), "p\\q");
+        assert_eq!(set_text(native, 0b00110), "r\ns,t\ru");
+        assert_eq!(set_text(native, 0b11000), "v\0w,y'z");
+        assert_eq!(set_text(native, 0b11111), "p\\q,r\ns,t\ru,v\0w,y'z");
+    }
+
+    #[test]
+    fn labels_without_an_escape_and_malformed_lists_read_as_before() {
+        let native =
+            "enum('a','b,c','(d)','','\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}','it''s')";
+        let want = [
+            "a",
+            "b,c",
+            "(d)",
+            "",
+            "\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}",
+            "it's",
+        ];
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(
+                enum_text(native, i as i64 + 1).unwrap(),
+                *w,
+                "label {}",
+                i + 1
+            );
+        }
+        assert_eq!(enum_text("enum('ok'", 1).unwrap(), "ok");
+        assert!(enum_text("enum(", 1).is_err());
+        assert_eq!(enum_text(r"enum('a\qb','c\')", 1).unwrap(), r"a\qb");
+        assert_eq!(enum_text(r"enum('a\qb','c\')", 2).unwrap(), "c\\");
+        assert_eq!(enum_text("enum('a','b')", 0).unwrap(), "");
+        assert!(mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, "garbage").is_none());
+    }
+
+    #[test]
+    fn a_set_of_more_than_eight_members_reads_its_second_byte() {
+        let native = "set('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10')";
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+        match fix.apply(&RivetValue::Bytes(vec![0x01, 0x02])).unwrap() {
+            RivetValue::Bytes(b) => assert_eq!(String::from_utf8(b).unwrap(), "m1,m10"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_set_value_of_more_than_eight_bytes_is_not_truncated_into_a_mask() {
+        let native = "set('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10')";
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+        let nine = vec![0x01, 0, 0, 0, 0, 0, 0, 0, 0xff];
+        match fix.apply(&RivetValue::Bytes(nine.clone())).unwrap() {
+            RivetValue::Bytes(b) => assert_eq!(b, nine),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_hex_label_is_refused_because_its_digits_are_unpadded() {
+        for (native, idx, n, digits) in [
+            ("enum(x'12f09f9a80','a')", 1, 1, "12f09f9a80"),
+            ("enum(x'f09f9a80a','a')", 1, 1, "f09f9a80a"),
+            ("enum('a',x'5ff')", 1, 2, "5ff"),
+            ("enum('a',x'e9')", 2, 2, "e9"),
+            ("enum('a','b',x'ff')", 1, 3, "ff"),
+            ("set(x'1f0','b')", 1, 1, "1f0"),
+        ] {
+            let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+            let err = fix.apply(&RivetValue::Int(idx)).unwrap_err();
+            let want = format!(
+                "cannot be read: the column declares label {n} as the hex literal x'{digits}', which MySQL writes without zero padding, so the label's bytes cannot be recovered from the catalog"
+            );
+            assert!(
+                err.reason
+                    .starts_with(&format!("{want}. A `columns:` override")),
+                "{native}: {}",
+                err.reason
+            );
+            assert_eq!(
+                err.code.map(|c| c.id),
+                Some("RIVET_SOURCE_CDC_CELL_UNSUPPORTED"),
+                "{native}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_enum_label_refusal_is_the_cell_refusal_with_or_without_a_columns_override() {
+        for (native, idx, cause) in [
+            ("enum(x'12f09f9a80','a')", 2, "without zero padding"),
+            ("enum('a','b')", 3, "past the column's 2 ENUM labels"),
+        ] {
+            let err = enum_text(native, idx).unwrap_err();
+            for overridden in [false, true] {
+                let e = CellRefusal {
+                    row: 3,
+                    value: RivetValue::Int(idx),
+                    reason: err.reason.clone(),
+                    code: err.code,
+                }
+                .into_error("status", &DataType::Utf8, overridden);
+                let msg = format!("{e:#}");
+                assert_eq!(
+                    crate::error::code_of(&e).map(|c| c.id),
+                    Some("RIVET_SOURCE_CDC_CELL_UNSUPPORTED"),
+                    "{native} overridden={overridden}: {msg}"
+                );
+                assert!(
+                    msg.contains("column 'status'")
+                        && msg.contains(cause)
+                        && msg.contains("leave the column out of the capture, then: Re-baseline")
+                        && !msg.contains("correct or drop"),
+                    "{native} overridden={overridden}: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn labels_that_start_or_end_with_x_are_not_hex_literals() {
+        let native = "enum('x','x''','xx','ax')";
+        for (i, want) in ["x", "x'", "xx", "ax"].iter().enumerate() {
+            assert_eq!(enum_text(native, i as i64 + 1).unwrap(), *want, "{i}");
+        }
     }
 
     // Negative family #2 at the MySQL BINARY level: every cell fix must be

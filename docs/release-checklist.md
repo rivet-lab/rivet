@@ -82,7 +82,7 @@ checklist is what a maintainer fills out **before** pushing the tag.
 
 ## 4. Security
 
-- [ ] `cargo audit` — no unpatched advisories in declared deps.
+- [ ] `cargo deny check` — no unpatched advisories, license, ban or source violations.
 - [ ] Secret-redaction tests green: `tests/config_secrets.rs`,
       `tests/validate_secrets.rs` (where present).
 - [ ] No new code path emits raw `DATABASE_URL` / `RIVET_STATE_URL` / cloud
