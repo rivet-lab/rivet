@@ -717,7 +717,7 @@ def _stage_table_self_test() -> None:
             f.startswith("verify_") for f in island_functions(table)), island_functions(table)
         assert table[-1].name == "live modules" and [s.name for s in cut[-1]] == ["live modules"], \
             "live modules runs last and alone: it runs what no stage before it ran"
-        assert "release hygiene" in {s.name for s in table}, "cargo audit and docgen --check are gate stages"
+        assert "release hygiene" in {s.name for s in table}, "cargo deny check and docgen --check are gate stages"
         first = next(s for s in table if s.name == "release build path")
         assert not [s for s in table[:table.index(first)] if CARGO in s.needs | s.uses and s.name != "clean tree"], \
             "the release build path reads the committed lock before any other cargo stage"
@@ -928,6 +928,9 @@ def _self_test() -> int:
     stand_health.self_test()
     stand_memory.self_test()
     stand_profiles.self_test()
+    import inspect
+    assert "stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))" in inspect.getsource(main), \
+        "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
     _stand_down_self_test()
     sunk = Ledger(colour=False)
     sunk._buf = []
@@ -1384,6 +1387,7 @@ def _self_test() -> int:
     skip_census._self_test()
     fix_cells._self_test()
     scenarios.matrix_reader_self_test()
+    scenarios.store_probe_self_test()
     field_state._self_test()
     print("\nregression stage (child harness, stand, banner):")
     return regression._self_test()
@@ -2188,7 +2192,7 @@ def main(argv: list[str] | None = None) -> int:
     from . import stand_profiles, stand_sweep
     for line in stand_sweep.sweep():
         print(f"  {line}")
-    refused = stand_profiles.refusal(stand_profiles.bring_up())
+    refused = stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))
     if refused:
         print(refused, file=sys.stderr)
         return 3
