@@ -1,7 +1,7 @@
 //! The operator contract, from the 2026-10-07 CLI sweep by hand (docs/operator-contract-matrix.yaml):
 //! what rivet's exit, its refusal text and its advice commands promise an operator, one generator
 //! per pattern and one cell per engine. A cell asserts the correct behaviour; one that fails today
-//! is an `open_defect_*` cell acknowledged in dev/release_oracle/known_red.py.
+//! is a cell acknowledged in dev/release_oracle/known_red.py.
 //!
 //! Oracles: the exit code and `Error:` line of the real binary, the destination re-read, the
 //! source, and the engine's own catalog. Refusals with a remedy go through `Rig::refuses_twice_then`;
@@ -3960,8 +3960,8 @@ fn an_oplog_rolled_past_the_checkpoint_after_a_changes_run_is_refused_by_code_mo
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql() {
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql() {
     cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mysql(
         "oc_hdw1",
         "id BIGINT PRIMARY KEY, v BIGINT",
@@ -3969,8 +3969,8 @@ fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mys
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres() {
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres() {
     cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::pg(
         "oc_hdw1",
         "id BIGINT PRIMARY KEY, v BIGINT",
@@ -3978,8 +3978,8 @@ fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_pos
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql() {
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql() {
     cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mssql(
         "oc_hdw1",
         "id BIGINT PRIMARY KEY, v BIGINT",
@@ -3988,13 +3988,13 @@ fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mss
 
 #[cfg(feature = "oracle")]
 #[test]
-#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle() {
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle() {
     cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::oracle_with("oc_hdw1", |r, _| r));
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-fn open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo() {
+#[ignore = "live: requires docker compose mongo-rs"]
+fn a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo() {
     cdc_run_over_a_state_that_refuses_its_ledger_row(CdcScenario::mongo_with("oc_hdw1", |r, _| r));
 }
