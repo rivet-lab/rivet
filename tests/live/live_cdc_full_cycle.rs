@@ -390,7 +390,7 @@ fn a_slot_another_config_advanced_is_refused_instead_of_losing_its_changes() {
 /// writes the checkpoint in its own form; a later advance by a real foreign reader is refused
 /// RIVET_SOURCE_CDC_LOG_GAP on every run (main: refused on the first upgraded run already).
 #[test]
-#[ignore = "live: requires docker compose --profile cdc postgres-cdc + RIVET_LEASE_CARRIER_BIN"]
+#[ignore = "live+exclusive: the slot position is compared with the checkpoint, an unrelated writer moves it; requires postgres-cdc + RIVET_LEASE_CARRIER_BIN — set RIVET_TEST_EXCLUSIVE=1"]
 fn an_upgraded_stream_whose_old_release_advanced_its_slot_past_the_checkpoint_continues() {
     let tbl = unique_name("rivet_pg_upgrade");
     let other = unique_name("rivet_pg_upgrade_other");

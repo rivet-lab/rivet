@@ -72,6 +72,14 @@ ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicate
     # not answer counts as the whole body. With the exclusion lifted under `--lib --bins` the
     # `true` mutant is CAUGHT and the `false` one MISSED: only a standby answers `true`.
     "pg_in_recovery": ("a one-expression fn; offline reaches the unanswered probe, the answer needs a standby", 100),
+    # 2026-11-04: the ten fns the lcov showed as reached were each stubbed and run under the offline battery and `--lib --bins`.
+    # Four stubs died to a lib test and their exclusions were removed; the six below stay, each with the only test that grades it.
+    "run_loads": ("2026-11-04: stub caught only by cli_contract::load_and_compact_without_a_load_block_stop_by_code, none under --lib --bins; closes with a local-warehouse load cell", 5),
+    "run_compacts": ("2026-11-04: stub caught only by cli_contract::load_and_compact_without_a_load_block_stop_by_code and scheduler_contract fixtures, none under --lib --bins; closes with a local-warehouse compact cell", 5),
+    "run_capture": ("2026-11-04: stub caught only by the source guards cdc_axis_matrix_guard and harness_env_hygiene_guard; behaviour graded by the live CDC suite", 10),
+    "run_cdc_export": ("2026-11-04: stub caught only by runner_frame_gate::the_cdc_drain_brackets_the_source_harm_window_and_captures_open_forensics; behaviour graded by the live CDC suite", 90),
+    "run_cdc_inner": ("2026-11-04: stub caught only by seam_bypass_guard::the_registry_matches_the_tree; behaviour graded by the live CDC suite", 85),
+    "pause": ("2026-11-04: equivalent, unit tests run the cfg(test) twin so the production body never executes; no stub is caught", 5),
 }  # ratchet-pin: end
 
 

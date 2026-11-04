@@ -73,6 +73,8 @@ GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-re
         "2026-11-01: #729 re-cut the COMMIT arm this cell crosses; 0.32.2 already captured or refused a statement-logged insert, so it is a regression guard",
     "mysql_lost_checkpoint_under_a_baseline_stream_is_refused_not_reanchored":
         "2026-11-01: #730 sibling: a finished initial snapshot was already refused by ensure_anchor on 0.32.2; the changes-only cell is the one that fails there",
+    "check_still_accepts_overrides_the_run_accepts_postgres":
+        "2026-11-04: #805 positive control: an override the run accepts was accepted by check on 0.32.2 as well, so it passes there; it guards the new refusal from widening; the cells that fail there are the check_refuses_ cells of the same file; closes when the baseline moves past 0.32.2",
     "validate_prefix_of_a_partitioned_export_verifies_that_directory_postgres":
         "2026-11-02: #755 control: a pinned --prefix verified that one directory on 0.32.2 as well; it guards the run-set validate from widening it; closes when the baseline moves past 0.32.2",
 }  # ratchet-pin: end

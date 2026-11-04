@@ -39,6 +39,7 @@ import os
 import random
 import re
 import threading
+import time
 import shutil
 import socket
 import sys
@@ -260,30 +261,45 @@ def matrix_reader_self_test() -> None:
     print("self-test ok: matrix.yaml versions rows are read in any key order and an unreadable row stops the run")
 
 
-def _tcp_open(host: str, port: int, timeout: float = 3.0) -> bool:
-    """The `exec 3<>/dev/tcp/host/port` probe: can we connect at all."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
+PROBE_TIMEOUT = 10.0
+PROBE_TRIES = 4
+PROBE_PAUSE = 1.0
+
+
+def _answered(probe, tries: int, pause: float) -> bool:
+    """True when `probe()` succeeds within `tries` attempts; one slow or refused answer is not a down service."""
+    for i in range(tries):
+        if probe():
             return True
-    except OSError:
-        return False
+        if i + 1 < tries:
+            time.sleep(pause)
+    return False
 
 
-def _http_reachable(url: str, timeout: float = 3.0) -> bool:
-    """`curl -s -o /dev/null --max-time 3 <url>`.
+def _tcp_open(host: str, port: int, timeout: float = PROBE_TIMEOUT, tries: int = PROBE_TRIES, pause: float = PROBE_PAUSE) -> bool:
+    """Can we connect at all, retrying a connect that timed out or was refused."""
+    def once() -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
 
-    curl without `-f` exits 0 on ANY completed transfer, so an HTTP 400/403/404
-    counts as "the service answered" — which is the point for the Azurite probe
-    (`?comp=list` unauthenticated is a 4xx) and for fake-gcs. Only a refused
-    connection / timeout means down, so HTTPError is UP and URLError is DOWN.
-    """
-    try:
-        with urllib.request.urlopen(url, timeout=timeout):
+    return _answered(once, tries, pause)
+
+
+def _http_reachable(url: str, timeout: float = PROBE_TIMEOUT, tries: int = PROBE_TRIES, pause: float = PROBE_PAUSE) -> bool:
+    """True when the service answers with ANY HTTP status (a 4xx is up); a timeout or refused connection is retried, then down."""
+    def once() -> bool:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout):
+                return True
+        except urllib.error.HTTPError:
             return True
-    except urllib.error.HTTPError:
-        return True
-    except (urllib.error.URLError, OSError):
-        return False
+        except (urllib.error.URLError, OSError):
+            return False
+
+    return _answered(once, tries, pause)
 
 
 def _first_match(text: str, pattern: str) -> str:
@@ -360,12 +376,7 @@ def duckdb_allnull_cloud(store: str, bucket: str, prefix: str, work: Path) -> tu
     if store == "gcs":
         dl = work / f"nullprof_gcs_{random.randint(0, 32767)}"
         dl.mkdir(parents=True, exist_ok=True)
-        got = run([PY, str(_asset("lib/gcs_pull.py")),
-                   "http://127.0.0.1:4443", bucket, prefix, str(dl)]).stdout.strip()
-        try:
-            if int(got) <= 0:
-                return (-1, -1)
-        except ValueError:
+        if gcs_pull(bucket, prefix, dl) <= 0:
             return (-1, -1)
         return _allnull_parse(_duckdb_list(f"SELECT {cols} FROM read_parquet('{dl}/**/*.parquet')"))
     return (-1, -1)
@@ -515,6 +526,100 @@ def docker_names() -> list[str]:
 
 
 # ── object stores ────────────────────────────────────────────────────────────
+def store_probe_self_test() -> None:
+    """A slow first answer is retried, not read as a down store; a failed fake-gcs list raises instead of reading as 0 rows."""
+    import importlib.util
+    import json as _json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    spec = importlib.util.spec_from_file_location("gcs_pull_under_test", _asset("lib/gcs_pull.py"))
+    gp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gp)
+    assert gp.TIMEOUT >= 30, "the list timeout must outlast the 13 s fake-gcs latency measured on the gate"
+
+    class Fake:
+        """A server answering each path from a script of (delay, status, body); the last step repeats."""
+
+        def __init__(self, script):
+            self.script, self.seen = script, {}
+            fake = self
+
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    path = self.path.split("?")[0]
+                    steps = fake.script.get(path, [(0, 404, b"")])
+                    i = fake.seen.get(path, 0)
+                    fake.seen[path] = i + 1
+                    delay, status, body = steps[min(i, len(steps) - 1)]
+                    time.sleep(delay)
+                    try:
+                        self.send_response(status)
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    except OSError:
+                        pass
+
+                def log_message(self, *a):
+                    pass
+
+            self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+            self.url = f"http://127.0.0.1:{self.srv.server_port}"
+            threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.srv.shutdown()
+            self.srv.server_close()
+
+    listing = "/storage/v1/b/b/o"
+    media = "/download/storage/v1/b/b/o/p%2Fa.parquet"
+    one = _json.dumps({"items": [{"name": "p/a.parquet"}]}).encode()
+    kw = {"timeout": 0.5, "attempts": 3, "pause": 0.0}
+    with Fake({"/health": [(1.2, 200, b"ok"), (0, 200, b"ok")]}) as f:
+        assert _http_reachable(f.url + "/health", timeout=0.5, tries=3, pause=0.0), "a slow first answer is retried"
+    with Fake({"/health": [(2.0, 200, b"")]}) as f:
+        assert not _http_reachable(f.url + "/health", timeout=0.3, tries=2, pause=0.0), "an answer that never comes is down"
+    with socket.socket() as s0:
+        s0.bind(("127.0.0.1", 0))
+        closed = s0.getsockname()[1]
+    assert not _tcp_open("127.0.0.1", closed, timeout=0.3, tries=2, pause=0.0), "a refused port is down"
+    with tempfile.TemporaryDirectory() as d:
+        with Fake({listing: [(1.2, 200, one), (0, 200, one)], media: [(0, 500, b""), (0, 200, b"PAR1")]}) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 1, "a list slower than the timeout is retried and delivers"
+            assert (Path(d) / "part_0.parquet").read_bytes() == b"PAR1", "a download that failed once is retried"
+        with Fake({listing: [(2.0, 200, one)]}) as f:
+            try:
+                gp.pull(f.url, "b", "p/", d, timeout=0.3, attempts=2, pause=0.0)
+            except gp.PullError:
+                pass
+            else:
+                raise AssertionError("a list that never answers must raise, not read as 0 objects")
+        with Fake({listing: [(0, 404, b"")]}) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 0, "a missing bucket holds nothing"
+        with Fake({listing: [(0, 200, one)], media: [(0, 500, b"")]}) as f:
+            try:
+                gp.pull(f.url, "b", "p/", d, **kw)
+            except gp.PullError:
+                pass
+            else:
+                raise AssertionError("an object that cannot be downloaded must raise, not shorten the count")
+        pages = {listing: [(0, 200, _json.dumps({"items": [{"name": "p/a.parquet"}], "nextPageToken": "t"}).encode()),
+                           (0, 200, _json.dumps({"items": [{"name": "p/b.parquet"}]}).encode())],
+                 media: [(0, 200, b"x")], "/download/storage/v1/b/b/o/p%2Fb.parquet": [(0, 200, b"y")]}
+        with Fake(pages) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 2, "every page of the list is read"
+        try:
+            gcs_pull("b", "p/", Path(d), endpoint=f"http://127.0.0.1:{closed}")
+        except StoreReadError:
+            pass
+        else:
+            raise AssertionError("a pull that failed must raise StoreReadError through the wrapper")
+    print("self-test ok: a slow store probe is retried; a failed fake-gcs list or download raises, never reads as 0 rows")
+
+
 def store_up(store: str) -> bool:
     """Health probe per store. A down emulator makes the cell SKIP, never PASS."""
     if store == "s3":
@@ -579,6 +684,18 @@ def store_parts(store: str, bucket: str, prefix: str, work: Path) -> tuple[str, 
     return None
 
 
+class StoreReadError(RuntimeError):
+    """A store's list or download kept failing; the destination was not read, which is not an empty one."""
+
+
+def gcs_pull(bucket: str, prefix: str, dest: Path, *flags: str, endpoint: str = "http://127.0.0.1:4443") -> int:
+    """Objects lib/gcs_pull.py brought down from fake-gcs; a pull that failed raises, never reads as 0."""
+    p = run([PY, str(_asset("lib/gcs_pull.py")), endpoint, bucket, prefix, str(dest), *flags])
+    if p.returncode != 0 or not p.stdout.strip().isdigit():
+        raise StoreReadError(f"fake-gcs {bucket}/{prefix} unreadable: {(p.stderr or p.stdout).strip()[-300:]}")
+    return int(p.stdout.strip())
+
+
 def pull_prefix(store: str, bucket: str, prefix: str, dest: Path) -> bool:
     """Download a store prefix WHOLE into `dest` (manifests included) with the store's own client; False when the client is absent or nothing came down."""
     dest.mkdir(parents=True, exist_ok=True)
@@ -589,11 +706,7 @@ def pull_prefix(store: str, bucket: str, prefix: str, dest: Path) -> bool:
              MINIO_ACCESS_KEY, MINIO_SECRET_KEY])
         return run(["mc", "cp", "--recursive", f"rivetgate/{bucket}/{prefix}/", str(dest)]).ok
     if store == "gcs":
-        # `--all`: the default mode pulls only parquet, renamed `part_N.parquet`,
-        # which cannot answer what the run declared.
-        got = run([PY, str(_asset("lib/gcs_pull.py")), "http://127.0.0.1:4443", bucket,
-                   prefix, str(dest), "--all"]).stdout.strip()
-        return got.isdigit() and int(got) > 0
+        return gcs_pull(bucket, prefix, dest, "--all") > 0
     if store == "azure":
         if not have("az"):
             return False
