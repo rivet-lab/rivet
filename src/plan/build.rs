@@ -580,10 +580,6 @@ fn resolve_chunked_strategy(
             (export.chunk_by_days.is_some(), "chunk_by_days"),
             (export.chunk_count.is_some(), "chunk_count"),
             (
-                composite && export.parallel > 1,
-                "parallel > 1 on a composite key",
-            ),
-            (
                 composite && export.keyset_incremental,
                 "keyset_incremental on a composite key",
             ),
@@ -2330,10 +2326,10 @@ mod tests {
         }
     }
 
-    /// A composite chunk_by_key refuses parallel workers and keyset_incremental before any probe.
+    /// A composite chunk_by_key refuses keyset_incremental before any probe and plans parallel workers.
     #[test]
-    fn a_composite_chunk_by_key_refuses_parallel_and_keyset_incremental() {
-        for (parallel, incremental) in [(4, false), (1, true)] {
+    fn a_composite_chunk_by_key_refuses_keyset_incremental_but_not_parallel() {
+        for (parallel, incremental) in [(1, true), (4, true)] {
             let mut export = minimal_export();
             export.mode = ExportMode::Chunked;
             export.chunk_by_key = crate::config::ChunkKey::new(vec!["id".into(), "kind".into()]);
@@ -2354,6 +2350,7 @@ mod tests {
         }
         for (key, parallel, incremental) in [
             (vec!["id".to_string(), "kind".to_string()], 1, false),
+            (vec!["id".to_string(), "kind".to_string()], 4, false),
             (vec!["id".to_string()], 4, false),
             (vec!["id".to_string()], 1, true),
         ] {

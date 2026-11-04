@@ -67,7 +67,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import blessed_path, cdc, gcp, scenarios
+from . import blessed_path, cdc, gcp, scenarios, stand_health
 from ..pytools import registry
 from .core import (
     Ledger, SkipCause,
@@ -1366,7 +1366,8 @@ def sc_blessed_flow(led: Ledger, engine: str, tag: str, url: str,
             continue
         if cell.store != "local" and not scenarios.store_up(cell.store):
             led.skipped(cell.engine, tag, "flow:chain", cell.store,
-                        f"{cell.engine} {cell.label} — {cell.store} store not up", cause=SkipCause.ENV)
+                        f"{cell.engine} {cell.label} — {cell.store} store not up", cause=SkipCause.ENV,
+                        target=stand_health.store_target(cell.store))
             continue
         tasks.append((cell, key, u))
 
