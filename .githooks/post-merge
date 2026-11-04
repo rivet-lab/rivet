@@ -1,0 +1,2 @@
+#!/bin/sh
+exec python3 "$(dirname "$0")/../dev/pytools/post_merge_clean.py" "$@"
