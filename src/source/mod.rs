@@ -289,6 +289,8 @@ pub struct ExportRequest<'a> {
     pub upper_bound: Option<&'a str>,
     /// The composite keyset key's columns after `incremental.primary_column`; empty for a single key.
     pub key_rest: &'a [String],
+    /// A parallel range worker's page: its composite floor and ceiling may name only the leading key columns.
+    pub key_range: bool,
 }
 
 impl<'a> ExportRequest<'a> {
@@ -315,6 +317,7 @@ impl<'a> ExportRequest<'a> {
             base_relation: crate::sql::strip_select_star_from(query),
             upper_bound: None,
             key_rest: &[],
+            key_range: false,
         }
     }
 
@@ -342,6 +345,7 @@ impl<'a> ExportRequest<'a> {
             base_relation: crate::sql::strip_select_star_from(base),
             upper_bound: None,
             key_rest: &[],
+            key_range: false,
         }
     }
 
@@ -385,6 +389,12 @@ impl<'a> ExportRequest<'a> {
     /// Page a composite keyset key: the columns after the lead.
     pub fn with_key_rest(mut self, key_rest: &'a [String]) -> Self {
         self.key_rest = key_rest;
+        self
+    }
+
+    /// Mark a parallel range worker's page, whose composite floor and ceiling may name only the lead.
+    pub fn with_key_range(mut self, key_range: bool) -> Self {
+        self.key_range = key_range;
         self
     }
 }
