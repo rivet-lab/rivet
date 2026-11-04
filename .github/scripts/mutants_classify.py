@@ -56,6 +56,11 @@ Usage:
         two classes, plus the `--exclude-re` regexes that remove each class
         from a cargo-mutants run. Without `--extents`, everything is P1.
 
+  mutants_classify.py graded --diff <f> --p1 <f> --p2 <f> --drop-p2 <f> --graded <f> --budget <n>
+        Decides the graded set and rewrites `--drop-p2` to the exclusions the
+        shards apply (empty unless the P2 class is really excluded). Prints
+        `whole` or `p1`; the shards read the files and decide nothing.
+
   mutants_classify.py verify <expected-p1> <actual-list>
         Set equality between the P1 class and what cargo-mutants ACTUALLY
         listed once the P2 exclusions were applied. The regexes are generated,
@@ -278,6 +283,15 @@ def verify(expected: list[str], actual: list[str]) -> list[str]:
             f"`delete field X from struct Y expression` shape, bypasses `--exclude-re`):\n  {sample}"
         )
     return errors
+
+
+def decide_graded(
+    diff: list[str], p1: list[str], p2: list[str], drop_p2: list[str], budget: int
+) -> tuple[str, list[str], list[str]]:
+    """`(state, graded set, exclusions the shards apply)`, decided in one place."""
+    if p2 and len(p1) + len(p2) <= budget:
+        return "whole", list(diff), []
+    return "p1", list(p1), list(drop_p2) if p2 else []
 
 
 def audit(p2: list[str], caught: list[str]) -> tuple[list[str], list[str]]:
@@ -563,11 +577,26 @@ def self_test() -> int:
         want |= {os.path.normpath(Path(d) / "src" / "load" / n) for n in ("a.rs", "b.rs")}
         assert got == want, got
 
+    mut = [f"src/a.rs:{i}:1: replace f{i} -> ()" for i in range(4)]
+    pats = exclusion_regexes(mut[2:])
+    for name, args, want in (
+        ("fits the budget", (mut, mut[:2], mut[2:], pats, 4), ("whole", mut, [])),
+        ("over the budget", (mut, mut[:2], mut[2:], pats, 3), ("p1", mut[:2], pats)),
+        ("P2 discarded", (mut, mut, [], pats, 4), ("p1", mut, [])),
+        ("nothing deprioritised", (mut, mut, [], [], 4), ("p1", mut, [])),
+    ):
+        got = decide_graded(*args)
+        assert got == want, (name, got, want)
+        state, graded, drop = got
+        survivors = [m for m in graded if not any(re.search(r, m) for r in drop)]
+        assert survivors == graded, (name, "an exclusion un-grades a graded mutant", graded, drop)
+
     print(
         "self-test ok: include_str!- and CARGO_MANIFEST_DIR-read files, executed / zero-coverage / unmeasured-file / uncovered-line / "
         "unparseable classification, the no-coverage fallback, exact exclusions, "
         "both verify directions, six rejected report shapes, and the P2 audit scoped "
-        "to the P2 class over PR #265's leaked StructField kills"
+        "to the P2 class over PR #265's leaked StructField kills, and the graded set "
+        "decided with the exclusions the shards apply"
     )
     return 0
 
@@ -639,6 +668,16 @@ def main(argv: list[str]) -> int:
         print(f"reach={reach} p1={len(p1)} p2={len(p2)}")
         for name in p2:
             print(f"  report-only (offline coverage 0): {name}")
+        return 0
+
+    if len(argv) >= 2 and argv[1] == "graded":
+        read = lambda f: [ln for ln in Path(_arg(argv, f) or "").read_text().splitlines() if ln.strip()]
+        state, graded, drop = decide_graded(
+            read("--diff"), read("--p1"), read("--p2"), read("--drop-p2"), int(_arg(argv, "--budget") or 0)
+        )
+        _write(_arg(argv, "--graded"), graded)
+        _write(_arg(argv, "--drop-p2"), drop)
+        print(state)
         return 0
 
     if len(argv) == 4 and argv[1] == "verify":
