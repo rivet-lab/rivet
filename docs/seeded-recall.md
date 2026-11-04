@@ -80,6 +80,7 @@ one, a red one, one from a dirty tree and a missing record are each refused.
 | `BROKEN` | the patched tree does not build, or cargo did not recompile it. A red build is not a catch. | FAIL |
 | `NO-CONTROL` | no declared cell is green on the unpatched tree, so the row grades nothing | FAIL |
 | `ABORTED` | a control-green cell was stopped by nextest (TIMEOUT, ABORT, SIGKILL) instead of failing; only a failing assertion catches a seed, so a hang-class seed needs a watchdog test that fails | FAIL |
+| `STAND-DOWN` | the cells ran while the stand was down or unreadable (the gate's stand watchdog, or a cell that failed on the stand's own `live test requires ...` panic): neither a catch nor a miss | INFRA (the run is NOT GRADED) |
 | `N/A` | the manifest says why the code path does not exist on this engine | N/A row, counted under `na_ceiling` |
 
 Every `N/A` row is written to the ledger with its reason. Their count is held under
