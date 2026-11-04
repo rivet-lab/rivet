@@ -1862,7 +1862,7 @@ fn row_count_as(
 /// A GCS destination's named key signs the BigQuery load, never the ambient ADC identity.
 #[test]
 #[ignore = "open defect HFF-1; closes with fix/destination-credential-every-leg"]
-fn a_bigquery_load_signs_with_the_destinations_named_key() {
+fn open_defect_a_bigquery_load_signs_with_the_destinations_named_key() {
     let stand = minting_stand();
     let dir = tempfile::tempdir().unwrap();
     let (named, ambient) = (
@@ -1881,7 +1881,7 @@ fn a_bigquery_load_signs_with_the_destinations_named_key() {
 /// A destination's named key beside a static `RIVET_BQ_ACCESS_TOKEN` is two named identities: refused by code before any BigQuery request.
 #[test]
 #[ignore = "open defect HFF-1; closes with fix/destination-credential-every-leg"]
-fn a_named_key_beside_a_static_bigquery_token_is_refused_by_code() {
+fn open_defect_a_named_key_beside_a_static_bigquery_token_is_refused_by_code() {
     let stand = minting_stand();
     let dir = tempfile::tempdir().unwrap();
     let (named, ambient) = (
