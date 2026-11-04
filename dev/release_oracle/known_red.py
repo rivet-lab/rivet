@@ -63,11 +63,9 @@ _KEYSET_KEY_ONE_CHUNK = (
 
 
 KNOWN_RED: tuple[KnownRed, ...] = (
-<<<<<<< HEAD
     _open("live_destination_credential::open_defect_an_s3_profile_beside_env_keys_is_refused",
           "an S3 destination naming aws_profile beside env keys is refused by code, run",
           "HFF-2 (consolidated-2026-11-03): an S3 destination naming aws_profile beside access_key_env and secret_key_env signs with the profile alone, because opendal's customized credential loader ignores the static keys, so the operator's keys are never used and nothing says so; opened 2026-11-04; closes with fix/destination-credential-every-leg, which names the conflict at config load as RIVET_CONFIG_DESTINATION_AUTH_INVALID"),
-=======
     _open("live_stop_class::open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql",
           "refusal contract: the invocation ended with [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 2), expected [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 1)",
           "VP-8 (seam stop-class, 2026-11-04): a missing table refused by a coded Environment stop exits by the words of the name the operator chose, because stop_class returns None for the kind and classify_exit reads the message text, which holds the name; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exits 2 where PG and MySQL exit 1 for the same refusal. Opened 2026-11-04; closes with fix/stop-class-by-code"),
@@ -80,7 +78,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     _open("live_stop_class::open_defect_an_mssql_read_blocked_past_its_lock_timeout_exits_retryable",
           "assertion `left == right` failed: a lock wait that timed out clears when the lock does: retryable",
           "MT-F-F (seam stop-class, 2026-11-04): MSSQL error 1222 (lock request time out) reaches the stop as a stringified SOURCE_QUERY_FAILED whose text the retry classifier does not know, so a read that timed out on a held lock exits 1 where the same wait on MySQL (1205) exits 2. Opened 2026-11-04; closes with fix/stop-class-by-code"),
->>>>>>> origin/main
     _open("live_cdc_mbt::open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot",
           "assertion `left == right` failed: stream differs from the source on negative TIME(1)/TIME(2) with a fraction",
           "TF-1 (consolidated-2026-11-03 section 2): mysql_common 0.37.3 binlog/misc.rs:35-39 subtracts 0x100 from a u32 fraction for a negative TIME(1)/TIME(2) with a fraction, so a debug rivet panics and a release rivet writes 625:04:19.277216 for -00:00:00.50 in a string column; a row of any table in the binlog panics every MySQL CDC run that reads it. Opened 2026-11-04; closes with fix/mysql-binlog-time-fraction"),
