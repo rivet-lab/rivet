@@ -906,7 +906,7 @@ fn oracle_class_census_is_pinned() {
 // back through the bq CLI (bq show -j, bq ls -j --parent_job_id) and the base counted through bq.
 // 2026-10-21: +2 independent - the PostgreSQL upgrade from a released 0.32.1 (slot and checkpoint
 // read through `confirmed_flush_lsn`) and its way back.
-const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
+const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min (review 2027-02-01)
 // 2026-09-28, source connection ceilings: +3 shared codec — the run's captured row is the
 // fixture check; the oracle is the server's own connection counter.
 // 2026-09-29: +2 shared codec — the Oracle TRUNCATE refusal on re-run and the uncaptured-truncate cell.
@@ -940,8 +940,8 @@ const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent min
 // 119 -> 132 (2026-10-29, #719): the column-grants cells read the delivered parts with arrow; the rig oracle grades the runs it can.
 // 132 -> 133 (2026-10-31, #728): the dropped-database cell reads the parts of its stopped run and of the re-baseline with arrow; the stop itself is graded by its code.
 // 133 -> 134 (2026-11-03, TF-2): the MySQL ENUM/SET label cell reads the stream and snapshot parts with arrow against the labels the test created; the rig oracle grades both legs against the source.
-const PIN_SHARED_CODEC: usize = 134; // ratchet-pin: cdc-census-shared-codec
-const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
+const PIN_SHARED_CODEC: usize = 134; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
 // 2026-09-29: +2 presence — the MySQL out-of-range TIME and Oracle int-override refusals, whose oracle is the refusal plus the unmoved checkpoint.
@@ -965,7 +965,7 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter
 // 89 -> 93 (2026-10-21, #675): four MySQL bare-name cells read every part's ids and compare them with the rows written to each database.
 // 93 -> 102 (2026-10-29, #719): column-grants cells whose oracle is a coded refusal, an unmoved checkpoint or the part set a refused run left.
 // 102 -> 105 (2026-10-30): MySQL RESET MASTER resume cells whose oracle is a coded refusal and an unmoved checkpoint, or a warning; the rig oracle grades every run.
-const PIN_PRESENCE: usize = 105; // ratchet-pin: cdc-census-presence
+const PIN_PRESENCE: usize = 105; // ratchet-pin: cdc-census-presence (review 2027-02-01)
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a
 /// COMPLETENESS claim must carry a class-(a) INDEPENDENT oracle — not merely

@@ -114,7 +114,7 @@ const UNIT: &[Field] = &[("export", Str, false), ("table", Str, true)];
 
 /// Keys of the run entry that `RunAggregateEntry` does not serialize yet.
 const NOT_YET_EMITTED: &[&str] = &[
-    // ratchet-pin: scheduler-contract-not-yet-emitted strings
+    // ratchet-pin: scheduler-contract-not-yet-emitted strings (review 2027-02-01)
     "error",
     "stop_reason",
     "tables",
@@ -123,7 +123,7 @@ const NOT_YET_EMITTED: &[&str] = &[
 
 /// Keys of the `--json-errors` object that the binary does not print yet.
 const JSON_ERRORS_NOT_YET_EMITTED: &[&str] = &[
-    // ratchet-pin: scheduler-contract-json-errors-not-yet-emitted strings
+    // ratchet-pin: scheduler-contract-json-errors-not-yet-emitted strings (review 2027-02-01)
     "exit_code",
     "class",
     "kind",
@@ -135,7 +135,7 @@ const JSON_ERRORS_NOT_YET_EMITTED: &[&str] = &[
 
 /// Members of a killed child's run entry that the parent still writes blank.
 const CRASHED_ENTRY_NOT_YET_FILLED: &[&str] = &[
-    // ratchet-pin: scheduler-contract-crashed-entry-not-yet-filled strings
+    // ratchet-pin: scheduler-contract-crashed-entry-not-yet-filled strings (review 2027-02-01)
     "run_id", "mode",
     // ratchet-pin: end
 ];

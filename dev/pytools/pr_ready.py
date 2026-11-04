@@ -12,6 +12,7 @@ Stdlib only, so the hooks and CI run it on a bare `python3`.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -20,6 +21,12 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+if __package__:
+    from . import review_dates
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import review_dates  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parents[2]
 GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else (shutil.which("git") or "git")
@@ -33,7 +40,7 @@ TRAILER = re.compile(r"^\s*(co-authored-by|claude-session):", re.I)
 BYTE_SLICE = re.compile(r"\[\s*\.\.\s*[A-Za-z_][\w.]*\.len\(\)\s*\]|\[\s*[A-Za-z_]\w*\s*\.\.\s*[A-Za-z_]\w*\s*\+\s*\w+\s*\]")
 SQL_PARSER = re.compile(r"^\+?\s*(sqlparser|sqlformat|sql-parse|pg_query|sqlparse)\b")
 BINARY = re.compile(r"\.(gif|png|jpg|jpeg|parquet|ico|pdf)$")
-MARK = re.compile(r"ratchet-pin:\s*([\w.-]+)(?:\s+(sum|strings|lines))?(?:\s+(min))?")
+MARK = re.compile(review_dates.MARKER + r"(?:\s+(sum|strings|lines))?(?:\s+(min))?")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 NUMBER = re.compile(r"(?<!\w)\d\w*")
 # Definitions that look like a pin by name; each must carry a `ratchet-pin:` marker.
@@ -174,7 +181,7 @@ def pin_files(rev: str) -> dict[str, str]:
     out = {}
     for hit in git("grep", "-l", "-e", "ratchet-pin:", rev, check=False).splitlines():
         path = hit.split(":", 1)[1]
-        if path != "dev/pytools/pr_ready.py":
+        if path not in review_dates.NOT_ENTRIES:
             out[path] = git("show", f"{rev}:{path}")
     return out
 
@@ -261,8 +268,8 @@ def changelog_verdict(changed: list[str], base_log: str, head_log: str, body: st
 # ── the branch checks (CI and local) ────────────────────────────────────────
 
 
-def branch_rows(base: str, body: str | None) -> list[tuple[str, str, str]]:
-    """(check, verdict, line) for every rule graded off git alone."""
+def branch_rows(base: str, body: str | None, expiry: bool = False) -> list[tuple[str, str, str]]:
+    """(check, verdict, line) for every rule graded off git alone; `expiry` also fails a review date that has passed."""
     mb = git("merge-base", base, "HEAD").strip()
     rows = []
     bad = commit_violations(f"{mb}..HEAD")
@@ -275,6 +282,8 @@ def branch_rows(base: str, body: str | None) -> list[tuple[str, str, str]]:
     bad = added_line_violations(diff)
     added = sum(1 for d in diff.splitlines() if d.startswith("+") and not d.startswith("+++ "))
     rows.append(("Cyrillic in added lines", "FAIL" if bad else "PASS", "; ".join(bad[:5]) or f"none in {added} added lines"))
+    bad, counted = review_dates.tree_problems(ROOT, dt.date.today(), expiry)
+    rows.append(("review dates", "FAIL" if bad else "PASS", "; ".join(bad[:5]) or counted))
     loose = unmarked_pins()
     rows.append(("pins carry a marker", "FAIL" if loose else "PASS", "; ".join(loose[:5]) or f"{len(all_pins('HEAD'))} ratchet pins discovered"))
     up = raised(all_pins(mb), all_pins("HEAD"))
@@ -414,7 +423,7 @@ def run_local(args: argparse.Namespace) -> int:
     else:
         print("pr-ready: mutants in-diff ...", file=sys.stderr, flush=True)
         rows.append(("mutants in-diff", *mutants(out, args.base, args.jobs)))
-    rows += branch_rows(args.base, body)
+    rows += branch_rows(args.base, body, expiry=True)
     sha = git("rev-parse", "--short", "HEAD").strip()
     print_rows(f"make pr-ready @ {sha} (base {args.base}){' --fast' if args.fast else ''}; logs {out}", rows)
     return 1 if any(v == "FAIL" for _, v, _ in rows) else 0

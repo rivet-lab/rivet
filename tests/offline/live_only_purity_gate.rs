@@ -96,7 +96,7 @@ impl Decisions {
 /// pure function next door plus its unit test, which is what the six
 /// extractions this ledger was born from ended up as.
 const BASELINE: &[(&str, usize, usize, usize, usize)] = &[
-    // ratchet-pin: live-only-purity sum
+    // ratchet-pin: live-only-purity sum (review 2027-02-01)
     // ── qualified exclusions (`Type::f`, `<impl Tr for T>::f`) ─────────────
     // Visible to this gate since 2026-09-23: the parser read only a bare leading
     // identifier, so every qualified whole-function exclusion was skipped and

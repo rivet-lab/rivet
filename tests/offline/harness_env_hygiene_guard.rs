@@ -229,7 +229,7 @@ fn product_env_surface() -> BTreeMap<String, String> {
 
 /// Every environment read and test-hook call site under `src/`, keyed without line numbers so an edit does not move it.
 const PRODUCT_ENV_SURFACE: &[&str] = &[
-    // ratchet-pin: product-env-surface strings
+    // ratchet-pin: product-env-surface strings (review 2027-02-01)
     "src/bin/rivet-mcp.rs clap env DATABASE_URL",
     "src/bin/seed/main.rs env::var CONFIRM_ENV",
     "src/cli/args.rs clap env RIVET_LOCK_WAIT",

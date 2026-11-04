@@ -71,7 +71,7 @@ SEED, STREAM_TABLES, BIG = 40, 4, 40_000
 VERDICT = re.compile(r"^\s*(?:(status:)\s*(\w+)|((?:CDC )?LOAD|COMPACT) (OK|SKIP|FAILED|REFUSED)\b|(\d+ of \d+) .*(failed)|(Error):(?: \[(RIVET_\w+)\])?)")
 #: A wrapper-visible difference between an old release and this build that is intended, with its reason:
 #: `<situation> · <step>: <was> -> <is>`.
-ACCEPTED_DIFFERENCES: dict[str, str] = {  # ratchet-pin: field-state-accepted-differences strings
+ACCEPTED_DIFFERENCES: dict[str, str] = {  # ratchet-pin: field-state-accepted-differences strings (review 2027-02-01)
     "a warehouse table dropped · compact: exit 1; 1x COMPACT FAILED; 1x COMPACT OK; 1x Error -> exit 5; 1x COMPACT FAILED; "
     "1x COMPACT OK; 1x Error RIVET_LOAD_COMPACT_BASE_MISSING":
         "the exit follows the code class: a compact over a dropped base table is the refusal "

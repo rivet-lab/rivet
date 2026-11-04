@@ -89,7 +89,7 @@ const ENGINE_PRODUCED: &[&str] = &[
 
 /// Local renderers measured 2026-10-01 (`src/source/`-relative `file::fn`). Shrink-only.
 const CEILING: &[(&str, &[&str])] = &[
-    // ratchet-pin: local-renderers strings
+    // ratchet-pin: local-renderers strings (review 2027-02-01)
     (
         "decimal_plain",
         &[
