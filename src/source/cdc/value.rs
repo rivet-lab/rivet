@@ -971,9 +971,21 @@ fn epoch_text(b: &[u8]) -> Option<(i64, u32)> {
     Some((sec.parse().ok()?, micros))
 }
 
+/// The cell refusal of an ENUM or SET label that has no reading, coded and with the remedy no `columns:` override can replace.
+fn label_refusal(why: impl Into<String>) -> FixRefusal {
+    FixRefusal {
+        reason: format!(
+            "{}. A `columns:` override does not carry the label either: leave the column out of the capture, then: {}",
+            why.into(),
+            crate::source::cdc::checkpoint_identity::RECOVER
+        ),
+        code: Some(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED),
+    }
+}
+
 /// The labels, or the refusal for a declaration that has none.
-fn readable(labels: &Labels) -> Result<&[String], String> {
-    labels.as_deref().map_err(|why| why.clone())
+fn readable(labels: &Labels) -> Result<&[String], FixRefusal> {
+    labels.as_deref().map_err(|why| label_refusal(why.as_str()))
 }
 
 fn set_labels(labels: &[String], mask: u64) -> RivetValue {
@@ -988,14 +1000,14 @@ fn set_labels(labels: &[String], mask: u64) -> RivetValue {
 }
 
 /// The label of 1-based ENUM index `idx`; 0 is MySQL's invalid-value sentinel `''`, past the list is refused.
-fn enum_label(labels: &[String], idx: i64) -> Result<RivetValue, String> {
+fn enum_label(labels: &[String], idx: i64) -> Result<RivetValue, FixRefusal> {
     if idx <= 0 {
         return Ok(RivetValue::Bytes(Vec::new()));
     }
     labels
         .get(idx as usize - 1)
         .map(|l| RivetValue::Bytes(l.clone().into_bytes()))
-        .ok_or_else(|| format!("is past the column's {} ENUM labels", labels.len()))
+        .ok_or_else(|| label_refusal(format!("is past the column's {} ENUM labels", labels.len())))
 }
 
 /// Render `Bytes` to a string LOSSLESSLY: verbatim when the bytes are valid UTF-8
@@ -1216,29 +1228,50 @@ mod tests {
             let want = format!(
                 "cannot be read: the column declares label {n} as the hex literal x'{digits}', which MySQL writes without zero padding, so the label's bytes cannot be recovered from the catalog"
             );
-            assert_eq!(err.reason, want, "{native}");
+            assert!(
+                err.reason
+                    .starts_with(&format!("{want}. A `columns:` override")),
+                "{native}: {}",
+                err.reason
+            );
+            assert_eq!(
+                err.code.map(|c| c.id),
+                Some("RIVET_SOURCE_CDC_CELL_UNSUPPORTED"),
+                "{native}"
+            );
         }
     }
 
     #[test]
-    fn a_hex_label_refusal_carries_the_cell_refusal_remedy() {
-        let err = enum_text("enum(x'12f09f9a80','a')", 2).unwrap_err();
-        let msg = format!(
-            "{:#}",
-            CellRefusal {
-                row: 3,
-                value: RivetValue::Int(2),
-                reason: err.reason,
-                code: err.code,
+    fn an_enum_label_refusal_is_the_cell_refusal_with_or_without_a_columns_override() {
+        for (native, idx, cause) in [
+            ("enum(x'12f09f9a80','a')", 2, "without zero padding"),
+            ("enum('a','b')", 3, "past the column's 2 ENUM labels"),
+        ] {
+            let err = enum_text(native, idx).unwrap_err();
+            for overridden in [false, true] {
+                let e = CellRefusal {
+                    row: 3,
+                    value: RivetValue::Int(idx),
+                    reason: err.reason.clone(),
+                    code: err.code,
+                }
+                .into_error("status", &DataType::Utf8, overridden);
+                let msg = format!("{e:#}");
+                assert_eq!(
+                    crate::error::code_of(&e).map(|c| c.id),
+                    Some("RIVET_SOURCE_CDC_CELL_UNSUPPORTED"),
+                    "{native} overridden={overridden}: {msg}"
+                );
+                assert!(
+                    msg.contains("column 'status'")
+                        && msg.contains(cause)
+                        && msg.contains("leave the column out of the capture, then: Re-baseline")
+                        && !msg.contains("correct or drop"),
+                    "{native} overridden={overridden}: {msg}"
+                );
             }
-            .into_error("status", &DataType::Utf8, false)
-        );
-        assert!(
-            msg.contains("column 'status'")
-                && msg.contains("without zero padding")
-                && msg.contains("leave the column out of the capture, then: Re-baseline"),
-            "{msg}"
-        );
+        }
     }
 
     #[test]
