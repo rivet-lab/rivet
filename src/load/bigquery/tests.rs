@@ -1783,3 +1783,140 @@ fn a_rebaseline_buffers_a_tombstone_for_each_base_row_the_buffer_does_not_hold()
     );
     assert!(inserted.load(std::sync::atomic::Ordering::SeqCst));
 }
+
+// ── the identity a BigQuery load signs with, against a stand that also mints tokens ─
+
+static IDENTITY_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A stand that mints `tok-<who>` at `/<who>/token` and answers any other path as a failing BigQuery.
+fn minting_stand() -> Stand {
+    Stand::start(|seen, _| match seen.path.strip_suffix("/token") {
+        Some(who) => json(
+            200,
+            &format!(
+                r#"{{"access_token":"tok-{}","expires_in":3600,"token_type":"Bearer"}}"#,
+                who.trim_start_matches('/')
+            ),
+        ),
+        None => json(400, r#"{"error":{"message":"stand"}}"#),
+    })
+}
+
+/// A service-account key file for `who` in `dir`, minting at `stand`.
+fn key_file(dir: &tempfile::TempDir, stand: &Stand, who: &str) -> String {
+    let path = dir.path().join(format!("{who}.json"));
+    let key = serde_json::json!({
+        "type": "service_account",
+        "project_id": "p",
+        "private_key_id": "1",
+        "private_key": crate::gcp_auth::TEST_RSA_PKCS8_PEM,
+        "client_email": format!("{who}@x.iam.gserviceaccount.com"),
+        "client_id": "1",
+        "token_uri": format!("{}/{who}/token", stand.endpoint()),
+    });
+    std::fs::write(&path, key.to_string()).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// The `Authorization` of every BigQuery API request the stand saw, token requests left out.
+fn api_authorizations(stand: &Stand) -> Vec<String> {
+    stand
+        .seen()
+        .into_iter()
+        .filter(|r| !r.path.ends_with("/token"))
+        .map(|r| r.authorization)
+        .collect()
+}
+
+/// `row_count` through [`crate::load::build_loader`] for a GCS destination holding `credentials_file`, with the ambient ADC key and `static_token` in the environment.
+fn row_count_as(
+    stand: &Stand,
+    credentials_file: Option<String>,
+    ambient: &str,
+    static_token: &str,
+) -> Result<u64> {
+    let _env = IDENTITY_ENV.lock().unwrap_or_else(|p| p.into_inner());
+    let set = [
+        ("RIVET_BQ_API_ENDPOINT", stand.endpoint()),
+        ("GOOGLE_APPLICATION_CREDENTIALS", ambient),
+        ("RIVET_BQ_ACCESS_TOKEN", static_token),
+    ];
+    for (k, v) in set {
+        unsafe { std::env::set_var(k, v) };
+    }
+    let mut plan = crate::load::plan::test_plan(crate::load::plan::LoadMode::Full, "gs://b/p/");
+    plan.destination = crate::config::DestinationConfig {
+        destination_type: crate::config::DestinationType::Gcs,
+        bucket: Some("b".into()),
+        credentials_file,
+        ..Default::default()
+    };
+    let loader = crate::load::build_loader(&plan, "run", &Default::default());
+    let counted = loader.row_count("orders");
+    for (k, _) in set {
+        unsafe { std::env::remove_var(k) };
+    }
+    counted
+}
+
+/// A GCS destination's named key signs the BigQuery load, never the ambient ADC identity.
+#[test]
+#[ignore = "open defect HFF-1; closes with fix/destination-credential-every-leg"]
+fn a_bigquery_load_signs_with_the_destinations_named_key() {
+    let stand = minting_stand();
+    let dir = tempfile::tempdir().unwrap();
+    let (named, ambient) = (
+        key_file(&dir, &stand, "named"),
+        key_file(&dir, &stand, "ambient"),
+    );
+    let _ = row_count_as(&stand, Some(named), &ambient, "");
+    let seen = api_authorizations(&stand);
+    assert_eq!(
+        seen.iter().collect::<std::collections::BTreeSet<_>>(),
+        ["Bearer tok-named".to_string()].iter().collect(),
+        "every BigQuery request carries the named key's token"
+    );
+}
+
+/// A destination's named key beside a static `RIVET_BQ_ACCESS_TOKEN` is two named identities: refused by code before any BigQuery request.
+#[test]
+#[ignore = "open defect HFF-1; closes with fix/destination-credential-every-leg"]
+fn a_named_key_beside_a_static_bigquery_token_is_refused_by_code() {
+    let stand = minting_stand();
+    let dir = tempfile::tempdir().unwrap();
+    let (named, ambient) = (
+        key_file(&dir, &stand, "named"),
+        key_file(&dir, &stand, "ambient"),
+    );
+    let err = row_count_as(&stand, Some(named), &ambient, "tok-static")
+        .expect_err("two named identities are refused");
+    crate::error::assert_coded(&err, "RIVET_CONFIG_DESTINATION_AUTH_INVALID", 1);
+    assert_eq!(
+        api_authorizations(&stand),
+        Vec::<String>::new(),
+        "the refused load sends no BigQuery request"
+    );
+}
+
+/// With no named key the load signs with the ambient ADC identity, and a static token as given.
+#[test]
+fn a_destination_with_no_named_key_loads_as_the_ambient_identity_or_the_static_token() {
+    let stand = minting_stand();
+    let dir = tempfile::tempdir().unwrap();
+    let ambient = key_file(&dir, &stand, "ambient");
+    let _ = row_count_as(&stand, None, &ambient, "");
+    assert_eq!(
+        api_authorizations(&stand)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["Bearer tok-ambient".to_string()].into(),
+    );
+    let stand = minting_stand();
+    let _ = row_count_as(&stand, None, &ambient, "tok-static");
+    assert_eq!(
+        api_authorizations(&stand)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["Bearer tok-static".to_string()].into(),
+    );
+}

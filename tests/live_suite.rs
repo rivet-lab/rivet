@@ -140,6 +140,8 @@ mod live_crash_soak;
 mod live_cross_db_parity;
 #[path = "live/live_density_probe.rs"]
 mod live_density_probe;
+#[path = "live/live_destination_credential.rs"]
+mod live_destination_credential;
 #[path = "live/live_destination_parity.rs"]
 mod live_destination_parity;
 #[path = "live/live_entry_points_run_set.rs"]
