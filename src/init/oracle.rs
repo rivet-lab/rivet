@@ -63,7 +63,7 @@ pub(super) fn introspect(
     schema: &str,
     table: &str,
     cdc: bool,
-) -> Result<TableInfo> {
+) -> Result<super::Introspected> {
     let mut columns = columns_of(conn, schema, table)?;
     let (mut schema, mut table) = (schema.to_string(), table.to_string());
     if columns.is_empty()
@@ -90,18 +90,17 @@ pub(super) fn introspect(
              names upper-case — check the spelling, and that the user can SELECT it."
         );
     }
-    let mappings = conn
-        .type_mappings(
-            &super::select_all(SourceType::Oracle, &[&schema, &table]),
-            &ColumnOverrides::default(),
+    let probe = conn.type_mappings(
+        &super::select_all(SourceType::Oracle, &[&schema, &table]),
+        &ColumnOverrides::default(),
+    );
+    let unreadable = super::probe_keyset_refusals(SourceType::Oracle, &mut columns, probe, || {
+        crate::source::oracle::finer_than_microsecond_columns(
+            conn,
+            &format!("'{}'", lit(&schema)),
+            &format!("'{}'", lit(&table)),
         )
-        .map_err(|e| super::keyset_probe_context(e, &format!("{schema}.{table}")))?;
-    let finer = crate::source::oracle::finer_than_microsecond_columns(
-        conn,
-        &format!("'{}'", lit(&schema)),
-        &format!("'{}'", lit(&table)),
-    )?;
-    super::mark_keyset_refusals(SourceType::Oracle, &mut columns, &mappings, &finer);
+    })?;
     let (owner, name) = (lit(&schema), lit(&table));
     let stats = conn.query_scalar(&format!(
         "SELECT NVL(TO_CHAR(num_rows), 'NULL') FROM all_tables \
@@ -127,7 +126,7 @@ pub(super) fn introspect(
     let cdc_unmineable = asked_for_cdc(cdc, || {
         cdc_unmineable(&schema, &table, |sql| conn.query_rows(sql))
     })?;
-    Ok(TableInfo {
+    let info = TableInfo {
         cdc_capture_instance: None,
         cdc_unmineable,
         density,
@@ -136,7 +135,8 @@ pub(super) fn introspect(
         row_estimate,
         total_bytes: None,
         columns,
-    })
+    };
+    Ok((info, unreadable))
 }
 
 /// The mineability probe's answer for a CDC scaffold; any other init never runs it.

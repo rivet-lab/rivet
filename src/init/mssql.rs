@@ -71,7 +71,11 @@ pub(super) fn list_tables(
     Ok(names)
 }
 
-pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> Result<TableInfo> {
+pub(super) fn introspect(
+    conn: &mut MssqlSource,
+    schema: &str,
+    table: &str,
+) -> Result<super::Introspected> {
     let schema_lit = schema.replace('\'', "''");
     let table_lit = table.replace('\'', "''");
 
@@ -144,16 +148,15 @@ pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> R
     if columns.is_empty() {
         return Err(super::table_not_found(&format!("{schema}.{table}")));
     }
-    let mappings = conn
-        .type_mappings(
-            &super::select_all(SourceType::Mssql, &[schema, table]),
-            &ColumnOverrides::default(),
-        )
-        .map_err(|e| super::keyset_probe_context(e, &format!("{schema}.{table}")))?;
-    let finer = crate::source::mssql::finer_than_microsecond_columns(conn, schema, table)?;
-    super::mark_keyset_refusals(SourceType::Mssql, &mut columns, &mappings, &finer);
+    let probe = conn.type_mappings(
+        &super::select_all(SourceType::Mssql, &[schema, table]),
+        &ColumnOverrides::default(),
+    );
+    let unreadable = super::probe_keyset_refusals(SourceType::Mssql, &mut columns, probe, || {
+        crate::source::mssql::finer_than_microsecond_columns(conn, schema, table)
+    })?;
 
-    Ok(TableInfo {
+    let info = TableInfo {
         cdc_capture_instance,
         cdc_unmineable: None,
         density: None,
@@ -162,7 +165,8 @@ pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> R
         row_estimate,
         total_bytes: None,
         columns,
-    })
+    };
+    Ok((info, unreadable))
 }
 
 /// Split the `RS`/`US`-delimited column aggregate back into [`ColumnInfo`]s.

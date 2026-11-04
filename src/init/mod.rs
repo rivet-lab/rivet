@@ -489,14 +489,74 @@ pub(super) fn select_all(source: crate::config::SourceType, parts: &[&str]) -> S
     format!("SELECT * FROM {}", quoted.join("."))
 }
 
-/// The failure of the probe that reads the types `table` is delivered as: coded, with the cause and the remedy.
-pub(super) fn keyset_probe_context(e: anyhow::Error, table: &str) -> anyhow::Error {
+/// A table read from the catalog, with the cause its type probe failed when the user cannot SELECT it.
+pub(super) type Introspected = (TableInfo, Option<String>);
+
+/// `schema.table` of `info`, or the bare table when it has no schema.
+fn table_label(info: &TableInfo) -> String {
+    if info.schema.is_empty() {
+        info.table.clone()
+    } else {
+        format!("{}.{}", info.schema, info.table)
+    }
+}
+
+/// The stop for a table whose column types could not be read: coded, with the cause and the remedy.
+fn keyset_probe_context(cause: &str, table: &str) -> anyhow::Error {
     crate::error::coded(
         crate::error::codes::INIT_TABLE_UNREADABLE,
         format!(
-            "init: reading the column types of {table} to choose its keyset key failed: {e:#}; grant SELECT on {table} or leave it out of init"
+            "init: reading the column types of {table} to choose its keyset key failed: {cause}; grant SELECT on {table} or leave it out of init"
         ),
     )
+}
+
+/// The table of a single-table init, or the coded stop when its column types could not be read.
+fn require_readable((info, unreadable): Introspected) -> Result<TableInfo> {
+    match unreadable {
+        Some(cause) => Err(keyset_probe_context(&cause, &table_label(&info))),
+        None => Ok(info),
+    }
+}
+
+/// The warning for a table a schema scan keeps without a keyset key because its column types could not be read.
+fn unreadable_table_warning(table: &str, cause: &str) -> String {
+    format!(
+        "rivet: WARN [{}] init: reading the column types of {table} failed: {cause}; {table} is scaffolded without a keyset key; grant SELECT on {table} or leave it out of init\n",
+        crate::error::codes::INIT_TABLE_UNREADABLE.id
+    )
+}
+
+/// The stop for a schema scan in which no table could be read.
+fn nothing_readable(tables: &[String]) -> anyhow::Error {
+    crate::error::coded(
+        crate::error::codes::INIT_TABLE_UNREADABLE,
+        format!(
+            "init: the column types of none of the {} table(s) in the scan could be read: {}; grant SELECT on them or point --schema at a schema the user can read",
+            tables.len(),
+            tables.join(", ")
+        ),
+    )
+}
+
+/// Mark the keyset refusals from the probe's types; when the probe failed mark every column and return the cause.
+pub(super) fn probe_keyset_refusals(
+    source: crate::config::SourceType,
+    columns: &mut [ColumnInfo],
+    probe: Result<Vec<crate::types::TypeMapping>>,
+    finer_than_microsecond: impl FnOnce() -> Result<Vec<String>>,
+) -> Result<Option<String>> {
+    match probe {
+        Ok(mappings) => {
+            let finer = finer_than_microsecond()?;
+            mark_keyset_refusals(source, columns, &mappings, &finer);
+            Ok(None)
+        }
+        Err(e) => {
+            columns.iter_mut().for_each(|c| c.not_keyset = true);
+            Ok(Some(format!("{e:#}")))
+        }
+    }
 }
 
 /// Set `not_keyset` on every column the keyset seam refuses, from the types the engine delivers for the table.
@@ -1162,11 +1222,11 @@ fn introspect_single_table(
     Ok(match source_type(source_url)? {
         "postgres" => {
             let mut client = postgres::connect(source_url, tls)?;
-            let mut info = postgres::introspect(
+            let mut info = require_readable(postgres::introspect(
                 &mut client,
                 eff_schema.as_deref().unwrap_or("public"),
                 table_name,
-            )?;
+            )?)?;
             postgres::density_probe(&mut client, &mut info);
             info
         }
@@ -1199,17 +1259,17 @@ fn introspect_single_table(
                 }
                 mysql::use_database(&mut conn, db)?;
             }
-            let mut info = mysql::introspect(&mut conn, table_name)?;
+            let mut info = require_readable(mysql::introspect(&mut conn, table_name)?)?;
             mysql::density_probe(&mut conn, &mut info);
             info
         }
         "mssql" => {
             let mut conn = mssql::connect(source_url, tls)?;
-            let mut info = mssql::introspect(
+            let mut info = require_readable(mssql::introspect(
                 &mut conn,
                 &mssql_table_schema(eff_schema.as_deref().unwrap_or("public")),
                 table_name,
-            )?;
+            )?)?;
             mark_mssql_catalog_exact(&mut info);
             info
         }
@@ -1217,12 +1277,12 @@ fn introspect_single_table(
         "oracle" => {
             let mut conn = oracle::connect(source_url, tls)?;
             let owner = oracle::resolve_schema(&mut conn, eff_schema.as_deref())?;
-            oracle::introspect(
+            require_readable(oracle::introspect(
                 &mut conn,
                 &owner,
                 &crate::sql::oracle_catalog_name(table_name),
                 cdc,
-            )?
+            )?)?
         }
         "mongo" => {
             // #12 bughunt: --schema was silently ignored for Mongo (the cross-db
@@ -1527,34 +1587,50 @@ fn table_discovery(info: &TableInfo) -> TableDiscovery {
     }
 }
 
-/// Classify one table's introspection result during a WHOLE-SCHEMA scan: keep
-/// it, skip it, or abort the scan.
-///
-/// Skip covers exactly the "listed but not introspectable" shape every engine
-/// can produce — a table dropped between `list_tables` and `introspect` (the
-/// live suite's parallelism does this constantly), and MySQL's broken VIEW,
-/// which stays listed with zero columns after its base table is gone. Any OTHER
-/// error must abort: a scan that shrugged off a connection drop or a permission
-/// error would emit a silently truncated scaffold that reads as a small schema.
-///
-/// Pure and shared by all three engine arms, so the tolerance cannot drift
-/// per-engine again (MySQL shipped without it — one stale view failed every
-/// schema-wide init) and so both mutants of the guard (`skip everything` /
-/// `skip nothing`) die in a unit test rather than surviving on a live-only path.
-fn scan_step(res: Result<TableInfo>) -> Result<Option<TableInfo>> {
+/// Classify one table of a schema scan: keep it (warning when its types were unreadable), skip a vanished one, abort on any other error.
+fn scan_step(res: Result<Introspected>, unreadable: &mut Vec<String>) -> Result<Option<TableInfo>> {
     match res {
-        Ok(info) => Ok(Some(info)),
+        Ok((info, None)) => Ok(Some(info)),
+        Ok((info, Some(cause))) => {
+            let label = table_label(&info);
+            eprint!("{}", unreadable_table_warning(&label, &cause));
+            unreadable.push(label);
+            Ok(Some(info))
+        }
         Err(e) if e.to_string().contains("not found or has no columns") => Ok(None),
         Err(e) => Err(e),
     }
 }
 
+/// Every table of the scan; stops (`RIVET_INIT_TABLE_UNREADABLE`) only when none of them could be read.
 fn introspect_all(
     tls: Option<&crate::config::TlsConfig>,
     source_url: &str,
     schema: Option<&str>,
     filter: &TableFilter,
+    cdc: bool,
+) -> Result<Vec<TableInfo>> {
+    let mut unreadable = Vec::new();
+    let out = scan_tables(tls, source_url, schema, filter, cdc, &mut unreadable)?;
+    refuse_unreadable_scan(out.len(), &unreadable)?;
+    Ok(out)
+}
+
+/// The stop for a scan that found tables and could read the column types of none of them.
+fn refuse_unreadable_scan(scanned: usize, unreadable: &[String]) -> Result<()> {
+    if scanned > 0 && unreadable.len() == scanned {
+        return Err(nothing_readable(unreadable));
+    }
+    Ok(())
+}
+
+fn scan_tables(
+    tls: Option<&crate::config::TlsConfig>,
+    source_url: &str,
+    schema: Option<&str>,
+    filter: &TableFilter,
     #[cfg_attr(not(feature = "oracle"), allow(unused_variables))] cdc: bool,
+    unreadable: &mut Vec<String>,
 ) -> Result<Vec<TableInfo>> {
     match source_type(source_url)? {
         "postgres" => {
@@ -1571,7 +1647,9 @@ fn introspect_all(
             );
             let mut out = Vec::with_capacity(names.len());
             for n in names {
-                if let Some(mut info) = scan_step(postgres::introspect(&mut client, sch, &n))? {
+                if let Some(mut info) =
+                    scan_step(postgres::introspect(&mut client, sch, &n), unreadable)?
+                {
                     postgres::density_probe(&mut client, &mut info);
                     out.push(info)
                 }
@@ -1606,10 +1684,7 @@ fn introspect_all(
             let names = retain_filtered(catalog_order(mysql::list_tables(&mut conn, &db)?), filter);
             let mut out = Vec::with_capacity(names.len());
             for n in names {
-                // MySQL was the one arm WITHOUT the vanished-table tolerance: a
-                // BROKEN VIEW (listed, zero columns once its base is dropped)
-                // made every schema-wide init fail — see scan_step.
-                if let Some(mut info) = scan_step(mysql::introspect(&mut conn, &n))? {
+                if let Some(mut info) = scan_step(mysql::introspect(&mut conn, &n), unreadable)? {
                     mysql::density_probe(&mut conn, &mut info);
                     out.push(info);
                 }
@@ -1627,7 +1702,9 @@ fn introspect_all(
             let names = retain_filtered(catalog_order(mssql::list_tables(&mut conn, sch)?), filter);
             let mut out = Vec::with_capacity(names.len());
             for n in names {
-                if let Some(mut info) = scan_step(mssql::introspect(&mut conn, sch, &n))? {
+                if let Some(mut info) =
+                    scan_step(mssql::introspect(&mut conn, sch, &n), unreadable)?
+                {
                     mark_mssql_catalog_exact(&mut info);
                     out.push(info)
                 }
@@ -1642,7 +1719,9 @@ fn introspect_all(
             names.retain(|n| filter.matches_folded(n));
             let mut out = Vec::with_capacity(names.len());
             for n in names {
-                if let Some(info) = scan_step(oracle::introspect(&mut conn, &owner, &n, cdc))? {
+                if let Some(info) =
+                    scan_step(oracle::introspect(&mut conn, &owner, &n, cdc), unreadable)?
+                {
                     out.push(info)
                 }
             }
@@ -2316,32 +2395,26 @@ mod tests {
         );
     }
 
-    /// Both mutants of `scan_step`'s guard, killed where the CI gate can see
-    /// them: the whole-schema scan is a live-only path, so `guard -> true` and
-    /// `guard -> false` survived `cargo mutants -- --lib --bins` on PR #245
-    /// until the decision was extracted into this pure function.
+    /// A vanished table is skipped, any other error aborts the scan, a table passes through.
     #[test]
     fn scan_step_skips_only_the_vanished_table_shape() {
-        // The real message every engine's introspect emits for the shape.
         let vanished = Err(anyhow::anyhow!(
             "Table 'qa_broken_v' not found or has no columns. Check the table name \
              and that the user has SELECT privilege."
         ));
         assert!(
-            matches!(scan_step(vanished), Ok(None)),
+            matches!(scan_step(vanished, &mut Vec::new()), Ok(None)),
             "a listed-but-vanished table (dropped mid-scan, or a broken view) must be \
              SKIPPED — aborting on it is how one stale view failed every schema-wide init"
         );
 
-        // `guard -> true` makes EVERY error a skip; this is what kills it.
         let real = Err(anyhow::anyhow!("connection refused (os error 61)"));
         assert!(
-            scan_step(real).is_err(),
+            scan_step(real, &mut Vec::new()).is_err(),
             "any other error must ABORT the scan — swallowing a connection drop emits a \
              silently truncated scaffold that reads as a small schema"
         );
 
-        // And the pass-through, so the extraction cannot quietly drop tables.
         let info = TableInfo {
             cdc_capture_instance: None,
             cdc_unmineable: None,
@@ -2352,7 +2425,11 @@ mod tests {
             columns: Vec::new(),
             density: None,
         };
-        assert!(matches!(scan_step(Ok(info)), Ok(Some(i)) if i.table == "t"));
+        let mut unreadable = Vec::new();
+        assert!(
+            matches!(scan_step(Ok((info, None)), &mut unreadable), Ok(Some(i)) if i.table == "t")
+        );
+        assert!(unreadable.is_empty());
     }
 
     use super::*;
@@ -2421,6 +2498,69 @@ mod tests {
             total_bytes: None,
             columns: cols,
         }
+    }
+
+    fn scan_table(name: &str, rows: i64, columns: Vec<ColumnInfo>) -> TableInfo {
+        TableInfo {
+            table: name.into(),
+            ..make_table(rows, columns)
+        }
+    }
+
+    fn indexed(name: &str, ty: &str) -> ColumnInfo {
+        ColumnInfo {
+            is_indexed: true,
+            ..col(name, ty, false)
+        }
+    }
+
+    fn readable_scan_tables() -> Vec<TableInfo> {
+        vec![
+            scan_table(
+                "a_orders",
+                5_000_000,
+                vec![
+                    col("id", "bigint", true),
+                    col("created_at", "timestamp", false),
+                    col("status", "text", false),
+                ],
+            ),
+            scan_table(
+                "b_events",
+                150_000,
+                vec![col("id", "uuid", true), col("payload", "text", false)],
+            ),
+            scan_table(
+                "c_small",
+                100,
+                vec![col("code", "varchar", true), col("note", "text", false)],
+            ),
+            scan_table(
+                "d_wide",
+                150_000,
+                vec![
+                    col("sku", "varchar", true),
+                    indexed("shard", "int"),
+                    col("title", "text", false),
+                ],
+            ),
+        ]
+    }
+
+    fn locked_small_table() -> TableInfo {
+        scan_table(
+            "y_locked_small",
+            100,
+            vec![col("code", "varchar", true), col("note", "text", false)],
+        )
+    }
+
+    fn locked_big_table() -> TableInfo {
+        scan_table(
+            "z_locked_big",
+            150_000,
+            vec![col("id", "uuid", true), col("payload", "text", false)],
+        )
     }
 
     /// #148 (roast 2026-08-09): avg_row_bytes must return None once the density
@@ -2766,15 +2906,127 @@ mod tests {
         assert_eq!(make_table(100_001, columns()).suggest_mode(), "chunked");
     }
 
-    /// The probe failure is coded, names the table, the cause and the remedy.
+    /// A single-table init stops on a table whose types could not be read, coded, naming the table, the cause and the remedy.
     #[test]
-    fn a_failed_type_probe_is_coded_and_names_the_table_the_cause_and_the_remedy() {
-        let e = keyset_probe_context(anyhow::anyhow!("permission denied"), "s.t");
+    fn a_named_table_whose_types_cannot_be_read_stops_init_with_the_cause_and_the_remedy() {
+        let table = || scan_table("t", 10, vec![col("id", "bigint", true)]);
+        let e = require_readable((
+            TableInfo {
+                schema: "s".into(),
+                ..table()
+            },
+            Some("permission denied for table t".into()),
+        ))
+        .unwrap_err();
         crate::error::assert_coded(&e, "RIVET_INIT_TABLE_UNREADABLE", 1);
         assert_eq!(
             format!("{e:#}"),
-            "init: reading the column types of s.t to choose its keyset key failed: permission denied; grant SELECT on s.t or leave it out of init"
+            "init: reading the column types of s.t to choose its keyset key failed: permission denied for table t; grant SELECT on s.t or leave it out of init"
         );
+        let bare = require_readable((
+            TableInfo {
+                schema: String::new(),
+                ..table()
+            },
+            Some("denied".into()),
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{bare:#}").contains("column types of t to choose"),
+            "{bare:#}"
+        );
+        assert_eq!(require_readable((table(), None)).unwrap().table, "t");
+    }
+
+    /// A schema scan keeps an unreadable table, records it, and warns in coded words with the table, the cause and the remedy.
+    #[test]
+    fn a_scan_keeps_an_unreadable_table_and_names_it_in_a_coded_warning() {
+        let mut unreadable = Vec::new();
+        let kept = scan_step(
+            Ok((locked_small_table(), Some("permission denied".into()))),
+            &mut unreadable,
+        )
+        .unwrap();
+        assert_eq!(kept.unwrap().table, "y_locked_small");
+        assert_eq!(unreadable, vec!["public.y_locked_small".to_string()]);
+        assert_eq!(
+            unreadable_table_warning("public.y_locked_small", "permission denied"),
+            "rivet: WARN [RIVET_INIT_TABLE_UNREADABLE] init: reading the column types of public.y_locked_small failed: permission denied; public.y_locked_small is scaffolded without a keyset key; grant SELECT on public.y_locked_small or leave it out of init\n"
+        );
+    }
+
+    /// A scan stops only when it found tables and could read none of them.
+    #[test]
+    fn a_scan_stops_only_when_no_table_could_be_read() {
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let e = refuse_unreadable_scan(2, &names(&["public.a", "public.b"])).unwrap_err();
+        crate::error::assert_coded(&e, "RIVET_INIT_TABLE_UNREADABLE", 1);
+        assert_eq!(
+            format!("{e:#}"),
+            "init: the column types of none of the 2 table(s) in the scan could be read: public.a, public.b; grant SELECT on them or point --schema at a schema the user can read"
+        );
+        assert!(refuse_unreadable_scan(2, &names(&["public.a"])).is_ok());
+        assert!(refuse_unreadable_scan(2, &[]).is_ok());
+        assert!(refuse_unreadable_scan(0, &[]).is_ok());
+    }
+
+    /// A failed probe marks every column `not_keyset` and returns the cause; a good probe returns none.
+    #[test]
+    fn a_failed_probe_marks_every_column_not_keyset_and_returns_the_cause() {
+        let mut columns = vec![col("id", "bigint", true), col("n", "text", false)];
+        let cause = probe_keyset_refusals(
+            crate::config::SourceType::Postgres,
+            &mut columns,
+            Err(anyhow::anyhow!("permission denied")),
+            || unreachable!("the catalog is not asked when the probe failed"),
+        )
+        .unwrap();
+        assert_eq!(cause.as_deref(), Some("permission denied"));
+        assert!(columns.iter().all(|c| c.not_keyset));
+        let asked = std::cell::Cell::new(false);
+        let mut readable = vec![col("id", "bigint", true)];
+        let cause = probe_keyset_refusals(
+            crate::config::SourceType::Postgres,
+            &mut readable,
+            Ok(Vec::new()),
+            || {
+                asked.set(true);
+                Ok(Vec::new())
+            },
+        )
+        .unwrap();
+        assert!(cause.is_none() && asked.get());
+    }
+
+    /// Readable tables of a scan that also holds unreadable ones scaffold byte for byte as main scaffolded them.
+    #[test]
+    fn readable_tables_scaffold_as_main_did_beside_unreadable_ones() {
+        let main_readable = include_str!("fixtures/scan_readable_as_main.yaml");
+        let mut readable = readable_scan_tables();
+        readable.push(locked_small_table());
+        assert_eq!(schema_scaffold(&readable, None).text, main_readable);
+
+        let mut scan = readable_scan_tables();
+        for mut t in [locked_small_table(), locked_big_table()] {
+            let cause = probe_keyset_refusals(
+                crate::config::SourceType::Postgres,
+                &mut t.columns,
+                Err(anyhow::anyhow!("permission denied")),
+                || Ok(Vec::new()),
+            )
+            .unwrap();
+            assert!(cause.is_some());
+            scan.push(t);
+        }
+        let text = schema_scaffold(&scan, None).text;
+        let tail = text
+            .strip_prefix(main_readable)
+            .expect("every readable export and the small unreadable one are main's bytes");
+        assert!(
+            tail.contains("name: z_locked_big") && tail.contains("mode: full"),
+            "{tail}"
+        );
+        assert!(!tail.contains("chunk_by_key"), "{tail}");
     }
 
     /// Init marks a column `not_keyset` exactly when the planner's `admit_keyset_keys` refuses it, for every type on every engine.

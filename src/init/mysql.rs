@@ -71,7 +71,7 @@ pub(super) fn list_tables(conn: &mut mysql::PooledConn, database: &str) -> Resul
     Ok(rows)
 }
 
-pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<TableInfo> {
+pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<super::Introspected> {
     // Row estimate + on-disk size from information_schema (fast, no COUNT(*)).
     let row_and_size: Option<(Option<u64>, Option<u64>, Option<u64>)> =
         conn.exec_first(TABLE_STATS_SQL, (table,))?;
@@ -115,15 +115,18 @@ pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<Ta
             },
         )
         .collect();
-    let mappings = crate::source::mysql::type_mappings_on(
-        conn,
-        &super::select_all(SourceType::Mysql, &[table]),
-        &ColumnOverrides::default(),
-    )
-    .map_err(|e| super::keyset_probe_context(e, table))?;
-    super::mark_keyset_refusals(SourceType::Mysql, &mut columns, &mappings, &[]);
+    let unreadable = super::probe_keyset_refusals(
+        SourceType::Mysql,
+        &mut columns,
+        crate::source::mysql::type_mappings_on(
+            conn,
+            &super::select_all(SourceType::Mysql, &[table]),
+            &ColumnOverrides::default(),
+        ),
+        || Ok(Vec::new()),
+    )?;
 
-    Ok(TableInfo {
+    let info = TableInfo {
         cdc_capture_instance: None,
         cdc_unmineable: None,
         density: None,
@@ -132,7 +135,8 @@ pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<Ta
         row_estimate,
         total_bytes,
         columns,
-    })
+    };
+    Ok((info, unreadable))
 }
 
 /// First-run density probe (#148) — MySQL is the primary target: `TABLE_ROWS`
