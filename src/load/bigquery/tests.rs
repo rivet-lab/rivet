@@ -1319,7 +1319,7 @@ fn an_unpartitioned_target_packs_into_one_job_without_reading_footers() {
     let partition = partition_at(time_key(Some("ts"), Granularity::Day), None, false);
     let loader = BigQueryLoader::new("p", "d")
         .partition(partition.clone())
-        .batched_by_footers(dest);
+        .staged_under(dest);
     let uris = uris();
     assert_eq!(loader.batches(&uris, None).unwrap(), vec![uris.clone()]);
     assert!(loader.batches(&uris, Some(&partition)).is_err());
@@ -1861,7 +1861,6 @@ fn row_count_as(
 
 /// A GCS destination's named key signs the BigQuery load, never the ambient ADC identity.
 #[test]
-#[ignore = "open defect HFF-1; closes with fix/destination-credential-every-leg"]
 fn a_bigquery_load_signs_with_the_destinations_named_key() {
     let stand = minting_stand();
     let dir = tempfile::tempdir().unwrap();
@@ -1880,7 +1879,6 @@ fn a_bigquery_load_signs_with_the_destinations_named_key() {
 
 /// A destination's named key beside a static `RIVET_BQ_ACCESS_TOKEN` is two named identities: refused by code before any BigQuery request.
 #[test]
-#[ignore = "open defect HFF-1; closes with fix/destination-credential-every-leg"]
 fn a_named_key_beside_a_static_bigquery_token_is_refused_by_code() {
     let stand = minting_stand();
     let dir = tempfile::tempdir().unwrap();
@@ -1919,4 +1917,31 @@ fn a_destination_with_no_named_key_loads_as_the_ambient_identity_or_the_static_t
             .collect::<std::collections::BTreeSet<_>>(),
         ["Bearer tok-static".to_string()].into(),
     );
+}
+
+/// A named key BigQuery cannot mint a token from is refused by code, never replaced by the ambient identity.
+#[test]
+fn a_named_key_bigquery_cannot_mint_is_refused_not_replaced() {
+    let stand = minting_stand();
+    let dir = tempfile::tempdir().unwrap();
+    let ambient = key_file(&dir, &stand, "ambient");
+    let path = dir.path().join("impersonated.json");
+    std::fs::write(
+        &path,
+        r#"{"type":"impersonated_service_account","delegates":[],"service_account_impersonation_url":"https://iamcredentials.googleapis.com/x:generateAccessToken","source_credentials":{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r"}}"#,
+    )
+    .unwrap();
+    let err = row_count_as(
+        &stand,
+        Some(path.to_string_lossy().into_owned()),
+        &ambient,
+        "",
+    )
+    .expect_err("a key rivet cannot mint is refused");
+    crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+    assert!(
+        format!("{err:#}").contains("only a service_account key is signed in process"),
+        "{err:#}"
+    );
+    assert_eq!(api_authorizations(&stand), Vec::<String>::new());
 }

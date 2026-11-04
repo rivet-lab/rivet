@@ -3,7 +3,7 @@ use opendal::Operator;
 use opendal::services::Azblob;
 
 use super::cloud::{CloudBackend, CloudDestination};
-use crate::config::DestinationConfig;
+use crate::config::{DestinationConfig, DestinationCredential};
 use crate::error::Result;
 
 /// Threshold under which a SAS token is considered "near expiry" and a
@@ -206,50 +206,29 @@ impl CloudBackend for AzureBackend {
             }
         }
 
-        if config.allow_anonymous {
-            // Azurite emulator and public read-only containers.  Skip every
-            // auth path — opendal will still talk to the endpoint but won't
-            // attach `Authorization`.
-            log::info!("Azure: allow_anonymous (Azurite emulator or public container)");
-        } else {
-            let account_name = config.account_name.as_deref().ok_or_else(|| {
-                crate::error::coded(crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID, "Azure destination requires 'account_name' (or 'allow_anonymous: true' for Azurite)")
-            })?;
-            builder = builder.account_name(account_name);
-
-            // v0.7.2 P0.4: account_key_env XOR sas_token_env.  Both being
-            // set means the operator copy-pasted two auth blocks and we
-            // can't safely pick one — fail loud.
-            match (&config.account_key_env, &config.sas_token_env) {
-                (Some(_), Some(_)) => crate::rivet_bail!(
-                    crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
-                    "Azure destination: 'account_key_env' and 'sas_token_env' are mutually exclusive — pick one auth mode"
-                ),
-                (Some(env_name), None) => {
-                    let key = read_credential_env(env_name, "account key")?;
-                    builder = builder.account_key(key.as_str());
-                }
-                (None, Some(env_name)) => {
-                    let raw = read_credential_env(env_name, "SAS token")?;
-                    // Operators copy the full `?sv=…&sig=…` URL fragment from
-                    // the portal — trim the leading `?` so opendal's
-                    // signer sees the raw token body.  Defensive: opendal
-                    // currently tolerates the `?`, but a future version
-                    // may not.
-                    let token = raw.trim_start_matches('?');
-                    // Preflight `se=` (v0.7.4): fail fast on already-expired
-                    // tokens, warn on near-expiry, stay silent otherwise.
-                    // This runs before opendal touches the wire so a stale
-                    // SAS produces a Rivet-shaped error message instead of
-                    // an opaque 403 on the first PUT.
-                    enforce_sas_expiry(token)?;
-                    builder = builder.sas_token(token);
-                }
-                (None, None) => crate::rivet_bail!(
-                    crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
-                    "Azure destination requires 'account_key_env' or 'sas_token_env' (or 'allow_anonymous: true' for Azurite)"
-                ),
+        match DestinationCredential::choose(config, "destination")? {
+            DestinationCredential::Anonymous => {
+                log::info!("Azure: allow_anonymous (Azurite emulator or public container)");
             }
+            DestinationCredential::AzureKey {
+                account_name,
+                key_env,
+            } => {
+                builder = builder.account_name(&account_name);
+                let key = read_credential_env(&key_env, "account key")?;
+                builder = builder.account_key(key.as_str());
+            }
+            DestinationCredential::AzureSas {
+                account_name,
+                sas_env,
+            } => {
+                builder = builder.account_name(&account_name);
+                let raw = read_credential_env(&sas_env, "SAS token")?;
+                let token = raw.trim_start_matches('?');
+                enforce_sas_expiry(token)?;
+                builder = builder.sas_token(token);
+            }
+            _ => {}
         }
 
         Ok(Operator::new(builder)?.finish())

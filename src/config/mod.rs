@@ -2,6 +2,7 @@ mod cdc;
 pub(crate) mod credential_file;
 pub mod cursor;
 pub(crate) mod destination;
+pub(crate) mod destination_credential;
 mod export;
 mod format;
 mod gcp_secret;
@@ -18,6 +19,7 @@ pub(crate) mod url;
 pub use cdc::*;
 pub use cursor::IncrementalCursorMode;
 pub use destination::*;
+pub(crate) use destination_credential::DestinationCredential;
 pub use export::*;
 pub use format::*;
 pub use notifications::*;
@@ -1286,61 +1288,7 @@ impl Config {
             }
         }
 
-        if export.destination.destination_type == DestinationType::S3 {
-            let ak = export.destination.access_key_env.is_some();
-            let sk = export.destination.secret_key_env.is_some();
-            if ak != sk {
-                crate::config_bail!(
-                    crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
-                    "export '{}': S3 requires both access_key_env and secret_key_env, or neither (use default AWS credential chain)",
-                    export.name
-                );
-            }
-        }
-
-        if export.destination.destination_type == DestinationType::Gcs
-            && export.destination.allow_anonymous
-            && export.destination.credentials_file.is_some()
-        {
-            crate::config_bail!(
-                crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
-                "export '{}': GCS allow_anonymous cannot be used together with credentials_file",
-                export.name
-            );
-        }
-
-        if export.destination.destination_type == DestinationType::Azure {
-            let has_name = export.destination.account_name.is_some();
-            let has_key = export.destination.account_key_env.is_some();
-            let has_sas = export.destination.sas_token_env.is_some();
-            if export.destination.allow_anonymous {
-                if has_name || has_key || has_sas {
-                    crate::config_bail!(
-                        crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
-                        "export '{}': Azure allow_anonymous cannot be combined with account_name/account_key_env/sas_token_env",
-                        export.name
-                    );
-                }
-            } else if has_key && has_sas {
-                crate::config_bail!(
-                    crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
-                    "export '{}': Azure account_key_env and sas_token_env are mutually exclusive — pick one auth mode",
-                    export.name
-                );
-            } else if !has_name {
-                crate::config_bail!(
-                    crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
-                    "export '{}': Azure requires account_name (plus account_key_env or sas_token_env), or allow_anonymous: true for Azurite",
-                    export.name
-                );
-            } else if !has_key && !has_sas {
-                crate::config_bail!(
-                    crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
-                    "export '{}': Azure requires account_key_env or sas_token_env (or allow_anonymous: true for Azurite)",
-                    export.name
-                );
-            }
-        }
+        DestinationCredential::choose(&export.destination, &format!("export '{}'", export.name))?;
 
         Ok(())
     }

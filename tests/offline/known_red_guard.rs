@@ -27,7 +27,8 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 11 -> 13 (2026-11-03): the gc_orphans-beside-a-CDC-run's-first-roll cells on MySQL and PostgreSQL, open defect CDC-RUN-START (fix/cdc-run-start-marker).
 // 13 -> 14 (2026-11-04): the MySQL CDC negative TIME(1)/(2) fraction cell (TF-1, closes with fix/mysql-binlog-time-fraction).
 // 14 -> 15 (2026-11-04): the S3 profile-beside-env-keys cell, open defect HFF-2 (closes with fix/destination-credential-every-leg).
-const ENTRY_CEILING: usize = 15; // ratchet-pin: known-red-entries
+// 15 -> 14 (2026-11-04): the S3 profile-beside-env-keys cell is a plain cell again (fix/destination-credential-every-leg).
+const ENTRY_CEILING: usize = 14; // ratchet-pin: known-red-entries
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
