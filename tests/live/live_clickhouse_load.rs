@@ -1062,6 +1062,94 @@ fn a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_postgr
     );
 }
 
+#[test]
+#[ignore = "live+gate-only: open defect CDC-RUN-START; closes with fix/cdc-run-start-marker"]
+fn open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = seeded("rivet_ch_start", 5);
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chload");
+    let loader = staged_at(Rig::mysql_cdc(&tbl), &prefix).top_line(&load_line(
+        db.1,
+        &db,
+        ", gc_orphans: true",
+    ));
+    let runner = staged_at(
+        Rig::mysql_cdc(&tbl)
+            .export_named(loader.export_name())
+            .checkpoint_path(loader.checkpoint())
+            .cdc("rollover: 3"),
+        &prefix,
+    );
+    a_load_from_another_state_db_crosses_a_rolling_cdc_run(
+        loader,
+        runner,
+        &format!("{}.{tbl}", db.0),
+        1,
+        || {
+            let mut c = conn();
+            for i in 6..=14 {
+                c.query_drop(format!("INSERT INTO {tbl} (id, v) VALUES ({i}, {i})"))
+                    .expect("the backlog");
+            }
+        },
+        || source_rows(&tbl),
+    );
+}
+
+#[test]
+#[ignore = "live+gate-only: open defect CDC-RUN-START; closes with fix/cdc-run-start-marker"]
+fn open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let tbl = unique_name("rivet_ch_pgstart");
+    let slot = unique_name("rivet_ch_pgstart_slot");
+    let _slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, v BIGINT); \
+         INSERT INTO {tbl} SELECT g, g FROM generate_series(1, 5) g"
+    ))
+    .expect("seed");
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chload");
+    let loader = staged_at(Rig::pg_cdc(&tbl, &slot), &prefix).top_line(&load_line(
+        db.1,
+        &db,
+        ", gc_orphans: true",
+    ));
+    let runner = staged_at(
+        Rig::pg_cdc(&tbl, &slot)
+            .export_named(loader.export_name())
+            .checkpoint_path(loader.checkpoint())
+            .cdc("rollover: 3"),
+        &prefix,
+    );
+    let mut writer = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+    a_load_from_another_state_db_crosses_a_rolling_cdc_run(
+        loader,
+        runner,
+        &format!("{}.{tbl}", db.0),
+        1,
+        || {
+            for i in 6..=14 {
+                writer
+                    .batch_execute(&format!("INSERT INTO {tbl} VALUES ({i}, {i})"))
+                    .expect("the backlog");
+            }
+        },
+        || {
+            let mut reader =
+                postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+            pg_rows(&mut reader, &tbl)
+        },
+    );
+}
+
 /// A materialized view on the change log writes rows of its own; the load's count
 /// must be the rows it inserted, or every load after the view is attached refuses.
 #[test]

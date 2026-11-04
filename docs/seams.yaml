@@ -66,3 +66,14 @@ seams:
       - "active_running_run_ids ("
       - "has_active_running_manifest ("
     exceptions: []
+  - id: config-knob-quantity
+    owner: src/config/quantity.rs::Knob
+    reads: "a numeric config knob or CLI flag: its range, what 0 means, and the bytes, rows, key span or ratio the runtime uses"
+    bypass:
+      - "chunk_size as i64"
+      - "effective_chunk_size as i64"
+      - "( max_val - min_val )"
+      - "checked_sub ( min_i )"
+      - "rollover : a . rollover"
+      - "page . max ( 1 )"
+    exceptions: []

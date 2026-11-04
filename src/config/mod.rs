@@ -8,6 +8,7 @@ mod gcp_secret;
 mod lints;
 pub mod load;
 mod notifications;
+pub(crate) mod quantity;
 pub mod resolve;
 pub mod schema;
 pub(crate) mod snowflake_account;
@@ -26,6 +27,7 @@ pub use resolve::{parse_file_size, resolve_vars};
 pub use schema::generate_config_schema_pretty;
 pub use source::*;
 
+use quantity::Knob;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -786,6 +788,9 @@ impl Config {
         // (no `page_size`) keeps no checkpoint, so `resume: true` is silently
         // ignored — the whole collection re-reads every run (roast 2026-08-09,
         // sibling of the parallel+resume reject above).
+        if let Some(page) = self.source.mongo.as_ref().and_then(|m| m.page_size) {
+            Knob::PAGE_SIZE.validate_source(page)?;
+        }
         if let Some(m) = self.source.mongo.as_ref()
             && m.resume
             && m.page_size.is_none()
@@ -1162,6 +1167,10 @@ impl Config {
             );
         }
 
+        if let Some(q) = &export.quality {
+            Knob::ratios(&format!("export '{}'", export.name), &q.null_ratio_max)?;
+        }
+
         let merged =
             crate::tuning::merge_tuning_config(self.source.tuning.as_ref(), export.tuning.as_ref());
         if let Some(t) = merged
@@ -1477,17 +1486,7 @@ impl Config {
                         export.name
                     );
                 }
-                // chunk_size == 0 would divide the range into zero-width
-                // slices and (before the saturating fix in generate_chunks)
-                // either infinite-loop or produce no progress. QA backlog
-                // Task 5.1.
-                if export.chunk_size == 0 {
-                    crate::config_bail!(
-                        crate::error::codes::CONFIG_MODE_SETTING_INVALID,
-                        "export '{}': chunked mode requires chunk_size >= 1 (got 0)",
-                        export.name
-                    );
-                }
+                Knob::CHUNK_SIZE.validate_export(&export.name, export.chunk_size)?;
                 // parallel == 0 means "spawn zero workers". Claiming tasks
                 // with no workers stalls the pipeline. QA backlog Task 5.1.
                 if export.parallel == 0 {
@@ -1497,12 +1496,8 @@ impl Config {
                         export.name
                     );
                 }
-                if let Some(0) = export.chunk_count {
-                    crate::config_bail!(
-                        crate::error::codes::CONFIG_CHUNK_COUNT_INVALID,
-                        "export '{}': chunk_count must be >= 1",
-                        export.name
-                    );
+                if let Some(count) = export.chunk_count {
+                    Knob::CHUNK_COUNT.validate_export(&export.name, count)?;
                 }
                 if export.chunk_count.is_some() && export.chunk_by_days.is_some() {
                     crate::config_bail!(
