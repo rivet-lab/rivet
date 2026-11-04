@@ -26,6 +26,10 @@ gate_profiles:
   tz:          {services: [clickhouse-tz],        url: "http://127.0.0.1:8125"}
   mysql-stmt:  {services: [mysql-stmt-84-lctn1],  url: "mysql://root@127.0.0.1:3333"}
   clickhouse:  {services: [clickhouse],           url: "http://127.0.0.1:8123", profile: ""}
+  governor:    {services: [mssql-governor],       url: "sqlserver://sa:Rivet_Passw0rd!@127.0.0.1:1435/rivet"}
+  minio:       {services: [minio],                url: "http://127.0.0.1:9000", profile: ""}
+  fake-gcs:    {services: [fake-gcs],             url: "http://127.0.0.1:4443", profile: ""}
+  azurite:     {services: [azurite],              url: "http://127.0.0.1:10000", profile: ""}
 
 # Persistent databases on every source: `rivet` (tests, gate) and `rivet_bench` (the seeded
 # 1M-row harness fixture, expensive to rebuild). Nothing else is permanent.
