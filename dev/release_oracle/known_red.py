@@ -63,6 +63,18 @@ _KEYSET_KEY_ONE_CHUNK = (
 
 
 KNOWN_RED: tuple[KnownRed, ...] = (
+    _open("live_stop_class::open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql",
+          "refusal contract: the invocation ended with [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 2), expected [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 1)",
+          "VP-8 (seam stop-class, 2026-11-04): a missing table refused by a coded Environment stop exits by the words of the name the operator chose, because stop_class returns None for the kind and classify_exit reads the message text, which holds the name; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exits 2 where PG and MySQL exit 1 for the same refusal. Opened 2026-11-04; closes with fix/stop-class-by-code"),
+    _open("live_stop_class::open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle",
+          "refusal contract: the invocation ended with [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 2), expected [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 1)",
+          "VP-8 (seam stop-class, 2026-11-04): a missing table refused by a coded Environment stop exits by the words of the name the operator chose, because stop_class returns None for the kind and classify_exit reads the message text, which holds the name; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exits 2 where PG and MySQL exit 1 for the same refusal. Opened 2026-11-04; closes with fix/stop-class-by-code"),
+    _open("live_stop_class::open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo",
+          "refusal contract: the invocation ended with [RIVET_SOURCE_COLLECTION_NOT_FOUND] (exit 2), expected [RIVET_SOURCE_COLLECTION_NOT_FOUND] (exit 1)",
+          "VP-8 (seam stop-class, 2026-11-04): a missing collection refused by a coded Environment stop exits by the words of the name the operator chose, because stop_class returns None for the kind and classify_exit reads the message text, which holds the name; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exits 2 where PG and MySQL exit 1 for the same refusal. Opened 2026-11-04; closes with fix/stop-class-by-code"),
+    _open("live_stop_class::open_defect_an_mssql_read_blocked_past_its_lock_timeout_exits_retryable",
+          "assertion `left == right` failed: a lock wait that timed out clears when the lock does: retryable",
+          "MT-F-F (seam stop-class, 2026-11-04): MSSQL error 1222 (lock request time out) reaches the stop as a stringified SOURCE_QUERY_FAILED whose text the retry classifier does not know, so a read that timed out on a held lock exits 1 where the same wait on MySQL (1205) exits 2. Opened 2026-11-04; closes with fix/stop-class-by-code"),
     _open("live_cdc_mbt::open_defect_mysql_cdc_enum_set_labels_match_the_snapshot",
           'rig oracle: VALUES: 6 source row(s) not delivered, 6 delivered row(s) not in the source; differing column(s) [\'e\', \'s\'] of [\'id\', \'e\', \'s\']; source-only [\'[["num", "1"], "C:\\\\\\\\temp", "p\\\\\\\\q,r\\\\ns"]\', \'[["num", "2"], "a\\\\nb", "r\\\\ns,t\\\\ru"]\', \'[["num", "3"], "c\\\\rd", "t\\\\ru,v\\\\u0000w"]\', \'[["num", ',
           "TF-2 (consolidated-2026-11-03 section 2): parse_enum_labels (src/source/cdc/value.rs) reverses only the doubled quote of MySQL's append_unescaped, so a label holding a backslash, LF, CR or NUL reaches the stream with the catalog's escaping while the snapshot holds the stored label. Opened 2026-11-03; closes with fix/mysql-enum-label-escapes"),

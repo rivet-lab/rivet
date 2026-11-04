@@ -1820,7 +1820,8 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
                  "-e", "MYSQL_ROOT_PASSWORD=rivet", "-e", "MYSQL_DATABASE=rivet",
                  "-e", "MYSQL_USER=rivet", "-e", "MYSQL_PASSWORD=rivet", "-p", f"{port}:3306"]
     elif engine == "mssql":
-        args += ["--memory", "3g", "-e", "MSSQL_MEMORY_LIMIT_MB=2048",
+        from . import stand_memory
+        args += ["--memory", stand_memory.MSSQL_MEM_LIMIT, "-e", f"MSSQL_MEMORY_LIMIT_MB={stand_memory.MSSQL_LIMIT_MB}",
                  "-e", "ACCEPT_EULA=Y", "-e", "MSSQL_SA_PASSWORD=Rivet_Passw0rd!", "-p", f"{port}:1433"]
     elif engine == "mongo":
         args += ["--memory", "1g", "-p", f"{port}:27017"]
