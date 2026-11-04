@@ -1632,6 +1632,7 @@ mod tests {
         single_int_pk: Option<String>,
         finer: bool,
         row_estimate: i64,
+        queries: Vec<String>,
     }
 
     impl KeyedCatalog {
@@ -1644,6 +1645,7 @@ mod tests {
                 single_int_pk: None,
                 finer: false,
                 row_estimate,
+                queries: Vec::new(),
             }
         }
     }
@@ -1673,9 +1675,10 @@ mod tests {
         }
         fn type_mappings(
             &mut self,
-            _query: &str,
+            query: &str,
             _column_overrides: &crate::types::ColumnOverrides,
         ) -> Result<Vec<crate::types::TypeMapping>> {
+            self.queries.push(query.to_string());
             Ok(vec![self.mapping.clone()])
         }
     }
@@ -1718,6 +1721,131 @@ mod tests {
         match &plan.strategy {
             ExtractionStrategy::Keyset(k) => Some(format!("{}:{}", k.key_column, k.chunk_size)),
             _ => None,
+        }
+    }
+
+    fn keys_after_probe(
+        source_type: SourceType,
+        mut catalog: KeyedCatalog,
+        export: &ExportConfig,
+    ) -> (Vec<String>, Vec<String>) {
+        let introspection = introspect_table(&mut catalog, source_type, "t", export)
+            .expect("the catalog probe answers");
+        (introspection.keyset_keys, catalog.queries)
+    }
+
+    fn chunked_by(chunk_by_key: Option<&[&str]>, chunk_column: Option<&str>) -> ExportConfig {
+        let mut export = minimal_export();
+        export.mode = ExportMode::Chunked;
+        export.query = None;
+        export.table = Some("t".into());
+        export.chunk_column = chunk_column.map(Into::into);
+        export.chunk_by_key = chunk_by_key.map(|cols| {
+            crate::config::ChunkKey::new(cols.iter().map(|c| c.to_string()).collect())
+                .expect("a key")
+        });
+        export
+    }
+
+    /// The catalog probe checks the offered keys against the delivered types exactly when the keyset will page by a single-column key.
+    #[test]
+    fn the_catalog_probe_checks_the_offered_keys_only_when_the_keyset_pages_by_a_single_key() {
+        use crate::types::RivetType;
+        let unusable = || KeyedCatalog::of(RivetType::Bool, 10);
+        let kept = vec!["k".to_string()];
+        let none: Vec<String> = Vec::new();
+
+        let named = chunked_by(Some(&["k"]), Some("id"));
+        for source in [
+            SourceType::Postgres,
+            SourceType::Mysql,
+            SourceType::Mssql,
+            SourceType::Oracle,
+        ] {
+            assert_eq!(
+                keys_after_probe(source, unusable(), &named).0,
+                none,
+                "{source:?} named"
+            );
+        }
+
+        let auto = chunked_by(None, None);
+        assert_eq!(
+            keys_after_probe(SourceType::Mysql, unusable(), &auto).0,
+            none
+        );
+        assert_eq!(
+            keys_after_probe(SourceType::Postgres, unusable(), &auto).0,
+            kept
+        );
+        assert_eq!(
+            keys_after_probe(SourceType::Mssql, unusable(), &auto).0,
+            kept
+        );
+        assert_eq!(
+            keys_after_probe(SourceType::Oracle, unusable(), &auto).0,
+            kept
+        );
+
+        let with_column = chunked_by(None, Some("id"));
+        assert_eq!(
+            keys_after_probe(SourceType::Mysql, unusable(), &with_column).0,
+            kept
+        );
+
+        let mut with_pk = unusable();
+        with_pk.single_int_pk = Some("id".into());
+        assert_eq!(keys_after_probe(SourceType::Mysql, with_pk, &auto).0, kept);
+
+        let composite = chunked_by(Some(&["k", "x"]), None);
+        assert_eq!(
+            keys_after_probe(SourceType::Postgres, unusable(), &composite).0,
+            kept
+        );
+    }
+
+    /// The probe reads the delivered types from the export's own select, or from the whole table when it has none.
+    #[test]
+    fn the_catalog_probe_reads_the_types_the_export_delivers() {
+        use crate::types::RivetType;
+        let whole = chunked_by(Some(&["k"]), None);
+        let (_, queries) = keys_after_probe(
+            SourceType::Postgres,
+            KeyedCatalog::of(RivetType::Int64, 10),
+            &whole,
+        );
+        assert_eq!(queries, vec!["SELECT * FROM t".to_string()]);
+
+        let mut selected = chunked_by(Some(&["k"]), None);
+        selected.table_select = Some("SELECT k FROM t WHERE live".into());
+        let (_, queries) = keys_after_probe(
+            SourceType::Postgres,
+            KeyedCatalog::of(RivetType::Int64, 10),
+            &selected,
+        );
+        assert_eq!(queries, vec!["SELECT k FROM t WHERE live".to_string()]);
+    }
+
+    /// A composite key reads the primary key and the columns a tuple cursor can advance.
+    #[test]
+    fn a_composite_key_reads_the_columns_a_tuple_cursor_can_advance() {
+        use crate::types::RivetType;
+        let composite = chunked_by(Some(&["k", "x"]), None);
+        for (rivet_type, advances) in [(RivetType::Int64, true), (RivetType::Bool, false)] {
+            let mut catalog = KeyedCatalog::of(rivet_type.clone(), 10);
+            let introspection =
+                introspect_table(&mut catalog, SourceType::Postgres, "t", &composite)
+                    .expect("the catalog probe answers");
+            assert_eq!(
+                introspection.tuple_cursor_columns,
+                if advances {
+                    vec!["k".to_string()]
+                } else {
+                    Vec::new()
+                },
+                "{rivet_type:?}"
+            );
+            assert_eq!(catalog.queries, vec!["SELECT * FROM t".to_string()]);
         }
     }
 

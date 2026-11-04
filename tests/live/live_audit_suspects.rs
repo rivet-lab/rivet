@@ -806,7 +806,7 @@ fn parallel_keyset_incremental_on_a_timestamptz_key_reads_each_row_once_in_a_tok
 #[ignore = "live: requires docker compose mssql"]
 fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row() {
     for (ty, base) in [
-        ("DATETIME2(7)", "2024-01-01 00:00:00.5"),
+        ("DATETIME2(6)", "2024-01-01 00:00:00.5"),
         ("DATETIME", "2024-01-01 00:00:00.997"),
     ] {
         let table = unique_name("ks_dtinc");

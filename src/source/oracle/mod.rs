@@ -864,15 +864,16 @@ fn introspect_oracle_on(
         .filter_map(|r| r.into_iter().next().flatten())
         .collect();
     let finer_than_microsecond = finer_than_microsecond_columns(src, &owner, &table)?;
-    Ok(crate::source::TableIntrospection {
+    let mut introspection = crate::source::TableIntrospection {
         single_int_pk,
         keyset_keys,
         row_estimate,
         avg_row_bytes: None,
         int_columns,
-        finer_than_microsecond,
         ..Default::default()
-    })
+    };
+    introspection.finer_than_microsecond = finer_than_microsecond;
+    Ok(introspection)
 }
 
 #[cfg(test)]

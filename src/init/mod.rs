@@ -2740,6 +2740,29 @@ mod tests {
         assert_eq!(t, "orders");
     }
 
+    /// `SELECT *` quotes every part of the name the way its engine quotes identifiers.
+    #[test]
+    fn select_all_quotes_each_part_for_its_engine() {
+        use crate::config::SourceType;
+        for (source, expected) in [
+            (SourceType::Postgres, "SELECT * FROM \"s\".\"t\""),
+            (SourceType::Mysql, "SELECT * FROM `s`.`t`"),
+            (SourceType::Mssql, "SELECT * FROM [s].[t]"),
+            (SourceType::Oracle, "SELECT * FROM \"s\".\"t\""),
+        ] {
+            assert_eq!(select_all(source, &["s", "t"]), expected, "{source:?}");
+        }
+        assert_eq!(select_all(SourceType::Mysql, &["t"]), "SELECT * FROM `t`");
+    }
+
+    /// A table of exactly 100000 rows is not large; one more is.
+    #[test]
+    fn a_table_is_large_for_chunking_one_row_past_100000() {
+        let columns = || vec![col("id", "bigint", true)];
+        assert_eq!(make_table(100_000, columns()).suggest_mode(), "full");
+        assert_eq!(make_table(100_001, columns()).suggest_mode(), "chunked");
+    }
+
     /// The probe failure names the table, the cause and the remedy.
     #[test]
     fn a_failed_type_probe_names_the_table_the_cause_and_the_remedy() {

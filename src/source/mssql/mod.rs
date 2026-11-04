@@ -1311,15 +1311,16 @@ fn introspect_mssql_on(src: &mut MssqlSource, qualified_table: &str) -> Result<T
         })
         .unwrap_or_default();
 
-    Ok(TableIntrospection {
+    let mut introspection = TableIntrospection {
         single_int_pk,
         keyset_keys,
         row_estimate,
         avg_row_bytes: None,
         int_columns,
-        finer_than_microsecond,
         ..Default::default()
-    })
+    };
+    introspection.finer_than_microsecond = finer_than_microsecond;
+    Ok(introspection)
 }
 
 #[cfg(test)]
