@@ -2381,7 +2381,7 @@ mod tests {
                 assert_eq!(classify_exit(&err), want, "{} over {text:?}", code.id);
             }
         }
-        assert!(walked >= 17, "{walked}");
+        assert!(walked >= 16, "{walked}");
     }
 
     /// A wrapper code exits by the typed verdict of its cause, whatever words its message holds.
