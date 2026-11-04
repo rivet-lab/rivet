@@ -267,7 +267,7 @@ services:
     <<: *mssql-limits
     environment:
       <<: *mssql-env
-      MSSQL_AGENT_ENABLED: "true"
+      MSSQL_AGENT_ENABLED: "true"   # the Agent runs the CDC capture job
     ports: ["1619:1433"]
     volumes:
       - mssql2019_cdc_data:/var/opt/mssql

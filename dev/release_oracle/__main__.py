@@ -71,7 +71,6 @@ from . import (
     shared_state,
     skip_census,
     stand_health,
-    stand_memory,
     state_parity,
     tls_downgrade,
     upgrade,
@@ -923,7 +922,7 @@ def _self_test() -> int:
     from .partner_shape import init_slot
     assert init_slot("    cdc:\n      slot: rivet_rivet_public_cdc  # logical slot\n") == "rivet_rivet_public_cdc"
     assert init_slot("mode: cdc\n") is None, "a config naming no slot names none"
-    from . import stand_disk, stand_profiles
+    from . import stand_disk, stand_memory, stand_profiles
     failure.self_test()
     stand_disk.self_test()
     stand_health.self_test()
@@ -1822,6 +1821,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
                  "-e", "MYSQL_ROOT_PASSWORD=rivet", "-e", "MYSQL_DATABASE=rivet",
                  "-e", "MYSQL_USER=rivet", "-e", "MYSQL_PASSWORD=rivet", "-p", f"{port}:3306"]
     elif engine == "mssql":
+        from . import stand_memory
         args += ["--memory", stand_memory.MSSQL_MEM_LIMIT, "-e", f"MSSQL_MEMORY_LIMIT_MB={stand_memory.MSSQL_LIMIT_MB}",
                  "-e", "ACCEPT_EULA=Y", "-e", "MSSQL_SA_PASSWORD=Rivet_Passw0rd!", "-p", f"{port}:1433"]
     elif engine == "mongo":
@@ -2044,6 +2044,7 @@ def _run_one_version(led: Ledger, ns: argparse.Namespace, engine: str, line: str
     parts = line.split()
     tag, image, port = parts[0], parts[1], int(parts[2])
     led.phase(f"{engine} {tag} ({image})")
+    from . import stand_memory
     url = ""
     with led.split(f"{engine} {tag}: bring-up"), stand_memory.admitted(engine, led.ok):
         try:

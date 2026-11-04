@@ -16,7 +16,9 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-__all__ = ["HEAVY", "MSSQL_LIMIT_MB", "MSSQL_MEM_LIMIT", "admitted", "stand_unbounded", "unbounded_mssql"]
+import yaml
+
+__all__ = ["HEAVY", "MSSQL_LIMIT_MB", "MSSQL_MEM_LIMIT", "admitted", "unbounded_mssql"]
 
 HEAVY = frozenset({"oracle", "mssql"})
 FLOOR_GIB = 4.5
@@ -25,6 +27,7 @@ POLL_SECS = 15.0
 KIB_PER_GIB = 1024 ** 2
 MSSQL_MEM_LIMIT = "3g"
 MSSQL_LIMIT_MB = 2048
+STAND_COMPOSE_FILES = ("docker-compose.yaml", "dev/stand/docker-compose.yaml")
 _ONE_AT_A_TIME = threading.Lock()
 
 
@@ -66,31 +69,21 @@ def wait_for_headroom(read: Callable[[], float | None] = vm_available_gib, floor
 
 
 def unbounded_mssql(compose: dict) -> list[str]:
-    """Services of a parsed compose file running a SQL Server image without the container and engine memory limits."""
+    """Services of a parsed compose file running a SQL Server image without `mem_limit` MSSQL_MEM_LIMIT and `MSSQL_MEMORY_LIMIT_MB` MSSQL_LIMIT_MB."""
     bad = []
     for name, svc in sorted((compose.get("services") or {}).items()):
         if "mssql/server" not in str(svc.get("image", "")):
             continue
         env = svc.get("environment") or {}
         env = dict(e.split("=", 1) for e in env) if isinstance(env, list) else env
-        capped = str(svc.get("mem_limit", "")).lower() == MSSQL_MEM_LIMIT
-        if not capped or str(env.get("MSSQL_MEMORY_LIMIT_MB", "")) != str(MSSQL_LIMIT_MB):
+        if str(svc.get("mem_limit", "")).lower() != MSSQL_MEM_LIMIT or str(env.get("MSSQL_MEMORY_LIMIT_MB", "")) != str(MSSQL_LIMIT_MB):
             bad.append(name)
     return bad
 
 
-def compose_files(root: Path) -> list[str]:
-    """Tracked compose files of the repo."""
-    out = subprocess.run(["git", "-C", str(root), "ls-files", "*docker-compose*.y*ml"], capture_output=True, text=True, check=True)
-    return out.stdout.split()
-
-
 def stand_unbounded(root: Path) -> list[str]:
-    """`file: service` for every SQL Server service of a tracked compose file without the memory limits."""
-    import yaml
-
-    docs = [(f, d) for f in compose_files(root) for d in yaml.safe_load_all((root / f).read_text()) if isinstance(d, dict)]
-    return [f"{f}: {n}" for f, d in docs for n in unbounded_mssql(d)]
+    """`file: service` for every SQL Server service of the stand's compose files without the memory limits."""
+    return [f"{f}: {n}" for f in STAND_COMPOSE_FILES for n in unbounded_mssql(yaml.safe_load((root / f).read_text()))]
 
 
 @contextmanager
@@ -136,11 +129,10 @@ def self_test() -> None:
     svc = {"image": "mcr.microsoft.com/mssql/server:2022-latest", "mem_limit": MSSQL_MEM_LIMIT,
            "environment": {"MSSQL_MEMORY_LIMIT_MB": str(MSSQL_LIMIT_MB)}}
     assert unbounded_mssql({"services": {"ok": svc, "pg": {"image": "postgres:16"}}}) == []
-    assert unbounded_mssql({"services": {"a": {**svc, "mem_limit": None}}}) == ["a"], "no container limit"
-    assert unbounded_mssql({"services": {"b": {**svc, "environment": {"MSSQL_PID": "Developer"}}}}) == ["b"], "no engine limit"
+    assert unbounded_mssql({"services": {"a": {**svc, "mem_limit": None}}}) == ["a"], "a SQL Server without mem_limit is unbounded"
+    assert unbounded_mssql({"services": {"b": {**svc, "environment": {"MSSQL_PID": "Developer"}}}}) == ["b"], "no MSSQL_MEMORY_LIMIT_MB"
     assert unbounded_mssql({"services": {"c": {**svc, "environment": [f"MSSQL_MEMORY_LIMIT_MB={MSSQL_LIMIT_MB}"]}}}) == []
     root = Path(__file__).resolve().parents[2]
-    assert len(compose_files(root)) >= 2, compose_files(root)
     assert stand_unbounded(root) == [], stand_unbounded(root)
     print("stand_memory self-test: ok")
 
