@@ -1214,6 +1214,17 @@ mod tests {
     }
 
     #[test]
+    fn a_set_value_of_more_than_eight_bytes_is_not_truncated_into_a_mask() {
+        let native = "set('m1','m2','m3','m4','m5','m6','m7','m8','m9','m10')";
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+        let nine = vec![0x01, 0, 0, 0, 0, 0, 0, 0, 0xff];
+        match fix.apply(&RivetValue::Bytes(nine.clone())).unwrap() {
+            RivetValue::Bytes(b) => assert_eq!(b, nine),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn every_hex_label_is_refused_because_its_digits_are_unpadded() {
         for (native, idx, n, digits) in [
             ("enum(x'12f09f9a80','a')", 1, 1, "12f09f9a80"),
