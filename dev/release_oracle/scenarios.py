@@ -575,6 +575,25 @@ def store_probe_self_test() -> None:
             pass
         else:
             raise AssertionError("a pull that failed must raise StoreReadError through the wrapper")
+    from unittest import mock
+
+    def sc_load_rows(pulled: Proc) -> list:
+        led = Ledger(colour=False)
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(sys.modules[__name__], "_WORK", Path(d)), \
+                mock.patch.object(sys.modules[__name__], "store_up", lambda *_a, **_k: True), \
+                mock.patch.object(sys.modules[__name__], "cfg", lambda *_a: "bkt"), \
+                mock.patch.object(sys.modules[__name__], "rivet", lambda *_a, **_k: Proc([], 0, "", "")), \
+                mock.patch.object(sys.modules[__name__], "_source_count_distinct", lambda *_a: "150000"), \
+                mock.patch.object(sys.modules[__name__], "run", lambda *_a, **_k: pulled):
+            sc_load(led, "mysql", "8.4", "mysql://u@h/db", "gcs")
+        return led.cells
+
+    cells = sc_load_rows(Proc([], 1, "", "urlopen error timed out"))
+    assert [c.status for c in cells] == [Status.INFRA] and "timed out" in cells[0].detail, \
+        f"a destination that could not be read is not a destination that holds 0 rows: {cells}"
+    cells = sc_load_rows(Proc([], 0, "0\n", ""))
+    assert [(c.status, c.detail) for c in cells] == [(Status.FAIL, "empty-destination")], cells
     print("self-test ok: a slow fake-gcs list is retried; a failed list or download raises, never reads as 0 rows")
 
 
@@ -1215,7 +1234,11 @@ def sc_load(led: Ledger, engine: str, tag: str, url: str, store: str) -> None:
             _first_match(out, r"error|fail"),
         )
         return
-    parts = store_parts(store, bucket, prefix, work_dir())
+    try:
+        parts = store_parts(store, bucket, prefix, work_dir())
+    except StoreReadError as e:
+        led.ungraded(engine, tag, "load", store, f"load→{store} readback failed: {e}")
+        return
     n = _duckdb_list(f"{parts[0]}SELECT count(*) FROM {parts[1]}") if parts else ""
     scnt = _source_count_distinct(engine, url, "users", "id").split(" ")[0]
     if n and n == scnt:

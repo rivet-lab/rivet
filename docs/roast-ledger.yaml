@@ -65,6 +65,14 @@ entries:
     status: done
     verdict: "orphans re-checked with git grep; the derived step runs every script that handles --self-test"
     closes: "merged as #744"
+  - id: HDW-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: a CDC run may write without a ledger row, and a load consumes any run the ledger does not list
+    copies: [src/pipeline/cdc_job.rs:116, src/pipeline/job.rs:871, src/load/reconcile.rs:493, src/load/orchestrate.rs:814, src/load/orchestrate.rs:1103, src/load/orchestrate.rs:1172, src/load/staging.rs:80, src/load/staging.rs:166, src/load/staging.rs:423]
+    status: accepted-as-bugfix
+    verdict: "confirmed by the load_ledger_tests probe: with no running row the second load of a grown CDC run selects [] and records it consumed"
+    closes: "CDC begins through the ledger half of ledger_begin_run and bucket_writers (unlisted_cdc_runs) owns the CDC no-row rule for the consume path, cleanup_source, the prefix gate and gc_orphans; the CDC-begin half of RHS-1 closes here; run-closing and run-still-writing land with no exceptions"
   - id: TF-2
     date: 2026-11-03
     lens: seam packaging 2026-11-03
@@ -97,6 +105,14 @@ entries:
     status: deferred-past-gate
     verdict: "read in the crate source, not run: affects only pre-5.6.4 temporal columns (MySQL 5.7), not 8.0"
     closes: "an upstream fix to the legacy arm, or a property test over arbitrary binlog TIME bytes against the patched fork"
+  - id: CKPT-BUSY
+    date: 2026-11-04
+    lens: harness flake 2026-11-04
+    title: a SQLite replan beside a concurrent writer of the state can still get SQLITE_BUSY on a loaded runner
+    copies: [src/state/checkpoint.rs:936]
+    status: deferred-past-gate
+    verdict: "seen in CI run 41826246423 (Mutants, shard 0, unmutated baseline): a_replan_beside_another_writer_of_the_state_waits_for_it reported 1 of 1000 replans failed beside 56643 writes: database is locked; the file is unchanged by the PR that saw it"
+    closes: "a cell in which the writer holds the state lock across the replan every time, so the wait is proven by the race it loses rather than by 1000 tries"
   - id: TF-2b
     date: 2026-11-04
     lens: seam packaging 2026-11-03

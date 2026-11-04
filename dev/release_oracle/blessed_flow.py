@@ -1401,16 +1401,21 @@ def sc_blessed_flow(led: Ledger, engine: str, tag: str, url: str,
         # does not hold a cell_gate() permit while it waits (that would starve batch
         # cells). Non-cdc cells use a no-op context and never serialise.
         serialize = cdc_lock if cell.pipeline == "cdc" else nullcontext()
+        failed = False
         try:
             with serialize, cell_gate():
                 with child.span(
                     f"cell {engine} flow {cell.pipeline}/{cell.lifecycle}/{cell.store}/{cell.state}"
                 ):
                     run_cell(child, cell, u, state_url, tag)
+        except scenarios.StoreReadError as e:
+            child.ungraded(cell.engine, tag, f"flow:{cell.pipeline}/{cell.lifecycle}", cell.store,
+                           f"{cell.engine} {cell.label} — destination readback failed: {e}")
+            failed = True
         except Exception as e:  # a raising cell must not abort the whole matrix
             child.failed(cell.engine, tag, f"flow:{cell.pipeline}/{cell.lifecycle}",
                          cell.store, f"{cell.engine} {cell.label} — cell raised: {e}", "raised")
-        failed = any(c.status.value == "FAIL" for c in child.cells)
+        failed = failed or any(c.status.value == "FAIL" for c in child.cells)
         with lock:
             child.flush_into(led)
             verdicts[key] = "fail" if failed else "pass"
