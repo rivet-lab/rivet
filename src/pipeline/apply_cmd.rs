@@ -88,7 +88,7 @@ pub fn run_apply_command(
     //     can opt into; the only correct recovery is to re-run `rivet plan`.
     artifact.verify_integrity()?;
 
-    // 1b. Un-appliable inline-url plan (finding #17): a plan generated from an
+    // 1b. Un-applicable inline-url plan (finding #17): a plan generated from an
     //     inline `url:` config has its credentials redacted to `REDACTED@…`
     //     with no env/file reference to re-resolve them, so apply would die
     //     deep in the driver with an opaque auth/"password missing" error.
@@ -458,7 +458,7 @@ fn reject_unrecoverable_inline_url(artifact: &PlanArtifact) -> Result<()> {
         return Ok(());
     }
 
-    // A redacted URL is still appliable if apply has another way to obtain
+    // A redacted URL is still applicable if apply has another way to obtain
     // credentials: an env/file URL reference, an env password, or enough
     // structured fields to rebuild the connection.
     let has_recovery = source.url_env.is_some()
@@ -576,7 +576,7 @@ mod tests {
             None,
             None,
         ))
-        .expect("plain url is appliable");
+        .expect("plain url is applicable");
         // Redacted with NO recovery path must refuse loudly.
         let err = reject_unrecoverable_inline_url(&set(redacted, None, None, None, None))
             .expect_err("stripped credentials with no recovery must refuse");
@@ -607,7 +607,7 @@ mod tests {
         );
         reject_unrecoverable_inline_url(&set(masked, Some("DB_URL"), None, None, None))
             .expect("url_env recovers");
-        // …and one that never held a password is appliable as it is.
+        // …and one that never held a password is applicable as it is.
         reject_unrecoverable_inline_url(&set(
             Some("host=/var/run/postgresql user=u dbname=d"),
             None,
