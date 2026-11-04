@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import gcp, scenarios
+from . import gcp, scenarios, stand_health
 from .core import (
     Ledger, SkipCause,
     docker,
@@ -501,7 +501,7 @@ def _bq_one_engine(
     matrix: str,
     work: Path,
     keep: bool,
-    up: Callable[..., str | None],
+    up: Callable[..., str],
     seed: Callable[..., str],
 ) -> None:
     """One engine's whole BQ leg: export → load → compare to the source → clean up.
@@ -517,10 +517,10 @@ def _bq_one_engine(
     image = fields[1] if len(fields) > 1 else ""
     port = _PORTS[engine]
 
-    url = up(led, engine, _TAG, image, port)
-    if not url:
-        led.failed("bigquery", engine, "golden", "-",
-                   f"BigQuery[{engine}]: bring-up failed", "bring-up")
+    try:
+        url = up(led, engine, _TAG, image, port)
+    except stand_health.BringUpError as e:
+        led.failed("bigquery", engine, "golden", "-", f"BigQuery[{engine}]: bring-up failed: {e}", f"bring-up: {e}")
         return None
     if seed(engine, _TAG, url):
         led.skipped("bigquery", engine, "golden", "-",
@@ -627,7 +627,7 @@ def run_bigquery_golden(
     *,
     keep: bool = False,
     parallel: int = 1,
-    bring_up: Callable[..., str | None],
+    bring_up: Callable[..., str],
     seed_engine: Callable[..., str],
 ) -> None:
     _up, _seed = bring_up, seed_engine
