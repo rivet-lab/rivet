@@ -160,6 +160,8 @@ mod live_init_extended;
 mod live_keyset;
 #[path = "live/live_keyset_composite.rs"]
 mod live_keyset_composite;
+#[path = "live/live_keyset_key_type.rs"]
+mod live_keyset_key_type;
 #[path = "live/live_keyset_metrics.rs"]
 mod live_keyset_metrics;
 #[path = "live/live_keyset_parallel.rs"]

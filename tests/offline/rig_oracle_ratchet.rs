@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 // 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
 // 28 -> 29 (2026-10-31, H1): the zone-less change-log cell loads into a log it altered off the ledger's DateTime64(6, 'UTC') on purpose; it reads instants and values through the second client; closes when the oracle grades a declared legacy type.
 // 30 -> 31 (2026-11-04, TF-1): the negative TIME(1)/(2) fraction cell drives a stream run that panics in a debug binary and leaves a running row; graded by MySQL's CAST text and the batch refusal; the fix PR removes the opt-out.
-const NO_ORACLE_CEILING: usize = 31; // ratchet-pin: no-oracle-opt-outs
+// 31 -> 32 (2026-11-04): the datetime2(7) keyset cell under timestamp_ns delivers 700 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
+const NO_ORACLE_CEILING: usize = 32; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
