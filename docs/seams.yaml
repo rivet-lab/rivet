@@ -50,6 +50,22 @@ seams:
       - {at: src/pipeline/cdc_job.rs::run_cdc_inner, dated: 2026-10-31, reason: "copy of the table and tables fold plus a multi flag, not reachable", closes: "cdc_captured_tables returns the multi flag after the gate"}
       - {at: src/preflight/cdc_health.rs::oracle_checks, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
       - {at: src/preflight/cdc_health.rs::run_refusals, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
+  - id: run-closing
+    owner: src/pipeline/job.rs::ledger_begin_run
+    reads: "the run-status row a run opens before its first write, and the failed or finished outcome every run closes once, with its notification"
+    scope: [src/pipeline/]
+    bypass:
+      - "begin_run_under_lease ("
+    exceptions: []
+  - id: run-still-writing
+    owner: src/load/staging.rs::bucket_writers
+    reads: "which runs may still be writing into an export prefix: ledger rows, running markers, and a CDC run the ledger does not know"
+    scope: [src/load/]
+    bypass:
+      - "ledger_writers ("
+      - "active_running_run_ids ("
+      - "has_active_running_manifest ("
+    exceptions: []
   - id: config-knob-quantity
     owner: src/config/quantity.rs::Knob
     reads: "a numeric config knob or CLI flag: its range, what 0 means, and the bytes, rows, key span or ratio the runtime uses"
