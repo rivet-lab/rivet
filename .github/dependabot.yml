@@ -73,7 +73,9 @@ updates:
 
   # ── GitHub Actions used by the workflows ─────────────────────────────────
   - package-ecosystem: github-actions
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/free-disk"
     schedule:
       interval: weekly
       day: monday

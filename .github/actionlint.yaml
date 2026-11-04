@@ -1,0 +1,5 @@
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      # 2026-11-04: baseline of 45 shellcheck findings present when actionlint was added (35 SC2015); new codes still fail; closes as the scripts move to Python.
+      - 'shellcheck reported issue in this script: SC(2010|2012|2015|2034|2035|2044|2086|2129|2211):.+'
