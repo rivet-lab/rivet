@@ -111,16 +111,25 @@ pub(super) fn run_cdc_export(
     };
     let export = &expanded_export;
 
-    let started_at = chrono::Utc::now().to_rfc3339();
-    let run_prefix = super::finalize::destination_uri_for_manifest(&export.destination);
-    if let Err(e) = state.begin_run_under_lease(
-        &run_id,
+    if let Err(e) = super::job::ledger_begin_run(
+        state,
         &export.name,
         &config.source.state_key(),
-        &run_prefix,
-        &started_at,
+        &export.destination,
+        &run_id,
     ) {
-        log::warn!("cdc: run-status begin failed for '{}': {e:#}", export.name);
+        let summary = cdc_summary(
+            &run_id,
+            export,
+            "failed",
+            0,
+            0,
+            0,
+            0,
+            started.elapsed().as_millis() as i64,
+            Some(crate::redact::redact_error(&e)),
+        );
+        return (Err(e), summary);
     }
 
     let read_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
