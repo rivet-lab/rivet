@@ -2455,6 +2455,15 @@ mod setup_hint {
             )),
             "a driver message that echoes `cdc:` mid-word is still an opaque driver error"
         );
+        for opaque in [
+            "db error: relation the orders cdc: does not exist",
+            "db error:  cdc: stray",
+        ] {
+            assert!(
+                hinted(anyhow::anyhow!(opaque)),
+                "a segment ending ` cdc` after a spaced or empty engine is not rivet's prefix: {opaque}"
+            );
+        }
         for rivet_own in [
             "oracle cdc: the redo log changed",
             "sqlserver cdc: capture job stopped",
