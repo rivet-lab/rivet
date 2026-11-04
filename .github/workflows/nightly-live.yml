@@ -34,24 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # ubuntu-latest ships ~14 GB free. This job runs a release build +
-      # release test rebuild + 7 docker images + the 60K-row content_items
-      # fixture. Without freeing pre-installed toolchains the worker has
-      # been hitting disk pressure mid-test (cf. recent failures at
-      # 6a4c5af landing — exit 101 with no clear test annotation because
-      # cargo's stderr write fails under ENOSPC). Same fix as the `e2e`
-      # job in ci.yml; ~30 GB headroom for ~15 s wall.
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          large-packages: false
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          swap-storage: false
-      - name: Disk snapshot — pre-build
-        run: df -h /
+      - uses: ./.github/actions/free-disk
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -300,6 +283,7 @@ jobs:
       MONGO_VERSION: ${{ matrix.mongo_version }}
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94"
@@ -397,6 +381,7 @@ jobs:
           - { engine: postgres, tag: "17", env: POSTGRES_CDC_TAG }
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2.87.29
@@ -444,6 +429,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2.87.29
@@ -498,6 +484,8 @@ jobs:
       - name: Sunday gate
         id: day
         run: echo "sunday=$([ "$(date -u +%u)" = "7" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/free-disk
+        if: steps.day.outputs.sunday == 'yes'
       - uses: dtolnay/rust-toolchain@stable
         if: steps.day.outputs.sunday == 'yes'
       - uses: Swatinem/rust-cache@v2

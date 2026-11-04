@@ -1,0 +1,19 @@
+name: Free disk space
+description: Removes the runner's preinstalled toolchains and prints the root disk before and after.
+runs:
+  using: composite
+  steps:
+    - name: Disk before
+      shell: bash
+      run: df -h /
+    - uses: jlumbroso/free-disk-space@main
+      with:
+        large-packages: false
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        swap-storage: false
+    - name: Disk after
+      shell: bash
+      run: df -h /
