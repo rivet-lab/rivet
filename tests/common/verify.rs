@@ -222,6 +222,45 @@ pub(crate) fn begin(argv: &[String], envs: &[(&str, &str)], cwd: Option<&Path>) 
 
 /// Grade a finished invocation by how it exited: exit 0, or a one-export failure whose `stderr` names its rows delivered ([`refusal::names_its_delivery`]), against its source ([`finish`]); anything else against the snapshot taken before it. Returns whether a known defect disagreed as marked.
 pub(crate) fn settle(
+    case: Case,
+    status: std::process::ExitStatus,
+    stdout: &[u8],
+    stderr: &[u8],
+    envs: &[(&str, &str)],
+    opts: &Opts,
+) -> bool {
+    keeping_rivets_verdict(status, stderr, || {
+        grade_exit(case, status, stdout, stderr, envs, opts)
+    })
+}
+
+/// Run `grade`; a panic in it is raised again carrying rivet's exit, the last lines of its stderr and the panic's own message.
+fn keeping_rivets_verdict<R>(
+    status: std::process::ExitStatus,
+    stderr: &[u8],
+    grade: impl FnOnce() -> R,
+) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(grade)) {
+        Ok(r) => r,
+        Err(panic) => {
+            let said = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("(a panic that carries no message)");
+            let text = String::from_utf8_lossy(stderr);
+            let lines: Vec<&str> = text.lines().collect();
+            let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+            panic!(
+                "the oracle's grade panicked; rivet's own verdict was: exit {:?}\n--- rivet stderr (last 40 lines) ---\n{tail}\n--- oracle panic ---\n{said}",
+                status.code()
+            );
+        }
+    }
+}
+
+/// Grade the finished invocation by its exit ([`settle`]).
+fn grade_exit(
     mut case: Case,
     status: std::process::ExitStatus,
     stdout: &[u8],
@@ -1795,6 +1834,35 @@ fn source_url(url: &str) -> String {
     ]
     .iter()
     .fold(url.to_string(), |u, (from, to)| u.replace(from, to))
+}
+
+#[test]
+fn a_grade_that_panics_keeps_rivets_exit_and_stderr() {
+    use std::os::unix::process::ExitStatusExt;
+    let stderr: String = (1..=100).map(|n| format!("rivet line {n}\n")).collect();
+    let raised = std::panic::catch_unwind(|| {
+        keeping_rivets_verdict(
+            std::process::ExitStatus::from_raw(3 << 8),
+            stderr.as_bytes(),
+            || panic!("oracle blew up: {}", 42),
+        )
+    })
+    .expect_err("a panicking grade must still fail");
+    let said = raised
+        .downcast_ref::<String>()
+        .expect("a formatted message");
+    for want in [
+        "exit Some(3)",
+        "rivet line 100",
+        "rivet line 61",
+        "oracle blew up: 42",
+    ] {
+        assert!(said.contains(want), "`{want}` missing from:\n{said}");
+    }
+    assert!(
+        !said.contains("rivet line 60\n"),
+        "more than the last 40 lines:\n{said}"
+    );
 }
 
 #[test]

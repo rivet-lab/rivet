@@ -378,9 +378,22 @@ class Ledger:
         self._emit(self._c("1;35", f"  ⚠ ORACLE INFRA (the cell graded nothing; re-run it) — {msg}"))
         self.add(engine, version, scenario, store, Status.INFRA, detail or msg)
 
+    def incident(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str, target: str) -> bool:
+        """When `target` answered earlier in this run it went away mid-run: record INFRA (a stand incident) and return True."""
+        try:
+            from . import stand_health
+        except ImportError:  # pragma: no cover - bare sys.path entry
+            import stand_health  # type: ignore
+        if not (target and stand_health.BOOK.seen_up(target)):
+            return False
+        self.ungraded(engine, version, scenario, store, f"{msg} [stand incident: {target} answered earlier in this run]", detail or msg)
+        return True
+
     def skipped(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str = "", *,
-                cause: SkipCause) -> None:
-        """Print the ⊘ AND record a SKIP row that names why it did not run."""
+                cause: SkipCause, target: str = "") -> None:
+        """Print the ⊘ AND record a SKIP row that names why it did not run; an ENV skip of a `target` that answered earlier is a stand incident (INFRA)."""
+        if cause is SkipCause.ENV and self.incident(engine, version, scenario, store, msg, detail, target):
+            return
         self.skip(msg)
         self.add(engine, version, scenario, store, Status.SKIP, detail or msg, cause=cause)
 
