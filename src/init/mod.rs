@@ -42,7 +42,7 @@ pub(crate) struct ColumnInfo {
     /// so pre-existing catalog-replay fixtures still parse.
     #[serde(default)]
     pub is_indexed: bool,
-    /// Set by an engine whose planner refuses this column as a keyset key although its type name reads as one.
+    /// Set when the keyset seam refuses the type the engine delivers this column as; filled from the server at introspection.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_keyset: bool,
     /// Set by an engine whose run refuses this column as an incremental cursor although its type name reads as one.
@@ -179,16 +179,11 @@ impl TableInfo {
             .map(|c| c.name.as_str())
     }
 
-    /// The single-column PK if it is a KEYSET-usable type (see
-    /// [`is_keysettable_type`]) — an integer / uuid / string / timestamp / date
-    /// PK, but NOT a `decimal`/`numeric` PK (which the planner refuses as a keyset
-    /// key). This is the signal that a large NON-INTEGER-PK table can still keyset
-    /// (`chunk_by_key`) instead of falling to a full scan. `None` for a composite
-    /// PK, no PK, or a decimal-typed PK.
+    /// The single-column PK when the keyset seam admits its delivered type; `None` for a composite, absent or refused PK.
     pub(crate) fn keysettable_pk_column(&self) -> Option<&str> {
         let pk = self.single_pk_column()?;
         let col = self.columns.iter().find(|c| c.name == pk)?;
-        (is_keysettable_type(&col.data_type) && !col.not_keyset).then_some(pk)
+        (!col.not_keyset).then_some(pk)
     }
 
     /// Whether the table has any key `chunked` can page by: an integer column or a keysettable PK.
@@ -199,14 +194,6 @@ impl TableInfo {
     /// Suggest extraction mode based on row count and available columns.
     pub(crate) fn suggest_mode(&self) -> &'static str {
         if self.row_estimate > 100_000 {
-            // A range-chunkable integer column OR a keyset-usable single PK (uuid /
-            // string / … — any orderable indexed key) both mean "chunked": the
-            // scaffold then routes an integer PK / integer column to range chunking
-            // and a non-integer single PK to keyset (`chunk_by_key`). Before this a
-            // large uuid/string-PK table with no integer column fell to `full` — an
-            // unbounded scan that is not durability-safe on a large table (ADR-0020).
-            // A decimal PK is NOT keysettable (planner refuses it), so it stays
-            // `full` unless it also has an integer column to range-chunk.
             if self.has_chunk_key() {
                 return "chunked";
             }
@@ -493,34 +480,38 @@ pub(crate) fn is_tombstone_stamp(name: &str) -> bool {
     )
 }
 
-/// Whether a column of this type can be a KEYSET (seek) key — i.e. the keyset
-/// cursor can read + compare it (`WHERE key > last ORDER BY key`). MUST mirror the
-/// planner's `keyset_keys` restriction (`source::TableIntrospection`): integer /
-/// float / string / timestamp / date / uuid are readable; `decimal`/`numeric` (and
-/// `money`) are EXCLUDED — the planner refuses a decimal keyset key, so init must
-/// not scaffold `chunk_by_key` on one (it would fail the run). Used to decide
-/// whether a large NON-INTEGER single-PK table can keyset instead of falling to
-/// `full`.
-fn is_keysettable_type(t: &str) -> bool {
-    if is_integer_type(t) || is_timestamp_type(t) {
-        return true;
+/// `SELECT *` over the identifiers `parts` (schema, table), quoted for `source`.
+pub(super) fn select_all(source: crate::config::SourceType, parts: &[&str]) -> String {
+    let quoted: Vec<String> = parts
+        .iter()
+        .map(|p| crate::sql::quote_ident(source, p))
+        .collect();
+    format!("SELECT * FROM {}", quoted.join("."))
+}
+
+/// The failure of the probe that reads the types `table` is delivered as, with the cause and the remedy.
+pub(super) fn keyset_probe_context(e: anyhow::Error, table: &str) -> anyhow::Error {
+    e.context(format!(
+        "init: reading the column types of {table} to choose its keyset key failed; grant the init user SELECT on {table}, or leave the table out of this init"
+    ))
+}
+
+/// Set `not_keyset` on every column the keyset seam refuses, from the types the engine delivers for the table.
+pub(super) fn mark_keyset_refusals(
+    source: crate::config::SourceType,
+    columns: &mut [ColumnInfo],
+    mappings: &[crate::types::TypeMapping],
+    finer_than_microsecond: &[String],
+) {
+    for c in columns {
+        c.not_keyset = crate::source::keyset_key::column_refusal(
+            source,
+            mappings,
+            finer_than_microsecond,
+            &c.name,
+        )
+        .is_some();
     }
-    let t = t.to_lowercase();
-    // uuid, string (char/varchar/text families), and float/real/double — but NOT
-    // decimal/numeric/money (the planner's keyset cursor excludes those).
-    // `number`: an Oracle NUMBER without precision (init::oracle::catalog_type) —
-    // the cursor carries it as exact text and the server compares it numerically.
-    t == "number"
-        || t.contains("uuid")
-        || t.contains("uniqueidentifier")
-        || t.contains("char") // char, varchar, nvarchar, character varying, bpchar
-        || t.contains("text")
-        || t == "float"
-        || t == "real"
-        || t == "double"
-        || t == "double precision"
-        || t == "float4"
-        || t == "float8"
 }
 
 pub(super) fn source_type(source_url: &str) -> Result<&'static str> {
@@ -2749,12 +2740,72 @@ mod tests {
         assert_eq!(t, "orders");
     }
 
+    /// The probe failure names the table, the cause and the remedy.
+    #[test]
+    fn a_failed_type_probe_names_the_table_the_cause_and_the_remedy() {
+        let e = keyset_probe_context(anyhow::anyhow!("permission denied"), "s.t");
+        assert_eq!(
+            format!("{e:#}"),
+            "init: reading the column types of s.t to choose its keyset key failed; grant the init user SELECT on s.t, or leave the table out of this init: permission denied"
+        );
+    }
+
+    /// Init marks a column `not_keyset` exactly when the planner's `admit_keyset_keys` refuses it, for every type on every engine.
+    #[test]
+    fn init_and_the_planner_refuse_the_same_keyset_keys() {
+        use crate::config::SourceType;
+        use crate::source::TableIntrospection;
+        use crate::source::keyset_key::samples::{mapping_of, rivet_type_samples};
+        for source in [
+            SourceType::Postgres,
+            SourceType::Mysql,
+            SourceType::Mssql,
+            SourceType::Oracle,
+        ] {
+            for finer in [false, true] {
+                let mappings: Vec<_> = rivet_type_samples()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let mut m = mapping_of(t);
+                        m.column_name = format!("c{i}");
+                        m
+                    })
+                    .collect();
+                let names: Vec<String> = mappings.iter().map(|m| m.column_name.clone()).collect();
+                let finer_list = if finer { names.clone() } else { Vec::new() };
+                let mut columns: Vec<ColumnInfo> = names
+                    .iter()
+                    .map(|n| ColumnInfo {
+                        name: n.clone(),
+                        ..Default::default()
+                    })
+                    .collect();
+                mark_keyset_refusals(source, &mut columns, &mappings, &finer_list);
+                let mut planner = TableIntrospection {
+                    keyset_keys: names.clone(),
+                    finer_than_microsecond: finer_list.clone(),
+                    ..Default::default()
+                };
+                planner.admit_keyset_keys(source, &mappings);
+                for (c, m) in columns.iter().zip(&mappings) {
+                    assert_eq!(
+                        !c.not_keyset,
+                        planner.is_usable_keyset_key(&c.name),
+                        "{source:?} finer={finer}: init and the planner disagree on {:?}",
+                        m.rivet_type
+                    );
+                }
+                assert!(
+                    columns.iter().any(|c| c.not_keyset) && columns.iter().any(|c| !c.not_keyset),
+                    "{source:?} finer={finer}: the sweep must hold admitted and refused types"
+                );
+            }
+        }
+    }
+
     #[test]
     fn init_keysets_a_large_non_int_pk_but_never_a_decimal_pk() {
-        // The fix: a large table with a NON-INTEGER single-column PK of a
-        // keyset-usable type (uuid / string) scaffolds keyset (chunk_by_key), not a
-        // full scan — matching an integer PK. A DECIMAL PK is NOT keysettable (the
-        // planner refuses it), so it stays `full`. Dogfood-confirmed on PG/MySQL/MSSQL.
         let uuid_pk = make_table(
             150_000,
             vec![col("id", "uuid", true), col("n", "int", false)],
@@ -2781,6 +2832,7 @@ mod tests {
                     numeric_precision: Some(20),
                     numeric_scale: Some(0),
                     is_indexed: false,
+                    not_keyset: true,
                     ..Default::default()
                 },
                 col("name", "text", false),

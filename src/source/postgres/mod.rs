@@ -257,6 +257,26 @@ fn avg_row_bytes(row_estimate: i64, rel_size_bytes: i64) -> Option<i64> {
     (row_estimate > 0).then(|| rel_size_bytes / row_estimate)
 }
 
+/// The delivered type of every column of `query`, read from the server's description of the statement.
+pub(crate) fn type_mappings_on(
+    client: &mut Client,
+    query: &str,
+    column_overrides: &ColumnOverrides,
+) -> Result<Vec<TypeMapping>> {
+    let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
+    let stmt = prepare_fresh(client, &wrapped)?;
+    let hints = pg_numeric_catalog_hints_opt(client, query);
+    Ok(stmt
+        .columns()
+        .iter()
+        .map(|col| {
+            let rivet = rivet_type_for_pg_column(col, column_overrides, hints.as_ref());
+            let source = SourceColumn::simple(col.name(), col.type_().name(), true);
+            TypeMapping::from_source(&source, rivet)
+        })
+        .collect())
+}
+
 fn introspect_pg_on(
     client: &mut Client,
     qualified_table: &str,
@@ -672,19 +692,7 @@ impl super::Source for PostgresSource {
         query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
-        let stmt = prepare_fresh(&mut self.client, &wrapped)?;
-        let hints = pg_numeric_catalog_hints_opt(&mut self.client, query);
-        let mappings = stmt
-            .columns()
-            .iter()
-            .map(|col| {
-                let rivet = rivet_type_for_pg_column(col, column_overrides, hints.as_ref());
-                let source = SourceColumn::simple(col.name(), col.type_().name(), true);
-                TypeMapping::from_source(&source, rivet)
-            })
-            .collect();
-        Ok(mappings)
+        type_mappings_on(&mut self.client, query, column_overrides)
     }
 
     /// Snapshot the source-harm counters from `pg_stat_database` for the current

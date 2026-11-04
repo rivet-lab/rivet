@@ -1,7 +1,8 @@
 use postgres::Client;
 
-use crate::config::TlsConfig;
+use crate::config::{SourceType, TlsConfig};
 use crate::error::Result;
+use crate::types::ColumnOverrides;
 
 use super::{ColumnInfo, TableInfo};
 
@@ -110,7 +111,7 @@ pub(super) fn introspect(client: &mut Client, schema: &str, table: &str) -> Resu
         return Err(super::table_not_found(&format!("{schema}.{table}")));
     }
 
-    let columns = col_rows
+    let mut columns: Vec<ColumnInfo> = col_rows
         .iter()
         .map(|row| {
             let name: String = row.get(0);
@@ -132,6 +133,13 @@ pub(super) fn introspect(client: &mut Client, schema: &str, table: &str) -> Resu
             }
         })
         .collect();
+    let mappings = crate::source::postgres::type_mappings_on(
+        client,
+        &super::select_all(SourceType::Postgres, &[schema, table]),
+        &ColumnOverrides::default(),
+    )
+    .map_err(|e| super::keyset_probe_context(e, &format!("{schema}.{table}")))?;
+    super::mark_keyset_refusals(SourceType::Postgres, &mut columns, &mappings, &[]);
 
     Ok(TableInfo {
         cdc_capture_instance: None,

@@ -4661,6 +4661,23 @@ seeds:
       mssql:
         cells: [keyset_key_is_refused_mssql_varbinary_unique_key, keyset_key_is_refused_mssql_time_unique_key, keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds, keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond, keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds, keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key, "lib:a_sub_microsecond_mssql_key_is_refused_until_it_is_delivered_in_nanoseconds", "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders"]
       oracle:
-        cells: ["lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size"]
+        cells: ["lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size", "lib:an_oracle_catalog_type_keys_a_seek_by_what_it_is_delivered_as"]
       mongo:
         na: "Mongo always pages by _id; there is no user chunk_by_key knob and no keyset key to type"
+
+  - name: keyset-key-init-mirror
+    class: "rivet init decides which key it scaffolds as a keyset key by a type list of its own instead of the seam the planner calls, so init scaffolds a key the planner refuses (a run that stops at plan) or withholds one the planner admits"
+    history: "2026-11-04 - found verifying the keyset-key-type seam PR: init kept is_keysettable_type and per-engine catalog flags that mirrored the planner by hand; init now probes the delivered types and marks not_keyset through keyset_key::column_refusal"
+    scope: source
+    patch: keyset-key-init-mirror/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
+      mysql:
+        cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
+      mssql:
+        cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
+      oracle:
+        cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
+      mongo:
+        na: "Mongo always pages by _id; init scaffolds no keyset key for it"

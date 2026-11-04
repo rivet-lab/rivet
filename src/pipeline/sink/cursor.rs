@@ -628,64 +628,7 @@ mod tests {
         assert_eq!(extract_last_cursor_value(&batch, "bin", &schema), None);
     }
 
-    fn mapping_of(rivet_type: crate::types::RivetType) -> crate::types::TypeMapping {
-        crate::types::TypeMapping::from_source(
-            &crate::types::SourceColumn::simple("k", "native", false),
-            rivet_type,
-        )
-    }
-
-    fn rivet_type_samples() -> Vec<crate::types::RivetType> {
-        use crate::types::{RivetType, TimeUnit as U};
-        let ts = |unit, tz: Option<&str>| RivetType::Timestamp {
-            unit,
-            timezone: tz.map(Into::into),
-        };
-        vec![
-            RivetType::Bool,
-            RivetType::Int16,
-            RivetType::Int32,
-            RivetType::Int64,
-            RivetType::UInt64,
-            RivetType::Float32,
-            RivetType::Float64,
-            RivetType::Decimal {
-                precision: 18,
-                scale: 0,
-            },
-            RivetType::Decimal {
-                precision: 30,
-                scale: 4,
-            },
-            RivetType::Date,
-            RivetType::Time {
-                unit: U::Microsecond,
-            },
-            RivetType::Time {
-                unit: U::Nanosecond,
-            },
-            ts(U::Second, None),
-            ts(U::Millisecond, None),
-            ts(U::Microsecond, None),
-            ts(U::Microsecond, Some("UTC")),
-            ts(U::Nanosecond, None),
-            ts(U::Nanosecond, Some("UTC")),
-            RivetType::String,
-            RivetType::Text,
-            RivetType::Binary,
-            RivetType::Json,
-            RivetType::Uuid,
-            RivetType::Enum,
-            RivetType::Interval,
-            RivetType::List {
-                inner: Box::new(RivetType::Int32),
-            },
-            RivetType::Unsupported {
-                native_type: "geometry".into(),
-                reason: "no mapping".into(),
-            },
-        ]
-    }
+    use crate::source::keyset_key::samples::{mapping_of, rivet_type_samples};
 
     /// Every type the keyset seam admits has a cursor arm; the renderable types it still refuses are named.
     #[test]
@@ -695,7 +638,11 @@ mod tests {
         use crate::types::RivetType;
         let renderable_but_refused = |source: SourceType, t: &RivetType| match t {
             RivetType::Json | RivetType::Interval => true,
-            RivetType::Decimal { .. } => source != SourceType::Oracle,
+            RivetType::Decimal { scale, .. } => source != SourceType::Oracle || *scale != 0,
+            RivetType::Float32 | RivetType::Float64 => source == SourceType::Oracle,
+            RivetType::Timestamp {
+                timezone: Some(_), ..
+            } => source == SourceType::Oracle,
             RivetType::Enum => source == SourceType::Mysql,
             _ => false,
         };

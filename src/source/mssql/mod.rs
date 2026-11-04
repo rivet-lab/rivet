@@ -1215,6 +1215,18 @@ pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
     )
 }
 
+/// The `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond.
+pub(crate) fn finer_than_microsecond_columns(
+    src: &mut MssqlSource,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>> {
+    Ok(src
+        .query_scalar(&finer_than_microsecond_sql(schema, table))?
+        .map(|s| split_char31(&s))
+        .unwrap_or_default())
+}
+
 /// Splits a CHAR(31)-joined catalog list into its non-empty members.
 fn split_char31(joined: &str) -> Vec<String> {
     joined
@@ -1269,10 +1281,7 @@ fn introspect_mssql_on(src: &mut MssqlSource, qualified_table: &str) -> Result<T
         .map(|s| split_char31(&s))
         .unwrap_or_default();
 
-    let finer_than_microsecond: Vec<String> = src
-        .query_scalar(&finer_than_microsecond_sql(&schema, &table))?
-        .map(|s| split_char31(&s))
-        .unwrap_or_default();
+    let finer_than_microsecond = finer_than_microsecond_columns(src, &schema, &table)?;
 
     // Single-column integer PK → range chunking.
     let single_int_pk = src.query_scalar(&single_int_pk_sql(&schema, &table))?;

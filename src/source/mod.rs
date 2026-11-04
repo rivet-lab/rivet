@@ -122,22 +122,7 @@ impl TableIntrospection {
         mappings: &[TypeMapping],
         column: &str,
     ) -> Option<&'static str> {
-        let Some(mapping) = mappings
-            .iter()
-            .find(|m| m.column_name == column)
-            .or_else(|| {
-                mappings
-                    .iter()
-                    .find(|m| m.column_name.eq_ignore_ascii_case(column))
-            })
-        else {
-            return Some("is not among the columns the export delivers");
-        };
-        let finer = self
-            .finer_than_microsecond
-            .iter()
-            .any(|c| c.eq_ignore_ascii_case(column));
-        keyset_key::keyset_key_refusal(source, mapping, finer)
+        keyset_key::column_refusal(source, mappings, &self.finer_than_microsecond, column)
     }
 
     /// The refusal cause recorded for `column`, if `admit_keyset_keys` dropped it.

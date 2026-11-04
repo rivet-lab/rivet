@@ -14,9 +14,12 @@
 //! Server identifier and never appear in `information_schema` type names, so the
 //! split back apart is unambiguous.
 
+use crate::config::SourceType;
 use crate::error::Result;
 use crate::source::Source;
 use crate::source::mssql::MssqlSource;
+
+use crate::types::ColumnOverrides;
 
 use super::{ColumnInfo, TableInfo};
 
@@ -87,7 +90,12 @@ pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> R
         .unwrap_or(0)
         .max(0);
 
-    // Column metadata: one `RS`-delimited record of eight `US`-delimited fields per column.
+    // Column metadata: one `RS`-delimited record per column, each holding six
+    // `US`-delimited fields (name, data_type, is_pk, is_nullable, precision,
+    // scale, leads-an-index). `COLUMNPROPERTY(..., 'IsXmlIndexable')` is not needed; PK-ness
+    // comes from the primary-key constraint join, NULL-ability and numeric
+    // precision/scale from `information_schema.COLUMNS`. `ISNULL(...,'')` keeps
+    // absent precision/scale as empty fields so the `US` split stays aligned.
     let columns_sql = format!(
         "SELECT STRING_AGG(CONVERT(nvarchar(max), \
              CONCAT( \
@@ -97,8 +105,7 @@ pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> R
                  c.IS_NULLABLE, CHAR(31), \
                  ISNULL(CONVERT(varchar(12), c.NUMERIC_PRECISION), ''), CHAR(31), \
                  ISNULL(CONVERT(varchar(12), c.NUMERIC_SCALE), ''), CHAR(31), \
-                 CASE WHEN ix.name IS NULL THEN '0' ELSE '1' END, CHAR(31), \
-                 ISNULL(CONVERT(varchar(12), c.DATETIME_PRECISION), '') \
+                 CASE WHEN ix.name IS NULL THEN '0' ELSE '1' END \
              )), CHAR(30)) WITHIN GROUP (ORDER BY c.ORDINAL_POSITION) \
          FROM information_schema.COLUMNS c \
          LEFT JOIN ( \
@@ -132,11 +139,19 @@ pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> R
         .flatten();
 
     let agg = conn.query_scalar(&columns_sql)?;
-    let columns: Vec<ColumnInfo> = agg.as_deref().map(parse_columns_agg).unwrap_or_default();
+    let mut columns: Vec<ColumnInfo> = agg.as_deref().map(parse_columns_agg).unwrap_or_default();
 
     if columns.is_empty() {
         return Err(super::table_not_found(&format!("{schema}.{table}")));
     }
+    let mappings = conn
+        .type_mappings(
+            &super::select_all(SourceType::Mssql, &[schema, table]),
+            &ColumnOverrides::default(),
+        )
+        .map_err(|e| super::keyset_probe_context(e, &format!("{schema}.{table}")))?;
+    let finer = crate::source::mssql::finer_than_microsecond_columns(conn, schema, table)?;
+    super::mark_keyset_refusals(SourceType::Mssql, &mut columns, &mappings, &finer);
 
     Ok(TableInfo {
         cdc_capture_instance,
@@ -159,12 +174,9 @@ fn parse_columns_agg(agg: &str) -> Vec<ColumnInfo> {
         .filter(|rec| !rec.is_empty())
         .filter_map(|rec| {
             let f: Vec<&str> = rec.split(US).collect();
-            if f.len() != 8 {
+            if f.len() != 7 {
                 return None;
             }
-            let finer_than_microsecond = f[7]
-                .parse::<u32>()
-                .is_ok_and(|digits| digits > crate::source::keyset_key::MICROSECOND_DIGITS as u32);
             Some(ColumnInfo {
                 is_indexed: f[2] == "1" || f[6] == "1",
                 name: f[0].to_string(),
@@ -173,7 +185,6 @@ fn parse_columns_agg(agg: &str) -> Vec<ColumnInfo> {
                 is_nullable: f[3].eq_ignore_ascii_case("YES"),
                 numeric_precision: f[4].parse::<u32>().ok(),
                 numeric_scale: f[5].parse::<u32>().ok(),
-                not_keyset: finer_than_microsecond,
                 ..Default::default()
             })
         })
@@ -203,8 +214,8 @@ mod tests {
     #[test]
     fn a_rowversion_column_is_never_read_as_a_timestamp() {
         let agg = format!(
-            "id{US}bigint{US}1{US}NO{US}19{US}0{US}1{US}{RS}rv{US}timestamp{US}0{US}NO{US}{US}{US}0{US}{RS}\
-             seen_at{US}datetime2{US}0{US}YES{US}{US}{US}0{US}7"
+            "id{US}bigint{US}1{US}NO{US}19{US}0{US}1{RS}rv{US}timestamp{US}0{US}NO{US}{US}{US}0{RS}\
+             seen_at{US}datetime2{US}0{US}YES{US}{US}{US}0"
         );
         let cols = parse_columns_agg(&agg);
         let ty = |n: &str| cols.iter().find(|c| c.name == n).unwrap().data_type.clone();
@@ -253,9 +264,9 @@ mod tests {
     fn parse_columns_agg_round_trips_fields() {
         // id BIGINT PK NOT NULL, amount DECIMAL(12,2) NOT NULL, note NVARCHAR NULL.
         let s = agg(&[
-            rec(&["id", "bigint", "1", "NO", "", "", "1", ""]),
-            rec(&["amount", "decimal", "0", "NO", "12", "2", "1", ""]),
-            rec(&["note", "nvarchar", "0", "YES", "", "", "0", ""]),
+            rec(&["id", "bigint", "1", "NO", "", "", "1"]),
+            rec(&["amount", "decimal", "0", "NO", "12", "2", "1"]),
+            rec(&["note", "nvarchar", "0", "YES", "", "", "0"]),
         ]);
         let cols = parse_columns_agg(&s);
         assert_eq!(cols.len(), 3);
@@ -281,38 +292,11 @@ mod tests {
         assert!(cols[2].is_nullable);
     }
 
-    /// A datetime2 or datetimeoffset finer than a microsecond is not a keyset key at init.
-    #[test]
-    fn a_column_finer_than_a_microsecond_is_not_a_keyset_key() {
-        let s = agg(&[
-            rec(&["a", "datetime2", "1", "NO", "", "", "1", "7"]),
-            rec(&["b", "datetime2", "0", "NO", "", "", "0", "6"]),
-            rec(&["c", "datetimeoffset", "0", "NO", "", "", "0", "7"]),
-            rec(&["d", "datetime", "0", "NO", "", "", "0", "3"]),
-            rec(&["e", "int", "0", "NO", "10", "0", "0", ""]),
-        ]);
-        let flags: Vec<(String, bool)> = parse_columns_agg(&s)
-            .into_iter()
-            .map(|c| (c.name, c.not_keyset))
-            .collect();
-        let expected: Vec<(String, bool)> = [
-            ("a", true),
-            ("b", false),
-            ("c", true),
-            ("d", false),
-            ("e", false),
-        ]
-        .iter()
-        .map(|(n, f)| (n.to_string(), *f))
-        .collect();
-        assert_eq!(flags, expected);
-    }
-
     #[test]
     fn parse_columns_agg_skips_malformed_record() {
         // Second record has only 2 fields — dropped, the well-formed one survives.
         let s = agg(&[
-            rec(&["id", "bigint", "1", "NO", "", "", "1", ""]),
+            rec(&["id", "bigint", "1", "NO", "", "", "1"]),
             rec(&["broken", "rec"]),
         ]);
         let cols = parse_columns_agg(&s);

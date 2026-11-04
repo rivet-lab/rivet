@@ -16,6 +16,9 @@ pub(crate) fn keyset_key_refusal(
         return Some("is delivered as text, which does not sort as the stored value");
     }
     match &mapping.rivet_type {
+        RivetType::Float32 | RivetType::Float64 if source == SourceType::Oracle => {
+            Some("is a binary float, which is not a keyset key on Oracle")
+        }
         RivetType::Int16
         | RivetType::Int32
         | RivetType::Int64
@@ -26,9 +29,14 @@ pub(crate) fn keyset_key_refusal(
         | RivetType::String
         | RivetType::Text
         | RivetType::Uuid => None,
-        RivetType::Decimal { .. } if source == SourceType::Oracle => None,
+        RivetType::Decimal { scale: 0, .. } if source == SourceType::Oracle => None,
         RivetType::Decimal { .. } => {
             Some("is a decimal, which the cursor cannot advance past exactly")
+        }
+        RivetType::Timestamp {
+            timezone: Some(_), ..
+        } if source == SourceType::Oracle => {
+            Some("is a timestamp with a time zone, which is not a keyset key on Oracle")
         }
         RivetType::Timestamp {
             unit: TimeUnit::Microsecond,
@@ -52,5 +60,92 @@ pub(crate) fn keyset_key_refusal(
         RivetType::Interval => Some("is an interval, which does not sort as text"),
         RivetType::List { .. } => Some("is an array, which the cursor cannot render"),
         RivetType::Unsupported { .. } => Some("has a type rivet does not read"),
+    }
+}
+
+/// The cause `column`, as the engine delivers it in `mappings`, cannot key a keyset seek; `None` when it can.
+pub(crate) fn column_refusal(
+    source: SourceType,
+    mappings: &[TypeMapping],
+    finer_than_microsecond: &[String],
+    column: &str,
+) -> Option<&'static str> {
+    let Some(mapping) = mappings
+        .iter()
+        .find(|m| m.column_name == column)
+        .or_else(|| {
+            mappings
+                .iter()
+                .find(|m| m.column_name.eq_ignore_ascii_case(column))
+        })
+    else {
+        return Some("is not among the columns the export delivers");
+    };
+    let finer = finer_than_microsecond
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(column));
+    keyset_key_refusal(source, mapping, finer)
+}
+
+/// Samples the offline tests that sweep every Rivet type share.
+#[cfg(test)]
+pub(crate) mod samples {
+    use crate::types::{RivetType, SourceColumn, TimeUnit as U, TypeMapping};
+
+    /// The mapping of a column named `k` delivered as `rivet_type`.
+    pub(crate) fn mapping_of(rivet_type: RivetType) -> TypeMapping {
+        TypeMapping::from_source(&SourceColumn::simple("k", "native", false), rivet_type)
+    }
+
+    /// A sample of every Rivet type, with the precision, scale and zone variants the seam tells apart.
+    pub(crate) fn rivet_type_samples() -> Vec<RivetType> {
+        let ts = |unit, tz: Option<&str>| RivetType::Timestamp {
+            unit,
+            timezone: tz.map(Into::into),
+        };
+        vec![
+            RivetType::Bool,
+            RivetType::Int16,
+            RivetType::Int32,
+            RivetType::Int64,
+            RivetType::UInt64,
+            RivetType::Float32,
+            RivetType::Float64,
+            RivetType::Decimal {
+                precision: 18,
+                scale: 0,
+            },
+            RivetType::Decimal {
+                precision: 30,
+                scale: 4,
+            },
+            RivetType::Date,
+            RivetType::Time {
+                unit: U::Microsecond,
+            },
+            RivetType::Time {
+                unit: U::Nanosecond,
+            },
+            ts(U::Second, None),
+            ts(U::Millisecond, None),
+            ts(U::Microsecond, None),
+            ts(U::Microsecond, Some("UTC")),
+            ts(U::Nanosecond, None),
+            ts(U::Nanosecond, Some("UTC")),
+            RivetType::String,
+            RivetType::Text,
+            RivetType::Binary,
+            RivetType::Json,
+            RivetType::Uuid,
+            RivetType::Enum,
+            RivetType::Interval,
+            RivetType::List {
+                inner: Box::new(RivetType::Int32),
+            },
+            RivetType::Unsupported {
+                native_type: "geometry".into(),
+                reason: "no mapping".into(),
+            },
+        ]
     }
 }

@@ -4,9 +4,12 @@
 //! speak (see [`catalog_type`]), the way the SQL Server reader renames
 //! `timestamp` to `rowversion`.
 
+use crate::config::SourceType;
 use crate::error::Result;
 use crate::source::Source;
 use crate::source::oracle::OracleSource;
+
+use crate::types::ColumnOverrides;
 
 use super::{ColumnInfo, TableInfo};
 
@@ -87,6 +90,18 @@ pub(super) fn introspect(
              names upper-case — check the spelling, and that the user can SELECT it."
         );
     }
+    let mappings = conn
+        .type_mappings(
+            &super::select_all(SourceType::Oracle, &[&schema, &table]),
+            &ColumnOverrides::default(),
+        )
+        .map_err(|e| super::keyset_probe_context(e, &format!("{schema}.{table}")))?;
+    let finer = crate::source::oracle::finer_than_microsecond_columns(
+        conn,
+        &format!("'{}'", lit(&schema)),
+        &format!("'{}'", lit(&table)),
+    )?;
+    super::mark_keyset_refusals(SourceType::Oracle, &mut columns, &mappings, &finer);
     let (owner, name) = (lit(&schema), lit(&table));
     let stats = conn.query_scalar(&format!(
         "SELECT NVL(TO_CHAR(num_rows), 'NULL') FROM all_tables \
@@ -282,13 +297,13 @@ fn column_info(f: &[Option<String>]) -> Option<ColumnInfo> {
     Some(ColumnInfo {
         name: name.clone()?,
         data_type: catalog_type(&raw, precision, scale),
-        not_keyset: !crate::source::oracle::is_keyset_key_type(&raw, precision, scale),
         not_cursor: crate::source::oracle::is_sub_microsecond_type(&raw, scale),
         is_primary_key: is_pk,
         is_indexed: is_pk || ix.as_deref() == Some("1"),
         is_nullable: nullable.as_deref() == Some("Y"),
         numeric_precision: precision,
         numeric_scale: scale.and_then(|s| u32::try_from(s).ok()),
+        ..Default::default()
     })
 }
 
@@ -514,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn init_keys_and_cursors_only_columns_the_oracle_planner_and_run_accept() {
+    fn init_cursors_only_columns_the_oracle_run_accepts() {
         let row = |v: [&str; 7]| -> Vec<Option<String>> {
             v.iter()
                 .map(|c| (!c.is_empty()).then(|| c.to_string()))
@@ -533,37 +548,6 @@ mod tests {
             ],
             density: None,
         };
-        let ts6 = ["UPDATED_AT", "TIMESTAMP(6)", "0", "1", "N", "", "6"];
-        for refused in [
-            ["K", "BINARY_DOUBLE", "1", "1", "N", "", ""],
-            ["K", "BINARY_FLOAT", "1", "1", "N", "", ""],
-            ["K", "TIMESTAMP(6) WITH TIME ZONE", "1", "1", "N", "", "6"],
-            [
-                "K",
-                "TIMESTAMP(6) WITH LOCAL TIME ZONE",
-                "1",
-                "1",
-                "N",
-                "",
-                "6",
-            ],
-            ["K", "TIMESTAMP(9)", "1", "1", "N", "", "9"],
-        ] {
-            let info = table(refused, ts6);
-            assert_eq!(info.keysettable_pk_column(), None, "{}", refused[1]);
-            assert_eq!(info.suggest_mode(), "incremental", "{}", refused[1]);
-        }
-        for keyed in [
-            ["K", "VARCHAR2", "1", "1", "N", "", ""],
-            ["K", "TIMESTAMP(6)", "1", "1", "N", "", "6"],
-        ] {
-            assert_eq!(
-                table(keyed, ts6).keysettable_pk_column(),
-                Some("K"),
-                "{}",
-                keyed[1]
-            );
-        }
         let ts9 = ["UPDATED_AT", "TIMESTAMP(9)", "0", "1", "N", "", "9"];
         let info = table(["ID", "VARCHAR2", "1", "1", "N", "", ""], ts9);
         assert_eq!(

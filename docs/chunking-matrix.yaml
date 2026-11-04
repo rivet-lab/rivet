@@ -135,6 +135,14 @@ scenarios:
     mongo:    { na: "Mongo init scaffolds a collection scan, not a SQL keyset key" }
     oracle:   { test: an_init_generated_config_keysets_a_number_19_key_past_i64 }
 
+  - id: keyset_init_and_planner_agree
+    what: "rivet init marks a column not_keyset exactly when the planner's admit_keyset_keys refuses the type the engine delivers for it, for every Rivet type with and without the finer-than-microsecond flag"
+    postgres: { test: init_and_the_planner_refuse_the_same_keyset_keys }
+    mysql:    { test: init_and_the_planner_refuse_the_same_keyset_keys }
+    mssql:    { test: init_and_the_planner_refuse_the_same_keyset_keys }
+    mongo:    { na: "Mongo always pages by _id; init scaffolds no keyset key" }
+    oracle:   { test: init_and_the_planner_refuse_the_same_keyset_keys }
+
   # ── range chunking (WHERE key BETWEEN a AND b) ────────────────────────────
   - id: range_auto_single_int_pk
     what: "chunked + table: shortcut, no chunk_column → auto range-chunk on the single-integer PK"

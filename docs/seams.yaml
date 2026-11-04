@@ -64,8 +64,12 @@ seams:
   - id: keyset-key-type
     owner: src/source/keyset_key.rs::keyset_key_refusal
     reads: "which delivered column types a keyset seek can key: the cursor must read the last value and re-bind it as a literal that orders as the stored value"
-    also_in: [src/source/mod.rs]
+    also_in: [src/source/mod.rs, src/init/mod.rs]
     bypass:
+      - "not_keyset :"
+      - ". not_keyset ="
+      - "is_keysettable_type ("
+      - "is_keyset_key_type ("
       - ". keyset_keys . push ("
       - ". keyset_keys . retain ("
       - ". keyset_keys . extend ("

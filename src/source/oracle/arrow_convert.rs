@@ -538,6 +538,51 @@ pub(super) fn rows_to_batch(
 mod tests {
     use super::*;
 
+    /// The seam over what an Oracle catalog type is delivered as: integer NUMBERs, text, DATE and zone-less timestamps to the microsecond key a seek.
+    #[test]
+    fn an_oracle_catalog_type_keys_a_seek_by_what_it_is_delivered_as() {
+        use crate::config::SourceType;
+        use crate::source::keyset_key::keyset_key_refusal;
+        use crate::types::SourceColumn;
+        let refusal = |kind, native: &str, p, s, finer| {
+            let rivet = autodetect(kind, native, p, s, native);
+            let mapping =
+                TypeMapping::from_source(&SourceColumn::simple("K", native, false), rivet);
+            keyset_key_refusal(SourceType::Oracle, &mapping, finer)
+        };
+        for (kind, native, p, s) in [
+            (OraKind::Number, "number", 10, 0),
+            (OraKind::Number, "number", 38, 0),
+            (OraKind::Number, "number", 7, -2),
+            (OraKind::Number, "number", 0, -127),
+            (OraKind::Number, "number", 126, -127),
+            (OraKind::Text, "varchar", 0, 0),
+            (OraKind::Text, "nchar", 0, 0),
+            (OraKind::Date, "date", 0, 0),
+            (OraKind::Timestamp, "timestamp", 6, 0),
+            (OraKind::Timestamp, "timestamp", 6, 6),
+        ] {
+            assert_eq!(refusal(kind, native, p, s, false), None, "{native} {p} {s}");
+        }
+        for (kind, native, p, s, finer) in [
+            (OraKind::Number, "number", 12, 2, false),
+            (OraKind::Number, "number", 10, 3, false),
+            (OraKind::BinaryFloat, "binary_float", 0, 0, false),
+            (OraKind::BinaryDouble, "binary_double", 0, 0, false),
+            (OraKind::Timestamp, "timestamp", 9, 9, true),
+            (OraKind::TimestampTz, "timestamp_tz", 6, 6, false),
+            (OraKind::TimestampLtz, "timestamp_ltz", 6, 6, false),
+            (OraKind::Raw, "raw", 0, 0, false),
+            (OraKind::Boolean, "boolean", 0, 0, false),
+            (OraKind::IntervalDs, "interval_ds", 0, 0, false),
+        ] {
+            assert!(
+                refusal(kind, native, p, s, finer).is_some(),
+                "{native} {p} {s} cannot key a seek"
+            );
+        }
+    }
+
     #[test]
     fn a_sub_microsecond_column_is_marked_lossy_and_a_bare_number_warns_by_name() {
         use crate::types::{SourceColumn, TypeFidelity};

@@ -1,6 +1,9 @@
 use mysql::prelude::Queryable;
 
+use crate::config::SourceType;
 use crate::error::Result;
+
+use crate::types::ColumnOverrides;
 
 use super::{ColumnInfo, TableInfo};
 
@@ -15,7 +18,7 @@ const TABLE_STATS_SQL: &str = "SELECT TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH FROM
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?";
 
 const COLUMNS_SQL: &str = "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_KEY, IS_NULLABLE, \
-            NUMERIC_PRECISION, NUMERIC_SCALE, COLUMN_TYPE \
+            NUMERIC_PRECISION, NUMERIC_SCALE \
      FROM information_schema.COLUMNS \
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
      ORDER BY ORDINAL_POSITION";
@@ -88,34 +91,18 @@ pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<Ta
 
     // Column metadata (includes KEY + IS_NULLABLE + numeric precision/scale for decimal columns).
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(
-        String,
-        String,
-        String,
-        String,
-        Option<u32>,
-        Option<u32>,
-        String,
-    )> = conn.exec(COLUMNS_SQL, (table,))?;
+    let rows: Vec<(String, String, String, String, Option<u32>, Option<u32>)> =
+        conn.exec(COLUMNS_SQL, (table,))?;
 
     if rows.is_empty() {
         return Err(super::table_not_found(table));
     }
 
-    let columns = rows
+    let mut columns: Vec<ColumnInfo> = rows
         .into_iter()
         .map(
-            |(
-                name,
-                data_type,
-                column_key,
-                nullable,
-                numeric_precision,
-                numeric_scale,
-                column_type,
-            )| {
+            |(name, data_type, column_key, nullable, numeric_precision, numeric_scale)| {
                 ColumnInfo {
-                    not_keyset: column_type.eq_ignore_ascii_case("tinyint(1)"),
                     is_indexed: !column_key.is_empty(),
                     is_primary_key: column_key == "PRI",
                     is_nullable: nullable.eq_ignore_ascii_case("YES"),
@@ -128,6 +115,13 @@ pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<Ta
             },
         )
         .collect();
+    let mappings = crate::source::mysql::type_mappings_on(
+        conn,
+        &super::select_all(SourceType::Mysql, &[table]),
+        &ColumnOverrides::default(),
+    )
+    .map_err(|e| super::keyset_probe_context(e, table))?;
+    super::mark_keyset_refusals(SourceType::Mysql, &mut columns, &mappings, &[]);
 
     Ok(TableInfo {
         cdc_capture_instance: None,
