@@ -432,14 +432,6 @@ exclude_re = [
     # to filter" in 23s and, being continue-on-error, never complained).
     # Guarded now by `exclude_patterns_are_not_over_broad`.
     "replace && with \\|\\| in overlay_measured_rows",
-    # run_exports_as_child_processes SPAWNS child `rivet run` processes and drives
-    # the IPC card UI — it has no offline caller, so a body stub is unkillable
-    # HERE by construction (the live-only class, cf. run_pool / density_probe). Its
-    # pure decision — the common-mode representative-error class key — is extracted
-    # into `representative_error` (unit-tested + RED-proven, incl. random-alnum
-    # collapse), and the heartbeat + card flow are live-guarded by
-    # live_parallel_ux (common-mode banner + heartbeat) and the parallel-cards GIF.
-    "replace run_exports_as_child_processes ->",
     # `elapsed() < sample_interval` vs `<=` in Governor::run's pacing check:
     # the two differ only when the elapsed time equals the interval to the
     # NANOSECOND, and even then the `<=` form merely defers that one sample by a
@@ -649,15 +641,7 @@ exclude_re = [
     "replace BigQueryLoader::drift_of -> Result<Option<super::ChangelogDrift>>",
     "replace <impl super::ShapeControl for BigQueryLoader>::changelog_drift -> Result<Option<super::ChangelogDrift>>",
     "replace <impl super::ShapeControl for BigQueryLoader>::adoption_drift -> Result<Option<super::ChangelogDrift>>",
-    # The CDC job's two source-bound bodies: the baseline pairing (opens the source
-    # to type-check each recipe) and the drain itself. Live: full_cdc_cycle_{mysql,
-    # mssql,mongo} — a stubbed baseline leaves the warehouse short of the seed, a
-    # stubbed drain captures nothing. NOT the postgres variant for the baseline stub:
-    # `CdcScenario::pg_with` creates the slot BEFORE the seed, so the stream carries
-    # the seed rows and the warehouse is whole without any baseline — green, not
-    # evidence. partner_shape_three_tables_one_stream_postgres (slot created by the
-    # product at run 1, after the seed) is the PG oracle.
-    "replace initial_snapshot_pending -> Result<Vec<ExportConfig>>",
+    # run_cdc_inner (the drain): live full_cdc_cycle_{mysql,mssql,mongo}; offline stub graded only by seam_bypass_guard (2026-11-04).
     "replace run_cdc_inner -> \\(Vec<crate::manifest::RunManifest>, Result<\\(\\)>\\)",
     # `capture_load_units` connects to the source to type the load spec. Live:
     # the_recipe_column_types_reach_the_stream_and_the_recorded_spec (Decimal(12,4)
@@ -672,17 +656,6 @@ exclude_re = [
     # never closes a transaction and the arm deletion captures no rows (full cycle).
     "replace MysqlChangeStream::close_transaction_at -> bool",
     "delete match arm Some\\(EventData::RowsEvent\\(re\\)\\) in MysqlChangeStream::fill",
-    # `pin_plan_to_its_run` (load/pin.rs) lists a real store's manifests
-    # and reads the state DB; the decision it feeds — rebuilding the plan from one
-    # run's spec — is `retype_plan` (unit-tested). Stubbed to `Ok(plan.clone())` it
-    # is the pre-fix behaviour. Live:
-    # a_load_is_typed_from_its_own_run_not_from_the_last_writer_of_its_name
-    # (two `users` exports on one Postgres state). MEASURED under the stub
-    # (2026-09-17): the mysql load SUCCEEDS and BigQuery's catalog shows the
-    # postgres export's columns `["_id", "w"]` on the mysql table — a silent wrong
-    # DDL, not a refusal; the test reads INFORMATION_SCHEMA, never rivet's exit.
-    # The release gate's parallel engine matrix races exactly that.
-    "replace pin_plan_to_its_run -> Result<load::plan::LoadPlan>",
     # `mysql_checks` (preflight/cdc_health.rs) is doctor's MySQL glue: it opens a
     # connection, reads SHOW GLOBAL VARIABLES / SHOW BINARY LOGS and pushes the verdicts
     # of the pure `mysql_binlog_config_verdict` / checkpoint graders (unit-tested). Its
@@ -936,10 +909,6 @@ exclude_re = [
     #     and mssql_a_never_changed_table_is_not_refused_after_cleanup_passes_its_anchor FAIL.
     "replace pin_checkpoint_at_max_lsn -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
     "replace <impl ChangeStream for MssqlChangeStream>::drained_frontier -> Option<crate::source::cdc::Position> with None$",
-    # source_object_of_capture_instance (live-only: dials SQL Server; in the diff only because its config literal lost a field), each of the five stubs
-    # (Ok(None), and Ok(Some) of empty/"xyzzy" pairs) measured with the stub applied: mssql_cdc_refuses_an_unknown_capture_instance_before_the_snapshot_is_durable
-    # and mssql_cdc_snapshot_leg_reads_the_captured_relation_not_the_default_schema both FAIL.
-    "replace source_object_of_capture_instance -> Result<Option<\\(String, String\\)>> with ",
     # - Oracle interval_iso (each stub, and the IntervalDs arm): edge_oracle_types_export_losslessly
     #   fails on IYM/IDS ("unsupported conversion from interval day to second to
     #   OracleIntervalYM" for the arm). build_column's BinaryFloat (Float64 and Utf8),
