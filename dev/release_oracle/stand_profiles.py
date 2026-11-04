@@ -32,6 +32,7 @@ AG_ROLES = {"mssql-ag-primary": "PRIMARY HEALTHY", "mssql-ag-secondary": "SECOND
 AG_QUERY = ("SET NOCOUNT ON; SELECT r.replica_server_name, s.role_desc + ' ' + s.synchronization_health_desc "
             "FROM sys.dm_hadr_availability_replica_states s JOIN sys.availability_replicas r ON r.replica_id = s.replica_id")
 AG_START = "dev/mssql-ag/setup.sh"
+SA_PASSWORD = "Rivet_Passw0rd!"
 
 
 def is_up(url: str) -> bool:
@@ -61,6 +62,12 @@ def gone_mounts(name: str, spec: dict) -> list[str]:
     return gone
 
 
+def seed_args(spec: dict) -> list[str]:
+    """The `compose exec` arguments that run the profile's idempotent `seed_sql` on its first service."""
+    return ["exec", "-T", spec["services"][0], "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", SA_PASSWORD,
+            "-C", "-b", "-Q", spec["seed_sql"]]
+
+
 def bring_up(profiles: dict[str, dict] | None = None, up: Callable[[str], bool] = is_up,
              compose: Callable[[list[str]], bool] | None = None,
              mounts: Callable[[str, dict], list[str]] = gone_mounts) -> dict[str, str]:
@@ -79,6 +86,8 @@ def bring_up(profiles: dict[str, dict] | None = None, up: Callable[[str], bool] 
             still[name] = "bind-mount source gone: " + ", ".join(gone)
         elif not up(spec["url"]):
             still[name] = "did not come up"
+        elif spec.get("seed_sql") and not compose(seed_args(spec)):
+            still[name] = "its seed statement failed"
     return still
 
 
@@ -92,7 +101,7 @@ def replica_ports() -> list[int]:
 def ag_roles() -> dict[str, str]:
     """`replica -> "ROLE HEALTH"` as the availability-group primary reports it ({} when it cannot be asked)."""
     p = run(["docker", "exec", "rivet-mssql-ag-primary-1", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa",
-             "-P", "Rivet_Passw0rd!", "-C", "-h", "-1", "-W", "-s", "|", "-Q", AG_QUERY], timeout=60)
+             "-P", SA_PASSWORD, "-C", "-h", "-1", "-W", "-s", "|", "-Q", AG_QUERY], timeout=60)
     rows = [line.split("|") for line in p.out.splitlines() if "|" in line] if p.ok else []
     return {name.strip(): state.strip() for name, state in rows}
 
@@ -206,6 +215,13 @@ def self_test() -> None:
     assert calls == [["--profile", "b", "up", "-d", "--wait", "--wait-timeout", str(UP_WAIT_SECS), "sb1", "sb2"]], calls
     state.update(a=True, b=False, c=True)
     assert bring_up(spec, up=is_it_up, compose=lambda args: False, mounts=healthy) == {"b": "did not come up"}
+    seeded = {"c": {**spec["c"], "seed_sql": "SELECT 1"}}
+    seen: list[list[str]] = []
+    state.update(a=True, b=True, c=True)
+    assert bring_up(seeded, up=is_it_up, compose=lambda args: seen.append(args) or True, mounts=healthy) == {}
+    assert seen == [seed_args(seeded["c"])] and seen[0][:3] == ["exec", "-T", "sc"] and seen[0][-1] == "SELECT 1", seen
+    assert bring_up(seeded, up=is_it_up, compose=lambda args: False, mounts=healthy) == {"c": "its seed statement failed"}
+    assert registry.gate_profiles()["governor"]["seed_sql"] == "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet"
     calls.clear()
     state.update(a=True, b=True, c=True)
     gone = {"c": ["sc: /deleted/worktree/dev/x.xml"]}
