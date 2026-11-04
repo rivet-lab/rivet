@@ -27,7 +27,7 @@ python3 -m dev.release_oracle --engines postgres,mysql
 ### Oracle (23-free, batch only)
 
 The gate starts its own `gvenzl/oracle-free:23-slim-faststart` on `:55023` (3 GiB cap, readiness
-waits up to ~5 min, a SKIP when it never answers) and seeds it from `seeds/common/oracle.sql` plus
+waits up to ~5 min, one FAIL row naming the last probe's reason when it never answers) and seeds it from `seeds/common/oracle.sql` plus
 the gate-owned `oracle_tz_probe.sql` (TIMESTAMP WITH TIME ZONE by offset and by region name,
 which the canonical type matrix lacks). DuckDB has no Oracle scanner, so the SOURCE side is read by
 **python-oracledb** (thin, uv-pinned, imported lazily): exact `Decimal`s, LOBs read in full so an
@@ -370,7 +370,14 @@ green.
 ## Contract
 
 - A cell is **PASS** only when its check RAN and MATCHED.
-- A down service / absent cloud cred is **SKIP** — never a silent pass.
+- An absent cloud cred, or a store or service that was never ready at bring-up, is an ENV **SKIP**
+  (graded by `skip_allow` and the census) — never a silent pass.
+- A stand that answered earlier in the run and is down now (a store, a state DB, a container
+  OOM-killed or dead, an unreadable docker) is a **stand incident**: the cell it hit is **INFRA**
+  and the run is **NOT GRADED** — never a SKIP and never a FAIL with the nextest panic text.
+  Seeded recall reads it the same way (STAND-DOWN, never CAUGHT and never MISSED).
+- An engine that never answers its readiness probe within its deadline is one **FAIL** row per
+  engine x version carrying the last probe's reason.
 - **A missing previous-release baseline is a FAIL, not a SKIP.** A gate that grades
   nothing must not report a non-failure; the only way to make those three stages skip
   is `--without-prev-release-comparison`, which says so in every row and in the final
