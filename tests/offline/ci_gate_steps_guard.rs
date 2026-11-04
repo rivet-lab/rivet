@@ -217,3 +217,50 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
         "a skip must come from a scope job that succeeded: {run}"
     );
 }
+
+const FREE_DISK: &str = "./.github/actions/free-disk";
+
+/// A job that brings a compose stack up frees the runner's disk first, through the one shared action.
+#[test]
+fn every_job_that_starts_a_compose_stack_frees_the_disk_first() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let action = std::fs::read_to_string(root.join(".github/actions/free-disk/action.yml"))
+        .expect("read the free-disk action");
+    assert!(
+        action.contains("jlumbroso/free-disk-space@") && action.contains("df -h /"),
+        "the shared free-disk action must run the cleaner and print the disk"
+    );
+    let mut seen = 0;
+    for entry in std::fs::read_dir(root.join(".github/workflows")).expect("list workflows") {
+        let path = entry.expect("workflow entry").path();
+        let text = std::fs::read_to_string(&path).expect("read workflow");
+        let wf: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).expect("parse workflow");
+        let Some(jobs) = wf["jobs"].as_mapping() else {
+            continue;
+        };
+        for (job, body) in jobs {
+            let steps = body["steps"].as_sequence().cloned().unwrap_or_default();
+            let starts_stack = |s: &serde_yaml_ng::Value| {
+                s["run"].as_str().unwrap_or_default().lines().any(|l| {
+                    l.contains("docker compose") && l.split_whitespace().any(|w| w == "up")
+                })
+            };
+            let Some(first_up) = steps.iter().position(starts_stack) else {
+                continue;
+            };
+            seen += 1;
+            assert!(
+                steps[..first_up]
+                    .iter()
+                    .any(|s| s["uses"].as_str() == Some(FREE_DISK)),
+                "{}: job `{}` starts a compose stack without `uses: {FREE_DISK}` before it",
+                path.display(),
+                job.as_str().unwrap_or("?")
+            );
+        }
+    }
+    assert!(
+        seen >= 2,
+        "found {seen} compose jobs: the scan lost its target"
+    );
+}

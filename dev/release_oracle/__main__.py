@@ -70,6 +70,7 @@ from . import (
     scenarios,
     shared_state,
     skip_census,
+    stand_health,
     state_parity,
     tls_downgrade,
     upgrade,
@@ -101,8 +102,8 @@ def start_stores(led: Ledger) -> None:
     # MinIO the `up` had just RECREATED (no volume — its buckets gone) was not up yet,
     # so the bucket PUT below failed unread and every s3 cell then failed on
     # `bucket not found` (measured 2026-09-25: all four CDC cells).
-    wait_until(lambda: scenarios.store_up("s3"), tries=30, delay=1.0)
-    wait_until(lambda: scenarios.store_up("gcs"), tries=15, delay=1.0)
+    scenarios.store_up("s3", 30.0)
+    scenarios.store_up("gcs", 15.0)
 
     # MinIO: a signed REST PUT (the `mc` images are no longer public); 409 = already there.
     from dev.pytools.e2e import s3_bucket_exists, s3_make_bucket
@@ -215,6 +216,36 @@ def gate_kind(ns: argparse.Namespace, config: dict | None = None) -> str:
     return ISLAND_GATE if ns.island else FULL_GATE if ns.with_seeded_recall else REDUCED_GATE
 
 
+def _live_stage_takes_the_selector_self_test() -> None:
+    """The live-modules stage of the table is handed the engines `--engines` names, none when it names none."""
+    from unittest import mock
+
+    for argv, want in ((["--engines", "mysql,mssql"], ["mysql", "mssql"]), ([], [])):
+        seen: list = []
+        stage = next(st for st in gate_stages(parse_args(argv)) if st.name == "live modules")
+        with mock.patch.object(live_modules, "verify_live_modules", lambda led, engines=None: seen.append(engines)):
+            stage.run(Ledger(colour=False))
+        assert seen == [want], f"the live-modules stage got {seen} for {argv}"
+
+
+def _narrowed_run_has_no_tag_self_test(full_argv: list[str]) -> None:
+    """A full gate's record is accepted by release.py, and the same record of a run narrowed by `--engines` is refused."""
+    import json
+
+    from ..pytools import release
+
+    def refusal(argv: list[str]) -> str | None:
+        ns = parse_args(argv)
+        rec = {"at": "t", "sha": "a" * 40, "binary": "a" * 9, "gate": gate_kind(ns), "config": gate_config(ns), "dirty": False,
+               "verdict": "RELEASE-READY", "skipped_env": []}
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "t.jsonl").write_text(json.dumps(rec) + "\n")
+            return release.gate_refusal("a" * 40, Path(d) / "t.jsonl")
+
+    assert refusal(full_argv) is None, "the control record of a full gate must be accepted"
+    assert refusal([*full_argv, "--engines", "mysql"]) is not None, "release.py accepts a run narrowed by --engines"
+
+
 def _gate_kind_self_test() -> None:
     """Only `make release-oracle-full`'s and `make release-oracle-island`'s arguments make their record kind; each escape, a missing recall or a narrowed scope makes a run reduced."""
     import re
@@ -250,6 +281,7 @@ def _gate_kind_self_test() -> None:
             assert gate_kind(parse_args(argv)) == REDUCED_GATE, f"an empty state URL grades SQLite only and still reads as a {kind} run"
             os.environ["RIVET_GATE_STATE_URL"] = "postgresql://state.invalid/rivet"
             assert gate_config(parse_args([*argv, "--state-url", "postgresql://state.invalid/rivet"])) == CANONICAL_CONFIG
+        _narrowed_run_has_no_tag_self_test(argv_of("release-oracle-full"))
         assert "--island" not in argv_of("release-oracle-full") and "--island" in argv_of("release-oracle-island")
         assert "--with-seeded-recall" in argv_of("release-oracle-full"), "the per-run gate runs the recall"
         bare = re.search(r"^release-oracle:.*?\n\t(.*)", makefile, re.M)
@@ -789,6 +821,70 @@ def _oracle_restart_self_test() -> None:
     assert "no answer in 3 polls" in why and "ORA-27102" in why and "SP2-0640" in why and "rc=1" in why and log in why, why
 
 
+def _stand_down_self_test() -> None:
+    """A stand outage is one verdict for every stage: a live test that ran against a dead stand is INFRA, a store that answered earlier and went away is an incident, a store is proven by retries, and a never-ready engine writes one FAIL row."""
+    import contextlib
+    import io
+    from unittest import mock
+
+    from .core import Proc
+
+    def led_of() -> Ledger:
+        led = Ledger(colour=False)
+        led._buf = []
+        return led
+
+    book = stand_health.Book()
+    with mock.patch.object(stand_health, "BOOK", book):
+        since = book.mark()
+        led = led_of()
+        with contextlib.redirect_stdout(io.StringIO()):
+            scenarios._module_red(led, "s", "leg", "t_dead", "live test requires Postgres reachable on 127.0.0.1:5433.", Path("x.log"), since)
+            scenarios._module_red(led, "s", "leg", "t_panic", "assertion failed: rows == 3", Path("x.log"), since)
+        assert [c.status for c in led.cells] == [Status.INFRA, Status.FAIL], "a panic that names the stand is INFRA, a product panic stays FAIL"
+        book.note(stand_health.WATCH + "containers", stand_health.down("stand container rivet-postgres-1 died"))
+        led = led_of()
+        with contextlib.redirect_stdout(io.StringIO()):
+            scenarios._module_red(led, "s", "leg", "t_any", "assertion failed: rows == 3", Path("x.log"), since)
+        assert [c.status for c in led.cells] == [Status.INFRA], "a test that ran while the watchdog saw the stand down is INFRA whatever it printed"
+
+    book = stand_health.Book()
+    calls: list[int] = []
+
+    def flaky(url: str) -> Callable[[], str]:
+        def probe() -> str:
+            calls.append(1)
+            return "" if len(calls) > 1 else "refused"
+        return probe
+
+    with mock.patch.object(stand_health, "BOOK", book), mock.patch.object(stand_health, "http_probe", flaky), mock.patch.object(stand_health.time, "sleep", lambda s: None):
+        assert scenarios.store_up("s3", 5.0) and len(calls) == 2, "one refused request is retried inside the deadline"
+        assert not scenarios.store_up("nope"), "an unknown store is not up"
+
+    book = stand_health.Book()
+    with mock.patch.object(stand_health, "BOOK", book), mock.patch.object(scenarios, "store_up", lambda store: False):
+        book.note(stand_health.store_target("s3"), stand_health.ALIVE)
+        led = led_of()
+        with contextlib.redirect_stdout(io.StringIO()):
+            scenarios.sc_load(led, "mongo", "5", "mongodb://x", "s3")
+            scenarios.sc_load(led, "mongo", "5", "mongodb://x", "gcs")
+        assert [c.status for c in led.cells] == [Status.INFRA, Status.SKIP], "a store that answered and went away is INFRA, one that never answered is an ENV skip"
+        assert led.cells[1].cause is SkipCause.ENV
+
+    led = led_of()
+    with mock.patch.object(sys.modules[__name__], "bring_up", side_effect=stand_health.BringUpError("never became ready: not ready after 90s: refused")), contextlib.redirect_stdout(io.StringIO()):
+        _run_one_version(led, argparse.Namespace(keep=True), "mysql", "8.0 img 3306")
+    rows = [(c.engine, c.status) for c in led.cells if c.engine == "mysql"]
+    assert rows == [("mysql", Status.FAIL)] and "refused" in led.cells[0].detail, f"a never-ready engine writes exactly one FAIL row naming the probe: {led.cells}"
+    with mock.patch.object(sys.modules[__name__], "docker", lambda *a, **k: Proc(list(a), 1, "", "no space left on device")):
+        try:
+            bring_up(led_of(), "mysql", "8.0", "img", 3306)
+        except stand_health.BringUpError as e:
+            assert "no space left" in str(e)
+        else:
+            raise AssertionError("an engine that cannot start raises, it does not return None")
+
+
 def _self_test() -> int:
     """Grade this module's env-flag grammar against `regression`'s.
 
@@ -826,7 +922,7 @@ def _self_test() -> int:
     from .partner_shape import init_slot
     assert init_slot("    cdc:\n      slot: rivet_rivet_public_cdc  # logical slot\n") == "rivet_rivet_public_cdc"
     assert init_slot("mode: cdc\n") is None, "a config naming no slot names none"
-    from . import stand_disk, stand_health, stand_memory, stand_profiles
+    from . import stand_disk, stand_memory, stand_profiles
     failure.self_test()
     stand_disk.self_test()
     stand_health.self_test()
@@ -835,6 +931,7 @@ def _self_test() -> int:
     import inspect
     assert "stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))" in inspect.getsource(main), \
         "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
+    _stand_down_self_test()
     sunk = Ledger(colour=False)
     sunk._buf = []
     sunk.failed("mysql", "8.0", "seed", "-", "seed had errors")
@@ -850,7 +947,8 @@ def _self_test() -> int:
         led = Ledger(colour=False)
         led._buf = []
         led.failed("postgres", "16", "bq-load", "-", "state(pg): connect failed: the database system is in recovery mode")
-        down = stand_disk.Watchdog([stand_disk.Probe(lambda: stand_health.state_reason("postgresql://u@127.0.0.1:1/s", lambda *a: answer, lambda s: None), 1.0)])
+        down = stand_health.Watchdog([stand_health.Probe(stand_health.WATCH + "state DB", lambda: stand_health.reason_verdict(
+            stand_health.state_reason("postgresql://u@127.0.0.1:1/s", lambda *a: answer, lambda s: None)), 1.0)], book=stand_health.Book())
         with contextlib.redirect_stdout(io.StringIO()):
             led.stand_invalid = down.stop()
             led.report()
@@ -1058,7 +1156,9 @@ def _self_test() -> int:
     stale = [m for m in live_modules.EXCLUDED if m not in mods]
     assert not stale, f"live_modules.EXCLUDED names modules live_suite no longer has: {stale}"
     left, expr = live_modules.derived_filter(["a", "b", "common"], {"b"}, {"t_1"})
-    assert left == ["a"] and expr == "(test(/^a::/)) - test(/::(t_1)$/)", (left, expr)
+    assert left == ["a"] and expr == "(test(/^(a)::/)) - test(/::(t_1)$/)", (left, expr)
+    live_modules.self_test()
+    _live_stage_takes_the_selector_self_test()
     # perf: a regression past the tolerance fails, noise under the absolute slack does not.
     from .perf import Sample, perf_verdict
     base = Sample(True, 1.0, 0.02, 50 * 1024 * 1024, {})
@@ -1294,7 +1394,7 @@ def _self_test() -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="release-oracle", add_help=True)
-    ap.add_argument("--engines", default="", help="comma-separated subset, e.g. postgres,mysql")
+    ap.add_argument("--engines", default="", help="comma-separated subset, e.g. postgres,mysql; narrows the engine matrix and the live modules (engine-less modules still run)")
     ap.add_argument(
         "--versions",
         default=os.environ.get("RIVET_ORACLE_VERSIONS", ""),
@@ -1607,7 +1707,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
     # The cells a fix added or edited since the baseline, through the baseline: each must fail there.
     table.append(serial("fix cells", lambda led: fix_cells.verify_fix_cells(led)))
     # Last: it runs every live_suite test no stage above already ran.
-    table.append(serial("live modules", lambda led: live_modules.verify_live_modules(led)))
+    table.append(serial("live modules", lambda led: live_modules.verify_live_modules(led, live_modules.engines_arg(ns.engines))))
     return table
 
 
@@ -1655,9 +1755,9 @@ def _host_port_open(port: int) -> bool:
         return False
 
 
-def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str | None:
+def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
     """Start one engine×version and wait for it to answer. Returns its URL, or
-    None when it could not start (the caller records a SKIP).
+    raises `stand_health.BringUpError` with the last probe's reason (the caller records the one FAIL row).
 
     The container name is a plain function of (engine, tag) — see
     `core.engine_container`. The bash equivalent had to keep that expansion on
@@ -1735,19 +1835,16 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
                  "-v", f"{ROOT / 'dev' / 'oracle' / 'init'}:/container-entrypoint-initdb.d:ro",
                  "-p", f"{port}:1521"]
     else:
-        led.skipped(engine, tag, "all", "-", f"{engine}:{tag} unknown engine kind", cause=SkipCause.ENV)
-        return None
+        raise stand_health.BringUpError(f"unknown engine kind {engine!r}")
 
     started = docker(*args, image, *cmd)
     if not started.ok:
-        led.skip(f"{engine}:{tag} could not start ({image}): {started.stderr.strip()[-200:]}")
-        return None
+        raise stand_health.BringUpError(f"could not start ({image}): {started.stderr.strip()[-200:]}")
 
     # One engine may need SEVERAL probe spellings across the versions this gate
     # pins. Mongo is the case: `mongosh` exists from 5.0 on, while 4.4 ships only
     # the legacy `mongo` shell — so a mongosh-only probe reports 4.4 as never
-    # ready, which (now that the result is honoured) turns a perfectly healthy
-    # server into a SKIP. The compose healthcheck makes the same fallback.
+    # ready, which turns a perfectly healthy server into a FAIL. The compose healthcheck makes the same fallback.
     # The probe must query the TARGET DATABASE, not merely the server.
     #
     # `pg_isready` reports whether the server ANSWERS, and a server that answers
@@ -1789,7 +1886,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
     if engine == "mssql":
         probes = [[x for a in p for x in (sqlcmd(name) if a == "__SQLCMD__" else (a,))]
                   for p in probes]
-    from .core import docker_exec, wait_until
+    from .core import docker_exec
 
     # TWO consecutive successes, a second apart — not one.
     #
@@ -1799,29 +1896,25 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
     # says "ready" and the socket vanishes moments later; the seed then dies with
     # `connection to server on socket "…/.s.PGSQL.5432" failed: No such file or
     # directory`. Observed exactly that on postgres:14 in a full gate run.
-    def ready() -> bool:
+    def answers() -> str:
         if not _host_port_open(port):
-            return False
+            return f"127.0.0.1:{port} refuses a TCP connect"
         for probe in probes:
             if not docker_exec(name, *probe, timeout=20).ok:
                 continue  # this spelling is absent on this version — try the next
             time.sleep(1.0)
             if docker_exec(name, *probe, timeout=20).ok:
-                return True
-        return False
+                return ""
+        return f"no probe of {[p[0] for p in probes]} passed twice"
 
     # …and the RESULT is honoured. Ignoring it meant proceeding to seed a server
     # that never came up, which surfaced as a seed error blaming the SQL rather
     # than the bring-up — the same "ignored boolean" shape this gate exists to
     # catch elsewhere.
     tries = ORACLE_READY_TRIES if engine == "oracle" else 45
-    if not wait_until(ready, tries=tries, delay=2.0):
-        # FAIL, not SKIP: an engine the gate was asked to grade and did not is a hole.
-        led.failed(engine, tag, "all", "-",
-                    f"{engine}:{tag} never became ready (no probe of "
-                    f"{[p[0] for p in probes]} "
-                    f"never passed twice in ~{tries * 2}s)", "not ready")
-        return None
+    why = stand_health.ready(f"{engine}:{tag}", answers, tries * 2.0, every=2.0)
+    if why:
+        raise stand_health.BringUpError(f"never became ready: {why}")
 
     if engine == "mssql":
         docker_exec(name, *sqlcmd(name), "-S", "localhost", "-U", "sa",
@@ -1829,10 +1922,9 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str |
                     "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet")
 
     if engine == "oracle":
-        why = _oracle_restarted(name, ready)
+        why = _oracle_restarted(name, lambda: not answers())
         if why:
-            led.failed(engine, tag, "all", "-", f"{engine}:{tag} not ready after the processes restart: {why}", "not ready")
-            return None
+            raise stand_health.BringUpError(f"not ready after the processes restart: {why}")
 
     return scenarios.cfg("url", engine).replace("%PORT%", str(port))
 
@@ -1954,10 +2046,13 @@ def _run_one_version(led: Ledger, ns: argparse.Namespace, engine: str, line: str
     tag, image, port = parts[0], parts[1], int(parts[2])
     led.phase(f"{engine} {tag} ({image})")
     from . import stand_memory
+    url = ""
     with led.split(f"{engine} {tag}: bring-up"), stand_memory.admitted(engine, led.ok):
-        url = bring_up(led, engine, tag, image, port)
+        try:
+            url = bring_up(led, engine, tag, image, port)
+        except stand_health.BringUpError as e:
+            led.failed(engine, tag, "all", "-", f"{engine}:{tag} bring-up failed: {e}", f"not ready: {e}")
     if not url:
-        led.add(engine, tag, "all", "-", Status.FAIL, "bring-up failed")
         return
     # The seed is idempotent (DROP TABLE IF EXISTS …), so a transient
     # failure is retried: a fresh container under load can drop the seed
@@ -1998,7 +2093,7 @@ def run_concurrently(led: Ledger, title: str, stages: list[tuple[str, Callable[[
 
 
 def engine_loop(led: Ledger, ns: argparse.Namespace) -> None:
-    wanted = [e for e in ns.engines.split(",") if e] if ns.engines else None
+    wanted = live_modules.engines_arg(ns.engines)
     engines = [e for e in scenarios.cfg("engines").split() if not wanted or e in wanted]
     cap = max(1, ns.engine_parallel)
 
@@ -2036,18 +2131,15 @@ def _hold_gate_lock():
     return fh
 
 
-def _warehouse_env() -> str:
-    """The BigQuery/GCS env from dev/stand/registry.yaml (dev/pytools/warehouse_env.py); the line saying which."""
+def _warehouse_lines(ns: argparse.Namespace) -> list[str]:
+    """Fill the BigQuery/GCS and Snowflake env (dev/pytools/warehouse_env.py): always on a release run, else as the branch's changes call for; the lines saying which."""
+    from .core import FULL_GATE
     from ..pytools import warehouse_env
 
-    return warehouse_env.bigquery()
-
-
-def _snowflake_env() -> str:
-    """The Snowflake env from dev/stand/registry.yaml (dev/pytools/warehouse_env.py); the line saying which."""
-    from ..pytools import warehouse_env
-
-    return warehouse_env.snowflake()
+    if gate_kind(ns) in (FULL_GATE, ISLAND_GATE):
+        return [warehouse_env.bigquery(), warehouse_env.snowflake()]
+    paths = warehouse_env.changed_paths()
+    return [warehouse_env.fill("bigquery", paths), warehouse_env.fill("snowflake", paths)]
 
 
 def apply_run_policy(ns: argparse.Namespace) -> list[str]:
@@ -2071,6 +2163,11 @@ def main(argv: list[str] | None = None) -> int:
             evidence.LEDGER = Path(d, "last-green.yaml")  # fixture cells never reach the real ledger
             return _self_test()
     ns = parse_args(argv)
+    try:
+        live_modules.engines_arg(ns.engines)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
     refused = apply_run_policy(ns)
     if refused:
         print(f"RIVET_GATE_ENV_UNLISTED: {' '.join(refused)} in the shell. The gate takes its binary from the tree and its bless modes "
@@ -2078,7 +2175,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
     config = gate_config(ns)
-    from . import stand_disk, stand_health
+    from . import stand_disk
     refused = stand_disk.start_refusal(stand_disk.free_gib())
     if refused:
         print(refused, file=sys.stderr)
@@ -2109,7 +2206,7 @@ def main(argv: list[str] | None = None) -> int:
     # scope: a python3 that cannot import pymongo otherwise turns every mongo
     # version into a cryptic "seed had errors" and the gate into NOT-RELEASABLE,
     # with nothing pointing at the environment as the cause.
-    engines_wanted = [e for e in ns.engines.split(",") if e]
+    engines_wanted = live_modules.engines_arg(ns.engines)
     if (not engines_wanted or "postgres" in engines_wanted) and "psql" in find_keg_tools():
         print("the postgres cells shell to `psql` and none is on PATH or in a Homebrew keg (libpq) — install libpq "
               "and add its bin to PATH.",
@@ -2122,8 +2219,8 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
-    print(f"  {_warehouse_env()}")
-    print(f"  {_snowflake_env()}")
+    for line in _warehouse_lines(ns):
+        print(f"  {line}")
 
     record_stage_runs(_gate_modules())
     from .core import tree_identity

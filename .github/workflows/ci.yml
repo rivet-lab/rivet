@@ -1265,23 +1265,7 @@ jobs:
       # metadata` resolves without compiling, so this is a couple of seconds.
       - name: Cargo.lock is in sync with Cargo.toml (release uses --locked)
         run: cargo metadata --locked --format-version 1 > /dev/null
-      # `cargo test --all-targets` links every integration-test binary in the
-      # DEBUG profile — each statically links the full dep tree (arrow / parquet
-      # / openssl / ring / tiberius) with full debug info, hundreds of MB apiece.
-      # As the suite grew (live_differential / live_crash_soak / live_chunked_dense
-      # / sec_exit_codes …) the link working-set crossed ubuntu-latest's ~14 GB
-      # free, and `lld` (mmap-backed output) faults on the full disk with
-      # `ld terminated with signal 7 [Bus error]` — surfacing as a non-obvious
-      # exit 101. Same free-disk fix the e2e job already uses (~30 GB, ~15 s).
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          large-packages: false
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          swap-storage: false
+      - uses: ./.github/actions/free-disk
       - run: cargo test --all-targets
       # The semantic gates below were five jobs that each recompiled the crate to
       # re-run tests `--all-targets` had just run. They are steps now: the binaries
@@ -1386,8 +1370,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      # No free-disk step: the runner starts with 83 GB free of 145 GB, the build ends ~70 GB used
-      # and a leg ~90 GB (measured on PR #452's first run; each job prints `df` every run).
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94"
@@ -1464,6 +1446,7 @@ jobs:
       RIVET_ORACLE_LOG: ${{ github.workspace }}/target/rivet-oracle.log
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk
 
       - name: Start services (in the background)
         # `up -d` pulls ~20 images and starts them; that used to happen, and then be
@@ -1548,6 +1531,7 @@ jobs:
           # Re-open the shared mount after ClickHouse chowns /work to uid 101 on boot,
           # which propagates to the host on Linux and EACCESes the test writer.
           sudo chmod -R 0777 tests/.live-tmp
+          df -h /
 
       - name: Wait for services
         run: |
@@ -1816,7 +1800,7 @@ jobs:
 
       - name: Stop services
         if: always()
-        run: docker compose down
+        run: docker compose down -v --remove-orphans
 
   # A PR the scope skipped reports each leg's required check name as a success that says why.
   e2e-skipped:

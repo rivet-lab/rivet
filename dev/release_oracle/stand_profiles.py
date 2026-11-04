@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..pytools import registry
-from ..pytools.shell import tcp_open
+from . import stand_health
 from .core import ROOT, run
 
 __all__ = ["bring_up", "preflight", "refusal", "unusable"]
@@ -36,9 +36,9 @@ SA_PASSWORD = "Rivet_Passw0rd!"
 
 
 def is_up(url: str) -> bool:
-    """Does something listen on the URL's host port?"""
+    """Does the URL's host port accept a connection within the readiness deadline (`stand_health.ready`)?"""
     u = urlparse(url)
-    return tcp_open(u.hostname or "127.0.0.1", u.port or 0, timeout=2.0)
+    return stand_health.reach_tcp(u.hostname or "127.0.0.1", u.port or 0)
 
 
 def profile_flag(name: str, spec: dict) -> list[str]:
@@ -195,7 +195,24 @@ def preflight(replica: bool) -> str:
 
 def self_test() -> None:
     """Bring-up starts a stand that is down or mounts a gone source (recreating it), and a stand that stays broken is named in the refusal."""
+    import socket
+    import threading
     import yaml
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    late_port = probe.getsockname()[1]
+    probe.close()
+    late = socket.socket()
+
+    def listen_late() -> None:
+        time.sleep(1.5)
+        late.bind(("127.0.0.1", late_port))
+        late.listen(1)
+
+    threading.Thread(target=listen_late, daemon=True).start()
+    assert is_up(f"tcp://127.0.0.1:{late_port}"), "a stand that starts listening a moment after the first probe is up, not skipped"
+    late.close()
 
     spec = {"a": {"services": ["sa"], "url": "tcp://127.0.0.1:1"}, "b": {"services": ["sb1", "sb2"], "url": "tcp://127.0.0.1:2"},
             "c": {"services": ["sc"], "url": "tcp://127.0.0.1:3", "profile": ""}}

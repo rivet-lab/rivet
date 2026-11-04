@@ -247,6 +247,8 @@ KINDS = (
     {"bigquery": "bigquery|bq", "snowflake": "snowflake|sf", "clickhouse": "clickhouse|ch"},
     {"azure": "azure", "gcs": "gcs", "s3": "s3"},
 )
+#: The source engines, which the release gate's `--engines` also names.
+SOURCE_ENGINES = tuple(KINDS[0])
 
 
 def name_token(alts: str) -> str:
@@ -337,12 +339,16 @@ def kept_by_body(chosen: list[str], owners: set[str], root: Path = ROOT) -> list
 def nextest_filter(chosen: list[str], owners: set[str] = frozenset()) -> str:
     """The nextest expression: every other binary whole, and of `live_suite` the chosen modules, minus their tests
     whose name names only another owner of the changed owners' kind (a `_mssql` test for a MySQL change)."""
-    picked = "test(/^(" + "|".join(chosen) + ")::/)"
+    return "not binary(live_suite) | " + narrow_foreign("test(/^(" + "|".join(chosen) + ")::/)", chosen, owners)
+
+
+def narrow_foreign(picked: str, chosen: list[str], owners: set[str]) -> str:
+    """`picked` minus the tests of `chosen` named for another owner of the changed owners' kind, the ones whose body names a changed owner kept."""
     foreign = foreign_names(set(owners))
-    if foreign:
-        back = "".join(f" | test(={t})" for t in kept_by_body(chosen, set(owners)))
-        picked = f"({picked} - (test(/{foreign}/) - test(/{own_names(set(owners))}/)){back})"
-    return f"not binary(live_suite) | {picked}"
+    if not foreign:
+        return picked
+    back = "".join(f" | test(={t})" for t in kept_by_body(chosen, set(owners)))
+    return f"({picked} - (test(/{foreign}/) - test(/{own_names(set(owners))}/)){back})"
 
 
 def changed(base: str, head: str) -> list[str]:
