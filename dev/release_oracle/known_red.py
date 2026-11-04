@@ -53,6 +53,9 @@ _CDC_START = (
 
 
 KNOWN_RED: tuple[KnownRed, ...] = (
+    _open("live_cdc_mbt::open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot",
+          "assertion `left == right` failed: stream differs from the source on negative TIME(1)/TIME(2) with a fraction",
+          "TF-1 (consolidated-2026-11-03 section 2): mysql_common 0.37.3 binlog/misc.rs:35-39 subtracts 0x100 from a u32 fraction for a negative TIME(1)/TIME(2) with a fraction, so a debug rivet panics and a release rivet writes 625:04:19.277216 for -00:00:00.50 in a string column; a row of any table in the binlog panics every MySQL CDC run that reads it. Opened 2026-11-04; closes with fix/mysql-binlog-time-fraction"),
     KnownRed("upgrade[oracle/cdc-load]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
