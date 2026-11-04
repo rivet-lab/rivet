@@ -61,7 +61,7 @@ With the hooks enabled:
 - **`pre-commit`** mirrors the CI fmt + clippy + audit gates and keeps
   code-derived docs in sync: it runs cargo fmt/clippy, builds the rivet binary,
   regenerates the JSON schema + reference docs and stages them into your commit
-  (`git add -u schemas docs`), and runs cargo audit when installed — bypass with
+  (`git add -u schemas docs`), and runs cargo deny check when installed — bypass with
   `git commit --no-verify`.
 - **`commit-msg`** strips attribution trailers and refuses Cyrillic or a closing
   keyword before `#N` in the message.
