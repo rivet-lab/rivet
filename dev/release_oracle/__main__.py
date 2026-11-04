@@ -216,6 +216,36 @@ def gate_kind(ns: argparse.Namespace, config: dict | None = None) -> str:
     return ISLAND_GATE if ns.island else FULL_GATE if ns.with_seeded_recall else REDUCED_GATE
 
 
+def _live_stage_takes_the_selector_self_test() -> None:
+    """The live-modules stage of the table is handed the engines `--engines` names, none when it names none."""
+    from unittest import mock
+
+    for argv, want in ((["--engines", "mysql,mssql"], ["mysql", "mssql"]), ([], [])):
+        seen: list = []
+        stage = next(st for st in gate_stages(parse_args(argv)) if st.name == "live modules")
+        with mock.patch.object(live_modules, "verify_live_modules", lambda led, engines=None: seen.append(engines)):
+            stage.run(Ledger(colour=False))
+        assert seen == [want], f"the live-modules stage got {seen} for {argv}"
+
+
+def _narrowed_run_has_no_tag_self_test(full_argv: list[str]) -> None:
+    """A full gate's record is accepted by release.py, and the same record of a run narrowed by `--engines` is refused."""
+    import json
+
+    from ..pytools import release
+
+    def refusal(argv: list[str]) -> str | None:
+        ns = parse_args(argv)
+        rec = {"at": "t", "sha": "a" * 40, "binary": "a" * 9, "gate": gate_kind(ns), "config": gate_config(ns), "dirty": False,
+               "verdict": "RELEASE-READY", "skipped_env": []}
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "t.jsonl").write_text(json.dumps(rec) + "\n")
+            return release.gate_refusal("a" * 40, Path(d) / "t.jsonl")
+
+    assert refusal(full_argv) is None, "the control record of a full gate must be accepted"
+    assert refusal([*full_argv, "--engines", "mysql"]) is not None, "release.py accepts a run narrowed by --engines"
+
+
 def _gate_kind_self_test() -> None:
     """Only `make release-oracle-full`'s and `make release-oracle-island`'s arguments make their record kind; each escape, a missing recall or a narrowed scope makes a run reduced."""
     import re
@@ -251,6 +281,7 @@ def _gate_kind_self_test() -> None:
             assert gate_kind(parse_args(argv)) == REDUCED_GATE, f"an empty state URL grades SQLite only and still reads as a {kind} run"
             os.environ["RIVET_GATE_STATE_URL"] = "postgresql://state.invalid/rivet"
             assert gate_config(parse_args([*argv, "--state-url", "postgresql://state.invalid/rivet"])) == CANONICAL_CONFIG
+        _narrowed_run_has_no_tag_self_test(argv_of("release-oracle-full"))
         assert "--island" not in argv_of("release-oracle-full") and "--island" in argv_of("release-oracle-island")
         assert "--with-seeded-recall" in argv_of("release-oracle-full"), "the per-run gate runs the recall"
         bare = re.search(r"^release-oracle:.*?\n\t(.*)", makefile, re.M)
@@ -1056,7 +1087,9 @@ def _self_test() -> int:
     stale = [m for m in live_modules.EXCLUDED if m not in mods]
     assert not stale, f"live_modules.EXCLUDED names modules live_suite no longer has: {stale}"
     left, expr = live_modules.derived_filter(["a", "b", "common"], {"b"}, {"t_1"})
-    assert left == ["a"] and expr == "(test(/^a::/)) - test(/::(t_1)$/)", (left, expr)
+    assert left == ["a"] and expr == "(test(/^(a)::/)) - test(/::(t_1)$/)", (left, expr)
+    live_modules.self_test()
+    _live_stage_takes_the_selector_self_test()
     # perf: a regression past the tolerance fails, noise under the absolute slack does not.
     from .perf import Sample, perf_verdict
     base = Sample(True, 1.0, 0.02, 50 * 1024 * 1024, {})
@@ -1293,7 +1326,7 @@ def _self_test() -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="release-oracle", add_help=True)
-    ap.add_argument("--engines", default="", help="comma-separated subset, e.g. postgres,mysql")
+    ap.add_argument("--engines", default="", help="comma-separated subset, e.g. postgres,mysql; narrows the engine matrix and the live modules (engine-less modules still run)")
     ap.add_argument(
         "--versions",
         default=os.environ.get("RIVET_ORACLE_VERSIONS", ""),
@@ -1606,7 +1639,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
     # The cells a fix added or edited since the baseline, through the baseline: each must fail there.
     table.append(serial("fix cells", lambda led: fix_cells.verify_fix_cells(led)))
     # Last: it runs every live_suite test no stage above already ran.
-    table.append(serial("live modules", lambda led: live_modules.verify_live_modules(led)))
+    table.append(serial("live modules", lambda led: live_modules.verify_live_modules(led, live_modules.engines_arg(ns.engines))))
     return table
 
 
@@ -1996,7 +2029,7 @@ def run_concurrently(led: Ledger, title: str, stages: list[tuple[str, Callable[[
 
 
 def engine_loop(led: Ledger, ns: argparse.Namespace) -> None:
-    wanted = [e for e in ns.engines.split(",") if e] if ns.engines else None
+    wanted = live_modules.engines_arg(ns.engines)
     engines = [e for e in scenarios.cfg("engines").split() if not wanted or e in wanted]
     cap = max(1, ns.engine_parallel)
 
@@ -2069,6 +2102,11 @@ def main(argv: list[str] | None = None) -> int:
             evidence.LEDGER = Path(d, "last-green.yaml")  # fixture cells never reach the real ledger
             return _self_test()
     ns = parse_args(argv)
+    try:
+        live_modules.engines_arg(ns.engines)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
     refused = apply_run_policy(ns)
     if refused:
         print(f"RIVET_GATE_ENV_UNLISTED: {' '.join(refused)} in the shell. The gate takes its binary from the tree and its bless modes "
@@ -2107,7 +2145,7 @@ def main(argv: list[str] | None = None) -> int:
     # scope: a python3 that cannot import pymongo otherwise turns every mongo
     # version into a cryptic "seed had errors" and the gate into NOT-RELEASABLE,
     # with nothing pointing at the environment as the cause.
-    engines_wanted = [e for e in ns.engines.split(",") if e]
+    engines_wanted = live_modules.engines_arg(ns.engines)
     if (not engines_wanted or "postgres" in engines_wanted) and "psql" in find_keg_tools():
         print("the postgres cells shell to `psql` and none is on PATH or in a Homebrew keg (libpq) — install libpq "
               "and add its bin to PATH.",
