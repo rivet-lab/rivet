@@ -4647,3 +4647,20 @@ seeds:
         cells: [check_refuses_a_timestamp_with_a_time_declared_date_oracle]
       mongo:
         na: "a document source has no declared column wire type: the probe returns before it reads a row (source_type == Mongo)"
+
+  - name: stop-class
+    class: "an environment stop (a code of kind Environment, or a wrapper over a driver error) exits by the word its message holds, not by its declaration and the typed verdict of its cause: a relation named login_timeouts or deadlock_log exits 2 retryable for good, a blocked read past its lock timeout exits 1, and a retryable stop recoded by an outer layer loses its verdict"
+    history: "2026-11-03 seam stop-class - VP-8, MT-F-A, MT-F-B, MT-F-F, RC-C5, RER-2, RER-3; RED on main 2026-11-04 (a missing MSSQL, Oracle or MongoDB relation named for a failure exited 2 where its code says 1, an MSSQL read past lock_timeout_s exited 1 where the lock clears and the remedy is to run again)"
+    scope: source
+    patch: stop-class/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+      mysql:
+        cells: ["lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+      mssql:
+        cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql, an_mssql_read_blocked_past_its_lock_timeout_exits_retryable, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+      oracle:
+        cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+      mongo:
+        cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]

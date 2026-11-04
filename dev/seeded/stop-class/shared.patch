@@ -1,0 +1,36 @@
+diff --git a/src/error.rs b/src/error.rs
+index 6609f111..b3c71e1f 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -608,15 +608,8 @@ pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
+         ErrorKind::Busy | ErrorKind::Transient => Some(ExitClass::Retryable),
+         ErrorKind::Internal => Some(ExitClass::Internal),
+         ErrorKind::Integrity => Some(ExitClass::DataIntegrity),
+-        ErrorKind::Usage | ErrorKind::Environment(Retry::Never) => Some(ExitClass::Generic),
+-        ErrorKind::Environment(Retry::Always) => Some(ExitClass::Retryable),
+-        ErrorKind::Environment(Retry::ByCause) => coded.cause().map(|c| {
+-            if c.is_transient() {
+-                ExitClass::Retryable
+-            } else {
+-                ExitClass::Generic
+-            }
+-        }),
++        ErrorKind::Usage => Some(ExitClass::Generic),
++        ErrorKind::Environment(_) => None,
+     }
+ }
+ 
+diff --git a/src/error/retry.rs b/src/error/retry.rs
+index f507b7d4..97e5ea87 100644
+--- a/src/error/retry.rs
++++ b/src/error/retry.rs
+@@ -119,9 +119,6 @@ fn classify_io_kind(kind: std::io::ErrorKind) -> Option<RetryClass> {
+ }
+ 
+ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
+-    if let Some(kept) = crate::error::kept_verdict(err) {
+-        return kept;
+-    }
+     // A typed stop (drift, integrity, a non-environment code) is permanent, whatever its text says.
+     if crate::error::stop_class(err).is_some() {
+         return PERMANENT;
