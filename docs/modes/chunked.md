@@ -273,9 +273,18 @@ Each page seeks past the last row's key tuple
 query is a bounded range scan on the primary key and no transaction outlives a page.
 The list must be exactly the primary key's columns in order, each of an integer,
 string, date, timestamp without time zone or uuid type; otherwise the plan stops with
-`RIVET_PLAN_CHUNK_KEY_UNUSABLE` and names the primary key. A composite key runs
-sequentially: `parallel: N` and `keyset_incremental: true` are refused with it.
-`chunk_checkpoint: true` resumes a crashed run from the stored key tuple.
+`RIVET_PLAN_CHUNK_KEY_UNUSABLE` and names the primary key. `keyset_incremental: true`
+is refused with a composite key. `chunk_checkpoint: true` resumes a crashed run from
+the stored key tuple.
+
+With `parallel: N`, the workers split the table by the key's **first** column:
+boundaries are sampled on `id` at run open, and each worker reads its range
+`(id > lo AND id <= hi)` page by page on the whole tuple. All rows that share one
+`id` value fall in the same range, so the union reads every row exactly once. With
+`chunk_checkpoint: true` each finished range is recorded, and a resume re-reads only
+the ranges that had not finished. Boundary sampling is the same as for a single key
+(a row count plus one ordered offset read per boundary), so on a very large table
+the run's opening queries scan the key's index.
 
 **Auto-resolution (MySQL).** With the `table:` shortcut and **no** `chunk_by_key`,
 if the table has no single-integer PK but *does* have a usable single-column
