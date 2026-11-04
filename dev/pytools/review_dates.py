@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
-import importlib.util
 import re
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -102,11 +102,11 @@ def pin_rows(root: Path) -> list[tuple[str, int, str]]:
 
 
 def known_red_entries(root: Path) -> list[tuple[str, str, str]]:
-    """(match, reason, expires) of the real ledger, loaded by path so the check needs no package import."""
-    spec = importlib.util.spec_from_file_location("review_known_red", root / "dev/release_oracle/known_red.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
+    """(match, reason, expires) of the real ledger, executed from its source so no stale bytecode answers."""
+    path = root / "dev/release_oracle/known_red.py"
+    mod = types.ModuleType("review_known_red")
+    sys.modules[mod.__name__] = mod
+    exec(compile(path.read_text(), str(path), "exec"), mod.__dict__)
     return [(k.match, k.reason, k.expires) for k in mod.KNOWN_RED]
 
 

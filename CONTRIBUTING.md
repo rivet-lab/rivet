@@ -40,6 +40,9 @@ workflow enforces on the PR itself:
   `Claude-Session` trailer, and never put fix/close/resolve before `#N` (write `see #N`);
 - a raised ratchet pin (any line or block marked `ratchet-pin:`) is named in a
   `## Ratchets raised` section of the PR body; lowering one needs nothing;
+- every `ratchet-pin:` line, every `SKIP_ALLOWED` reason and every known-red entry carries a review
+  date (`(review YYYY-MM-DD)`; for a known-red entry its `expires`); a malformed or non-calendar
+  date fails the PR rules, a passed one fails `make pr-ready` and the nightly run;
 - a change under `src/` adds a changelog fragment, one file under `changelog.d/` in the
   CHANGELOG entry format (see `changelog.d/README.md`), or the PR body says
   `No user-visible change`. Fragments keep open pull requests from conflicting on the top

@@ -88,6 +88,10 @@ def main(argv: list[str]) -> int:
                            stdout=open(out / f"{label}.log", "w"), stderr=subprocess.STDOUT)
         report.append(f"- {label} ({target}): {'green' if g.returncode == 0 else 'RED'} ({label}.log)")
         rc |= g.returncode != 0
+    rd = subprocess.run([sys.executable, "dev/pytools/review_dates.py", "check"], cwd=ROOT, capture_output=True, text=True)
+    (out / "review-dates.log").write_text(rd.stdout + rd.stderr)
+    report.append(f"- review dates: {'all in date' if rd.returncode == 0 else 'EXPIRED OR MALFORMED'} (review-dates.log)")
+    rc |= rd.returncode != 0
     duration = argv[argv.index("--soak") + 1] if "--soak" in argv else "30m"
     prev = Path(os.environ.get("RIVET_PREV_RELEASE_BIN") or next(
         (ROOT / ".gate-baseline").glob("rivet-v*/rivet"), Path("missing")))
