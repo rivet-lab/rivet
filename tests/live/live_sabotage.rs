@@ -2284,13 +2284,22 @@ fn collection_dropped_under_it() {
 }
 
 /// Documents of the collection a held read finds dropped.
-const HELD_READ_DOCS: i64 = 10_000;
+const HELD_READ_DOCS: i64 = 1_500;
 
-/// A MongoDB export of `HELD_READ_DOCS` documents delivered once, then run again with its collection dropped while a wire proxy holds the `parallel.unwrap_or(1)` reads `pick` accepts: the second run is refused by code and leaves the first run's marker and manifests as they were, and with the collection put back a run delivers the source.
-fn collection_dropped_before_a_read(
+/// What happens to the collection while the proxy holds the reads.
+#[derive(Clone, Copy)]
+enum UnderHold {
+    Dropped,
+    DroppedAndCreatedAgain,
+}
+
+/// A MongoDB export of `HELD_READ_DOCS` documents delivered once, then run again while a wire proxy holds `held` reads `pick` accepts and the collection is dropped, or dropped and created again with the same documents, under them: the second run is refused by code and leaves the first run's marker and manifests as they were, and with the collection put back a run delivers the source.
+fn collection_changed_under_a_held_read(
     opts: Option<&str>,
     parallel: Option<usize>,
     pick: fn(&mongodb::bson::Document) -> bool,
+    held: usize,
+    under: UnderHold,
 ) {
     require_alive(LiveService::Mongo);
     let db = unique_name("sab_ddl_held");
@@ -2318,9 +2327,12 @@ fn collection_dropped_before_a_read(
     hold.arm();
     let met = rig.beside_a_live_run_over_a_source_taken(
         &[],
-        |_| hold.holds(parallel.unwrap_or(1)),
+        |_| hold.holds(held),
         |_| {
-            m.drop_collection("t");
+            match under {
+                UnderHold::Dropped => m.drop_collection("t"),
+                UnderHold::DroppedAndCreatedAgain => m.seed_int_id("t", HELD_READ_DOCS),
+            }
             hold.release();
         },
         |_, ()| m.seed_int_id("t", HELD_READ_DOCS),
@@ -2330,9 +2342,13 @@ fn collection_dropped_before_a_read(
         &run,
         Refused::by_code("RIVET_SOURCE_COLLECTION_NOT_FOUND", 1),
     );
+    let named = match under {
+        UnderHold::Dropped => "was dropped while the run read it",
+        UnderHold::DroppedAndCreatedAgain => "was dropped and created again while the run read it",
+    };
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains("was dropped while the run read it"),
-        "the refusal names the drop:\n{}",
+        String::from_utf8_lossy(&run.stderr).contains(named),
+        "the refusal names the change ({named}):\n{}",
         String::from_utf8_lossy(&run.stderr)
     );
     assert!(
@@ -5795,23 +5811,79 @@ fn a_table_dropped_under_a_live_run_delivers_or_fails_loudly_mongo() {
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn a_collection_dropped_before_a_keyset_page_is_refused_by_code_mongo() {
-    collection_dropped_before_a_read(
+    collection_changed_under_a_held_read(
         Some("page_size: 1000, resume: true"),
         None,
         a_later_keyset_page,
+        1,
+        UnderHold::Dropped,
     );
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn a_collection_dropped_before_a_full_scan_is_refused_by_code_mongo() {
-    collection_dropped_before_a_read(None, None, the_full_scan);
+    collection_changed_under_a_held_read(None, None, the_full_scan, 1, UnderHold::Dropped);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo() {
-    collection_dropped_before_a_read(Some("page_size: 1000"), Some(4), an_id_range_worker);
+    collection_changed_under_a_held_read(
+        Some("page_size: 1000"),
+        Some(4),
+        an_id_range_worker,
+        4,
+        UnderHold::Dropped,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        Some("page_size: 1000, resume: true"),
+        None,
+        a_later_keyset_page,
+        1,
+        UnderHold::DroppedAndCreatedAgain,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_under_a_full_scan_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        None,
+        None,
+        the_full_scan,
+        1,
+        UnderHold::DroppedAndCreatedAgain,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_under_an_id_range_read_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        Some("page_size: 1000"),
+        Some(4),
+        an_id_range_worker,
+        4,
+        UnderHold::DroppedAndCreatedAgain,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_before_the_workers_connect_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        Some("page_size: 1000"),
+        Some(4),
+        the_id_sample,
+        1,
+        UnderHold::DroppedAndCreatedAgain,
+    );
 }
 
 #[test]

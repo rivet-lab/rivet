@@ -42,12 +42,14 @@ pub(crate) fn run_mongo_parallel(
         ))
     })?;
 
-    // Boundaries: a short-lived probe connection computes the ranges, then drops
-    // before the workers open theirs (mirrors the chunked Detect preamble).
-    let ranges = {
-        let probe =
+    let (ranges, pinned) = {
+        let mut probe =
             MongoSource::connect(&url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?;
-        probe.sample_id_ranges(collection, parallel)?
+        probe.confirm_collection(collection)?;
+        (
+            probe.sample_id_ranges(collection, parallel)?,
+            probe.pinned(),
+        )
     };
     log::info!(
         "export '{}': parallel `_id`-range read — {} range(s), page size {}",
@@ -79,11 +81,13 @@ pub(crate) fn run_mongo_parallel(
     std::thread::scope(|s| {
         for (w, range) in ranges.iter().enumerate() {
             let (url, key_plan, stamp, ext, fan_r) = (&url, &key_plan, &stamp, &shared_ext, &fan);
-            // Bson bounds aren't Copy — clone the slice into the worker.
+            let pinned = pinned.clone();
             let (lo, hi) = (range.0.clone(), range.1.clone());
             let dest = std::sync::Arc::clone(&shared_dest);
             fan.spawn(s, format!("worker {w}"), move || {
-                range_worker_pages(url, plan, key_plan, kp, stamp, w, lo, hi, dest, ext, fan_r)
+                range_worker_pages(
+                    url, plan, key_plan, kp, stamp, w, lo, hi, pinned, dest, ext, fan_r,
+                )
             });
         }
     });
@@ -134,13 +138,15 @@ fn range_worker_pages(
     worker: usize,
     lo: mongodb::bson::Bson,
     hi: mongodb::bson::Bson,
+    pinned: std::collections::HashMap<String, Vec<u8>>,
     dest: std::sync::Arc<Box<dyn crate::destination::Destination>>,
     ext: &str,
     fan: &super::fan_in::FanIn,
 ) -> Result<()> {
     let unit = commit::UnitId::Chunk(worker as i64);
     let mut src = MongoSource::connect(url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?
-        .with_id_range(lo, hi);
+        .with_id_range(lo, hi)
+        .with_pinned(pinned);
 
     let mut last: Option<String> = None;
     let mut page = 0usize;

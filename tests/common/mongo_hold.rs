@@ -173,3 +173,13 @@ pub fn the_full_scan(command: &Document) -> bool {
 pub fn an_id_range_worker(command: &Document) -> bool {
     find_with_id_operator(command, "$lt")
 }
+
+/// The `$sample` aggregate a parallel run plans its `_id` ranges with.
+pub fn the_id_sample(command: &Document) -> bool {
+    command.contains_key("aggregate")
+        && command.get_array("pipeline").is_ok_and(|stages| {
+            stages
+                .iter()
+                .any(|s| s.as_document().is_some_and(|d| d.contains_key("$sample")))
+        })
+}

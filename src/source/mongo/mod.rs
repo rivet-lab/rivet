@@ -49,6 +49,8 @@ use crate::source::{BatchSink, ExportRequest, Source};
 use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
 
 pub(crate) mod cdc;
+#[cfg(test)]
+mod fake_server;
 
 /// The byte budget at which a document batch flushes. The `document` column is an
 /// Arrow `Utf8` (i32 offsets): a batch accumulating > 2 GiB panics ("byte array
@@ -292,6 +294,37 @@ impl MongoSource {
             id_guard_checked: std::collections::HashSet::new(),
             started_as: std::collections::HashMap::new(),
         })
+    }
+
+    /// Refuse `collection` when it is gone or listed under another UUID than this source first saw; the first listing pins the UUID.
+    pub(crate) fn confirm_collection(&mut self, collection: &str) -> Result<()> {
+        let listed = list_collection_uuids(&self.session, collection);
+        refuse_a_missing_collection(
+            self.session.db(),
+            collection,
+            listed.as_deref(),
+            self.started_as.get(collection).map(Vec::as_slice),
+        )?;
+        if let Some(uuid) = listed.as_deref().and_then(<[_]>::first) {
+            self.started_as
+                .entry(collection.to_string())
+                .or_insert_with(|| uuid.clone());
+        }
+        Ok(())
+    }
+
+    /// The UUIDs this source has pinned, by collection.
+    pub(crate) fn pinned(&self) -> std::collections::HashMap<String, Vec<u8>> {
+        self.started_as.clone()
+    }
+
+    /// Read under the UUIDs another source pinned, so a worker never pins a collection created after its run began.
+    pub(crate) fn with_pinned(
+        mut self,
+        pinned: std::collections::HashMap<String, Vec<u8>>,
+    ) -> Self {
+        self.started_as = pinned;
+        self
     }
 
     /// Bind this reader to one disjoint `_id` slice `[lo, hi)` (a parallel
@@ -723,18 +756,7 @@ impl Source for MongoSource {
             )
         })?;
         let db = self.session.client().database(self.session.db());
-        let listed = list_collection_uuids(&self.session, coll_name);
-        refuse_a_missing_collection(
-            self.session.db(),
-            coll_name,
-            listed.as_deref(),
-            self.started_as.get(coll_name).map(Vec::as_slice),
-        )?;
-        if let Some(uuid) = listed.as_deref().and_then(<[_]>::first) {
-            self.started_as
-                .entry(coll_name.to_string())
-                .or_insert_with(|| uuid.clone());
-        }
+        self.confirm_collection(coll_name)?;
         let schema = blob_schema();
         sink.on_schema(schema.clone())?;
 
@@ -871,14 +893,7 @@ impl Source for MongoSource {
             Ok::<usize, anyhow::Error>(total)
         })?;
 
-        if total == 0 {
-            refuse_a_missing_collection(
-                self.session.db(),
-                coll_name,
-                list_collection_uuids(&self.session, coll_name).as_deref(),
-                self.started_as.get(coll_name).map(Vec::as_slice),
-            )?;
-        }
+        self.confirm_collection(coll_name)?;
 
         log::info!("total: {total} documents (collection '{coll_name}')");
         Ok(())
@@ -1546,5 +1561,180 @@ mod error_code_tests {
             let err = decode_id_cursor(token).unwrap_err();
             crate::error::assert_coded(&err, "RIVET_STATE_CURSOR_INCOMPARABLE", 5);
         }
+    }
+}
+
+#[cfg(test)]
+mod collection_identity_tests {
+    use super::fake_server::FakeMongo;
+    use super::*;
+    use crate::tuning::SourceTuning;
+
+    const FIRST: [u8; 16] = [1; 16];
+    const SECOND: [u8; 16] = [2; 16];
+
+    #[derive(Default)]
+    struct Rows {
+        rows: usize,
+    }
+
+    impl BatchSink for Rows {
+        fn on_schema(&mut self, _schema: SchemaRef) -> Result<()> {
+            Ok(())
+        }
+        fn on_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+            self.rows += batch.num_rows();
+            Ok(())
+        }
+    }
+
+    fn documents(n: i32) -> Vec<Document> {
+        (0..n).map(|i| doc! { "_id": i, "v": i }).collect()
+    }
+
+    fn source(fake: &FakeMongo) -> MongoSource {
+        MongoSource::connect(&fake.url("shop"), None, None).expect("connect to the fake server")
+    }
+
+    fn read(source: &mut MongoSource, page_limit: Option<usize>) -> (Result<()>, usize) {
+        let tuning = SourceTuning::from_config(None);
+        let overrides = ColumnOverrides::default();
+        let mut request = ExportRequest::unwrapped("SELECT * FROM t", &tuning, &overrides);
+        request.page_limit = page_limit;
+        let mut sink = Rows::default();
+        let outcome = source.export(&request, &mut sink);
+        (outcome, sink.rows)
+    }
+
+    fn code(outcome: Result<()>) -> Option<&'static str> {
+        crate::error::error_code(&outcome.expect_err("the read is refused"))
+    }
+
+    #[test]
+    fn a_collection_that_stays_the_same_is_read_whole() {
+        let fake = FakeMongo::serving(&FIRST, documents(5));
+        let (outcome, rows) = read(&mut source(&fake), None);
+        outcome.expect("an unchanged collection reads");
+        assert_eq!(rows, 5);
+    }
+
+    #[test]
+    fn a_missing_collection_is_refused_before_any_read() {
+        let fake = FakeMongo::serving(&FIRST, documents(5));
+        fake.shelf.lock().unwrap().uuid = None;
+        let (outcome, rows) = read(&mut source(&fake), None);
+        assert_eq!(code(outcome), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
+        assert_eq!((rows, fake.shelf.lock().unwrap().finds), (0, 0));
+    }
+
+    #[test]
+    fn a_collection_created_again_under_a_read_is_refused_though_the_read_returned_documents() {
+        let fake = FakeMongo::serving(&FIRST, documents(5));
+        fake.shelf.lock().unwrap().on_find = Some(Box::new(|shelf, _| {
+            shelf.uuid = Some(SECOND.to_vec());
+        }));
+        let (outcome, rows) = read(&mut source(&fake), None);
+        assert_eq!(code(outcome), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
+        assert_eq!(rows, 5);
+    }
+
+    #[test]
+    fn a_collection_dropped_under_a_read_that_returned_documents_is_refused() {
+        let fake = FakeMongo::serving(&FIRST, documents(5));
+        fake.shelf.lock().unwrap().on_find = Some(Box::new(|shelf, _| shelf.uuid = None));
+        let (outcome, rows) = read(&mut source(&fake), None);
+        assert_eq!(code(outcome), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
+        assert_eq!(rows, 5);
+    }
+
+    #[test]
+    fn a_collection_created_again_between_two_pages_is_refused_on_the_second() {
+        let fake = FakeMongo::serving(&FIRST, documents(3));
+        let mut keyset = source(&fake);
+        let (first, _) = read(&mut keyset, None);
+        first.expect("the first read pins the collection");
+        let finds_before = fake.shelf.lock().unwrap().finds;
+        fake.shelf.lock().unwrap().uuid = Some(SECOND.to_vec());
+        let (second, rows) = read(&mut keyset, None);
+        assert_eq!(code(second), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
+        assert_eq!((rows, fake.shelf.lock().unwrap().finds), (0, finds_before));
+    }
+
+    #[test]
+    fn a_worker_reads_under_the_uuid_its_run_pinned_not_the_one_it_finds() {
+        let fake = FakeMongo::serving(&FIRST, documents(3));
+        let mut probe = source(&fake);
+        probe.confirm_collection("t").expect("the probe pins");
+        assert_eq!(probe.pinned().get("t").map(Vec::as_slice), Some(&FIRST[..]));
+        fake.shelf.lock().unwrap().uuid = Some(SECOND.to_vec());
+        let mut worker = source(&fake).with_pinned(probe.pinned());
+        let (outcome, rows) = read(&mut worker, None);
+        assert_eq!(code(outcome), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
+        assert_eq!((rows, fake.shelf.lock().unwrap().finds), (0, 0));
+    }
+
+    #[test]
+    fn a_source_without_a_pin_pins_the_collection_it_first_lists() {
+        let fake = FakeMongo::serving(&FIRST, documents(1));
+        let mut reader = source(&fake);
+        assert!(reader.pinned().is_empty());
+        reader
+            .confirm_collection("t")
+            .expect("the collection is listed");
+        assert_eq!(
+            reader.pinned().get("t").map(Vec::as_slice),
+            Some(&FIRST[..])
+        );
+        fake.shelf.lock().unwrap().uuid = Some(SECOND.to_vec());
+        reader
+            .confirm_collection("t")
+            .expect_err("the second listing differs from the pin");
+        assert_eq!(
+            reader.pinned().get("t").map(Vec::as_slice),
+            Some(&FIRST[..])
+        );
+    }
+
+    #[test]
+    fn a_listing_the_role_may_not_read_refuses_nothing() {
+        let fake = FakeMongo::serving(&FIRST, documents(4));
+        fake.shelf.lock().unwrap().listing_denied = true;
+        let (outcome, rows) = read(&mut source(&fake), None);
+        outcome.expect("a denied listing fails open");
+        assert_eq!(rows, 4);
+    }
+
+    #[test]
+    fn a_view_listed_without_a_uuid_is_read() {
+        let fake = FakeMongo::serving(&[], documents(2));
+        let (outcome, rows) = read(&mut source(&fake), None);
+        outcome.expect("a view has an empty UUID and stays readable");
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn the_listing_names_the_uuid_the_server_holds() {
+        let fake = FakeMongo::serving(&FIRST, documents(1));
+        let session = MongoSession::connect(&fake.url("shop"), None).expect("connect");
+        assert_eq!(
+            list_collection_uuids(&session, "t"),
+            Some(vec![FIRST.to_vec()])
+        );
+        fake.shelf.lock().unwrap().uuid = None;
+        assert_eq!(list_collection_uuids(&session, "t"), Some(Vec::new()));
+        fake.shelf.lock().unwrap().listing_denied = true;
+        assert_eq!(list_collection_uuids(&session, "t"), None);
+    }
+
+    #[test]
+    fn the_session_check_refuses_a_missing_collection_and_passes_a_listed_one() {
+        let fake = FakeMongo::serving(&FIRST, documents(1));
+        let session = MongoSession::connect(&fake.url("shop"), None).expect("connect");
+        session.require_collection("t").expect("listed");
+        fake.shelf.lock().unwrap().uuid = None;
+        assert_eq!(
+            crate::error::error_code(&session.require_collection("t").expect_err("missing")),
+            Some("RIVET_SOURCE_COLLECTION_NOT_FOUND")
+        );
     }
 }
