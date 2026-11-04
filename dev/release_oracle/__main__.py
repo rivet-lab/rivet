@@ -101,8 +101,8 @@ def start_stores(led: Ledger) -> None:
     # MinIO the `up` had just RECREATED (no volume — its buckets gone) was not up yet,
     # so the bucket PUT below failed unread and every s3 cell then failed on
     # `bucket not found` (measured 2026-09-25: all four CDC cells).
-    wait_until(lambda: scenarios.store_up("s3"), tries=30, delay=1.0)
-    wait_until(lambda: scenarios.store_up("gcs"), tries=15, delay=1.0)
+    wait_until(lambda: scenarios.store_up("s3", tries=1), tries=30, delay=1.0)
+    wait_until(lambda: scenarios.store_up("gcs", tries=1), tries=15, delay=1.0)
 
     # MinIO: a signed REST PUT (the `mc` images are no longer public); 409 = already there.
     from dev.pytools.e2e import s3_bucket_exists, s3_make_bucket
@@ -1284,6 +1284,7 @@ def _self_test() -> int:
     skip_census._self_test()
     fix_cells._self_test()
     scenarios.matrix_reader_self_test()
+    scenarios.store_read_self_test()
     field_state._self_test()
     print("\nregression stage (child harness, stand, banner):")
     return regression._self_test()

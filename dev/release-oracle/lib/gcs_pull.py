@@ -6,7 +6,7 @@ Uses only the fake-gcs JSON API (list) + its media download endpoint, so it neve
 routes through rivet: a rivet write bug cannot rubber-stamp its own output.
 
 Usage: gcs_pull.py <endpoint> <bucket> <prefix> <dest_dir> [--all]
-Prints the number of objects downloaded.
+Prints the number of objects downloaded; a list or a download that fails exits 1 naming it, never a smaller count.
 
 `--all` pulls EVERY object and preserves its path under the prefix, rather than
 only `.parquet` flattened to `part_N.parquet`. A caller that needs to know what
@@ -28,11 +28,11 @@ try:
     with urllib.request.urlopen(list_url, timeout=10) as r:
         import json
         items = json.load(r).get("items", [])
-except Exception:
-    print(0)
-    sys.exit(0)
+except Exception as e:
+    sys.exit(f"gcs_pull: list {list_url}: {e}")
 
 n = 0
+failed = []
 for it in items:
     name = it.get("name", "")
     if not pull_all and not name.endswith(".parquet"):
@@ -47,6 +47,8 @@ for it in items:
     try:
         urllib.request.urlretrieve(media, out)
         n += 1
-    except Exception:
-        pass
+    except Exception as e:
+        failed.append(f"{name}: {e}")
+if failed:
+    sys.exit("gcs_pull: " + "; ".join(failed))
 print(n)
