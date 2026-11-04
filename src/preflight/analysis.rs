@@ -1,4 +1,5 @@
 use super::HealthVerdict;
+use crate::config::quantity::Knob;
 use crate::config::{ExportConfig, ExportMode};
 
 /// B1: Human-readable strategy name derived from mode + config.
@@ -17,7 +18,7 @@ pub(crate) fn derive_strategy_resolved(export: &ExportConfig, auto_pk: Option<&s
     // (plan::build) turns it into ExtractionStrategy::Keyset, so the diagnostic
     // must label it keyset — not `chunked(?, …)`, whose `?` is the absent
     // chunk_column that keyset does not use.
-    if let Some(key) = export.chunk_by_key.as_deref() {
+    if let Some(key) = export.chunk_by_key.as_ref() {
         if export.parallel > 1 {
             return format!(
                 "keyset-parallel({}, size={}, p={})",
@@ -83,7 +84,7 @@ pub(crate) fn preflight_range_col(export: &ExportConfig) -> Option<&str> {
     export
         .chunk_column
         .as_deref()
-        .or(export.chunk_by_key.as_deref())
+        .or(export.chunk_key_lead())
         .or(export.cursor_column.as_deref())
         .or(export.time_column.as_deref())
 }
@@ -401,7 +402,7 @@ pub(crate) fn diagnose_mode_str(export: &ExportConfig) -> String {
     // Keyset (chunk_by_key) is its own read strategy — surface the actual seek
     // key + page size, not `chunked (column: ?, …)` (the `?` = the unused
     // chunk_column). Mirrors the derive_strategy keyset branch above.
-    if let Some(key) = export.chunk_by_key.as_deref() {
+    if let Some(key) = export.chunk_by_key.as_ref() {
         if export.parallel > 1 {
             return format!(
                 "keyset (key: {}, size: {}, parallel: {})",
@@ -495,17 +496,9 @@ pub(crate) fn chunk_sparsity_from_counts(
     max_i: i64,
     chunk_size: usize,
 ) -> ChunkSparsityInfo {
-    // CHECKED: a signed key spanning near the full i64 domain (a hash-distributed
-    // bigint) overflows the plain subtraction — debug panics, release wraps to a
-    // garbage span that then feeds the sparsity math. The sibling estimator in
-    // this file (`check_oversized_chunk`) was hardened the same way.
-    let range_span = max_i.checked_sub(min_i).unwrap_or(i64::MAX).max(1);
+    let range_span = Knob::range_span(min_i, max_i);
     let density = row_count as f64 / range_span as f64;
-    let logical_windows = if chunk_size == 0 {
-        0
-    } else {
-        (range_span + chunk_size as i64 - 1) / chunk_size as i64
-    };
+    let logical_windows = Knob::logical_windows(range_span, chunk_size);
     let is_sparse = row_count > 0 && density < 0.1 && logical_windows > 10;
     ChunkSparsityInfo {
         is_sparse,
@@ -605,7 +598,7 @@ pub(crate) fn check_oversized_chunk(
     let rows_per_chunk: i64 = if export.chunk_by_key.is_some() {
         // Keyset (seek) pages hold exactly chunk_size rows (bar the last),
         // independent of key density — no cursor_min/max span math applies.
-        export.chunk_size as i64
+        Knob::saturating_i64(export.chunk_size)
     } else {
         let min_i: i64 = cursor_min?.parse().ok()?;
         let max_i: i64 = cursor_max?.parse().ok()?;
@@ -629,7 +622,7 @@ pub(crate) fn check_oversized_chunk(
     // Bytes scale linearly with chunk_size (keyset: chunk_size×B; range:
     // density×chunk_size×B), so scaling chunk_size by budget/actual lands one
     // chunk under the budget regardless of mode.
-    let suggested = (export.chunk_size as i64)
+    let suggested = Knob::saturating_i64(export.chunk_size)
         .saturating_mul(MAX_CHUNK_SCAN_BYTES)
         .saturating_div(bytes_per_chunk)
         .max(1);
@@ -998,7 +991,7 @@ pub(crate) fn build_suggestion(
                     let col = export
                         .chunk_column
                         .as_deref()
-                        .or(export.chunk_by_key.as_deref())
+                        .or(export.chunk_key_lead())
                         .unwrap_or("chunk_column");
                     parts.push(format!(
                         "Create an index on '{}' to speed up range scans.",
@@ -1037,7 +1030,7 @@ pub(crate) fn build_suggestion(
                     let col = export
                         .chunk_column
                         .as_deref()
-                        .or(export.chunk_by_key.as_deref())
+                        .or(export.chunk_key_lead())
                         .unwrap_or("chunk_column");
                     // Keyset is sequential; only range chunking benefits from
                     // "add parallel workers", so tailor the fix to the strategy.
@@ -2021,6 +2014,14 @@ mod tests {
     }
 
     // ── chunk_sparsity_from_counts ──────────────────────────────────────────
+    #[test]
+    fn sparsity_over_the_full_i64_range_saturates_instead_of_overflowing() {
+        let info = chunk_sparsity_from_counts(10, i64::MIN, i64::MAX, 100_000);
+        assert_eq!(info.range_span, i64::MAX);
+        assert!(info.is_sparse);
+        let huge = chunk_sparsity_from_counts(10, i64::MIN, i64::MAX, usize::MAX);
+        assert_eq!(huge.logical_windows, 1);
+    }
 
     #[test]
     fn chunk_sparsity_dense_range_not_sparse() {

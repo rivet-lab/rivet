@@ -577,7 +577,7 @@ impl Source for MssqlSource {
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
         // Keyset (seek) pages build a dialect-correct
         // `OFFSET 0 ROWS FETCH NEXT n ROWS ONLY` clause (T-SQL has no `LIMIT`).
-        let built = build_export_query(request, crate::config::SourceType::Mssql);
+        let built = build_export_query(request, crate::config::SourceType::Mssql)?;
         let sql = built.sql.clone();
         let overrides = request.column_overrides.clone();
         // Stream the result one Arrow batch at a time (peak RSS ≈ one batch,
@@ -1286,6 +1286,7 @@ fn introspect_mssql_on(src: &mut MssqlSource, qualified_table: &str) -> Result<T
         row_estimate,
         avg_row_bytes: None,
         int_columns,
+        ..Default::default()
     })
 }
 

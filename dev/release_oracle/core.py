@@ -378,9 +378,22 @@ class Ledger:
         self._emit(self._c("1;35", f"  ⚠ ORACLE INFRA (the cell graded nothing; re-run it) — {msg}"))
         self.add(engine, version, scenario, store, Status.INFRA, detail or msg)
 
+    def incident(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str, target: str) -> bool:
+        """When `target` answered earlier in this run it went away mid-run: record INFRA (a stand incident) and return True."""
+        try:
+            from . import stand_health
+        except ImportError:  # pragma: no cover - bare sys.path entry
+            import stand_health  # type: ignore
+        if not (target and stand_health.BOOK.seen_up(target)):
+            return False
+        self.ungraded(engine, version, scenario, store, f"{msg} [stand incident: {target} answered earlier in this run]", detail or msg)
+        return True
+
     def skipped(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str = "", *,
-                cause: SkipCause) -> None:
-        """Print the ⊘ AND record a SKIP row that names why it did not run."""
+                cause: SkipCause, target: str = "") -> None:
+        """Print the ⊘ AND record a SKIP row that names why it did not run; an ENV skip of a `target` that answered earlier is a stand incident (INFRA)."""
+        if cause is SkipCause.ENV and self.incident(engine, version, scenario, store, msg, detail, target):
+            return
         self.skip(msg)
         self.add(engine, version, scenario, store, Status.SKIP, detail or msg, cause=cause)
 
@@ -711,7 +724,7 @@ HARNESS_ENV: frozenset[str] = frozenset((
     "RIVET_CDC_STATE_URL", "RIVET_CONC_SRC_CONTAINER", "RIVET_CONC_SRC_URL", "RIVET_CONC_STATE_URL",
     "RIVET_FAILURE_MONGO_URL", "RIVET_FIELD_LOCK", "RIVET_FIELD_MYSQL_CONTAINER", "RIVET_FIELD_REPLAY_BIN",
     "RIVET_FLOW_VERDICTS", "RIVET_GATE_SHARED_STATE", "RIVET_GATE_STATE_URL",
-    "RIVET_LEASE_CARRIER_BIN", "RIVET_LOCK_WAIT", "RIVET_MIGRATION_CARRIER_BIN",
+    "RIVET_LEASE_CARRIER_BIN", "RIVET_LIVE_SLOT", "RIVET_LOCK_WAIT", "RIVET_MIGRATION_CARRIER_BIN",
     "RIVET_ORACLE_DOCKER", "RIVET_ORACLE_LATEST_ONLY", "RIVET_ORACLE_LOG", "RIVET_ORACLE_SELFTEST_FLAG",
     "RIVET_ORACLE_VERSIONS", "RIVET_ORACLE_WITHOUT_PREV_RELEASE", "RIVET_ORACLE_WORK",
     "RIVET_PREV_RELEASE_BIN", "RIVET_REGENERATE_FIXTURES",

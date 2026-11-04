@@ -79,6 +79,22 @@ scenarios:
     mongo:    { na: "BSON dates ride the verbatim document blob; the extJSON test pins the mechanism" }
     oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["TIMESTAMP(9)"] }
 
+  - id: type_time_negative_fraction
+    what: "a negative TIME(1)/TIME(2) with a fraction is the stored duration on the stream leg: MySQL's own text in a string column, the snapshot's refusal in a default one"
+    postgres: { na: "PostgreSQL time of day is never negative" }
+    mysql:    { test: open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot, oracle: independent }
+    mssql:    { na: "SQL Server time has no negative value" }
+    mongo:    { na: "no TIME type; a value rides the document blob" }
+    oracle:   { na: "Oracle has no TIME type" }
+
+  - id: type_time_beside_negative_fraction
+    what: "the TIME values next to a negative TIME(1)/TIME(2) fraction decode alike on the stream and in the source: positive TIME(1)/(2), a whole negative second, negative TIME(3)/(4)/(6) with a fraction"
+    postgres: { na: "PostgreSQL time of day is never negative" }
+    mysql:    { test: mysql_cdc_time_values_beside_a_negative_fraction_match_the_source, oracle: independent }
+    mssql:    { na: "SQL Server time has no negative value" }
+    mongo:    { na: "no TIME type; a value rides the document blob" }
+    oracle:   { na: "Oracle has no TIME type" }
+
   - id: type_timestamp_tz
     what: "naive vs tz-aware timestamp — CDC preserves the UTC instant under a non-default session/DB timezone (the +9h render-time trap)"
     postgres: { test: pg_cdc_non_utc_database_timezone_matches_batch, oracle: independent }
@@ -134,6 +150,14 @@ scenarios:
     mssql:    { na: "SQL Server has no SET type" }
     mongo:    { na: "no SET type" }
     oracle:   { na: "Oracle has no SET type" }
+
+  - id: type_enum_set_label_text
+    what: "ENUM and SET labels holding a backslash, LF, CR, NUL, a quote and non-ASCII text are the stored labels on the stream leg as on the snapshot leg"
+    postgres: { na: "PostgreSQL sends an enum value as its label text; no label is parsed from a catalog rendering" }
+    mysql:    { test: open_defect_mysql_cdc_enum_set_labels_match_the_snapshot, oracle: independent }
+    mssql:    { na: "SQL Server has no ENUM or SET type" }
+    mongo:    { na: "no enum or SET type; a string rides the document blob" }
+    oracle:   { na: "Oracle has no ENUM or SET type" }
 
   - id: type_bit
     what: "BIT(n) through CDC — BIT(1) boolean, BIT(n>1) integer; a BIT(64) with bit 63 set fails loud, never a silent NULL (finding #4)"

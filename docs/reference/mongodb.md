@@ -382,7 +382,7 @@ server, just without topology discovery.
 | key | values | default | effect |
 | --- | ------ | ------- | ------ |
 | `json` | `relaxed` \| `canonical` | `relaxed` | how `document` renders (see [Type fidelity](#type-fidelity)) |
-| `page_size` | `N` | — | keyset (seek) paging on `_id`; bounds query time on big collections |
+| `page_size` | `N` | — | keyset (seek) paging on `_id`; bounds query time on big collections; from 1 to 9223372036854775807, `0` is `RIVET_CONFIG_VALUE_OUT_OF_RANGE` |
 | `resume` | `bool` | `false` | resume batch keyset paging across runs (reuses the export checkpoint) |
 | `read_concern` | `server` \| `snapshot` | `server` | `snapshot` gives a point-in-time read (5.0+ replica set) |
 | `no_cursor_timeout` | `bool` | `true` | keep a slow scan's cursor alive |

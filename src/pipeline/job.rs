@@ -220,12 +220,14 @@ pub(super) fn build_metric_row(
     tuning_class: &str,
 ) -> crate::state::MetricRow {
     let (chunk_size, parallel) = match &plan.strategy {
-        crate::plan::ExtractionStrategy::Chunked(cp) => {
-            (Some(cp.chunk_size as i64), Some(cp.parallel as i64))
-        }
-        crate::plan::ExtractionStrategy::Keyset(kp) => {
-            (Some(kp.chunk_size as i64), Some(kp.parallel.max(1) as i64))
-        }
+        crate::plan::ExtractionStrategy::Chunked(cp) => (
+            Some(crate::config::quantity::Knob::saturating_i64(cp.chunk_size)),
+            Some(cp.parallel as i64),
+        ),
+        crate::plan::ExtractionStrategy::Keyset(kp) => (
+            Some(crate::config::quantity::Knob::saturating_i64(kp.chunk_size)),
+            Some(kp.parallel.max(1) as i64),
+        ),
         _ => (None, None),
     };
     crate::state::MetricRow {
@@ -2028,6 +2030,7 @@ mod tests {
             checkpoint: true,
             incremental,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         plan
     }
@@ -2464,6 +2467,7 @@ mod tests {
                 checkpoint: true,
                 incremental,
                 parallel: 1,
+                key_rest: Vec::new(),
             })
         };
         let incremental = ExtractionStrategy::Incremental(IncrementalCursorPlan {
@@ -3168,6 +3172,7 @@ mod tests {
             checkpoint: true,
             incremental: false,
             parallel: 2,
+            key_rest: Vec::new(),
         });
         let state = crate::state::StateStore::open_in_memory().unwrap();
         let (key, name) = (plan.progress_key(), plan.export_name.as_str());
@@ -3602,6 +3607,7 @@ mod tests {
             checkpoint: false,
             incremental: false,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         assert_eq!(strategy_key_column(&plan), Some(("keyset", "order_no")));
         plan.strategy = ExtractionStrategy::Incremental(IncrementalCursorPlan {
@@ -3636,6 +3642,7 @@ mod tests {
                 checkpoint: false,
                 incremental: false,
                 parallel,
+                key_rest: Vec::new(),
             });
             build_metric_row(
                 &RunSummary::stub_for_testing("run-keyset", "orders"),

@@ -47,6 +47,38 @@ scenarios:
     mongo:    { test: mongo_batch_resume_reads_only_new_since_last_run }
     oracle:   { test: keyset_checkpoint_resume_second_run_captures_only_new_keys_oracle }
 
+  - id: keyset_composite_primary_key
+    what: "chunk_by_key: [a, b] on a composite PRIMARY KEY pages by the key tuple in key order; the union reads every row exactly once (DuckDB count + distinct key count)."
+    postgres: { test: composite_key_pages_every_row_once_postgres }
+    mysql:    { test: composite_key_pages_every_row_once_mysql }
+    mssql:    { test: composite_key_pages_every_row_once_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: composite_key_pages_every_row_once_oracle }
+
+  - id: keyset_composite_resume_after_crash
+    what: "chunk_by_key: [a, b] + chunk_checkpoint: a run killed mid-stream resumes past the stored key tuple; the destination holds every row exactly once."
+    postgres: { test: composite_key_resume_after_a_crash_is_exact_postgres }
+    mysql:    { test: composite_key_resume_after_a_crash_is_exact_mysql }
+    mssql:    { test: composite_key_resume_after_a_crash_is_exact_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: composite_key_resume_after_a_crash_is_exact_oracle }
+
+  - id: keyset_composite_parallel
+    what: "chunk_by_key: [a, b] + parallel: N splits the key by its lead column into ranges (all rows of one lead value in one range); ≥2 workers ran and the union reads every row exactly once (DuckDB count + distinct key count)."
+    postgres: { test: composite_key_parallel_reads_every_row_once_postgres }
+    mysql:    { test: composite_key_parallel_reads_every_row_once_mysql }
+    mssql:    { test: composite_key_parallel_reads_every_row_once_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: composite_key_parallel_reads_every_row_once_oracle }
+
+  - id: keyset_composite_parallel_resume_after_crash
+    what: "chunk_by_key: [a, b] + parallel: N + chunk_checkpoint: a run killed after its first range commits resumes the unfinished ranges; the destination holds every row exactly once."
+    postgres: { test: composite_key_parallel_resume_after_a_crash_is_exact_postgres }
+    mysql:    { test: composite_key_parallel_resume_after_a_crash_is_exact_mysql }
+    mssql:    { test: composite_key_parallel_resume_after_a_crash_is_exact_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: composite_key_parallel_resume_after_a_crash_is_exact_oracle }
+
   - id: keyset_parallel_fanout
     what: "chunk_by_key + parallel: N → N ROW-percentile-range workers seek concurrently (feat/parallel-keyset — a DISTINCT chunking strategy: nth-row percentile range sampling, sparse-key immune). Union reads every row exactly once AND the run fans to ≥2 workers (no silent collapse to a single serial worker)."
     postgres: { test: parallel_keyset_parity_postgres }
@@ -62,6 +94,38 @@ scenarios:
     mssql:    { test: parallel_keyset_incremental_mssql }
     mongo:    { na: "Mongo incremental is the `_id`-range reader's `resume`, not SQL keyset_incremental (covered by the mongo resume scenario above)" }
     oracle:   { test: parallel_keyset_incremental_oracle }
+
+  - id: keyset_key_type_admission
+    what: "a keyset key (explicit chunk_by_key, or MySQL's auto-picked unique key) is accepted only when the cursor reader can advance it: over several pages a MySQL BINARY/TIME/TINYINT(1)/ENUM, PG bytea/time and MSSQL varbinary/time key is refused at check, plan and run by RIVET_PLAN_CHUNK_KEY_UNUSABLE with nothing written (RED until fix/seam-keyset-key-type: the run writes page 0 then stops with exit 5, or skips rows)"
+    postgres: { test: open_defect_keyset_key_is_refused_postgres_bytea_unique_key }
+    mysql:    { test: open_defect_keyset_key_is_refused_mysql_binary16_primary_key }
+    mssql:    { test: open_defect_keyset_key_is_refused_mssql_varbinary_unique_key }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_timestamp_9_keyset_key_stays_refused_oracle }
+
+  - id: keyset_key_type_readable_types
+    what: "the key types the cursor reads (integer, text, date, timestamp up to microseconds, uuid, and a sub-microsecond key under its timestamp_ns override) deliver the source's ids exactly once over several pages; the neighbour of keyset_key_type_admission that must not change"
+    postgres: { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_postgres }
+    mysql:    { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_mysql }
+    mssql:    { test: a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle }
+
+  - id: keyset_sub_microsecond_key
+    what: "a keyset key finer than the microsecond the default batch keeps (MSSQL datetime2(7)/datetimeoffset(7)) is refused at check, plan and run by RIVET_PLAN_CHUNK_KEY_UNUSABLE, whether the rows sit a tick past each microsecond or all inside one (RED until fix/seam-keyset-key-type: the seek re-reads the row at the end of every page, exit 0); the same key under its timestamp_ns override delivers every row once"
+    postgres: { na: "PostgreSQL timestamps stop at microseconds, which the batch keeps exactly" }
+    mysql:    { na: "MySQL DATETIME/TIMESTAMP stop at microseconds, which the batch keeps exactly" }
+    mssql:    { test: open_defect_keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_timestamp_9_keyset_key_stays_refused_oracle }
+
+  - id: keyset_unusable_key_on_a_one_chunk_table
+    what: "owner decision Q11 (2026-11-03): under mode: chunked a key the cursor cannot advance is refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE even when the table fits one chunk, as a large table is (RED until fix/seam-keyset-key-type: a MySQL auto-picked key downgrades to a snapshot, an explicit chunk_by_key reads one short page, both exit 0)"
+    postgres: { test: open_defect_keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key }
+    mysql:    { test: open_defect_keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key }
+    mssql:    { test: open_defect_keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { na: "the explicit chunk_by_key check precedes the small-table escape and Oracle's probe drops the key, so the refusal does not depend on the table's size; pinned by a_timestamp_9_keyset_key_stays_refused_oracle" }
 
   - id: keyset_init_generates_for_pk
     what: "rivet init on a single-column-PK table scaffolds chunk_by_key (keyset), not range chunk_column"

@@ -4595,3 +4595,71 @@ seeds:
         cells: ["lib:postgres_state_decides_liveness_by_literal_path_containment", "lib:postgres_state_cleanup_and_gc_follow_the_literal_prefix"]
       sqlite-state:
         cells: ["lib:sqlite_state_decides_liveness_by_literal_path_containment", "lib:sqlite_state_cleanup_and_gc_follow_the_literal_prefix"]
+
+  - name: config-knob-range-unchecked
+    class: "a count or ratio knob is read without its range: a `chunk_size` of 2^63 or more wraps to a zero window and the run ends exit 0 with 0 rows, `--rollover 0`, Mongo `page_size: 0` and a `quality.null_ratio_max` of NaN, infinity or outside 0 to 1 are accepted"
+    history: "2026-11-03 - found by the seam packaging (HCF-1, HCF-3, HCF-4): chunk_size 2^63 planned 0 windows and exited 0 with 0 rows on every SQL engine; fixed by src/config/quantity.rs::Knob"
+    scope: source
+    patch: config-knob-range-unchecked/shared.patch
+    engines:
+      postgres:
+        cells: [chunk_size_past_i64_is_refused_postgres, cdc_rollover_zero_is_refused_on_the_flag_postgres, null_ratio_max_outside_the_unit_interval_is_refused_postgres, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+      mysql:
+        cells: [chunk_size_past_i64_is_refused_mysql, cdc_rollover_zero_is_refused_on_the_flag_mysql, null_ratio_max_outside_the_unit_interval_is_refused_mysql, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+      mssql:
+        cells: [chunk_size_past_i64_is_refused_mssql, cdc_rollover_zero_is_refused_on_the_flag_mssql, null_ratio_max_outside_the_unit_interval_is_refused_mssql, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+      oracle:
+        cells: [chunk_size_past_i64_is_refused_oracle, cdc_rollover_zero_is_refused_on_the_flag_oracle, null_ratio_max_outside_the_unit_interval_is_refused_oracle, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+      mongo:
+        cells: [mongo_page_size_zero_is_refused, cdc_rollover_zero_is_refused_on_the_flag_mongo, null_ratio_max_outside_the_unit_interval_is_refused_mongo, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
+
+  - name: key-span-read-in-i64
+    class: "the span of a key range and the window over it are computed in 64-bit signed arithmetic, so a `chunk_count` (or a `chunk_size` near i64::MAX) over a key range as wide as bigint overflows: a panic in debug, a refusal that blames a knob already set in release"
+    history: "2026-11-03 - found by the seam packaging (HCF-8): rivet plan and run panicked at detect.rs and preflight/analysis.rs on a table holding i64::MIN and i64::MAX; fixed by Knob::key_span and the 128-bit windows"
+    scope: source
+    patch: key-span-read-in-i64/shared.patch
+    engines:
+      postgres:
+        cells: [wide_key_windows_plan_and_deliver_postgres, "lib:a_full_i64_range_has_a_span_and_a_window_no_i64_holds"]
+      mysql:
+        cells: [wide_key_windows_plan_and_deliver_mysql, "lib:a_full_i64_range_has_a_span_and_a_window_no_i64_holds"]
+      mssql:
+        cells: [wide_key_windows_plan_and_deliver_mssql, "lib:a_full_i64_range_has_a_span_and_a_window_no_i64_holds"]
+      oracle:
+        cells: [wide_key_windows_plan_and_deliver_oracle, "lib:a_full_i64_range_has_a_span_and_a_window_no_i64_holds"]
+      mongo:
+        na: "a MongoDB collection has no range chunking: its windows are _id pages (page_size), never a span over an integer key"
+
+  - name: cdc-rollover-flag-unrouted
+    class: "`rivet cdc --rollover` is passed to the stream as typed while `cdc.rollover` is refused at zero: `--rollover 0` runs and rolls a part on every committed transaction"
+    history: "2026-11-03 - found by the seam packaging (HCF-4): `rivet cdc --rollover 0` was accepted on every CDC engine where the config key is refused RIVET_CONFIG_CDC_ROLLOVER_INVALID; fixed by routing the flag through Knob::ROLLOVER"
+    scope: source
+    patch: cdc-rollover-flag-unrouted/shared.patch
+    engines:
+      postgres:
+        cells: [cdc_rollover_zero_is_refused_on_the_flag_postgres]
+      mysql:
+        cells: [cdc_rollover_zero_is_refused_on_the_flag_mysql]
+      mssql:
+        cells: [cdc_rollover_zero_is_refused_on_the_flag_mssql]
+      oracle:
+        cells: [cdc_rollover_zero_is_refused_on_the_flag_oracle]
+      mongo:
+        cells: [cdc_rollover_zero_is_refused_on_the_flag_mongo]
+
+  - name: check-override-wire-not-refused
+    class: "rivet check reads a columns: override through the run's converter but drops the wire-mismatch refusal, so check exits 0 on a config the run refuses with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"
+    history: "audit defect 11, 2026-11-03: check and check --type-report accepted an int4 column declared string on PostgreSQL while run refused it, on all four SQL engines"
+    scope: source
+    patch: check-override-wire-not-refused/shared.patch
+    engines:
+      postgres:
+        cells: [check_refuses_an_int4_column_declared_string_postgres]
+      mysql:
+        cells: [check_refuses_a_text_value_declared_uuid_mysql]
+      mssql:
+        cells: [check_refuses_an_int_column_declared_string_mssql]
+      oracle:
+        cells: [check_refuses_a_timestamp_with_a_time_declared_date_oracle]
+      mongo:
+        na: "a document source has no declared column wire type: the probe returns before it reads a row (source_type == Mongo)"

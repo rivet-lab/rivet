@@ -202,6 +202,8 @@ fn pg_content_export_under_update_pressure() {
             page_limit: None,
             base_relation: None,
             upper_bound: None,
+            key_rest: &[],
+            key_range: false,
         },
         &mut sink,
     );
@@ -328,6 +330,8 @@ fn pg_full_content_export_max_pressure() {
             page_limit: None,
             base_relation: None,
             upper_bound: None,
+            key_rest: &[],
+            key_range: false,
         },
         &mut sink,
     );

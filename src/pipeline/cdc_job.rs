@@ -784,7 +784,9 @@ fn run_cdc_inner(
             outputs,
             format: export.format,
             max_events: cdc.max_events,
-            rollover: cdc.rollover.unwrap_or(100_000),
+            rollover: cdc
+                .rollover
+                .unwrap_or(crate::config::quantity::DEFAULT_COUNT),
             rollover_memory_bytes: cdc_rollover_memory_bytes(cdc.rollover_memory_mb),
             run_id: run_id.to_string(),
             started_at: now,
@@ -1330,7 +1332,7 @@ mod tests {
             leg.tuning.is_some(),
             "a recipe without `tuning:` must not erase the CDC export's budget"
         );
-        assert_eq!(leg.chunk_by_key.as_deref(), Some("id"));
+        assert_eq!(leg.chunk_key_lead(), Some("id"));
         assert_eq!(leg.chunk_size, 250_000);
         assert_eq!(leg.parallel, 4);
         assert!(leg.chunk_checkpoint, "the baseline must be resumable");

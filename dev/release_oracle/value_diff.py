@@ -242,10 +242,20 @@ def oracle_rows(url: str, sql: str) -> list[dict]:
 
 
 def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
-    """(column names, rows) of `sql` read by python-oracledb, as `oracle_rows` reads them — the names survive an empty result."""
+    """(column names, rows) of `sql` read by python-oracledb, as `oracle_rows` reads them — the names survive an empty result. A LOB arrives inline as str/bytes (no round trip per LOB); the server's own LOB length tells an empty LOB from a NULL one."""
     from urllib.parse import unquote, urlparse
 
     import oracledb
+
+    inline = {
+        oracledb.DB_TYPE_CLOB: oracledb.DB_TYPE_LONG,
+        oracledb.DB_TYPE_NCLOB: oracledb.DB_TYPE_LONG_NVARCHAR,
+        oracledb.DB_TYPE_BLOB: oracledb.DB_TYPE_LONG_RAW,
+    }
+
+    def as_inline(cursor, md):
+        if md.type_code in inline:
+            return cursor.var(inline[md.type_code], size=1 << 30, arraysize=cursor.arraysize)
 
     oracledb.defaults.fetch_decimals = True
     u = urlparse(url)
@@ -255,11 +265,22 @@ def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
     ) as con, con.cursor() as cur:
         cur.execute("ALTER SESSION SET TIME_ZONE = 'UTC'")
         cur.arraysize = 5000
-        cur.execute(sql)
+        cur.parse(sql)
         names = [d[0] for d in cur.description]
-        return names, [
-            tuple(v.read() if isinstance(v, oracledb.LOB) else v for v in row) for row in cur.fetchall()
-        ]
+        lobs = {i: d[1] is oracledb.DB_TYPE_BLOB for i, d in enumerate(cur.description) if d[1] in inline}
+        if lobs:
+            lens = ", ".join(f'DBMS_LOB.GETLENGTH(q."{names[i]}")' for i in lobs)
+            sql = f"SELECT q.*, {lens} FROM ({sql}) q"
+            cur.outputtypehandler = as_inline
+        cur.execute(sql)
+        out = []
+        for row in cur.fetchall():
+            row = list(row)
+            for k, (i, blob) in enumerate(lobs.items()):
+                if row[i] is None and row[len(names) + k] == 0:
+                    row[i] = b"" if blob else ""
+            out.append(tuple(row[: len(names)]))
+        return names, out
 
 
 def oracle_table_select(url: str, table: str, renders: dict | None = None) -> str:

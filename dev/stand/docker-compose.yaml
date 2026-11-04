@@ -38,6 +38,10 @@ x-mssql-env: &mssql-env
   ACCEPT_EULA: "Y"
   MSSQL_SA_PASSWORD: "Rivet_Passw0rd!"
   MSSQL_PID: Developer
+  MSSQL_MEMORY_LIMIT_MB: "2048"
+
+x-mssql-limits: &mssql-limits
+  mem_limit: 3g
 
 x-pg-health: &pg-health
   test: ["CMD-SHELL", "pg_isready -U rivet"]
@@ -140,6 +144,7 @@ services:
     image: mcr.microsoft.com/mssql/server:2019-latest
     profiles: ["batch"]
     restart: unless-stopped
+    <<: *mssql-limits
     environment: *mssql-env
     ports: ["1519:1433"]
     volumes:
@@ -150,6 +155,7 @@ services:
     image: mcr.microsoft.com/mssql/server:2022-latest
     profiles: ["batch"]
     restart: unless-stopped
+    <<: *mssql-limits
     environment: *mssql-env
     ports: ["1522:1433"]
     volumes:
@@ -258,6 +264,7 @@ services:
     image: mcr.microsoft.com/mssql/server:2019-latest
     profiles: ["cdc"]
     restart: unless-stopped
+    <<: *mssql-limits
     environment:
       <<: *mssql-env
       MSSQL_AGENT_ENABLED: "true"   # the Agent runs the CDC capture job
@@ -270,6 +277,7 @@ services:
     image: mcr.microsoft.com/mssql/server:2022-latest
     profiles: ["cdc"]
     restart: unless-stopped
+    <<: *mssql-limits
     environment:
       <<: *mssql-env
       MSSQL_AGENT_ENABLED: "true"

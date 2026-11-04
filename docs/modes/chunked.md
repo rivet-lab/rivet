@@ -261,6 +261,31 @@ exports:
 
 Output files: one per page, named `{export}_{run_id}_keyset_{tag}.parquet` where run_id is `{export}_YYYYMMDDTHHMMSS.mmm` (filename sanitization maps the `.` to `_`) and the tag is `start` for the first page, then a 16-hex hash of that page's seek cursor — e.g. `events_events_20260529T120000_123_keyset_start.parquet`. The run_id/seek-based name makes a crash-resume overwrite its own page idempotently.
 
+**Composite primary key.** When the table's primary key has several columns
+(for example `uuid` + `varchar`), list them in key order:
+
+```yaml
+    chunk_by_key: [id, kind]     # the PRIMARY KEY's columns, in key order
+```
+
+Each page seeks past the last row's key tuple
+(`WHERE id >= ? AND (id > ? OR kind > ?) ORDER BY id, kind LIMIT n`), so every
+query is a bounded range scan on the primary key and no transaction outlives a page.
+The list must be exactly the primary key's columns in order, each of an integer,
+string, date, timestamp without time zone or uuid type; otherwise the plan stops with
+`RIVET_PLAN_CHUNK_KEY_UNUSABLE` and names the primary key. `keyset_incremental: true`
+is refused with a composite key. `chunk_checkpoint: true` resumes a crashed run from
+the stored key tuple.
+
+With `parallel: N`, the workers split the table by the key's **first** column:
+boundaries are sampled on `id` at run open, and each worker reads its range
+`(id > lo AND id <= hi)` page by page on the whole tuple. All rows that share one
+`id` value fall in the same range, so the union reads every row exactly once. With
+`chunk_checkpoint: true` each finished range is recorded, and a resume re-reads only
+the ranges that had not finished. Boundary sampling is the same as for a single key
+(a row count plus one ordered offset read per boundary), so on a very large table
+the run's opening queries scan the key's index.
+
 **Auto-resolution (MySQL).** With the `table:` shortcut and **no** `chunk_by_key`,
 if the table has no single-integer PK but *does* have a usable single-column
 unique key, Rivet auto-selects keyset on it and logs a `warn` naming the key

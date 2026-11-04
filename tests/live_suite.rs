@@ -53,6 +53,8 @@ mod audit_state;
 mod audit_target_typo;
 #[path = "live/batch_memory_policy.rs"]
 mod batch_memory_policy;
+#[path = "live/check_override_wire.rs"]
+mod check_override_wire;
 #[path = "live/chunking_stand.rs"]
 mod chunking_stand;
 #[path = "live/gate_tls_failures.rs"]
@@ -124,6 +126,8 @@ mod live_chunked_recovery;
 mod live_cli_flags;
 #[path = "live/live_clickhouse_load.rs"]
 mod live_clickhouse_load;
+#[path = "live/live_config_knob_counts.rs"]
+mod live_config_knob_counts;
 #[path = "live/live_content_load.rs"]
 mod live_content_load;
 #[path = "live/live_continued_key_load.rs"]
@@ -154,6 +158,10 @@ mod live_init_delta;
 mod live_init_extended;
 #[path = "live/live_keyset.rs"]
 mod live_keyset;
+#[path = "live/live_keyset_composite.rs"]
+mod live_keyset_composite;
+#[path = "live/live_keyset_key_type.rs"]
+mod live_keyset_key_type;
 #[path = "live/live_keyset_metrics.rs"]
 mod live_keyset_metrics;
 #[path = "live/live_keyset_parallel.rs"]
@@ -346,3 +354,5 @@ mod live_state_pooler;
 mod live_state_reset_live_run;
 #[path = "live/live_stated_guarantees.rs"]
 mod live_stated_guarantees;
+#[path = "live/live_stop_class.rs"]
+mod live_stop_class;

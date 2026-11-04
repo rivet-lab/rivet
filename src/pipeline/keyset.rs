@@ -192,6 +192,10 @@ fn fill_keyset_page(
         last_run_at: None,
         cursor_column: None,
     });
+    let (key_rest, key_range) = match &plan.strategy {
+        ExtractionStrategy::Keyset(k) => (k.key_rest.as_slice(), fans_out(k.parallel)),
+        _ => (&[][..], false),
+    };
     let mut sink = ExportSink::new(plan)?;
     src.export(
         // `query` is the unwrapped base; the driver wraps it with the keyset
@@ -202,6 +206,8 @@ fn fill_keyset_page(
             .with_incremental(Some(key_plan))
             .with_cursor(cursor_state.as_ref())
             .with_upper_bound(upper)
+            .with_key_rest(key_rest)
+            .with_key_range(key_range)
             .with_page_limit(page_size),
         &mut sink,
     )?;
@@ -362,6 +368,22 @@ fn partition_ranges(
     ranges
 }
 
+/// Sampled ranges as the worker seeks them: a composite key's lead-column bounds become one-value key tuples.
+#[allow(clippy::type_complexity)]
+fn lead_bounds(
+    ranges: Vec<(usize, Option<String>, Option<String>, bool)>,
+    key_rest: &[String],
+) -> Vec<(usize, Option<String>, Option<String>, bool)> {
+    if key_rest.is_empty() {
+        return ranges;
+    }
+    let tuple = |v: Option<String>| v.map(|v| serde_json::json!([v]).to_string());
+    ranges
+        .into_iter()
+        .map(|(i, lo, hi, done)| (i, tuple(lo), tuple(hi), done))
+        .collect()
+}
+
 /// What a resumed full pass reads past a last, open-ended range the crashed run committed.
 #[derive(Debug, PartialEq, Eq)]
 enum UnreadTail {
@@ -488,9 +510,13 @@ fn run_keyset_parallel(
 
     let kp = keyset_plan(plan);
     let scope = plan.source.state_key();
-    let key = kp.key_column.clone();
+    let key = kp.cursor_identity();
     let page_size = kp.chunk_size;
     let checkpoint = kp.checkpoint;
+    let sample = |src: &mut dyn Source, floor, ceil| {
+        sample_parallel_ranges(src, plan, &kp.key_column, parallel, floor, ceil)
+            .map(|ranges| lead_bounds(ranges, &kp.key_rest))
+    };
 
     // Resume detection (checkpoint only): a surviving resume_run_id means a prior
     // parallel run of this export crashed. Reuse its run_id (so every worker's
@@ -522,7 +548,7 @@ fn run_keyset_parallel(
     {
         let anchor = progress.cursor()?.last_cursor_value;
         let st = plan.source.source_type;
-        let key_q = crate::sql::quote_ident(st, &key);
+        let key_q = crate::sql::quote_ident(st, &kp.key_column);
         // The source answers "is anything past the anchor" in its own collation.
         let past_anchor = anchor
             .as_deref()
@@ -572,7 +598,7 @@ fn run_keyset_parallel(
             // THEN set the anchor. If a crash lands before the anchor, the next run
             // sees no resume_run_id and does a fresh full pass (persist replaces the
             // orphaned rows) — safe, never a skip.
-            let fresh = sample_parallel_ranges(src, plan, &key, parallel, floor_r, ceil_r)?;
+            let fresh = sample(src, floor_r, ceil_r)?;
             st.persist_keyset_ranges(
                 &plan.export_name,
                 &scope,
@@ -583,7 +609,7 @@ fn run_keyset_parallel(
             st.set_resume_run_id(progress.key(), &summary.run_id)?;
             fresh
         }
-        _ => sample_parallel_ranges(src, plan, &key, parallel, floor_r, ceil_r)?,
+        _ => sample(src, floor_r, ceil_r)?,
     };
 
     // The anchor advance for incremental = the last range's ceiling (the source max
@@ -1927,6 +1953,100 @@ mod tests {
         ) -> Result<Vec<crate::types::TypeMapping>> {
             Ok(vec![])
         }
+    }
+
+    struct CompositePage(Vec<String>, bool);
+    impl Source for CompositePage {
+        fn export(
+            &mut self,
+            request: &source::ExportRequest<'_>,
+            sink: &mut dyn source::BatchSink,
+        ) -> Result<()> {
+            use arrow::datatypes::{DataType, Field, Schema};
+            self.0 = request.key_rest.to_vec();
+            self.1 = request.key_range;
+            let schema = std::sync::Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("kind", DataType::Utf8, false),
+            ]));
+            sink.on_schema(schema.clone())?;
+            sink.on_batch(&arrow::record_batch::RecordBatch::try_new(
+                schema,
+                vec![
+                    std::sync::Arc::new(arrow::array::Int64Array::from(vec![1, 2])),
+                    std::sync::Arc::new(arrow::array::StringArray::from(vec!["a", "z"])),
+                ],
+            )?)
+        }
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(vec![])
+        }
+    }
+
+    /// A composite-key page asks the source for the rest of the key and stores the last row's key tuple.
+    #[test]
+    fn a_composite_key_page_reads_by_the_whole_key_and_stores_its_tuple() {
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.strategy = ExtractionStrategy::Keyset(KeysetPlan {
+            key_column: "id".into(),
+            chunk_size: 10,
+            checkpoint: true,
+            incremental: false,
+            parallel: 1,
+            key_rest: vec!["kind".into()],
+        });
+        let key = IncrementalCursorPlan {
+            primary_column: "id".into(),
+            fallback_column: None,
+            mode: IncrementalCursorMode::SingleColumn,
+            settle: None,
+        };
+        let mut src = CompositePage(Vec::new(), true);
+        let sink = fill_keyset_page(&mut src, &plan, &key, 10, None, None)
+            .unwrap()
+            .expect("a page with rows");
+        assert_eq!(src.0, vec!["kind".to_string()]);
+        assert!(!src.1, "a sequential page is not a range worker's");
+        assert_eq!(sink.effective_cursor().as_deref(), Some(r#"["2","z"]"#));
+        if let ExtractionStrategy::Keyset(k) = &mut plan.strategy {
+            k.parallel = 4;
+        }
+        fill_keyset_page(
+            &mut src,
+            &plan,
+            &key,
+            10,
+            Some(r#"["0"]"#),
+            Some(r#"["9"]"#),
+        )
+        .unwrap();
+        assert!(src.1, "a parallel worker's page reads a lead-bounded range");
+    }
+
+    /// A composite key's sampled lead bounds become one-value tuples; a single key's stay bare values.
+    #[test]
+    fn a_composite_keys_ranges_are_bounded_by_lead_tuples() {
+        let sampled = || {
+            vec![
+                (0, None, Some("b".to_string()), false),
+                (1, Some("b".to_string()), None, false),
+            ]
+        };
+        assert_eq!(
+            lead_bounds(sampled(), &["kind".into()]),
+            vec![
+                (0, None, Some(r#"["b"]"#.to_string()), false),
+                (1, Some(r#"["b"]"#.to_string()), None, false),
+            ]
+        );
+        assert_eq!(lead_bounds(sampled(), &[]), sampled());
     }
 
     /// A page the sink rotated hands back the part that landed before a later part failed.

@@ -111,7 +111,9 @@ fn pg_check_reports_a_timestamptz_cursor_range_in_iso_utc_for_any_session() {
         .source_url(&role.url())
         .mode("incremental")
         .export_line("cursor_column: ts");
-    let out = rig.cli(&["check"]);
+    let out = rig
+        .run_after(&["check"], &[], Pairing::SameRefusal)
+        .preflight;
     let said = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

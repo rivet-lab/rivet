@@ -513,6 +513,21 @@ pub fn check(
         })?;
     }
 
+    let config_dir = std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    for export in &exports {
+        let column_overrides =
+            crate::plan::parse_column_overrides_pub(&export.columns, &export.name)?;
+        type_report::refuse_override_wire_mismatch(
+            &config,
+            export,
+            &column_overrides,
+            config_dir,
+            params,
+        )?;
+    }
+
     // Whether the check ends clean (no strict failure, no target-fail column).
     // Stays true for the default `rivet check` (no type report), so the "Next:
     // rivet run" pointer still fires.
@@ -2189,6 +2204,7 @@ mod tests {
             checkpoint: false,
             incremental: false,
             parallel: 1,
+            key_rest: Vec::new(),
         });
         assert_eq!(super::one_pass_note(&chunked, Some(&keyset)), None);
     }

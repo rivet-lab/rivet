@@ -15,6 +15,102 @@ use super::format::{CompressionProfile, CompressionType, FormatType, ParquetConf
 use super::resolve::{parse_file_size, resolve_vars};
 use crate::tuning::TuningConfig;
 
+/// A keyset key: one column, or a composite primary key's columns in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkKey(Vec<String>);
+
+impl ChunkKey {
+    /// A key over these columns; `None` when the list is empty.
+    pub fn new(columns: Vec<String>) -> Option<Self> {
+        (!columns.is_empty()).then_some(Self(columns))
+    }
+
+    /// The first column, which orders the seek and names the cursor.
+    pub fn lead(&self) -> &str {
+        &self.0[0]
+    }
+
+    /// The columns after the lead, empty for a single-column key.
+    pub fn rest(&self) -> &[String] {
+        &self.0[1..]
+    }
+
+    /// Every key column in order.
+    pub fn columns(&self) -> &[String] {
+        &self.0
+    }
+
+    /// True when the key spans more than one column.
+    pub fn is_composite(&self) -> bool {
+        self.0.len() > 1
+    }
+}
+
+impl From<&str> for ChunkKey {
+    fn from(c: &str) -> Self {
+        Self(vec![c.to_string()])
+    }
+}
+
+impl From<String> for ChunkKey {
+    fn from(c: String) -> Self {
+        Self(vec![c])
+    }
+}
+
+impl std::fmt::Display for ChunkKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_composite() {
+            write!(f, "[{}]", self.0.join(", "))
+        } else {
+            f.write_str(self.lead())
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChunkKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            One(String),
+            List(Vec<String>),
+        }
+        match Raw::deserialize(d)? {
+            Raw::One(c) => Ok(Self(vec![c])),
+            Raw::List(cols) => Self::new(cols).ok_or_else(|| {
+                serde::de::Error::custom("chunk_by_key list must name at least one column")
+            }),
+        }
+    }
+}
+
+impl Serialize for ChunkKey {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.is_composite() {
+            self.0.serialize(s)
+        } else {
+            self.lead().serialize(s)
+        }
+    }
+}
+
+impl JsonSchema for ChunkKey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ChunkKey".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "One key column, or the primary key's columns in order",
+            "anyOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+            ]
+        })
+    }
+}
+
 /// What to do when structural schema drift is detected (column added, removed, or retyped).
 ///
 /// ```yaml
@@ -215,11 +311,8 @@ pub struct ExportConfig {
     /// When set, `chunk_size` is computed dynamically from min/max.
     pub chunk_count: Option<usize>,
     pub chunk_by_days: Option<u32>,
-    /// Keyset (seek) pagination on this single index-backed unique key — the
-    /// source-safe shape for tables without a single-integer PK (OPT-4). The
-    /// column MUST be backed by a usable index (PK or unique); the planner
-    /// refuses a non-indexed key rather than emit a full-scan + filesort query.
-    pub chunk_by_key: Option<String>,
+    /// Keyset (seek) pagination on an index-backed unique key: one column, or the primary key's columns in order.
+    pub chunk_by_key: Option<ChunkKey>,
     /// Concurrent chunk/page workers (default 1). On a RANGE chunk (`chunk_column`)
     /// or KEYSET (`chunk_by_key`) export, `parallel: N` fans the table into N
     /// ROW-percentile ranges that seek concurrently over separate connections — the
@@ -429,6 +522,11 @@ pub struct ExportConfig {
 }
 
 impl ExportConfig {
+    /// The keyset key's lead column, when `chunk_by_key` is set.
+    pub fn chunk_key_lead(&self) -> Option<&str> {
+        self.chunk_by_key.as_ref().map(ChunkKey::lead)
+    }
+
     /// The export FAMILY this export's runs belong to: the RECORDED
     /// `snapshot_parent` for the CDC snapshot leg `cdc_job` synthesizes, the
     /// parent family for a range sub-export the pool `--split` synthesizes, the
@@ -848,7 +946,7 @@ fn default_mode() -> ExportMode {
 }
 
 pub(crate) fn default_chunk_size() -> usize {
-    100_000
+    super::quantity::DEFAULT_COUNT
 }
 
 fn default_parallel() -> usize {
@@ -949,7 +1047,7 @@ pub(crate) fn sample_export(name: &str) -> ExportConfig {
         incremental_cursor_mode: Default::default(),
         chunk_column: None,
         chunk_dense: false,
-        chunk_size: 100_000,
+        chunk_size: default_chunk_size(),
         chunk_size_memory_mb: None,
         chunk_count: None,
         chunk_by_days: None,
@@ -991,6 +1089,31 @@ pub(crate) fn sample_export(name: &str) -> ExportConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The config schema accepts chunk_by_key as a column name or a non-empty list of names.
+    #[test]
+    fn chunk_key_schema_is_a_string_or_a_non_empty_list() {
+        let schema = serde_json::to_value(schemars::schema_for!(ChunkKey)).unwrap();
+        let any_of = schema["anyOf"].as_array().expect("anyOf");
+        assert_eq!(any_of[0]["type"], "string");
+        assert_eq!(any_of[1]["type"], "array");
+        assert_eq!(any_of[1]["minItems"], 1);
+    }
+
+    /// chunk_by_key reads a column or a non-empty list and writes back the same shape.
+    #[test]
+    fn chunk_key_is_a_column_or_a_non_empty_list() {
+        let one: ChunkKey = serde_yaml_ng::from_str("id").unwrap();
+        assert!(!one.is_composite());
+        assert_eq!(serde_json::to_string(&one).unwrap(), r#""id""#);
+        let two: ChunkKey = serde_yaml_ng::from_str("[id, kind]").unwrap();
+        assert_eq!(two.lead(), "id");
+        assert_eq!(two.rest(), ["kind".to_string()]);
+        assert_eq!(two.to_string(), "[id, kind]");
+        assert_eq!(serde_json::to_string(&two).unwrap(), r#"["id","kind"]"#);
+        let err = serde_yaml_ng::from_str::<ChunkKey>("[]").unwrap_err();
+        assert!(err.to_string().contains("at least one column"), "{err}");
+    }
 
     /// A settle age is a whole number with one of four units, positive and at most `i32::MAX` seconds.
     #[test]
