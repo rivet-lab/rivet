@@ -112,7 +112,7 @@ soak:
 
 # Full live suite under nextest (per-test isolation), sweeping stale fixtures
 # FIRST so an interrupted prior run never pollutes the shared `rivet` DB, and
-# again after a green run so no orphaned replication slot keeps pinning WAL. The warehouse env
+# comes from dev/stand/registry.yaml only for a warehouse whose code the branch changed (RIVET_WAREHOUSE_LIVE overrides).
 # comes from dev/stand/registry.yaml as in the gate, so the cloud cells verify, not skip.
 # Requires `docker compose up -d` (postgres + mysql + the validator containers).
 test-live: sweep-test-db sweep-test-cloud

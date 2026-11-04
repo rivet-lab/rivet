@@ -2033,18 +2033,15 @@ def _hold_gate_lock():
     return fh
 
 
-def _warehouse_env() -> str:
-    """The BigQuery/GCS env from dev/stand/registry.yaml (dev/pytools/warehouse_env.py); the line saying which."""
+def _warehouse_lines(ns: argparse.Namespace) -> list[str]:
+    """Fill the BigQuery/GCS and Snowflake env (dev/pytools/warehouse_env.py): always on a release run, else as the branch's changes call for; the lines saying which."""
+    from .core import FULL_GATE
     from ..pytools import warehouse_env
 
-    return warehouse_env.bigquery()
-
-
-def _snowflake_env() -> str:
-    """The Snowflake env from dev/stand/registry.yaml (dev/pytools/warehouse_env.py); the line saying which."""
-    from ..pytools import warehouse_env
-
-    return warehouse_env.snowflake()
+    if gate_kind(ns) in (FULL_GATE, ISLAND_GATE):
+        return [warehouse_env.bigquery(), warehouse_env.snowflake()]
+    paths = warehouse_env.changed_paths()
+    return [warehouse_env.fill("bigquery", paths), warehouse_env.fill("snowflake", paths)]
 
 
 def apply_run_policy(ns: argparse.Namespace) -> list[str]:
@@ -2119,8 +2116,8 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
-    print(f"  {_warehouse_env()}")
-    print(f"  {_snowflake_env()}")
+    for line in _warehouse_lines(ns):
+        print(f"  {line}")
 
     record_stage_runs(_gate_modules())
     from .core import tree_identity
