@@ -148,6 +148,9 @@ fn an_mssql_read_blocked_past_its_lock_timeout_exits_retryable() {
         "CREATE TABLE {table} (id BIGINT PRIMARY KEY, v BIGINT NOT NULL);\nINSERT INTO {table} VALUES (1,1);"
     ));
     let _guard = MssqlTable::adopt(table.clone());
+    let release = format!("rivet.dbo.{}", unique_name("sc_lock_go"));
+    mssql_exec(&format!("CREATE TABLE {release} (id BIGINT);"));
+    let _release_guard = MssqlTable::adopt(release.clone());
     let rig = Rig::mssql_batch("sc_lock")
         .query(&format!("SELECT id, v FROM {table}"))
         .source_line("tuning:")
@@ -155,11 +158,16 @@ fn an_mssql_read_blocked_past_its_lock_timeout_exits_retryable() {
     let blocked = "EXISTS (SELECT 1 FROM sys.dm_exec_requests WHERE blocking_session_id = @@SPID)";
     let tx = format!(
         "SET XACT_ABORT ON; DECLARE @deadline DATETIME2;\n\
-         BEGIN TRAN; UPDATE {table} SET v = 2 WHERE id = 1;\n{}WAITFOR DELAY '00:00:30';COMMIT;",
+         BEGIN TRAN; UPDATE {table} SET v = 2 WHERE id = 1;\n{}{}COMMIT;",
         server_wait(
             blocked,
             60,
             "fixture: rivet's read never blocked on the held row lock"
+        ),
+        server_wait(
+            &format!("EXISTS (SELECT 1 FROM {release} WITH (NOLOCK))"),
+            120,
+            "fixture: the run never ended while the lock was held"
         ),
     );
     let writer = std::thread::spawn(move || mssql_exec_once(&tx));
@@ -168,6 +176,7 @@ fn an_mssql_read_blocked_past_its_lock_timeout_exits_retryable() {
         "the writer's row lock",
     );
     let out = rig.run();
+    mssql_exec(&format!("INSERT INTO {release} VALUES (1);"));
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     let held = writer.join().expect("writer thread");
     held.unwrap_or_else(|e| panic!("{e}"));

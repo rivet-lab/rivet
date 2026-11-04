@@ -1402,8 +1402,8 @@ pub mod codes {
     /// rivet's own test hook raised the fault `RIVET_TEST_ERROR_AT` names.
     pub const CLI_TEST_FAULT_INJECTED: Code = environment(
         "RIVET_CLI_TEST_FAULT_INJECTED",
-        Retry::Never,
-        "unset `RIVET_TEST_ERROR_AT`; the fault is rivet's own test hook, not the source",
+        Retry::ByCause,
+        "unset `RIVET_TEST_ERROR_AT` and `RIVET_TEST_TRANSIENT_ONCE`; the fault is rivet's own test hook, not the source",
     );
     /// Every export in the config is a CDC stream or a backfill recipe, which `rivet plan` does not plan.
     pub const PLAN_NOTHING_TO_PLAN: Code = usage(

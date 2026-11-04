@@ -145,7 +145,7 @@ fn mssql_incremental_on_a_locking_database_warns_with_the_fix() {
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn mssql_lock_timeout_fails_a_blocked_read_fast() {
+fn mssql_lock_timeout_cuts_a_blocked_read_fast_and_the_retry_delivers_once_the_lock_clears() {
     let table = format!("rivet.dbo.{}", unique_name("lock_to"));
     mssql_exec(&format!(
         "CREATE TABLE {table} (id BIGINT PRIMARY KEY, v BIGINT NOT NULL);\nINSERT INTO {table} VALUES (1,1);"
@@ -175,11 +175,16 @@ fn mssql_lock_timeout_fails_a_blocked_read_fast() {
         &format!("SELECT COUNT(*) FROM {table} WITH (NOLOCK) WHERE v = 2"),
         "the writer's row lock",
     );
-    let said = rig.run_expect_fail();
+    let out = rig.run();
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
     let held = writer.join().expect("writer thread");
+    held.unwrap_or_else(|e| panic!("{e}"));
     assert!(
-        said.contains("Lock request time out period exceeded"),
+        said.contains("Lock request time out period exceeded") && said.contains("retry 1/"),
         "{said}"
     );
-    held.unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        out.status.success(),
+        "the retry after the lock cleared must deliver\n{said}"
+    );
 }
