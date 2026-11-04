@@ -1,7 +1,10 @@
 """The cloud env every live warehouse cell reads, filled from dev/stand/registry.yaml.
 
     python -m dev.pytools.warehouse_env -- CMD ...   fill the env, say which, then exec CMD
+    python -m dev.pytools.warehouse_env --self-test  check which changed paths wake which warehouse
 
+A run outside the release gate fills a warehouse only when the branch changed that warehouse's code
+(OWN_PATHS, or SHARED_PATHS for both) or RIVET_WAREHOUSE_LIVE names it (bigquery, snowflake, all, none).
 A variable the shell already set wins. BigQuery/GCS are filled when a Google credential is at
 hand, Snowflake when the `snow` connection logs in and sees the schema; otherwise the line says
 SKIP and the cells report that nothing was verified. The release gate and `make test-live` both
@@ -16,6 +19,17 @@ import re
 import sys
 
 from . import registry, shell
+
+OWN_PATHS = {
+    "bigquery": ("src/load/bigquery/", "src/load/bq_rest.rs", "tests/common/bigquery.rs",
+                 "tests/type_roundtrip/bigquery_load.rs", "dev/release_oracle/bigquery.py", "dev/bigquery/"),
+    "snowflake": ("src/load/snowflake.rs", "src/load/snowflake_rest.rs", "src/config/snowflake_account.rs",
+                  "tests/common/snowflake.rs", "tests/live/live_snowflake_", "tests/type_roundtrip/snowflake_load.rs"),
+}
+SHARED_PATHS = ("src/load/", "src/destination/gcs.rs", "src/types/target.rs", "tests/common/warehouse.rs",
+                "tests/harness/", "tests/oracle_fixture_matrix.rs", "tests/live/live_mongo_order_warehouses.rs",
+                "dev/pytools/warehouse_env.py", "dev/stand/registry.yaml")
+OTHER_TARGETS = ("src/load/clickhouse.rs",)
 
 
 def bigquery() -> str:
@@ -82,13 +96,89 @@ def snowflake() -> str:
             f"(connection {os.environ['RIVET_SF_CONNECTION']}, warehouse {os.environ['RIVET_SF_WAREHOUSE']})")
 
 
+def touches(kind: str, paths: list[str]) -> bool:
+    """Whether any changed path is this warehouse's own code or code every warehouse load runs."""
+    for path in paths:
+        if path.startswith(OWN_PATHS[kind]):
+            return True
+        if path.startswith(SHARED_PATHS) and not path.startswith(OTHER_TARGETS + sum(OWN_PATHS.values(), ())):
+            return True
+    return False
+
+
+def changed_paths() -> list[str] | None:
+    """The paths this branch changed since origin/main, committed, staged, unstaged and untracked; None when git cannot say."""
+    base = shell.run(["git", "merge-base", "HEAD", "origin/main"], timeout=60)
+    diff = shell.run(["git", "diff", "--name-only", base.stdout.strip()], timeout=60) if base.ok else base
+    new = shell.run(["git", "ls-files", "--others", "--exclude-standard"], timeout=60)
+    if not (diff.ok and new.ok):
+        return None
+    return [line for line in (diff.stdout + new.stdout).splitlines() if line]
+
+
+def wanted(kind: str, switch: str, paths: list[str] | None) -> str | None:
+    """None when this warehouse runs; else the SKIP reason naming how to run it."""
+    named = {w.strip() for w in switch.lower().split(",") if w.strip()}
+    if kind in named or "all" in named:
+        return None
+    if "none" in named:
+        return f"RIVET_WAREHOUSE_LIVE={switch} leaves {kind} out"
+    if named:
+        return f"RIVET_WAREHOUSE_LIVE={switch} does not name {kind}"
+    if paths is None:
+        return None
+    if touches(kind, paths):
+        return None
+    return f"no {kind} code changed since origin/main (RIVET_WAREHOUSE_LIVE={kind} runs it)"
+
+
+def fill(kind: str, paths: list[str] | None) -> str:
+    """Fill one warehouse's env when this run wants it; the line saying which."""
+    why = wanted(kind, os.environ.get("RIVET_WAREHOUSE_LIVE", ""), paths)
+    label = {"bigquery": "BigQuery/GCS", "snowflake": "Snowflake"}[kind]
+    if why:
+        return f"{label} legs SKIP: {why}"
+    return bigquery() if kind == "bigquery" else snowflake()
+
+
+def self_test() -> int:
+    """Check the path rule on fixed change lists."""
+    cases = [
+        ("bigquery", [], False), ("snowflake", [], False),
+        ("bigquery", ["src/load/bigquery/ddl.rs"], True), ("snowflake", ["src/load/bigquery/ddl.rs"], False),
+        ("snowflake", ["src/load/snowflake_rest.rs"], True), ("bigquery", ["src/load/snowflake_rest.rs"], False),
+        ("snowflake", ["tests/live/live_snowflake_compact.rs"], True),
+        ("bigquery", ["src/load/orchestrate.rs"], True), ("snowflake", ["src/load/orchestrate.rs"], True),
+        ("snowflake", ["src/destination/gcs.rs"], True), ("bigquery", ["src/load/clickhouse.rs"], False),
+        ("snowflake", ["src/load/clickhouse.rs"], False), ("bigquery", ["src/source/mysql/cdc.rs", "README.md"], False),
+    ]
+    bad = [(k, p) for k, p, want in cases if touches(k, p) != want]
+    switches = [
+        ("bigquery", "all", [], None), ("snowflake", "bigquery", ["src/load/snowflake.rs"], "does not name"),
+        ("snowflake", "none", ["src/load/snowflake.rs"], "leaves"), ("bigquery", "", None, None),
+        ("bigquery", "", [], "no bigquery code changed"), ("snowflake", "Snowflake", [], None),
+    ]
+    for kind, switch, paths, want in switches:
+        got = wanted(kind, switch, paths)
+        if (want is None) != (got is None) or (want and want not in got):
+            bad.append((kind, switch))
+    if bad:
+        print(f"warehouse_env self-test FAILED: {bad}", file=sys.stderr)
+        return 1
+    print("warehouse_env self-test: ok")
+    return 0
+
+
 def main(argv: list[str]) -> int:
-    """Fill the env, print both lines, exec the command after `--`."""
+    """Fill the env this branch's changes call for, print both lines, exec the command after `--`."""
+    if argv == ["--self-test"]:
+        return self_test()
     cmd = argv[1:] if argv[:1] == ["--"] else argv
     if not cmd:
         print(__doc__, file=sys.stderr)
         return 2
-    for line in (bigquery(), snowflake()):
+    paths = changed_paths()
+    for line in (fill("bigquery", paths), fill("snowflake", paths)):
         print(f"  {line}", file=sys.stderr, flush=True)
     os.execvp(cmd[0], cmd)
 

@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import stand_health
 from .core import Ledger, SkipCause, have, rivet, rivet_bin, run
 from .scenarios import _manifest_declared_parts, _tcp_open, work_dir
 
@@ -371,7 +372,8 @@ def _pg_unavailable(led: Ledger, scenario: str) -> bool:
         led.failed("postgres", VER, scenario, "-", f"{scenario}: psql is not on PATH; the cell that shells to it did not run", "no psql")
         return True
     if not _tcp_open("127.0.0.1", 5432):
-        led.skipped("postgres", VER, scenario, "-", f"{scenario}: the stand PostgreSQL (:5432) is unavailable", "no pg", cause=SkipCause.ENV)
+        led.skipped("postgres", VER, scenario, "-", f"{scenario}: the stand PostgreSQL (:5432) is unavailable", "no pg", cause=SkipCause.ENV,
+                    target=stand_health.tcp_target("127.0.0.1", 5432))
         return True
     return False
 
@@ -413,7 +415,8 @@ def verify_failed_run_tail(led: Ledger) -> None:
         _pg_drift_case(led, tok)
     if not _tcp_open("127.0.0.1", 27017):
         led.skipped("mongo", VER, "failed_run_tail", "f_mongo_par",
-                    "failed_run_tail[f_mongo_par]: the stand MongoDB (:27017) is down", "no mongo", cause=SkipCause.ENV)
+                    "failed_run_tail[f_mongo_par]: the stand MongoDB (:27017) is down", "no mongo", cause=SkipCause.ENV,
+                    target=stand_health.tcp_target("127.0.0.1", 27017))
     else:
         _mongo_case(led, _token())
 
@@ -581,7 +584,8 @@ def verify_transient_retry_exact(led: Ledger) -> None:
     if not (_tcp_open("127.0.0.1", 8474) and _tcp_open("127.0.0.1", 15432)):
         for key in ("b_reset_before", "b_reset_after"):
             led.skipped("postgres", VER, "transient_retry_exact", key,
-                        f"transient_retry_exact[{key}]: toxiproxy (:8474/:15432) is down", "no toxiproxy", cause=SkipCause.ENV)
+                        f"transient_retry_exact[{key}]: toxiproxy (:8474/:15432) is down", "no toxiproxy", cause=SkipCause.ENV,
+                        target=stand_health.tcp_target("127.0.0.1", 8474))
         return
     _reset_peer_case(led, False, tok)
     _reset_peer_case(led, True, tok)

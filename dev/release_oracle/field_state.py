@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import stand_health
 from .core import Ledger, SkipCause, Proc, checked_exports, isolate_state_db, rivet_bin, run, run_lanes, server_of, strategy_lines
 
 __all__ = ["verify_upgrade_from_field_state", "COMPATIBILITY_FLOOR", "ACCEPTED_DIFFERENCES"]
@@ -79,6 +80,14 @@ ACCEPTED_DIFFERENCES: dict[str, str] = {  # ratchet-pin: field-state-accepted-di
 }  # ratchet-pin: end
 #: A step that died on the road to the warehouse or its token service said nothing about rivet's contract.
 TRANSPORT = re.compile(r"ADC token request failed|HTTP 5\d\d|Timeout was reached|timed out|connection reset|Connection refused", re.I)
+
+
+def not_rivets(text: str, since: float) -> str:
+    """Why a red in `text` is not rivet's ("" = it is): the warehouse transport failed, or the stand watchdog read DOWN or UNREADABLE since `since`."""
+    if TRANSPORT.search(text):
+        return "a step did not reach the warehouse"
+    seen = stand_health.judge(text, since)
+    return "" if seen.alive else f"the stand was {seen.kind.value} ({seen.reason})"
 #: The engines whose `init --mode cdc` over several tables writes one `tables:` stream with recipes.
 RECIPE_ENGINES = ("mysql", "postgres")
 BULK = {
@@ -705,7 +714,8 @@ def stream_cell(led: Ledger, olds: list[tuple[str, Path]], root: Path, engine: s
     variant, kill = f"stream-{baseline}{'/' + how if how else ''}", "baseline" if how == "killed-baseline" else "change"
     row, name = (engine, "-", SCEN, store), f"field[{_who(olds)}][{engine}/{variant}/{store}]"
     if not store_up("gcs") or not _bucket():
-        return led.skipped(*row, f"{name}: the GCS emulator on :4443 is down", "no fake-gcs", cause=SkipCause.ENV)
+        return led.skipped(*row, f"{name}: the GCS emulator on :4443 is down", "no fake-gcs", cause=SkipCause.ENV,
+                           target=stand_health.store_target("gcs"))
     tag = f"{engine[:2]}{_tag(olds)}{baseline[0]}{(how or 'as-run')[0]}{store[:2]}{os.getpid()}"
     if state_url:
         state_url = isolate_state_db(state_url, tag) or ""
@@ -960,16 +970,16 @@ def _unbuilt(led: Ledger, row: tuple, name: str, ver: str, w: _World) -> bool:
     return bool(w.why)
 
 
-def _warehouse_down(target: str) -> str:
-    """Why `target` cannot be loaded into here, or ''."""
+def _warehouse_down(target: str) -> tuple[str, str]:
+    """(why `target` cannot be loaded into here or '', the stand target whose earlier answer makes that a stand incident)."""
     from .scenarios import store_up
     from .upgrade_matrix import _ch
 
     if target == "bigquery":
-        return "" if os.environ.get("BQ_ORACLE_PROJECT") and os.environ.get("BQ_ORACLE_BUCKET") else "no BQ_ORACLE_PROJECT / BQ_ORACLE_BUCKET"
+        return ("" if os.environ.get("BQ_ORACLE_PROJECT") and os.environ.get("BQ_ORACLE_BUCKET") else "no BQ_ORACLE_PROJECT / BQ_ORACLE_BUCKET"), ""
     if _ch("SELECT 1") is None:
-        return "ClickHouse on :8123 is down"
-    return "" if store_up("gcs") and _bucket() else "the GCS emulator on :4443 is down"
+        return "ClickHouse on :8123 is down", ""
+    return ("" if store_up("gcs") and _bucket() else "the GCS emulator on :4443 is down"), stand_health.store_target("gcs")
 
 
 def _together(jobs: list[Callable[[], object]]) -> list:
@@ -987,9 +997,10 @@ def contract_cell(led: Ledger, releases: list[tuple[str, Path]], root: Path, url
     from .upgrade_cdc_load import MySQL
 
     row = ("mysql", "-", SCEN, f"contract-{target}")
-    down = _warehouse_down(target)
+    since = stand_health.BOOK.mark()
+    down, probed = _warehouse_down(target)
     if down:
-        return led.skipped(*row, f"field[contract/mysql/{target}]: {down}", down, cause=SkipCause.ENV)
+        return led.skipped(*row, f"field[contract/mysql/{target}]: {down}", down, cause=SkipCause.ENV, target=probed)
     tag = f"ct{target[:2]}{os.getpid()}"
     src = MySQL(url, None, tag)
     tables = [src.name(0), src.name(1)]
@@ -1041,16 +1052,17 @@ def contract_cell(led: Ledger, releases: list[tuple[str, Path]], root: Path, url
                             if status == "error":
                                 led.ungraded(*row, f"field[v{ver}][contract/mysql/{target}]: oracle: {said} could not be read: {detail}", "oracle")
                             elif status != "pass":
-                                led.failed(*row, f"field[v{ver}][contract/mysql/{target}]: loss — {said} is not the source's: "
-                                                 f"{worlds[ver][1].plain(detail)[:300]}", "loss")
+                                (led.ungraded if not_rivets(detail, since) else led.failed)(
+                                    *row, f"field[v{ver}][contract/mysql/{target}]: loss — {said} is not the source's: "
+                                          f"{worlds[ver][1].plain(detail)[:300]}", "loss")
             for ver, (was, now) in seen.items():
                 name = f"field[v{ver}][contract/mysql/{target}]"
                 diffs = differences(was, now)
                 for line, accepted in diffs:
                     sit, verb = line.split(": ", 1)[0].split(" · ")
                     why = errors.get((ver, sit, verb), "")
-                    if TRANSPORT.search(why):
-                        led.ungraded(*row, f"{name}: infra: a step did not reach the warehouse, so its answer is not rivet's — {line} ({why})", "infra")
+                    if cause := not_rivets(why, since):
+                        led.ungraded(*row, f"{name}: infra: {cause}, so its answer is not rivet's — {line} ({why})", "infra")
                     elif accepted:
                         led.passed(*row, f"{name} was -> is (accepted: {ACCEPTED_DIFFERENCES[line]}) — {line}", "accepted difference")
                     else:
@@ -1074,9 +1086,10 @@ def empty_table_cell(led: Ledger, releases: list[tuple[str, Path]], root: Path, 
     from .upgrade_cdc_load import MySQL
 
     row = ("mysql", "-", SCEN, f"empty-{target}")
-    down = _warehouse_down(target)
+    since = stand_health.BOOK.mark()
+    down, probed = _warehouse_down(target)
     if down:
-        return led.skipped(*row, f"field[mysql/empty-at-baseline/{target}]: {down}", down, cause=SkipCause.ENV)
+        return led.skipped(*row, f"field[mysql/empty-at-baseline/{target}]: {down}", down, cause=SkipCause.ENV, target=probed)
     tag = f"em{target[:2]}{os.getpid()}"
     src = MySQL(url, None, tag)
     kept, empty = src.name(0), src.name(1)
@@ -1118,7 +1131,7 @@ def empty_table_cell(led: Ledger, releases: list[tuple[str, Path]], root: Path, 
             for ver, w in worlds.items():
                 name = f"field[v{ver}][mysql/empty-at-baseline/{target}]"
                 if bad.get(ver):
-                    kind = "infra" if TRANSPORT.search(bad[ver]) else "empty table"
+                    kind = "infra" if not_rivets(bad[ver], since) else "empty table"
                     (led.ungraded if kind == "infra" else led.failed)(*row, f"{name}: {kind} — {bad[ver]}", kind)
                 elif unread.get(ver):
                     led.ungraded(*row, f"{name}: oracle: {unread[ver]}", "oracle")
@@ -1237,6 +1250,25 @@ def _self_test() -> None:
     """The graders on fixtures: each finding kind is the one row that fails, and the config edits are strict."""
     src = [(i, i) for i in range(1, 11)]
     old, new = src[:8], src[8:]
+    clock = [0.0]
+    book = stand_health.Book(lambda: clock[0])
+    with_book = stand_health.BOOK
+    stand_health.BOOK = book
+    try:
+        t0 = book.mark()
+        assert not_rivets("loss: 2 rows", t0) == "", "a red the stand did not cause is rivet's"
+        assert not_rivets("HTTP 503 from the warehouse", t0) == "a step did not reach the warehouse"
+        assert not_rivets("live test requires Mysql reachable on 127.0.0.1:3306.", t0).startswith("the stand was DOWN")
+        book.note(stand_health.WATCH + "state DB", stand_health.down("57P03 recovery"))
+        assert not_rivets("loss: 2 rows", t0).startswith("the stand was DOWN (57P03 recovery)"), "a red that ran while the watchdog said DOWN is the stand's"
+        clock[0] = 5.0
+        book.note(stand_health.WATCH + "state DB", stand_health.ALIVE)
+        clock[0] = 9.0
+        assert not_rivets("loss: 2 rows", 7.0) == "", "an episode that closed before the cell began does not touch it"
+        book.note(stand_health.WATCH + "containers", stand_health.unreadable("docker events exited 1"))
+        assert not_rivets("loss: 2 rows", 7.0).startswith("the stand was UNREADABLE")
+    finally:
+        stand_health.BOOK = with_book
     assert finding(src, src, new, new) is None and finding(src, src) is None
     assert finding(src, src + src, src, new)[0] == "restart", finding(src, src + src, src, new)
     assert finding(src, src + new[:1], new + new[:1], new)[0] == "duplicate"

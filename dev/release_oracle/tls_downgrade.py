@@ -17,11 +17,13 @@ import time
 from pathlib import Path
 
 try:
+    from . import stand_health
     from .core import Ledger, SkipCause, port_of, rivet
     from .scenarios import NO_TIMEOUT, _failed, _passed, _skipped, _tcp_open, work_dir
     from .cdc import _mysql, _psql, _sqlcmd
     from ..pytools import registry
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
+    import stand_health  # type: ignore
     from core import Ledger, SkipCause, port_of, rivet  # type: ignore
     from scenarios import NO_TIMEOUT, _failed, _passed, _skipped, _tcp_open, work_dir  # type: ignore
     from cdc import _mysql, _psql, _sqlcmd  # type: ignore
@@ -112,7 +114,8 @@ def verify_tls_downgrade_refused(led: Ledger) -> None:
         url = registry.source(src)["url"]
         port = port_of(url) or 0
         if not _tcp_open("127.0.0.1", port):
-            _skipped(led, "infra", src, scen, "-", f"tls-downgrade[{label}]: {src} :{port} down", "down", cause=SkipCause.ENV)
+            _skipped(led, "infra", src, scen, "-", f"tls-downgrade[{label}]: {src} :{port} down", "down", cause=SkipCause.ENV,
+                     target=stand_health.tcp_target("127.0.0.1", port))
             continue
         table = f"tls_{os.getpid()}_{n}"
         out = work / table
