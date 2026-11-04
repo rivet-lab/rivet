@@ -763,13 +763,9 @@ pub(crate) enum MysqlCellFix {
     /// Signed MEDIUMINT arrives WITHOUT 24-bit sign extension (the binlog
     /// stores 3 bytes; 0x800000 decodes as +8388608 instead of −8388608).
     MediumIntSign,
-    /// ENUM arrives as its 1-based INDEX — map to the label (from the native
-    /// type's `enum('a','b',…)` declaration); index 0 is MySQL's invalid-value
-    /// sentinel → empty string, matching the server's own rendering.
+    /// ENUM arrives as its 1-based index; mapped to the label the declaration holds, 0 is the empty string.
     EnumLabels(Labels),
-    /// SET arrives as its BITMASK (little-endian raw bytes, one bit per member)
-    /// — render the set members comma-joined in declaration order, exactly as
-    /// the server's own text form ("x,z").
+    /// SET arrives as its little-endian bitmask; rendered as the members comma-joined in declaration order.
     SetLabels(Labels),
     /// BINARY(n): the driver right-trims trailing NULs — pad back to width n
     /// (the batch export carries the full padded value).
@@ -827,7 +823,7 @@ pub(crate) fn mysql_cell_fix(
 /// The labels of an ENUM or SET declaration, or why one is unreadable.
 type Labels = Result<Vec<String>, String>;
 
-/// Labels from `enum('a','b','it''s')` as MySQL's `Field_enum::sql_type` writes them (`append_unescaped`, or `x'..'` for a label that is not well formed), in declaration order; total over any input.
+/// Labels from `enum('a','b','it''s')` as `append_unescaped` writes them, in declaration order; a hex literal `x'..'` is refused, total over any input.
 fn parse_enum_labels(native: &str) -> Labels {
     let Some(start) = native.find('(') else {
         return Ok(Vec::new());
@@ -845,7 +841,6 @@ fn parse_enum_labels(native: &str) -> Labels {
             continue;
         }
         let hex = prev == 'x';
-        prev = ',';
         let mut label = String::new();
         loop {
             match chars.next() {
@@ -854,7 +849,7 @@ fn parse_enum_labels(native: &str) -> Labels {
                     label.push('\'');
                 }
                 Some('\'') | None => break,
-                Some('\\') if !hex => match chars.peek() {
+                Some('\\') => match chars.peek() {
                     Some('\\') => {
                         chars.next();
                         label.push('\\');
@@ -876,26 +871,19 @@ fn parse_enum_labels(native: &str) -> Labels {
                 Some(other) => label.push(other),
             }
         }
-        labels.push(if hex {
-            hex_label(&label, labels.len() + 1)?
-        } else {
-            label
-        });
+        if hex {
+            return Err(hex_refusal(labels.len() + 1, &label));
+        }
+        labels.push(label);
     }
     Ok(labels)
 }
 
-/// The text of the hex literal `x'..'` MySQL writes for label `n`, or why it has none.
-fn hex_label(digits: &str, n: usize) -> Result<String, String> {
-    let bytes: Option<Vec<u8>> = digits
-        .as_bytes()
-        .chunks(2)
-        .map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok())
-        .collect();
-    bytes
-        .filter(|_| digits.len().is_multiple_of(2))
-        .and_then(|b| String::from_utf8(b).ok())
-        .ok_or_else(|| format!("cannot be read: the column declares label {n} as the hex literal x'{digits}', which is not UTF-8 text"))
+/// Why label `n`, written by MySQL as the hex literal `x'digits'`, has no reading.
+fn hex_refusal(n: usize, digits: &str) -> String {
+    format!(
+        "cannot be read: the column declares label {n} as the hex literal x'{digits}', which MySQL writes without zero padding, so the label's bytes cannot be recovered from the catalog"
+    )
 }
 
 impl MysqlCellFix {
@@ -911,7 +899,6 @@ impl MysqlCellFix {
         Ok(match (self, v) {
             (_, V::Null) => V::Null,
             (MysqlCellFix::TimestampEpoch, V::Bytes(b)) => match epoch_text(b) {
-                // '0000-00-00 00:00:00' arrives as epoch 0, which no real TIMESTAMP holds: NULL, as batch.
                 Some((0, 0)) => V::Null,
                 Some((secs, micros)) => chrono::DateTime::from_timestamp(secs, micros * 1_000)
                     .map(|dt| V::DateTime(dt.naive_utc()))
@@ -941,7 +928,6 @@ impl MysqlCellFix {
                 enum_label(readable(labels)?, i64::try_from(*u).unwrap_or(i64::MAX))?
             }
             (MysqlCellFix::SetLabels(labels), V::Bytes(b)) if b.len() <= 8 => {
-                // Little-endian storage: byte 0 carries members 1..=8.
                 let mut word = [0u8; 8];
                 word.iter_mut().zip(b).for_each(|(d, s)| *d = *s);
                 let mask = u64::from_le_bytes(word);
@@ -1216,26 +1202,32 @@ mod tests {
     }
 
     #[test]
-    fn a_hex_label_is_its_text_and_one_that_is_not_utf8_is_refused() {
-        assert_eq!(enum_text("enum(x'c3a9','a')", 1).unwrap(), "\u{e9}");
-        assert_eq!(enum_text("enum(x'c3a9','a')", 2).unwrap(), "a");
-        let err = enum_text("enum(x'e9','a')", 1).unwrap_err();
-        assert!(err.reason.contains("not UTF-8 text"), "{err:?}");
-        let second = enum_text("enum('a',x'e9')", 1).unwrap_err();
-        assert_eq!(
-            second.reason,
-            "cannot be read: the column declares label 2 as the hex literal x'e9', which is not UTF-8 text"
-        );
-        let raw = enum_text(r"enum(x'4\\0')", 1).unwrap_err();
-        assert_eq!(
-            raw.reason,
-            r"cannot be read: the column declares label 1 as the hex literal x'4\\0', which is not UTF-8 text"
-        );
+    fn every_hex_label_is_refused_because_its_digits_are_unpadded() {
+        for (native, idx, n, digits) in [
+            ("enum(x'12f09f9a80','a')", 1, 1, "12f09f9a80"),
+            ("enum(x'f09f9a80a','a')", 1, 1, "f09f9a80a"),
+            ("enum('a',x'5ff')", 1, 2, "5ff"),
+            ("enum('a',x'e9')", 2, 2, "e9"),
+            ("enum('a','b',x'ff')", 1, 3, "ff"),
+            ("set(x'1f0','b')", 1, 1, "1f0"),
+        ] {
+            let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+            let err = fix.apply(&RivetValue::Int(idx)).unwrap_err();
+            let want = format!(
+                "cannot be read: the column declares label {n} as the hex literal x'{digits}', which MySQL writes without zero padding, so the label's bytes cannot be recovered from the catalog"
+            );
+            assert_eq!(err.reason, want, "{native}");
+        }
+    }
+
+    #[test]
+    fn a_hex_label_refusal_carries_the_cell_refusal_remedy() {
+        let err = enum_text("enum(x'12f09f9a80','a')", 2).unwrap_err();
         let msg = format!(
             "{:#}",
             CellRefusal {
                 row: 3,
-                value: RivetValue::Int(1),
+                value: RivetValue::Int(2),
                 reason: err.reason,
                 code: err.code,
             }
@@ -1243,9 +1235,18 @@ mod tests {
         );
         assert!(
             msg.contains("column 'status'")
+                && msg.contains("without zero padding")
                 && msg.contains("leave the column out of the capture, then: Re-baseline"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn labels_that_start_or_end_with_x_are_not_hex_literals() {
+        let native = "enum('x','x''','xx','ax')";
+        for (i, want) in ["x", "x'", "xx", "ax"].iter().enumerate() {
+            assert_eq!(enum_text(native, i as i64 + 1).unwrap(), *want, "{i}");
+        }
     }
 
     // Negative family #2 at the MySQL BINARY level: every cell fix must be
