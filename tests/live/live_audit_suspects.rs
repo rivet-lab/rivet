@@ -800,14 +800,18 @@ fn parallel_keyset_incremental_on_a_timestamptz_key_reads_each_row_once_in_a_tok
     );
 }
 
-/// Parallel keyset incremental over an MSSQL datetime key whose newest row has a sub-second
-/// part: the open-time ceiling must include it, so run 1 exports every row.
+/// Parallel keyset incremental over an MSSQL datetime key whose newest row has a sub-second part: the open-time ceiling includes it, so run 1 exports every row; a `datetime2(7)` key does so under `timestamp_ns`.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row() {
-    for (ty, base) in [
-        ("DATETIME2(6)", "2024-01-01 00:00:00.5"),
-        ("DATETIME", "2024-01-01 00:00:00.997"),
+    for (ty, base, overrides) in [
+        ("DATETIME2(6)", "2024-01-01 00:00:00.5", None),
+        (
+            "DATETIME2(7)",
+            "2024-01-01 00:00:00.5",
+            Some("columns: {ts: timestamp_ns}"),
+        ),
+        ("DATETIME", "2024-01-01 00:00:00.997", None),
     ] {
         let table = unique_name("ks_dtinc");
         let values = (1..=200)
@@ -819,7 +823,7 @@ fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row()
              CREATE TABLE dbo.{table} (ts {ty} NOT NULL PRIMARY KEY, id INT NOT NULL); \
              INSERT INTO dbo.{table} VALUES {values}"
         ));
-        let rig = Rig::mssql_batch(&table)
+        let mut rig = Rig::mssql_batch(&table)
             .duckdb_oracle()
             .mode("chunked")
             .export_line("chunk_by_key: ts")
@@ -827,6 +831,9 @@ fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row()
             .export_line("chunk_checkpoint: true")
             .export_line("keyset_incremental: true")
             .export_line("chunk_size: 40");
+        if let Some(line) = overrides {
+            rig = rig.export_line(line);
+        }
         let out = rig.run_with_envs_bounded(&[], std::time::Duration::from_secs(120));
         let rows = duckdb_parquet_rows(rig.oracle_dir());
         mssql_exec(&format!("DROP TABLE dbo.{table}"));
@@ -837,6 +844,36 @@ fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row()
             "{ty}: the newest row is inside the open-time ceiling"
         );
     }
+}
+
+/// Parallel keyset incremental over a `datetime2(7)` key without the `timestamp_ns` override is refused by code before any read.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn parallel_keyset_incremental_on_an_mssql_datetime2_7_key_is_refused_without_the_override() {
+    let table = unique_name("ks_dt7ref");
+    let values = (1..=200)
+        .map(|i| {
+            format!("(DATEADD(MINUTE, {i}, CAST('2024-01-01 00:00:00.5' AS DATETIME2(7))), {i})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    mssql_exec(&format!(
+        "IF OBJECT_ID('dbo.{table}') IS NOT NULL DROP TABLE dbo.{table}; \
+         CREATE TABLE dbo.{table} (ts DATETIME2(7) NOT NULL PRIMARY KEY, id INT NOT NULL); \
+         INSERT INTO dbo.{table} VALUES {values}"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: ts")
+        .export_line("parallel: 3")
+        .export_line("chunk_checkpoint: true")
+        .export_line("keyset_incremental: true")
+        .export_line("chunk_size: 40");
+    let out = rig.run();
+    let parts = files_with_extension(&rig.out_dir(), "parquet").len();
+    mssql_exec(&format!("DROP TABLE dbo.{table}"));
+    assert_refused(&out, Refused::by_code("RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1));
+    assert_eq!(parts, 0, "nothing is written before the refusal");
 }
 
 /// `rivet check` under a `db_datareader` login still reports the MSSQL row estimate: it

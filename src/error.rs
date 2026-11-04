@@ -1632,6 +1632,11 @@ pub mod codes {
         "RIVET_INIT_TABLE_NOT_FOUND",
         "correct `--table` (and `--schema`), or grant the user SELECT on the table",
     );
+    /// `rivet init` could not read the column types of a table it scaffolds: the user lacks SELECT, or the view is broken.
+    pub const INIT_TABLE_UNREADABLE: Code = usage(
+        "RIVET_INIT_TABLE_UNREADABLE",
+        "grant SELECT on the table or leave it out of init",
+    );
     /// `rivet init` found no table or view to scaffold.
     pub const INIT_NO_TABLES: Code = usage(
         "RIVET_INIT_NO_TABLES",
@@ -1909,6 +1914,7 @@ pub mod codes {
         INIT_CDC_NAME_TAKEN,
         INIT_CONFIG_EXISTS,
         INIT_TABLE_NOT_FOUND,
+        INIT_TABLE_UNREADABLE,
         INIT_NO_TABLES,
         LOAD_SPLIT_GENERATIONS_MIXED,
         LOAD_SPEC_MISSING,

@@ -345,6 +345,12 @@ CDC (change streams) emits the same two-column shape prefixed with the
      is microsecond — the 7th digit drops). Keep the default `timestamp` for
      BigQuery unless you carry the raw nanos.
 
+   **Keyset key:** the µs cursor cannot page a `datetime2`/`datetimeoffset` key with
+   more than 6 fractional digits (a bare `datetime2` is `datetime2(7)`), so
+   `chunk_by_key:` refuses it with `RIVET_PLAN_CHUNK_KEY_UNUSABLE` unless the
+   `timestamp_ns` / `timestamp_tz_ns` override delivers it; for a BigQuery
+   `TIMESTAMP` use a `datetime2(6)`, an integer key or `mode: full` instead.
+
    **Incremental mode:** the default µs cursor on a `datetime2(7)` lands one tick
    below the source max, re-exporting the boundary row every run — use
    `timestamp_ns` (the cursor literal then carries all 9 digits), a `datetime2(6)`

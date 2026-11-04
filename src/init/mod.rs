@@ -489,11 +489,14 @@ pub(super) fn select_all(source: crate::config::SourceType, parts: &[&str]) -> S
     format!("SELECT * FROM {}", quoted.join("."))
 }
 
-/// The failure of the probe that reads the types `table` is delivered as, with the cause and the remedy.
+/// The failure of the probe that reads the types `table` is delivered as: coded, with the cause and the remedy.
 pub(super) fn keyset_probe_context(e: anyhow::Error, table: &str) -> anyhow::Error {
-    e.context(format!(
-        "init: reading the column types of {table} to choose its keyset key failed; grant the init user SELECT on {table}, or leave the table out of this init"
-    ))
+    crate::error::coded(
+        crate::error::codes::INIT_TABLE_UNREADABLE,
+        format!(
+            "init: reading the column types of {table} to choose its keyset key failed: {e:#}; grant SELECT on {table} or leave it out of init"
+        ),
+    )
 }
 
 /// Set `not_keyset` on every column the keyset seam refuses, from the types the engine delivers for the table.
@@ -2763,13 +2766,14 @@ mod tests {
         assert_eq!(make_table(100_001, columns()).suggest_mode(), "chunked");
     }
 
-    /// The probe failure names the table, the cause and the remedy.
+    /// The probe failure is coded, names the table, the cause and the remedy.
     #[test]
-    fn a_failed_type_probe_names_the_table_the_cause_and_the_remedy() {
+    fn a_failed_type_probe_is_coded_and_names_the_table_the_cause_and_the_remedy() {
         let e = keyset_probe_context(anyhow::anyhow!("permission denied"), "s.t");
+        crate::error::assert_coded(&e, "RIVET_INIT_TABLE_UNREADABLE", 1);
         assert_eq!(
             format!("{e:#}"),
-            "init: reading the column types of s.t to choose its keyset key failed; grant the init user SELECT on s.t, or leave the table out of this init: permission denied"
+            "init: reading the column types of s.t to choose its keyset key failed: permission denied; grant SELECT on s.t or leave it out of init"
         );
     }
 
