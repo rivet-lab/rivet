@@ -228,7 +228,10 @@ impl CloudBackend for AzureBackend {
                 enforce_sas_expiry(token)?;
                 builder = builder.sas_token(token);
             }
-            _ => {}
+            DestinationCredential::Ambient
+            | DestinationCredential::GcsKeyFile(_)
+            | DestinationCredential::S3Env { .. }
+            | DestinationCredential::S3Profile(_) => {}
         }
 
         Ok(Operator::new(builder)?.finish())

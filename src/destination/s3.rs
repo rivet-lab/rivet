@@ -116,7 +116,11 @@ impl CloudBackend for S3Backend {
                     builder = builder.session_token(token.as_str());
                 }
             }
-            _ => {}
+            DestinationCredential::Ambient
+            | DestinationCredential::Anonymous
+            | DestinationCredential::GcsKeyFile(_)
+            | DestinationCredential::AzureKey { .. }
+            | DestinationCredential::AzureSas { .. } => {}
         }
 
         Ok(Operator::new(builder)?.finish())
