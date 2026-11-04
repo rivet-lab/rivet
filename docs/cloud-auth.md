@@ -205,7 +205,7 @@ you need to prove it.
 
 No Google Cloud SDK is needed on PATH for either leg. The one credential shape
 that still requires `gcloud` is `external_account` (workload identity), which
-needs an STS token exchange rivet does not implement.
+needs an STS token exchange this edition does not implement (it is part of rivet Pro).
 
 ```yaml
 destination:
@@ -413,8 +413,9 @@ RivetRunOperator(
 )
 ```
 
-On a worker inside Google Cloud, prefer the attached service account or Workload Identity over a
-key file: rivet reads it through ADC with no file on disk.
+Workload Identity and the attached service account of a Google Cloud worker (GKE, GCE, Cloud Run)
+are part of rivet Pro. This edition reads the key file named by `GOOGLE_APPLICATION_CREDENTIALS` or
+the gcloud ADC login.
 
 Grant the credential read access on each secret, not on the project:
 
