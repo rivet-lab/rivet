@@ -220,12 +220,14 @@ pub(super) fn build_metric_row(
     tuning_class: &str,
 ) -> crate::state::MetricRow {
     let (chunk_size, parallel) = match &plan.strategy {
-        crate::plan::ExtractionStrategy::Chunked(cp) => {
-            (Some(cp.chunk_size as i64), Some(cp.parallel as i64))
-        }
-        crate::plan::ExtractionStrategy::Keyset(kp) => {
-            (Some(kp.chunk_size as i64), Some(kp.parallel.max(1) as i64))
-        }
+        crate::plan::ExtractionStrategy::Chunked(cp) => (
+            Some(crate::config::quantity::Knob::saturating_i64(cp.chunk_size)),
+            Some(cp.parallel as i64),
+        ),
+        crate::plan::ExtractionStrategy::Keyset(kp) => (
+            Some(crate::config::quantity::Knob::saturating_i64(kp.chunk_size)),
+            Some(kp.parallel.max(1) as i64),
+        ),
         _ => (None, None),
     };
     crate::state::MetricRow {

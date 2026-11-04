@@ -47,27 +47,8 @@ _HDW1_LOAD = (
     "HDW-1 (seam run-still-writing, 2026-11-03): a load from a state that holds no ledger row for a CDC run in flight counts the run finished, loads the parts of one roll and records the run consumed, so the rolls that follow are never loaded; closes with fix/run-closing-cdc-begin, where still_writing owns the CDC no-row rule"
 )
 
-
-_HCF1 = (
-    "HCF-1, 2026-11-03: a chunk_size of 2^63 or more wraps to a window size of 0 or less, plans no window and exits 0 with 0 rows, "
-    "where validate, plan and run name no refusal. Closes with fix/config-knob-quantity-counts (RIVET_CONFIG_VALUE_OUT_OF_RANGE from the one Knob)"
-)
-_HCF8 = (
-    "HCF-8, 2026-11-03: windows over a key range as wide as i64, sized by chunk_count or by a chunk_size near i64::MAX, overflow i64 in the "
-    "plan (src/preflight/analysis.rs) or the run (src/pipeline/chunked/detect.rs): a debug panic, exit 101. "
-    "Closes with fix/config-knob-quantity-counts (the key span in u128)"
-)
-_HCF4 = (
-    "HCF-4, 2026-11-03: `rivet cdc --rollover 0` is accepted and runs while `cdc.rollover: 0` is refused RIVET_CONFIG_CDC_ROLLOVER_INVALID. "
-    "Closes with fix/config-knob-quantity-counts (the flag is read through the same Knob)"
-)
-_HCF4_MONGO = (
-    "HCF-4, 2026-11-03: Mongo `page_size: 0` is clamped to 1 (src/plan/build.rs) and the run succeeds while every other count knob refuses 0. "
-    "Closes with fix/config-knob-quantity-counts (RIVET_CONFIG_VALUE_OUT_OF_RANGE, the clamp removed)"
-)
-_HCF3 = (
-    "HCF-3, 2026-11-03: quality.null_ratio_max accepts NaN, infinity, values above 1 and values below 0 (src/quality.rs), "
-    "so a threshold that can never fire passes validate. Closes with fix/config-knob-quantity-counts (a ratio outside [0, 1] is RIVET_CONFIG_VALUE_OUT_OF_RANGE)"
+_CDC_START = (
+    "CDC-RUN-START (seam run-still-writing, 2026-11-03): a CDC run writes no running marker and no manifest before its first roll, so a load from another state DB with gc_orphans removes the part the run uploaded and has not manifested yet; closes with fix/cdc-run-start-marker, which writes a running manifest under the run's own key at start"
 )
 
 
@@ -84,51 +65,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("sentinels[rivet_sent_ts9/keyset]: SUCCEEDED WITH A CHANGED VALUE: `V` differs at ID=('num', '1'): source ' 2024-01-01 00:00:00.000000001' vs warehouse datetime.datetime(2024, 1, 1, 0, 0)",
              _TS9,
              _EXPIRES),
-    _open("live_config_knob_counts::open_defect_cdc_rollover_zero_is_refused_on_the_flag_mongo",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_CDC_ROLLOVER_INVALID] (exit 1)",
-          _HCF4),
-    _open("live_config_knob_counts::open_defect_cdc_rollover_zero_is_refused_on_the_flag_mssql",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_CDC_ROLLOVER_INVALID] (exit 1)",
-          _HCF4),
-    _open("live_config_knob_counts::open_defect_cdc_rollover_zero_is_refused_on_the_flag_mysql",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_CDC_ROLLOVER_INVALID] (exit 1)",
-          _HCF4),
-    _open("live_config_knob_counts::open_defect_cdc_rollover_zero_is_refused_on_the_flag_oracle",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_CDC_ROLLOVER_INVALID] (exit 1)",
-          _HCF4),
-    _open("live_config_knob_counts::open_defect_cdc_rollover_zero_is_refused_on_the_flag_postgres",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_CDC_ROLLOVER_INVALID] (exit 1)",
-          _HCF4),
-    _open("live_config_knob_counts::open_defect_chunk_size_past_i64_is_refused_mssql",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_VALUE_OUT_OF_RANGE] (exit 1)",
-          _HCF1),
-    _open("live_config_knob_counts::open_defect_chunk_size_past_i64_is_refused_mysql",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_VALUE_OUT_OF_RANGE] (exit 1)",
-          _HCF1),
-    _open("live_config_knob_counts::open_defect_chunk_size_past_i64_is_refused_oracle",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_VALUE_OUT_OF_RANGE] (exit 1)",
-          _HCF1),
-    _open("live_config_knob_counts::open_defect_chunk_size_past_i64_is_refused_postgres",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_VALUE_OUT_OF_RANGE] (exit 1)",
-          _HCF1),
-    _open("live_config_knob_counts::open_defect_mongo_page_size_zero_is_refused",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_VALUE_OUT_OF_RANGE] (exit 1)",
-          _HCF4_MONGO),
-    _open("live_config_knob_counts::open_defect_null_ratio_max_outside_the_unit_interval_is_refused",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_CONFIG_VALUE_OUT_OF_RANGE] (exit 1)",
-          _HCF3),
-    _open("live_config_knob_counts::open_defect_wide_key_windows_plan_and_deliver_mssql",
-          "exit Some(101): attempt to add with overflow",
-          _HCF8),
-    _open("live_config_knob_counts::open_defect_wide_key_windows_plan_and_deliver_mysql",
-          "exit Some(101): attempt to subtract with overflow",
-          _HCF8),
-    _open("live_config_knob_counts::open_defect_wide_key_windows_plan_and_deliver_oracle",
-          "exit Some(101): attempt to subtract with overflow",
-          _HCF8),
-    _open("live_config_knob_counts::open_defect_wide_key_windows_plan_and_deliver_postgres",
-          "exit Some(101): attempt to add with overflow",
-          _HCF8),
     _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres",
           "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
           _HDW1_CONTRACT),
@@ -147,6 +83,12 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     _open("live_clickhouse_load::open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql",
           "assertion `left == right` failed: the view's live rows must equal the source",
           _HDW1_LOAD),
+    _open("live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql",
+          "the load beside the rolling run:",
+          _CDC_START),
+    _open("live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres",
+          "the load beside the rolling run:",
+          _CDC_START),
 )
 
 

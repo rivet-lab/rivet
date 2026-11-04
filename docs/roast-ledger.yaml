@@ -73,3 +73,19 @@ entries:
     status: accepted-as-bugfix
     verdict: "confirmed against rivet code and the MySQL 8.0 and 8.4 append_unescaped source: a label with a backslash, LF, CR or NUL differs between stream and snapshot"
     closes: "parse_enum_labels reverses every append_unescaped escape; the stream label equals the snapshot label"
+  - id: HCF-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: numeric config counts, spans and ratios are range-checked and converted in each reader instead of one table
+    copies: [src/pipeline/chunked/detect.rs:401, src/pipeline/chunked/detect.rs:424, src/pipeline/chunked/math.rs:31, src/preflight/analysis.rs:502, src/cli/dispatch.rs:454, src/plan/build.rs:438, src/quality.rs:269]
+    status: accepted-as-bugfix
+    verdict: "confirmed: chunk_size 2^63 plans 0 windows and exits 0 with 0 rows; chunk_count over a full key range panics in debug and names the knob already set in release; --rollover 0 is accepted where the config refuses it"
+    closes: "src/config/quantity.rs holds every count, span and ratio knob and every copy routes through it; HCF-8, HCF-4 and HCF-3 close with it"
+  - id: CDC-RUN-START
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: a CDC run writes no running marker and no manifest before its first roll, so a foreign-state gc_orphans load removes the first part and the cleanup_source gate cannot see the run
+    copies: [src/pipeline/cdc/sink.rs:409, src/pipeline/manifest_writer.rs:455, src/load/staging.rs:80, src/load/staging.rs:337]
+    status: deferred-past-gate
+    verdict: "confirmed live: a gc_orphans load between the first roll's upload and its manifest removed 1 orphan part (HDW-1 rework run, MySQL CDC); open_defect cells on MySQL and PostgreSQL"
+    closes: "fix/cdc-run-start-marker: the CDC sink writes a running manifest under the run's own key at start, the first Success rewrite supersedes it, a stale one is closed by state finish-run; bucket_writers then sees the run from its first byte"

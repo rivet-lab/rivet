@@ -68,6 +68,8 @@ mod chunking_matrix_guard;
 mod cli_contract;
 #[path = "offline/config_fuzz.rs"]
 mod config_fuzz;
+#[path = "offline/config_knob_counts.rs"]
+mod config_knob_counts;
 #[path = "offline/config_parse_errors.rs"]
 mod config_parse_errors;
 #[path = "offline/config_secrets.rs"]

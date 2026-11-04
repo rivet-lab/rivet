@@ -946,7 +946,7 @@ fn default_mode() -> ExportMode {
 }
 
 pub(crate) fn default_chunk_size() -> usize {
-    100_000
+    super::quantity::DEFAULT_COUNT
 }
 
 fn default_parallel() -> usize {
@@ -1047,7 +1047,7 @@ pub(crate) fn sample_export(name: &str) -> ExportConfig {
         incremental_cursor_mode: Default::default(),
         chunk_column: None,
         chunk_dense: false,
-        chunk_size: 100_000,
+        chunk_size: default_chunk_size(),
         chunk_size_memory_mb: None,
         chunk_count: None,
         chunk_by_days: None,

@@ -50,3 +50,14 @@ seams:
       - {at: src/pipeline/cdc_job.rs::run_cdc_inner, dated: 2026-10-31, reason: "copy of the table and tables fold plus a multi flag, not reachable", closes: "cdc_captured_tables returns the multi flag after the gate"}
       - {at: src/preflight/cdc_health.rs::oracle_checks, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
       - {at: src/preflight/cdc_health.rs::run_refusals, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
+  - id: config-knob-quantity
+    owner: src/config/quantity.rs::Knob
+    reads: "a numeric config knob or CLI flag: its range, what 0 means, and the bytes, rows, key span or ratio the runtime uses"
+    bypass:
+      - "chunk_size as i64"
+      - "effective_chunk_size as i64"
+      - "( max_val - min_val )"
+      - "checked_sub ( min_i )"
+      - "rollover : a . rollover"
+      - "page . max ( 1 )"
+    exceptions: []
