@@ -352,3 +352,5 @@ mod live_state_pooler;
 mod live_state_reset_live_run;
 #[path = "live/live_stated_guarantees.rs"]
 mod live_stated_guarantees;
+#[path = "live/live_stop_class.rs"]
+mod live_stop_class;
