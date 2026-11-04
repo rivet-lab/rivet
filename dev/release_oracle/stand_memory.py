@@ -14,14 +14,20 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
-__all__ = ["HEAVY", "admitted"]
+import yaml
+
+__all__ = ["HEAVY", "MSSQL_LIMIT_MB", "MSSQL_MEM_LIMIT", "admitted", "unbounded_mssql"]
 
 HEAVY = frozenset({"oracle", "mssql"})
 FLOOR_GIB = 4.5
 WAIT_SECS = 600.0
 POLL_SECS = 15.0
 KIB_PER_GIB = 1024 ** 2
+MSSQL_MEM_LIMIT = "3g"
+MSSQL_LIMIT_MB = 2048
+STAND_COMPOSE_FILES = ("docker-compose.yaml", "dev/stand/docker-compose.yaml")
 _ONE_AT_A_TIME = threading.Lock()
 
 
@@ -60,6 +66,24 @@ def wait_for_headroom(read: Callable[[], float | None] = vm_available_gib, floor
         if seen is None or seen >= floor:
             return f"waited {clock() - start:.0f}s for the docker VM to free memory ({seen} GiB available, floor {floor:.0f})"
     return f"docker VM still under {floor:.0f} GiB available after {limit:.0f}s ({seen:.1f} GiB); starting anyway"
+
+
+def unbounded_mssql(compose: dict) -> list[str]:
+    """Services of a parsed compose file running a SQL Server image without `mem_limit` MSSQL_MEM_LIMIT and `MSSQL_MEMORY_LIMIT_MB` MSSQL_LIMIT_MB."""
+    bad = []
+    for name, svc in sorted((compose.get("services") or {}).items()):
+        if "mssql/server" not in str(svc.get("image", "")):
+            continue
+        env = svc.get("environment") or {}
+        env = dict(e.split("=", 1) for e in env) if isinstance(env, list) else env
+        if str(svc.get("mem_limit", "")).lower() != MSSQL_MEM_LIMIT or str(env.get("MSSQL_MEMORY_LIMIT_MB", "")) != str(MSSQL_LIMIT_MB):
+            bad.append(name)
+    return bad
+
+
+def stand_unbounded(root: Path) -> list[str]:
+    """`file: service` for every SQL Server service of the stand's compose files without the memory limits."""
+    return [f"{f}: {n}" for f in STAND_COMPOSE_FILES for n in unbounded_mssql(yaml.safe_load((root / f).read_text()))]
 
 
 @contextmanager
@@ -102,6 +126,14 @@ def self_test() -> None:
     with admitted("oracle", held.append, lambda: "waited 5s"):
         assert _ONE_AT_A_TIME.locked(), "a heavy engine holds the slot while it starts"
     assert not _ONE_AT_A_TIME.locked() and held == ["oracle: waited 5s"], held
+    svc = {"image": "mcr.microsoft.com/mssql/server:2022-latest", "mem_limit": MSSQL_MEM_LIMIT,
+           "environment": {"MSSQL_MEMORY_LIMIT_MB": str(MSSQL_LIMIT_MB)}}
+    assert unbounded_mssql({"services": {"ok": svc, "pg": {"image": "postgres:16"}}}) == []
+    assert unbounded_mssql({"services": {"a": {**svc, "mem_limit": None}}}) == ["a"], "a SQL Server without mem_limit is unbounded"
+    assert unbounded_mssql({"services": {"b": {**svc, "environment": {"MSSQL_PID": "Developer"}}}}) == ["b"], "no MSSQL_MEMORY_LIMIT_MB"
+    assert unbounded_mssql({"services": {"c": {**svc, "environment": [f"MSSQL_MEMORY_LIMIT_MB={MSSQL_LIMIT_MB}"]}}}) == []
+    root = Path(__file__).resolve().parents[2]
+    assert stand_unbounded(root) == [], stand_unbounded(root)
     print("stand_memory self-test: ok")
 
 
