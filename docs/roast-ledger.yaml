@@ -89,3 +89,11 @@ entries:
     status: deferred-past-gate
     verdict: "confirmed live: a gc_orphans load between the first roll's upload and its manifest removed 1 orphan part (HDW-1 rework run, MySQL CDC); open_defect cells on MySQL and PostgreSQL"
     closes: "fix/cdc-run-start-marker: the CDC sink writes a running manifest under the run's own key at start, the first Success rewrite supersedes it, a stale one is closed by state finish-run; bucket_writers then sees the run from its first byte"
+  - id: CKPT-BUSY
+    date: 2026-11-04
+    lens: harness flake 2026-11-04
+    title: a SQLite replan beside a concurrent writer of the state can still get SQLITE_BUSY on a loaded runner
+    copies: [src/state/checkpoint.rs:936]
+    status: deferred-past-gate
+    verdict: "seen in CI run 41826246423 (Mutants, shard 0, unmutated baseline): a_replan_beside_another_writer_of_the_state_waits_for_it reported 1 of 1000 replans failed beside 56643 writes: database is locked; the file is unchanged by the PR that saw it"
+    closes: "a cell in which the writer holds the state lock across the replan every time, so the wait is proven by the race it loses rather than by 1000 tries"
