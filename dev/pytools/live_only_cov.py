@@ -72,6 +72,12 @@ ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicate
     # not answer counts as the whole body. With the exclusion lifted under `--lib --bins` the
     # `true` mutant is CAUGHT and the `false` one MISSED: only a standby answers `true`.
     "pg_in_recovery": ("a one-expression fn; offline reaches the unanswered probe, the answer needs a standby", 100),
+    "run_loads": ("2026-11-04: Ok(()) stub MISSED under --lib --bins; offline reaches plan_loads' refusal only, the load is graded by the live warehouse matrix", 4),
+    "run_compacts": ("2026-11-04: Ok(()) stub MISSED under --lib --bins; offline reaches plan_loads' refusal only, the merge is graded by live_cdc_compact", 5),
+    "run_capture": ("2026-11-04: its viable stub is MISSED under --lib --bins; offline reaches the unreachable-source open error only, the capture is graded by the live CDC cells", 10),
+    "run_cdc_inner": ("2026-11-04: its viable stub is MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 85),
+    "run_cdc_export": ("2026-11-04: stub MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 90),
+    "pause": ("2026-11-04: the offline executions are the cfg(test) twin; the production body is not compiled into the test build, so its stub is MISSED by construction", 0),
 }  # ratchet-pin: end
 
 

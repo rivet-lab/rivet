@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 // 27 -> 28 (2026-10-29, #719 follow-up): the one shared helper of the table-rename and sql_mode cells grades the changes the run delivered against the statements it committed; closes when the oracle reads the account's columns.
 // 28 -> 29 (2026-10-31, H1): the zone-less change-log cell loads into a log it altered off the ledger's DateTime64(6, 'UTC') on purpose; it reads instants and values through the second client; closes when the oracle grades a declared legacy type.
 // 30 -> 31 (2026-11-04, TF-1): the negative TIME(1)/(2) fraction cell drives a stream run that panics in a debug binary and leaves a running row; graded by MySQL's CAST text and the batch refusal; the fix PR removes the opt-out.
-const NO_ORACLE_CEILING: usize = 31; // ratchet-pin: no-oracle-opt-outs
+// 31 -> 32 (2026-11-04): the datetime2(7) keyset cell under timestamp_ns delivers 700 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
+const NO_ORACLE_CEILING: usize = 32; // ratchet-pin: no-oracle-opt-outs
 
 /// Typed declarations in tests/live of what a run that does not exit 0 may leave.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
@@ -47,7 +48,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 626 -> 624 (2026-11-01): live_batch_census rewrites parts through one Rig::rewrite_part; two helper calls left.
 // 628 -> 626 (2026-10-31): the unused duckdb_s3_parquet_rows helper left tests/common/duckdb.rs; no call site moved.
 // 624 -> 626 (2026-11-03): #792 composite keyset cells read distinct (id, kind) tuples; row_census keys one column. Closes when row_census takes a key list.
-const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites
+// 626 -> 628 (2026-11-03): #792 parallel composite keyset cells, same tuple read. Closes with the line above.
+const DUCKDB_HELPER_CEILING: usize = 628; // ratchet-pin: duckdb-helper-sites
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];

@@ -41,12 +41,9 @@ import re
 import threading
 import time
 import shutil
-import socket
 import sys
 import tempfile
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from tempfile import mkdtemp
 
@@ -55,7 +52,7 @@ try:  # importable both as a package module and as a plain sibling file
                        keep_failure_log, mysql_client, nextest_filter, nextest_outcomes, nextest_panics, nextest_passed, nextest_started, port_of, release_bin_env,
                        rivet, rivet_bin, run, sqlcmd, test_passed)
     from ..pytools.duckcli import ARGV as DUCKDB
-    from . import state_lib
+    from . import stand_health, state_lib
 except ImportError:  # pragma: no cover - depends on how the driver is invoked
     from core import (  # type: ignore
         HERE,
@@ -88,6 +85,7 @@ except ImportError:  # pragma: no cover - depends on how the driver is invoked
         test_passed,
     )
     DUCKDB = [sys.executable, str(Path(__file__).resolve().parents[1] / "pytools" / "duckcli.py")]
+    import stand_health  # type: ignore
     import state_lib  # type: ignore
 
 __all__ = [
@@ -217,9 +215,9 @@ def _failed(led: Ledger, eng: str, ver: str, scenario: str, store: str, msg: str
 
 
 def _skipped(led: Ledger, eng: str, ver: str, scenario: str, store: str, msg: str, detail: str = "", *,
-             cause: SkipCause) -> None:
-    led.skip(msg)
-    led.add(eng, ver, scenario, store, Status.SKIP, detail, cause=cause)
+             cause: SkipCause, target: str = "") -> None:
+    """`Ledger.skipped`, for the stages that pass the ledger first."""
+    led.skipped(eng, ver, scenario, store, msg, detail, cause=cause, target=target)
 
 
 # ── small shared helpers ─────────────────────────────────────────────────────
@@ -261,113 +259,9 @@ def matrix_reader_self_test() -> None:
     print("self-test ok: matrix.yaml versions rows are read in any key order and an unreadable row stops the run")
 
 
-def store_read_self_test() -> None:
-    """A stalled store is probed again; a failed read of the destination is INFRA with the read's own error, an empty one is a product FAIL."""
-    import http.server
-    import threading
-    from unittest import mock
-
-    probes: list[bool] = []
-
-    def probe_script(answers: list[bool]):
-        probes.clear()
-
-        def probe(_url: str, timeout: float = 3.0) -> bool:
-            probes.append(True)
-            return answers[min(len(probes) - 1, len(answers) - 1)]
-
-        return mock.patch.object(sys.modules[__name__], "_http_reachable", probe), mock.patch("time.sleep")
-
-    for answers, want, asked in (([False, False, True], True, 3), ([False], False, 3), ([True], True, 1)):
-        probe, sleep = probe_script(answers)
-        with probe, sleep:
-            assert store_up("gcs") is want and len(probes) == asked, (answers, probes)
-
-    def sc_load_rows(pulled: Proc) -> list:
-        led = Ledger(colour=False)
-        with tempfile.TemporaryDirectory() as d, mock.patch("time.sleep"), \
-                mock.patch.object(sys.modules[__name__], "_WORK", Path(d)), \
-                mock.patch.object(sys.modules[__name__], "store_up", lambda _s: True), \
-                mock.patch.object(sys.modules[__name__], "cfg", lambda *_a: "bkt"), \
-                mock.patch.object(sys.modules[__name__], "rivet", lambda *_a, **_k: Proc([], 0, "", "")), \
-                mock.patch.object(sys.modules[__name__], "_source_count_distinct", lambda *_a: "150000"), \
-                mock.patch.object(sys.modules[__name__], "run", lambda *_a, **_k: pulled):
-            sc_load(led, "mysql", "8.4", "mysql://u@h/db", "gcs")
-        return led.cells
-
-    answers = iter([Proc([], 1, "", "stalled"), Proc([], 0, "2\n", "")])
-    with tempfile.TemporaryDirectory() as d, mock.patch("time.sleep"), \
-            mock.patch.object(sys.modules[__name__], "run", lambda *_a, **_k: next(answers)):
-        assert pull_prefix("gcs", "bkt", "p", Path(d)) is True, "a pull that stalled once is made again"
-
-    cells = sc_load_rows(Proc([], 1, "", "urlopen error timed out"))
-    assert [c.status for c in cells] == [Status.INFRA] and "timed out" in cells[0].detail, \
-        f"a destination that could not be read is not a destination that holds 0 rows: {cells}"
-    cells = sc_load_rows(Proc([], 0, "0\n", ""))
-    assert [(c.status, c.detail) for c in cells] == [(Status.FAIL, "empty-destination")], cells
-
-    objects = {"p/_SUCCESS": b"{}", "p/part-0.parquet": b"x"}
-
-    class Emulator(http.server.BaseHTTPRequestHandler):
-        broken: set[str] = set()
-
-        def do_GET(self) -> None:
-            path = urllib.parse.unquote(self.path)
-            if path.startswith("/storage/v1/b/bkt/o?"):
-                body = json.dumps({"items": [{"name": n} for n in objects]}).encode()
-            else:
-                name = path.split("/o/")[1].split("?")[0]
-                body = objects[name] if name not in self.broken else None
-            self.send_response(200 if body is not None else 500)
-            self.end_headers()
-            self.wfile.write(body or b"")
-
-        def log_message(self, *_a) -> None:
-            pass
-
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Emulator)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    endpoint = f"http://127.0.0.1:{srv.server_port}"
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            pull = lambda: run([PY, str(_asset("lib/gcs_pull.py")), endpoint, "bkt", "p", d, "--all"])  # noqa: E731
-            got = pull()
-            assert got.returncode == 0 and got.stdout.strip() == "2", got
-            Emulator.broken = {"p/part-0.parquet"}
-            got = pull()
-            assert got.returncode != 0 and "part-0.parquet" in got.stderr, f"an object that did not come down is a failed read, not a smaller count: {got}"
-        with tempfile.TemporaryDirectory() as d:
-            got = run([PY, str(_asset("lib/gcs_pull.py")), "http://127.0.0.1:1", "bkt", "p", d, "--all"])
-            assert got.returncode != 0 and got.stderr.strip(), f"an unreachable emulator is a failed read, not 0 objects: {got}"
-    finally:
-        srv.shutdown()
-    print("self-test ok: a stalled store is probed again; a failed read of a destination is INFRA, an empty one is a FAIL")
-
-
-def _tcp_open(host: str, port: int, timeout: float = 3.0) -> bool:
-    """The `exec 3<>/dev/tcp/host/port` probe: can we connect at all."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _http_reachable(url: str, timeout: float = 3.0) -> bool:
-    """`curl -s -o /dev/null --max-time 3 <url>`.
-
-    curl without `-f` exits 0 on ANY completed transfer, so an HTTP 400/403/404
-    counts as "the service answered" — which is the point for the Azurite probe
-    (`?comp=list` unauthenticated is a 4xx) and for fake-gcs. Only a refused
-    connection / timeout means down, so HTTPError is UP and URLError is DOWN.
-    """
-    try:
-        with urllib.request.urlopen(url, timeout=timeout):
-            return True
-    except urllib.error.HTTPError:
-        return True
-    except (urllib.error.URLError, OSError):
-        return False
+def _tcp_open(host: str, port: int) -> bool:
+    """Does host:port accept a connection within the readiness deadline (`stand_health.ready`)."""
+    return stand_health.reach_tcp(host, port)
 
 
 def _first_match(text: str, pattern: str) -> str:
@@ -443,10 +337,8 @@ def duckdb_allnull_cloud(store: str, bucket: str, prefix: str, work: Path) -> tu
         ))
     if store == "gcs":
         dl = work / f"nullprof_gcs_{random.randint(0, 32767)}"
-        try:
-            if not pull_prefix("gcs", bucket, prefix, dl):
-                return (-1, -1)
-        except StoreReadFailed:
+        dl.mkdir(parents=True, exist_ok=True)
+        if gcs_pull(bucket, prefix, dl) <= 0:
             return (-1, -1)
         return _allnull_parse(_duckdb_list(f"SELECT {cols} FROM read_parquet('{dl}/**/*.parquet')"))
     return (-1, -1)
@@ -596,32 +488,126 @@ def docker_names() -> list[str]:
 
 
 # ── object stores ────────────────────────────────────────────────────────────
-class StoreReadFailed(Exception):
-    """The oracle's own read of a destination failed on every try: the cell graded nothing, which is not a statement about the destination."""
+def store_probe_self_test() -> None:
+    """A slow fake-gcs list is retried; a failed list or download raises instead of reading as 0 rows."""
+    import importlib.util
+    import json as _json
+    import socket
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    spec = importlib.util.spec_from_file_location("gcs_pull_under_test", _asset("lib/gcs_pull.py"))
+    gp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gp)
+    assert gp.TIMEOUT >= 30, "the list timeout must outlast the 13 s fake-gcs latency measured on the gate"
+
+    class Fake:
+        """A server answering each path from a script of (delay, status, body); the last step repeats."""
+
+        def __init__(self, script):
+            self.script, self.seen = script, {}
+            fake = self
+
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    path = self.path.split("?")[0]
+                    steps = fake.script.get(path, [(0, 404, b"")])
+                    i = fake.seen.get(path, 0)
+                    fake.seen[path] = i + 1
+                    delay, status, body = steps[min(i, len(steps) - 1)]
+                    time.sleep(delay)
+                    try:
+                        self.send_response(status)
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    except OSError:
+                        pass
+
+                def log_message(self, *a):
+                    pass
+
+            self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+            self.url = f"http://127.0.0.1:{self.srv.server_port}"
+            threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.srv.shutdown()
+            self.srv.server_close()
+
+    listing = "/storage/v1/b/b/o"
+    media = "/download/storage/v1/b/b/o/p%2Fa.parquet"
+    one = _json.dumps({"items": [{"name": "p/a.parquet"}]}).encode()
+    kw = {"timeout": 0.5, "attempts": 3, "pause": 0.0}
+    with socket.socket() as s0:
+        s0.bind(("127.0.0.1", 0))
+        closed = s0.getsockname()[1]
+    with tempfile.TemporaryDirectory() as d:
+        with Fake({listing: [(1.2, 200, one), (0, 200, one)], media: [(0, 500, b""), (0, 200, b"PAR1")]}) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 1, "a list slower than the timeout is retried and delivers"
+            assert (Path(d) / "part_0.parquet").read_bytes() == b"PAR1", "a download that failed once is retried"
+        with Fake({listing: [(2.0, 200, one)]}) as f:
+            try:
+                gp.pull(f.url, "b", "p/", d, timeout=0.3, attempts=2, pause=0.0)
+            except gp.PullError:
+                pass
+            else:
+                raise AssertionError("a list that never answers must raise, not read as 0 objects")
+        with Fake({listing: [(0, 404, b"")]}) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 0, "a missing bucket holds nothing"
+        with Fake({listing: [(0, 200, one)], media: [(0, 500, b"")]}) as f:
+            try:
+                gp.pull(f.url, "b", "p/", d, **kw)
+            except gp.PullError:
+                pass
+            else:
+                raise AssertionError("an object that cannot be downloaded must raise, not shorten the count")
+        pages = {listing: [(0, 200, _json.dumps({"items": [{"name": "p/a.parquet"}], "nextPageToken": "t"}).encode()),
+                           (0, 200, _json.dumps({"items": [{"name": "p/b.parquet"}]}).encode())],
+                 media: [(0, 200, b"x")], "/download/storage/v1/b/b/o/p%2Fb.parquet": [(0, 200, b"y")]}
+        with Fake(pages) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 2, "every page of the list is read"
+        try:
+            gcs_pull("b", "p/", Path(d), endpoint=f"http://127.0.0.1:{closed}")
+        except StoreReadError:
+            pass
+        else:
+            raise AssertionError("a pull that failed must raise StoreReadError through the wrapper")
+    from unittest import mock
+
+    def sc_load_rows(pulled: Proc) -> list:
+        led = Ledger(colour=False)
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(sys.modules[__name__], "_WORK", Path(d)), \
+                mock.patch.object(sys.modules[__name__], "store_up", lambda *_a, **_k: True), \
+                mock.patch.object(sys.modules[__name__], "cfg", lambda *_a: "bkt"), \
+                mock.patch.object(sys.modules[__name__], "rivet", lambda *_a, **_k: Proc([], 0, "", "")), \
+                mock.patch.object(sys.modules[__name__], "_source_count_distinct", lambda *_a: "150000"), \
+                mock.patch.object(sys.modules[__name__], "run", lambda *_a, **_k: pulled):
+            sc_load(led, "mysql", "8.4", "mysql://u@h/db", "gcs")
+        return led.cells
+
+    cells = sc_load_rows(Proc([], 1, "", "urlopen error timed out"))
+    assert [c.status for c in cells] == [Status.INFRA] and "timed out" in cells[0].detail, \
+        f"a destination that could not be read is not a destination that holds 0 rows: {cells}"
+    cells = sc_load_rows(Proc([], 0, "0\n", ""))
+    assert [(c.status, c.detail) for c in cells] == [(Status.FAIL, "empty-destination")], cells
+    print("self-test ok: a slow fake-gcs list is retried; a failed list or download raises, never reads as 0 rows")
 
 
-def _bounded(attempt, *, tries: int = 3, budget: float = 15.0, pause: float = 2.0, sleep=time.sleep, clock=time.monotonic):
-    """The first answer of `attempt()` that is not None, tried again within `tries` and `budget` seconds; None when none came."""
-    start = clock()
-    for n in range(1, tries + 1):
-        got = attempt()
-        if got is not None:
-            return got
-        if n == tries or clock() - start + pause >= budget:
-            return None
-        sleep(pause)
+STORE_HEALTH = {
+    "s3": "http://127.0.0.1:9000/minio/health/live",
+    "gcs": "http://127.0.0.1:4443/storage/v1/b",
+    "azure": "http://127.0.0.1:10000/devstoreaccount1?comp=list",
+}
 
 
-def store_up(store: str, *, tries: int = 3) -> bool:
-    """Health probe per store, tried again while it stalls; a store that never answers makes the cell SKIP, never PASS."""
-    urls = {
-        "s3": "http://127.0.0.1:9000/minio/health/live",
-        "gcs": "http://127.0.0.1:4443/storage/v1/b",
-        "azure": "http://127.0.0.1:10000/devstoreaccount1?comp=list",
-    }
-    if store not in urls:
-        return False
-    return _bounded(lambda: True if _http_reachable(urls[store]) else None, tries=tries) is True
+def store_up(store: str, deadline: float = stand_health.HTTP_DEADLINE) -> bool:
+    """Is the object store's emulator ready within `deadline`; an unknown store is not up."""
+    url = STORE_HEALTH.get(store)
+    return url is not None and stand_health.reach_http(store, url, deadline)
 
 
 def store_readback(store: str, bucket: str, prefix: str, work: Path) -> str:
@@ -633,8 +619,7 @@ def store_readback(store: str, bucket: str, prefix: str, work: Path) -> str:
     passes its own inspection. MinIO is read straight over S3 by DuckDB's httpfs,
     fake-gcs is pulled through its JSON API by lib/gcs_pull.py, Azurite through
     the `az` CLI. An empty return means the client is absent — the caller records
-    SKIP ("no readback tool"), not a pass and not a failure. A read that FAILED
-    raises `StoreReadFailed`; it is never an empty return.
+    SKIP ("no readback tool"), not a pass and not a failure.
 
     (The bash form of this function is where the `local store=$1 … dl="${store}"`
     same-line gotcha lived: bash 3.2 resolved `${store}` in the enclosing scope,
@@ -675,8 +660,20 @@ def store_parts(store: str, bucket: str, prefix: str, work: Path) -> tuple[str, 
     return None
 
 
+class StoreReadError(RuntimeError):
+    """A store's list or download kept failing; the destination was not read, which is not an empty one."""
+
+
+def gcs_pull(bucket: str, prefix: str, dest: Path, *flags: str, endpoint: str = "http://127.0.0.1:4443") -> int:
+    """Objects lib/gcs_pull.py brought down from fake-gcs; a pull that failed raises, never reads as 0."""
+    p = run([PY, str(_asset("lib/gcs_pull.py")), endpoint, bucket, prefix, str(dest), *flags])
+    if p.returncode != 0 or not p.stdout.strip().isdigit():
+        raise StoreReadError(f"fake-gcs {bucket}/{prefix} unreadable: {(p.stderr or p.stdout).strip()[-300:]}")
+    return int(p.stdout.strip())
+
+
 def pull_prefix(store: str, bucket: str, prefix: str, dest: Path) -> bool:
-    """Download a store prefix WHOLE into `dest` (manifests included) with the store's own client; False when the client is absent or the prefix holds nothing, `StoreReadFailed` when the read itself failed."""
+    """Download a store prefix WHOLE into `dest` (manifests included) with the store's own client; False when the client is absent or nothing came down."""
     dest.mkdir(parents=True, exist_ok=True)
     if store == "s3":
         if not have("mc"):
@@ -685,20 +682,7 @@ def pull_prefix(store: str, bucket: str, prefix: str, dest: Path) -> bool:
              MINIO_ACCESS_KEY, MINIO_SECRET_KEY])
         return run(["mc", "cp", "--recursive", f"rivetgate/{bucket}/{prefix}/", str(dest)]).ok
     if store == "gcs":
-        said: list[str] = []
-
-        def pull() -> int | None:
-            p = run([PY, str(_asset("lib/gcs_pull.py")), "http://127.0.0.1:4443", bucket,
-                     prefix, str(dest), "--all"])
-            if p.returncode == 0 and p.stdout.strip().isdigit():
-                return int(p.stdout.strip())
-            said.append((p.stderr.strip().splitlines() or [f"exit {p.returncode}, stdout {p.stdout.strip()!r}"])[-1])
-            return None
-
-        got = _bounded(pull)
-        if got is None:
-            raise StoreReadFailed(f"gcs pull of {bucket}/{prefix} failed: {said[-1]}")
-        return got > 0
+        return gcs_pull(bucket, prefix, dest, "--all") > 0
     if store == "azure":
         if not have("az"):
             return False
@@ -1208,7 +1192,8 @@ def sc_keyset_parallel(led: Ledger, engine: str, tag: str, url: str) -> None:
 # ── load: export TO the object store, then read it back INDEPENDENTLY ────────
 def sc_load(led: Ledger, engine: str, tag: str, url: str, store: str) -> None:
     if not store_up(store):
-        _skipped(led, engine, tag, "load", store, f"{store} emulator down", "emulator down", cause=SkipCause.ENV)
+        _skipped(led, engine, tag, "load", store, f"{store} emulator down", "emulator down", cause=SkipCause.ENV,
+                 target=stand_health.store_target(store))
         return
     # A run-UNIQUE prefix (this run's mktemp token). Part names are run-unique by
     # design, so they never clobber a prior run's — which means a STABLE prefix
@@ -1251,7 +1236,7 @@ def sc_load(led: Ledger, engine: str, tag: str, url: str, store: str) -> None:
         return
     try:
         parts = store_parts(store, bucket, prefix, work_dir())
-    except StoreReadFailed as e:
+    except StoreReadError as e:
         led.ungraded(engine, tag, "load", store, f"load→{store} readback failed: {e}")
         return
     n = _duckdb_list(f"{parts[0]}SELECT count(*) FROM {parts[1]}") if parts else ""
@@ -1483,7 +1468,7 @@ def verify_state_migrations(led: Ledger) -> None:
             f"state-migration parity: state Postgres {_su.hostname or '127.0.0.1'}:"
             f"{_su.port or 5432} unreachable (is the dev stand up?)",
             "state pg down",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target(_su.hostname or "127.0.0.1", _su.port or 5432),
         )
         return
     if not have("cargo"):
@@ -1494,7 +1479,7 @@ def verify_state_migrations(led: Ledger) -> None:
         _skipped(
             led, "state", "migrations", "parity", "-",
             "state-migration parity: source Postgres :5432 down", "no source pg",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 5432),
         )
         return
     led.phase("State-migration parity (SQLite vs Postgres state, RED-proven, release binary)")
@@ -1633,7 +1618,7 @@ def verify_network_faults(led: Ledger) -> None:
             led, "infra", "network", "faults", "-",
             "network-faults: toxiproxy admin :8474 unreachable (docker compose up -d toxiproxy)",
             "toxiproxy down",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 8474),
         )
         return
     _drive_live_tests(
@@ -1665,7 +1650,8 @@ def verify_tls_required(led: Ledger) -> None:
         return
     if not _tcp_open("127.0.0.1", 5432):
         _skipped(led, "infra", "tls", "policy", "-",
-                 "tls-policy: source Postgres :5432 down", "no source pg", cause=SkipCause.ENV)
+                 "tls-policy: source Postgres :5432 down", "no source pg", cause=SkipCause.ENV,
+                 target=stand_health.tcp_target("127.0.0.1", 5432))
         return
     _drive_live_tests(
         led, "infra", "tls", "policy",
@@ -1693,7 +1679,7 @@ def verify_auth(led: Ledger) -> None:
             led, "infra", "mongo", "auth", "-",
             "mongo-auth: :27020 unreachable (docker compose up -d mongo-auth)",
             "mongo-auth down",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 27020),
         )
         return
     _drive_live_tests(
@@ -1720,7 +1706,7 @@ def verify_cdc_standby(led: Ledger) -> None:
         return
     RAN_LIVE_TESTS.add(CDC_STANDBY_TEST)
     if not _tcp_open("127.0.0.1", 5436):
-        _replica_down(led, "cdc-standby", ":5436 unreachable", "python3 -m dev.pytools.cdc_stand standby")
+        _replica_down(led, "cdc-standby", ":5436 unreachable", "python3 -m dev.pytools.cdc_stand standby", 5436)
         return
     _drive_live_tests(
         led, "infra", "pg", "cdc-standby",
@@ -1882,7 +1868,7 @@ def verify_replica_read(led: Ledger) -> None:
     RAN_LIVE_TESTS.update([REPLICA_READ_TEST, *(test for _, _, test, _ in REPLICA_CELLS)])
     if not _tcp_open("127.0.0.1", 3309):
         _replica_down(led, "read", "no mysql-replica :3309",
-                      "docker compose --profile replica up -d mysql-primary mysql-replica")
+                      "docker compose --profile replica up -d mysql-primary mysql-replica", 3309)
         return
     led.phase(
         "Replica read (rivet captures a read-replica's re-logged binlog — "
@@ -1917,7 +1903,7 @@ def verify_replica_read(led: Ledger) -> None:
     for label, ports, test, hint in REPLICA_CELLS:
         down = [port for port in ports if not _tcp_open("127.0.0.1", port)]
         if down:
-            _replica_down(led, label, "port(s) " + ", ".join(f":{p}" for p in down) + " closed", hint)
+            _replica_down(led, label, "port(s) " + ", ".join(f":{p}" for p in down) + " closed", hint, down[0])
             continue
         cell_log = work_dir() / f"replica_{label}.log"
         p = run(
@@ -1961,8 +1947,10 @@ def set_without_replica_topologies(on: bool) -> None:
         os.environ.pop(_REPLICA_ESCAPE_ENV, None)
 
 
-def _replica_down(led: Ledger, label: str, what: str, hint: str) -> None:
-    """A replica topology that is down FAILS its row — SKIP only under the named escape."""
+def _replica_down(led: Ledger, label: str, what: str, hint: str, port: int = 0) -> None:
+    """A replica topology that is down FAILS its row (INFRA when its port answered earlier in this run) — SKIP only under the named escape."""
+    if port and led.incident("replica", label, "-", "-", f"replica {label}: {what}", "replica stand down", stand_health.tcp_target("127.0.0.1", port)):
+        return
     if without_replica_topologies():
         _skipped(led, "replica", label, "-", "-",
                  f"replica {label}: {what} — GIVEN UP on purpose by {_REPLICA_ESCAPE_FLAG} "
@@ -2053,7 +2041,7 @@ def verify_pool_e2e(led: Ledger) -> None:
             led, "pool", "e2e", "-", "-",
             "pool e2e: no toxiproxy :8474 (docker compose up -d toxiproxy)",
             "no toxiproxy",
-            cause=SkipCause.ENV,
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 8474),
         )
         return
     _run_pool_module(
@@ -2128,6 +2116,15 @@ def nextest_live(log_path: Path, expr: str, env: dict[str, str] | None = None,
     return nextest_outcomes(p.out), nextest_started(p.out), self_skipped(skip_log), nextest_panics(p.out)
 
 
+def _module_red(led: Ledger, scenario: str, label: str, name: str, why: str, log_path: Path, since: float) -> None:
+    """A live test that did not pass: FAIL with its panic, or INFRA when the stand was down or unreadable while it ran."""
+    seen = stand_health.judge(why, since)
+    if seen.alive:
+        _failed(led, scenario, "batch", "-", "-", f"{label} FAILED · {name} — {why} (see {log_path})")
+    else:
+        led.ungraded(scenario, "batch", "-", "-", f"{label} · {name} ran while the stand was {seen.kind.value} ({seen.reason}) — {why} (see {log_path})")
+
+
 def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
                       modules: list[str], env: dict[str, str] | None = None,
                       expr: str | None = None, threads: int | None = None,
@@ -2152,6 +2149,7 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
             if keep and path.is_file():
                 keep_failure_log(path, f"{os.getpid()}-{path.name}")
 
+    since = stand_health.BOOK.mark()
     verdicts, started, skipped, panics = leg(
         log_path, expr or " | ".join(f"test(/^{m}::/)" for m in modules), env, f"nextest {label}")
     if started is not None and len(verdicts) != started:
@@ -2187,8 +2185,7 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
             GREEN_CELLS.add(name)
             _passed(led, scenario, "batch", "-", "-", f"{label} · {name}{f' (run again with {again[0]})' if name in owed else ''}")
         else:
-            why = panics.get(name, "no panic line read")
-            _failed(led, scenario, "batch", "-", "-", f"{label} FAILED · {name} — {why} (see {log_path})")
+            _module_red(led, scenario, label, name, panics.get(name, "no panic line read"), log_path, since)
 
 
 def verify_pool_split(led: Ledger) -> None:
@@ -2216,7 +2213,8 @@ def verify_pool_split(led: Ledger) -> None:
     for port, what in ((8474, "toxiproxy"), (5432, "source postgres")):
         if not _tcp_open("127.0.0.1", port):
             _skipped(led, "pool", "split", "-", "-",
-                     f"pool split: no {what} :{port} (docker compose up -d)", f"no {what}", cause=SkipCause.ENV)
+                     f"pool split: no {what} :{port} (docker compose up -d)", f"no {what}", cause=SkipCause.ENV,
+                     target=stand_health.tcp_target("127.0.0.1", port))
             return
     _run_pool_module(
         led,

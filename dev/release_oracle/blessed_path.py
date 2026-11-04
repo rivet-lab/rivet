@@ -86,7 +86,7 @@ from pathlib import Path
 from ..pytools import registry
 from .core import (Ledger, SkipCause, cell_gate, cell_parallel, container_for_port, docker_exec,
                    have, port_of, run, rivet)
-from . import scenarios
+from . import scenarios, stand_health
 
 # The gate's own bucket — the SAME derivation blessed_flow uses, because this
 # module had the same defect blessed_flow's comment records having fixed: a
@@ -653,7 +653,7 @@ def sc_blessed_path(
             pfx = cloud_prefix(engine, tag, table, scenario)
             try:
                 got = scenarios.store_readback(store, _bucket(store), pfx, work)
-            except scenarios.StoreReadFailed as e:
+            except scenarios.StoreReadError as e:
                 led.ungraded(engine, tag, "blessed:oracle", store, f"{engine} {tag} {store} · oracle — readback failed: {e}")
                 return
             duck_rows = int(got.splitlines()[0]) if got.strip().isdigit() else -1
@@ -851,7 +851,8 @@ def verify_blessed_path(
                 if sc["applies"](t, engine):
                     tasks.append((t, name, "gcs", "", "gcs/sq"))
     else:
-        led.skipped(engine, tag, "blessed:store", "gcs", f"{engine} {tag} · gcs — store not up", cause=SkipCause.ENV)
+        led.skipped(engine, tag, "blessed:store", "gcs", f"{engine} {tag} · gcs — store not up", cause=SkipCause.ENV,
+                    target=stand_health.store_target("gcs"))
 
     # The warehouse cycle runs on ONE table per engine, deliberately: it costs a
     # real GCS round-trip and a BigQuery job, and what it proves — that a foreign

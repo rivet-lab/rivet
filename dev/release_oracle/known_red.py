@@ -51,14 +51,33 @@ _CDC_START = (
     "CDC-RUN-START (seam run-still-writing, 2026-11-03): a CDC run writes no running marker and no manifest before its first roll, so a load from another state DB with gc_orphans removes the part the run uploaded and has not manifested yet; closes with fix/cdc-run-start-marker, which writes a running manifest under the run's own key at start"
 )
 
+_KEYSET_KEY_CURSOR = (
+    "ER-3/ER-6 (seam keyset-key-type, 2026-11-03): the probes admit every unique NOT NULL key but decimal, while the cursor reader (extract_last_cursor_value) has no Binary, Boolean or Time64 arm and a MySQL ENUM orders by member index but seeks by string; the run writes page 0 and stops with exit 5 RIVET_SOURCE_PROBE_UNREADABLE (or skips rows); closes with fix/seam-keyset-key-type, which refuses the key at plan with RIVET_PLAN_CHUNK_KEY_UNUSABLE"
+)
+_KEYSET_KEY_SUB_US = (
+    "ER-1 (seam keyset-key-type, 2026-11-03): an MSSQL datetime2(7)/datetimeoffset(7) chunk_by_key is admitted although the default batch holds microseconds, so the seek re-reads the row at the end of every page (exit 0 with duplicates) or cannot advance (exit 5); closes with fix/seam-keyset-key-type, which refuses the key at plan unless a timestamp_ns override is set"
+)
+_KEYSET_KEY_ONE_CHUNK = (
+    "RHS-3 (seam keyset-key-type, owner decision Q11 2026-11-03): a table that fits one chunk, under mode: chunked with a key the cursor cannot advance, runs with exit 0 (an auto-picked MySQL key downgrades to a snapshot, an explicit chunk_by_key reads one short page) while the same config on a large table fails or duplicates; closes with fix/seam-keyset-key-type, which refuses it with exit 1 RIVET_PLAN_CHUNK_KEY_UNUSABLE"
+)
+
 
 KNOWN_RED: tuple[KnownRed, ...] = (
+    _open("live_stop_class::open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql",
+          "refusal contract: the invocation ended with [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 2), expected [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 1)",
+          "VP-8 (seam stop-class, 2026-11-04): a missing table refused by a coded Environment stop exits by the words of the name the operator chose, because stop_class returns None for the kind and classify_exit reads the message text, which holds the name; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exits 2 where PG and MySQL exit 1 for the same refusal. Opened 2026-11-04; closes with fix/stop-class-by-code"),
+    _open("live_stop_class::open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle",
+          "refusal contract: the invocation ended with [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 2), expected [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 1)",
+          "VP-8 (seam stop-class, 2026-11-04): a missing table refused by a coded Environment stop exits by the words of the name the operator chose, because stop_class returns None for the kind and classify_exit reads the message text, which holds the name; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exits 2 where PG and MySQL exit 1 for the same refusal. Opened 2026-11-04; closes with fix/stop-class-by-code"),
+    _open("live_stop_class::open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo",
+          "refusal contract: the invocation ended with [RIVET_SOURCE_COLLECTION_NOT_FOUND] (exit 2), expected [RIVET_SOURCE_COLLECTION_NOT_FOUND] (exit 1)",
+          "VP-8 (seam stop-class, 2026-11-04): a missing collection refused by a coded Environment stop exits by the words of the name the operator chose, because stop_class returns None for the kind and classify_exit reads the message text, which holds the name; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exits 2 where PG and MySQL exit 1 for the same refusal. Opened 2026-11-04; closes with fix/stop-class-by-code"),
+    _open("live_stop_class::open_defect_an_mssql_read_blocked_past_its_lock_timeout_exits_retryable",
+          "assertion `left == right` failed: a lock wait that timed out clears when the lock does: retryable",
+          "MT-F-F (seam stop-class, 2026-11-04): MSSQL error 1222 (lock request time out) reaches the stop as a stringified SOURCE_QUERY_FAILED whose text the retry classifier does not know, so a read that timed out on a held lock exits 1 where the same wait on MySQL (1205) exits 2. Opened 2026-11-04; closes with fix/stop-class-by-code"),
     _open("live_cdc_mbt::open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot",
           "assertion `left == right` failed: stream differs from the source on negative TIME(1)/TIME(2) with a fraction",
           "TF-1 (consolidated-2026-11-03 section 2): mysql_common 0.37.3 binlog/misc.rs:35-39 subtracts 0x100 from a u32 fraction for a negative TIME(1)/TIME(2) with a fraction, so a debug rivet panics and a release rivet writes 625:04:19.277216 for -00:00:00.50 in a string column; a row of any table in the binlog panics every MySQL CDC run that reads it. Opened 2026-11-04; closes with fix/mysql-binlog-time-fraction"),
-    _open("live_cdc_mbt::open_defect_mysql_cdc_enum_set_labels_match_the_snapshot",
-          'rig oracle: VALUES: 6 source row(s) not delivered, 6 delivered row(s) not in the source; differing column(s) [\'e\', \'s\'] of [\'id\', \'e\', \'s\']; source-only [\'[["num", "1"], "C:\\\\\\\\temp", "p\\\\\\\\q,r\\\\ns"]\', \'[["num", "2"], "a\\\\nb", "r\\\\ns,t\\\\ru"]\', \'[["num", "3"], "c\\\\rd", "t\\\\ru,v\\\\u0000w"]\', \'[["num", ',
-          "TF-2 (consolidated-2026-11-03 section 2): parse_enum_labels (src/source/cdc/value.rs) reverses only the doubled quote of MySQL's append_unescaped, so a label holding a backslash, LF, CR or NUL reaches the stream with the catalog's escaping while the snapshot holds the stored label. Opened 2026-11-03; closes with fix/mysql-enum-label-escapes"),
     KnownRed("upgrade[oracle/cdc-load]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
@@ -95,6 +114,48 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     _open("live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres",
           "the load beside the rolling run:",
           _CDC_START),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_binary16_primary_key",
+          "keyset key MySQL BINARY(16) primary key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_CURSOR),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_time_unique_key",
+          "keyset key MySQL TIME unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_CURSOR),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_tinyint1_unique_key",
+          "keyset key MySQL TINYINT(1) unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_CURSOR),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_enum_unique_key",
+          "keyset key MySQL ENUM unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_CURSOR),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_postgres_bytea_unique_key",
+          "keyset key PostgreSQL bytea unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_CURSOR),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_postgres_time_unique_key",
+          "keyset key PostgreSQL time unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_CURSOR),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_varbinary_unique_key",
+          "keyset key SQL Server varbinary unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_CURSOR),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_time_unique_key",
+          "keyset key SQL Server time unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_CURSOR),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds",
+          "keyset key SQL Server datetime2(7) key, a tick past each microsecond over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_SUB_US),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond",
+          "keyset key SQL Server datetime2(7) key, nine ticks inside one microsecond over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_SUB_US),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds",
+          "keyset key SQL Server datetimeoffset(7) key, a tick past each microsecond over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_SUB_US),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key",
+          "keyset key MySQL BINARY(16) primary key on a table that fits one chunk: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_ONE_CHUNK),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key",
+          "keyset key PostgreSQL bytea unique key on a table that fits one chunk: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_ONE_CHUNK),
+    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key",
+          "keyset key SQL Server datetime2(7) key, a tick past each microsecond on a table that fits one chunk: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
+          _KEYSET_KEY_ONE_CHUNK),
 )
 
 

@@ -232,9 +232,18 @@ pub(crate) fn build_export_query(
             let key: Vec<&str> = std::iter::once(plan.primary_column.as_str())
                 .chain(request.key_rest.iter().map(String::as_str))
                 .collect();
+            let tuple = |v: &str| key_tuple_values(v, key.len(), request.key_range);
             let cursor = request.cursor.and_then(|c| c.last_cursor_value.as_deref());
-            let last = cursor.map(|c| key_tuple_values(c, key.len())).transpose()?;
-            build_tuple_keyset_query(request.query, &key, last.as_deref(), limit, source_type)
+            let last = cursor.map(tuple).transpose()?;
+            let upper = request.upper_bound.map(tuple).transpose()?;
+            build_tuple_keyset_query(
+                request.query,
+                &key,
+                last.as_deref(),
+                upper.as_deref(),
+                limit,
+                source_type,
+            )
         }
         (Some(limit), Some(plan)) => {
             let cursor = request.cursor.and_then(|c| c.last_cursor_value.as_deref());
@@ -267,10 +276,12 @@ pub(crate) fn build_export_query(
     })
 }
 
-/// The values of a stored composite-key cursor, refused unless it is a JSON array of `arity` strings.
-fn key_tuple_values(cursor: &str, arity: usize) -> anyhow::Result<Vec<String>> {
+/// The values of a stored composite-key cursor, refused unless it is a JSON array of `arity` strings, or of a leading part when `prefix`.
+fn key_tuple_values(cursor: &str, arity: usize, prefix: bool) -> anyhow::Result<Vec<String>> {
     match serde_json::from_str::<Vec<String>>(cursor) {
-        Ok(values) if values.len() == arity => Ok(values),
+        Ok(values) if values.len() == arity || (prefix && (1..arity).contains(&values.len())) => {
+            Ok(values)
+        }
         _ => crate::rivet_bail!(
             crate::error::codes::STATE_CURSOR_INCOMPARABLE,
             "the stored keyset cursor `{cursor}` is not a value tuple of the {arity}-column \
@@ -279,25 +290,33 @@ fn key_tuple_values(cursor: &str, arity: usize) -> anyhow::Result<Vec<String>> {
     }
 }
 
-/// One keyset page over a composite key: rows past the `last` tuple in key order.
+/// One keyset page over a composite key: rows past the `last` tuple and up to the `upper` tuple, in key order.
 pub(crate) fn build_tuple_keyset_query(
     base_query: &str,
     key: &[&str],
     last: Option<&[String]>,
+    upper: Option<&[String]>,
     limit: usize,
     source_type: SourceType,
 ) -> BuiltQuery {
     let cols: Vec<String> = key.iter().map(|k| quote_ident(source_type, k)).collect();
     let order = cols.join(", ");
-    let filter = match last {
-        Some(vals) => {
-            let lits: Vec<String> = vals
-                .iter()
-                .map(|v| inline_literal(source_type, v))
-                .collect();
-            format!(" WHERE {}", tuple_after(&cols, &lits))
-        }
-        None => String::new(),
+    let lits = |vals: &[String]| -> Vec<String> {
+        vals.iter()
+            .map(|v| inline_literal(source_type, v))
+            .collect()
+    };
+    let preds: Vec<String> = [
+        last.map(|v| tuple_after(cols.get(..v.len()).unwrap_or_default(), &lits(v))),
+        upper.map(|v| tuple_at_most(cols.get(..v.len()).unwrap_or_default(), &lits(v))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let filter = if preds.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", preds.join(" AND "))
     };
     BuiltQuery::without_param(format!(
         "SELECT * FROM ({base}) {from_rivet}{filter} ORDER BY {order} {page}",
@@ -315,6 +334,17 @@ fn tuple_after(cols: &[String], lits: &[String]) -> String {
             format!("{c} >= {v} AND ({c} > {v} OR ({}))", tuple_after(cs, vs))
         }
         _ => unreachable!("tuple_after: key and cursor arity are checked by key_tuple_values"),
+    }
+}
+
+/// `(c1, .., cn) <= (v1, .., vn)` spelled so a leading-column index range bounds the scan on every engine.
+fn tuple_at_most(cols: &[String], lits: &[String]) -> String {
+    match (cols, lits) {
+        ([c], [v]) => format!("{c} <= {v}"),
+        ([c, cs @ ..], [v, vs @ ..]) => {
+            format!("{c} <= {v} AND ({c} < {v} OR ({}))", tuple_at_most(cs, vs))
+        }
+        _ => unreachable!("tuple_at_most: key and bound arity are checked by key_tuple_values"),
     }
 }
 
@@ -597,6 +627,7 @@ mod tests {
             "SELECT * FROM t",
             &["id", "kind"],
             None,
+            None,
             10,
             SourceType::Postgres,
         );
@@ -609,6 +640,7 @@ mod tests {
             "SELECT * FROM t",
             &["a", "b", "c"],
             Some(&last),
+            None,
             10,
             SourceType::Postgres,
         );
@@ -641,14 +673,84 @@ mod tests {
         );
     }
 
+    /// A parallel range worker over a composite key seeks past its lead-only floor and stops at its lead-only ceiling.
+    #[test]
+    fn a_composite_range_page_seeks_past_its_floor_and_stops_at_its_ceiling() {
+        let tuning = crate::tuning::SourceTuning::from_config(None);
+        let overrides = crate::types::ColumnOverrides::default();
+        let rest = ["kind".to_string()];
+        let key = single("id");
+        for (floor, upper, want) in [
+            (
+                Some(r#"["3"]"#),
+                Some(r#"["9"]"#),
+                r#"WHERE "id" > E'3' AND "id" <= E'9' ORDER BY"#,
+            ),
+            (
+                Some(r#"["3","b"]"#),
+                Some(r#"["9"]"#),
+                r#"WHERE "id" >= E'3' AND ("id" > E'3' OR ("kind" > E'b')) AND "id" <= E'9' ORDER BY"#,
+            ),
+            (None, Some(r#"["9"]"#), r#"WHERE "id" <= E'9' ORDER BY"#),
+            (Some(r#"["3"]"#), None, r#"WHERE "id" > E'3' ORDER BY"#),
+            (
+                None,
+                Some(r#"["9","m"]"#),
+                r#"WHERE "id" <= E'9' AND ("id" < E'9' OR ("kind" <= E'm')) ORDER BY"#,
+            ),
+        ] {
+            let cursor = cursor_with(floor);
+            let request =
+                crate::source::ExportRequest::unwrapped("SELECT * FROM t", &tuning, &overrides)
+                    .with_incremental(Some(&key))
+                    .with_cursor(Some(&cursor))
+                    .with_key_rest(&rest)
+                    .with_upper_bound(upper)
+                    .with_key_range(true)
+                    .with_page_limit(5);
+            let built = build_export_query(&request, SourceType::Postgres).unwrap();
+            assert!(
+                built.sql.contains(want),
+                "{floor:?} {upper:?}: {}",
+                built.sql
+            );
+        }
+    }
+
+    /// Only a range worker's floor may name a leading part of the composite key; a sequential cursor of one value is refused.
+    #[test]
+    fn a_lead_only_composite_cursor_is_read_only_by_a_range_worker() {
+        assert_eq!(key_tuple_values(r#"["1"]"#, 2, true).unwrap(), vec!["1"]);
+        for bad in [r#"[]"#, r#"["1","a","x"]"#] {
+            let err = key_tuple_values(bad, 2, true).expect_err(bad);
+            crate::error::assert_coded(&err, "RIVET_STATE_CURSOR_INCOMPARABLE", 5);
+        }
+        let tuning = crate::tuning::SourceTuning::from_config(None);
+        let overrides = crate::types::ColumnOverrides::default();
+        let rest = ["kind".to_string()];
+        let key = single("id");
+        let cursor = cursor_with(Some(r#"["3"]"#));
+        let request =
+            crate::source::ExportRequest::unwrapped("SELECT * FROM t", &tuning, &overrides)
+                .with_incremental(Some(&key))
+                .with_cursor(Some(&cursor))
+                .with_key_rest(&rest)
+                .with_page_limit(5);
+        let err = build_export_query(&request, SourceType::Postgres).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_STATE_CURSOR_INCOMPARABLE", 5);
+    }
+
     /// A stored cursor that is not a tuple of the key's arity is refused as incomparable.
     #[test]
     fn a_composite_keyset_cursor_of_the_wrong_shape_is_refused() {
         for bad in ["42", r#"["1"]"#, r#"["1","a","x"]"#, r#"[1,"a"]"#] {
-            let err = key_tuple_values(bad, 2).expect_err(bad);
+            let err = key_tuple_values(bad, 2, false).expect_err(bad);
             crate::error::assert_coded(&err, "RIVET_STATE_CURSOR_INCOMPARABLE", 5);
         }
-        assert_eq!(key_tuple_values(r#"["1","a"]"#, 2).unwrap(), vec!["1", "a"]);
+        assert_eq!(
+            key_tuple_values(r#"["1","a"]"#, 2, false).unwrap(),
+            vec!["1", "a"]
+        );
     }
 
     #[test]
@@ -765,6 +867,7 @@ mod tests {
             base_relation: None,
             upper_bound,
             key_rest: &[],
+            key_range: false,
         };
         let page = build_export_query(&request(Some(100), None), SourceType::Postgres).unwrap();
         assert_eq!(
