@@ -327,7 +327,7 @@ exclude_re = [
     "delete match arm \"oracle\" in init_discovery_json",
     # 2026-11-05 introspect_single_table arms open a live connection; witness: an_init_generated_config_keysets_a_number_19_key_past_i64.
     "delete match arm \"oracle\" in introspect_single_table",
-    # 2026-11-05 witness: init_scaffolds_no_keyset_key_for_a_tinyint1_primary_key_mysql.
+    # 2026-11-05 witness: init_scaffolds_no_keyset_key_for_a_binary16_primary_key_mysql.
     "delete match arm \"mysql\" in introspect_single_table",
     # 2026-11-05 witness: init_scaffolds_no_keyset_key_for_a_datetime2_7_primary_key_mssql.
     "delete match arm \"mssql\" in introspect_single_table",
