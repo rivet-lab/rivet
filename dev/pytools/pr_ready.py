@@ -396,6 +396,14 @@ def mutants(out: Path, base: str, jobs: int) -> tuple[str, str]:
     return verdict, f"{line} (whole diff; CI may excuse a miss in a function the offline suite never executes)"
 
 
+def secrets_tree() -> tuple[str, str]:
+    """The pinned gitleaks over every tracked file; NOT RUN when it is absent or not the pin."""
+    rc = subprocess.run([sys.executable, str(ROOT / "dev/pytools/secrets_scan.py"), "tree"], capture_output=True, text=True)
+    if rc.returncode == 2:
+        return "NOT RUN", rc.stderr.strip().splitlines()[-1] if rc.stderr.strip() else "gitleaks not run"
+    return ("PASS", "no findings in the tracked tree") if rc.returncode == 0 else ("FAIL", "gitleaks found a secret: python3 dev/pytools/secrets_scan.py tree")
+
+
 def run_local(args: argparse.Namespace) -> int:
     """`make pr-ready`: every check, then one summary block."""
     out = Path(tempfile.mkdtemp(prefix="pr-ready-"))
@@ -414,6 +422,7 @@ def run_local(args: argparse.Namespace) -> int:
     else:
         print("pr-ready: mutants in-diff ...", file=sys.stderr, flush=True)
         rows.append(("mutants in-diff", *mutants(out, args.base, args.jobs)))
+    rows.append(("secrets scan", *secrets_tree()))
     rows += branch_rows(args.base, body)
     sha = git("rev-parse", "--short", "HEAD").strip()
     print_rows(f"make pr-ready @ {sha} (base {args.base}){' --fast' if args.fast else ''}; logs {out}", rows)
