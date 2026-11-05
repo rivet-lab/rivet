@@ -56,6 +56,9 @@ _KEYSET_KEY_ONE_CHUNK = (
 
 
 KNOWN_RED: tuple[KnownRed, ...] = (
+    _open("live_destination_credential::open_defect_an_s3_profile_beside_env_keys_is_refused",
+          "an S3 destination naming aws_profile beside env keys is refused by code, run; exit Some(0)",
+          "HFF-2 (consolidated-2026-11-03): an S3 destination naming aws_profile beside access_key_env and secret_key_env signs with the profile alone and the run ends with exit 0 and no [RIVET_CONFIG_DESTINATION_AUTH_INVALID] (any other exit, such as 5 RIVET_DEST_CREDENTIALS_INVALID from an AWS_PROFILE on the host, is another reason), because opendal's customized credential loader ignores the static keys, so the operator's keys are never used and nothing says so; opened 2026-11-04; closes with fix/destination-credential-every-leg, which names the conflict at config load as RIVET_CONFIG_DESTINATION_AUTH_INVALID"),
     _open("live_stop_class::open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql",
           "refusal contract: the invocation ended with [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 2), expected [RIVET_SOURCE_TABLE_NOT_FOUND] (exit 1)",
           "VP-8 (seam stop-class, 2026-11-04): a missing table refused by a coded Environment stop exits by the words of the name the operator chose, because stop_class returns None for the kind and classify_exit reads the message text, which holds the name; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exits 2 where PG and MySQL exit 1 for the same refusal. Opened 2026-11-04; closes with fix/stop-class-by-code"),
