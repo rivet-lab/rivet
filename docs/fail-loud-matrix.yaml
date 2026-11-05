@@ -76,9 +76,9 @@ scenarios:
     what: "a batch export and a CDC export sharing one destination prefix → refused (their manifests would clobber), never a silent overwrite"
     postgres: { test: cross_shape_overwrite_is_refused_same_shape_allowed }
     mysql:    { test: cdc_scaffold_gets_its_own_prefix_and_cross_shape_overwrite_is_refused }
-    mssql:    { na: "guard_manifest_mode is engine-agnostic (src/manifest.rs), reached from every pipeline path — pinned by the PG offline unit + the MySQL live test" }
-    mongo:    { na: "same engine-agnostic manifest-mode guard; pinned once" }
-    oracle:   { na: "guard_manifest_mode is engine-agnostic (src/manifest.rs), reached from every pipeline path including the Oracle CDC drain — pinned once" }
+    mssql:    { test: a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mssql }
+    mongo:    { test: a_mongo_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored }
+    oracle:   { test: a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_oracle }
 
   - id: remote_plaintext_tls_refused
     what: "a remote (non-loopback) plaintext connection with no tls: block → refused on policy (CWE-319), not attempted; loopback plaintext stays allowed"

@@ -222,6 +222,11 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `enum` | `enum` | `Utf8` + logical=enum | label text | custom PG enum | type_roundtrip |
 | `text[]` | `list<string>` | `List<Utf8>` | — | 1-D arrays | type_roundtrip |
 | `integer[]` | `list<int32>` | `List<Int32>` | — | 1-D arrays | type_roundtrip |
+| `date[]` | `list<date>` | `List<Date32>` | — | 1-D arrays; an element of `infinity` or `-infinity` is refused, map it to a bound in the query | type capability ledger |
+| `timestamp[]` / `timestamptz[]` | `list<timestamp>` | `List<Timestamp(µs)>` / `List<Timestamp(µs, UTC)>` | — | 1-D arrays; the same `infinity` refusal | type capability ledger |
+| `time[]` | `list<time>` | `List<Time64(µs)>` | — | 1-D arrays; an element of `24:00:00` is refused | type capability ledger |
+| `uuid[]` | `list<uuid>` | `List<FixedSizeBinary(16)>` with the `arrow.uuid` item | — | read as native UUID lists downstream | type capability ledger |
+| `bytea[]` | `list<binary>` | `List<Binary>` | — | 1-D arrays | type capability ledger |
 | nullable / all-null | — | null bitmap preserved | empty cells | `note_nullable`, `note_all_null` | type_roundtrip |
 | large `text` | `string` | `Utf8` | escaped | 2k–5k chars | type_roundtrip |
 
