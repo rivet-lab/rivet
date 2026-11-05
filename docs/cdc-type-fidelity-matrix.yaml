@@ -185,7 +185,7 @@ scenarios:
 
   - id: type_list
     what: "PostgreSQL 1-D arrays (int[]/text[]/…) as a real Arrow List through CDC; a multi-dimensional array fails loud, never a flat NULL list (finding #6)"
-    postgres: { test: multidim_array_literal_is_refused_not_flattened_to_bogus_nulls, oracle: fail_loud, known_defect: ["DATE[]", "TIMESTAMP[]", "TIMESTAMPTZ[]", "TIME[]", "UUID[]", "BYTEA[]", "NUMERIC[]"] }
+    postgres: { test: multidim_array_literal_is_refused_not_flattened_to_bogus_nulls, oracle: fail_loud, known_defect: ["NUMERIC[]"] }
     mysql:    { na: "MySQL has no array column type" }
     mssql:    { na: "SQL Server has no array column type" }
     mongo:    { na: "arrays ride the verbatim document blob (BSON array → extJSON)" }

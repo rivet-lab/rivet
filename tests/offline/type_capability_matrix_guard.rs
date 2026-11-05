@@ -131,6 +131,9 @@ fn row_violations(doc: &Value) -> Vec<String> {
     let valid_delivery = |d: &str| {
         forms.contains(d)
             || extensions.contains(&d)
+            || d.strip_prefix("List(")
+                .and_then(|e| e.strip_suffix(')'))
+                .is_some_and(|e| extensions.contains(&e))
             || d.parse::<arrow_schema::DataType>()
                 .is_ok_and(|t| t.to_string() == d)
     };
@@ -329,14 +332,15 @@ const KNOWN_DEFECTS: &[&str] = &[
     "postgres:MONEY",
     "postgres:INET",
     "postgres:CIDR",
-    "postgres:DATE[]",
-    "postgres:TIMESTAMP[]",
-    "postgres:TIMESTAMPTZ[]",
-    "postgres:TIME[]",
-    "postgres:UUID[]",
-    "postgres:BYTEA[]",
     "postgres:NUMERIC[]",
     "postgres:UUID (ClickHouse)",
+    // 2026-11-05: six array rows moved from unsupported to delivered; a NULL array still loads as [] on ClickHouse, closes with the ClickHouse array-NULL step.
+    "postgres:DATE[] (ClickHouse)",
+    "postgres:TIMESTAMP[] (ClickHouse)",
+    "postgres:TIMESTAMPTZ[] (ClickHouse)",
+    "postgres:TIME[] (ClickHouse)",
+    "postgres:UUID[] (ClickHouse)",
+    "postgres:BYTEA[] (ClickHouse)",
     "postgres:TEXT[] (ClickHouse)",
     "postgres:INTEGER[] (ClickHouse)",
     "postgres:DOUBLE PRECISION[] (ClickHouse)",
@@ -456,6 +460,25 @@ fn a_known_defect_without_today_delivery_is_refused() {
     let bad = row_violations(&doc);
     for want in ["needs `today_delivery:`", "needs `clickhouse.today:`"] {
         assert!(bad.iter().any(|b| b.contains(want)), "{want}: {bad:?}");
+    }
+}
+
+/// A list of a canonical extension is a delivery label; a list of anything else is not.
+#[test]
+fn a_list_delivery_label_names_a_canonical_extension_only() {
+    for (label, ok) in [
+        ("List(arrow.uuid)", true),
+        ("List(arrow.json)", true),
+        ("List(arrow.bogus)", false),
+        ("List(arrow.uuid", false),
+    ] {
+        let mut doc = ledger();
+        row_mut(&mut doc, "postgres", "UUID[]").insert("delivery".into(), label.into());
+        let bad: Vec<String> = row_violations(&doc)
+            .into_iter()
+            .filter(|b| b.contains("rows[UUID[]]: delivery"))
+            .collect();
+        assert_eq!(bad.is_empty(), ok, "{label}: {bad:?}");
     }
 }
 

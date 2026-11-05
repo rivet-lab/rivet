@@ -419,9 +419,10 @@ infra:
     # 2026-11-05: +3 structural N/A rows from destination-credential-read-by-one-leg (local, azure, stdout name no credential this seed reaches).
     # 2026-11-04: +12 structural N/A rows from mongo-empty-read-after-drop, mongo-collection-uuid-not-compared and mongo-parallel-worker-pins-its-own-uuid (a SQL page query of a dropped table fails with the missing-relation error, never an empty page).
     # 2026-11-05: +8 structural N/A rows from mongo-listing-failure-fails-open and mongo-progress-not-bound-to-incarnation (a SQL engine has no collection listing; SQL tables recreated under a run are a separate, reported defect).
+    # 2026-11-05: +4 structural N/A rows from pg-temporal-uuid-bytea-array-refused (MySQL, SQL Server, Oracle and MongoDB have no PostgreSQL array element builder).
     # 2026-11-05: +4 structural N/A rows from number-text-without-its-label (PostgreSQL, MySQL, SQL Server and MongoDB reach no Oracle NUMBER mapping).
-    # 2026-11-05: recounted after merging main: 518 `na:` rows in dev/seeded/seeds.yaml (recall.parse_manifest).
-    na_ceiling: 518  # ratchet-pin: seeded-na
+    # 2026-11-05: recounted after merging main: 522 `na:` rows in dev/seeded/seeds.yaml (recall.parse_manifest).
+    na_ceiling: 522  # ratchet-pin: seeded-na
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
