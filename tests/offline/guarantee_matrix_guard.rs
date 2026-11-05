@@ -21,14 +21,16 @@ const GATE_DIR: &str = "dev/release_oracle";
 // and a_rerun_never_overwrites_the_previous_parts are held on Oracle too.
 // 17 -> 16 (2026-10-14): decimals_never_become_floats is held on every engine by one SqlEngine body.
 // 16 -> 15 (2026-10-15): no_row_silently_skipped is no longer contradicted; a cursor past the manifest is refused.
-const ROWS_NOT_HELD: usize = 15; // ratchet-pin: guarantee-rows-not-held
+// 15 -> 14 (2026-11-05): default_policy is no longer contradicted; an undeclared Oracle TIMESTAMP(7..9) is refused.
+const ROWS_NOT_HELD: usize = 14; // ratchet-pin: guarantee-rows-not-held
 /// `gap` cells over all rows. Shrink-only; LOWER it when a cell is written.
 // 29 -> 26 (2026-10-14): the `on_schema_drift: fail` cells already existed on MySQL, SQL Server and Oracle
 // (one body, live_schema_drift.rs); the row now cites them. 26 -> 19: the Oracle crash-after-write cell holds
 // three rows, the Oracle rapid-runs cell one, and a plain re-run of a finished checkpointed export is one
 // SqlEngine body on PostgreSQL, SQL Server and Oracle.
 // 19 -> 17 (2026-10-14): the decimal golden body holds the SQL Server and Oracle cells.
-const GAP_CELLS: usize = 17; // ratchet-pin: guarantee-gap-cells
+// 17 -> 16 (2026-11-05): a test cell holds default_policy on Oracle.
+const GAP_CELLS: usize = 16; // ratchet-pin: guarantee-gap-cells
 
 fn rows() -> Vec<Value> {
     let doc: Value = serde_yaml_ng::from_str(&subject_text(MATRIX))
