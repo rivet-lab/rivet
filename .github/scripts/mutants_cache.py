@@ -74,6 +74,15 @@ def replay(cache_path: str, wanted_path: str) -> int:
     return 0
 
 
+def missing(cache_path: str, wanted_path: str) -> int:
+    """Print every wanted mutant with no outcome or a timeout, one per line."""
+    cache = _load(cache_path).get("outcomes", {})
+    for m in _lines(wanted_path):
+        if cache.get(m, "timeout") == "timeout":
+            print(m)
+    return 0
+
+
 def record(cache_path: str, out_dirs: list[str]) -> int:
     """Merge every `mutants.out` directory's outcome lists into the cache."""
     doc = _load(cache_path)
@@ -162,6 +171,13 @@ def self_test() -> int:
             labelled(cache, "caught")
         check("labelled caught", buf.getvalue().strip(), "src/a.rs:1:1: replace f -> ()")
 
+        open(w, "w").write("src/a.rs:1:1: replace f -> ()\nsrc/z.rs:9:9: replace q -> ()\nsrc/c.rs:3:3: replace h -> ()\n")
+        buf = _io.StringIO()
+        with _c.redirect_stdout(buf):
+            missing(cache, w)
+        check("missing names the unknown and the timed out", buf.getvalue().split("\n")[:-1],
+              ["src/z.rs:9:9: replace q -> ()", "src/c.rs:3:3: replace h -> ()"])
+
         # an empty wanted set is not a hit
         open(w, "w").write("")
         check("empty set refuses", replay(cache, w), 1)
@@ -184,6 +200,8 @@ def main() -> int:
         return self_test()
     if len(sys.argv) >= 2 and sys.argv[1] == "replay":
         return replay(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 4 and sys.argv[1] == "missing":
+        return missing(sys.argv[2], sys.argv[3])
     if len(sys.argv) >= 2 and sys.argv[1] == "record":
         return record(sys.argv[2], sys.argv[3:])
     if len(sys.argv) == 4 and sys.argv[1] == "labelled":
