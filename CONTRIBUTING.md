@@ -39,7 +39,8 @@ workflow enforces on the PR itself:
 - commit messages and the PR title/body are English, carry no `Co-Authored-By` /
   `Claude-Session` trailer, and never put fix/close/resolve before `#N` (write `see #N`);
 - a raised ratchet pin (any line or block marked `ratchet-pin:`) is named in a
-  `## Ratchets raised` section of the PR body; lowering one needs nothing;
+  `## Ratchets raised` section of the PR body; lowering one needs nothing. A pin whose marker
+  names a `count <pathspec> <regex>` is measured from the tree (`pr_ready.py pins`), so there is no number to type;
 - a change under `src/` adds a changelog fragment, one file under `changelog.d/` in the
   CHANGELOG entry format (see `changelog.d/README.md`), or the PR body says
   `No user-visible change`. Fragments keep open pull requests from conflicting on the top

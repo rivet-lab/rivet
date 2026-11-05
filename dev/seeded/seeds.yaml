@@ -3258,6 +3258,22 @@ seeds:
         na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
       oracle:
         na: "Oracle has no TIME type, and the MySQL cell fix does not run"
+  - name: mysql-binlog-negative-time-fraction
+    class: "a dependency's decoder of a binary wire value mis-reads a sign-and-fraction encoding at the edge of its range, so the stream leg of one engine delivers or crashes on a value the snapshot leg of the same engine reads as stored"
+    history: "2026-11-04 - TF-1: mysql_common 0.37.3 subtracted 0x100 from a u32 fraction byte for a negative MySQL TIME(1)/TIME(2) with a fraction, so a debug rivet panicked and a release rivet read about 625 hours; closed by the rivet-lab/rust_mysql_common pin, the seed removes the pin"
+    scope: source
+    patch: mysql-binlog-negative-time-fraction/shared.patch
+    engines:
+      postgres:
+        na: "a PostgreSQL `time` is a time of day and is never negative; the MySQL binlog decoder does not run"
+      mysql:
+        cells: [mysql_cdc_negative_time_fraction_matches_the_snapshot]
+      mssql:
+        na: "a SQL Server `time` is a time of day and is never negative; the MySQL binlog decoder does not run"
+      mongo:
+        na: "a MongoDB change row is two text cells; the MySQL binlog decoder does not run"
+      oracle:
+        na: "Oracle has no TIME type; the MySQL binlog decoder does not run"
   - name: cursor-past-manifest-continued
     class: a stored incremental cursor past the `cursor_high` of the destination's success manifest is continued from, so the rows between are never delivered
     history: "2026-10-15 - `last_cursor_value` edited to N+2 after a run that delivered 1..=N: exit 0 with `COUNT(*): source 43, delivered 41` on PostgreSQL, MySQL and SQL Server, through 0.31.0 (open_defect_a_cursor_moved_forward_delivers_or_refuses_*); fixed by refuse_a_cursor_past_the_manifest at the one claim seam every batch run passes"
@@ -4753,3 +4769,28 @@ seeds:
         cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
       mongo:
         na: "Mongo always pages by _id; init scaffolds no keyset key for it"
+  - name: destination-credential-read-by-one-leg
+    class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
+    history: "2026-11-03 seam packaging HFF-1 and HFF-2: with `credentials_file:` naming a service-account key every BigQuery request of `rivet load` carried the ambient ADC token; an S3 `aws_profile` beside `access_key_env` and `secret_key_env` signed with the profile alone and `rivet check` exited 0"
+    scope: destination
+    patch: destination-credential-read-by-one-leg/shared.patch
+    engines:
+      local:
+        na: "the seed edits the BigQuery token source and the credential chooser; a local directory names no credential"
+      s3:
+        cells:
+          - "an_s3_profile_beside_env_keys_is_refused"
+          - "lib:two_named_identities_are_refused_by_code"
+      gcs:
+        cells:
+          - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
+          - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
+      azure:
+        na: "the seed edits the BigQuery token source and the S3 arm of the chooser; the Azure arm already refused key beside SAS before the chooser"
+      stdout:
+        na: "the seed edits the BigQuery token source and the credential chooser; stdout names no credential"
+      lib:
+        cells:
+          - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
+          - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
+          - "lib:two_named_identities_are_refused_by_code"

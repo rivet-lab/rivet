@@ -1215,7 +1215,7 @@ pub fn build_loader(
                 &plan.clustering,
                 run_id,
             )
-            .batched_by_footers(plan.destination.clone())
+            .staged_under(plan.destination.clone())
             .layout(plan.layout)
             .renamed(plan.renames.clone())
             .journaled(journal.clone()),
