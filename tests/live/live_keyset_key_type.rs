@@ -155,6 +155,14 @@ const MSSQL_ALIAS_DT2_7: Case = Case {
     key_ddl: "dbo.rivet_ks_ts7",
     ..MSSQL_DT2_7_DISTINCT_US
 };
+
+/// The alias case over its own type `name`, so cells that run in parallel never share a server type.
+fn alias_dt2_7(name: &'static str) -> Case {
+    Case {
+        key_ddl: name,
+        ..MSSQL_ALIAS_DT2_7
+    }
+}
 const PG_DOMAIN_BYTEA: Case = Case {
     label: "PostgreSQL domain over bytea unique key",
     key_ddl: "rivet_ks_bytea",
@@ -482,15 +490,15 @@ fn keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key() {
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn keyset_key_is_refused_mssql_alias_type_over_datetime2_7() {
-    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7", "DATETIME2(7)");
-    refused_over_several_pages(SqlEngine::Mssql, MSSQL_ALIAS_DT2_7);
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_pages", "DATETIME2(7)");
+    refused_over_several_pages(SqlEngine::Mssql, alias_dt2_7("dbo.rivet_ks_ts7_pages"));
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn keyset_key_is_refused_on_a_one_chunk_table_mssql_alias_type_over_datetime2_7() {
-    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7", "DATETIME2(7)");
-    refused_on_a_table_that_fits_one_chunk(SqlEngine::Mssql, MSSQL_ALIAS_DT2_7);
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_one", "DATETIME2(7)");
+    refused_on_a_table_that_fits_one_chunk(SqlEngine::Mssql, alias_dt2_7("dbo.rivet_ks_ts7_one"));
 }
 
 #[test]
@@ -608,10 +616,10 @@ fn init_scaffolds_no_keyset_key_for_a_datetime2_7_primary_key_mssql() {
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql() {
-    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7", "DATETIME2(7)");
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_init", "DATETIME2(7)");
     init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
         SqlEngine::Mssql,
-        MSSQL_ALIAS_DT2_7,
+        alias_dt2_7("dbo.rivet_ks_ts7_init"),
         MSSQL_DT2_6,
     );
 }
