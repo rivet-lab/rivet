@@ -69,7 +69,7 @@ scenarios:
     mysql:    { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mssql:    { test: cdc_money_past_f64_exact_range_fails_loud_not_a_falsely_exact_decimal, oracle: fail_loud }
     mongo:    { test: mongo_cdc_change_stream_renders_tricky_bson_verbatim_like_batch, oracle: independent }
-    oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["NUMBER"] }
+    oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
 
   - id: type_date_time
     what: "date + time-of-day survive the change stream with the batch Arrow types"

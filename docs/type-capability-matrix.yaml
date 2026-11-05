@@ -283,7 +283,7 @@ engines:
       "Timestamp(µs, \"UTC\")": {source: "TO_CHAR(SYS_EXTRACT_UTC({c}), 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF6')", duck: "strftime({c}, '%Y-%m-%dT%H:%M:%S.%f')", canon: "timestamp"}
       "Timestamp(ns)": {source: "TO_CHAR({c}, 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF9')", duck: "strftime({c}, '%Y-%m-%dT%H:%M:%S.%n')", canon: "timestamp"}
     rows:
-      - {native_type: "NUMBER", sample: ["123.45", "12345678901234567890.123456789", "1E125", "-0.000000000000000000000000000000000000001"], delivery: "decimal_plain", today_delivery: "Utf8", known_defect: "plain decimal text without the rivet.text_form label (ADR-0038 CP5/CP11, Oracle engine step)"}
+      - {native_type: "NUMBER", sample: ["123.45", "12345678901234567890.123456789", "1E125", "-0.000000000000000000000000000000000000001"], delivery: "decimal_plain"}
       - {native_type: "NUMBER(38,10)", sample: ["1.5", "1234567890123456789012345678.0123456789", "0.5"], delivery: "Decimal128(38, 10)"}
       - {native_type: "NUMBER(9)", sample: ["42", "-999999999", "0"], delivery: "Int32"}
       - {native_type: "NUMBER(18)", sample: ["9007199254740993", "-999999999999999999", "0"], delivery: "Int64"}

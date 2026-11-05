@@ -349,7 +349,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     "mssql:DATETIMEOFFSET",
     "mssql:TIME",
     "mssql:UNIQUEIDENTIFIER (ClickHouse)",
-    "oracle:NUMBER",
     "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end
 
