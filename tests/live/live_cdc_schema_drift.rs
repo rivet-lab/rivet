@@ -353,7 +353,7 @@ fn pg_cdc_upgrade_baseline_takes_server_text_silently_and_still_refuses_a_new_co
     let _slot = Slot::new(slot.clone());
     let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
     c.batch_execute(&format!(
-        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, n NUMERIC, d DATE[])"
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, n NUMERIC, d DATE[], m NUMERIC[])"
     ))
     .unwrap();
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
@@ -384,7 +384,7 @@ fn pg_cdc_upgrade_baseline_takes_server_text_silently_and_still_refuses_a_new_co
     );
 
     c.batch_execute(&format!(
-        "INSERT INTO {tbl} VALUES (1, 1.50, ARRAY['2024-01-01'::date])"
+        "INSERT INTO {tbl} VALUES (1, 1.50, ARRAY['2024-01-01'::date], ARRAY[1.5::numeric])"
     ))
     .unwrap();
     rig.run_ok();
@@ -399,7 +399,12 @@ fn pg_cdc_upgrade_baseline_takes_server_text_silently_and_still_refuses_a_new_co
                 )
             })
             .collect();
-    for (name, ty) in [("id", "Int64"), ("n", "Utf8"), ("d", "Utf8")] {
+    for (name, ty) in [
+        ("id", "Int64"),
+        ("n", "Utf8"),
+        ("m", "Utf8"),
+        ("d", "List(Field { data_type: Date32, nullable: true })"),
+    ] {
         assert!(
             migrated.contains(&(name.to_string(), ty.to_string())),
             "the baseline must now hold {name}: {ty}: {migrated:?}"
@@ -412,7 +417,7 @@ fn pg_cdc_upgrade_baseline_takes_server_text_silently_and_still_refuses_a_new_co
     );
 
     c.batch_execute(&format!(
-        "ALTER TABLE {tbl} ADD COLUMN extra INT; INSERT INTO {tbl} VALUES (2, 2, NULL, 7)"
+        "ALTER TABLE {tbl} ADD COLUMN extra INT; INSERT INTO {tbl} VALUES (2, 2, NULL, NULL, 7)"
     ))
     .unwrap();
     let said = rig.run_expect_fail();

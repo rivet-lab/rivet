@@ -185,6 +185,38 @@ fn mongo_parallel_export_refuses_to_clobber_a_cdc_manifest() {
     );
 }
 
+/// A Mongo batch export over a prefix that holds a CDC manifest is refused by code, and the rig oracle finds no resume point stored.
+#[test]
+#[ignore = "live: requires docker compose up -d mongo"]
+fn a_mongo_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored() {
+    require_alive(LiveService::Mongo);
+    let shapes: &[(&str, &[&str])] = &[
+        ("", &[]),
+        ("page_size: 100", &[]),
+        ("page_size: 100, resume: true", &[]),
+        ("page_size: 100", &["parallel: 4"]),
+    ];
+    for (n, (mongo, lines)) in shapes.iter().enumerate() {
+        let db = unique_name(&format!("mxs{n}"));
+        MongoTest::connect(PORT, &db).seed_int_id("bench", 200);
+        let mut rig = batch(&db, "bench");
+        if !mongo.is_empty() {
+            rig = rig.mongo(mongo);
+        }
+        for l in *lines {
+            rig = rig.export_line(l);
+        }
+        std::fs::create_dir_all(rig.out_dir()).unwrap();
+        std::fs::write(
+            rig.out_dir().join("manifest.json"),
+            br#"{"manifest_version":1,"run_id":"prior-cdc","mode":"cdc","parts":[]}"#,
+        )
+        .unwrap();
+        let run = rig.run();
+        assert_refused(&run, Refused::by_code("RIVET_DEST_PREFIX_MODE_MISMATCH", 5));
+    }
+}
+
 #[test]
 #[ignore = "live: requires docker compose up -d mongo"]
 fn mongo_batch_typed_cursor_pages_string_id() {

@@ -1141,9 +1141,11 @@ fn execute_resolved_plan(
         });
     }
 
-    let gate = settle_columns_are_temporal(plan, summary.open_mappings.as_deref()).and_then(|()| {
-        plan_open_columns(&plan.export_name, &mut summary.open_mappings, tail.strict)
-    });
+    let gate = settle_columns_are_temporal(plan, summary.open_mappings.as_deref())
+        .and_then(|()| {
+            plan_open_columns(&plan.export_name, &mut summary.open_mappings, tail.strict)
+        })
+        .and_then(|()| super::frame::RunnerFrame::refuse_cross_shape_prefix(plan));
     let result = match gate {
         Err(e) => Err(e),
         Ok(()) if plan.strategy.requires_parallel_execution() => {
