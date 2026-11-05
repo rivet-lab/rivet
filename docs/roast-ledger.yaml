@@ -65,6 +65,22 @@ entries:
     status: done
     verdict: "orphans re-checked with git grep; the derived step runs every script that handles --self-test"
     closes: "merged as #744"
+  - id: HDW-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: a CDC run may write without a ledger row, and a load consumes any run the ledger does not list
+    copies: [src/pipeline/cdc_job.rs:116, src/pipeline/job.rs:871, src/load/reconcile.rs:493, src/load/orchestrate.rs:814, src/load/orchestrate.rs:1103, src/load/orchestrate.rs:1172, src/load/staging.rs:80, src/load/staging.rs:166, src/load/staging.rs:423]
+    status: accepted-as-bugfix
+    verdict: "confirmed by the load_ledger_tests probe: with no running row the second load of a grown CDC run selects [] and records it consumed"
+    closes: "CDC begins through the ledger half of ledger_begin_run and bucket_writers (unlisted_cdc_runs) owns the CDC no-row rule for the consume path, cleanup_source, the prefix gate and gc_orphans; the CDC-begin half of RHS-1 closes here; run-closing and run-still-writing land with no exceptions"
+  - id: TF-2
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: MySQL CDC unescapes only doubled quotes in ENUM and SET labels read from COLUMN_TYPE
+    copies: [src/source/cdc/value.rs:832]
+    status: accepted-as-bugfix
+    verdict: "confirmed against rivet code and the MySQL 8.0 and 8.4 append_unescaped source: a label with a backslash, LF, CR or NUL differs between stream and snapshot"
+    closes: "parse_enum_labels reverses every append_unescaped escape; the stream label equals the snapshot label"
   - id: HCF-1
     date: 2026-11-03
     lens: seam packaging 2026-11-03
@@ -81,6 +97,22 @@ entries:
     status: deferred-past-gate
     verdict: "confirmed live: a gc_orphans load between the first roll's upload and its manifest removed 1 orphan part (HDW-1 rework run, MySQL CDC); open_defect cells on MySQL and PostgreSQL"
     closes: "fix/cdc-run-start-marker: the CDC sink writes a running manifest under the run's own key at start, the first Success rewrite supersedes it, a stale one is closed by state finish-run; bucket_writers then sees the run from its first byte"
+  - id: CKPT-BUSY
+    date: 2026-11-04
+    lens: harness flake 2026-11-04
+    title: a SQLite replan beside a concurrent writer of the state can still get SQLITE_BUSY on a loaded runner
+    copies: [src/state/checkpoint.rs:936]
+    status: deferred-past-gate
+    verdict: "seen in CI run 41826246423 (Mutants, shard 0, unmutated baseline): a_replan_beside_another_writer_of_the_state_waits_for_it reported 1 of 1000 replans failed beside 56643 writes: database is locked; the file is unchanged by the PR that saw it"
+    closes: "a cell in which the writer holds the state lock across the replan every time, so the wait is proven by the race it loses rather than by 1000 tries"
+  - id: TF-2b
+    date: 2026-11-04
+    lens: seam packaging 2026-11-03
+    title: a MySQL ENUM or SET label with a utf8mb4 4-byte character converts to a question mark in the catalog text, so a CDC run delivers a wrong label with exit 0
+    copies: [src/source/cdc/value.rs:832]
+    status: deferred-past-gate
+    verdict: "stated in the TF-2 PR body (#807) and not reproduced on a binary: the catalog text is utf8mb3, the 4-byte character is not representable there"
+    closes: "read the labels from the binlog TABLE_MAP optional metadata ENUM_STR_VALUE and SET_STR_VALUE instead of COLUMN_TYPE, the same follow-up that lifts the hex label refusal"
   - id: HFF-1
     date: 2026-11-03
     lens: seam packaging 2026-11-03

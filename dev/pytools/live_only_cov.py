@@ -77,7 +77,6 @@ ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicate
     "run_capture": ("2026-11-04: its viable stub is MISSED under --lib --bins; offline reaches the unreachable-source open error only, the capture is graded by the live CDC cells", 10),
     "run_cdc_inner": ("2026-11-04: its viable stub is MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 85),
     "run_cdc_export": ("2026-11-04: stub MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 90),
-    "pin_plan_to_its_run": ("2026-11-04: its only whole-body stub does not compile (LoadPlan has no Default); offline reaches the refused() early exit only", 10),
     "pause": ("2026-11-04: the offline executions are the cfg(test) twin; the production body is not compiled into the test build, so its stub is MISSED by construction", 0),
 }  # ratchet-pin: end
 

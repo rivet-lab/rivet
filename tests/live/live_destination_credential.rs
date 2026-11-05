@@ -274,12 +274,17 @@ fn an_s3_profile_beside_env_keys_is_refused() {
     let run = f.rig.run_args_env(&[], &envs);
     assert!(
         stderr_of(&run).contains(CONFLICT),
-        "an S3 destination naming aws_profile beside env keys is refused by code, run"
+        "an S3 destination naming aws_profile beside env keys is refused by code, run; exit {:?}",
+        run.status.code()
     );
-    let check = f.rig.cli_env(&["check"], &envs);
+    let check = f.rig.cli_env(
+        &["check", "--config", &f.rig.config_path().to_string_lossy()],
+        &envs,
+    );
     assert!(
         stderr_of(&check).contains(CONFLICT),
-        "an S3 destination naming aws_profile beside env keys is refused by code, check"
+        "an S3 destination naming aws_profile beside env keys is refused by code, check; exit {:?}",
+        check.status.code()
     );
 }
 

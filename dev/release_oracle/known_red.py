@@ -40,13 +40,6 @@ def _open(cell: str, symptom: str, reason: str) -> KnownRed:
     """The entry of one `open_defect_*` live cell: its test path and the first line of its panic."""
     return KnownRed(f"{cell} — {symptom}", reason, _EXPIRES)
 
-_HDW1_CONTRACT = (
-    "HDW-1 (seam run-closing, 2026-11-03): a CDC run begins its run-status row warn-only, so over a state that refuses the row it reads its stream and writes anyway; closes with fix/run-closing-cdc-begin, which opens the row through ledger_begin_run and refuses by code"
-)
-_HDW1_LOAD = (
-    "HDW-1 (seam run-still-writing, 2026-11-03): a load from a state that holds no ledger row for a CDC run in flight counts the run finished, loads the parts of one roll and records the run consumed, so the rolls that follow are never loaded; closes with fix/run-closing-cdc-begin, where still_writing owns the CDC no-row rule"
-)
-
 _CDC_START = (
     "CDC-RUN-START (seam run-still-writing, 2026-11-03): a CDC run writes no running marker and no manifest before its first roll, so a load from another state DB with gc_orphans removes the part the run uploaded and has not manifested yet; closes with fix/cdc-run-start-marker, which writes a running manifest under the run's own key at start"
 )
@@ -78,9 +71,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     _open("live_cdc_mbt::open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot",
           "assertion `left == right` failed: stream differs from the source on negative TIME(1)/TIME(2) with a fraction",
           "TF-1 (consolidated-2026-11-03 section 2): mysql_common 0.37.3 binlog/misc.rs:35-39 subtracts 0x100 from a u32 fraction for a negative TIME(1)/TIME(2) with a fraction, so a debug rivet panics and a release rivet writes 625:04:19.277216 for -00:00:00.50 in a string column; a row of any table in the binlog panics every MySQL CDC run that reads it. Opened 2026-11-04; closes with fix/mysql-binlog-time-fraction"),
-    _open("live_cdc_mbt::open_defect_mysql_cdc_enum_set_labels_match_the_snapshot",
-          'rig oracle: VALUES: 6 source row(s) not delivered, 6 delivered row(s) not in the source; differing column(s) [\'e\', \'s\'] of [\'id\', \'e\', \'s\']; source-only [\'[["num", "1"], "C:\\\\\\\\temp", "p\\\\\\\\q,r\\\\ns"]\', \'[["num", "2"], "a\\\\nb", "r\\\\ns,t\\\\ru"]\', \'[["num", "3"], "c\\\\rd", "t\\\\ru,v\\\\u0000w"]\', \'[["num", ',
-          "TF-2 (consolidated-2026-11-03 section 2): parse_enum_labels (src/source/cdc/value.rs) reverses only the doubled quote of MySQL's append_unescaped, so a label holding a backslash, LF, CR or NUL reaches the stream with the catalog's escaping while the snapshot holds the stored label. Opened 2026-11-03; closes with fix/mysql-enum-label-escapes"),
     KnownRed("upgrade[oracle/cdc-load]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
@@ -93,24 +83,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("sentinels[rivet_sent_ts9/keyset]: SUCCEEDED WITH A CHANGED VALUE: `V` differs at ID=('num', '1'): source ' 2024-01-01 00:00:00.000000001' vs warehouse datetime.datetime(2024, 1, 1, 0, 0)",
              _TS9,
              _EXPIRES),
-    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
-          _HDW1_CONTRACT),
-    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
-          _HDW1_CONTRACT),
-    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
-          _HDW1_CONTRACT),
-    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
-          _HDW1_CONTRACT),
-    _open("live_operator_contract::open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle",
-          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_STATE_NOT_WRITABLE] (exit 1)",
-          _HDW1_CONTRACT),
-    _open("live_clickhouse_load::open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql",
-          "assertion `left == right` failed: the view's live rows must equal the source",
-          _HDW1_LOAD),
     _open("live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql",
           "the load beside the rolling run:",
           _CDC_START),
