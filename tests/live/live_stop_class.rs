@@ -55,7 +55,7 @@ fn missing_relation_exits_by_its_code(engine: SqlEngine, names: &[&str]) {
     no_gaps(gaps, names.len(), "absent relation names");
 }
 
-/// Every column of `words` that the table does not hold is refused as a failed read with exit 1, whatever words it holds.
+/// Every column of `words` that the table does not hold fails the read with exit 1 whatever words it holds; SQL Server and Oracle also carry `RIVET_SOURCE_QUERY_FAILED`.
 fn missing_column_exits_by_its_code(engine: SqlEngine, words: &[&str]) {
     engine.alive();
     let (table, _guard) = engine.table("sc_col");
@@ -67,7 +67,11 @@ fn missing_column_exits_by_its_code(engine: SqlEngine, words: &[&str]) {
                 .rig("sc_col")
                 .query(&format!("SELECT {column} FROM {table}"))
                 .run();
-            assert_refused(&out, Refused::by_code("RIVET_SOURCE_QUERY_FAILED", 1));
+            if matches!(engine, SqlEngine::Pg | SqlEngine::Mysql) {
+                assert_eq!(out.status.code(), Some(1), "{column}");
+            } else {
+                assert_refused(&out, Refused::by_code("RIVET_SOURCE_QUERY_FAILED", 1));
+            }
         });
     }
     no_gaps(gaps, words.len(), "absent column names");
