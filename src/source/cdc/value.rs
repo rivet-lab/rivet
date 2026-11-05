@@ -160,6 +160,11 @@ pub(crate) fn is_buildable(dt: &DataType) -> bool {
                 | DataType::Float32
                 | DataType::Float64
                 | DataType::Utf8
+                | DataType::Date32
+                | DataType::Time64(TimeUnit::Microsecond)
+                | DataType::Timestamp(TimeUnit::Microsecond, _)
+                | DataType::FixedSizeBinary(16)
+                | DataType::Binary
         );
     }
     matches!(
@@ -376,6 +381,14 @@ fn date_value(v: &RivetValue) -> Result<i32, String> {
     }
 }
 
+/// The UTC instant a timestamp cell stores, as microseconds since the epoch.
+fn timestamp_micros_value(v: &RivetValue) -> Result<i64, String> {
+    match v {
+        RivetValue::DateTime(d) => Ok(d.and_utc().timestamp_micros()),
+        _ => Err(NO_READING.into()),
+    }
+}
+
 /// The Time64 microseconds a time of day stores; a duration outside one day is refused.
 fn time_value(v: &RivetValue) -> Result<i64, String> {
     match v {
@@ -455,10 +468,7 @@ pub(crate) fn build_column(
         DataType::Timestamp(TimeUnit::Microsecond, tz) => {
             let arr = typed_col!(
                 TimestampMicrosecondBuilder::with_capacity(n),
-                |v: &RivetValue| match v {
-                    V::DateTime(d) => Ok(d.and_utc().timestamp_micros()),
-                    _ => Err(NO_READING.to_string()),
-                }
+                timestamp_micros_value
             );
             match tz {
                 Some(tz) => Arc::new(arr.with_timezone(tz.clone())),
@@ -677,7 +687,75 @@ fn build_list_column(
         }};
     }
 
+    macro_rules! list_mapped {
+        ($child:expr, $conv:expr, $b:ident, $x:ident => $push:expr) => {{
+            let mut lb = ListBuilder::new($child).with_field(field.clone());
+            for (row, c) in cells.iter().enumerate() {
+                match c {
+                    Some(v @ V::Array(elems)) => {
+                        for e in elems {
+                            if matches!(e, V::Null) {
+                                lb.values().append_null();
+                                continue;
+                            }
+                            match ($conv)(e) {
+                                Ok($x) => {
+                                    let $b = lb.values();
+                                    $push
+                                }
+                                Err(reason) => {
+                                    return Err(CellRefusal::new(
+                                        row,
+                                        v,
+                                        format!("has an element {:?} that {reason}", render_str(e)),
+                                    ));
+                                }
+                            }
+                        }
+                        lb.append(true);
+                    }
+                    None => lb.append(false),
+                    Some(other) => return Err(CellRefusal::new(row, other, NOT_ONE_DIMENSIONAL)),
+                }
+            }
+            Arc::new(lb.finish()) as ArrayRef
+        }};
+    }
+
     Ok(match field.data_type() {
+        DataType::Date32 => {
+            list_mapped!(Date32Builder::new(), date_value, b, x => b.append_value(x))
+        }
+        DataType::Time64(TimeUnit::Microsecond) => list_mapped!(
+            Time64MicrosecondBuilder::new(),
+            time_value,
+            b,
+            x => b.append_value(x)
+        ),
+        DataType::Timestamp(TimeUnit::Microsecond, tz) => list_mapped!(
+            TimestampMicrosecondBuilder::new().with_timezone_opt(tz.clone()),
+            timestamp_micros_value,
+            b,
+            x => b.append_value(x)
+        ),
+        DataType::FixedSizeBinary(16) => list_mapped!(
+            FixedSizeBinaryBuilder::new(16),
+            |e: &RivetValue| match e {
+                V::Bytes(by) => fixed_binary_bytes(by, 16).ok_or_else(|| NO_READING.to_string()),
+                _ => Err(NO_READING.to_string()),
+            },
+            b,
+            x => b.append_value(&x).expect("fixed_binary_bytes returns exactly 16 bytes")
+        ),
+        DataType::Binary => list_mapped!(
+            BinaryBuilder::new(),
+            |e: &RivetValue| match e {
+                V::Bytes(by) => Ok(by.clone()),
+                _ => Err(NO_READING.to_string()),
+            },
+            b,
+            x => b.append_value(x)
+        ),
         DataType::Boolean => list_col!(BooleanBuilder::new(), ListElem::Bool(x) => x),
         DataType::Int16 => list_col!(Int16Builder::new(), ListElem::I16(x) => x),
         DataType::Int32 => list_col!(Int32Builder::new(), ListElem::I32(x) => x),
@@ -1885,6 +1963,19 @@ mod tests {
             DataType::Timestamp(TimeUnit::Microsecond, None),
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         ];
+        let list = |t| DataType::List(Arc::new(arrow::datatypes::Field::new("item", t, true)));
+        let mut buildable = buildable.to_vec();
+        buildable.extend([
+            list(DataType::Date32),
+            list(DataType::Time64(TimeUnit::Microsecond)),
+            list(DataType::Timestamp(TimeUnit::Microsecond, None)),
+            list(DataType::Timestamp(
+                TimeUnit::Microsecond,
+                Some("UTC".into()),
+            )),
+            list(DataType::FixedSizeBinary(16)),
+            list(DataType::Binary),
+        ]);
         for dt in &buildable {
             assert!(is_buildable(dt), "is_buildable must accept {dt:?}");
             let arr = build("c", dt, &[None]).unwrap();
@@ -1898,9 +1989,102 @@ mod tests {
         for dt in [
             DataType::Date64,
             DataType::Timestamp(TimeUnit::Nanosecond, None),
+            list(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+            list(DataType::FixedSizeBinary(8)),
+            list(DataType::Time64(TimeUnit::Nanosecond)),
+            list(DataType::Decimal128(10, 2)),
         ] {
             assert!(!is_buildable(&dt), "is_buildable must reject {dt:?}");
         }
+    }
+
+    /// Date, time, timestamp, uuid and bytea list elements build to the stored values, with NULL elements, empty and NULL lists kept.
+    #[test]
+    fn temporal_uuid_and_bytea_lists_build_to_the_stored_values() {
+        use RivetValue as V;
+        use arrow::array::{Array, ListArray};
+        use arrow::datatypes::Field;
+        let day = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let uuid_bytes = vec![7u8; 16];
+        let cases = [
+            (
+                DataType::Date32,
+                V::DateTime(day.and_hms_opt(0, 0, 0).unwrap()),
+                "2024-01-02",
+            ),
+            (
+                DataType::Time64(TimeUnit::Microsecond),
+                V::TimeMicros(3_723_250_000),
+                "01:02:03.250",
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                V::DateTime(day.and_hms_micro_opt(3, 4, 5, 6).unwrap()),
+                "2024-01-02T03:04:05.000006",
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                V::DateTime(day.and_hms_micro_opt(3, 4, 5, 6).unwrap()),
+                "2024-01-02T03:04:05.000006Z",
+            ),
+            (
+                DataType::FixedSizeBinary(16),
+                V::Bytes(uuid_bytes.clone()),
+                "07070707070707070707070707070707",
+            ),
+            (DataType::Binary, V::Bytes(vec![0, 255]), "00ff"),
+        ];
+        for (elem, v, shown) in cases {
+            let dt = DataType::List(Arc::new(Field::new("item", elem.clone(), true)));
+            let cell = V::Array(vec![v.clone(), V::Null]);
+            let empty = V::Array(vec![]);
+            let arr = build_column(&dt, &[Some(&cell), Some(&empty), None])
+                .unwrap_or_else(|r| panic!("{elem}: {v:?} refused: {}", r.reason));
+            assert_eq!(arr.data_type(), &dt, "{elem}");
+            let lists = arr.as_any().downcast_ref::<ListArray>().unwrap();
+            assert_eq!(lists.value(0).len(), 2, "{elem}");
+            assert!(lists.value(0).is_null(1), "{elem}");
+            assert_eq!(lists.value(1).len(), 0, "{elem}");
+            assert!(lists.is_null(2), "{elem}");
+            let got = arrow::util::display::array_value_to_string(&lists.value(0), 0).unwrap();
+            assert_eq!(got, shown, "{elem}");
+        }
+    }
+
+    /// A list element its type cannot hold refuses the whole cell and names the element.
+    #[test]
+    fn an_unrepresentable_temporal_or_binary_list_element_is_refused() {
+        use RivetValue as V;
+        use arrow::datatypes::Field;
+        let day = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let list = |t| DataType::List(Arc::new(Field::new("item", t, true)));
+        let cases = [
+            (
+                list(DataType::Date32),
+                V::DateTime(day.and_hms_opt(1, 0, 0).unwrap()),
+            ),
+            (
+                list(DataType::Time64(TimeUnit::Microsecond)),
+                V::TimeMicros(86_400_000_000),
+            ),
+            (
+                list(DataType::Timestamp(TimeUnit::Microsecond, None)),
+                V::Int(1),
+            ),
+            (list(DataType::FixedSizeBinary(16)), V::Bytes(vec![1; 15])),
+            (list(DataType::FixedSizeBinary(16)), V::Int(1)),
+            (list(DataType::Binary), V::Int(1)),
+        ];
+        for (dt, elem) in cases {
+            let cell = V::Array(vec![elem.clone()]);
+            let r = build_column(&dt, &[Some(&cell)])
+                .expect_err(&format!("{dt}: {elem:?} must be refused"));
+            assert_eq!((r.row, &r.value), (0, &cell), "{dt}");
+            assert!(r.reason.starts_with("has an element"), "{}", r.reason);
+        }
+        let raw = V::Bytes(b"{2024-01-01,infinity}".to_vec());
+        let r = build_column(&list(DataType::Date32), &[Some(&raw)]).unwrap_err();
+        assert!(r.reason.contains("multi-dimensional"), "{}", r.reason);
     }
 
     /// Every typed arm refuses a mismatched non-NULL cell by name, and still nulls a genuine NULL.
