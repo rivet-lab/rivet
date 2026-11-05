@@ -2286,6 +2286,9 @@ fn collection_dropped_under_it() {
 /// Documents of the collection a held read finds dropped.
 const HELD_READ_DOCS: i64 = 1_500;
 
+/// The MongoDB options of a resumable keyset export, whose progress is bound to the collection it was written for.
+const KEYSET_RESUME: &str = "page_size: 1000, resume: true";
+
 /// What happens to the collection while the proxy holds the reads.
 #[derive(Clone, Copy)]
 enum UnderHold {
@@ -2293,7 +2296,7 @@ enum UnderHold {
     DroppedAndCreatedAgain,
 }
 
-/// A MongoDB export of `HELD_READ_DOCS` documents delivered once, then run again while a wire proxy holds `held` reads `pick` accepts and the collection is dropped, or dropped and created again with the same documents, under them: the second run is refused by code and leaves the first run's marker and manifests as they were, and with the collection put back a run delivers the source.
+/// A MongoDB export of `HELD_READ_DOCS` documents delivered once, then run again while a wire proxy holds `held` reads `pick` accepts and the collection is dropped, or dropped and created again with the same documents, under them: the second run is refused by code and leaves the first run's marker and manifests as they were, and with the collection put back a run delivers the source (a resumable keyset export first needs `rivet state reset`, its stored cursor being another stream's).
 fn collection_changed_under_a_held_read(
     opts: Option<&str>,
     parallel: Option<usize>,
@@ -2356,7 +2359,22 @@ fn collection_changed_under_a_held_read(
         "the run whose collection was dropped before a read changed the marker or manifests of the run before it"
     );
     m.seed_int_id("t", HELD_READ_DOCS);
-    recovers(&rig, &[]);
+    match opts {
+        Some(KEYSET_RESUME) => refused_as_another_stream_then_reset_recovers(&rig),
+        _ => recovers(&rig, &[]),
+    }
+}
+
+/// A run over a collection put back after the one a stored keyset cursor was written for is refused `RIVET_STATE_CURSOR_STREAM_MISMATCH`, every time, and after `rivet state reset` a run delivers the source.
+fn refused_as_another_stream_then_reset_recovers(rig: &Rig) {
+    for _ in 0..2 {
+        assert_refused(
+            &rig.run(),
+            Refused::by_code("RIVET_STATE_CURSOR_STREAM_MISMATCH", 5),
+        );
+    }
+    state(rig, "reset", rig.export_name());
+    recovers(rig, &[]);
 }
 
 /// The `_id` of every document the rig's manifests declare, as text, sorted.
@@ -2401,7 +2419,7 @@ fn collection_created_again_with_other_ids_after_a_refused_resume() {
     let hold = WireHold::holding(MONGO_PORT, a_later_keyset_page);
     let rig = Rig::mongo_batch("t")
         .source_url(&MongoTest::url(hold.port(), &db))
-        .mongo("page_size: 1000, resume: true");
+        .mongo(KEYSET_RESUME);
     let rig = stopped_mid_run(rig, &[Leftover::ResumePoint]);
     hold.arm();
     let met = rig.beside_a_live_run_over_a_source_taken(
@@ -2433,7 +2451,7 @@ fn collection_created_again_with_other_ids_after_a_refused_resume() {
                 "the run after the refusal is refused by the code of the stored progress:
 {said}"
             );
-            state(&rig, "reset", "t");
+            state(&rig, "reset", rig.export_name());
             ok(rig.run());
         }
     }
@@ -2477,11 +2495,9 @@ fn collection_dropped_after_the_run_ended() {
     let met = rig.beside_a_live_run_over_a_source_taken(
         &[],
         |_| true,
-        |_| {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            m.drop_collection("t");
-        },
+        |_| (),
         |_, ()| {
+            m.drop_collection("t");
             m.seed_int_id("t", DOCS);
             restored.set(true);
         },
@@ -5904,7 +5920,7 @@ fn a_table_dropped_under_a_live_run_delivers_or_fails_loudly_mongo() {
 #[ignore = "live: requires docker compose mongo"]
 fn a_collection_dropped_before_a_keyset_page_is_refused_by_code_mongo() {
     collection_changed_under_a_held_read(
-        Some("page_size: 1000, resume: true"),
+        Some(KEYSET_RESUME),
         None,
         a_later_keyset_page,
         1,
@@ -5934,7 +5950,7 @@ fn a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo() {
 #[ignore = "live: requires docker compose mongo"]
 fn a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo() {
     collection_changed_under_a_held_read(
-        Some("page_size: 1000, resume: true"),
+        Some(KEYSET_RESUME),
         None,
         a_later_keyset_page,
         1,
