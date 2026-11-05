@@ -2258,17 +2258,26 @@ fn map_pg_value(typ: &str, val: &str, quoted: bool) -> Option<RivetValue> {
 
 /// True when an array of `inner` becomes a CDC list column; other arrays travel as the server's own literal text.
 fn array_elem_is_listed(inner: &str) -> bool {
-    ![
-        "timestamp",
-        "time",
+    const NATIVE: [&str; 6] = [
         "date",
+        "time without time zone",
+        "timestamp without time zone",
+        "timestamp with time zone",
         "uuid",
         "bytea",
-        "numeric",
-        "money",
-    ]
-    .iter()
-    .any(|p| inner.starts_with(p))
+    ];
+    NATIVE.contains(&inner)
+        || ![
+            "timestamp",
+            "time",
+            "date",
+            "uuid",
+            "bytea",
+            "numeric",
+            "money",
+        ]
+        .iter()
+        .any(|p| inner.starts_with(p))
 }
 
 /// Parse a PG array literal (`{alpha,"with,comma","he said \"hi\"",NULL}`)
@@ -3256,11 +3265,10 @@ mod tests {
     #[test]
     fn an_unlisted_array_keeps_the_servers_own_literal() {
         for (typ, lit) in [
-            ("date[]", "{2024-01-01,NULL}"),
-            ("timestamp without time zone[]", "{\"2024-01-01 12:00:00\"}"),
-            ("uuid[]", "{550e8400-e29b-41d4-a716-446655440000}"),
             ("numeric[]", "{1.50,2}"),
-            ("bytea[]", "{\"\\\\x00ff\"}"),
+            ("money[]", "{$1.50}"),
+            ("time with time zone[]", "{12:00:00+00}"),
+            ("daterange[]", "{\"[2024-01-01,2024-02-01)\"}"),
         ] {
             assert_eq!(
                 map_pg_value(typ, lit, false),
@@ -3275,6 +3283,102 @@ mod tests {
                 RivetValue::Null
             ]))
         );
+    }
+
+    /// Date, time, timestamp, uuid and bytea arrays parse to the typed elements their list column holds.
+    #[test]
+    fn temporal_uuid_and_bytea_arrays_parse_to_typed_elements() {
+        let day = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        assert_eq!(
+            map_pg_value("date[]", "{2024-01-01,NULL}", false),
+            Some(RivetValue::Array(vec![
+                RivetValue::DateTime(day.and_hms_opt(0, 0, 0).unwrap()),
+                RivetValue::Null,
+            ]))
+        );
+        assert_eq!(
+            map_pg_value(
+                "timestamp without time zone[]",
+                "{\"2024-01-01 12:00:00.5\"}",
+                false
+            ),
+            Some(RivetValue::Array(vec![RivetValue::DateTime(
+                day.and_hms_micro_opt(12, 0, 0, 500_000).unwrap()
+            )]))
+        );
+        assert_eq!(
+            map_pg_value(
+                "timestamp with time zone[]",
+                "{\"2024-01-01 12:00:00+02\"}",
+                false
+            ),
+            Some(RivetValue::Array(vec![RivetValue::DateTime(
+                day.and_hms_opt(10, 0, 0).unwrap()
+            )]))
+        );
+        assert_eq!(
+            map_pg_value("time without time zone[]", "{01:02:03.25}", false),
+            Some(RivetValue::Array(vec![RivetValue::TimeMicros(
+                3_723_250_000
+            )]))
+        );
+        assert_eq!(
+            map_pg_value(
+                "uuid[]",
+                "{550e8400-e29b-41d4-a716-446655440000,NULL}",
+                false
+            ),
+            Some(RivetValue::Array(vec![
+                RivetValue::Bytes(vec![
+                    0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55,
+                    0x44, 0x00, 0x00
+                ]),
+                RivetValue::Null,
+            ]))
+        );
+        assert_eq!(
+            map_pg_value("bytea[]", "{\"\\\\x00ff\",\"\\\\x\"}", false),
+            Some(RivetValue::Array(vec![
+                RivetValue::Bytes(vec![0x00, 0xff]),
+                RivetValue::Bytes(Vec::new()),
+            ]))
+        );
+    }
+
+    /// An infinite date or timestamp inside an array leaves the literal whole, so the sink refuses the cell by name.
+    #[test]
+    fn an_infinite_element_keeps_the_array_literal_whole() {
+        for (typ, lit) in [
+            ("date[]", "{2024-01-01,infinity}"),
+            ("timestamp without time zone[]", "{\"-infinity\"}"),
+        ] {
+            assert_eq!(
+                map_pg_value(typ, lit, false),
+                Some(RivetValue::Bytes(lit.as_bytes().to_vec())),
+                "{typ}"
+            );
+        }
+    }
+
+    /// Only the exact element names the batch export maps natively become list columns.
+    #[test]
+    fn array_elem_is_listed_matches_the_native_set_exactly() {
+        for inner in [
+            "date",
+            "time without time zone",
+            "timestamp without time zone",
+            "timestamp with time zone",
+            "uuid",
+            "bytea",
+            "text",
+            "integer",
+            "tstzrange",
+        ] {
+            assert!(array_elem_is_listed(inner), "{inner}");
+        }
+        for inner in ["numeric", "money", "time with time zone", "daterange"] {
+            assert!(!array_elem_is_listed(inner), "{inner}");
+        }
     }
 
     proptest::proptest! {

@@ -1,0 +1,105 @@
+[graph]
+all-features = true
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa timing side channel, no upstream fix; reached only by GCS service-account JWT signing via opendal/reqsign, a batch CLI with a handful of signatures (review 2027-02-04)" },
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; proc-macro under parquet, no runtime code ships (review 2027-02-04)" },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained via serde_yaml_ng; parses operator-written config only, parser swap tracked in #724 (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic duplicate-attribute check; reqsign pins 0.37 and opendal 0.38, fix needs >= 0.41, DoS-class from an operator-configured endpoint (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace-declaration allocation; same pins as RUSTSEC-2026-0194 (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0391", reason = "zstd stream context reuse leak; fresh Decoder per payload on the MySQL binlog path, fix needs zstd 0.14 which mysql_common 0.37 and parquet 59 block, #724 (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0395", reason = "zstd-safe StableInBuffer on CCtx; experimental feature off, encoder only (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0396", reason = "zstd-safe Seekable reads; seekable feature off (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0397", reason = "zstd-safe OutBuffer::around_pos; the decoder uses OutBuffer::around (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe Seekable::decompress; seekable feature off (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0399", reason = "zstd-safe init_using_cdict/ddict; no dictionaries used (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0400", reason = "zstd-safe dictionary after a one-shot call; no dictionaries used (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0401", reason = "zstd-safe train_from_buffer; zdict training is not called (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0402", reason = "zstd-safe CCtx::try_clone; encoder only, experimental feature off (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe uninitialised memory on a failed legacy-frame decode; bulk API unaffected (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0404", reason = "zstd-safe DCtx::try_clone; not called (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0405", reason = "zstd-safe InBuffer::pos out of range; the decoder uses InBuffer::around (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0406", reason = "zstd-safe multithreaded CCtx with an unfinished frame; zstdmt off, encoder only (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0442", reason = "RUSTSEC-2026-0442 accepted 2026-11-05: rivet never builds RunEndEncoded arrays, so unreachable; arrow stays at =59.0.0 until the upstream parquet writer memory regression (59.2.0+) is fixed, then the pin moves to the fixed release. Review 2026-11-19." },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "UPL-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "deny"
+wildcards = "allow"
+highlight = "all"
+skip = [
+    { crate = "aes@0.8.4", reason = "older aes held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "atoi@2.0.0", reason = "older atoi held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "base64@0.22.1", reason = "older base64 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "block-buffer@0.10.4", reason = "older block-buffer held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "block-padding@0.3.3", reason = "older block-padding held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "cbc@0.1.2", reason = "older cbc held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "cipher@0.4.4", reason = "older cipher held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "const-oid@0.9.6", reason = "older const-oid held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "core-foundation@0.9.4", reason = "older core-foundation held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "cpufeatures@0.2.17", reason = "older cpufeatures held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "crypto-common@0.1.7", reason = "older crypto-common held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "der@0.7.10", reason = "older der held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "digest@0.10.7", reason = "older digest held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "fallible-iterator@0.2.0", reason = "older fallible-iterator held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "getrandom@0.2.17", reason = "older getrandom held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "getrandom@0.3.4", reason = "older getrandom held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "hashbrown@0.14.5", reason = "older hashbrown held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "hashbrown@0.16.1", reason = "older hashbrown held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "hmac@0.12.1", reason = "older hmac held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "inout@0.1.4", reason = "older inout held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "md-5@0.10.6", reason = "older md-5 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "openssl-probe@0.1.6", reason = "older openssl-probe held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "pbkdf2@0.12.2", reason = "older pbkdf2 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "pem@3.0.6", reason = "older pem held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "pem-rfc7468@0.7.0", reason = "older pem-rfc7468 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "phf@0.12.1", reason = "older phf held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "phf_shared@0.12.1", reason = "older phf_shared held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "pkcs5@0.7.1", reason = "older pkcs5 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "pkcs8@0.10.2", reason = "older pkcs8 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "quick-xml@0.37.5", reason = "older quick-xml held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "r-efi@5.3.0", reason = "older r-efi held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "rand@0.8.8", reason = "older rand held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "rand@0.9.5", reason = "older rand held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "rand_chacha@0.3.1", reason = "older rand_chacha held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "rand_core@0.6.4", reason = "older rand_core held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "rand_core@0.9.5", reason = "older rand_core held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "salsa20@0.10.2", reason = "older salsa20 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "scrypt@0.11.0", reason = "older scrypt held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "sha1@0.10.7", reason = "older sha1 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "sha2@0.10.9", reason = "older sha2 held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "spki@0.7.3", reason = "older spki held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "syn@2.0.119", reason = "older syn held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "wasi@0.11.1+wasi-snapshot-preview1", reason = "older wasi held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+    { crate = "windows-sys@0.52.0", reason = "older windows-sys held by a dependency pin; baseline 2026-11-04, closes when the tree converges (review 2027-02-04)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# 2026-11-04: the mysql_common fork pins a one-line fix for a negative TIME(1)/(2) binlog fraction (upstream blackbeam/rust_mysql_common#200); drop this entry and the [patch] with the upstream release.
+allow-git = ["https://github.com/rivet-lab/rust_mysql_common"]

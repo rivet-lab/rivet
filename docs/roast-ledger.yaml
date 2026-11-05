@@ -65,14 +65,30 @@ entries:
     status: done
     verdict: "orphans re-checked with git grep; the derived step runs every script that handles --self-test"
     closes: "merged as #744"
+  - id: HDW-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: a CDC run may write without a ledger row, and a load consumes any run the ledger does not list
+    copies: [src/pipeline/cdc_job.rs:116, src/pipeline/job.rs:871, src/load/reconcile.rs:493, src/load/orchestrate.rs:814, src/load/orchestrate.rs:1103, src/load/orchestrate.rs:1172, src/load/staging.rs:80, src/load/staging.rs:166, src/load/staging.rs:423]
+    status: done
+    verdict: "confirmed by the load_ledger_tests probe: with no running row the second load of a grown CDC run selects [] and records it consumed"
+    closes: "merged as #801 (780ef5e7): CDC begins through ledger_begin_run (src/pipeline/job.rs:873, called at src/pipeline/cdc_job.rs:114) and bucket_writers (src/load/staging.rs:56, unlisted_cdc_runs) owns the CDC no-row rule; run-closing and run-still-writing hold no exceptions in docs/seams.yaml; the gc_orphans first-part gap stays open as CDC-RUN-START"
+  - id: TF-2
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: MySQL CDC unescapes only doubled quotes in ENUM and SET labels read from COLUMN_TYPE
+    copies: [src/source/cdc/value.rs:832]
+    status: done
+    verdict: "confirmed against rivet code and the MySQL 8.0 and 8.4 append_unescaped source: a label with a backslash, LF, CR or NUL differs between stream and snapshot"
+    closes: "merged as #807 (25f7db09): parse_enum_labels (src/source/cdc/value.rs:827) reverses the doubled quote, backslash, LF, CR and NUL escapes; the lib cells every_append_unescaped_escape_is_reversed_in_an_enum_label and _in_a_set_member and the live cell mysql_cdc_enum_set_labels_match_the_snapshot hold it"
   - id: HCF-1
     date: 2026-11-03
     lens: seam packaging 2026-11-03
     title: numeric config counts, spans and ratios are range-checked and converted in each reader instead of one table
     copies: [src/pipeline/chunked/detect.rs:401, src/pipeline/chunked/detect.rs:424, src/pipeline/chunked/math.rs:31, src/preflight/analysis.rs:502, src/cli/dispatch.rs:454, src/plan/build.rs:438, src/quality.rs:269]
-    status: accepted-as-bugfix
+    status: done
     verdict: "confirmed: chunk_size 2^63 plans 0 windows and exits 0 with 0 rows; chunk_count over a full key range panics in debug and names the knob already set in release; --rollover 0 is accepted where the config refuses it"
-    closes: "src/config/quantity.rs holds every count, span and ratio knob and every copy routes through it; HCF-8, HCF-4 and HCF-3 close with it"
+    closes: "merged as #802 (ad96fe21): src/config/quantity.rs holds every count, span and ratio knob, every copy routes through it and the config-knob-quantity seam holds no exceptions; HCF-8, HCF-4 and HCF-3 closed with it"
   - id: CDC-RUN-START
     date: 2026-11-03
     lens: seam packaging 2026-11-03
@@ -81,3 +97,35 @@ entries:
     status: deferred-past-gate
     verdict: "confirmed live: a gc_orphans load between the first roll's upload and its manifest removed 1 orphan part (HDW-1 rework run, MySQL CDC); open_defect cells on MySQL and PostgreSQL"
     closes: "fix/cdc-run-start-marker: the CDC sink writes a running manifest under the run's own key at start, the first Success rewrite supersedes it, a stale one is closed by state finish-run; bucket_writers then sees the run from its first byte"
+  - id: MYSQL-COMMON-LEGACY-TIME
+    date: 2026-11-04
+    lens: fix/mysql-binlog-time-fraction follow-up
+    title: the mysql_common legacy MYSQL_TYPE_TIME arm reads LeU24 unsigned and ignores the sign
+    copies: [src/binlog/value.rs:100-107 of the mysql_common crate]
+    status: deferred-past-gate
+    verdict: "read in the crate source, not run: affects only pre-5.6.4 temporal columns (MySQL 5.7), not 8.0; re-read 2026-11-05 in the pinned fork a660b506 (Cargo.toml [patch.crates-io]): the MYSQL_TYPE_TIME arm at src/binlog/value.rs:100-108 still reads LeU24 and builds Time(false, ...)"
+    closes: "an upstream fix to the legacy arm taken into the fork, or a property test over arbitrary binlog TIME bytes against the patched fork; no cell exists for it today"
+  - id: CKPT-BUSY
+    date: 2026-11-04
+    lens: harness flake 2026-11-04
+    title: a SQLite replan beside a concurrent writer of the state can still get SQLITE_BUSY on a loaded runner
+    copies: [src/state/checkpoint.rs:936]
+    status: deferred-past-gate
+    verdict: "seen in CI run 41826246423 (Mutants, shard 0, unmutated baseline): a_replan_beside_another_writer_of_the_state_waits_for_it reported 1 of 1000 replans failed beside 56643 writes: database is locked; the file is unchanged by the PR that saw it"
+    closes: "the residual busy is named: the forced-order cells a_replan_beside_a_writer_that_never_lets_go_gets_its_turn and a_replan_beside_a_writer_slower_than_the_turn_patience_gets_its_turn (src/state/checkpoint.rs:949, :995; #638, #663) already hold the writer across the replan and pass, so the sighting needs a holder they do not model (a failure log that names the holder, or a stall past the busy timeout on a loaded runner); until then the 1000-try cell stays the only cover of it"
+  - id: TF-2b
+    date: 2026-11-04
+    lens: seam packaging 2026-11-03
+    title: a MySQL ENUM or SET label with a utf8mb4 4-byte character converts to a question mark in the catalog text, so a CDC run delivers a wrong label with exit 0
+    copies: [src/source/cdc/value.rs:832]
+    status: deferred-past-gate
+    verdict: "stated in the TF-2 PR body (#807) and not reproduced on a binary: the catalog text is utf8mb3, the 4-byte character is not representable there; re-checked 2026-11-05 on main: the labels still come from COLUMN_TYPE (parse_enum_labels, src/source/cdc/value.rs:827), mysql_common exposes ENUM_STR_VALUE and SET_STR_VALUE (consts.rs:521, table_map_event.rs:626 and :767 of the pinned fork) and the MySQL source already refuses a server whose binlog_row_metadata is not FULL (src/source/mysql/cdc.rs:432), so the follow-up is unblocked"
+    closes: "read the labels from the binlog TABLE_MAP optional metadata ENUM_STR_VALUE and SET_STR_VALUE instead of COLUMN_TYPE, the same follow-up that lifts the hex label refusal"
+  - id: HFF-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: a destination's named credential signs the object-store leg only, so the BigQuery load and its pin sign as the ambient identity; an S3 aws_profile beside env keys is accepted and the keys are ignored
+    copies: [src/load/bq_rest.rs:169, src/destination/s3.rs:92, src/config/mod.rs:1291]
+    status: done
+    verdict: "confirmed: with credentials_file naming a service-account key every BigQuery request carried the ambient token; S3 aws_profile with access_key_env and secret_key_env signed with the profile alone and check exited 0; opened as live cells on PostgreSQL and in-crate against bq_rest::stand"
+    closes: "merged as #829 (e155de82): DestinationCredential::choose (src/config/destination_credential.rs:28) is the one reader of the destination's credential fields and a combination that names two identities is refused by RIVET_CONFIG_DESTINATION_AUTH_INVALID; HFF-1 and HFF-2 closed with it"

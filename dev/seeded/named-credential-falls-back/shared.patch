@@ -11,13 +11,13 @@ index 0fabe968..0fe30e79 100644
      }
  
 diff --git a/src/destination/gcs.rs b/src/destination/gcs.rs
-index b4bcb54e..23d6a9de 100644
+index 9fc284ac..282691fc 100644
 --- a/src/destination/gcs.rs
 +++ b/src/destination/gcs.rs
-@@ -241,11 +241,7 @@ impl CloudBackend for GcsBackend {
+@@ -242,11 +242,7 @@ impl CloudBackend for GcsBackend {
                  .disable_config_load();
              log::info!("GCS: allow_anonymous (emulator mode; no OAuth / service account)");
-         } else if let Some(cred_file) = &config.credentials_file {
+         } else if let DestinationCredential::GcsKeyFile(cred_file) = &credential {
 -            crate::config::credential_file::google_key("destination.credentials_file", cred_file)?;
 -            builder = builder
 -                .credential_path(cred_file)

@@ -129,6 +129,23 @@ impl Rig {
                 "{{ type: gcs, bucket: {bucket}, prefix: \"{prefix}/{export}{slash}\", \
                  endpoint: \"{endpoint}\", allow_anonymous: true }}"
             ),
+            Some(CloudDest::S3Profile {
+                bucket,
+                prefix,
+                endpoint,
+                profile,
+                keys,
+            }) => {
+                let keys = if *keys {
+                    "access_key_env: RIVET_TEST_MINIO_AK, secret_key_env: RIVET_TEST_MINIO_SK, "
+                } else {
+                    ""
+                };
+                format!(
+                    "{{ type: s3, bucket: {bucket}, prefix: \"{prefix}/{export}{slash}\", region: us-east-1, \
+                     endpoint: \"{endpoint}\", {keys}aws_profile: {profile} }}"
+                )
+            }
             Some(CloudDest::GcsLive { bucket, prefix }) => {
                 format!("{{ type: gcs, bucket: {bucket}, prefix: \"{prefix}/{export}{slash}\" }}")
             }

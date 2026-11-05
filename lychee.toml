@@ -1,7 +1,7 @@
 max_redirects = 5
+# 2026-11-05 (review 2026-12-01): dev/docgen/config_md.py links type names to anchors the generated page never defines; closes when it links the section headings
+exclude_path = ['docs/reference/config-reference\.md']
 exclude = [
-  # 2026-11-04 (review 2026-12-01): dev/docgen/config_md.py links type names to anchors the generated page never defines; closes when it links the section headings
-  'reference/config-reference\.md#',
   # 2026-11-04 (review 2027-02-01): CHANGELOG history names files deleted since; history is not rewritten
   'docs/bench/reports/REPORT_mssql\.md',
   'docs/benchmark_report_v0\.5\.x\.md',

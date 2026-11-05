@@ -1029,10 +1029,11 @@ engines. What remains:
   before-images need `binlog_row_image=FULL` (MySQL) / `REPLICA IDENTITY FULL`
   (PostgreSQL); otherwise only key columns are carried.
 - **Type parity with the batch export**: every type both modes deliver —
-  including PostgreSQL arrays of text and numbers (real `List` columns, inner
-  NULLs preserved) and `NUMERIC`/`DECIMAL` above precision 38 (`Decimal256`) —
-  is byte-identical to the batch export. Where the modes differ today (PostgreSQL
-  bare `numeric`, `money`, `inet`, `cidr` and temporal/uuid/bytea/numeric arrays:
+  including PostgreSQL arrays of text, numbers, dates, times, timestamps, uuids
+  and bytea (real `List` columns, inner NULLs preserved) and `NUMERIC`/`DECIMAL`
+  above precision 38 (`Decimal256`) — is byte-identical to the batch export.
+  Where the modes differ today (PostgreSQL
+  bare `numeric`, `money`, `inet`, `cidr` and numeric arrays:
   batch refuses the column, CDC carries the server's text) the difference is
   declared in `docs/type-capability-matrix.yaml`. Enforced per engine by the live
   `*_batch_and_cdc_deliver_every_ledger_row_alike` tests, generated from that

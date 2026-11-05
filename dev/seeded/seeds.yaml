@@ -3258,6 +3258,22 @@ seeds:
         na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
       oracle:
         na: "Oracle has no TIME type, and the MySQL cell fix does not run"
+  - name: mysql-binlog-negative-time-fraction
+    class: "a dependency's decoder of a binary wire value mis-reads a sign-and-fraction encoding at the edge of its range, so the stream leg of one engine delivers or crashes on a value the snapshot leg of the same engine reads as stored"
+    history: "2026-11-04 - TF-1: mysql_common 0.37.3 subtracted 0x100 from a u32 fraction byte for a negative MySQL TIME(1)/TIME(2) with a fraction, so a debug rivet panicked and a release rivet read about 625 hours; closed by the rivet-lab/rust_mysql_common pin, the seed removes the pin"
+    scope: source
+    patch: mysql-binlog-negative-time-fraction/shared.patch
+    engines:
+      postgres:
+        na: "a PostgreSQL `time` is a time of day and is never negative; the MySQL binlog decoder does not run"
+      mysql:
+        cells: [mysql_cdc_negative_time_fraction_matches_the_snapshot]
+      mssql:
+        na: "a SQL Server `time` is a time of day and is never negative; the MySQL binlog decoder does not run"
+      mongo:
+        na: "a MongoDB change row is two text cells; the MySQL binlog decoder does not run"
+      oracle:
+        na: "Oracle has no TIME type; the MySQL binlog decoder does not run"
   - name: cursor-past-manifest-continued
     class: a stored incremental cursor past the `cursor_high` of the destination's success manifest is continued from, so the rows between are never delivered
     history: "2026-10-15 - `last_cursor_value` edited to N+2 after a run that delivered 1..=N: exit 0 with `COUNT(*): source 43, delivered 41` on PostgreSQL, MySQL and SQL Server, through 0.31.0 (open_defect_a_cursor_moved_forward_delivers_or_refuses_*); fixed by refuse_a_cursor_past_the_manifest at the one claim seam every batch run passes"
@@ -4531,6 +4547,23 @@ seeds:
       mongo:
         na: "the change stream carries no statement text: this path is never reached"
 
+  - name: mysql-enum-label-escapes-unread
+    class: "an ENUM or SET label read from the catalog's COLUMN_TYPE keeps the escapes MySQL's append_unescaped wrote (a doubled backslash, a backslash-n for LF, backslash-r for CR, backslash-0 for NUL), so the CDC stream delivers a label that differs from the stored label the snapshot delivers, exit 0"
+    history: "TF-2, seam packaging 2026-11-03 - RED on main 2026-11-03 (the rig oracle: 6 source rows not delivered, differing columns e and s, delivered labels with doubled backslashes)"
+    scope: source
+    engines:
+      mysql:
+        patch: mysql-enum-label-escapes-unread/mysql.patch
+        cells: [mysql_cdc_enum_set_labels_match_the_snapshot, "lib:every_append_unescaped_escape_is_reversed_in_an_enum_label", "lib:every_append_unescaped_escape_is_reversed_in_a_set_member"]
+      postgres:
+        na: "an enum label arrives in the logical stream as stored text, with no catalog escaping to reverse: this path is never reached"
+      mssql:
+        na: "SQL Server has no ENUM or SET type: this path is never reached"
+      oracle:
+        na: "Oracle has no ENUM or SET type: this path is never reached"
+      mongo:
+        na: "a MongoDB document carries no ENUM or SET column: this path is never reached"
+
   - name: manifest-census-reads-unfiltered
     class: "a reader of the run manifests under one prefix counts a Failed attempt or a foreign export's unit, so validate --depth full fails a healthy prefix on parts gc collected, and a foreign unit tiles a gap a split export still has"
     history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: a Failed unit manifest whose parts gc had collected made validate --depth full exit 1 (could not verify), and completed_units_tile counted a foreign family's unit; closed 2026-11-01 by routing the readers through ManifestCensus::succeeded / completed / completed_split_units"
@@ -4579,6 +4612,61 @@ seeds:
         cells: ["lib:postgres_state_decides_liveness_by_literal_path_containment", "lib:postgres_state_cleanup_and_gc_follow_the_literal_prefix"]
       sqlite-state:
         cells: ["lib:sqlite_state_decides_liveness_by_literal_path_containment", "lib:sqlite_state_cleanup_and_gc_follow_the_literal_prefix"]
+
+  - name: cdc-run-without-ledger-row
+    class: "a CDC run whose run-status row the state does not take reads its stream and writes anyway, so a load that trusts the ledger cannot tell the run from a finished one"
+    history: "found 2026-11-03 by the seam packaging pass (HDW-1): cdc_job begin_run_under_lease was warn-only while batch ledger_begin_run refused; RED on main 2026-11-03 (a CDC run over a state that refuses run_status ended exit 0 with the change written)"
+    scope: source
+    patch: cdc-run-without-ledger-row/shared.patch
+    engines:
+      postgres:
+        cells: [a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres]
+      mysql:
+        cells: [a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql]
+      mssql:
+        cells: [a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql]
+      mongo:
+        cells: [a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo]
+      oracle:
+        cells: [a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle]
+
+  - name: load-consumes-cdc-run-without-ledger-row
+    class: "a load records a CDC run consumed when the ledger holds no row for it, so the parts the run writes in later rolls are never loaded and the next load prints up to date, exit 0"
+    history: "found 2026-11-03 by the seam packaging pass (HDW-1): the second load of a grown CDC run selected [] and recorded it consumed; RED on main 2026-11-03 (the warehouse held ids 1..8 of the source's 1..14)"
+    scope: source
+    patch: load-consumes-cdc-run-without-ledger-row/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part", "lib:a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists"]
+      mysql:
+        cells:
+          - a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql
+          - "lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part"
+          - "lib:a_load_overlapping_a_cdc_run_over_a_foreign_state_delivers_every_part"
+          - "lib:a_cdc_run_with_no_row_is_consumed_once_a_newer_run_exists_and_not_before"
+      mssql:
+        cells: ["lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part", "lib:a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists"]
+      mongo:
+        cells: ["lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part", "lib:a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists"]
+      oracle:
+        cells: ["lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part", "lib:a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists"]
+
+  - name: gc-and-cleanup-spare-unlisted-cdc-run
+    class: "a load's orphan sweep and its source-cleanup gate read only running markers, so a CDC run no ledger row accounts for loses a part it uploaded and has not manifested yet"
+    history: "found 2026-11-03 by the verifier of PR 801 (HDW-1 rework): maybe_gc_orphans and prefix_has_active_run read has_active_running_manifest while the load's own guards read bucket_writers; RED 2026-11-03 (the foreign-state load with gc_orphans removed the part and the warehouse lacked the run's rows)"
+    scope: source
+    patch: gc-and-cleanup-spare-unlisted-cdc-run/shared.patch
+    engines:
+      postgres:
+        cells: [a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_postgres, "lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
+      mysql:
+        cells: [a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_mysql, "lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
+      mssql:
+        cells: ["lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
+      mongo:
+        cells: ["lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
+      oracle:
+        cells: ["lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
 
   - name: config-knob-range-unchecked
     class: "a count or ratio knob is read without its range: a `chunk_size` of 2^63 or more wraps to a zero window and the run ends exit 0 with 0 rows, `--rollover 0`, Mongo `page_size: 0` and a `quality.null_ratio_max` of NaN, infinity or outside 0 to 1 are accepted"
@@ -4647,3 +4735,80 @@ seeds:
         cells: [check_refuses_a_timestamp_with_a_time_declared_date_oracle]
       mongo:
         na: "a document source has no declared column wire type: the probe returns before it reads a row (source_type == Mongo)"
+
+  - name: destination-credential-read-by-one-leg
+    class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
+    history: "2026-11-03 seam packaging HFF-1 and HFF-2: with `credentials_file:` naming a service-account key every BigQuery request of `rivet load` carried the ambient ADC token; an S3 `aws_profile` beside `access_key_env` and `secret_key_env` signed with the profile alone and `rivet check` exited 0"
+    scope: destination
+    patch: destination-credential-read-by-one-leg/shared.patch
+    engines:
+      local:
+        na: "the seed edits the BigQuery token source and the credential chooser; a local directory names no credential"
+      s3:
+        cells:
+          - "an_s3_profile_beside_env_keys_is_refused"
+          - "lib:two_named_identities_are_refused_by_code"
+      gcs:
+        cells:
+          - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
+          - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
+      azure:
+        na: "the seed edits the BigQuery token source and the S3 arm of the chooser; the Azure arm already refused key beside SAS before the chooser"
+      stdout:
+        na: "the seed edits the BigQuery token source and the credential chooser; stdout names no credential"
+      lib:
+        cells:
+          - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
+          - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
+          - "lib:two_named_identities_are_refused_by_code"
+
+  - name: pg-temporal-uuid-bytea-array-refused
+    class: "a PostgreSQL date[], time[], timestamp[], timestamptz[], uuid[] or bytea[] column is refused by the batch export instead of being delivered as a native list"
+    history: "type-known-defects cluster C7 (2026-11-05); RED from this patch: the batch export of a date[] column stops with the element-type refusal and the ledger test fails on the six array rows"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-temporal-uuid-bytea-array-refused/postgres.patch
+        cells: [postgres_batch_and_cdc_deliver_every_ledger_row_alike]
+      mysql:
+        na: "the seed edits the PostgreSQL list builder; MySQL has no array column type"
+      mssql:
+        na: "the seed edits the PostgreSQL list builder; SQL Server has no array column type"
+      oracle:
+        na: "the seed edits the PostgreSQL list builder; an Oracle collection column is refused by type, not built as a list"
+      mongo:
+        na: "the seed edits the PostgreSQL list builder; a MongoDB array is a value inside the one document column, never a list column"
+
+  - name: batch-runner-stores-state-before-the-cross-shape-refusal
+    class: a batch run onto a prefix that holds another shape's manifest stores its plan, anchor or cursor before the refusal, so a refused run leaves that resume point behind
+    history: "known defect in tests/offline/rig_oracle_ratchet.rs since the cross-shape guard landed: a parallel chunk-checkpoint run refused for a CDC manifest left an in_progress chunk run with pending tasks; the keyset runners (every engine, MongoDB included) opened their guarded frame after their resume run id, ranges or anchor were written, and a skip_empty run with no rows never opened it; on main and on v0.32.2"
+    scope: source
+    patch: batch-runner-stores-state-before-the-cross-shape-refusal/shared.patch
+    engines:
+      postgres:
+        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_postgres]
+      mysql:
+        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mysql]
+      mssql:
+        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mssql]
+      oracle:
+        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_oracle]
+      mongo:
+        cells: [a_mongo_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored]
+
+  - name: number-text-without-its-label
+    class: "an Oracle NUMBER that no fixed-scale decimal holds (bare NUMBER, FLOAT, precision above 38) is written as plain decimal text in a Utf8 column without the rivet.text_form = decimal_plain label, in batch and in CDC alike, so a reader cannot tell the canonical text from a free string"
+    history: "type-known-defects oracle:NUMBER of docs/type-capability-matrix.yaml (ADR-0038 CP5); RED on main 2026-11-05 (the ledger row without its marker fails oracle_batch_and_cdc_deliver_every_ledger_row_alike: delivery text, target decimal_plain)"
+    scope: source
+    engines:
+      postgres:
+        na: "the seed edits the Oracle NUMBER mapping; a PostgreSQL numeric without a declared precision is read by the PostgreSQL mapper, never by the Oracle one"
+      mysql:
+        na: "the seed edits the Oracle NUMBER mapping, which no MySQL column reaches; DECIMAL carries its precision and scale natively"
+      mssql:
+        na: "the seed edits the Oracle NUMBER mapping, which no SQL Server column reaches; decimal carries its precision and scale natively"
+      mongo:
+        na: "the seed edits the Oracle NUMBER mapping, which no MongoDB value reaches; Decimal128 is delivered natively"
+      oracle:
+        patch: number-text-without-its-label/oracle.patch
+        cells: [oracle_batch_and_cdc_deliver_every_ledger_row_alike, "lib:a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not"]
