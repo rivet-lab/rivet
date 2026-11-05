@@ -19,10 +19,21 @@ extend-ignore-re = [
   'Nam libero tempore[^"]*',
   'Nulla facilisi',
   'METADATAtailtail',
+  'pg_fo_(ckpt|nockpt|follow)',
+  '\bnd_schema\b|rivet_nd_slot',
+  'mons\?\(\?:ths\?\)\?',
+  '"rror" in l',
+  '`ture`',
+  'validat\.\*pass\|pass\.\*validat',
+  'fixe\[sd\]',
+  '\|certificat\|',
+  'rivet_cdc_inh',
+  '`brin`',
+  '\(DAA\)',
 ]
 extend-ignore-identifiers-re = [
-  '\w*(childs|processs|familys)(_\w*)?',
-  '(acccess_key_env|checkpont|qeury|colum|oders|SELCT|SELET|SELEC|selec|fromt|postgress|compre)',
+  '^\w*(childs|processs|familys)(_\w*)?$',
+  '^(acccess_key_env|checkpont|qeury|colum|oders|SELCT|SELET|SELEC|selec|fromt|postgress|compre)$',
 ]
 
 [default.extend-words]
@@ -32,25 +43,9 @@ lits = "lits"
 tme = "tme"
 strat = "strat"
 lok = "lok"
-fo = "fo"
-nd = "nd"
-inh = "inh"
-brin = "brin"
 alikes = "alikes"
 aks = "aks"
-gti = "gti"
-daa = "daa"
-ths = "ths"
-rror = "rror"
-ture = "ture"
-validat = "validat"
-certificat = "certificat"
-fixe = "fixe"
 raison = "raison"
 bre = "bre"
 iif = "iif"
-conver = "conver"
-hed = "hed"
-ned = "ned"
-ded = "ded"
 caf = "caf"

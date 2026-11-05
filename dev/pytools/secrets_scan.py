@@ -3,15 +3,14 @@
 
     secrets_scan.py staged            the staged diff (the pre-commit hook)
     secrets_scan.py tree [--require]  every file tracked at HEAD
-    secrets_scan.py --self-test
+    secrets_scan.py --self-test [--require]
 
-Exit 0 clean, 1 a finding, 2 not run (gitleaks absent or not the pinned version; --require makes that an error).
+Exit 0 clean, 1 a finding, 2 not run (gitleaks absent or not the pinned binary, see lint_tools.py; 1 under --require or CI).
 The allowlist is `.gitleaks.toml`: path or value plus rule, each with its reason in `description`.
 """
 
 from __future__ import annotations
 
-import re
 import secrets
 import shutil
 import subprocess
@@ -19,50 +18,45 @@ import sys
 import tempfile
 from pathlib import Path
 
+if __package__:
+    from . import lint_tools
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lint_tools  # type: ignore[no-redef]
+
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = "8.30.1"
+VERSION = lint_tools.TOOLS["gitleaks"].version
 CONFIG = ROOT / ".gitleaks.toml"
 GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else (shutil.which("git") or "git")
 
 
-def installed() -> str | None:
-    """The gitleaks version on PATH, or None when there is none."""
-    exe = shutil.which("gitleaks")
-    if not exe:
-        return None
-    out = subprocess.run([exe, "version"], capture_output=True, text=True).stdout
-    m = re.search(r"\d+\.\d+\.\d+", out)
-    return m.group(0) if m else None
-
-
-def command(mode: str, target: Path, config: Path = CONFIG) -> list[str]:
+def command(mode: str, target: Path, config: Path = CONFIG, exe: str = "gitleaks") -> list[str]:
     """The gitleaks argv of one mode: `staged` (the repo at `target`) or `tree` (a directory)."""
     common = ["--no-banner", "-v", "--redact", "--exit-code", "1", "-c", str(config)]
     if mode == "staged":
-        return ["gitleaks", "git", "--staged", *common, str(target)]
-    return ["gitleaks", "dir", *common, "."]
+        return [exe, "git", "--staged", *common, str(target)]
+    return [exe, "dir", *common, "."]
 
 
-def not_run(require: bool) -> int:
-    """Say why nothing was scanned; an error under --require, else a loud 'not run'."""
-    have = installed()
-    why = "gitleaks is not installed" if have is None else f"gitleaks {have} is installed, the pin is {VERSION}"
-    print(f"secrets scan NOT RUN: {why} (brew install gitleaks, or the release v{VERSION})", file=sys.stderr)
-    return 2
+def not_run(why: str, require: bool) -> int:
+    """Say why nothing was scanned: exit 2 on a dev machine, 1 under --require or CI."""
+    print(f"secrets scan NOT RUN: {why} ({lint_tools.INSTALL})", file=sys.stderr)
+    return 1 if require or lint_tools.in_ci() else 2
 
 
 def scan(mode: str, root: Path, require: bool = False, config: Path = CONFIG) -> int:
     """Run one mode over the repo at `root`."""
-    if installed() != VERSION:
-        return not_run(require)
+    exe, why = lint_tools.verified("gitleaks")
+    if exe is None:
+        return not_run(why, require)
     if mode == "staged":
-        return subprocess.run(command(mode, root, config), cwd=root).returncode
+        return subprocess.run(command(mode, root, config, exe), cwd=root).returncode
     with tempfile.TemporaryDirectory(prefix="secrets-scan-") as tmp:
         archive = subprocess.Popen([GIT, "archive", "HEAD"], cwd=root, stdout=subprocess.PIPE)
         subprocess.run(["tar", "-x", "-C", tmp], stdin=archive.stdout, check=True)
         if archive.wait() != 0:
             return 1
-        return subprocess.run(command(mode, Path(tmp), config), cwd=tmp).returncode
+        return subprocess.run(command(mode, Path(tmp), config, exe), cwd=tmp).returncode
 
 
 def repo(files: dict[str, str]) -> Path:
@@ -76,13 +70,14 @@ def repo(files: dict[str, str]) -> Path:
     return root
 
 
-def self_test() -> int:
+def self_test(require: bool = False) -> int:
     """A fake token and a fake private key fail in the staged and the tree mode; clean and allowlisted content passes."""
     assert command("staged", Path("/r"))[:4] == ["gitleaks", "git", "--staged", "--no-banner"]
     assert command("tree", Path("/r"))[:2] == ["gitleaks", "dir"] and command("tree", Path("/r"))[-1] == "."
-    if installed() != VERSION:
-        print(f"secrets_scan self-test: argv ok; fixtures NOT RUN (gitleaks {installed() or 'absent'}, pin {VERSION})")
-        return 0
+    exe, why = lint_tools.verified("gitleaks")
+    if exe is None:
+        print(f"secrets_scan self-test: argv ok; fixtures NOT RUN ({why})")
+        return 1 if require else 0
     token = "ghp_" + secrets.token_hex(18)
     pem = "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCbCRikdpLmY2r2\n" * 4 + "-----END " + "PRIVATE KEY-----\n"
     azurite = "AccountKey=" + "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq" + "/K1SZFPTOtr/KBHBeksoGMGw==\n"
@@ -110,8 +105,8 @@ def self_test() -> int:
 
 def main(argv: list[str]) -> int:
     """Dispatch the modes."""
-    if argv == ["--self-test"]:
-        return self_test()
+    if argv in (["--self-test"], ["--self-test", "--require"]):
+        return self_test(require=len(argv) == 2)
     if argv[:1] in (["staged"], ["tree"]):
         return scan(argv[0], ROOT, require="--require" in argv)
     print(__doc__, file=sys.stderr)
