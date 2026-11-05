@@ -1192,7 +1192,22 @@ def slot_keys(ora, slot: str, table: str, key: list[str]) -> list[tuple[str, ...
     sql = f"SELECT n.nspname::text, c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = {_lit(table)}::regclass"
     rel = ora.rows(f"SELECT * FROM postgres_query('pg', {_lit(sql)})")[0]
     peek = f"SELECT data FROM pg_logical_slot_peek_changes({_lit(slot)}, NULL, NULL)"
-    return test_decoding_keys([r[0] for r in ora.rows(f"SELECT * FROM postgres_query('pg', {_lit(peek)})")], tuple(rel), key)
+    return test_decoding_keys([r[0] for r in peek_rows(ora, f"SELECT * FROM postgres_query('pg', {_lit(peek)})")], tuple(rel), key)
+
+
+PEEK_RACE = "could not map file"
+
+
+def peek_rows(ora, sql: str, tries: int = 8, pause: float = 0.25) -> list:
+    """`ora.rows(sql)` of a slot peek, retried while a concurrent DDL leaves the decoder unable to map a relation file."""
+    for i in range(tries):
+        try:
+            return ora.rows(sql)
+        except Exception as e:  # noqa: BLE001
+            if PEEK_RACE not in str(e) or i + 1 == tries:
+                raise
+            time.sleep(pause)
+    raise AssertionError("unreachable")
 
 
 _TD_IDENT = r'"(?:[^"]|"")*"|[^\s".:\[]+'
@@ -1789,6 +1804,59 @@ def transient(e: BaseException) -> bool:
     return "deadlock" in str(e) or transport_down(e)
 
 
+def _peek_self_test() -> None:
+    """A slot peek that meets the server's transient decoding error is read again; any other server error surfaces."""
+    from unittest import mock
+
+    import duckdb
+
+    from . import duck
+
+    mapped = duckdb.Error('Failed to prepare COPY "COPY (SELECT "data" FROM (SELECT data FROM pg_logical_slot_peek_changes(\'s\', NULL, NULL)) AS q) '
+                          'TO STDOUT (FORMAT "binary");": ERROR:  could not map filenumber "base/16384/492910" to relation OID\n')
+    missing = duckdb.Error('Failed to prepare COPY "...": ERROR:  replication slot "s" does not exist\n')
+
+    class Db:
+        def __init__(self, script: list) -> None:
+            self.script, self.asked = script, 0
+
+        def sql(self, _q: str):
+            step = self.script[min(self.asked, len(self.script) - 1)]
+            self.asked += 1
+
+            class Rel:
+                def fetchall(_s):
+                    if isinstance(step, BaseException):
+                        raise step
+                    return step
+
+            return Rel()
+
+        def close(self) -> None:
+            pass
+
+    def peek(script: list) -> tuple[list, int]:
+        with duck.Oracle() as ora, mock.patch.dict(duck.retry.__kwdefaults__, {"sleep": lambda _s: None}):
+            ora.db = Db(script)
+            return slot_keys(ora, "s", "public.t", ["id"]), ora.db.asked
+
+    row = [("table public.t: INSERT: id[bigint]:1",)]
+    keys, asked = peek([[("public", "t")], mapped, row])
+    assert keys == [("1",)] and asked == 3, "a peek that met the catalog race is read again and answers"
+    try:
+        peek([[("public", "t")], mapped])
+    except duck.OracleUnavailable as e:
+        assert "filenumber" in str(e), e
+    else:
+        raise AssertionError("a decoding error on every try must end as OracleUnavailable, never an empty slot")
+    try:
+        peek([[("public", "t")], missing])
+    except duckdb.Error as e:
+        assert not isinstance(e, duck.OracleUnavailable) and "does not exist" in str(e), e
+    else:
+        raise AssertionError("a missing slot must surface as itself")
+
+
 def _self_test() -> None:
     assert _bound('"ID"', "<=", "10", "NUMBER (by value)") == 'TRY_CAST("ID" AS DECIMAL(38, 10)) <= 10'
     assert _bound('"K"', ">", "10", "VARCHAR2") == """"K" > '10'""", "a text cursor compares as text"
@@ -1876,6 +1944,7 @@ def _self_test() -> None:
     else:
         raise AssertionError("a wrong-data error must surface as itself, never as an infrastructure verdict")
 
+    _peek_self_test()
     assert not transient(RuntimeError("CURL error [356]=x")), "a code must match whole"
     assert not transient(RuntimeError("Binder Error: Referenced column \"id\" not found"))
     assert type_loss("INTEGER", "BIGINT") is None
@@ -1926,6 +1995,37 @@ def _self_test() -> None:
     assert one("VARCHAR", "BIGINT", "VARCHAR(10)"), "a text column delivered as a number is a loss"
     assert not one("VARCHAR", "TIMESTAMP", "DATETIME2"), "a temporal the oracle renders as text is the ledger's to grade"
     assert one("TIMESTAMP WITH TIME ZONE", "TIMESTAMP", "TIMESTAMPTZ(3)")
+    class Flaky:
+        """A DuckDB stand-in whose first `fail` calls raise `err`."""
+
+        def __init__(self, fail, err):
+            self.fail, self.err, self.calls = fail, err, 0
+
+        def rows(self, sql):
+            self.calls += 1
+            if self.calls <= self.fail:
+                raise RuntimeError(self.err)
+            return [("table public.t: INSERT: id[bigint]:1",)]
+
+    race = 'ERROR:  could not map filenumber "base/16384/492910" to relation OID'
+    flaky = Flaky(3, race)
+    assert peek_rows(flaky, "q", pause=0) == [("table public.t: INSERT: id[bigint]:1",)] and flaky.calls == 4, "a peek that raced DDL is retried"
+    old_pg = Flaky(1, 'ERROR:  could not map filenode "base/16384/492910" to relation OID')
+    assert peek_rows(old_pg, "q", pause=0) and old_pg.calls == 2, "the pre-16 wording is the same race"
+    stuck = Flaky(99, race)
+    try:
+        peek_rows(stuck, "q", tries=4, pause=0)
+    except RuntimeError:
+        assert stuck.calls == 4, "a race that never clears is raised after the last try"
+    else:
+        raise AssertionError("a peek that keeps failing must raise, never read as no changes")
+    other = Flaky(1, "ERROR:  replication slot is active for PID 7")
+    try:
+        peek_rows(other, "q", pause=0)
+    except RuntimeError:
+        assert other.calls == 1, "only the DDL race is retried"
+    else:
+        raise AssertionError("another error is raised at once")
     phantom = ["COUNT(*): source 1, delivered 2", "COUNT(`id`) (non-null): source 1, delivered 2",
                "VALUES: 0 source row(s) not delivered, 1 delivered row(s) not in the source; differing column(s) []"]
     assert known_defect_covers("delivered-only rows", phantom)

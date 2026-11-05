@@ -1,0 +1,41 @@
+diff --git a/src/config/destination_credential.rs b/src/config/destination_credential.rs
+index 4bcc18f1..37a9545d 100644
+--- a/src/config/destination_credential.rs
++++ b/src/config/destination_credential.rs
+@@ -59,9 +59,6 @@ impl DestinationCredential {
+             ));
+         }
+         match &config.aws_profile {
+-            Some(_) if ak.is_some() || st.is_some() => Err(refuse(
+-                "S3 aws_profile cannot be combined with access_key_env, secret_key_env or session_token_env: the profile alone would sign and the env keys would be ignored.\n  Fix: remove aws_profile to sign with the env keys, or remove the env key fields to sign with the profile.",
+-            )),
+             Some(profile) => Ok(Self::S3Profile(profile.clone())),
+             None if ak.is_some() || st.is_some() => Ok(Self::S3Env {
+                 access_key_env: ak.clone(),
+diff --git a/src/load/bq_rest.rs b/src/load/bq_rest.rs
+index 5ffa7358..e0837b57 100644
+--- a/src/load/bq_rest.rs
++++ b/src/load/bq_rest.rs
+@@ -621,21 +621,12 @@ impl Auth {
+     /// The token source of a load run as `credential`: a destination's named key signs it, beside no static token; anything else resolves the ambient chain.
+     fn resolve(
+         http: &reqwest::blocking::Client,
+-        credential: &DestinationCredential,
++        _credential: &DestinationCredential,
+     ) -> Result<Self> {
+         let static_token = std::env::var("RIVET_BQ_ACCESS_TOKEN").ok();
+         let static_given = static_token
+             .as_deref()
+             .is_some_and(|t| !t.trim().is_empty());
+-        if let DestinationCredential::GcsKeyFile(path) = credential {
+-            if static_given {
+-                crate::rivet_bail!(
+-                    crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
+-                    "destination.credentials_file '{path}' names a service-account key and RIVET_BQ_ACCESS_TOKEN names a token: a load signs as one identity.\n  Fix: unset RIVET_BQ_ACCESS_TOKEN to load as the key, or remove credentials_file to load with the token."
+-                );
+-            }
+-            return Self::named_key(http, path);
+-        }
+         if let Some(tok) = static_token.as_deref()
+             && static_given
+         {

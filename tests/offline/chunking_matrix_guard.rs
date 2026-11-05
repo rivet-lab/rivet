@@ -206,7 +206,8 @@ const MATRICES: &[(&str, usize)] = &[
     // write-only). 0 gaps: the surface Rivet parses is fully covered.
     // Raised 0 -> 3 (2026-09-26): the Oracle column's honest gaps (batch-only phase 1).
     // Lowered 3 -> 1 (2026-09-29): Oracle checkpoint + spill cells are structurally `na`.
-    ("docs/fuzz-matrix.yaml", 1),
+    // Raised 1 -> 2 (2026-11-04): the MySQL binlog TIME decoder is the patched mysql_common fork, with no fuzz target yet; closes with the fork decoder driven by the fuzz crate.
+    ("docs/fuzz-matrix.yaml", 2),
     // URL & credential safety — the userinfo encode/decode/redact class that
     // regressed THREE times (round-1 MSSQL round-trip, round-3 redact_pg_url, and
     // the general log redactor), each invisible to point tests. `test:` cells are
