@@ -172,3 +172,17 @@ scenarios:
     chunked:     { na: "a chunked run writes its manifest at its end" }
     keyset:      { na: "a keyset run writes its manifest at its end" }
     cdc:         { test: a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres }
+
+  - id: cdc_run_marks_each_table_running_before_its_first_part
+    what: "a CDC table's running manifest is at the destination, declaring no part, when its first part is written; a run killed mid-roll leaves it (CDC-RUN-START, every engine)"
+    incremental: { na: "an incremental run writes one manifest, at its end" }
+    chunked:     { na: "a chunked run writes its manifest at its end" }
+    keyset:      { na: "a keyset run writes its manifest at its end" }
+    cdc:         { test: a_cdc_table_marks_itself_running_before_its_first_part_lands }
+
+  - id: cdc_failed_run_closes_its_running_marker
+    what: "a CDC run that fails before any part of a table reached the store removes that table's running marker; one that failed after a part reached it rewrites the marker failed over those parts"
+    incremental: { na: "an incremental run writes one manifest, at its end" }
+    chunked:     { na: "a chunked run writes its manifest at its end" }
+    keyset:      { na: "a keyset run writes its manifest at its end" }
+    cdc:         { test: a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker }

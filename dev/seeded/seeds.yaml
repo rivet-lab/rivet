@@ -4675,15 +4675,32 @@ seeds:
     patch: cdc-run-start-marker/shared.patch
     engines:
       postgres:
-        cells: [a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres, "lib:a_cdc_table_marks_itself_running_before_its_first_part_lands"]
+        cells: [a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres, "lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_postgres]
       mysql:
-        cells: [a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql, "lib:a_cdc_table_marks_itself_running_before_its_first_part_lands"]
+        cells: [a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql, "lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mysql]
       mssql:
-        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands"]
+        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mssql]
       mongo:
-        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands"]
+        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mongo]
       oracle:
-        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands"]
+        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_oracle]
+
+  - name: cdc-run-close-marker
+    class: "a CDC run that fails before any part reached the store rewrites its running marker as a Failed manifest over no parts instead of removing it, so the prefix holds a manifest of a run that wrote nothing"
+    history: "2026-11-05 - cluster C4 CDC-RUN-START: the failed-run leg of the running marker; the marker is removed when no part of the table reached the store and rewritten Failed only over the parts that did"
+    scope: source
+    patch: cdc-run-close-marker/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+      mysql:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+      mssql:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+      mongo:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+      oracle:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
 
   - name: config-knob-range-unchecked
     class: "a count or ratio knob is read without its range: a `chunk_size` of 2^63 or more wraps to a zero window and the run ends exit 0 with 0 rows, `--rollover 0`, Mongo `page_size: 0` and a `quality.null_ratio_max` of NaN, infinity or outside 0 to 1 are accepted"
