@@ -251,6 +251,8 @@ struct TargetFailTally {
     /// Any fatal policy violation, or any target-refused column: what `--strict`
     /// bails on.
     any_fatal: bool,
+    /// Any column its own mapping refuses: fails the check with or without `--strict`.
+    any_refused: bool,
 }
 
 /// What the run-wide type-report tally means for `rivet check`.
@@ -267,7 +269,7 @@ enum TypeReportOutcome {
 impl TargetFailTally {
     /// The outcome for this tally. The note is text, so `--json` never gets it.
     fn outcome(&self, strict: bool, json_output: bool) -> TypeReportOutcome {
-        if strict && self.any_fatal {
+        if self.any_refused || (strict && self.any_fatal) {
             TypeReportOutcome::Fail
         } else if !strict && self.columns > 0 && !json_output {
             TypeReportOutcome::Note
@@ -287,6 +289,9 @@ impl TargetFailTally {
         for report in reports {
             if report.has_fatal() {
                 self.any_fatal = true;
+            }
+            if report.has_refused() {
+                self.any_refused = true;
             }
             if let Some(t) = target
                 && report.has_target_fail()
@@ -1094,6 +1099,29 @@ mod tests {
         value
     }
 
+    /// A column its own mapping refuses fails the check with or without `--strict`, `--json` included.
+    #[test]
+    fn a_refused_column_fails_the_tally_whatever_the_flags() {
+        let mut report = empty_report("e");
+        report
+            .violations
+            .push(crate::types::policy::PolicyViolation {
+                column_name: "ts".into(),
+                fidelity: crate::types::TypeFidelity::Lossy,
+                message: "m".into(),
+                fatal: true,
+                refused: true,
+            });
+        let mut tally = TargetFailTally::default();
+        tally.add_export(None, &[report]);
+        for (strict, json) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(tally.outcome(strict, json), TypeReportOutcome::Fail);
+        }
+        let mut clean = TargetFailTally::default();
+        clean.add_export(None, &[empty_report("c")]);
+        assert_eq!(clean.outcome(false, false), TypeReportOutcome::Clean);
+    }
+
     fn empty_report(export: &str) -> type_report::ExportTypeReport {
         type_report::ExportTypeReport {
             export: export.to_string(),
@@ -1170,7 +1198,8 @@ mod tests {
             TargetFailTally {
                 columns: 7,
                 label: Some("bigquery"),
-                any_fatal: true
+                any_fatal: true,
+                any_refused: false
             },
             "7 refused columns, the FIRST target's label, and --strict must bail"
         );
@@ -2150,6 +2179,7 @@ mod tests {
             fidelity: TypeFidelity::Unsupported,
             message: format!("m-{c}"),
             fatal,
+            refused: false,
         };
         let report = |table: Option<&str>, violations| type_report::ExportTypeReport {
             export: "e".into(),

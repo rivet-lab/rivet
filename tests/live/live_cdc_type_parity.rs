@@ -1924,8 +1924,20 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
         "ledger_ora",
         &columns_ddl(&lg.rows, "id NUMBER(10) PRIMARY KEY"),
     );
-    let cdc = Rig::oracle_cdc(t.name()).cdc_line("initial: snapshot");
-    let batch = Rig::oracle_batch(t.name());
+    let declared = format!(
+        "columns: {{{}}}",
+        lg.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.native == "TIMESTAMP(9)")
+            .map(|(i, _)| format!("C{i}: timestamp"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let cdc = Rig::oracle_cdc(t.name())
+        .cdc_line("initial: snapshot")
+        .export_line(&declared);
+    let batch = Rig::oracle_batch(t.name()).export_line(&declared);
     let st = Stand {
         engine: "oracle",
         bare: t.name().to_string(),

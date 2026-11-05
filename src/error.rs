@@ -771,10 +771,10 @@ pub mod codes {
         "RIVET_CONFIG_COLUMN_OVERRIDE_TABLE_UNKNOWN",
         "use a bare column key, or qualify it with a table this export captures",
     );
-    /// A column whose mapping is lossy or unsupported, refused under `--strict`.
+    /// A column whose mapping is lossy or unsupported (refused under `--strict`), or needs a `columns:` declaration (always).
     pub const TYPE_UNSAFE_MAPPING: Code = usage(
         "RIVET_TYPE_UNSAFE_MAPPING",
-        "add a `columns:` override the engine delivers exactly, CAST or drop the column in the export's `query:`, or run without `--strict` to accept it with a warning",
+        "add a `columns:` override the engine delivers exactly (or one that names the loss), or CAST or drop the column in the export's `query:`",
     );
     /// A statement that ran past the configured duration cap, carried by the existing
     /// `source::StatementDurationTimeout` marker (recognised in [`super::error_code`]).

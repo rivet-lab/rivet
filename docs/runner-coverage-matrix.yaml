@@ -560,10 +560,10 @@ scenarios:
     cdc:            { test: mysql_cdc_flush_past_the_partition_budget_is_cut_and_every_part_notes_its_partitions }
 
   - id: type_policy_gate
-    what: "ADR-0038 CP6: the run applies `TypePolicy` to the export's column plan before any data is read (`types::plan_columns`) — lossy/unsupported columns warn by default and refuse under `rivet run --strict` with RIVET_TYPE_UNSAFE_MAPPING, the verdict `check --type-report --strict` gives. Batch applies it once in `execute_resolved_plan` (`plan_open_columns`, on the open-forensics probe's mappings) BEFORE the strategy dispatch, so no batch runner can bypass it; a strict run whose open probe resolved nothing refuses rather than skip the check. CDC applies it per table in `run_capture` on `CdcSchemaResolver::resolve`'s result, before the sink reads an event."
-    single:         { test: oracle_batch_timestamp9_warns_by_default_and_strict_refuses_before_export }
+    what: "ADR-0038 CP6: the run applies `TypePolicy` to the export's column plan before any data is read (`types::plan_columns`) — lossy/unsupported columns warn by default and refuse under `rivet run --strict` with RIVET_TYPE_UNSAFE_MAPPING, the verdict `check --type-report --strict` gives; a mapping that carries a refusal (Oracle TIMESTAMP(7..9) undeclared) is refused under any policy, with or without --strict, through the same `TypePolicy::validate`. Batch applies it once in `execute_resolved_plan` (`plan_open_columns`, on the open-forensics probe's mappings) BEFORE the strategy dispatch, so no batch runner can bypass it; a strict run whose open probe resolved nothing refuses rather than skip the check. CDC applies it per table in `run_capture` on `CdcSchemaResolver::resolve`'s result, before the sink reads an event."
+    single:         { test: oracle_batch_timestamp9_is_refused_until_declared_under_every_policy }
     chunked:        { na: "shared seam: plan_open_columns runs in execute_resolved_plan before the strategy dispatch" }
     chunked_checkpoint: { na: "shared seam (execute_resolved_plan, before the dispatch)" }
     keyset:         { na: "shared seam (execute_resolved_plan, before the dispatch)" }
     mongo_parallel: { na: "shared seam (execute_resolved_plan, before the dispatch); a Mongo export's schema is the fixed {_id, document, meta} shape, so it has no lossy column to refuse" }
-    cdc:            { test: oracle_cdc_timestamp9_warns_by_default_and_strict_refuses_before_any_part_or_checkpoint }
+    cdc:            { test: oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row }

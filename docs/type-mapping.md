@@ -80,7 +80,9 @@ Supported override types: `bool`, `int2/int4/int8`, `float4/float8`,
 `decimal(p,s)`, `date`, `timestamp`, `timestamp_ns`, `timestamp_tz`,
 `timestamp_tz_ns`, `text`, `binary`, `json`, `uuid`. The `_ns` timestamp
 variants preserve sub-microsecond precision (range 1677–2262; see gap 4) — the
-plain `timestamp` is microsecond with full date range.
+plain `timestamp` is microsecond with full date range. An Oracle
+`TIMESTAMP(7..9)` column is the one case where the declaration is required: undeclared, the run is refused
+(`RIVET_TYPE_UNSAFE_MAPPING`) rather than truncated.
 
 The override path is safe: a `uid: uuid` declaration tries to parse each
 cell — either 16 raw bytes (BINARY(16) layout) or a 36-char canonical text

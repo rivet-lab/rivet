@@ -47,7 +47,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CONFIG_PATH_UNSAFE` | usage | 1 | use a plain name and a bucket-relative path: no `/`, `\`, `..`, NUL, leading `.` or URI scheme |
 | `RIVET_CONFIG_ROW_HASH_INVALID` | usage | 1 | list each column of one table once under `meta_columns.row_hash`, or use `row_hash: true` |
 | `RIVET_CONFIG_COLUMN_OVERRIDE_TABLE_UNKNOWN` | usage | 1 | use a bare column key, or qualify it with a table this export captures |
-| `RIVET_TYPE_UNSAFE_MAPPING` | usage | 1 | add a `columns:` override the engine delivers exactly, CAST or drop the column in the export's `query:`, or run without `--strict` to accept it with a warning |
+| `RIVET_TYPE_UNSAFE_MAPPING` | usage | 1 | add a `columns:` override the engine delivers exactly (or one that names the loss), or CAST or drop the column in the export's `query:` |
 | `RIVET_SOURCE_STATEMENT_TIMEOUT` | environment | 2 if transient, else 1 | raise `tuning.statement_timeout_s`, or narrow the chunk |
 | `RIVET_SOURCE_CURSOR_FINER_THAN_MICROSECOND` | refusal | 5 | cursor on a column at microsecond precision or coarser, or cast the cursor to TIMESTAMP(6) in a curated query |
 | `RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT` | refusal | 5 | re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
