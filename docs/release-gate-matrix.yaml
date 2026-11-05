@@ -417,7 +417,9 @@ infra:
     # 2026-11-03: +4 structural N/A rows from mysql-enum-label-escapes-unread (postgres, mssql, oracle, mongo carry no catalog-escaped ENUM or SET label).
     # 2026-11-04: +1 structural N/A row from keyset-key-type-unchecked (MongoDB always pages by _id, there is no keyset key to type).
     # 2026-11-04: +1 structural N/A row from keyset-key-init-mirror (MongoDB init scaffolds no keyset key).
-    na_ceiling: 489  # ratchet-pin: seeded-na
+    # 2026-11-04: +4 structural N/A rows from mysql-binlog-negative-time-fraction (PostgreSQL, SQL Server, MongoDB and Oracle have no MySQL binlog TIME decoder).
+    # 2026-11-05: +3 structural N/A rows from destination-credential-read-by-one-leg (local, azure, stdout name no credential this seed reaches).
+    na_ceiling: 496  # ratchet-pin: seeded-na
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

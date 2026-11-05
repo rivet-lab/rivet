@@ -42,6 +42,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
+use crate::config::DestinationCredential;
 use crate::gcp_auth::{self, BlockingAdcTokenSource};
 
 /// BigQuery's JSON API root. Overridable so a live check can be pointed at a
@@ -138,7 +139,7 @@ fn shared_http() -> Result<reqwest::blocking::Client> {
 impl BigQueryApi {
     /// Build a client for `project`, resolving the token source eagerly so a
     /// missing credential is reported before the first job is enqueued.
-    pub(crate) fn new(project: &str) -> Result<Self> {
+    pub(crate) fn new(project: &str, credential: &DestinationCredential) -> Result<Self> {
         let http = shared_http()?;
         Ok(Self {
             project: project.to_string(),
@@ -151,7 +152,7 @@ impl BigQueryApi {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-            auth: Auth::resolve(&http)?,
+            auth: Auth::resolve(&http, credential)?,
             http,
             journal: Default::default(),
         })
@@ -165,8 +166,12 @@ impl BigQueryApi {
 
     /// A client whose jobs write `dataset`, so a job it has to fetch by id is polled in
     /// that dataset's location.
-    pub(crate) fn for_dataset(project: &str, dataset: &str) -> Result<Self> {
-        let mut api = Self::new(project)?;
+    pub(crate) fn for_dataset(
+        project: &str,
+        dataset: &str,
+        credential: &DestinationCredential,
+    ) -> Result<Self> {
+        let mut api = Self::new(project, credential)?;
         api.dataset = Some(dataset.to_string());
         Ok(api)
     }
@@ -613,15 +618,26 @@ pub(crate) enum TokenSourceKind {
 }
 
 impl Auth {
-    fn resolve(http: &reqwest::blocking::Client) -> Result<Self> {
+    /// The token source of a load run as `credential`: a destination's named key signs it, beside no static token; anything else resolves the ambient chain.
+    fn resolve(
+        http: &reqwest::blocking::Client,
+        credential: &DestinationCredential,
+    ) -> Result<Self> {
         let static_token = std::env::var("RIVET_BQ_ACCESS_TOKEN").ok();
-        // Static FIRST, before the ADC read: round-6 made a set-but-missing
-        // GOOGLE_APPLICATION_CREDENTIALS a loud error, and reading ADC eagerly
-        // here let that bail defeat the RIVET_BQ_ACCESS_TOKEN escape hatch —
-        // the one knob that exists precisely for environments where ADC is
-        // broken (round-7 refuter).
+        let static_given = static_token
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty());
+        if let DestinationCredential::GcsKeyFile(path) = credential {
+            if static_given {
+                crate::rivet_bail!(
+                    crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,
+                    "destination.credentials_file '{path}' names a service-account key and RIVET_BQ_ACCESS_TOKEN names a token: a load signs as one identity.\n  Fix: unset RIVET_BQ_ACCESS_TOKEN to load as the key, or remove credentials_file to load with the token."
+                );
+            }
+            return Self::named_key(http, path);
+        }
         if let Some(tok) = static_token.as_deref()
-            && !tok.trim().is_empty()
+            && static_given
         {
             return Ok(Auth::Static(Zeroizing::new(tok.to_string())));
         }
@@ -648,6 +664,26 @@ impl Auth {
             }
             TokenSourceKind::GcloudCli => Ok(Auth::GcloudCli),
         }
+    }
+
+    /// The token source minted in process from the service-account key file `path`; a key shape rivet cannot mint is refused, never replaced by another identity.
+    fn named_key(http: &reqwest::blocking::Client, path: &str) -> Result<Self> {
+        let key = crate::config::credential_file::google_key("destination.credentials_file", path)?;
+        let creds = gcp_auth::parse_adc_file(&String::from_utf8_lossy(&key))?.ok_or_else(|| {
+            crate::error::coded(
+                crate::error::codes::DEST_CREDENTIALS_INVALID,
+                format!(
+                    "destination.credentials_file '{path}' is a key rivet cannot mint a BigQuery token from (only a service_account key is signed in process).\n  Fix: point credentials_file at a service-account key JSON, or remove it to load with the ambient Google credentials (ADC)."
+                ),
+            )
+        })?;
+        let src = gcp_auth::shared_blocking_source(creds, http);
+        log::info!(
+            "BigQuery: authenticating with the destination's {} key as {}",
+            src.credential_kind(),
+            src.principal()
+        );
+        Ok(Auth::Adc(src))
     }
 
     fn access_token(&self) -> Result<Zeroizing<String>> {

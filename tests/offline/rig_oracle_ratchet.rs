@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// Oracle opt-outs in tests/live.
+// Oracle opt-outs in tests/live. History frozen at 2026-11-04; a later raise is declared in its PR body.
 // 17 -> 21 (2026-10-02): live_cdc_source_connections counts source connections, which the oracle's own read would add to.
 // 21 -> 22 (2026-10-03): the PG truncate refusal's resumed run keeps the pre-truncate rows the refusal says only a re-snapshot removes.
 // 22 -> 23 (2026-10-03): pg_cdc_a_declared_key_absent_from_the_old_key_does_not_split merges by a declared `load.pk: [code]`; the oracle dedups by the source primary key `id`.
@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 // 29 -> 30 (2026-11-03, #798): the ClickHouse cell a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql loads beside a live MySQL CDC run, which the oracle cannot grade against the source mid-run; it reads the current-state view through the second client; closes when the oracle grades a load taken during a CDC run.
 // 30 -> 31 (2026-11-04, TF-1): the negative TIME(1)/(2) fraction cell drives a stream run that panics in a debug binary and leaves a running row; graded by MySQL's CAST text and the batch refusal; the fix PR removes the opt-out.
 // 31 -> 32 (2026-11-04): the datetime2(7) keyset cell under timestamp_ns delivers 700 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
-const NO_ORACLE_CEILING: usize = 32; // ratchet-pin: no-oracle-opt-outs
+// 32 -> 31 (2026-11-04): the TF-1 cell closed with fix/mysql-binlog-time-fraction and its opt-out is gone.
+// ratchet-pin: no-oracle-opt-outs count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
-/// Typed declarations in tests/live of what a run that does not exit 0 may leave.
+// Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
 // 19 -> 34 (2026-10-07): the full-stand sweep: 9 CDC streams that commit what they read before the refusal, 3 runs cut mid-way that keep the parts they wrote, 2 ClickHouse loads whose answer is lost after the write, 1 --reconcile verdict exit.
 // 34 -> 35 (2026-10-07): the refused-run-keeps-refusing cells (one shared rig): parts, their file_log rows, the observed schema and the kept anchor.
@@ -37,7 +38,7 @@ const NO_ORACLE_CEILING: usize = 32; // ratchet-pin: no-oracle-opt-outs
 // 51 -> 52 (2026-10-29, #719 follow-up): the same helper; a refused run leaves its parts, rows and checkpoint for the re-run by design.
 // 52 -> 53 (2026-11-02): a BigQuery first load whose lease is lost mid-write (a_first_load_whose_lease_is_taken_during_the_write_*): the unowned table and its failed load_run row stay for the refusal the cell then asserts.
 // 53 -> 52 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); one leftover declaration left.
-const FAILED_RUN_LEFTOVER_CEILING: usize = 52; // ratchet-pin: failed-run-leftover-declarations
+// ratchet-pin: failed-run-leftover-declarations count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).
 // 2 -> 1 (2026-10-08): a run that fails before its first write leaves the prefix alone, so a failed manifest before a write is a failure, no longer an excuse.
@@ -130,44 +131,6 @@ fn call_sites(text: &str, name: &str) -> usize {
             !prev.is_some_and(|c| c.is_alphanumeric() || c == '_') && !before.ends_with("fn ")
         })
         .count()
-}
-
-#[test]
-fn no_oracle_opt_outs_never_grow() {
-    let srcs = sources();
-    super::nonvacuity::require_enumerated(srcs.len(), 100, "test sources scanned", "tests/ moved");
-    let n: usize = srcs
-        .iter()
-        .filter(|(rel, _)| rel.starts_with("tests/live/"))
-        .map(|(_, t)| {
-            t.matches(".no_oracle(").count()
-                + t.matches("run_rivet_ok_no_oracle(").count()
-                + t.matches("\"RIVET_TEST_NO_ORACLE\"").count()
-                + t.matches("NO_ORACLE_ENV").count()
-        })
-        .sum();
-    assert_eq!(
-        n, NO_ORACLE_CEILING,
-        "oracle opt-outs (`.no_oracle(`, `run_rivet_ok_no_oracle(`, `RIVET_TEST_NO_ORACLE`, `NO_ORACLE_ENV`): {n}, ceiling {NO_ORACLE_CEILING}. A new opt-out needs a reviewed \
-         reason and a raised ceiling; a removed one lowers the ceiling in the same diff."
-    );
-}
-
-#[test]
-fn failed_run_leftover_declarations_never_grow() {
-    let n: usize = sources()
-        .iter()
-        .filter(|(rel, _)| rel.starts_with("tests/live/"))
-        .map(|(_, t)| {
-            t.matches(".a_failed_run_may_leave(").count()
-                + t.matches("FAILED_RUN_LEAVES_ENV").count()
-        })
-        .sum();
-    assert_eq!(
-        n, FAILED_RUN_LEFTOVER_CEILING,
-        "declarations of what a failed run may leave (`.a_failed_run_may_leave(`, `FAILED_RUN_LEAVES_ENV`): {n}, ceiling \
-         {FAILED_RUN_LEFTOVER_CEILING}. A new one needs a reviewed reason and a raised ceiling; a removed one lowers the ceiling in the same diff."
-    );
 }
 
 /// Refusals the live cells accept with no `RIVET_*` code.

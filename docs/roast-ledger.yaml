@@ -105,6 +105,14 @@ entries:
     status: done
     verdict: "confirmed: a MySQL BINARY(16), TIME, TINYINT(1) or ENUM unique key is auto-picked and stops the run with exit 5 after page 0 (exit 0 as a snapshot on one chunk); an MSSQL datetime2(7) chunk_by_key delivers duplicates with exit 0"
     closes: "src/source/keyset_key.rs::keyset_key_refusal decides from the delivered type at plan time for the explicit key, MySQL's auto-picked key and the composite key; ER-1, ER-3, ER-6 and RHS-3 close with it"
+  - id: MYSQL-COMMON-LEGACY-TIME
+    date: 2026-11-04
+    lens: fix/mysql-binlog-time-fraction follow-up
+    title: the mysql_common legacy MYSQL_TYPE_TIME arm reads LeU24 unsigned and ignores the sign
+    copies: [src/binlog/value.rs:100-107 of the mysql_common crate]
+    status: deferred-past-gate
+    verdict: "read in the crate source, not run: affects only pre-5.6.4 temporal columns (MySQL 5.7), not 8.0"
+    closes: "an upstream fix to the legacy arm, or a property test over arbitrary binlog TIME bytes against the patched fork"
   - id: CKPT-BUSY
     date: 2026-11-04
     lens: harness flake 2026-11-04
@@ -121,3 +129,11 @@ entries:
     status: deferred-past-gate
     verdict: "stated in the TF-2 PR body (#807) and not reproduced on a binary: the catalog text is utf8mb3, the 4-byte character is not representable there"
     closes: "read the labels from the binlog TABLE_MAP optional metadata ENUM_STR_VALUE and SET_STR_VALUE instead of COLUMN_TYPE, the same follow-up that lifts the hex label refusal"
+  - id: HFF-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: a destination's named credential signs the object-store leg only, so the BigQuery load and its pin sign as the ambient identity; an S3 aws_profile beside env keys is accepted and the keys are ignored
+    copies: [src/load/bq_rest.rs:169, src/destination/s3.rs:92, src/config/mod.rs:1291]
+    status: accepted-as-bugfix
+    verdict: "confirmed: with credentials_file naming a service-account key every BigQuery request carried the ambient token; S3 aws_profile with access_key_env and secret_key_env signed with the profile alone and check exited 0; opened as live cells on PostgreSQL and in-crate against bq_rest::stand"
+    closes: "DestinationCredential::choose is the one reader of the destination's credential fields; the object-store builders and Auth::resolve route through it and a combination that names two identities is refused by RIVET_CONFIG_DESTINATION_AUTH_INVALID; HFF-1 and HFF-2 close with it"
