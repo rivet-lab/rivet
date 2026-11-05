@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 // 29 -> 30 (2026-11-03, #798): the ClickHouse cell a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql loads beside a live MySQL CDC run, which the oracle cannot grade against the source mid-run; it reads the current-state view through the second client; closes when the oracle grades a load taken during a CDC run.
 // 30 -> 31 (2026-11-04, TF-1): the negative TIME(1)/(2) fraction cell drives a stream run that panics in a debug binary and leaves a running row; graded by MySQL's CAST text and the batch refusal; the fix PR removes the opt-out.
 // 31 -> 32 (2026-11-04): the datetime2(7) keyset cell under timestamp_ns delivers 700 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
+// 32 -> 31 (2026-11-04): the TF-1 cell closed with fix/mysql-binlog-time-fraction and its opt-out is gone.
 // ratchet-pin: no-oracle-opt-outs count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.

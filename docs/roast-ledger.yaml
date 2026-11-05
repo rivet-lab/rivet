@@ -97,6 +97,14 @@ entries:
     status: deferred-past-gate
     verdict: "confirmed live: a gc_orphans load between the first roll's upload and its manifest removed 1 orphan part (HDW-1 rework run, MySQL CDC); open_defect cells on MySQL and PostgreSQL"
     closes: "fix/cdc-run-start-marker: the CDC sink writes a running manifest under the run's own key at start, the first Success rewrite supersedes it, a stale one is closed by state finish-run; bucket_writers then sees the run from its first byte"
+  - id: MYSQL-COMMON-LEGACY-TIME
+    date: 2026-11-04
+    lens: fix/mysql-binlog-time-fraction follow-up
+    title: the mysql_common legacy MYSQL_TYPE_TIME arm reads LeU24 unsigned and ignores the sign
+    copies: [src/binlog/value.rs:100-107 of the mysql_common crate]
+    status: deferred-past-gate
+    verdict: "read in the crate source, not run: affects only pre-5.6.4 temporal columns (MySQL 5.7), not 8.0"
+    closes: "an upstream fix to the legacy arm, or a property test over arbitrary binlog TIME bytes against the patched fork"
   - id: CKPT-BUSY
     date: 2026-11-04
     lens: harness flake 2026-11-04

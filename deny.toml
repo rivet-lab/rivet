@@ -100,4 +100,5 @@ skip = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# 2026-11-04: the mysql_common fork pins a one-line fix for a negative TIME(1)/(2) binlog fraction (upstream blackbeam/rust_mysql_common#200); drop this entry and the [patch] with the upstream release.
+allow-git = ["https://github.com/rivet-lab/rust_mysql_common"]
