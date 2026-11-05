@@ -419,8 +419,6 @@ infra:
     # 2026-11-04: +1 structural N/A row from keyset-key-init-mirror (MongoDB init scaffolds no keyset key).
     # 2026-11-04: +4 structural N/A rows from mysql-binlog-negative-time-fraction (PostgreSQL, SQL Server, MongoDB and Oracle have no MySQL binlog TIME decoder).
     # 2026-11-05: +3 structural N/A rows from destination-credential-read-by-one-leg (local, azure, stdout name no credential this seed reaches).
-    # 2026-11-05: +1 structural N/A row from keyset-key-type-unchecked (MongoDB always pages by _id, there is no keyset key to type).
-    # 2026-11-05: +1 structural N/A row from keyset-key-init-mirror (MongoDB init scaffolds no keyset key).
     # 2026-11-05: +4 structural N/A rows from keyset-key-alias-type-by-name (postgres, mysql, oracle and mongo have no catalog name match on a user type to seed).
     na_ceiling: 500  # ratchet-pin: seeded-na
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a

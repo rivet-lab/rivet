@@ -9,10 +9,11 @@ targetRules = ["generic-api-key"]
 regexes = ['''Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq''']
 
 [[allowlists]]
-description = "Throwaway test key material: the ClickHouse stand's self-signed TLS key, the unit-test RSA key and the redaction-test PEM markers; none authorises anything"
+description = "Throwaway test key material: the ClickHouse stand's self-signed TLS key, the unit-test RSA key, the destination-credential live-test RSA key and the redaction-test PEM markers; none authorises anything"
 targetRules = ["private-key"]
 paths = [
   '''^dev/clickhouse/tls/server\.key$''',
   '''^src/gcp_auth\.rs$''',
   '''^src/load/snowflake_rest\.rs$''',
+  '''^tests/fixtures/destination_credential/test_rsa_pkcs8\.pem$''',
 ]
