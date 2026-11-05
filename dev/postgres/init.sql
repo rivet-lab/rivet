@@ -212,14 +212,7 @@ CREATE TABLE array_matrix (
     f32s      REAL[],
     f64s      DOUBLE PRECISION[],
     texts     TEXT[],
-    -- NO array-of-{json,numeric,uuid,interval} here, and the reason is a
-    -- MEASUREMENT rather than an omission: the pipeline refuses every one of
-    -- them BEFORE `build_pg_text_array` is reached — `_numeric` has "no Rivet
-    -- mapping", jsonb[] and interval[] fail as "could not be decoded as a
-    -- one-dimensional Arrow List", and uuid[] is refused outright
-    -- ("temporal/uuid/bytea array elements are not yet supported"). Putting any
-    -- of them in this shared seed makes `rivet check` fail for every consumer,
-    -- the release oracle included.
+    -- No json, numeric or interval arrays here: the batch export refuses them.
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
