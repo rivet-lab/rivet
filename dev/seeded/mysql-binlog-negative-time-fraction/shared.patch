@@ -1,0 +1,24 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -200,9 +200,6 @@
+ futures-util = "0.3"
+ mysql_common = { version = "0.37", default-features = false, features = ["binlog"] }
+ 
+-[patch.crates-io]
+-mysql_common = { git = "https://github.com/rivet-lab/rust_mysql_common", rev = "a660b506c230efe91a31d0421e11c7f373533df9" }
+-
+ [[bench]]
+ name = "hot_paths"
+ harness = false
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2755,7 +2755,8 @@
+ [[package]]
+ name = "mysql_common"
+ version = "0.37.3"
+-source = "git+https://github.com/rivet-lab/rust_mysql_common?rev=a660b506c230efe91a31d0421e11c7f373533df9#a660b506c230efe91a31d0421e11c7f373533df9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0f27695f286b461da077b8c2f72f47feaa04ce3c3f9c0976257410e90e21208a"
+ dependencies = [
+  "base64 0.22.1",
+  "bitflags 2.13.2",

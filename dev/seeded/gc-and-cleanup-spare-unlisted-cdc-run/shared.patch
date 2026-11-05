@@ -1,0 +1,22 @@
+diff --git a/src/load/staging.rs b/src/load/staging.rs
+index 6c9a8dc..ba00728 100644
+--- a/src/load/staging.rs
++++ b/src/load/staging.rs
+@@ -180,7 +180,7 @@ pub(super) fn prefix_has_active_run(
+         return true;
+     }
+     let manifest_active = match load::reconcile::fetch_manifests_keyed(store, prefix) {
+-        Ok(keyed) => !bucket_writers(state, &keyed).is_empty(),
++        Ok(keyed) => load::reconcile::has_active_running_manifest(&keyed),
+         // Cannot read the manifests → cannot rule a live run out. Spare.
+         Err(_) => true,
+     };
+@@ -443,7 +443,7 @@ pub(super) fn maybe_gc_orphans(
+     // A query ERROR stays conservative (assume active → spare); a clean `false`
+     // (no running row) lets the manifest signal decide.
+     let ledger_active = ledger_says_writing(state, &plan.gcs_prefix);
+-    let active = prefix_is_active(ledger_active, !bucket_writers(state, &keyed).is_empty());
++    let active = prefix_is_active(ledger_active, load::reconcile::has_active_running_manifest(&keyed));
+     // Which `running` MARKERS the ledger already knows are dead (`state
+     // finish-run`, the split ceased-ordinal stamp): their run_id has a
+     // TERMINAL row, so the sweep may retire the marker even though no Success

@@ -86,6 +86,9 @@ fi
 echo "pre-commit: Cyrillic guard"
 python3 "$(dirname "$0")/../dev/pytools/pr_ready.py" text --staged
 
+echo "pre-commit: secrets scan (staged)"
+python3 "$(dirname "$0")/../dev/pytools/secrets_scan.py" staged || [ $? -eq 2 ]
+
 echo "pre-commit: cargo fmt --all -- --check"
 cargo fmt --all -- --check
 
