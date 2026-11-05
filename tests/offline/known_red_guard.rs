@@ -31,7 +31,7 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 31 -> 25 (2026-11-04): the six HDW-1 cells are plain cells again (fix/run-closing-cdc-begin).
 // 25 -> 26 (2026-11-05): the S3 profile-beside-env-keys cell, open defect HFF-2 (closes with fix/destination-credential-every-leg).
 // 26 -> 25 (2026-11-05): the TF-1 cell closed with fix/mysql-binlog-time-fraction.
-// ratchet-pin: known-red-entries count dev/release_oracle/known_red.py ^    (_open|KnownRed)\(
+// ratchet-pin: known-red-entries (review 2027-02-01) count dev/release_oracle/known_red.py ^    (_open|KnownRed)\(
 // 25 -> 24 (2026-11-05): the HFF-2 cell is green on fix/destination-credential-every-leg and its entry is deleted.
 // 24 -> 10 (2026-11-05): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
 
