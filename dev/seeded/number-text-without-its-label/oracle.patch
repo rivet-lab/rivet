@@ -1,0 +1,13 @@
+diff --git a/src/source/oracle/arrow_convert.rs b/src/source/oracle/arrow_convert.rs
+index dffda194..b929e62b 100644
+--- a/src/source/oracle/arrow_convert.rs
++++ b/src/source/oracle/arrow_convert.rs
+@@ -147,7 +147,7 @@ fn deliver_number_text(
+     precision: u8,
+     scale: i8,
+ ) -> TypeMapping {
+-    if kind == OraKind::Number && number_type(precision, scale) == RivetType::String {
++    if kind == OraKind::Number && number_type(precision, scale) == RivetType::String && false {
+         mapping.with_text(TextForm::DecimalPlain)
+     } else {
+         mapping
