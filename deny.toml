@@ -24,7 +24,7 @@ ignore = [
     { id = "RUSTSEC-2026-0404", reason = "zstd-safe DCtx::try_clone; not called (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0405", reason = "zstd-safe InBuffer::pos out of range; the decoder uses InBuffer::around (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0406", reason = "zstd-safe multithreaded CCtx with an unfinished frame; zstdmt off, encoder only (review 2027-02-04)" },
-    { id = "RUSTSEC-2026-0442", reason = "2026-11-05 owner decision: arrow-data 59.0.0 unsound for RunEndEncoded; rivet never builds RunEndEncoded arrays, unreachable; closes when the arrow pin moves past 59.0.0 after the memory regression is resolved (review 2026-11-19)" },
+    { id = "RUSTSEC-2026-0442", reason = "RUSTSEC-2026-0442 accepted 2026-11-05: rivet never builds RunEndEncoded arrays, so unreachable; arrow stays at =59.0.0 until the upstream parquet writer memory regression (59.2.0+) is fixed, then the pin moves to the fixed release. Review 2026-11-19." },
 ]
 
 [licenses]
