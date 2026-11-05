@@ -327,7 +327,6 @@ fn every_ledger_row_has_a_sample_and_a_real_delivery() {
 /// deletes its line here, and a new defect is fixed, not added here.
 const KNOWN_DEFECTS: &[&str] = &[
     // ratchet-pin: type-known-defects (review 2027-02-01) strings
-    "postgres:INTERVAL",
     "postgres:NUMERIC",
     "postgres:MONEY",
     "postgres:INET",

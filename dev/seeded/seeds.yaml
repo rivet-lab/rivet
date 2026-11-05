@@ -4812,3 +4812,20 @@ seeds:
       oracle:
         patch: number-text-without-its-label/oracle.patch
         cells: [oracle_batch_and_cdc_deliver_every_ledger_row_alike, "lib:a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not"]
+
+  - name: interval-text-without-its-label
+    class: "an INTERVAL column (PostgreSQL, Oracle) is written as ISO 8601 duration text in a Utf8 column without the rivet.text_form = iso8601_duration label (PostgreSQL in batch and in CDC alike, Oracle in batch), so a reader cannot tell the canonical duration from a free string"
+    history: "type-known-defects INTERVAL of docs/type-capability-matrix.yaml (ADR-0038 CP2/CP5, issue #851 class C); RED on main 2026-11-05 (the ledger row without its marker fails postgres_batch_and_cdc_deliver_every_ledger_row_alike: the ledger delivers text form iso8601_duration, the part labels it nothing)"
+    scope: source
+    patch: interval-text-without-its-label/shared.patch
+    engines:
+      postgres:
+        cells: [postgres_batch_and_cdc_deliver_every_ledger_row_alike, "lib:an_interval_is_delivered_as_labelled_iso8601_text_and_nothing_next_to_it_is"]
+      mysql:
+        na: "MySQL has no INTERVAL column type, so no column reaches the Interval arm the seed edits"
+      mssql:
+        na: "SQL Server has no INTERVAL type, so no column reaches the Interval arm the seed edits"
+      mongo:
+        na: "a MongoDB value has no interval type, so no field reaches the Interval arm the seed edits"
+      oracle:
+        cells: [edge_oracle_types_export_losslessly, "lib:an_interval_is_delivered_as_labelled_iso8601_text_and_nothing_next_to_it_is"]

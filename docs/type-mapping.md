@@ -218,7 +218,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `boolean` | `bool` | `Boolean` | true/false | | type_roundtrip |
 | `numeric(10,2)` | `decimal(10,2)` | `DECIMAL(10,2)` | exact decimal text | second precision tier | type_roundtrip |
 | `char` / `bpchar` | `string` | `Utf8` | escaped UTF-8 | padded char | type_roundtrip |
-| `interval` | `interval` | `Utf8` (ISO 8601) | duration text | not Parquet Interval type | type_roundtrip |
+| `interval` | `interval` | `Utf8` labelled `rivet.text_form = iso8601_duration` | ISO 8601 duration text, six fraction digits when the value has a fraction | not Parquet Interval type; a reader tells the duration text from a plain string by the field label | type_roundtrip, type capability ledger |
 | `enum` | `enum` | `Utf8` + logical=enum | label text | custom PG enum | type_roundtrip |
 | `text[]` | `list<string>` | `List<Utf8>` | — | 1-D arrays | type_roundtrip |
 | `integer[]` | `list<int32>` | `List<Int32>` | — | 1-D arrays | type_roundtrip |
