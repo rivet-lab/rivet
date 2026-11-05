@@ -584,8 +584,14 @@ Deliberately **N/A** (not gaps):
   listed under another UUID than the run's (dropped and created again, even with the same
   documents), ends the run `RIVET_SOURCE_COLLECTION_NOT_FOUND` (exit 1) and writes no
   `_SUCCESS`. A `parallel` run pins the UUID before it samples the `_id` ranges and hands it
-  to every worker. Create the collection again with its documents and run again; a role
-  that may not run `listCollections` is not checked.
+  to every worker. Create the collection again with its documents and run again; only a
+  role that may not run `listCollections` (`Unauthorized`) is not checked, any other
+  listing failure stops the run. A resumable keyset run and an incremental run record the
+  collection's UUID with their progress: after the collection is dropped and created again
+  the next run is refused `RIVET_STATE_CURSOR_STREAM_MISMATCH` (exit 5) and names both
+  incarnations, because the stored anchor or cursor belongs to documents that are gone.
+  Run `rivet state reset` to read the new collection from the start, or
+  `rivet state accept` to keep the progress for it.
 - **Keyset needs a single `_id` type.** Keyset paging (and `parallel`) seeks with
   `$gt`, which MongoDB **type-brackets** — it cannot cross from one BSON `_id`
   type to another (a numeric cursor never matches a string `_id`, even though

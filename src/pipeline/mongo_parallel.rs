@@ -45,6 +45,9 @@ pub(crate) fn run_mongo_parallel(
     let (ranges, pinned) = {
         let mut probe =
             MongoSource::connect(&url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?;
+        if let Some(incarnation) = plan.collection_incarnation.as_deref() {
+            probe.pin_incarnation(collection, incarnation);
+        }
         probe.confirm_collection(collection)?;
         (
             probe.sample_id_ranges(collection, parallel)?,

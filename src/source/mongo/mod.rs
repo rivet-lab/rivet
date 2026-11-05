@@ -171,31 +171,60 @@ fn default_server_selection_timeout(opts: &mut ClientOptions) {
         .get_or_insert(std::time::Duration::from_secs(10));
 }
 
-/// The UUIDs (empty for a view) the database lists under `collection`; `None` when the listing was not allowed (a role without `listCollections`).
-fn list_collection_uuids(session: &MongoSession, collection: &str) -> Option<Vec<Vec<u8>>> {
-    session.block_on(async {
+/// Whether the server refused the command for want of the privilege (code 13, `Unauthorized`).
+fn not_allowed(e: &mongodb::error::Error) -> bool {
+    matches!(&*e.kind, mongodb::error::ErrorKind::Command(c) if c.code == 13)
+}
+
+/// The UUIDs (empty for a view) the database lists under `collection`; `None` when the role may not list collections, an error for any other listing failure.
+fn list_collection_uuids(session: &MongoSession, collection: &str) -> Result<Option<Vec<Vec<u8>>>> {
+    let listed = session.block_on(async {
         let mut cursor = session
             .client()
             .database(session.db())
             .list_collections()
             .filter(doc! { "name": collection })
-            .await
-            .ok()?
+            .await?
             .with_type::<Document>();
-        let mut uuids = Vec::new();
-        while let Some(listed) = cursor.try_next().await.ok()? {
-            uuids.push(uuid_of_listing(&listed)?);
+        let mut rows = Vec::new();
+        while let Some(row) = cursor.try_next().await? {
+            rows.push(uuid_of_listing(&row));
         }
-        Some(uuids)
-    })
+        Ok::<_, mongodb::error::Error>(rows)
+    });
+    match listed {
+        Ok(uuids) => Ok(Some(uuids)),
+        Err(e) if not_allowed(&e) => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context(format!(
+            "listing MongoDB collection `{}.{collection}` failed — the run stops rather than \
+             read a collection it cannot confirm is the one it started on; run again once the \
+             server answers",
+            session.db()
+        ))),
+    }
 }
 
-/// The UUID bytes a `listCollections` row carries in `info.uuid` (empty for a view); `None` when the row has no `info`.
-fn uuid_of_listing(listed: &Document) -> Option<Vec<u8>> {
-    match listed.get_document("info").ok()?.get("uuid") {
-        Some(Bson::Binary(b)) => Some(b.bytes.clone()),
-        _ => Some(Vec::new()),
+/// The UUID bytes a `listCollections` row carries in `info.uuid`; empty for a view, which lists none.
+fn uuid_of_listing(listed: &Document) -> Vec<u8> {
+    match listed.get_document("info").ok().and_then(|i| i.get("uuid")) {
+        Some(Bson::Binary(b)) => b.bytes.clone(),
+        _ => Vec::new(),
     }
+}
+
+/// The lower-case hex of `bytes`.
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The bytes `text` spells in hex; `None` for anything else.
+fn bytes_of_hex(text: &str) -> Option<Vec<u8>> {
+    let digits = text.as_bytes();
+    digits.len().is_multiple_of(2).then_some(())?;
+    digits
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect()
 }
 
 /// Refuse a collection the database does not list, or lists under another UUID than the run `started` on; a listing that was not allowed refuses nothing.
@@ -234,8 +263,18 @@ fn refuse_a_missing_collection(
 impl MongoSession {
     /// Refuse a collection the database does not list, by the rule [`MongoSource::export`] refuses it by.
     pub(crate) fn require_collection(&self, collection: &str) -> Result<()> {
-        let listed = list_collection_uuids(self, collection);
+        let listed = list_collection_uuids(self, collection)?;
         refuse_a_missing_collection(self.db(), collection, listed.as_deref(), None)
+    }
+
+    /// The incarnation of `collection` as the database lists it now: its UUID in hex; `None` for a collection that is not listed, a view, or a listing the role may not read.
+    pub(crate) fn collection_incarnation(&self, collection: &str) -> Result<Option<String>> {
+        let listed = list_collection_uuids(self, collection)?;
+        Ok(listed
+            .as_deref()
+            .and_then(<[_]>::first)
+            .filter(|uuid| !uuid.is_empty())
+            .map(|uuid| hex_of(uuid)))
     }
 }
 
@@ -266,6 +305,8 @@ pub struct MongoSource {
     id_guard_checked: std::collections::HashSet<String>,
     /// The UUID each collection was listed under when this source first read it.
     started_as: std::collections::HashMap<String, Vec<u8>>,
+    /// The collections whose last listing this source confirmed and no read has used since.
+    confirmed: std::collections::HashSet<String>,
 }
 
 impl MongoSource {
@@ -291,12 +332,13 @@ impl MongoSource {
             id_range: None,
             id_guard_checked: std::collections::HashSet::new(),
             started_as: std::collections::HashMap::new(),
+            confirmed: std::collections::HashSet::new(),
         })
     }
 
     /// Refuse `collection` when it is gone or listed under another UUID than this source first saw; the first listing pins the UUID.
     pub(crate) fn confirm_collection(&mut self, collection: &str) -> Result<()> {
-        let listed = list_collection_uuids(&self.session, collection);
+        let listed = list_collection_uuids(&self.session, collection)?;
         refuse_a_missing_collection(
             self.session.db(),
             collection,
@@ -308,7 +350,25 @@ impl MongoSource {
                 .entry(collection.to_string())
                 .or_insert_with(|| uuid.clone());
         }
+        self.confirmed.insert(collection.to_string());
         Ok(())
+    }
+
+    /// Confirm `collection` before a read, unless the listing that ended the last read already did.
+    fn confirm_before_read(&mut self, collection: &str) -> Result<()> {
+        if self.confirmed.remove(collection) {
+            return Ok(());
+        }
+        self.confirm_collection(collection)
+    }
+
+    /// Read `collection` only as the incarnation (UUID in hex) a stored cursor was written against; a text that is no hex pins nothing.
+    pub(crate) fn pin_incarnation(&mut self, collection: &str, incarnation: &str) {
+        if let Some(uuid) = bytes_of_hex(incarnation) {
+            self.started_as
+                .entry(collection.to_string())
+                .or_insert(uuid);
+        }
     }
 
     /// The UUIDs this source has pinned, by collection.
@@ -725,6 +785,10 @@ fn flush(
 }
 
 impl Source for MongoSource {
+    fn pin_incarnation(&mut self, collection: &str, incarnation: &str) {
+        MongoSource::pin_incarnation(self, collection, incarnation);
+    }
+
     fn harm_counters(&mut self) -> Option<Vec<(String, i64)>> {
         let session = &self.session;
         session.block_on(async {
@@ -754,7 +818,7 @@ impl Source for MongoSource {
             )
         })?;
         let db = self.session.client().database(self.session.db());
-        self.confirm_collection(coll_name)?;
+        self.confirm_before_read(coll_name)?;
         let schema = blob_schema();
         sink.on_schema(schema.clone())?;
 
@@ -1156,14 +1220,14 @@ mod tests {
         };
         assert_eq!(
             uuid_of_listing(&doc! { "name": "t", "info": { "uuid": uuid } }),
-            Some(vec![7, 8, 9])
+            vec![7, 8, 9]
         );
         assert_eq!(
             uuid_of_listing(&doc! { "name": "v", "info": { "readOnly": true } }),
-            Some(Vec::new()),
+            Vec::<u8>::new(),
             "a view lists no uuid"
         );
-        assert_eq!(uuid_of_listing(&doc! { "name": "t" }), None);
+        assert_eq!(uuid_of_listing(&doc! { "name": "t" }), Vec::<u8>::new());
     }
 
     #[test]
@@ -1649,16 +1713,62 @@ mod collection_identity_tests {
     }
 
     #[test]
-    fn a_collection_created_again_between_two_pages_is_refused_on_the_second() {
+    fn a_collection_created_again_between_two_pages_is_refused_by_the_second_page_listing() {
         let fake = FakeMongo::serving(&FIRST, documents(3));
         let mut keyset = source(&fake);
         let (first, _) = read(&mut keyset, None);
         first.expect("the first read pins the collection");
-        let finds_before = fake.shelf.lock().unwrap().finds;
         fake.shelf.lock().unwrap().uuid = Some(SECOND.to_vec());
-        let (second, rows) = read(&mut keyset, None);
+        let (second, _) = read(&mut keyset, None);
         assert_eq!(code(second), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
-        assert_eq!((rows, fake.shelf.lock().unwrap().finds), (0, finds_before));
+    }
+
+    #[test]
+    fn a_page_lists_the_collection_once_and_the_first_page_lists_it_twice() {
+        let fake = FakeMongo::serving(&FIRST, documents(3));
+        let mut keyset = source(&fake);
+        read(&mut keyset, None).0.expect("page 1");
+        assert_eq!(fake.shelf.lock().unwrap().listed, 2);
+        read(&mut keyset, None).0.expect("page 2");
+        read(&mut keyset, None).0.expect("page 3");
+        assert_eq!(fake.shelf.lock().unwrap().listed, 4);
+    }
+
+    #[test]
+    fn a_listing_that_fails_for_any_reason_but_the_privilege_stops_the_run() {
+        let fake = FakeMongo::serving(&FIRST, documents(4));
+        fake.shelf.lock().unwrap().listing_fails = true;
+        let (outcome, rows) = read(&mut source(&fake), None);
+        let said = format!("{:#}", outcome.expect_err("an unanswered listing"));
+        assert!(
+            said.contains("listing MongoDB collection `shop.t` failed"),
+            "{said}"
+        );
+        assert_eq!((rows, fake.shelf.lock().unwrap().finds), (0, 0));
+    }
+
+    #[test]
+    fn a_collection_pinned_by_a_stored_cursor_refuses_one_created_again_before_any_read() {
+        let fake = FakeMongo::serving(&SECOND, documents(4));
+        let mut reader = source(&fake);
+        reader.pin_incarnation("t", &hex_of(&FIRST));
+        let (outcome, rows) = read(&mut reader, None);
+        assert_eq!(code(outcome), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
+        assert_eq!((rows, fake.shelf.lock().unwrap().finds), (0, 0));
+    }
+
+    #[test]
+    fn the_incarnation_of_a_collection_is_its_uuid_in_hex_and_a_view_has_none() {
+        let fake = FakeMongo::serving(&FIRST, documents(1));
+        let session = MongoSession::connect(&fake.url("shop"), None).expect("connect");
+        assert_eq!(
+            session.collection_incarnation("t").unwrap(),
+            Some("01010101010101010101010101010101".to_string())
+        );
+        fake.shelf.lock().unwrap().view = true;
+        assert_eq!(session.collection_incarnation("t").unwrap(), None);
+        fake.shelf.lock().unwrap().uuid = None;
+        assert_eq!(session.collection_incarnation("t").unwrap(), None);
     }
 
     #[test]
@@ -1707,7 +1817,8 @@ mod collection_identity_tests {
 
     #[test]
     fn a_view_listed_without_a_uuid_is_read() {
-        let fake = FakeMongo::serving(&[], documents(2));
+        let fake = FakeMongo::serving(&FIRST, documents(2));
+        fake.shelf.lock().unwrap().view = true;
         let (outcome, rows) = read(&mut source(&fake), None);
         outcome.expect("a view has an empty UUID and stays readable");
         assert_eq!(rows, 2);
@@ -1718,13 +1829,16 @@ mod collection_identity_tests {
         let fake = FakeMongo::serving(&FIRST, documents(1));
         let session = MongoSession::connect(&fake.url("shop"), None).expect("connect");
         assert_eq!(
-            list_collection_uuids(&session, "t"),
+            list_collection_uuids(&session, "t").unwrap(),
             Some(vec![FIRST.to_vec()])
         );
         fake.shelf.lock().unwrap().uuid = None;
-        assert_eq!(list_collection_uuids(&session, "t"), Some(Vec::new()));
+        assert_eq!(
+            list_collection_uuids(&session, "t").unwrap(),
+            Some(Vec::new())
+        );
         fake.shelf.lock().unwrap().listing_denied = true;
-        assert_eq!(list_collection_uuids(&session, "t"), None);
+        assert_eq!(list_collection_uuids(&session, "t").unwrap(), None);
     }
 
     #[test]

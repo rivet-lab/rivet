@@ -2359,6 +2359,98 @@ fn collection_changed_under_a_held_read(
     recovers(&rig, &[]);
 }
 
+/// The `_id` of every document the rig's manifests declare, as text, sorted.
+fn declared_text_ids(rig: &Rig) -> Vec<String> {
+    let mut ids: Vec<String> = rig
+        .read_declared_parts()
+        .iter()
+        .flat_map(|b| {
+            let at = b.schema().index_of("_id").expect("an _id column");
+            let text = arrow::compute::cast(b.column(at), &arrow::datatypes::DataType::Utf8)
+                .expect("an _id column casts to text");
+            let text = text
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .expect("text");
+            text.iter()
+                .flatten()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// First `_id` of the documents a collection holds once it is created again with ids the old one never held.
+const OTHER_FIRST_ID: i64 = 1_000_000;
+
+/// Documents of the collection created again with other ids.
+const OTHER_DOCS: i64 = 10;
+
+/// A resumable keyset MongoDB export refused after its first page because its collection was dropped and created again with other ids: the next run delivers exactly the new collection, or is refused by code until the operator's remedy, after which a run delivers exactly the new collection.
+fn collection_created_again_with_other_ids_after_a_refused_resume() {
+    require_alive(LiveService::Mongo);
+    let db = unique_name("sab_ddl_other");
+    let _guard = MongoDbGuard {
+        port: MONGO_PORT,
+        db: db.clone(),
+    };
+    let m = MongoTest::connect(MONGO_PORT, &db);
+    m.seed_int_id("t", HELD_READ_DOCS);
+    let hold = WireHold::holding(MONGO_PORT, a_later_keyset_page);
+    let rig = Rig::mongo_batch("t")
+        .source_url(&MongoTest::url(hold.port(), &db))
+        .mongo("page_size: 1000, resume: true");
+    let rig = stopped_mid_run(rig, &[Leftover::ResumePoint]);
+    hold.arm();
+    let met = rig.beside_a_live_run_over_a_source_taken(
+        &[],
+        |_| hold.holds(1),
+        |_| {
+            m.seed_int_id_from("t", OTHER_FIRST_ID, OTHER_DOCS);
+            hold.release();
+        },
+        |_, ()| (),
+    );
+    let (run, ()) = met.answered_while_alive();
+    assert_refused(
+        &run,
+        Refused::by_code("RIVET_SOURCE_COLLECTION_NOT_FOUND", 1),
+    );
+    let new_ids: Vec<String> = {
+        let mut ids: Vec<String> = (OTHER_FIRST_ID..OTHER_FIRST_ID + OTHER_DOCS)
+            .map(|i| i.to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    match rig.delivers_or_refuses(&["run"], &[]) {
+        Survived::Delivered => {}
+        Survived::Refused(said) => {
+            assert!(
+                said.contains("RIVET_STATE_CURSOR_STREAM_MISMATCH"),
+                "the run after the refusal is refused by the code of the stored progress:
+{said}"
+            );
+            state(&rig, "reset", "t");
+            ok(rig.run());
+        }
+    }
+    let delivered = declared_text_ids(&rig);
+    assert!(
+        delivered == new_ids,
+        "the run after the refusal exited 0 over a manifest declaring {} document(s) ({} .. {}) for a collection of {} created again as {} .. {}",
+        delivered.len(),
+        delivered.first().map_or("-", String::as_str),
+        delivered.last().map_or("-", String::as_str),
+        OTHER_DOCS,
+        OTHER_FIRST_ID,
+        OTHER_FIRST_ID + OTHER_DOCS - 1
+    );
+    ok(rig.cli(&["validate"]));
+}
+
 /// Every `_SUCCESS` marker and manifest under the rig's destination with its bytes.
 fn markers_and_manifests(rig: &Rig) -> Vec<(std::path::PathBuf, Vec<u8>)> {
     let mut found: Vec<_> = files_under(&rig.out_dir())
@@ -5848,6 +5940,12 @@ fn a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo
         1,
         UnderHold::DroppedAndCreatedAgain,
     );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_with_other_ids_after_a_refused_resume_is_read_whole_mongo() {
+    collection_created_again_with_other_ids_after_a_refused_resume();
 }
 
 #[test]

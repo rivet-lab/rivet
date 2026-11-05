@@ -18,6 +18,9 @@ pub(super) struct Shelf {
     pub uuid: Option<Vec<u8>>,
     pub docs: Vec<Document>,
     pub listing_denied: bool,
+    pub listing_fails: bool,
+    pub listed: usize,
+    pub view: bool,
     pub finds: usize,
     pub on_find: Option<OnFind>,
 }
@@ -74,7 +77,11 @@ fn answer(shelf: &mut Shelf, db: &str, command: &Document) -> Document {
             "ok": 0.0, "errmsg": "not authorized on db to execute command listCollections",
             "code": 13, "codeName": "Unauthorized",
         },
+        "listcollections" if shelf.listing_fails => doc! {
+            "ok": 0.0, "errmsg": "interrupted at shutdown", "code": 11600, "codeName": "InterruptedAtShutdown",
+        },
         "listcollections" => {
+            shelf.listed += 1;
             let name = command
                 .get_document("filter")
                 .and_then(|f| f.get_str("name"))
@@ -84,6 +91,11 @@ fn answer(shelf: &mut Shelf, db: &str, command: &Document) -> Document {
                 .uuid
                 .iter()
                 .map(|bytes| {
+                    if shelf.view {
+                        return Bson::Document(
+                            doc! { "name": name.clone(), "type": "view", "options": { "viewOn": "base", "pipeline": [] }, "info": { "readOnly": true } },
+                        );
+                    }
                     let uuid = Binary {
                         subtype: BinarySubtype::Uuid,
                         bytes: bytes.clone(),
