@@ -4759,12 +4759,16 @@ seeds:
     scope: source
     patch: stop-class-number/shared.patch
     engines:
+      postgres:
+        na: "classify_pg_sqlstate decides every PostgreSQL error by its SQLSTATE and leaves no word-matching for an undefined column; a_missing_column_exits_by_its_code_whatever_its_name_holds_postgres is its unchanged neighbour"
       mysql:
         cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_mysql, "lib:each_mysql_code_maps_to_its_class", "lib:a_permanent_mysql_number_exits_1_whatever_the_name_it_quotes_holds"]
       mssql:
         cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_mssql, "lib:each_mssql_number_maps_to_its_class"]
       oracle:
         cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_oracle, "lib:each_oracle_number_maps_to_its_class", "lib:a_typed_permanent_oracle_number_exits_1_whatever_the_name_it_quotes_holds"]
+      mongo:
+        na: "a MongoDB export reads whole documents; a field the documents do not hold is a null, not a refused read, so no driver number names a missing column"
 
   - name: destination-credential-read-by-one-leg
     class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
