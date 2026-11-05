@@ -1379,7 +1379,19 @@ fn load_one_cdc_base(
                     eprintln!("{}", whole_pass_into_buffer_note(&fqtn, &m.run_id));
                 }
                 buffered = baseline.iter().cloned().chain(stream).collect();
-            } else if let [_, ..] = baseline.as_slice() {
+            }
+            let stream = buffered;
+            let stream_uris = if stream.is_empty() {
+                Vec::new()
+            } else {
+                load::before_write(load::reconcile::select_load_uris(
+                    store,
+                    &plan.gcs_prefix,
+                    &stream,
+                ))?
+            };
+            let stream_uris = buffer_uris(stream_uris);
+            if !rebaseline && let [_, ..] = baseline.as_slice() {
                 let uris = load::before_write(load::reconcile::select_load_uris(
                     store,
                     &plan.gcs_prefix,
@@ -1391,13 +1403,28 @@ fn load_one_cdc_base(
                 // Reached only through `plan.layout.compacts()`, which is the `true`:
                 // the one predicate that owns "does the base carry the flag" is asked.
                 load::refuse_stale_buffer(loader, &plan.table, true)?;
+                let (cleanup, _prefix_lease) = match stream_uris {
+                    Some(_) => (None, None),
+                    None => cleanup_target_leased(
+                        plan,
+                        store,
+                        state,
+                        &inputs.cleanable,
+                        still_writing(
+                            &inputs.active_at_fetch,
+                            &inputs.marker_active,
+                            state.is_some(),
+                        )
+                        .as_ref(),
+                    ),
+                };
                 let r = load::run_load(
                     loader,
                     &plan.table,
                     &base_specs(plan, loader),
                     &uris,
                     Some(integrity.file_rows),
-                    None,
+                    cleanup.as_ref().map(|(s, c)| (*s, c)),
                     inputs.ownership,
                 )?;
                 eprintln!(
@@ -1415,19 +1442,7 @@ fn load_one_cdc_base(
                 landed.push(r.rows_loaded);
                 baseline_leg = Some(r);
             }
-            let stream = buffered;
-            let stream_uris = if stream.is_empty() {
-                Vec::new()
-            } else {
-                load::before_write(load::reconcile::select_load_uris(
-                    store,
-                    &plan.gcs_prefix,
-                    &stream,
-                ))?
-            };
-            // An idle drain writes a Success manifest with no parts: nothing to
-            // buffer, and the run is still recorded consumed by the closing record.
-            if let Some(uris) = buffer_uris(stream_uris) {
+            if let Some(uris) = stream_uris {
                 let manifests: Vec<_> = stream.iter().map(|(_, m)| m.clone()).collect();
                 let integrity =
                     load::before_write(load::reconcile::reconcile(&manifests, allow_source_drift))?;
@@ -3528,6 +3543,24 @@ mod load_ledger_tests {
             (work.rows, work.wrote.as_deref(), work.buffer.as_deref()),
             (2, Some("db.both_legs"), Some("db.both_legs__changes"))
         );
+    }
+
+    /// A first base-and-buffer load whose baseline lands alone still cleans the staged baseline under `cleanup_source`.
+    #[test]
+    fn a_baseline_loaded_alone_is_cleaned_under_cleanup_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open_in_memory().unwrap();
+        let mut plan = base_plan(&dir, "alone_cleaned");
+        plan.load.cleanup_source = true;
+        finished_row(&state, "r-base");
+        stage_run(&dir, "r-base", "full");
+        let mut job = cdc_job(&dir, &state, &plan);
+        job.loader = Box::new(load::tests::fake_loader(1));
+        let report = load_one_cdc_base(job, &["id".to_string()], false, Some(&state))
+            .unwrap()
+            .expect("the baseline loads");
+        assert!(report.baseline.as_ref().is_some_and(|b| b.source_cleaned));
+        assert!(!dir.path().join("p/part-r-base.parquet").exists());
     }
 
     /// Stage a successful baseline leg that exported no rows and wrote no part.
