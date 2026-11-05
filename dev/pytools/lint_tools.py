@@ -183,7 +183,8 @@ def download(url: str) -> bytes:
     """The body of `url`, three attempts."""
     for attempt in range(3):
         try:
-            return urllib.request.urlopen(url, timeout=120).read()
+            with urllib.request.urlopen(url, timeout=120) as response:
+                return response.read()
         except OSError:
             if attempt == 2:
                 raise
