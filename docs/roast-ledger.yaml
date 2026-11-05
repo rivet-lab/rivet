@@ -121,3 +121,11 @@ entries:
     status: deferred-past-gate
     verdict: "stated in the TF-2 PR body (#807) and not reproduced on a binary: the catalog text is utf8mb3, the 4-byte character is not representable there"
     closes: "read the labels from the binlog TABLE_MAP optional metadata ENUM_STR_VALUE and SET_STR_VALUE instead of COLUMN_TYPE, the same follow-up that lifts the hex label refusal"
+  - id: HFF-1
+    date: 2026-11-03
+    lens: seam packaging 2026-11-03
+    title: a destination's named credential signs the object-store leg only, so the BigQuery load and its pin sign as the ambient identity; an S3 aws_profile beside env keys is accepted and the keys are ignored
+    copies: [src/load/bq_rest.rs:169, src/destination/s3.rs:92, src/config/mod.rs:1291]
+    status: accepted-as-bugfix
+    verdict: "confirmed: with credentials_file naming a service-account key every BigQuery request carried the ambient token; S3 aws_profile with access_key_env and secret_key_env signed with the profile alone and check exited 0; opened as live cells on PostgreSQL and in-crate against bq_rest::stand"
+    closes: "DestinationCredential::choose is the one reader of the destination's credential fields; the object-store builders and Auth::resolve route through it and a combination that names two identities is refused by RIVET_CONFIG_DESTINATION_AUTH_INVALID; HFF-1 and HFF-2 close with it"
