@@ -121,9 +121,10 @@ pub struct BigQueryLoader {
     /// cost slices per run (across tables) as well as per table. `None` omits
     /// the label entirely.
     pub run_id: Option<String>,
-    /// Where the staged Parquet lives, for the footer reads that pack a load into
-    /// jobs of at most 4,000 partitions each; `None` loads everything in one job.
-    pub footer_source: Option<crate::config::DestinationConfig>,
+    /// The destination the Parquet is staged under: it signs the footer reads that pack a
+    /// load into jobs of at most 4,000 partitions each, and its named credential signs
+    /// the BigQuery requests; `None` loads everything in one job as the ambient identity.
+    pub destination: Option<crate::config::DestinationConfig>,
     /// The CDC layout: under `BaseAndBuffer`, `<table>__changes` is a per-cycle
     /// buffer — created without a partition (whole-scanned by one MERGE, then
     /// dropped), never shape-settled — and `compact` merges it into the base.
@@ -149,7 +150,7 @@ impl BigQueryLoader {
             clustering: Clustering::Auto(Vec::new()),
             run_id: None,
             layout: crate::load::plan::CdcLayout::LogAndView,
-            footer_source: None,
+            destination: None,
             api: Arc::new(OnceLock::new()),
             renames: Vec::new(),
             journal: Default::default(),
@@ -176,8 +177,8 @@ impl BigQueryLoader {
     /// Set the load-run correlation id, emitted as the `rivet_run` job label.
     /// Pack every load into jobs within BigQuery's partition cap, reading the partition
     /// column's range from each file's Parquet footer under `dest`.
-    pub fn batched_by_footers(mut self, dest: crate::config::DestinationConfig) -> Self {
-        self.footer_source = Some(dest);
+    pub fn staged_under(mut self, dest: crate::config::DestinationConfig) -> Self {
+        self.destination = Some(dest);
         self
     }
 
@@ -241,7 +242,7 @@ impl BigQueryLoader {
         partition: Option<&TablePartition>,
     ) -> Result<Vec<Vec<String>>> {
         let keyed = partition.filter(|p| p.key.column().is_some());
-        match self.footer_source.as_ref().zip(keyed) {
+        match self.destination.as_ref().zip(keyed) {
             Some((dest, partition)) => {
                 let store = crate::load::open_store(dest)?;
                 crate::load::partition_budget::plan_load_batches(&store, uris, partition)
@@ -276,8 +277,12 @@ impl BigQueryLoader {
         if let Some(api) = self.api.get() {
             return Ok(api);
         }
-        let built =
-            BigQueryApi::for_dataset(&self.project, &self.dataset)?.journaled(self.journal.clone());
+        let credential = match &self.destination {
+            Some(dest) => crate::config::DestinationCredential::choose(dest, "destination")?,
+            None => crate::config::DestinationCredential::Ambient,
+        };
+        let built = BigQueryApi::for_dataset(&self.project, &self.dataset, &credential)?
+            .journaled(self.journal.clone());
         let _ = self.api.set(built);
         Ok(self.api.get().expect("the client was just set"))
     }

@@ -1,6 +1,6 @@
 # Dependabot keeps dependencies current so security patches and bug fixes flow
 # in regularly instead of accumulating. Every PR it opens is gated by the full
-# CI suite (fmt, clippy, the test matrix, AND `cargo audit`), so an update only
+# CI suite (fmt, clippy, the test matrix, AND `cargo deny check`), so an update only
 # merges if it is green — review the diff, then merge.
 #
 # Strategy (see docs/reference/testing.md):
@@ -12,10 +12,10 @@
 #     upstream release, so a freshly shipped `.0` (or a regressing point release)
 #     never lands in the build before its first round of fixes.
 #   * GitHub also opens out-of-band *security* PRs the moment an advisory with a
-#     fix lands — that is how the accepted advisories in `.cargo/audit.toml`
+#     fix lands — that is how the accepted advisories in `deny.toml`
 #     (e.g. the `rand` entry, or tiberius's rustls bump) get retired. Those are
 #     NOT subject to the cooldown, so a real CVE fix is never delayed. The
-#     `cargo audit` gate (pre-commit + CI) is the hard backstop if a fixable
+#     `cargo deny check` gate (pre-commit + CI) is the hard backstop if a fixable
 #     advisory ever slips past the routine schedule.
 version: 2
 updates:

@@ -340,6 +340,26 @@ fn the_mutation_gate_actually_invokes_the_prioritiser() {
     );
 }
 
+/// The graded set and the exclusions a shard applies are decided once, in the plan.
+#[test]
+fn the_shard_reads_the_graded_set_the_plan_decided() {
+    let shard = job_shell("mutants-shard", 5);
+    let plan = job_shell("mutants-plan", 40);
+    assert!(
+        shard.contains("done < drop-p2.txt") && !shard.contains("GRADED"),
+        "a shard must apply drop-p2.txt as the plan wrote it and decide nothing on its own: a second \
+         decision drops mutants from a graded set the plan widened to the whole diff"
+    );
+    assert!(
+        plan.contains("\"$CLASSIFY\" graded --diff diff-list.txt"),
+        "the plan must decide the graded set through `mutants_classify.py graded`"
+    );
+    assert!(
+        !plan.contains("cp diff-list.txt graded.txt") && !plan.contains("cp p1.txt graded.txt"),
+        "the plan must not write graded.txt by hand: `graded` writes it with the exclusions"
+    );
+}
+
 /// Every verdict the classifier can publish is HANDLED by the workflow.
 ///
 /// The vocabulary is DERIVED from the script (`--states`), never re-typed here:

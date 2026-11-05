@@ -122,9 +122,14 @@ fn into_clickhouse(rig: Rig, db: &Db) -> Rig {
 
 /// [`into_clickhouse`] staging under `prefix`.
 fn into_clickhouse_at(rig: Rig, db: &Db, prefix: &str) -> Rig {
+    into_clickhouse_with_at(rig, db, prefix, "")
+}
+
+/// [`into_clickhouse_at`] with `extra` appended to the `load:` fields.
+fn into_clickhouse_with_at(rig: Rig, db: &Db, prefix: &str, extra: &str) -> Rig {
     staged_at(rig, prefix).top_line(&format!(
         "load: {{ target: clickhouse, url: \"{}\", database: {}, \
-             user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: [id] }}",
+             user: {CLICKHOUSE_USER}, password_env: {PASSWORD_ENV}, pk: [id]{extra} }}",
         db.1, db.0
     ))
 }
@@ -876,6 +881,7 @@ fn a_load_from_another_state_db_crosses_a_rolling_cdc_run(
     loader: Rig,
     runner: Rig,
     view: &str,
+    first_load_roll: u32,
     insert: impl FnOnce(),
     source: impl Fn() -> Vec<(i64, i64)>,
 ) {
@@ -907,7 +913,7 @@ fn a_load_from_another_state_db_crosses_a_rolling_cdc_run(
             ("RIVET_TEST_PAUSE_MARKER", &marker_env),
         ],
     );
-    let mut crossings = 0;
+    let (mut rolls, mut crossings) = (0, 0);
     let began = std::time::Instant::now();
     let status = loop {
         if let Some(status) = run.try_wait().expect("try_wait") {
@@ -919,6 +925,10 @@ fn a_load_from_another_state_db_crosses_a_rolling_cdc_run(
         );
         if marker.is_file() {
             std::fs::remove_file(&marker).expect("clear the park marker");
+            rolls += 1;
+            if rolls < first_load_roll {
+                continue;
+            }
             let mid = loader.load_args_env(&[], &ungraded);
             assert!(
                 mid.status.success(),
@@ -939,8 +949,8 @@ fn a_load_from_another_state_db_crosses_a_rolling_cdc_run(
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect HDW-1; closes with fix/run-closing-cdc-begin"]
-fn open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql() {
+#[ignore = "live: requires clickhouse + fake-gcs + mysql-cdc"]
+fn a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_mysql() {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(BUCKET);
@@ -959,6 +969,7 @@ fn open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_my
         loader,
         runner,
         &format!("{}.{tbl}", db.0),
+        1,
         || {
             let mut c = conn();
             for i in 6..=14 {
@@ -967,6 +978,87 @@ fn open_defect_a_load_from_another_state_db_does_not_strand_a_rolling_cdc_run_my
             }
         },
         || source_rows(&tbl),
+    );
+}
+
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mysql-cdc"]
+fn a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_mysql() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (tbl, _guard) = seeded("rivet_ch_hdw1gc", 5);
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chload");
+    let loader = into_clickhouse_with_at(Rig::mysql_cdc(&tbl), &db, &prefix, ", gc_orphans: true");
+    let runner = staged_at(
+        Rig::mysql_cdc(&tbl)
+            .export_named(loader.export_name())
+            .checkpoint_path(loader.checkpoint())
+            .cdc("rollover: 3"),
+        &prefix,
+    );
+    a_load_from_another_state_db_crosses_a_rolling_cdc_run(
+        loader,
+        runner,
+        &format!("{}.{tbl}", db.0),
+        2,
+        || {
+            let mut c = conn();
+            for i in 6..=14 {
+                c.query_drop(format!("INSERT INTO {tbl} (id, v) VALUES ({i}, {i})"))
+                    .expect("the backlog");
+            }
+        },
+        || source_rows(&tbl),
+    );
+}
+
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres-cdc"]
+fn a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_postgres() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let tbl = unique_name("rivet_ch_pggc");
+    let slot = unique_name("rivet_ch_pggc_slot");
+    let _slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, v BIGINT); \
+         INSERT INTO {tbl} SELECT g, g FROM generate_series(1, 5) g"
+    ))
+    .expect("seed");
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let prefix = unique_name("chload");
+    let loader =
+        into_clickhouse_with_at(Rig::pg_cdc(&tbl, &slot), &db, &prefix, ", gc_orphans: true");
+    let runner = staged_at(
+        Rig::pg_cdc(&tbl, &slot)
+            .export_named(loader.export_name())
+            .checkpoint_path(loader.checkpoint())
+            .cdc("rollover: 3"),
+        &prefix,
+    );
+    let mut writer = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+    a_load_from_another_state_db_crosses_a_rolling_cdc_run(
+        loader,
+        runner,
+        &format!("{}.{tbl}", db.0),
+        2,
+        || {
+            for i in 6..=14 {
+                writer
+                    .batch_execute(&format!("INSERT INTO {tbl} VALUES ({i}, {i})"))
+                    .expect("the backlog");
+            }
+        },
+        || {
+            let mut reader =
+                postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+            pg_rows(&mut reader, &tbl)
+        },
     );
 }
 
@@ -995,6 +1087,7 @@ fn open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_p
         loader,
         runner,
         &format!("{}.{tbl}", db.0),
+        1,
         || {
             let mut c = conn();
             for i in 6..=14 {
@@ -1041,6 +1134,7 @@ fn open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_p
         loader,
         runner,
         &format!("{}.{tbl}", db.0),
+        1,
         || {
             for i in 6..=14 {
                 writer

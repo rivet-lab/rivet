@@ -39,6 +39,7 @@ import os
 import random
 import re
 import threading
+import time
 import shutil
 import sys
 import tempfile
@@ -337,12 +338,7 @@ def duckdb_allnull_cloud(store: str, bucket: str, prefix: str, work: Path) -> tu
     if store == "gcs":
         dl = work / f"nullprof_gcs_{random.randint(0, 32767)}"
         dl.mkdir(parents=True, exist_ok=True)
-        got = run([PY, str(_asset("lib/gcs_pull.py")),
-                   "http://127.0.0.1:4443", bucket, prefix, str(dl)]).stdout.strip()
-        try:
-            if int(got) <= 0:
-                return (-1, -1)
-        except ValueError:
+        if gcs_pull(bucket, prefix, dl) <= 0:
             return (-1, -1)
         return _allnull_parse(_duckdb_list(f"SELECT {cols} FROM read_parquet('{dl}/**/*.parquet')"))
     return (-1, -1)
@@ -492,6 +488,115 @@ def docker_names() -> list[str]:
 
 
 # ── object stores ────────────────────────────────────────────────────────────
+def store_probe_self_test() -> None:
+    """A slow fake-gcs list is retried; a failed list or download raises instead of reading as 0 rows."""
+    import importlib.util
+    import json as _json
+    import socket
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    spec = importlib.util.spec_from_file_location("gcs_pull_under_test", _asset("lib/gcs_pull.py"))
+    gp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gp)
+    assert gp.TIMEOUT >= 30, "the list timeout must outlast the 13 s fake-gcs latency measured on the gate"
+
+    class Fake:
+        """A server answering each path from a script of (delay, status, body); the last step repeats."""
+
+        def __init__(self, script):
+            self.script, self.seen = script, {}
+            fake = self
+
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    path = self.path.split("?")[0]
+                    steps = fake.script.get(path, [(0, 404, b"")])
+                    i = fake.seen.get(path, 0)
+                    fake.seen[path] = i + 1
+                    delay, status, body = steps[min(i, len(steps) - 1)]
+                    time.sleep(delay)
+                    try:
+                        self.send_response(status)
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    except OSError:
+                        pass
+
+                def log_message(self, *a):
+                    pass
+
+            self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+            self.url = f"http://127.0.0.1:{self.srv.server_port}"
+            threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.srv.shutdown()
+            self.srv.server_close()
+
+    listing = "/storage/v1/b/b/o"
+    media = "/download/storage/v1/b/b/o/p%2Fa.parquet"
+    one = _json.dumps({"items": [{"name": "p/a.parquet"}]}).encode()
+    kw = {"timeout": 0.5, "attempts": 3, "pause": 0.0}
+    with socket.socket() as s0:
+        s0.bind(("127.0.0.1", 0))
+        closed = s0.getsockname()[1]
+    with tempfile.TemporaryDirectory() as d:
+        with Fake({listing: [(1.2, 200, one), (0, 200, one)], media: [(0, 500, b""), (0, 200, b"PAR1")]}) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 1, "a list slower than the timeout is retried and delivers"
+            assert (Path(d) / "part_0.parquet").read_bytes() == b"PAR1", "a download that failed once is retried"
+        with Fake({listing: [(2.0, 200, one)]}) as f:
+            try:
+                gp.pull(f.url, "b", "p/", d, timeout=0.3, attempts=2, pause=0.0)
+            except gp.PullError:
+                pass
+            else:
+                raise AssertionError("a list that never answers must raise, not read as 0 objects")
+        with Fake({listing: [(0, 404, b"")]}) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 0, "a missing bucket holds nothing"
+        with Fake({listing: [(0, 200, one)], media: [(0, 500, b"")]}) as f:
+            try:
+                gp.pull(f.url, "b", "p/", d, **kw)
+            except gp.PullError:
+                pass
+            else:
+                raise AssertionError("an object that cannot be downloaded must raise, not shorten the count")
+        pages = {listing: [(0, 200, _json.dumps({"items": [{"name": "p/a.parquet"}], "nextPageToken": "t"}).encode()),
+                           (0, 200, _json.dumps({"items": [{"name": "p/b.parquet"}]}).encode())],
+                 media: [(0, 200, b"x")], "/download/storage/v1/b/b/o/p%2Fb.parquet": [(0, 200, b"y")]}
+        with Fake(pages) as f:
+            assert gp.pull(f.url, "b", "p/", d, **kw) == 2, "every page of the list is read"
+        try:
+            gcs_pull("b", "p/", Path(d), endpoint=f"http://127.0.0.1:{closed}")
+        except StoreReadError:
+            pass
+        else:
+            raise AssertionError("a pull that failed must raise StoreReadError through the wrapper")
+    from unittest import mock
+
+    def sc_load_rows(pulled: Proc) -> list:
+        led = Ledger(colour=False)
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(sys.modules[__name__], "_WORK", Path(d)), \
+                mock.patch.object(sys.modules[__name__], "store_up", lambda *_a, **_k: True), \
+                mock.patch.object(sys.modules[__name__], "cfg", lambda *_a: "bkt"), \
+                mock.patch.object(sys.modules[__name__], "rivet", lambda *_a, **_k: Proc([], 0, "", "")), \
+                mock.patch.object(sys.modules[__name__], "_source_count_distinct", lambda *_a: "150000"), \
+                mock.patch.object(sys.modules[__name__], "run", lambda *_a, **_k: pulled):
+            sc_load(led, "mysql", "8.4", "mysql://u@h/db", "gcs")
+        return led.cells
+
+    cells = sc_load_rows(Proc([], 1, "", "urlopen error timed out"))
+    assert [c.status for c in cells] == [Status.INFRA] and "timed out" in cells[0].detail, \
+        f"a destination that could not be read is not a destination that holds 0 rows: {cells}"
+    cells = sc_load_rows(Proc([], 0, "0\n", ""))
+    assert [(c.status, c.detail) for c in cells] == [(Status.FAIL, "empty-destination")], cells
+    print("self-test ok: a slow fake-gcs list is retried; a failed list or download raises, never reads as 0 rows")
+
+
 STORE_HEALTH = {
     "s3": "http://127.0.0.1:9000/minio/health/live",
     "gcs": "http://127.0.0.1:4443/storage/v1/b",
@@ -555,6 +660,18 @@ def store_parts(store: str, bucket: str, prefix: str, work: Path) -> tuple[str, 
     return None
 
 
+class StoreReadError(RuntimeError):
+    """A store's list or download kept failing; the destination was not read, which is not an empty one."""
+
+
+def gcs_pull(bucket: str, prefix: str, dest: Path, *flags: str, endpoint: str = "http://127.0.0.1:4443") -> int:
+    """Objects lib/gcs_pull.py brought down from fake-gcs; a pull that failed raises, never reads as 0."""
+    p = run([PY, str(_asset("lib/gcs_pull.py")), endpoint, bucket, prefix, str(dest), *flags])
+    if p.returncode != 0 or not p.stdout.strip().isdigit():
+        raise StoreReadError(f"fake-gcs {bucket}/{prefix} unreadable: {(p.stderr or p.stdout).strip()[-300:]}")
+    return int(p.stdout.strip())
+
+
 def pull_prefix(store: str, bucket: str, prefix: str, dest: Path) -> bool:
     """Download a store prefix WHOLE into `dest` (manifests included) with the store's own client; False when the client is absent or nothing came down."""
     dest.mkdir(parents=True, exist_ok=True)
@@ -565,11 +682,7 @@ def pull_prefix(store: str, bucket: str, prefix: str, dest: Path) -> bool:
              MINIO_ACCESS_KEY, MINIO_SECRET_KEY])
         return run(["mc", "cp", "--recursive", f"rivetgate/{bucket}/{prefix}/", str(dest)]).ok
     if store == "gcs":
-        # `--all`: the default mode pulls only parquet, renamed `part_N.parquet`,
-        # which cannot answer what the run declared.
-        got = run([PY, str(_asset("lib/gcs_pull.py")), "http://127.0.0.1:4443", bucket,
-                   prefix, str(dest), "--all"]).stdout.strip()
-        return got.isdigit() and int(got) > 0
+        return gcs_pull(bucket, prefix, dest, "--all") > 0
     if store == "azure":
         if not have("az"):
             return False
@@ -1121,7 +1234,11 @@ def sc_load(led: Ledger, engine: str, tag: str, url: str, store: str) -> None:
             _first_match(out, r"error|fail"),
         )
         return
-    parts = store_parts(store, bucket, prefix, work_dir())
+    try:
+        parts = store_parts(store, bucket, prefix, work_dir())
+    except StoreReadError as e:
+        led.ungraded(engine, tag, "load", store, f"load→{store} readback failed: {e}")
+        return
     n = _duckdb_list(f"{parts[0]}SELECT count(*) FROM {parts[1]}") if parts else ""
     scnt = _source_count_distinct(engine, url, "users", "id").split(" ")[0]
     if n and n == scnt:

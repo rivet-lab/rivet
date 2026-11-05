@@ -98,6 +98,8 @@ mod mssql_column_data_fixture_guard;
 mod mutation_gate_config;
 #[path = "offline/mutation_gate_priority_guard.rs"]
 mod mutation_gate_priority_guard;
+#[path = "offline/mysql_binlog_time_fraction.rs"]
+mod mysql_binlog_time_fraction;
 #[path = "offline/mysql_wire_type_fixture_guard.rs"]
 mod mysql_wire_type_fixture_guard;
 #[path = "offline/oneshot_budget.rs"]
