@@ -198,6 +198,10 @@ tokio-util = { version = "0.7", features = ["compat"] }
 # transactions through the async driver directly — same crate the lib uses.
 mongodb = "3.9.1"
 futures-util = "0.3"
+mysql_common = { version = "0.37", default-features = false, features = ["binlog"] }
+
+[patch.crates-io]
+mysql_common = { git = "https://github.com/rivet-lab/rust_mysql_common", rev = "a660b506c230efe91a31d0421e11c7f373533df9" }
 
 [[bench]]
 name = "hot_paths"
