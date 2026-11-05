@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # (credential-gated oracle), the other is listed as a candidate for
 # UN-excluding rather than excused. Exceed the ceiling and the tool goes red —
 # the adjudication is graded, not asserted.
-ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicated sum
+ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicated (review 2027-02-01) sum
     # Excluded as OUTPUT-IDENTICAL (a log line — `-> ()` changes no value, so
     # the lib suite cannot kill it by construction), NOT as unreachable; its
     # oracle is live (roast_mysql_cdc_warns_on_a_minimal_backlog...). 100% of

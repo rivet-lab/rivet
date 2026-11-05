@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 // 30 -> 31 (2026-11-04, TF-1): the negative TIME(1)/(2) fraction cell drives a stream run that panics in a debug binary and leaves a running row; graded by MySQL's CAST text and the batch refusal; the fix PR removes the opt-out.
 // 31 -> 32 (2026-11-04): the datetime2(7) keyset cell under timestamp_ns delivers 700 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
 // 32 -> 31 (2026-11-04): the TF-1 cell closed with fix/mysql-binlog-time-fraction and its opt-out is gone.
-// ratchet-pin: no-oracle-opt-outs count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
+// ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
 // 0 -> 19 (2026-10-07): the refusal grade's first pass; every site is a gate that fails a run after its parts are written (quality, schema drift, a manifest that did not land).
@@ -37,11 +37,11 @@ use std::path::{Path, PathBuf};
 // 47 -> 51 (2026-10-29, #719): four column-grants cells whose failed run leaves its parts, rows and checkpoint for the re-run by design.
 // 51 -> 52 (2026-10-29, #719 follow-up): the same helper; a refused run leaves its parts, rows and checkpoint for the re-run by design.
 // 52 -> 53 (2026-11-02): a BigQuery first load whose lease is lost mid-write (a_first_load_whose_lease_is_taken_during_the_write_*): the unowned table and its failed load_run row stay for the refusal the cell then asserts.
-// ratchet-pin: failed-run-leftover-declarations count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
+// ratchet-pin: failed-run-leftover-declarations (review 2027-02-01) count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).
 // 2 -> 1 (2026-10-08): a run that fails before its first write leaves the prefix alone, so a failed manifest before a write is a failure, no longer an excuse.
-const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-product-defects
+const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-product-defects (review 2027-02-01)
 
 /// Rust DuckDB-helper call sites across tests/ (see [`duckdb_helper_names`]).
 // 626 -> 630 (2026-10-01): #378 merged first and added 4 calls in its Mongo null-_id tests.
@@ -51,7 +51,7 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 628 -> 626 (2026-10-31): the unused duckdb_s3_parquet_rows helper left tests/common/duckdb.rs; no call site moved.
 // 624 -> 626 (2026-11-03): #792 composite keyset cells read distinct (id, kind) tuples; row_census keys one column. Closes when row_census takes a key list.
 // 626 -> 628 (2026-11-03): #792 parallel composite keyset cells, same tuple read. Closes with the line above.
-const DUCKDB_HELPER_CEILING: usize = 628; // ratchet-pin: duckdb-helper-sites
+const DUCKDB_HELPER_CEILING: usize = 628; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];
@@ -137,7 +137,7 @@ fn call_sites(text: &str, name: &str) -> usize {
 // 4 -> 3 (2026-10-08): the bounded-drain refusal on a PostgreSQL standby carries RIVET_SOURCE_CDC_PREREQUISITE.
 // 3 -> 2 (2026-10-15): a run beside a held run lease is refused as RIVET_STATE_RUN_IN_PROGRESS (#538).
 // 2 -> 1 (2026-10-15): the mixed-type MongoDB `_id` refusal of a resumed keyset run is asserted as RIVET_SOURCE_KEYSET_KEY_UNORDERED.
-const UNCODED_REFUSAL_CEILING: usize = 1; // ratchet-pin: uncoded-refusals
+const UNCODED_REFUSAL_CEILING: usize = 1; // ratchet-pin: uncoded-refusals (review 2027-02-01)
 
 #[test]
 fn uncoded_refusals_the_cells_accept_never_grow() {
@@ -196,7 +196,7 @@ fn rust_duckdb_helper_call_sites_never_grow() {
 
 /// `(test fn, failure class, reason prefix)` of every `.oracle_known_defect(` site.
 const KNOWN_DEFECTS: &[(&str, &str, &str)] = &[
-    // ratchet-pin: oracle-known-defects strings
+    // ratchet-pin: oracle-known-defects (review 2027-02-01) strings
     (
         "a_pg_failover_to_the_standby_without_a_checkpoint_loses_the_rows_written_during_the_switch",
         "undelivered rows",
@@ -271,7 +271,7 @@ fn oracle_known_defects_are_a_named_set_that_only_shrinks() {
 }
 
 /// Hand-built spawns of the rivet binary in tests/live.
-const RAW_RIVET_CEILING: usize = 11; // ratchet-pin: raw-rivet-invocations
+const RAW_RIVET_CEILING: usize = 11; // ratchet-pin: raw-rivet-invocations (review 2027-02-01)
 
 /// `Command::new` of the rivet binary in `text`, in each spelling the suite uses.
 fn raw_rivet_sites(text: &str) -> usize {
