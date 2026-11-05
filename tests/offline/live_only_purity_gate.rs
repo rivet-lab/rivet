@@ -96,7 +96,7 @@ impl Decisions {
 /// pure function next door plus its unit test, which is what the six
 /// extractions this ledger was born from ended up as.
 const BASELINE: &[(&str, usize, usize, usize, usize)] = &[
-    // ratchet-pin: live-only-purity sum (review 2027-02-01)
+    // ratchet-pin: live-only-purity (review 2027-02-01) sum
     // ── qualified exclusions (`Type::f`, `<impl Tr for T>::f`) ─────────────
     // Visible to this gate since 2026-09-23: the parser read only a bare leading
     // identifier, so every qualified whole-function exclusion was skipped and
@@ -148,27 +148,6 @@ const BASELINE: &[(&str, usize, usize, usize, usize)] = &[
     // 1→0 `and` (2026-10-08): the per-unit skip condition (`split && resume`) moved out to the pure
     // `per_unit_skip_applies`, where the in-diff gate grades its `&&`.
     ("src/pipeline/run.rs::run_pool", 0, 0, 2, 0),
-    // The CDC job's baseline pairing (2026-09-17). Its one remaining `||` is
-    // `state.snapshot_done(..)? || dest.head("_SUCCESS")?.is_some()` — two I/O
-    // reads whose SHORT-CIRCUIT is the point (the object-store HEAD is skipped
-    // when the state DB already says done), so a pure predicate over both values
-    // would have to perform the second read unconditionally. The other three
-    // decisions it carried were extracted (`captures_changes_only`,
-    // `backfill_recipe_for`, an inverted `table_matches` guard).
-    (
-        "src/pipeline/cdc_job.rs::initial_snapshot_pending",
-        0,
-        1,
-        0,
-        0,
-    ),
-    (
-        "src/pipeline/parallel_children.rs::run_exports_as_child_processes",
-        0,
-        0,
-        5,
-        3,
-    ),
     // ── the orchestration scripts ────────────────────────────────────────
     // execute_resolved_plan's row is GONE because its whole-function exclusion
     // was LIFTED (2026-08-29): a critic measured 66% of that body executing
@@ -191,8 +170,7 @@ const BASELINE: &[(&str, usize, usize, usize, usize)] = &[
     // exhaustive so its arm-deletion mutants stop compiling. The staged-prefix
     // predicates (ledger_says_active, prefix_is_active, cleanup_verdict) have
     // since moved with their guards into src/load/staging.rs, and the other two
-    // excluded bodies with their commands: `run_compacts` into src/load/compact.rs,
-    // `pin_plan_to_its_run` into src/load/pin.rs — both clean, so no row either.
+    // excluded bodies with their commands: `run_compacts` into src/load/compact.rs, clean, so no row either.
     //
     // `prepare_load`'s two remaining `&&` are LET-CHAINS (`if let Some(s) =
     // state && let Some((_, m)) = keyed.first()`), not boolean decisions: the

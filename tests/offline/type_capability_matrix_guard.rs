@@ -298,7 +298,7 @@ fn render_violations(engine: &str, at: &str, render: &Value) -> Vec<String> {
 
 /// Rows per engine; a ledger may grow past these, never fall below them.
 const ROW_FLOOR: [(&str, usize); 4] = [
-    // ratchet-pin: type-ledger-rows sum min (review 2027-02-01)
+    // ratchet-pin: type-ledger-rows (review 2027-02-01) sum min
     ("postgres", 36),
     ("mysql", 31),
     ("mssql", 21),
@@ -323,7 +323,7 @@ fn every_ledger_row_has_a_sample_and_a_real_delivery() {
 /// (` (ClickHouse)` for a clickhouse.defect). Named and marked are the same set: a fix
 /// deletes its line here, and a new defect is fixed, not added here.
 const KNOWN_DEFECTS: &[&str] = &[
-    // ratchet-pin: type-known-defects strings (review 2027-02-01)
+    // ratchet-pin: type-known-defects (review 2027-02-01) strings
     "postgres:INTERVAL",
     "postgres:NUMERIC",
     "postgres:MONEY",

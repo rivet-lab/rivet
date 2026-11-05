@@ -32,7 +32,7 @@ REASONS = {
 }
 
 #: `file::test` → reason. Shrink-only.
-NO_CHECK: dict[str, str] = {  # ratchet-pin: tests-without-a-check strings (review 2027-02-01)
+NO_CHECK: dict[str, str] = {  # ratchet-pin: tests-without-a-check (review 2027-02-01) strings
     "src/config/mod.rs::absolute_local_path_is_allowed": "must not error",
     "src/config/mod.rs::audit_csv_default_compression_still_validates": "must not error",
     "src/config/mod.rs::config_without_braces_is_untouched": "must not error",
@@ -112,7 +112,7 @@ NO_CHECK: dict[str, str] = {  # ratchet-pin: tests-without-a-check strings (revi
 WEAK_ONLY_CEILING = 190  # ratchet-pin: tests-with-only-weak-assertions (review 2027-02-01)
 
 #: Fewer tests than this means the scan stopped matching, not that the tree shrank.
-TESTS_FLOOR = 6000  # ratchet-pin: test-checks-scan-sees-the-tree min (review 2027-02-01)
+TESTS_FLOOR = 6000  # ratchet-pin: test-checks-scan-sees-the-tree (review 2027-02-01) min
 
 SCRUB = re.compile(
     r"//[^\n]*|/\*.*?\*/"

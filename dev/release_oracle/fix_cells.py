@@ -46,7 +46,7 @@ GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else "git"
 FIX = re.compile(r"fix[(:!]")
 TEST = re.compile(r"^#\[test\]\n(?:#\[[^\n]*\n)*(?:pub )?fn (\w+)\(\) \{\n(.*?)^\}", re.M | re.S)
 #: Fix cells allowed to pass on the previous release, each with its reason. Shrink-only.
-GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-release strings (review 2027-02-01)
+GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-release (review 2027-02-01) strings
     "a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_bigquery":
         "2026-11-01: #737 second commit pins a refusal the BigQuery loader already made on 0.32.2; no product change in it, a regression guard for the new Mongo order",
     "a_table_swap_without_the_policy_is_met_as_before_mysql":

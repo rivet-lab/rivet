@@ -1021,8 +1021,8 @@ fn cdc_unicode_enum_labels_survive_end_to_end() {
 
 /// MySQL CDC ENUM and SET labels holding a backslash, LF, CR, NUL, a quote and non-ASCII text are the stored labels on the stream leg as on the snapshot leg.
 #[test]
-#[ignore = "live+gate-only: open defect TF-2; closes with fix/mysql-enum-label-escapes"]
-fn open_defect_mysql_cdc_enum_set_labels_match_the_snapshot() {
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn mysql_cdc_enum_set_labels_match_the_snapshot() {
     use arrow::array::StringArray;
     let enum_labels = [
         "C:\\temp",
@@ -1061,11 +1061,11 @@ fn open_defect_mysql_cdc_enum_set_labels_match_the_snapshot() {
     rig.run_ok();
     let mut want = Vec::new();
     for (k, e) in enum_labels.iter().enumerate() {
-        let s = format!(
-            "{},{}",
-            set_labels[k],
-            set_labels[(k + 1) % set_labels.len()]
+        let (lo, hi) = (
+            k.min((k + 1) % set_labels.len()),
+            k.max((k + 1) % set_labels.len()),
         );
+        let s = format!("{},{}", set_labels[lo], set_labels[hi]);
         c.exec_drop(
             format!("INSERT INTO {tbl} VALUES (?, ?, ?)"),
             (k as i64 + 1, *e, s.as_str()),
@@ -1142,11 +1142,7 @@ fn time_stream_legs_disagree(
         .map(|n| format!("{n}: string"))
         .collect::<Vec<_>>()
         .join(", ");
-    let stream = |leg: &str| {
-        Rig::mysql_cdc(tbl)
-            .export_named(&format!("{tbl}_{leg}"))
-            .no_oracle("TF-1: the stream run may crash in the dependency; graded by MySQL's CAST text and the batch refusal")
-    };
+    let stream = |leg: &str| Rig::mysql_cdc(tbl).export_named(&format!("{tbl}_{leg}"));
     let text = stream("text").export_line(&format!("columns: {{ {decl} }}"));
     let refuse = stream("refuse");
     text.pin_binlog_here();
@@ -1268,8 +1264,8 @@ fn time_stream_legs_disagree(
 
 /// A negative MySQL TIME(1) or TIME(2) with a fraction is the stored duration on the stream leg: MySQL's own text in a `string` column, the snapshot's refusal in a default one.
 #[test]
-#[ignore = "live+gate-only: open defect TF-1; closes with fix/mysql-binlog-time-fraction"]
-fn open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot() {
+#[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
+fn mysql_cdc_negative_time_fraction_matches_the_snapshot() {
     let _serial = cross_process_serial("mysql_cdc_time_fraction");
     let tbl = unique_name("cdc_tfrac");
     let mut c = mysql::Pool::new(MYSQL_CDC_URL).unwrap().get_conn().unwrap();

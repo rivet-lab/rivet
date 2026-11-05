@@ -49,7 +49,7 @@ const LAYERS: &[(&str, &str)] = &[
 
 /// Upward references measured 2026-10-10 on main 3994d3ca, as `from -> to::item`. Shrink-only.
 const EXCEPTIONS: &[&str] = &[
-    // ratchet-pin: module-layer-exceptions strings (review 2027-02-01)
+    // ratchet-pin: module-layer-exceptions (review 2027-02-01) strings
     "notify -> pipeline::RunSummary",
     "plan -> preflight::ExportDiagnostic",
     "plan -> source::Source",

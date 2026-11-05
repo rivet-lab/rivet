@@ -47,6 +47,13 @@ enum CloudDest {
         prefix: String,
         endpoint: String,
     },
+    S3Profile {
+        bucket: String,
+        prefix: String,
+        endpoint: String,
+        profile: String,
+        keys: bool,
+    },
     Azure {
         container: String,
         prefix: String,
@@ -443,6 +450,25 @@ impl Rig {
             bucket: bucket.to_string(),
             prefix: prefix.to_string(),
             endpoint: endpoint.to_string(),
+        });
+        self
+    }
+
+    /// The [`Rig::dest_s3`] destination naming `aws_profile: <profile>`, beside its env keys when `keys` is set.
+    pub fn dest_s3_with_profile(
+        mut self,
+        bucket: &str,
+        prefix: &str,
+        endpoint: &str,
+        profile: &str,
+        keys: bool,
+    ) -> Self {
+        self.cloud_dest = Some(CloudDest::S3Profile {
+            bucket: bucket.to_string(),
+            prefix: prefix.to_string(),
+            endpoint: endpoint.to_string(),
+            profile: profile.to_string(),
+            keys,
         });
         self
     }

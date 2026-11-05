@@ -123,7 +123,7 @@ const EXEMPT: &[(&str, &str)] = &[
 ];
 
 const MATRICES: &[(&str, usize)] = &[
-    // ratchet-pin: matrix-gaps sum (review 2027-02-01)
+    // ratchet-pin: matrix-gaps (review 2027-02-01) sum
     // Raised 0 -> 14 (2026-09-26): the Oracle column's honest gaps (batch-only phase 1).
     // Lowered 14 -> 12 (2026-09-26): Oracle init keyset scaffold + chunk_by_days proven live.
     // Lowered 12 -> 11 (2026-09-26): the `dense_chunk_dense` row went with `chunk_dense` (its Oracle gap too).
@@ -206,7 +206,8 @@ const MATRICES: &[(&str, usize)] = &[
     // write-only). 0 gaps: the surface Rivet parses is fully covered.
     // Raised 0 -> 3 (2026-09-26): the Oracle column's honest gaps (batch-only phase 1).
     // Lowered 3 -> 1 (2026-09-29): Oracle checkpoint + spill cells are structurally `na`.
-    ("docs/fuzz-matrix.yaml", 1),
+    // Raised 1 -> 2 (2026-11-04): the MySQL binlog TIME decoder is the patched mysql_common fork, with no fuzz target yet; closes with the fork decoder driven by the fuzz crate.
+    ("docs/fuzz-matrix.yaml", 2),
     // URL & credential safety — the userinfo encode/decode/redact class that
     // regressed THREE times (round-1 MSSQL round-trip, round-3 redact_pg_url, and
     // the general log redactor), each invisible to point tests. `test:` cells are
@@ -476,7 +477,7 @@ const ORACLE_STRENGTHS: &[&str] = &["independent", "differential", "self", "fail
 /// batch-differential to an INDEPENDENT oracle (a DuckDB/source re-read); never
 /// raise it — the ratchet drives the shared-decode-blind self-oracle debt to 0.
 const ORACLE_TRACKED: &[(&str, usize)] = &[
-    // ratchet-pin: matrix-weak-oracles sum (review 2027-02-01)
+    // ratchet-pin: matrix-weak-oracles (review 2027-02-01) sum
     // CDC value-decode — the differential debt was ground to 0: every (type × SQL
     // engine) cell is now an INDEPENDENT DuckDB-vs-source oracle (via the ledger-generated
     // *_batch_and_cdc_deliver_every_ledger_row_alike tests) or a fail_loud/na,

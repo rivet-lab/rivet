@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OPENERS = frozenset({"connect", "MongoClient", "urlopen"})
 
 #: `file::Class` → the connection it keeps for its lifetime. Shrink-only.
-OWNERS: dict[str, str] = {  # ratchet-pin: connection-owners strings (review 2027-02-01)
+OWNERS: dict[str, str] = {  # ratchet-pin: connection-owners (review 2027-02-01) strings
     "dev/release_oracle/duck.py::Oracle": "the DuckDB session a cell reads its stores through",
     "dev/release_oracle/rig_oracle.py::_Mem": "the in-memory DuckDB session of the self-tests",
     "dev/release_oracle/upgrade.py::_MongoKeys": "the Mongo client of one resume-load cell",

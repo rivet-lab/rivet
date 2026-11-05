@@ -39,10 +39,12 @@ workflow enforces on the PR itself:
 - commit messages and the PR title/body are English, carry no `Co-Authored-By` /
   `Claude-Session` trailer, and never put fix/close/resolve before `#N` (write `see #N`);
 - a raised ratchet pin (any line or block marked `ratchet-pin:`) is named in a
-  `## Ratchets raised` section of the PR body; lowering one needs nothing;
-- every `ratchet-pin:` line, every `SKIP_ALLOWED` reason and every known-red entry carries a review
-  date (`(review YYYY-MM-DD)`; for a known-red entry its `expires`); a malformed or non-calendar
-  date fails the PR rules, a passed one fails `make pr-ready` and the nightly run;
+  `## Ratchets raised` section of the PR body; lowering one needs nothing. A pin whose marker
+  names a `count <pathspec> <regex>` is measured from the tree (`pr_ready.py pins`), so there is no number to type;
+- every `ratchet-pin:` marker carries `(review YYYY-MM-DD)` right after its name, before `sum`, `count` or `min`; the date is a
+  calendar day at most 180 days away, and the same rule holds for every `SKIP_ALLOWED` reason (`(review YYYY-MM-DD)`), every known-red
+  entry and every `EXCUSES` entry (their `expires`). A malformed, missing or far date fails the PR rules; a passed one fails
+  `make pr-ready` and the nightly run (`dev/pytools/review_dates.py check`);
 - a change under `src/` adds a changelog fragment, one file under `changelog.d/` in the
   CHANGELOG entry format (see `changelog.d/README.md`), or the PR body says
   `No user-visible change`. Fragments keep open pull requests from conflicting on the top
@@ -63,7 +65,7 @@ With the hooks enabled:
 - **`pre-commit`** mirrors the CI fmt + clippy + audit gates and keeps
   code-derived docs in sync: it runs cargo fmt/clippy, builds the rivet binary,
   regenerates the JSON schema + reference docs and stages them into your commit
-  (`git add -u schemas docs`), and runs cargo audit when installed — bypass with
+  (`git add -u schemas docs`), and runs cargo deny check when installed — bypass with
   `git commit --no-verify`.
 - **`commit-msg`** strips attribution trailers and refuses Cyrillic or a closing
   keyword before `#N` in the message.

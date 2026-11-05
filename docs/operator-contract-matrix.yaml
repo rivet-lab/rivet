@@ -1,6 +1,6 @@
 # Operator-contract matrix. What rivet's exit code, refusal text and advice commands promise an
 # operator, from the 2026-10-07 CLI sweep by hand (RESULTS.md and the two sweep reports). Each
-# cell asserts the correct behaviour (tests/live/live_operator_contract.rs); an `open_defect_*`
+# cell asserts the correct behaviour (tests/live/live_operator_contract.rs); a
 # cell fails today and is acknowledged in dev/release_oracle/known_red.py with the symptom it shows.
 # Patterns: (a) exit 0 over a wrong destination, (b) a failure before the first write, (c) refusal
 # then remedy (Rig::refuses_twice_then), (d) the exit-code contract, (e) advice parity, (f) single rows.
@@ -34,11 +34,11 @@ scenarios:
 
   - id: cdc_run_ledger_row
     what: "RESULTS 3 (HDW-1): a CDC run over a state that refuses its run-status row is refused before it reads its stream (RIVET_STATE_NOT_WRITABLE, exit 1, nothing written), and delivers every change once the state is writable"
-    postgres: { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres }
-    mysql:    { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql }
-    mssql:    { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql }
-    mongo:    { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo }
-    oracle:   { test: open_defect_a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle }
+    postgres: { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres }
+    mysql:    { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mysql }
+    mssql:    { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mssql }
+    mongo:    { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_mongo }
+    oracle:   { test: a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_oracle }
 
   - id: cursor_write_fails
     what: "RESULTS 3 (the write after the manifest): a run whose cursor write fails delivers its rows once, keeps the stored cursor and exits 1 (RIVET_STATE_CURSOR_NOT_STORED)"
@@ -175,6 +175,14 @@ scenarios:
     mssql:    { na: "a SQL Server `time` is a time of day (00:00..24:00), never a duration past it" }
     mongo:    { na: "a MongoDB change row is two text cells (`_id`, `document`), with no TIME column" }
     oracle:   { na: "Oracle has no TIME type; a DATE or TIMESTAMP carries a time of day inside a day" }
+
+  - id: cdc_hex_enum_label_refusal
+    what: "an ENUM label MySQL writes as a hex literal (a binary-charset label of bytes that are not utf8mb3 text; the digits carry no zero padding) is refused as RIVET_SOURCE_CDC_CELL_UNSUPPORTED (exit 5) on every run, also under a `columns:` override of the column, and the column left out of the capture with the re-baseline recipe delivers"
+    postgres: { na: "a PostgreSQL enum value arrives as its label text; no label is read from a catalog rendering" }
+    mysql:    { test: a_hex_enum_label_in_a_stream_is_refused_by_code_with_or_without_an_override_mysql }
+    mssql:    { na: "SQL Server has no ENUM type" }
+    mongo:    { na: "a MongoDB document carries no ENUM column" }
+    oracle:   { na: "Oracle has no ENUM type" }
 
   - id: plan_unreadable_source
     what: "RESULTS 10: `plan` over a table that does not exist fails as RIVET_PLAN_SOURCE_UNREADABLE (exit 1) and seals no artifact"

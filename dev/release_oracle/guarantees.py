@@ -53,7 +53,7 @@ _ENV = {"RIVET_STATE_URL": "", "RIVET_GATE_STATE_URL": ""}
 
 #: MiB. The largest peak measured per engine on 2026-10-08 (release build, the stand), plus half:
 #: batch 96 / 128 / 141 / 141 / 135 at 5 million rows in `mode: full`, CDC 187 / 123 / 301 / 274 / 116 at 600,000 changes.
-RSS_CEILING_MIB = {  # ratchet-pin: flat-rss-ceiling-mib sum (review 2027-02-01)
+RSS_CEILING_MIB = {  # ratchet-pin: flat-rss-ceiling-mib (review 2027-02-01) sum
     "batch": {"postgres": 144, "mysql": 192, "mssql": 212, "oracle": 212, "mongo": 203},
     "cdc": {"postgres": 281, "mysql": 185, "mssql": 452, "mongo": 411, "oracle": 174},
 }  # ratchet-pin: end

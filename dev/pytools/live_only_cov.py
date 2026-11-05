@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # (credential-gated oracle), the other is listed as a candidate for
 # UN-excluding rather than excused. Exceed the ceiling and the tool goes red —
 # the adjudication is graded, not asserted.
-ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicated sum (review 2027-02-01)
+ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicated (review 2027-02-01) sum
     # Excluded as OUTPUT-IDENTICAL (a log line — `-> ()` changes no value, so
     # the lib suite cannot kill it by construction), NOT as unreachable; its
     # oracle is live (roast_mysql_cdc_warns_on_a_minimal_backlog...). 100% of
@@ -77,7 +77,6 @@ ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicate
     "run_capture": ("2026-11-04: its viable stub is MISSED under --lib --bins; offline reaches the unreachable-source open error only, the capture is graded by the live CDC cells", 10),
     "run_cdc_inner": ("2026-11-04: its viable stub is MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 85),
     "run_cdc_export": ("2026-11-04: stub MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 90),
-    "pin_plan_to_its_run": ("2026-11-04: its only whole-body stub does not compile (LoadPlan has no Default); offline reaches the refused() early exit only", 10),
     "pause": ("2026-11-04: the offline executions are the cfg(test) twin; the production body is not compiled into the test build, so its stub is MISSED by construction", 0),
 }  # ratchet-pin: end
 

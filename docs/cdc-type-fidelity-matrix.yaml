@@ -82,7 +82,7 @@ scenarios:
   - id: type_time_negative_fraction
     what: "a negative TIME(1)/TIME(2) with a fraction is the stored duration on the stream leg: MySQL's own text in a string column, the snapshot's refusal in a default one"
     postgres: { na: "PostgreSQL time of day is never negative" }
-    mysql:    { test: open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot, oracle: independent }
+    mysql:    { test: mysql_cdc_negative_time_fraction_matches_the_snapshot, oracle: independent }
     mssql:    { na: "SQL Server time has no negative value" }
     mongo:    { na: "no TIME type; a value rides the document blob" }
     oracle:   { na: "Oracle has no TIME type" }
@@ -154,7 +154,7 @@ scenarios:
   - id: type_enum_set_label_text
     what: "ENUM and SET labels holding a backslash, LF, CR, NUL, a quote and non-ASCII text are the stored labels on the stream leg as on the snapshot leg"
     postgres: { na: "PostgreSQL sends an enum value as its label text; no label is parsed from a catalog rendering" }
-    mysql:    { test: open_defect_mysql_cdc_enum_set_labels_match_the_snapshot, oracle: independent }
+    mysql:    { test: mysql_cdc_enum_set_labels_match_the_snapshot, oracle: independent }
     mssql:    { na: "SQL Server has no ENUM or SET type" }
     mongo:    { na: "no enum or SET type; a string rides the document blob" }
     oracle:   { na: "Oracle has no ENUM or SET type" }

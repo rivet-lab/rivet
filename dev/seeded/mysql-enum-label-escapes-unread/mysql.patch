@@ -1,0 +1,13 @@
+diff --git a/src/source/cdc/value.rs b/src/source/cdc/value.rs
+index b091a1ea..cb649515 100644
+--- a/src/source/cdc/value.rs
++++ b/src/source/cdc/value.rs
+@@ -849,7 +849,7 @@ fn parse_enum_labels(native: &str) -> Labels {
+                     label.push('\'');
+                 }
+                 Some('\'') | None => break,
+-                Some('\\') => match chars.peek() {
++                Some('\\') if false => match chars.peek() {
+                     Some('\\') => {
+                         chars.next();
+                         label.push('\\');

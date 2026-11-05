@@ -2,7 +2,7 @@ use opendal::Operator;
 use opendal::services::S3;
 
 use super::cloud::{CloudBackend, CloudDestination};
-use crate::config::DestinationConfig;
+use crate::config::{DestinationConfig, DestinationCredential};
 use crate::error::Result;
 
 /// S3 object-store destination. The retry policy, blocking wrap, and ADR-0013
@@ -89,28 +89,38 @@ impl CloudBackend for S3Backend {
             builder = builder.endpoint(endpoint);
         }
 
-        if let Some(env_name) = &config.access_key_env {
-            let key = read_credential_env(env_name, "access key")?;
-            builder = builder.access_key_id(key.as_str());
-        }
-        if let Some(env_name) = &config.secret_key_env {
-            let secret = read_credential_env(env_name, "secret key")?;
-            builder = builder.secret_access_key(secret.as_str());
-        }
-        // STS session token: required whenever `access_key_id` starts with
-        // `ASIA…` rather than `AKIA…`.  See `docs/cloud-auth.md`.
-        if let Some(env_name) = &config.session_token_env {
-            let token = read_credential_env(env_name, "session token")?;
-            builder = builder.session_token(token.as_str());
-        }
-
-        if let Some(profile) = &config.aws_profile {
-            log::info!("S3: using AWS profile '{}'", profile);
-            let loader = reqsign::AwsDefaultLoader::new(
-                reqwest::Client::new(),
-                named_profile_config(profile)?,
-            );
-            builder = builder.customized_credential_load(Box::new(loader));
+        match DestinationCredential::choose(config, "destination")? {
+            DestinationCredential::S3Profile(profile) => {
+                log::info!("S3: using AWS profile '{}'", profile);
+                let loader = reqsign::AwsDefaultLoader::new(
+                    reqwest::Client::new(),
+                    named_profile_config(&profile)?,
+                );
+                builder = builder.customized_credential_load(Box::new(loader));
+            }
+            DestinationCredential::S3Env {
+                access_key_env,
+                secret_key_env,
+                session_token_env,
+            } => {
+                if let Some(env_name) = &access_key_env {
+                    let key = read_credential_env(env_name, "access key")?;
+                    builder = builder.access_key_id(key.as_str());
+                }
+                if let Some(env_name) = &secret_key_env {
+                    let secret = read_credential_env(env_name, "secret key")?;
+                    builder = builder.secret_access_key(secret.as_str());
+                }
+                if let Some(env_name) = &session_token_env {
+                    let token = read_credential_env(env_name, "session token")?;
+                    builder = builder.session_token(token.as_str());
+                }
+            }
+            DestinationCredential::Ambient
+            | DestinationCredential::Anonymous
+            | DestinationCredential::GcsKeyFile(_)
+            | DestinationCredential::AzureKey { .. }
+            | DestinationCredential::AzureSas { .. } => {}
         }
 
         Ok(Operator::new(builder)?.finish())

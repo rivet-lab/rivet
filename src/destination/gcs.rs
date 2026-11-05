@@ -3,7 +3,7 @@ use opendal::services::Gcs;
 use std::sync::Arc;
 
 use super::cloud::{CloudBackend, CloudDestination};
-use crate::config::DestinationConfig;
+use crate::config::{DestinationConfig, DestinationCredential};
 use crate::error::Result;
 use crate::gcp_auth;
 
@@ -234,13 +234,14 @@ impl CloudBackend for GcsBackend {
             builder = builder.endpoint(endpoint);
         }
 
-        if config.allow_anonymous {
+        let credential = DestinationCredential::choose(config, "destination")?;
+        if credential == DestinationCredential::Anonymous {
             builder = builder
                 .allow_anonymous()
                 .disable_vm_metadata()
                 .disable_config_load();
             log::info!("GCS: allow_anonymous (emulator mode; no OAuth / service account)");
-        } else if let Some(cred_file) = &config.credentials_file {
+        } else if let DestinationCredential::GcsKeyFile(cred_file) = &credential {
             crate::config::credential_file::google_key("destination.credentials_file", cred_file)?;
             builder = builder
                 .credential_path(cred_file)

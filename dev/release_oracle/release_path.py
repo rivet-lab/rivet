@@ -157,18 +157,18 @@ def verify_release_build_path(led: Ledger) -> None:
 
 
 # ── release hygiene: the two CI checks a tag otherwise only meets on the PR ──────
-#: The commands CI runs (.github/workflows/ci.yml `cargo audit`, `python3 -m dev.pytools.docgen --check`).
+#: The commands CI runs (.github/workflows/ci.yml `cargo deny check`, `python3 -m dev.pytools.docgen --check`).
 HYGIENE = (
-    ("cargo audit", ["cargo", "audit"]),
+    ("cargo deny check", ["cargo", "deny", "check"]),
     ("docgen --check", [sys.executable, "-m", "dev.pytools.docgen", "--check"]),
 )
 
 
 def verify_release_hygiene(led: Ledger, runner=run) -> None:
-    """`cargo audit` and `docgen --check` against the tree the gate grades: one row each, a missing tool is a FAIL."""
+    """`cargo deny check` and `docgen --check` against the tree the gate grades: one row each, a missing tool is a FAIL."""
     from .core import first_error, rivet_bin
 
-    led.phase("Release hygiene (cargo audit / generated docs in sync)")
+    led.phase("Release hygiene (cargo deny / generated docs in sync)")
     for name, cmd in HYGIENE:
         env = {"RIVET": str(rivet_bin())} if cmd[0] == sys.executable else None
         p = runner(cmd, cwd=ROOT, timeout=900, env=env)
@@ -180,7 +180,7 @@ def verify_release_hygiene(led: Ledger, runner=run) -> None:
 
 
 def hygiene_self_test() -> None:
-    """A failing `cargo audit` is a FAIL row with its first error line; docgen reads the graded binary; both clean pass."""
+    """A failing `cargo deny check` is a FAIL row with its first error line; docgen reads the graded binary; both clean pass."""
     from .core import Proc
 
     calls: list[tuple[list[str], dict | None]] = []
@@ -194,13 +194,13 @@ def hygiene_self_test() -> None:
         return runner
 
     red = Ledger(colour=False)
-    verify_release_hygiene(red, runner=fake("audit"))
+    verify_release_hygiene(red, runner=fake("deny check"))
     rows = [(c.scenario, c.status.name) for c in red.cells]
-    assert rows == [("cargo audit", "FAIL"), ("docgen --check", "PASS")], rows
+    assert rows == [("cargo deny check", "FAIL"), ("docgen --check", "PASS")], rows
     assert "error: 1 vulnerability found!" in red.cells[0].detail, red.cells[0].detail
-    assert calls[0][0] == ["cargo", "audit"] and calls[1][0][-2:] == ["dev.pytools.docgen", "--check"], calls
+    assert calls[0][0] == ["cargo", "deny", "check"] and calls[1][0][-2:] == ["dev.pytools.docgen", "--check"], calls
     assert calls[1][1] and calls[1][1]["RIVET"].endswith("rivet"), calls[1]
     green = Ledger(colour=False)
     verify_release_hygiene(green, runner=fake("none"))
     assert not green.red and len(green.cells) == 2, green.cells
-    print("self-test ok: release hygiene — a cargo audit finding or stale generated docs is a FAIL row")
+    print("self-test ok: release hygiene — a cargo deny finding or stale generated docs is a FAIL row")
