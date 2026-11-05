@@ -1034,7 +1034,7 @@ seeds:
           - keyset_incremental_repointed_at_another_table_oracle
           - parallel_keyset_incremental_repointed_at_another_table_oracle
       mongo:
-        cells: [resume_repointed_at_another_collection_mongo]
+        na: "2026-11-05: the stored population of a MongoDB export names the collection incarnation (UUID), so a resume repointed at another collection is refused by the incarnation part even with the rows comparison broken (resume_repointed_at_another_collection_mongo stays green under this seed); that part is graded by mongo-progress-not-bound-to-incarnation, and the rows comparison alone is graded on the SQL engines and in the lib cell"
       lib:
         cells:
           - "lib:a_stored_cursor_is_refused_for_another_table_every_time_until_a_reset"

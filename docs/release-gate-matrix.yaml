@@ -422,7 +422,8 @@ infra:
     # 2026-11-05: +4 structural N/A rows from pg-temporal-uuid-bytea-array-refused (MySQL, SQL Server, Oracle and MongoDB have no PostgreSQL array element builder).
     # 2026-11-05: +4 structural N/A rows from number-text-without-its-label (PostgreSQL, MySQL, SQL Server and MongoDB reach no Oracle NUMBER mapping).
     # 2026-11-05: recounted after merging main: 522 `na:` rows in dev/seeded/seeds.yaml (recall.parse_manifest).
-    na_ceiling: 522  # ratchet-pin: seeded-na
+    # 2026-11-05: +1 N/A row, progress-inherited-by-another-stream x mongo: the collection incarnation in the stored population refuses the repoint before the rows comparison the seed breaks.
+    na_ceiling: 523  # ratchet-pin: seeded-na
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
