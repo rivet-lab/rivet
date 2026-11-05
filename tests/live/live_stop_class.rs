@@ -1,6 +1,6 @@
 //! The exit class of a stop (docs/operator-contract-matrix.yaml, seam stop-class): a coded stop exits by its
-//! code and by the typed verdict of its cause, never by a word in a table name or in a message. A cell
-//! asserts the correct behaviour.
+//! code and by the typed verdict of its cause, never by a word in a table or column name the operator chose.
+//! A cell asserts the correct behaviour.
 //!
 //! Oracles: the exit and `Error:` line of the real binary; the relation names are the operator's.
 
@@ -10,6 +10,8 @@ use crate::live_mssql_incremental_isolation::{server_wait, wait_visible};
 const MONGO_PORT: u16 = 27017;
 const NAMED_FOR_A_FAILURE: [&str; 3] = ["login_timeouts", "dns_zones", "deadlock_log"];
 const NAMED_PLAINLY: [&str; 2] = ["users", "orders_archive"];
+const COLUMNS_NAMED_FOR_A_FAILURE: [&str; 3] = ["login_timeout", "dns_cache", "deadlock_flag"];
+const COLUMNS_NAMED_PLAINLY: [&str; 2] = ["amount", "region_code"];
 
 /// Run `check`; a panic in it is recorded in `gaps` under `label`, its first line only.
 fn probe(gaps: &mut Vec<String>, label: &str, check: impl FnOnce()) {
@@ -51,6 +53,24 @@ fn missing_relation_exits_by_its_code(engine: SqlEngine, names: &[&str]) {
         });
     }
     no_gaps(gaps, names.len(), "absent relation names");
+}
+
+/// Every column of `words` that the table does not hold is refused as a failed read with exit 1, whatever words it holds.
+fn missing_column_exits_by_its_code(engine: SqlEngine, words: &[&str]) {
+    engine.alive();
+    let (table, _guard) = engine.table("sc_col");
+    let mut gaps = Vec::new();
+    for word in words {
+        probe(&mut gaps, word, || {
+            let column = engine.col(word);
+            let out = engine
+                .rig("sc_col")
+                .query(&format!("SELECT {column} FROM {table}"))
+                .run();
+            assert_refused(&out, Refused::by_code("RIVET_SOURCE_QUERY_FAILED", 1));
+        });
+    }
+    no_gaps(gaps, words.len(), "absent column names");
 }
 
 /// [`missing_relation_exits_by_its_code`] over a MongoDB collection.
@@ -138,6 +158,56 @@ fn a_missing_relation_named_plainly_exits_by_its_code_oracle() {
 #[ignore = "live: requires docker compose mongo"]
 fn a_missing_collection_named_plainly_exits_by_its_code_mongo() {
     missing_collection_exits_by_its_code(&NAMED_PLAINLY);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_missing_column_exits_by_its_code_whatever_its_name_holds_postgres() {
+    missing_column_exits_by_its_code(SqlEngine::Pg, &COLUMNS_NAMED_FOR_A_FAILURE);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_missing_column_named_plainly_exits_by_its_code_postgres() {
+    missing_column_exits_by_its_code(SqlEngine::Pg, &COLUMNS_NAMED_PLAINLY);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_missing_column_exits_by_its_code_whatever_its_name_holds_mysql() {
+    missing_column_exits_by_its_code(SqlEngine::Mysql, &COLUMNS_NAMED_FOR_A_FAILURE);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_missing_column_named_plainly_exits_by_its_code_mysql() {
+    missing_column_exits_by_its_code(SqlEngine::Mysql, &COLUMNS_NAMED_PLAINLY);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_missing_column_exits_by_its_code_whatever_its_name_holds_mssql() {
+    missing_column_exits_by_its_code(SqlEngine::Mssql, &COLUMNS_NAMED_FOR_A_FAILURE);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_missing_column_named_plainly_exits_by_its_code_mssql() {
+    missing_column_exits_by_its_code(SqlEngine::Mssql, &COLUMNS_NAMED_PLAINLY);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_missing_column_exits_by_its_code_whatever_its_name_holds_oracle() {
+    missing_column_exits_by_its_code(SqlEngine::Oracle, &COLUMNS_NAMED_FOR_A_FAILURE);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_missing_column_named_plainly_exits_by_its_code_oracle() {
+    missing_column_exits_by_its_code(SqlEngine::Oracle, &COLUMNS_NAMED_PLAINLY);
 }
 
 #[test]

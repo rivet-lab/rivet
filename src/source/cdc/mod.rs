@@ -1262,7 +1262,7 @@ pub(crate) fn pg_retention_warnings_on(client: &mut postgres::Client, slot: &str
     out
 }
 
-/// Add an engine's setup hint only to errors rivet did not raise itself: chosen by code, then by type, then by the engine prefix of the message.
+/// Add an engine's setup hint only to errors rivet did not raise itself: chosen by code, then by type, then by an engine `cdc` segment of the message.
 fn with_setup_hint(e: anyhow::Error, hint: &'static str) -> anyhow::Error {
     let rendered = format!("{e:#}");
     if let Some(coded) = e.downcast_ref::<crate::error::CodedError>()
@@ -2434,7 +2434,7 @@ mod setup_hint {
         );
     }
 
-    /// The hint is chosen by the error's code and the engine prefix at the start of a message, never by a `cdc:` that a driver message happens to echo.
+    /// The hint is chosen by the error's code and by an engine `cdc` segment of the message, never by a `cdc:` that a driver message happens to echo inside a word.
     #[test]
     fn the_setup_hint_is_chosen_by_code_then_by_the_prefix_not_by_a_substring() {
         let hint = super::PG_CDC_HINT;

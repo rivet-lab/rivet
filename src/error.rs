@@ -2065,7 +2065,8 @@ pub fn codes_markdown() -> String {
          `RIVET_<FAMILY>_<NAME>` code: in `--json-errors` output as `code`, and as a `[CODE]` \
          prefix on the text error line. The KIND decides the exit code. An environment code is \
          exit 1 (a fact), exit 2 (its remedy is to run again), or exit 2 only when the typed \
-         verdict of the failure it wraps is transient, never by a word in its message.\n\n\
+         verdict of the failure it wraps is transient (a driver error number, an io kind or a \
+         SQLSTATE); a wrapper raised without a typed cause reads the words of its message.\n\n\
          | exit | meaning |\n|---|---|\n\
          | 1 | usage — fix the config or the command; retrying fails the same way |\n\
          | 2 | a transient failure, or busy (another live rivet process holds the lease or lock \

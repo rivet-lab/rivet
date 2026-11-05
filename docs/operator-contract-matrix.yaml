@@ -496,6 +496,14 @@ scenarios:
     mongo:    { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo }
     oracle:   { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle }
 
+  - id: missing_column_exits_by_its_code
+    what: "2026-11-05 finding D1 of the stop-class verification (VP-8 class): a column the table does not hold is refused as a failed read (RIVET_SOURCE_QUERY_FAILED) with exit 1 whatever words its name holds; the driver numbers that name a missing or forbidden object or column (SQL Server 207/208/229/230, MySQL 1054/1142/1143, ORA-00904/00942/01031) are typed permanent, where a column named login_timeout, dns_cache or deadlock_flag exited 2 on SQL Server, MySQL and Oracle because the exit was read from the words of the message that holds the name; the plain-named neighbours (amount, region_code) exit 1 everywhere"
+    postgres: { test: a_missing_column_exits_by_its_code_whatever_its_name_holds_postgres }
+    mysql:    { test: a_missing_column_exits_by_its_code_whatever_its_name_holds_mysql }
+    mssql:    { test: a_missing_column_exits_by_its_code_whatever_its_name_holds_mssql }
+    mongo:    { na: "a MongoDB export reads whole documents; a field the documents do not hold is a null, not a refused read" }
+    oracle:   { test: a_missing_column_exits_by_its_code_whatever_its_name_holds_oracle }
+
   - id: mssql_lock_timeout_exits_retryable
     what: "2026-11-04 finding MT-F-F (seam stop-class): a SQL Server read that waited past `tuning: lock_timeout_s` on a row lock another session holds ends with error 1222 and exits 2 (retryable), as the same wait on MySQL (1205) does; it exited 1 because the stringified SOURCE_QUERY_FAILED text did not name the lock"
     postgres: { na: "PostgreSQL has no lock_timeout_s tuning knob in rivet; its lock_not_available (55P03) is a typed verdict the retry classifier reads, covered offline" }
