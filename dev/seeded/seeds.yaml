@@ -4763,18 +4763,18 @@ seeds:
           - "lib:two_named_identities_are_refused_by_code"
 
   - name: batch-runner-stores-state-before-the-cross-shape-refusal
-    class: a batch run onto a prefix that holds another shape's manifest stores its plan, anchor or cursor before the refusal, so a refused run leaves state behind
-    history: "known defect in tests/offline/rig_oracle_ratchet.rs since the cross-shape guard landed: a parallel chunk-checkpoint run refused for a CDC manifest left an in_progress chunk run with pending tasks; the keyset runners opened their guarded frame after their resume run id, ranges or anchor were written; on main and on v0.32.2"
+    class: a batch run onto a prefix that holds another shape's manifest stores its plan, anchor or cursor before the refusal, so a refused run leaves that resume point behind
+    history: "known defect in tests/offline/rig_oracle_ratchet.rs since the cross-shape guard landed: a parallel chunk-checkpoint run refused for a CDC manifest left an in_progress chunk run with pending tasks; the keyset runners (every engine, MongoDB included) opened their guarded frame after their resume run id, ranges or anchor were written, and a skip_empty run with no rows never opened it; on main and on v0.32.2"
     scope: source
     patch: batch-runner-stores-state-before-the-cross-shape-refusal/shared.patch
     engines:
       postgres:
-        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_postgres]
+        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_postgres]
       mysql:
-        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_mysql]
+        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mysql]
       mssql:
-        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_mssql]
+        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mssql]
       oracle:
-        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_oracle]
+        cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_oracle]
       mongo:
-        na: "the Mongo batch runners open the guarded frame (mongo_parallel.rs, single.rs) before any state write"
+        cells: [a_mongo_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored]

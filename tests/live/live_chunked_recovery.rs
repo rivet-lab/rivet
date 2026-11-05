@@ -1521,10 +1521,12 @@ fn a_resume_after_a_failed_run_reports_the_rows_it_adopted() {
 const CDC_MANIFEST: &[u8] =
     br#"{"manifest_version":1,"run_id":"prior-cdc","mode":"cdc","parts":[]}"#;
 
-/// `(mode, export lines)` of every batch shape that stores a plan, anchor or cursor before its first part.
-const FOREIGN_PREFIX_SHAPES: &[(&str, &[&str])] = &[
-    ("full", &[]),
-    ("chunked", &["chunk_column: id", "chunk_size: 5"]),
+/// `(mode, export lines, source rows)` of every batch shape that stores a plan, anchor or cursor before its first part, and the empty-source `skip_empty` shape.
+const FOREIGN_PREFIX_SHAPES: &[(&str, &[&str], u32)] = &[
+    ("full", &[], 24),
+    ("full", &["skip_empty: true"], 0),
+    ("chunked", &["chunk_column: id", "chunk_size: 5"], 24),
+    ("incremental", &["cursor_column: id"], 24),
     (
         "chunked",
         &[
@@ -1532,6 +1534,7 @@ const FOREIGN_PREFIX_SHAPES: &[(&str, &[&str])] = &[
             "chunk_size: 5",
             "chunk_checkpoint: true",
         ],
+        24,
     ),
     (
         "chunked",
@@ -1541,6 +1544,7 @@ const FOREIGN_PREFIX_SHAPES: &[(&str, &[&str])] = &[
             "chunk_checkpoint: true",
             "parallel: 4",
         ],
+        24,
     ),
     (
         "chunked",
@@ -1549,6 +1553,7 @@ const FOREIGN_PREFIX_SHAPES: &[(&str, &[&str])] = &[
             "chunk_size: 5",
             "chunk_checkpoint: true",
         ],
+        24,
     ),
     (
         "chunked",
@@ -1558,6 +1563,7 @@ const FOREIGN_PREFIX_SHAPES: &[(&str, &[&str])] = &[
             "chunk_checkpoint: true",
             "parallel: 4",
         ],
+        24,
     ),
     (
         "chunked",
@@ -1566,22 +1572,26 @@ const FOREIGN_PREFIX_SHAPES: &[(&str, &[&str])] = &[
             "chunk_size: 5",
             "keyset_incremental: true",
         ],
+        24,
     ),
 ];
 
 /// Run one batch shape over a prefix that holds a CDC manifest: refused by name, and the rig oracle finds no plan, anchor or cursor stored.
-fn assert_a_cdc_prefix_is_refused_before_any_state(
+fn assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
     engine: SqlEngine,
     tag: &str,
     mode: &str,
     shape: &[&str],
+    rows: u32,
 ) {
     engine.alive();
     let (id, v) = (engine.col("id"), engine.col("v"));
     let i = engine.int64();
     let (table, _guard) = engine.create(tag, &format!("{id} {i} PRIMARY KEY, {v} {i} NOT NULL"));
-    let rows: Vec<String> = (1..=24).map(|g| format!("({g}, {g})")).collect();
-    engine.exec(&format!("INSERT INTO {table} VALUES {}", rows.join(", ")));
+    if rows > 0 {
+        let values: Vec<String> = (1..=rows).map(|g| format!("({g}, {g})")).collect();
+        engine.exec(&format!("INSERT INTO {table} VALUES {}", values.join(", ")));
+    }
     let mut rig = engine.rig(&table).mode(mode);
     for l in shape {
         rig = rig.export_line(l);
@@ -1589,48 +1599,47 @@ fn assert_a_cdc_prefix_is_refused_before_any_state(
     std::fs::create_dir_all(rig.out_dir()).unwrap();
     std::fs::write(rig.out_dir().join("manifest.json"), CDC_MANIFEST).unwrap();
     let run = rig.run();
-    let said = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        !run.status.success() && said.contains("already holds a 'cdc' manifest"),
-        "{tag} {mode} {shape:?}: a batch export must refuse to overwrite a CDC manifest by name; stderr:\n{said}"
-    );
+    assert_refused(&run, Refused::by_code("RIVET_DEST_PREFIX_MODE_MISMATCH", 5));
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
-fn a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_postgres() {
-    for (n, (mode, shape)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
-        assert_a_cdc_prefix_is_refused_before_any_state(
+fn a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_postgres() {
+    for (n, (mode, shape, rows)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
+        assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
             SqlEngine::Pg,
             &format!("xs_pg{n}"),
             mode,
             shape,
+            *rows,
         );
     }
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
-fn a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_mysql() {
-    for (n, (mode, shape)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
-        assert_a_cdc_prefix_is_refused_before_any_state(
+fn a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mysql() {
+    for (n, (mode, shape, rows)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
+        assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
             SqlEngine::Mysql,
             &format!("xs_my{n}"),
             mode,
             shape,
+            *rows,
         );
     }
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_mssql() {
-    for (n, (mode, shape)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
-        assert_a_cdc_prefix_is_refused_before_any_state(
+fn a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mssql() {
+    for (n, (mode, shape, rows)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
+        assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
             SqlEngine::Mssql,
             &format!("xs_ms{n}"),
             mode,
             shape,
+            *rows,
         );
     }
 }
@@ -1638,13 +1647,14 @@ fn a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_mssql(
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn a_batch_export_over_a_cdc_prefix_is_refused_before_any_state_is_stored_oracle() {
-    for (n, (mode, shape)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
-        assert_a_cdc_prefix_is_refused_before_any_state(
+fn a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_oracle() {
+    for (n, (mode, shape, rows)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
+        assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
             SqlEngine::Oracle,
             &format!("xs_ora{n}"),
             mode,
             shape,
+            *rows,
         );
     }
 }
