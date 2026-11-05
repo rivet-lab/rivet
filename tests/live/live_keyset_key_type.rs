@@ -178,6 +178,34 @@ const ORACLE_TS9: Case = Case {
     overrides: None,
 };
 
+#[cfg(feature = "oracle")]
+const ORACLE_BINARY_DOUBLE: Case = Case {
+    label: "Oracle BINARY_DOUBLE unique key",
+    key_ddl: "BINARY_DOUBLE",
+    key_value: |i| format!("{i}.5d"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_SCALED_NUMBER: Case = Case {
+    label: "Oracle NUMBER(12,2) unique key",
+    key_ddl: "NUMBER(12,2)",
+    key_value: |i| format!("{i} + 0.25"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_LTZ: Case = Case {
+    label: "Oracle TIMESTAMP(6) WITH LOCAL TIME ZONE unique key",
+    key_ddl: "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    key_value: |i| format!("TIMESTAMP '2024-01-01 00:00:00' + NUMTODSINTERVAL({i}, 'SECOND')"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+};
+
 /// The key columns and their config spelling: Oracle folds bare names up, the rest keep them.
 fn names(engine: SqlEngine) -> (&'static str, &'static str) {
     match engine.folds_upper() {
@@ -363,17 +391,30 @@ fn refused_on_a_table_that_fits_one_chunk(engine: SqlEngine, case: Case) {
 
 /// Every key type the cursor reads delivers the source's ids once over several pages.
 fn key_types_the_cursor_reads_deliver_the_seeded_ids(engine: SqlEngine, keys: &[KeyKind]) {
+    key_types_deliver_the_seeded_ids_over(engine, keys, 12, &[]);
+}
+
+/// Every key type in `keys` delivers the source's `rows` ids once, with the export lines `extra` added.
+fn key_types_deliver_the_seeded_ids_over(
+    engine: SqlEngine,
+    keys: &[KeyKind],
+    rows: i64,
+    extra: &[&str],
+) {
     for (label, ddl, value) in keys {
         let case = Case {
             label,
             key_ddl: ddl,
             key_value: *value,
             primary: false,
-            rows: 12,
+            rows,
             overrides: None,
         };
         let (table, _guard) = seeded(engine, &case, "ks_ok");
-        let rig = keyset_rig(engine, &table, &case, SMALL_PAGE);
+        let rig = extra.iter().fold(
+            keyset_rig(engine, &table, &case, SMALL_PAGE),
+            |rig, line| rig.export_line(line),
+        );
         let out = rig.run();
         assert!(
             out.status.success(),
@@ -717,8 +758,16 @@ fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle() {
         SqlEngine::Oracle,
         &[
             ("Oracle NUMBER(18)", "NUMBER(18)", |i| i.to_string()),
+            ("Oracle NUMBER(38)", "NUMBER(38)", |i| i.to_string()),
             ("Oracle VARCHAR2(16)", "VARCHAR2(16)", |i| {
                 format!("'k{i:03}'")
+            }),
+            ("Oracle NVARCHAR2(16)", "NVARCHAR2(16)", |i| {
+                format!("'k{i:03}'")
+            }),
+            ("Oracle CHAR(8)", "CHAR(8)", |i| format!("'k{i:03}'")),
+            ("Oracle DATE", "DATE", |i| {
+                format!("DATE '2024-01-01' + {i}")
             }),
             ("Oracle TIMESTAMP(6)", "TIMESTAMP(6)", |i| {
                 format!(
@@ -726,6 +775,43 @@ fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle() {
                 )
             }),
         ],
+    );
+}
+
+/// The bare `NUMBER` keys a seek must page: integers, fractions across zero, 35 digits, and both ends of the exponent range.
+#[cfg(feature = "oracle")]
+const ORACLE_BARE_NUMBER_KEYS: [KeyKind; 5] = [
+    ("Oracle bare NUMBER", "NUMBER", |i| i.to_string()),
+    ("Oracle bare NUMBER fractions across zero", "NUMBER", |i| {
+        format!("{i} - 6.5")
+    }),
+    ("Oracle bare NUMBER of 35 digits", "NUMBER", |i| {
+        format!("{i} * 100000000000000000000000000000 + {i} / 8")
+    }),
+    ("Oracle bare NUMBER of a large exponent", "NUMBER", |i| {
+        format!("{i}E100")
+    }),
+    ("Oracle bare NUMBER of a small exponent", "NUMBER", |i| {
+        format!("{i}E-100")
+    }),
+];
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_bare_number_keyset_key_delivers_the_seeded_ids_once_oracle() {
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Oracle, &ORACLE_BARE_NUMBER_KEYS);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_bare_number_keyset_key_delivers_the_seeded_ids_once_in_parallel_oracle() {
+    key_types_deliver_the_seeded_ids_over(
+        SqlEngine::Oracle,
+        &ORACLE_BARE_NUMBER_KEYS,
+        40,
+        &["parallel: 3"],
     );
 }
 
@@ -757,4 +843,13 @@ fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_onc
 #[ignore = "live: requires docker compose oracle"]
 fn a_timestamp_9_keyset_key_stays_refused_oracle() {
     a_refused_key_stays_refused(SqlEngine::Oracle, ORACLE_TS9);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_binary_double_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle() {
+    for case in [ORACLE_BINARY_DOUBLE, ORACLE_SCALED_NUMBER, ORACLE_LTZ] {
+        a_refused_key_stays_refused(SqlEngine::Oracle, case);
+    }
 }

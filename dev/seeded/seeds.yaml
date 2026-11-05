@@ -4861,3 +4861,20 @@ seeds:
       oracle:
         patch: number-text-without-its-label/oracle.patch
         cells: [oracle_batch_and_cdc_deliver_every_ledger_row_alike, "lib:a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not"]
+
+  - name: keyset-key-oracle-exact-number-refused
+    class: "the keyset key check refuses every column delivered as text, so an Oracle NUMBER held as exact decimal text (a bare NUMBER, which main pages by correctly) stops with RIVET_PLAN_CHUNK_KEY_UNUSABLE on a table that read every row once before the check"
+    history: "RED on the PR head 2026-11-05: live_oracle keyset_over_a_bare_number_pk_reads_every_row_once and parallel_keyset_reads_every_row_once refused after the merge of #845, which delivers a bare NUMBER as decimal_plain text"
+    scope: source
+    engines:
+      postgres:
+        na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; a PostgreSQL numeric is refused as a decimal key with or without it"
+      mysql:
+        na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; a MySQL DECIMAL is refused as a decimal key with or without it"
+      mssql:
+        na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; a SQL Server decimal is refused as a decimal key with or without it"
+      mongo:
+        na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; MongoDB pages by _id and has no chunk_by_key"
+      oracle:
+        patch: keyset-key-oracle-exact-number-refused/oracle.patch
+        cells: [a_bare_number_keyset_key_delivers_the_seeded_ids_once_oracle, keyset_over_a_bare_number_pk_reads_every_row_once, "lib:a_number_held_as_exact_text_keys_a_seek_on_oracle_alone"]

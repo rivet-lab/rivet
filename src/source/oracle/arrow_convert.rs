@@ -564,14 +564,17 @@ mod tests {
             let rivet = autodetect(kind, native, p, s, native);
             let mapping =
                 TypeMapping::from_source(&SourceColumn::simple("K", native, false), rivet);
+            let mapping = deliver_number_text(mapping, kind, p, s);
             keyset_key_refusal(SourceType::Oracle, &mapping, finer)
         };
         for (kind, native, p, s) in [
             (OraKind::Number, "number", 10, 0),
             (OraKind::Number, "number", 38, 0),
             (OraKind::Number, "number", 7, -2),
+            (OraKind::Number, "number", 0, 0),
             (OraKind::Number, "number", 0, -127),
             (OraKind::Number, "number", 126, -127),
+            (OraKind::Number, "number", 38, 39),
             (OraKind::Text, "varchar", 0, 0),
             (OraKind::Text, "nchar", 0, 0),
             (OraKind::Date, "date", 0, 0),

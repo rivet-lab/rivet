@@ -1,7 +1,7 @@
 //! The keyset key admission seam: which delivered column types the keyset cursor can advance.
 
 use crate::config::SourceType;
-use crate::types::{Delivery, RivetType, TimeUnit, TypeMapping};
+use crate::types::{Delivery, RivetType, TextForm, TimeUnit, TypeMapping};
 
 /// The fractional-second digits a microsecond timestamp keeps.
 pub(crate) const MICROSECOND_DIGITS: i32 = 6;
@@ -12,7 +12,9 @@ pub(crate) fn keyset_key_refusal(
     mapping: &TypeMapping,
     finer_than_microsecond: bool,
 ) -> Option<&'static str> {
-    if !matches!(mapping.delivery, Delivery::Native) {
+    let exact_number_text = source == SourceType::Oracle
+        && matches!(mapping.delivery, Delivery::Text(TextForm::DecimalPlain));
+    if !exact_number_text && !matches!(mapping.delivery, Delivery::Native) {
         return Some("is delivered as text, which does not sort as the stored value");
     }
     match &mapping.rivet_type {
@@ -208,6 +210,28 @@ mod tests {
             );
         }
         assert_eq!(keyset_key_refusal(SourceType::Oracle, &whole, false), None);
+    }
+
+    /// A NUMBER held as exact decimal text keys a seek on Oracle alone; other text forms never do.
+    #[test]
+    fn a_number_held_as_exact_text_keys_a_seek_on_oracle_alone() {
+        let exact = samples::mapping_of(RivetType::String).with_text(TextForm::DecimalPlain);
+        let instant = samples::mapping_of(RivetType::String).with_text(TextForm::IsoTimestampNanos);
+        let duration = samples::mapping_of(RivetType::String).with_text(TextForm::Iso8601Duration);
+        assert_eq!(keyset_key_refusal(SourceType::Oracle, &exact, false), None);
+        for source in [SourceType::Postgres, SourceType::Mysql, SourceType::Mssql] {
+            assert_eq!(
+                keyset_key_refusal(source, &exact, false),
+                Some("is delivered as text, which does not sort as the stored value"),
+                "{source:?}"
+            );
+        }
+        for text in [&instant, &duration] {
+            assert_eq!(
+                keyset_key_refusal(SourceType::Oracle, text, false),
+                Some("is delivered as text, which does not sort as the stored value")
+            );
+        }
     }
 
     /// The column is found by its own name, then by its name in any case, and is absent otherwise.
