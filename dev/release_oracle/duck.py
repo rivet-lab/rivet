@@ -38,6 +38,8 @@ TRANSIENT_CURL = re.compile(r"CURL error \[(7|28|35|52|55|56)\]")
 #: The token service the BigQuery extension's credentials come from answered 5xx (gcloud logs
 #: `oauth2_credentials.cc ... error 500 [{"error": "internal_failure"}]`): no read reached BigQuery.
 TRANSIENT_TOKEN = re.compile(r'"error":\s*"internal_failure"')
+#: A logical-decoding peek met a relation another session was rewriting (DuckDB's scanner hands over the server's text only, no SQLSTATE).
+TRANSIENT_DECODING = re.compile(r'ERROR:\s+could not map file(?:number|node) "[^"]*"')
 
 
 #: Where the DuckDB `snowflake` extension looks for its ADBC driver before its own extension directory.
@@ -73,9 +75,9 @@ class OracleUnavailable(Exception):
 
 
 def transient(e: BaseException) -> bool:
-    """Whether a DuckDB error is the reader's transport (curl, its token service, a dropped BigQuery Storage read session), not the data."""
+    """Whether a DuckDB error is the reader's transport (curl, its token service, a dropped BigQuery Storage read session, a decoding peek racing a rewrite), not the data."""
     s = str(e)
-    return bool(TRANSIENT_CURL.search(s)) or bool(TRANSIENT_TOKEN.search(s)) or bool(
+    return bool(TRANSIENT_CURL.search(s)) or bool(TRANSIENT_TOKEN.search(s)) or bool(TRANSIENT_DECODING.search(s)) or bool(
         "read session" in s and re.search(r"\b(CANCELLED|UNAVAILABLE|DEADLINE_EXCEEDED|ABORTED)\b", s))
 
 

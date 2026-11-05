@@ -1,5 +1,14 @@
 paths:
-  .github/workflows/**/*.{yml,yaml}:
+  # 2026-11-05: 44 shellcheck findings present when actionlint was added, matched by code and file (a new finding of a listed code in a listed file still passes, any other code or file fails); closes as the scripts move to Python.
+  .github/workflows/ci.yml:
     ignore:
-      # 2026-11-04: baseline of 45 shellcheck findings present when actionlint was added (35 SC2015); new codes still fail; closes as the scripts move to Python.
-      - 'shellcheck reported issue in this script: SC(2010|2012|2015|2034|2035|2044|2086|2129|2211):.+'
+      - 'shellcheck reported issue in this script: SC(2015|2034|2044|2129):.+'
+  .github/workflows/glibc228.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2211:.+'
+  .github/workflows/nightly-live.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC(2015|2034):.+'
+  .github/workflows/release.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC(2010|2012|2035|2086):.+'

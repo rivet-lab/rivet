@@ -167,7 +167,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
           components: rustfmt
@@ -189,7 +189,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
           components: clippy
@@ -270,7 +270,7 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Docs-only PR — skipping mutation testing."
           fi
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: steps.scope.outputs.code == 'true'
         with:
           toolchain: "1.94"
@@ -489,17 +489,9 @@ jobs:
             exit 0
           fi
           say state in-budget
-          # ONE run grades P1 and audits P2 whenever both fit the budget: the
-          # separate audit run paid a second cold build and baseline (6.5 min
-          # on PR #314) to grade seven mutants. Past the budget only P1 runs,
-          # through the verified P2 exclusions, and the audit is skipped.
-          if [ "$P2" -gt 0 ] && [ $((P1 + P2)) -le "$MUTANTS_DIFF_BUDGET" ]; then
-            say graded whole
-            cp diff-list.txt graded.txt
-          else
-            say graded p1
-            cp p1.txt graded.txt
-          fi
+          python3 "$CLASSIFY" graded --diff diff-list.txt --p1 p1.txt --p2 p2.txt --drop-p2 drop-p2.txt \
+            --graded graded.txt --budget "$MUTANTS_DIFF_BUDGET" > graded.state
+          say graded "$(cat graded.state)"
           N=$(grep -c . graded.txt || true)
           # ALL-OR-NOTHING replay: either every graded mutant is known for this
           # exact tree, or the run happens in full (see mutants_cache.py).
@@ -553,7 +545,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -572,15 +564,12 @@ jobs:
         run: cargo test --lib --bins --no-run
       - name: Mutate shard ${{ matrix.shard }}
         env:
-          GRADED: ${{ needs.mutants-plan.outputs.graded }}
           SHARD_N: ${{ needs.mutants-plan.outputs.shard_n }}
           MATRIX_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           DROP_P2=()
-          if [ "$GRADED" = "p1" ]; then
-            while IFS= read -r pat; do DROP_P2+=(--exclude-re "$pat"); done < drop-p2.txt
-          fi
+          while IFS= read -r pat; do DROP_P2+=(--exclude-re "$pat"); done < drop-p2.txt
           # --lib AND --bins: src/cli and src/init once lived only in the binary
           # target (PR #154 scored 35/47 MISSED on a lib-only run). Since the
           # binary links the library, --bins adds an empty harness — kept so the
@@ -709,7 +698,7 @@ jobs:
             if ! rc=$(python3 "$CACHE_PY" replay "$OUT" p1.txt); then
               say result tool-error
               echo "::error::a graded mutant has no outcome or TIMED OUT — this run has no verdict on it:"
-              python3 "$CACHE_PY" labelled "$OUT" timeout | grep -Fxf p1.txt || true
+              python3 "$CACHE_PY" missing "$OUT" p1.txt
               exit 1
             fi
           fi
@@ -837,7 +826,7 @@ jobs:
             echo "expected_state=docs-only" >> "$GITHUB_OUTPUT"
             echo "::notice::Docs-only PR — nothing to grade."
           fi
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: steps.scope.outputs.code == 'true'
         with:
           toolchain: "1.94"
@@ -1289,7 +1278,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -1359,7 +1348,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -1414,7 +1403,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -1519,7 +1508,7 @@ jobs:
           # the dominant E2E flake through 2026-08-16/17.
           ( docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle mysql-stmt-84-lctn1 > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: ${{ matrix.leg == 'pre' }}
         with:
           toolchain: "1.94"
@@ -1968,17 +1957,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Run cargo-audit directly (prebuilt binary, no compile) so it honors the
-      # accepted-advisory list in `.cargo/audit.toml` — the single source of
-      # truth shared with the `.githooks/pre-commit` hook. The previous
-      # `rustsec/audit-check` action did not reliably read that file, so the
-      # MSSQL driver's unavoidable tiberius→rustls-0.21 advisories failed the
-      # gate; documenting + tracking them in one place keeps the gate green
-      # while still catching every *fixable* future advisory.
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: cargo-audit
-      - run: cargo audit
+          tool: cargo-deny@0.20.2
+      - run: cargo deny check
 
   workflow-lint:
     name: Workflow lint (actionlint + zizmor)

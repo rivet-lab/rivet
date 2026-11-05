@@ -4,11 +4,13 @@ rules:
       # 2026-11-04: `$/` self-repository syntax is not accepted by actionlint; closes when it is.
       - ci.yml
       - nightly-live.yml
-      - release.yml
+      - release.yml:146
   cache-poisoning:
     ignore:
       # 2026-11-04: tag-scoped runs restore only default-branch caches (PR caches are ref-isolated); closes if release builds go cache-free.
-      - release.yml
+      - release.yml:35
+      - release.yml:57
+      - release.yml:105
   unpinned-images:
     ignore:
       # 2026-11-04: manylinux_2_28 is pypa's rolling image, a digest pin would expire on quay GC; closes with a mirrored copy.
@@ -16,8 +18,8 @@ rules:
   use-trusted-publishing:
     ignore:
       # 2026-11-04: crates.io publish uses the CARGO_REGISTRY_TOKEN secret; closes when crates.io trusted publishing is set up.
-      - release.yml
+      - release.yml:69
   superfluous-actions:
     ignore:
       # 2026-11-04: softprops/action-gh-release uploads a glob of assets; closes when the release step moves to `gh release`.
-      - release.yml
+      - release.yml:231

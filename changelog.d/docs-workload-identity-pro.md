@@ -1,0 +1,1 @@
+- **`docs/cloud-auth.md` recommended Workload Identity and the attached service account for the Secret Manager read**, which this edition does not mint in process. **Now** the page says they are part of rivet Pro and names the key file and gcloud ADC as this edition's credentials. **What to do:** nothing; a key file or gcloud ADC keeps working as before.
