@@ -267,8 +267,8 @@ impl S3Fixture {
 
 /// An S3 destination naming `aws_profile` beside `access_key_env` and `secret_key_env` is refused by code on `run` and `check`.
 #[test]
-#[ignore = "live+gate-only: open defect HFF-2; closes with fix/destination-credential-every-leg"]
-fn open_defect_an_s3_profile_beside_env_keys_is_refused() {
+#[ignore = "live: requires postgres + minio"]
+fn an_s3_profile_beside_env_keys_is_refused() {
     let f = S3Fixture::s3("dc_s3_both", true);
     let envs = f.envs();
     let run = f.rig.run_args_env(&[], &envs);
@@ -277,10 +277,7 @@ fn open_defect_an_s3_profile_beside_env_keys_is_refused() {
         "an S3 destination naming aws_profile beside env keys is refused by code, run; exit {:?}",
         run.status.code()
     );
-    let check = f.rig.cli_env(
-        &["check", "--config", &f.rig.config_path().to_string_lossy()],
-        &envs,
-    );
+    let check = f.rig.cli_env(&["check"], &envs);
     assert!(
         stderr_of(&check).contains(CONFLICT),
         "an S3 destination naming aws_profile beside env keys is refused by code, check; exit {:?}",
