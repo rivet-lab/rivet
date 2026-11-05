@@ -1,13 +1,13 @@
 """The post-merge hook body: keep a worktree's cargo target dir from growing after a merge.
 
-    python3 dev/pytools/post_merge_clean.py              cargo clean when the merge changed Cargo.lock, else drop incremental/
+    python3 dev/pytools/post_merge_clean.py                 cargo clean when the merge changed Cargo.lock, else drop incremental/
+    python3 dev/pytools/post_merge_clean.py --after-commit  the same for a merge finished by `git commit`; silent for any other commit
     python3 dev/pytools/post_merge_clean.py --self-test
 """
 
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -27,28 +27,51 @@ def git(root: Path, *args: str) -> str:
     return p.stdout
 
 
-def target_dir(root: Path, env: dict[str, str]) -> Path:
-    """The cargo target dir of this worktree: CARGO_TARGET_DIR when set, else `<root>/target`."""
+def own_target(root: Path, env: dict[str, str]) -> tuple[Path | None, str]:
+    """This worktree's own `<root>/target`, or None and the reason it is not to be cleaned."""
+    target = Path(os.path.abspath(root / "target"))
     raw = env.get("CARGO_TARGET_DIR")
-    return Path(os.path.abspath(root / raw if raw else root / "target"))
+    if raw and os.path.realpath(root / raw) != os.path.realpath(target):
+        return None, f"CARGO_TARGET_DIR names {os.path.abspath(root / raw)}, not this worktree's {target}"
+    if target.is_symlink():
+        return None, f"{target} is a symlink"
+    if not target.is_dir():
+        return None, f"no target dir at {target}"
+    if not (target / "CACHEDIR.TAG").is_file():
+        return None, f"{target} has no CACHEDIR.TAG, cargo did not make it"
+    return target, ""
 
 
-def lock_changed(root: Path) -> bool:
-    """Whether the merge that just finished changed Cargo.lock."""
-    return bool(git(root, "diff", "--name-only", "ORIG_HEAD", "HEAD", "--", "Cargo.lock").strip())
+def lock_changed(root: Path, base: str) -> bool:
+    """Whether Cargo.lock differs between `base` and HEAD."""
+    return bool(git(root, "diff", "--name-only", base, "HEAD", "--", "Cargo.lock").strip())
 
 
-def holders(target: Path, ps_text: str) -> list[str]:
-    """The `ps` lines whose argv names the target dir, in either spelling."""
-    spellings = {str(target), os.path.realpath(target)}
-    pat = re.compile("|".join(re.escape(s) + r"(?=[/\s]|$)" for s in spellings))
+def holders(target: Path, lsof_out: str) -> list[str]:
+    """The `lsof -F pcn` entries whose cwd, executable, mapped or open file lies under the target dir."""
+    roots = {str(target), os.path.realpath(target)}
     me = str(os.getpid())
-    return [ln.strip() for ln in ps_text.splitlines() if pat.search(ln) and ln.split(None, 1)[0] != me]
+    found: list[str] = []
+    pid = cmd = ""
+    for ln in lsof_out.splitlines():
+        tag, val = ln[:1], ln[1:]
+        if tag == "p":
+            pid, cmd = val, ""
+        elif tag == "c":
+            cmd = val
+        elif tag == "n" and pid != me and any(val == r or val.startswith(r + "/") for r in roots):
+            entry = f"{pid} {cmd} {val}"
+            if entry not in found:
+                found.append(entry)
+    return found
 
 
-def ps_text() -> str:
-    """`ps` with pid and full argv of every process, the same call on macOS and Linux."""
-    return subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True).stdout
+def lsof_text() -> str:
+    """`lsof -F pcn` of every process, the same call on macOS and Linux; a missing or empty lsof raises."""
+    p = subprocess.run(["lsof", "-nP", "-w", "-F", "pcn"], capture_output=True, text=True)
+    if not p.stdout:
+        raise RuntimeError(f"lsof listed nothing (rc {p.returncode}): {p.stderr.strip()[-200:]}")
+    return p.stdout
 
 
 def disk_bytes(path: Path) -> int:
@@ -77,19 +100,16 @@ def human(n: int) -> str:
     return f"{n} B"
 
 
-def run(root: Path, env: dict[str, str], cargo: list[str] | None = None) -> str:
+def run(root: Path, env: dict[str, str], base: str = "ORIG_HEAD", cargo: list[str] | None = None) -> str:
     """Clean the target dir as the merge warrants and return the one line to print."""
     cargo = cargo or CARGO
-    target = target_dir(root, env)
-    if not target.is_dir():
-        return f"post-merge: skipped, no target dir at {target}"
-    real, top = Path(os.path.realpath(target)), Path(os.path.realpath(root))
-    if real == top or real in top.parents:
-        return f"post-merge: skipped, {target} holds the worktree itself"
-    held = holders(target, ps_text())
+    target, why = own_target(root, env)
+    if target is None:
+        return f"post-merge: skipped, {why}"
+    held = holders(target, lsof_text())
     if held:
         return f"post-merge: skipped, a running process holds {target}: {held[0][:160]}"
-    if lock_changed(root):
+    if lock_changed(root, base):
         before = disk_bytes(target)
         p = subprocess.run([*cargo, "clean", "--target-dir", str(target)], cwd=root, capture_output=True, text=True)
         if p.returncode != 0:
@@ -110,7 +130,13 @@ def main(argv: list[str]) -> int:
     if argv == ["--self-test"]:
         return self_test()
     try:
-        print(run(Path(git(Path.cwd(), "rev-parse", "--show-toplevel").strip()), dict(os.environ)))
+        root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").strip())
+        base = "ORIG_HEAD"
+        if argv == ["--after-commit"]:
+            if len(git(root, "rev-list", "--parents", "-1", "HEAD").split()) < 3:
+                return 0
+            base = "HEAD^1"
+        print(run(root, dict(os.environ), base))
     except Exception as e:
         print(f"post-merge: skipped, {type(e).__name__}: {e}")
     return 0
@@ -149,15 +175,29 @@ def merged_repo(base: Path, lock_changes: bool) -> Path:
 
 
 def fake_target(target: Path) -> None:
-    """A target dir with deps, incremental and fingerprint content."""
-    for rel in ("debug/deps/x.rlib", "debug/incremental/a/b.bin", "debug/.fingerprint/f", "release/deps/y.rlib", "release/incremental/c/d.bin"):
+    """A target dir as cargo leaves it: tag, deps, incremental and fingerprint content."""
+    for rel in ("CACHEDIR.TAG", "debug/deps/x.rlib", "debug/incremental/a/b.bin", "debug/.fingerprint/f", "release/deps/y.rlib", "release/incremental/c/d.bin"):
         p = target / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(b"x" * 20000)
 
 
+def start_holder(root: Path, how: str, alias: Path) -> subprocess.Popen:
+    """A long-lived process held in the target dir: by relative argv, by a symlinked spelling of the argv, or by its cwd."""
+    exe = root / "target/debug/holdbin"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(shutil.which("sleep") or "/bin/sleep", exe)
+    if sys.platform == "darwin":
+        subprocess.run(["codesign", "--force", "--sign", "-", str(exe)], check=True, capture_output=True)
+    if how == "relative":
+        return subprocess.Popen(["./target/debug/holdbin", "60"], cwd=root)
+    if how == "symlinked":
+        return subprocess.Popen([str(alias / "target/debug/holdbin"), "60"], cwd="/")
+    return subprocess.Popen([str(exe), "60"], cwd=root / "target/debug/deps")
+
+
 def self_test() -> int:
-    """Lock changed, lock unchanged, a holder, a missing target and a target that is the worktree."""
+    """Lock changed or not, a holder started three ways, a target that is not this worktree's own, a merge finished by commit."""
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         fake = base / "fake_cargo.py"
@@ -166,40 +206,74 @@ def self_test() -> int:
 
         root = merged_repo(base / "a", True)
         fake_target(root / "target")
-        line = run(root, {}, cargo)
+        line = run(root, {"CARGO_TARGET_DIR": str(root / "target")}, cargo=cargo)
         assert "cargo clean" in line and "freed 0 bytes" not in line, line
         assert not (root / "target").exists(), "lock changed: the whole target must go"
 
         root = merged_repo(base / "b", False)
-        other = base / "elsewhere"
-        fake_target(other)
         fake_target(root / "target")
-        line = run(root, {"CARGO_TARGET_DIR": str(other)}, cargo)
+        line = run(root, {}, cargo=cargo)
         assert "Cargo.lock unchanged" in line and "freed 0 bytes" not in line, line
-        assert not (other / "debug/incremental").exists() and not (other / "release/incremental").exists()
-        assert (other / "debug/deps/x.rlib").exists() and (other / "release/deps/y.rlib").exists() and (other / "debug/.fingerprint/f").exists()
-        assert (root / "target/debug/incremental").exists(), "CARGO_TARGET_DIR must be respected"
+        assert not (root / "target/debug/incremental").exists() and not (root / "target/release/incremental").exists()
+        assert (root / "target/debug/deps/x.rlib").exists() and (root / "target/release/deps/y.rlib").exists() and (root / "target/debug/.fingerprint/f").exists()
 
         for lock in (True, False):
-            root = merged_repo(base / f"c{lock}", lock)
-            fake_target(root / "target")
-            holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", str(root / "target/debug/deps")])
-            try:
-                for _ in range(50):
-                    if holders(root / "target", ps_text()):
-                        break
-                    time.sleep(0.1)
-                line = run(root, {}, cargo)
-            finally:
-                holder.kill()
-                holder.wait()
-            assert "skipped, a running process" in line, line
-            assert (root / "target/debug/incremental").exists() and (root / "target/debug/deps/x.rlib").exists(), "a holder: nothing may be removed"
+            for how in ("relative", "symlinked", "cwd"):
+                root = merged_repo(base / f"c{lock}{how}", lock)
+                alias = base / f"alias{lock}{how}"
+                alias.symlink_to(root)
+                fake_target(root / "target")
+                holder = start_holder(root, how, alias)
+                try:
+                    for _ in range(50):
+                        if holders(root / "target", lsof_text()):
+                            break
+                        time.sleep(0.1)
+                    line = run(root, {}, cargo=cargo)
+                finally:
+                    holder.kill()
+                    holder.wait()
+                assert "skipped, a running process" in line, (how, line)
+                assert (root / "target/debug/incremental").exists() and (root / "target/debug/deps/x.rlib").exists(), (how, "a holder: nothing may be removed")
 
         root = merged_repo(base / "d", True)
-        assert "no target dir" in run(root, {}, cargo)
-        assert "holds the worktree" in run(root, {"CARGO_TARGET_DIR": "."}, cargo)
+        assert "no target dir" in run(root, {}, cargo=cargo)
+        other = merged_repo(base / "e", True)
+        fake_target(other / "target")
+        for env in ({"CARGO_TARGET_DIR": str(other / "target")}, {"CARGO_TARGET_DIR": "."}, {"CARGO_TARGET_DIR": str(base)}):
+            fake_target(root / "target")
+            line = run(root, env, cargo=cargo)
+            assert "skipped, CARGO_TARGET_DIR names" in line, line
+            assert (other / "target/debug/incremental").exists() and (root / "target/debug/incremental").exists(), env
+        shutil.rmtree(root / "target")
+        shared = base / "shared"
+        fake_target(shared)
+        (root / "target").symlink_to(shared)
+        assert "is a symlink" in run(root, {}, cargo=cargo) and (shared / "debug/incremental").exists()
+        (root / "target").unlink()
+        fake_target(root / "target")
+        (root / "target/CACHEDIR.TAG").unlink()
+        assert "no CACHEDIR.TAG" in run(root, {}, cargo=cargo) and (root / "target/debug/incremental").exists()
         assert (root / "Cargo.lock").exists() and (root / ".git").exists()
+
+        saved = os.getcwd(), os.environ.pop("CARGO_TARGET_DIR", None), CARGO[:]
+        try:
+            CARGO[:] = cargo
+            for lock in (True, False):
+                root = merged_repo(base / f"f{lock}", lock)
+                fake_target(root / "target")
+                os.chdir(root)
+                subprocess.run(["git", "update-ref", "ORIG_HEAD", "HEAD"], cwd=root, check=True)
+                assert main(["--after-commit"]) == 0
+                assert (root / "target").exists() is (not lock) and ((root / "target/debug/incremental").exists() is False), lock
+                fake_target(root / "target")
+                subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "plain"], cwd=root, check=True, capture_output=True)
+                assert main(["--after-commit"]) == 0 and (root / "target/debug/incremental").exists(), "a plain commit must leave the target alone"
+        finally:
+            os.chdir(saved[0])
+            if saved[1] is not None:
+                os.environ["CARGO_TARGET_DIR"] = saved[1]
+            CARGO[:] = saved[2]
     print("post_merge_clean self-test: ok")
     return 0
 

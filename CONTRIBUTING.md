@@ -65,10 +65,15 @@ With the hooks enabled:
   `git commit --no-verify`.
 - **`commit-msg`** strips attribution trailers and refuses Cyrillic or a closing
   keyword before `#N` in the message.
-- **`post-merge`** trims the worktree's cargo target dir after a merge: `cargo clean`
+- **`post-merge`** trims the worktree's own `target/` after a merge (also after a
+  conflicted merge finished with `git commit`, through `post-commit`): `cargo clean`
   when the merge changed `Cargo.lock`, else only `debug/incremental` and
-  `release/incremental`; it skips while a process holds the target dir and never
-  fails the merge.
+  `release/incremental`. It skips a `target` that is a symlink or has no
+  `CACHEDIR.TAG`, a `CARGO_TARGET_DIR` that names anything but this worktree's
+  `target/`, and any target that a running process holds (executable, cwd or an
+  open file, read with `lsof`). It never fails the merge. `--no-verify` does not
+  skip it (git runs `post-merge` and `post-commit` regardless); the bypass is
+  `git -c core.hooksPath=/dev/null merge ...`, which skips every hook.
 - **`pre-push`** runs the offline test suite (`cargo test --tests` — lib +
   integration, benches excluded) before the push leaves your machine — bypass
   with `git push --no-verify`.
