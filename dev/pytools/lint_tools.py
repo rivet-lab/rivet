@@ -24,7 +24,7 @@ REPO = "@repo"
 
 @dataclass(frozen=True)
 class Tool:
-    """A linter: executable, pinned version, repo-wide argv, the tier that runs it and its two self-test fixtures."""
+    """A linter: executable, pinned version, repo-wide argv, the tier that runs it, a good fixture and (fixture, needle) bad ones."""
 
     exe: str
     version: str
@@ -32,24 +32,55 @@ class Tool:
     install: str
     tier: str
     good: dict[str, str]
-    bad: dict[str, str]
-    needle: str
+    bad: tuple[tuple[dict[str, str], str], ...]
 
+
+MD_ARGS = ("--no-progress", "--config", "lychee.toml", "docs/**/*.md", "*.md")
+LYCHEE_INSTALL = "brew install lychee, or the release lychee-v{version}"
+TIMEOUT = 900
 
 AGENT = ".claude/agents/tidy-agent.md"
 AGENT_OK = "---\nname: tidy-agent\ndescription: Tidies a file when asked.\ntools: Read, Edit\nmodel: sonnet\n---\nTidy the file named in the task.\n"
 AGENT_BROKEN = "---\ndescription: Tidies a file when asked.\ntools: Read, Edit\nTidy the file named in the task.\n"
+MCP_PINNED = "{\"mcpServers\": {\"graph\": {\"command\": \"uvx\", \"args\": [\"code-review-graph==2.3.9\", \"serve\"], \"type\": \"stdio\"}}}\n"
+MCP_UNPINNED = MCP_PINNED.replace("==2.3.9", "")
 
 TOOLS = {
+    "lychee": Tool(
+        "lychee",
+        "0.24.2",
+        ("--offline", "--include-fragments", *MD_ARGS),
+        LYCHEE_INSTALL,
+        "pr",
+        {"lychee.toml": REPO, "a.md": "[b](b.md#top)\n", "b.md": "# Top\n", "docs/d/c.md": "[a](../../a.md)\n"},
+        (
+            ({"lychee.toml": REPO, "a.md": "[b](b.md#no-such-heading)\n", "b.md": "# Top\n"}, "no-such-heading"),
+            ({"lychee.toml": REPO, "docs/d/c.md": "[x](no-such-file.md)\n"}, "docs/d/no-such-file.md"),
+        ),
+    ),
+    "lychee-web": Tool(
+        "lychee",
+        "0.24.2",
+        ("--max-retries", "3", "--timeout", "30", *MD_ARGS),
+        LYCHEE_INSTALL,
+        "nightly",
+        {"lychee.toml": REPO, "a.md": "No links here.\n", "docs/d/c.md": "No links here.\n"},
+        (
+            ({"lychee.toml": REPO, "a.md": "[dead](http://127.0.0.1:9/unreachable)\n"}, "127.0.0.1:9"),
+            ({"lychee.toml": REPO, "docs/d/c.md": "[dead](http://127.0.0.1:9/unreachable)\n"}, "127.0.0.1:9"),
+        ),
+    ),
     "agnix": Tool(
         "agnix",
         "0.59.0",
         ("--strict", "."),
-        "the release v0.59.0 of agent-sh/agnix, or cargo install agnix-cli --version 0.59.0",
+        "the release v{version} of agent-sh/agnix, or cargo install agnix-cli --version {version}",
         "pr",
-        {AGENT: AGENT_OK},
-        {AGENT: AGENT_BROKEN},
-        "no 'name' field",
+        {AGENT: AGENT_OK, ".mcp.json": MCP_PINNED},
+        (
+            ({AGENT: AGENT_BROKEN}, "no 'name' field"),
+            ({".mcp.json": MCP_UNPINNED}, "without a pinned version"),
+        ),
     ),
 }
 
@@ -69,14 +100,17 @@ def installed(tool: Tool) -> str | None:
     return m.group(0) if m else "unknown"
 
 
-def run(name: str, root: Path = ROOT) -> tuple[str, str]:
-    """Run one tool over `root`: (PASS | FAIL | NOT RUN, one line)."""
+def run(name: str, root: Path = ROOT, timeout: int = TIMEOUT) -> tuple[str, str]:
+    """Run one tool over `root`: (PASS | FAIL | NOT RUN, one line); a run past `timeout` seconds is a FAIL."""
     tool = TOOLS[name]
     have = installed(tool)
     if have != tool.version:
         why = f"{tool.exe} is not installed" if have is None else f"{tool.exe} {have} is installed, the pin is {tool.version}"
-        return "NOT RUN", f"{why} ({tool.install})"
-    done = subprocess.run([tool.exe, *tool.argv], cwd=root, capture_output=True, text=True)
+        return "NOT RUN", f"{why} ({tool.install.format(version=tool.version)})"
+    try:
+        done = subprocess.run([tool.exe, *tool.argv], cwd=root, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "FAIL", f"{tool.exe} {tool.version} did not finish in {timeout} s"
     if done.returncode == 0:
         return "PASS", f"{tool.exe} {tool.version}: clean"
     lines = [ln for ln in (done.stdout + done.stderr).splitlines() if ln.strip()]
@@ -96,7 +130,7 @@ def self_test() -> int:
     """Every tool fails on its bad fixture and passes its good one; an absent tool is NOT RUN, never PASS."""
     for name, tool in TOOLS.items():
         assert tool.tier in ("pr", "nightly"), f"{name}: tier {tool.tier}"
-        TOOLS[name] = Tool("lint-tool-that-does-not-exist", tool.version, (), "n/a", tool.tier, {}, {}, "")
+        TOOLS[name] = Tool("lint-tool-that-does-not-exist", tool.version, (), "n/a", tool.tier, {}, ())
         try:
             assert run(name)[0] == "NOT RUN", f"{name}: an absent tool must not read as PASS"
         finally:
@@ -106,15 +140,23 @@ def self_test() -> int:
         if installed(tool) != tool.version:
             print(f"lint_tools self-test: {name} fixtures NOT RUN ({installed(tool) or 'absent'}, pin {tool.version})")
             continue
-        good, bad = fixture(tool.good), fixture(tool.bad)
-        try:
-            assert run(name, good)[0] == "PASS", (name, run(name, good))
-            verdict, line = run(name, bad)
-            assert verdict == "FAIL" and tool.needle in line, (name, verdict, line)
-        finally:
-            shutil.rmtree(good, ignore_errors=True)
-            shutil.rmtree(bad, ignore_errors=True)
+        for files, needle in ((tool.good, None), *tool.bad):
+            root = fixture(files)
+            try:
+                verdict, line = run(name, root)
+                if needle is None:
+                    assert verdict == "PASS", (name, verdict, line)
+                else:
+                    assert verdict == "FAIL" and needle in line, (name, needle, verdict, line)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
         graded.append(name)
+    me = sys.executable
+    TOOLS["hang"] = Tool(me, installed(Tool(me, "", (), "", "pr", {}, ())) or "", ("-c", "import time; time.sleep(60)"), "n/a", "pr", {}, ())
+    try:
+        assert run("hang", timeout=1)[0] == "FAIL", "a hung tool must read FAIL"
+    finally:
+        del TOOLS["hang"]
     print(f"lint_tools self-test: ok ({len(TOOLS)} tools table-checked; fixtures graded: {', '.join(graded) or 'none'})")
     return 0
 

@@ -249,9 +249,15 @@ enum ColumnStats {
 /// `column`'s span over every row group of one file; an all-NULL row group adds no values.
 fn column_span(meta: &ParquetMetaData, column: &str) -> ColumnStats {
     let schema = meta.file_metadata().schema_descr();
-    let Some(idx) = schema.columns().iter().position(|c| c.name() == column) else {
-        return ColumnStats::Unknown;
-    };
+    match schema.columns().iter().position(|c| c.name() == column) {
+        Some(idx) => column_span_at(meta, idx),
+        None => ColumnStats::Unknown,
+    }
+}
+
+/// The span of the leaf column at `idx` over every row group of one file.
+fn column_span_at(meta: &ParquetMetaData, idx: usize) -> ColumnStats {
+    let schema = meta.file_metadata().schema_descr();
     let descr = schema.column(idx);
     let Some(unit) = stored_unit(descr.logical_type_ref(), descr.physical_type()) else {
         return ColumnStats::Unknown;
@@ -304,14 +310,15 @@ pub(crate) fn timestamp_outside(
     hi_secs: i64,
 ) -> Option<(String, Option<String>)> {
     let schema = meta.file_metadata().schema_descr();
-    schema.columns().iter().find_map(|c| {
+    schema.columns().iter().enumerate().find_map(|(idx, c)| {
         if !matches!(c.logical_type_ref(), Some(LogicalType::Timestamp(_))) {
             return None;
         }
-        let span = match column_span(meta, c.name()) {
+        let name = c.path().string();
+        let span = match column_span_at(meta, idx) {
             ColumnStats::Span(span, _) => span,
             ColumnStats::NoValues => return None,
-            ColumnStats::Unknown => return Some((c.name().to_string(), None)),
+            ColumnStats::Unknown => return Some((name, None)),
         };
         let end = if to_seconds(span.lo, span.unit) < lo_secs {
             span.lo
@@ -320,7 +327,7 @@ pub(crate) fn timestamp_outside(
         } else {
             return None;
         };
-        Some((c.name().to_string(), Some(render(end, span.unit))))
+        Some((name, Some(render(end, span.unit))))
     })
 }
 
@@ -640,6 +647,74 @@ mod tests {
             check("unknown.parquet"),
             Some(("ts".to_string(), None)),
             "no statistics is named, never passed"
+        );
+    }
+
+    /// Footer metadata of list columns named `names`, each holding one row of `lists[i]` timestamps (texts when `None`).
+    fn list_columns_meta(columns: &[(&str, Option<Vec<i64>>)]) -> ParquetMetaData {
+        use arrow::array::{Array, ListBuilder, StringBuilder, TimestampMicrosecondBuilder};
+        let mut fields = Vec::new();
+        let mut arrays: Vec<ArrayRef> = Vec::new();
+        for (name, secs) in columns {
+            match secs {
+                None => {
+                    let mut b = ListBuilder::new(StringBuilder::new());
+                    b.values().append_value("x");
+                    b.append(true);
+                    let a = b.finish();
+                    fields.push(Field::new(*name, a.data_type().clone(), true));
+                    arrays.push(Arc::new(a));
+                }
+                Some(secs) => {
+                    let mut b =
+                        ListBuilder::new(TimestampMicrosecondBuilder::new().with_timezone("UTC"));
+                    for s in secs {
+                        b.values().append_value(micros(*s));
+                    }
+                    b.append(true);
+                    let a = b.finish();
+                    fields.push(Field::new(*name, a.data_type().clone(), true));
+                    arrays.push(Arc::new(a));
+                }
+            }
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let mut buf = Vec::new();
+        let mut w = ArrowWriter::try_new(&mut buf, schema.clone(), None).unwrap();
+        w.write(&RecordBatch::try_new(schema, arrays).unwrap())
+            .unwrap();
+        w.close().unwrap();
+        ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes::Bytes::from(buf))
+            .unwrap()
+    }
+
+    /// A timestamp list column is checked by its own footer leaf, never by the first leaf that shares its element name.
+    #[test]
+    fn a_timestamp_list_is_checked_by_its_own_leaf_not_by_the_name_item() {
+        let (lo, hi) = (at(1900, 1, 1, 0), at(2299, 12, 31, 23));
+        let late = at(9999, 12, 31, 0);
+        let inside = at(2024, 1, 1, 0);
+        assert_eq!(
+            timestamp_outside(
+                &list_columns_meta(&[("tags", None), ("seen", Some(vec![inside]))]),
+                lo,
+                hi
+            ),
+            None,
+            "a text list before it must not stand in for its statistics"
+        );
+        assert_eq!(
+            timestamp_outside(
+                &list_columns_meta(&[("a", Some(vec![inside])), ("b", Some(vec![inside, late]))]),
+                lo,
+                hi
+            ),
+            Some((
+                "b.list.item".to_string(),
+                Some("9999-12-31 00:00".to_string())
+            )),
+            "the second list is checked, not the first one twice"
         );
     }
 

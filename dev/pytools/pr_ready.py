@@ -4,6 +4,7 @@
     pr_ready.py run [--fast] [--base REV] [--body FILE]   everything a PR must pass; prints the summary block
     pr_ready.py ci --base SHA --event PATH [--body FILE]  CI: commits, PR text, raised ratchets, CHANGELOG
     pr_ready.py text --message FILE | --staged | --commits RANGE   the hooks
+    pr_ready.py pins [--rev REV]                          every ratchet pin and its measured value (working tree by default)
     pr_ready.py --self-test
 
 Stdlib only, so the hooks and CI run it on a bare `python3`.
@@ -39,7 +40,7 @@ TRAILER = re.compile(r"^\s*(co-authored-by|claude-session):", re.I)
 BYTE_SLICE = re.compile(r"\[\s*\.\.\s*[A-Za-z_][\w.]*\.len\(\)\s*\]|\[\s*[A-Za-z_]\w*\s*\.\.\s*[A-Za-z_]\w*\s*\+\s*\w+\s*\]")
 SQL_PARSER = re.compile(r"^\+?\s*(sqlparser|sqlformat|sql-parse|pg_query|sqlparse)\b")
 BINARY = re.compile(r"\.(gif|png|jpg|jpeg|parquet|ico|pdf)$")
-MARK = re.compile(r"ratchet-pin:\s*([\w.-]+)(?:\s+(sum|strings|lines))?(?:\s+(min))?")
+MARK = re.compile(r"ratchet-pin:\s*([\w.-]+)(?:\s+(sum|strings|lines|count))?(?:\s+(min))?")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 NUMBER = re.compile(r"(?<!\w)\d\w*")
 # Definitions that look like a pin by name; each must carry a `ratchet-pin:` marker.
@@ -140,7 +141,7 @@ def numbers(code: str, where: str) -> list[int]:
     return out
 
 
-def pins(text: str, path: str) -> dict[str, tuple[int, bool]]:
+def pins(text: str, path: str, census=None) -> dict[str, tuple[int, bool]]:
     """Every `ratchet-pin:` in a file: name → (measured value, is_floor). A shape it cannot read is an error."""
     lines = text.splitlines()
     out: dict[str, tuple[int, bool]] = {}
@@ -151,11 +152,19 @@ def pins(text: str, path: str) -> dict[str, tuple[int, bool]]:
         name, measure, floor = m.groups()
         if name in out:
             raise ValueError(f"{path}:{i + 1}: ratchet-pin {name} declared twice")
+        where = f"{path}:{i + 1}: ratchet-pin {name}"
         if measure is None:
-            ints = numbers(_code(line[: m.start()])[0], f"{path}:{i + 1}: ratchet-pin {name}")
+            ints = numbers(_code(line[: m.start()])[0], where)
             if len(ints) != 1:
-                raise ValueError(f"{path}:{i + 1}: ratchet-pin {name} needs exactly one integer on its line, found {len(ints)}")
+                raise ValueError(f"{where} needs exactly one integer on its line, found {len(ints)}")
             value = ints[0]
+        elif measure == "count":
+            spec = line[m.end() :].split(None, 1)
+            if len(spec) != 2 or census is None:
+                raise ValueError(f"{where} count needs `<pathspec> <extended regex>` after it and a census to count with")
+            value = census(spec[0], spec[1].strip())
+            if value == 0:
+                raise ValueError(f"{where} count matched nothing in {spec[0]}: the census is blind, so a shrink would read as green")
         else:
             body, closed = [], False
             for later in lines[i + 1 :]:
@@ -164,20 +173,25 @@ def pins(text: str, path: str) -> dict[str, tuple[int, bool]]:
                     break
                 body.append(later)
             if not closed and measure != "lines":
-                raise ValueError(f"{path}:{i + 1}: ratchet-pin {name} {measure} has no `ratchet-pin: end`")
+                raise ValueError(f"{where} {measure} has no `ratchet-pin: end`")
             if measure == "lines":
                 value = sum(1 for b in body if b.strip() and not b.strip().startswith(("#", "//")))
             elif measure == "strings":
                 value = sum(_code(b)[1] for b in body if not b.strip().startswith(("#", "//")))
             else:
-                value = sum(sum(numbers(_code(b)[0], f"{path}:{i + 1}: ratchet-pin {name} sum")) for b in body)
+                value = sum(sum(numbers(_code(b)[0], f"{where} sum")) for b in body)
         out[name] = (value, bool(floor))
     return out
 
 
-def pin_files(rev: str) -> dict[str, str]:
-    """Path → text of every tracked file holding a `ratchet-pin:` marker at `rev`."""
+def pin_files(rev: str | None) -> dict[str, str]:
+    """Path → text of every tracked file holding a `ratchet-pin:` marker at `rev` (the working tree when None)."""
     out = {}
+    if rev is None:
+        for path in git("grep", "-l", "-e", "ratchet-pin:", check=False).splitlines():
+            if path != "dev/pytools/pr_ready.py":
+                out[path] = (ROOT / path).read_text()
+        return out
     for hit in git("grep", "-l", "-e", "ratchet-pin:", rev, check=False).splitlines():
         path = hit.split(":", 1)[1]
         if path != "dev/pytools/pr_ready.py":
@@ -185,9 +199,22 @@ def pin_files(rev: str) -> dict[str, str]:
     return out
 
 
-def all_pins(rev: str) -> dict[str, tuple[int, bool]]:
-    """`path:NAME` → (value, is_floor) over the tree at `rev`."""
-    return {f"{p}:{n}": v for p, t in pin_files(rev).items() for n, v in pins(t, p).items()}
+def census(rev: str | None):
+    """The counter a `count` pin measures with: matches of an extended regex under a pathspec at `rev` (working tree when None)."""
+
+    def count(pathspec: str, regex: str) -> int:
+        cmd = [GIT, "grep", "-o", "-h", "-E", "-e", regex, *([rev] if rev else []), "--", pathspec]
+        p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+        if p.returncode > 1:
+            raise ValueError(f"census `{regex}` under {pathspec}: {p.stderr.strip()}")
+        return len(p.stdout.splitlines())
+
+    return count
+
+
+def all_pins(rev: str | None) -> dict[str, tuple[int, bool]]:
+    """`path:NAME` → (value, is_floor) over the tree at `rev` (the working tree when None)."""
+    return {f"{p}:{n}": v for p, t in pin_files(rev).items() for n, v in pins(t, p, census(rev)).items()}
 
 
 def raised(base: dict, head: dict) -> list[str]:
@@ -402,6 +429,14 @@ def mutants(out: Path, base: str, jobs: int) -> tuple[str, str]:
     return verdict, f"{line} (whole diff; CI may excuse a miss in a function the offline suite never executes)"
 
 
+def secrets_tree() -> tuple[str, str]:
+    """The pinned gitleaks over every tracked file; NOT RUN when it is absent or not the pin."""
+    rc = subprocess.run([sys.executable, str(ROOT / "dev/pytools/secrets_scan.py"), "tree"], capture_output=True, text=True)
+    if rc.returncode == 2:
+        return "NOT RUN", rc.stderr.strip().splitlines()[-1] if rc.stderr.strip() else "gitleaks not run"
+    return ("PASS", "no findings in the tracked tree") if rc.returncode == 0 else ("FAIL", "gitleaks found a secret: python3 dev/pytools/secrets_scan.py tree")
+
+
 def run_local(args: argparse.Namespace) -> int:
     """`make pr-ready`: every check, then one summary block."""
     out = Path(tempfile.mkdtemp(prefix="pr-ready-"))
@@ -421,6 +456,7 @@ def run_local(args: argparse.Namespace) -> int:
         print("pr-ready: mutants in-diff ...", file=sys.stderr, flush=True)
         rows.append(("mutants in-diff", *mutants(out, args.base, args.jobs)))
     rows += [(name, *lint_tools.run(name)) for name in lint_tools.tools("pr")]
+    rows.append(("secrets scan", *secrets_tree()))
     rows += branch_rows(args.base, body)
     sha = git("rev-parse", "--short", "HEAD").strip()
     print_rows(f"make pr-ready @ {sha} (base {args.base}){' --fast' if args.fast else ''}; logs {out}", rows)
@@ -437,6 +473,13 @@ def run_ci(args: argparse.Namespace) -> int:
     rows = branch_rows(args.base, body)
     print_rows(f"PR rules (base {args.base})", rows)
     return 1 if any(v in ("FAIL", "DECLARE") for _, v, _ in rows) else 0
+
+
+def run_pins(args: argparse.Namespace) -> int:
+    """Print `path:NAME value` for every ratchet pin at `--rev` (the working tree by default)."""
+    for key, (value, floor) in sorted(all_pins(args.rev).items()):
+        print(f"{key} {value}{' min' if floor else ''}")
+    return 0
 
 
 def run_text(args: argparse.Namespace) -> int:
@@ -504,7 +547,24 @@ def self_test() -> int:
     assert pins("const X: usize = 14; // ratchet-pin: x // was 5\n", "a.rs") == {"x": (14, False)}
     assert pins("# head\n# ratchet-pin: rows lines\nsrc/a.rs:1: x\n\nsrc/b.rs:2: y\n", "b.txt") == {"rows": (2, False)}
     assert pins("  FIRST_RUN_CEILING: 304  # +14 on #411 ratchet-pin: first-run\n", "ci.yml") == {"first-run": (304, False)}
+    seen = []
+
+    def fake(pathspec: str, regex: str) -> int:
+        seen.append((pathspec, regex))
+        return {"tests/live/": 32, "tests/none/": 0}[pathspec]
+
+    counted = "// ratchet-pin: opt-outs count tests/live/ \\.no_oracle\\(|NO_ORACLE_ENV\n"
+    assert pins(counted, "r.rs", fake) == {"opt-outs": (32, False)} and seen == [("tests/live/", "\\.no_oracle\\(|NO_ORACLE_ENV")], seen
+    here = census(None)
+    assert here("dev/pytools/pr_ready.py", "def (census|pins)\\(") == 2, "a census counts every match of an extended regex"
+    try:
+        here("dev/pytools/pr_ready.py", "(")
+        raise AssertionError("an unreadable regex must be an error, not a count of zero")
+    except ValueError:
+        pass
     for broken in (
+        "// ratchet-pin: o count tests/none/ x\n",
+        "// ratchet-pin: o count tests/live/\n",
         "const X: usize = N; // ratchet-pin: x\n",
         "const T: &[u8] = &[ // ratchet-pin: t sum\n 1,\n",
         "const X: usize = 14 + 5; // ratchet-pin: x\n",
@@ -514,7 +574,7 @@ def self_test() -> int:
         "const T: &[usize] = &[ // ratchet-pin: t sum\n 1_000,\n]; // ratchet-pin: end\n",
     ):
         try:
-            pins(broken, "b.rs")
+            pins(broken, "b.rs", fake)
             raise AssertionError(f"an unreadable pin must be an error: {broken!r}")
         except ValueError:
             pass
@@ -586,6 +646,8 @@ def main() -> int:
     c.add_argument("--base", required=True)
     c.add_argument("--event", help="the pull_request event payload ($GITHUB_EVENT_PATH)")
     c.add_argument("--body", help="a PR body file instead of the event payload")
+    n = sub.add_parser("pins")
+    n.add_argument("--rev", default=None)
     t = sub.add_parser("text")
     g = t.add_mutually_exclusive_group(required=True)
     g.add_argument("--message")
@@ -594,7 +656,7 @@ def main() -> int:
     args = ap.parse_args()
     if args.cmd == "ci" and not (args.event or args.body):
         ap.error("ci needs --event or --body")
-    return {"run": run_local, "ci": run_ci, "text": run_text}[args.cmd](args)
+    return {"run": run_local, "ci": run_ci, "pins": run_pins, "text": run_text}[args.cmd](args)
 
 
 if __name__ == "__main__":

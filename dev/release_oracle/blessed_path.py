@@ -651,7 +651,11 @@ def sc_blessed_path(
             duck_rows, duck_files = _parquet_rows_and_files(dest_dir)
         else:
             pfx = cloud_prefix(engine, tag, table, scenario)
-            got = scenarios.store_readback(store, _bucket(store), pfx, work)
+            try:
+                got = scenarios.store_readback(store, _bucket(store), pfx, work)
+            except scenarios.StoreReadError as e:
+                led.ungraded(engine, tag, "blessed:oracle", store, f"{engine} {tag} {store} · oracle — readback failed: {e}")
+                return
             duck_rows = int(got.splitlines()[0]) if got.strip().isdigit() else -1
             duck_files = -1  # the readback helper reports rows only
             man = _cloud_manifest(_bucket(store), pfx) or man

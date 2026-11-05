@@ -39,7 +39,8 @@ workflow enforces on the PR itself:
 - commit messages and the PR title/body are English, carry no `Co-Authored-By` /
   `Claude-Session` trailer, and never put fix/close/resolve before `#N` (write `see #N`);
 - a raised ratchet pin (any line or block marked `ratchet-pin:`) is named in a
-  `## Ratchets raised` section of the PR body; lowering one needs nothing;
+  `## Ratchets raised` section of the PR body; lowering one needs nothing. A pin whose marker
+  names a `count <pathspec> <regex>` is measured from the tree (`pr_ready.py pins`), so there is no number to type;
 - a change under `src/` adds a changelog fragment, one file under `changelog.d/` in the
   CHANGELOG entry format (see `changelog.d/README.md`), or the PR body says
   `No user-visible change`. Fragments keep open pull requests from conflicting on the top
@@ -60,10 +61,19 @@ With the hooks enabled:
 - **`pre-commit`** mirrors the CI fmt + clippy + audit gates and keeps
   code-derived docs in sync: it runs cargo fmt/clippy, builds the rivet binary,
   regenerates the JSON schema + reference docs and stages them into your commit
-  (`git add -u schemas docs`), and runs cargo audit when installed — bypass with
+  (`git add -u schemas docs`), and runs cargo deny check when installed — bypass with
   `git commit --no-verify`.
 - **`commit-msg`** strips attribution trailers and refuses Cyrillic or a closing
   keyword before `#N` in the message.
+- **`post-merge`** trims the worktree's own `target/` after a merge (also after a
+  conflicted merge finished with `git commit`, through `post-commit`): `cargo clean`
+  when the merge changed `Cargo.lock`, else only `debug/incremental` and
+  `release/incremental`. It skips a `target` that is a symlink or has no
+  `CACHEDIR.TAG`, a `CARGO_TARGET_DIR` that names anything but this worktree's
+  `target/`, and any target that a running process holds (executable, cwd or an
+  open file, read with `lsof`). It never fails the merge. `--no-verify` does not
+  skip it (git runs `post-merge` and `post-commit` regardless); the bypass is
+  `git -c core.hooksPath=/dev/null merge ...`, which skips every hook.
 - **`pre-push`** runs the offline test suite (`cargo test --tests` — lib +
   integration, benches excluded) before the push leaves your machine — bypass
   with `git push --no-verify`.
