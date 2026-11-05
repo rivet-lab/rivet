@@ -189,6 +189,8 @@ struct TableSink<'a> {
     column_sums: std::collections::BTreeMap<String, u64>,
     /// How many of `parts` the last per-roll manifest already declared.
     manifested_parts: usize,
+    /// Whether this table's `running` marker is already at the destination.
+    marked: bool,
     /// The open transaction's moved-in keys, which order a statement's key moves.
     moved: partition_guard::MovedIn,
     /// Names a change carried that the table's catalog no longer has (renamed or dropped).
@@ -208,6 +210,15 @@ struct SinkRun<'a> {
 }
 
 impl TableSink<'_> {
+    /// This table's `running` marker: its manifest before any part exists, under the run's own key.
+    fn running_marker(&self, run: &SinkRun<'_>) -> RunManifest {
+        RunManifest {
+            status: ManifestStatus::Running,
+            finished_at: String::new(),
+            ..self.manifest(run)
+        }
+    }
+
     /// This table's run manifest over the parts it has so far.
     fn manifest(&self, run: &SinkRun<'_>) -> RunManifest {
         build_manifest(
@@ -369,6 +380,24 @@ fn roll_all(
     for &i in &pending {
         sinks[i].prepare_schema()?;
     }
+    let unmarked: Vec<usize> = pending
+        .iter()
+        .copied()
+        .filter(|&i| !sinks[i].marked)
+        .collect();
+    let markers: Vec<(&dyn crate::destination::Destination, RunManifest)> = unmarked
+        .iter()
+        .map(|&i| (sinks[i].out.dest, sinks[i].running_marker(run)))
+        .collect();
+    crate::workers::run_each(&markers, |(dest, marker)| {
+        write_manifest_without_success_marker(*dest, marker).map(|_| ())
+    })
+    .into_iter()
+    .collect::<Result<()>>()?;
+    drop(markers);
+    for i in unmarked {
+        sinks[i].marked = true;
+    }
     let uploaded = {
         let view: Vec<&TableSink<'_>> = pending.iter().map(|&i| &sinks[i]).collect();
         let (engine, format, run_token) = (run.engine, run.format, run.run_token);
@@ -490,6 +519,7 @@ pub(crate) fn run_to_files(
             seq: 0,
             column_sums: std::collections::BTreeMap::new(),
             manifested_parts: 0,
+            marked: false,
             moved: Default::default(),
             gone: Default::default(),
         })
@@ -768,6 +798,18 @@ pub(crate) fn run_to_files(
         .collect::<Result<()>>()
         .err()
     } else {
+        for s in sinks.iter().filter(|s| s.marked && s.manifested_parts == 0) {
+            let failed = RunManifest {
+                status: ManifestStatus::Failed,
+                ..s.running_marker(&run)
+            };
+            if let Err(e) = write_manifest_without_success_marker(s.out.dest, &failed) {
+                log::warn!(
+                    "cdc: could not close the running marker of '{}': {e:#}",
+                    s.out.table
+                );
+            }
+        }
         None
     };
     match (drain, write_err) {
@@ -3094,6 +3136,7 @@ mod tests {
     /// sibling-gating never run.
     struct ManifestFailingDest {
         inner: Box<dyn crate::destination::Destination>,
+        marker_through: std::sync::atomic::AtomicBool,
     }
     impl crate::destination::Destination for ManifestFailingDest {
         fn write(
@@ -3102,7 +3145,11 @@ mod tests {
             key: &str,
         ) -> Result<crate::destination::WriteOutcome> {
             let name = key.rsplit('/').next().unwrap_or(key);
-            if name.starts_with("manifest") || name == "_SUCCESS" {
+            let marker = name.starts_with("manifest-")
+                && !self
+                    .marker_through
+                    .swap(true, std::sync::atomic::Ordering::SeqCst);
+            if !marker && (name.starts_with("manifest") || name == "_SUCCESS") {
                 anyhow::bail!("injected: terminal write of '{key}' refused");
             }
             self.inner.write(local, key)
@@ -3129,6 +3176,106 @@ mod tests {
         fn capabilities(&self) -> crate::destination::DestinationCapabilities {
             self.inner.capabilities()
         }
+    }
+
+    /// Reads the run-unique manifests under `dir` at every part write; a part write fails when `fail_parts`.
+    struct AtPartWriteDest {
+        inner: Box<dyn crate::destination::Destination>,
+        dir: std::path::PathBuf,
+        fail_parts: bool,
+        statuses: std::sync::Mutex<Vec<Vec<ManifestStatus>>>,
+    }
+    impl crate::destination::Destination for AtPartWriteDest {
+        fn write(
+            &self,
+            local: &std::path::Path,
+            key: &str,
+        ) -> Result<crate::destination::WriteOutcome> {
+            if key.ends_with(".parquet") {
+                let seen = run_unique_statuses(&self.dir);
+                self.statuses.lock().unwrap().push(seen);
+                if self.fail_parts {
+                    anyhow::bail!("injected: part write of '{key}' refused");
+                }
+            }
+            self.inner.write(local, key)
+        }
+        fn capabilities(&self) -> crate::destination::DestinationCapabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    fn run_unique_statuses(dir: &std::path::Path) -> Vec<ManifestStatus> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                crate::manifest::is_run_unique_manifest_name(&e.file_name().to_string_lossy())
+            })
+            .map(|e| {
+                serde_json::from_slice::<RunManifest>(&std::fs::read(e.path()).unwrap())
+                    .unwrap()
+                    .status
+            })
+            .collect()
+    }
+
+    /// A CDC table's `running` marker is at the destination before its first part is written.
+    #[test]
+    fn a_cdc_table_marks_itself_running_before_its_first_part_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = AtPartWriteDest {
+            inner: local_dest(&dir),
+            dir: dir.path().to_path_buf(),
+            fail_parts: false,
+            statuses: Default::default(),
+        };
+        let cols = int_col();
+        let mut stream = FakeStream {
+            events: VecDeque::from(vec![insert(1), insert(2), insert(3)]),
+            acked: Vec::new(),
+        };
+        let (_, r) = run_to_files(&mut stream, cfg(&dest, &cols, FormatType::Parquet, 2));
+        r.unwrap();
+        let seen = dest.statuses.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![vec![ManifestStatus::Running], vec![ManifestStatus::Success]],
+            "the first part lands beside a running marker, the second beside the roll's Success manifest"
+        );
+        assert_eq!(
+            run_unique_statuses(dir.path()),
+            vec![ManifestStatus::Success]
+        );
+    }
+
+    /// A run that fails before any roll is manifested closes its marker as `Failed`, so no load defers for it.
+    #[test]
+    fn a_cdc_run_that_fails_before_its_first_manifest_closes_its_running_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = AtPartWriteDest {
+            inner: local_dest(&dir),
+            dir: dir.path().to_path_buf(),
+            fail_parts: true,
+            statuses: Default::default(),
+        };
+        let cols = int_col();
+        let mut stream = FakeStream {
+            events: VecDeque::from(vec![insert(1), insert(2)]),
+            acked: Vec::new(),
+        };
+        let (_, r) = run_to_files(&mut stream, cfg(&dest, &cols, FormatType::Parquet, 2));
+        assert!(r.is_err(), "the part write was refused");
+        assert_eq!(
+            dest.statuses.lock().unwrap().clone(),
+            vec![vec![ManifestStatus::Running]],
+            "the marker was there when the part write failed"
+        );
+        assert_eq!(
+            run_unique_statuses(dir.path()),
+            vec![ManifestStatus::Failed]
+        );
+        assert!(!dir.path().join("_SUCCESS").exists());
     }
 
     /// A roll rewrites the run-unique manifest only for a table that gained a part since the
@@ -3196,14 +3343,14 @@ mod tests {
         };
         assert_eq!(
             run_unique(&idle),
-            2,
-            "b gained its part on the first roll and stayed idle for the next three: one \
-             per-roll manifest plus the terminal one, not one per roll of the whole stream"
+            3,
+            "b gained its part on the first roll and stayed idle for the next three: its running \
+             marker, one per-roll manifest and the terminal one, not one per roll of the whole stream"
         );
         assert_eq!(
             run_unique(&busy),
-            4,
-            "a gained a part on every roll, then the terminal"
+            5,
+            "a wrote its running marker, gained a part on every roll, then the terminal"
         );
     }
 
@@ -3593,6 +3740,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let dest = ManifestFailingDest {
             inner: local_dest(&d),
+            marker_through: Default::default(),
         };
         let cols = int_col();
         let mut e1 = insert(1);

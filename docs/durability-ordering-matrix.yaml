@@ -164,11 +164,11 @@ scenarios:
     incremental: { na: "an incremental run writes one manifest, at its end" }
     chunked:     { na: "a chunked run writes its manifest at its end" }
     keyset:      { na: "a keyset run writes its manifest at its end" }
-    cdc:         { test: open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql }
+    cdc:         { test: a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql }
 
   - id: gc_spares_a_cdc_runs_first_part_postgres
     what: "the same cycle over a PostgreSQL CDC run (CDC-RUN-START)"
     incremental: { na: "an incremental run writes one manifest, at its end" }
     chunked:     { na: "a chunked run writes its manifest at its end" }
     keyset:      { na: "a keyset run writes its manifest at its end" }
-    cdc:         { test: open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres }
+    cdc:         { test: a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres }
