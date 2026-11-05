@@ -4753,6 +4753,19 @@ seeds:
       mongo:
         cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
 
+  - name: stop-class-number
+    class: "a driver error number that names a missing or forbidden object, column or statement is not typed permanent, so a column or table called login_timeout, dns_cache or deadlock_flag falls to the words of the message and exits 2 retryable on SQL Server (207, 229), MySQL (1054, 1142) and Oracle (ORA-00904)"
+    history: "2026-11-05 finding D1 of the stop-class verification (VP-8 class); RED on main 2026-11-05 (a missing column named login_timeout exited 2 where its number says 1)"
+    scope: source
+    patch: stop-class-number/shared.patch
+    engines:
+      mysql:
+        cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_mysql, "lib:each_mysql_code_maps_to_its_class", "lib:a_permanent_mysql_number_exits_1_whatever_the_name_it_quotes_holds"]
+      mssql:
+        cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_mssql, "lib:each_mssql_number_maps_to_its_class"]
+      oracle:
+        cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_oracle, "lib:each_oracle_number_maps_to_its_class", "lib:a_typed_permanent_oracle_number_exits_1_whatever_the_name_it_quotes_holds"]
+
   - name: destination-credential-read-by-one-leg
     class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
     history: "2026-11-03 seam packaging HFF-1 and HFF-2: with `credentials_file:` naming a service-account key every BigQuery request of `rivet load` carried the ambient ADC token; an S3 `aws_profile` beside `access_key_env` and `secret_key_env` signed with the profile alone and `rivet check` exited 0"
