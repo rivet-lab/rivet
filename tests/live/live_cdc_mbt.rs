@@ -1142,11 +1142,7 @@ fn time_stream_legs_disagree(
         .map(|n| format!("{n}: string"))
         .collect::<Vec<_>>()
         .join(", ");
-    let stream = |leg: &str| {
-        Rig::mysql_cdc(tbl)
-            .export_named(&format!("{tbl}_{leg}"))
-            .no_oracle("TF-1: the stream run may crash in the dependency; graded by MySQL's CAST text and the batch refusal")
-    };
+    let stream = |leg: &str| Rig::mysql_cdc(tbl).export_named(&format!("{tbl}_{leg}"));
     let text = stream("text").export_line(&format!("columns: {{ {decl} }}"));
     let refuse = stream("refuse");
     text.pin_binlog_here();
@@ -1268,8 +1264,8 @@ fn time_stream_legs_disagree(
 
 /// A negative MySQL TIME(1) or TIME(2) with a fraction is the stored duration on the stream leg: MySQL's own text in a `string` column, the snapshot's refusal in a default one.
 #[test]
-#[ignore = "live+gate-only: open defect TF-1; closes with fix/mysql-binlog-time-fraction"]
-fn open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot() {
+#[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
+fn mysql_cdc_negative_time_fraction_matches_the_snapshot() {
     let _serial = cross_process_serial("mysql_cdc_time_fraction");
     let tbl = unique_name("cdc_tfrac");
     let mut c = mysql::Pool::new(MYSQL_CDC_URL).unwrap().get_conn().unwrap();

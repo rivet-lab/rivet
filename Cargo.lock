@@ -2755,8 +2755,7 @@ dependencies = [
 [[package]]
 name = "mysql_common"
 version = "0.37.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f27695f286b461da077b8c2f72f47feaa04ce3c3f9c0976257410e90e21208a"
+source = "git+https://github.com/rivet-lab/rust_mysql_common?rev=a660b506c230efe91a31d0421e11c7f373533df9#a660b506c230efe91a31d0421e11c7f373533df9"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -3905,6 +3904,7 @@ dependencies = [
  "md-5 0.11.0",
  "mongodb",
  "mysql",
+ "mysql_common",
  "native-tls",
  "opendal",
  "oracledb",

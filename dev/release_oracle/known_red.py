@@ -12,6 +12,8 @@ the defect's own symptom. The fix PR deletes the entry; the cell stays as the re
 from __future__ import annotations
 
 import datetime as _dt
+import re
+import sys
 from dataclasses import dataclass
 
 
@@ -23,6 +25,7 @@ class KnownRed:
 
 
 _EXPIRES = "2026-11-15"
+_DATED = re.compile(r"\b20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _ORACLE_CDC_LOAD = (
     "Oracle CDC does not load yet (ADR-0037; the Oracle GA work). The previous release's `rivet init --mode cdc` writes no `load:` block, and this cell still drives the previous release through `load`, which refuses. `upgrade[oracle/cdc-load/init=this]` grades what the scaffold does promise (the baseline Parquet equals the source). The cycle stays unsupported until Oracle CDC loads. Pinned 2026-11-01 to the whole refusal line"
 )
@@ -68,9 +71,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     _open("live_stop_class::open_defect_an_mssql_read_blocked_past_its_lock_timeout_exits_retryable",
           "assertion `left == right` failed: a lock wait that timed out clears when the lock does: retryable",
           "MT-F-F (seam stop-class, 2026-11-04): MSSQL error 1222 (lock request time out) reaches the stop as a stringified SOURCE_QUERY_FAILED whose text the retry classifier does not know, so a read that timed out on a held lock exits 1 where the same wait on MySQL (1205) exits 2. Opened 2026-11-04; closes with fix/stop-class-by-code"),
-    _open("live_cdc_mbt::open_defect_mysql_cdc_negative_time_fraction_matches_the_snapshot",
-          "assertion `left == right` failed: stream differs from the source on negative TIME(1)/TIME(2) with a fraction",
-          "TF-1 (consolidated-2026-11-03 section 2): mysql_common 0.37.3 binlog/misc.rs:35-39 subtracts 0x100 from a u32 fraction for a negative TIME(1)/TIME(2) with a fraction, so a debug rivet panics and a release rivet writes 625:04:19.277216 for -00:00:00.50 in a string column; a row of any table in the binlog panics every MySQL CDC run that reads it. Opened 2026-11-04; closes with fix/mysql-binlog-time-fraction"),
     KnownRed("upgrade[oracle/cdc-load]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
@@ -147,3 +147,48 @@ def match(msg: str, today: _dt.date | None = None) -> tuple[KnownRed | None, boo
         if k.match in (msg, unframed(msg)):
             return k, today <= _dt.date.fromisoformat(k.expires)
     return None, False
+
+
+def problems(entries: tuple[KnownRed, ...] | None = None) -> list[str]:
+    """Entries with an empty match, a reason that carries no ISO date, or an expiry that is not a date."""
+    out = []
+    for k in KNOWN_RED if entries is None else entries:
+        name = k.match[:80] or "<empty match>"
+        if not k.match.strip():
+            out.append(f"{name}: empty match")
+        if not _DATED.search(k.reason):
+            out.append(f"{name}: the reason carries no date (YYYY-MM-DD)")
+        try:
+            _dt.date.fromisoformat(k.expires)
+        except ValueError:
+            out.append(f"{name}: expiry {k.expires!r} is not a date")
+    return out
+
+
+def self_test() -> int:
+    """Each rule of [`problems`] goes RED on the entry it exists for and stays green on a dated one."""
+    ok = KnownRed("m::open_defect_x — boom", "X-1 (2026-11-04): why; closes with fix/x", "2026-11-15")
+    assert problems((ok,)) == [], problems((ok,))
+    assert problems((KnownRed("m", "why; closes with fix/x", "2026-11-15"),)), "an undated reason must fail"
+    assert problems((KnownRed("m", "opened 2026-13-40", "2026-11-15"),)), "a date that is no date must fail"
+    assert problems((KnownRed(" ", "2026-11-04 why", "2026-11-15"),)), "an empty match must fail"
+    assert problems((KnownRed("m", "2026-11-04 why", "soon"),)), "an expiry that is no date must fail"
+    assert problems() == [], "the ledger itself must be clean"
+    print("known_red self-test: ok")
+    return 0
+
+
+def main() -> int:
+    """Print the entry count when every entry is well formed, else the problems and exit 1."""
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
+    bad = problems()
+    for b in bad:
+        print(f"known_red: {b}", file=sys.stderr)
+    if not bad:
+        print(f"known_red: {len(KNOWN_RED)} entries, every reason dated")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
