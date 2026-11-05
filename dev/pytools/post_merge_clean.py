@@ -186,14 +186,16 @@ def start_holder(root: Path, how: str, alias: Path) -> subprocess.Popen:
     """A long-lived process held in the target dir: by relative argv, by a symlinked spelling of the argv, or by its cwd."""
     exe = root / "target/debug/holdbin"
     exe.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(shutil.which("sleep") or "/bin/sleep", exe)
+    shutil.copy(shutil.which("bash") or "/bin/bash", exe)
     if sys.platform == "darwin":
         subprocess.run(["codesign", "--force", "--sign", "-", str(exe)], check=True, capture_output=True)
+    wait = ["-c", "read line"]
+    pipe = {"stdin": subprocess.PIPE}
     if how == "relative":
-        return subprocess.Popen(["./target/debug/holdbin", "60"], cwd=root)
+        return subprocess.Popen(["./target/debug/holdbin", *wait], cwd=root, **pipe)
     if how == "symlinked":
-        return subprocess.Popen([str(alias / "target/debug/holdbin"), "60"], cwd="/")
-    return subprocess.Popen([str(exe), "60"], cwd=root / "target/debug/deps")
+        return subprocess.Popen([str(alias / "target/debug/holdbin"), *wait], cwd="/", **pipe)
+    return subprocess.Popen([str(exe), *wait], cwd=root / "target/debug/deps", **pipe)
 
 
 def self_test() -> int:
@@ -233,6 +235,7 @@ def self_test() -> int:
                 finally:
                     holder.kill()
                     holder.wait()
+                    holder.stdin.close()
                 assert "skipped, a running process" in line, (how, line)
                 assert (root / "target/debug/incremental").exists() and (root / "target/debug/deps/x.rlib").exists(), (how, "a holder: nothing may be removed")
 
