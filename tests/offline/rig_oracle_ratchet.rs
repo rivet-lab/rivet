@@ -213,11 +213,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str)] = &[
         "known defect: a checkpointed run its quality gate fails is recorded in export_progression",
     ),
     (
-        "chunked_checkpoint_refuses_to_clobber_a_cdc_manifest",
-        "a failed run left: chunk-checkpoint",
-        "known defect: the refusal to overwrite a CDC manifest comes after the chunk plan is stored",
-    ),
-    (
         "a_change_older_than_an_alter_is_refused_by_code_oracle",
         "a failed run left: resume-point",
         "known defect: a run refused for an undecodable change has already replaced the export's drift baseline in export_schema",

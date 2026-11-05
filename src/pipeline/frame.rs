@@ -55,6 +55,12 @@ impl RunnerFrame {
         Ok(frame)
     }
 
+    /// Refuse a prefix that holds another export shape's manifest, before any runner stores a plan, anchor or cursor.
+    pub(crate) fn refuse_cross_shape_prefix(plan: &ResolvedRunPlan) -> Result<()> {
+        let frame = Self::open_unguarded(plan)?;
+        crate::manifest::guard_manifest_mode(frame.dest.as_ref(), "batch")
+    }
+
     /// [`RunnerFrame::open`] for runners that share one destination across
     /// worker threads (parallel keyset / chunked / mongo).
     pub(crate) fn open_shared(
@@ -181,6 +187,34 @@ mod tests {
             msg.contains("cdc") || msg.contains("CDC"),
             "the refusal must name the cross-shape conflict: {msg}"
         );
+    }
+
+    /// The run-start guard refuses a CDC prefix and passes a clean or batch one.
+    #[test]
+    fn the_run_start_guard_refuses_a_cdc_prefix_and_passes_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        RunnerFrame::refuse_cross_shape_prefix(&local_plan(dir.path()))
+            .expect("a clean prefix passes");
+        for (mode, refused) in [("batch", false), ("cdc", true)] {
+            let manifest = serde_json::json!({
+                "manifest_version": 1, "export_name": "frame_probe", "mode": mode,
+                "run_id": "r1", "status": "success", "parts": []
+            });
+            std::fs::write(
+                dir.path().join("manifest.json"),
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            let got = RunnerFrame::refuse_cross_shape_prefix(&local_plan(dir.path()));
+            match (refused, got) {
+                (false, Ok(())) => {}
+                (true, Err(e)) => assert!(
+                    format!("{e:#}").contains("already holds a 'cdc' manifest"),
+                    "{e:#}"
+                ),
+                (_, other) => panic!("{mode}: refused={refused}, got {other:?}"),
+            }
+        }
     }
 
     /// …and a clean prefix opens, with the extension matching the format.
