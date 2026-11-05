@@ -36,7 +36,7 @@ class Tool:
 
 
 MD_ARGS = ("--no-progress", "--config", "lychee.toml", "docs/**/*.md", "*.md")
-LYCHEE_INSTALL = "brew install lychee, or the release lychee-v{version}"
+INSTALL = "brew install lychee, or the release lychee-v{version}"
 TIMEOUT = 900
 
 AGENT = ".claude/agents/tidy-agent.md"
@@ -50,7 +50,7 @@ TOOLS = {
         "lychee",
         "0.24.2",
         ("--offline", "--include-fragments", *MD_ARGS),
-        LYCHEE_INSTALL,
+        INSTALL,
         "pr",
         {"lychee.toml": REPO, "a.md": "[b](b.md#top)\n", "b.md": "# Top\n", "docs/d/c.md": "[a](../../a.md)\n"},
         (
@@ -62,7 +62,7 @@ TOOLS = {
         "lychee",
         "0.24.2",
         ("--max-retries", "3", "--timeout", "30", *MD_ARGS),
-        LYCHEE_INSTALL,
+        INSTALL,
         "nightly",
         {"lychee.toml": REPO, "a.md": "No links here.\n", "docs/d/c.md": "No links here.\n"},
         (
