@@ -446,7 +446,7 @@ Add a narrow, compatibility-aware path from extracted files into selected wareho
 - ✅ strict/permissive mapping policy (`TypePolicy`, `--strict` flag)
 - ✅ column type overrides (`columns:` YAML block)
 - ✅ complex types: Enum, Interval, List (Postgres); Enum/SET, TIME, arrays (MySQL)
-- ✅ **type roundtrip proof (v0.7.8)** — PG/MySQL → Parquet/CSV matrix tested through 4 independent readers (DuckDB, ClickHouse, pyarrow, BigQuery), 31 live tests in `tests/type_roundtrip/`, `make test-types-validators`. Documented in [`docs/type-mapping.md`](docs/type-mapping.md), [ADR-0014](docs/adr/0014-target-type-materialization.md), and per-tool benchmark reports under [`docs/bench/reports/REPORT_types*.md`](docs/bench/reports/)
+- ✅ **type roundtrip proof (v0.7.8)** — PG/MySQL → Parquet/CSV matrix tested through 4 independent readers (DuckDB, ClickHouse, pyarrow, BigQuery), 31 live tests in `tests/type_roundtrip/`, `make test-types-validators`. Documented in [`docs/type-mapping.md`](docs/type-mapping.md), [ADR-0014](docs/adr/0014-target-type-materialization.md), and per-tool benchmark reports under `docs/bench/reports/REPORT_types*.md`
 - ✅ **native Parquet logical types (v0.7.8)** — UUID → `FixedSizeBinary(16) + LogicalType::Uuid` via `arrow.uuid` extension; JSON → `LogicalType::Json` via `arrow.json` extension. Downstream engines (DuckDB, ClickHouse 25.x+, pyarrow) recognise UUID/JSON natively without a cast; BigQuery autoload promotes UUID→BYTES exact (one documented gap: BQ does not lift `LogicalType::Json` to native `JSON` without an explicit `--schema=attrs:JSON`)
 - ✅ **MySQL driver fidelity fixes (v0.7.8)** — PG arrays preserve NULL elements; MySQL `ENUM`/`SET` flag detection so `rivet.logical_type=enum` survives; `native_type` distinguishes UNSIGNED, `TINYINT(1)`, `BIT(1)`, CHAR vs VARCHAR, BINARY vs VARBINARY
 - ✅ **direct load path** — `rivet load` (BigQuery free `LOAD DATA` + Snowflake `COPY`), config-driven from the top-level `load:` block; partition/cluster honored; source cleanup; per-job cost-attribution labels (`src/load/{bigquery,snowflake}.rs`)
@@ -1258,7 +1258,7 @@ with verify-layer work as bandwidth allows.
 - [x] Plan/Apply workflow — sealed execution artifacts, ADR-0005
 - [x] Parallel exports — `--parallel-exports` + `--parallel-export-processes` with live cards UI
 - [x] Type safety layer — `--type-report`, TypePolicy, BigQuery compat, complex types (M1–M6)
-- [x] **Type roundtrip proof (v0.7.8, since expanded)** — **PG / MySQL / MSSQL** × Parquet/CSV validated through DuckDB + ClickHouse + pyarrow + BigQuery **+ Snowflake** (all live-verified together); native Parquet `LogicalType::Uuid` / `LogicalType::Json`; `make test-types-validators`; per-tool fidelity benchmark in [`docs/bench/reports/`](docs/bench/reports/). Now **guarded by the always-on value checksum** — A==B byte-identical across every matrix type on all 3 engines (the permanent matrix-guard regression oracle that would have caught the PG-enum side-A gap before ship)
+- [x] **Type roundtrip proof (v0.7.8, since expanded)** — **PG / MySQL / MSSQL** × Parquet/CSV validated through DuckDB + ClickHouse + pyarrow + BigQuery **+ Snowflake** (all live-verified together); native Parquet `LogicalType::Uuid` / `LogicalType::Json`; `make test-types-validators`; per-tool fidelity benchmark in `docs/bench/reports/`. Now **guarded by the always-on value checksum** — A==B byte-identical across every matrix type on all 3 engines (the permanent matrix-guard regression oracle that would have caught the PG-enum side-A gap before ship)
 - [x] Schema drift policy hooks — `on_schema_drift: warn|continue|fail` (Epic 7)
 - [x] Data shape drift detection — string/text width tracking (Epic 8)
 - [ ] 2–3 pilot tables repeated on a schedule *(organizational; optional automation K2)*
@@ -1294,7 +1294,7 @@ and the two-engine separation with explicit revisit triggers (ADR-0010).
 ## 10.1 Findings summary
 
 > **Validated against the source — see
-> [`docs/planning/optimization-backlog-validation.md`](docs/planning/optimization-backlog-validation.md)**
+> `docs/planning/optimization-backlog-validation.md`**
 > for per-item verdicts, file:line evidence, and implementation plans. A
 > line-by-line pass corrected OPT-4 and OPT-5 substantially (a deterministic
 > per-part content hash already exists; MySQL hard-refuses rather than silently

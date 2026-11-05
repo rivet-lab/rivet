@@ -34,6 +34,14 @@ DUR_TOL, DUR_SLACK = 1.5, 0.5
 RSS_TOL, RSS_SLACK = 1.3, 16.0
 
 
+def nightly_tools() -> list[str]:
+    """The lint tools of tier "nightly" in dev/pytools/lint_tools.py."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lint_tools
+
+    return lint_tools.tools("nightly")
+
+
 def gate_steps(argv: list[str]) -> list[tuple[str, str]]:
     """The (label, make target) gate runs this nightly makes, in order: the per-run gate, then the island of the same checkout."""
     if "--skip-gate" in argv:
@@ -91,7 +99,7 @@ def self_test() -> int:
     assert [t for _, t in gate_steps(["--skip-island"])] == ["release-oracle-full"] and gate_steps(["--skip-gate"]) == []
     steady = series([1], [50])
     me = sys.modules[__name__]
-    quiet = subprocess.CompletedProcess([], 0)
+    quiet = subprocess.CompletedProcess([], 0, "", "")
     now = dt.date.today()
     for day, want in (((now + dt.timedelta(days=30)).isoformat(), 0), ((now - dt.timedelta(days=1)).isoformat(), 1)):
         with tempfile.TemporaryDirectory() as t, mock.patch.object(me, "ROOT", review_dates.fixture(Path(t), day)), \
@@ -116,6 +124,11 @@ def main(argv: list[str]) -> int:
                            stdout=open(out / f"{label}.log", "w"), stderr=subprocess.STDOUT)
         report.append(f"- {label} ({target}): {'green' if g.returncode == 0 else 'RED'} ({label}.log)")
         rc |= g.returncode != 0
+    for name in nightly_tools():
+        lint = subprocess.run([sys.executable, str(ROOT / "dev/pytools/lint_tools.py"), "run", name], cwd=ROOT, capture_output=True, text=True)
+        (out / f"{name}.log").write_text(lint.stdout + lint.stderr)
+        report.append(f"- {name}: {'green' if lint.returncode == 0 else 'NOT RUN' if lint.returncode == 2 else 'RED'} ({name}.log)")
+        rc |= lint.returncode != 0
     line, failed = review_step(out)
     report.append(line)
     rc |= failed
