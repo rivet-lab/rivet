@@ -334,19 +334,19 @@ exclude_re = [
     # cargo-mutants directly, which is the stronger contract than the purity
     # ceiling that stood in for them; the newly-visible survivors are recorded
     # in docs/mutants-baseline.txt with this date.
-    "delete match arm \"postgres\" in introspect_all",
-    "delete match arm \"mysql\" in introspect_all",
-    "delete match arm \"mssql\" in introspect_all",
+    "delete match arm \"postgres\" in scan_tables",
+    "delete match arm \"mysql\" in scan_tables",
+    "delete match arm \"mssql\" in scan_tables",
     # The MongoDB arm opens a live connection too; live-guarded by
     # init_mongo_schema_wide_lists_collections_in_rivets_order (deleting the arm makes a mongodb://
     # init reach the dispatch's `unreachable!`).
-    "delete match arm \"mongo\" in introspect_all",
+    "delete match arm \"mongo\" in scan_tables",
     # The Oracle arms of init's live-only engine dispatch open a real connection, so
     # they are unkillable offline; each is live-guarded and was RED-proven by renaming
     # the arm: introspect_all by init_oracle_schema_wide_discovers_seeded_table, the
     # --discover scope by init_discover_names_the_oracle_table_scope, and
     # introspect_single_table by an_init_generated_config_keysets_a_number_19_key_past_i64.
-    "delete match arm \"oracle\" in introspect_all",
+    "delete match arm \"oracle\" in scan_tables",
     "delete match arm \"oracle\" in init_discovery_json",
     "delete match arm \"oracle\" in introspect_single_table",
     # density_probe (init/mysql.rs, init/postgres.rs) takes a live DB connection
