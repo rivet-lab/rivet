@@ -10,13 +10,24 @@ the previous release's. Reports land in dev/nightly_runs/<date>/. Scheduled by l
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import io
 import json
 import os
 import statistics
 import subprocess
 import sys
+import tempfile
+import types
 from pathlib import Path
+from unittest import mock
+
+if __package__:
+    from . import review_dates
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import review_dates  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parents[2]
 DUR_TOL, DUR_SLACK = 1.5, 0.5
@@ -52,6 +63,13 @@ def soak_regressions(prev: dict, cur: dict) -> list[str]:
     return out
 
 
+def review_step(out: Path) -> tuple[str, bool]:
+    """The review-dates report line and whether it failed; the problems land in review-dates.log."""
+    bad, counted = review_dates.tree_problems(ROOT, dt.date.today(), expiry=True)
+    (out / "review-dates.log").write_text("\n".join([*bad, counted]) + "\n")
+    return f"- review dates: {'all in date' if not bad else 'EXPIRED OR MALFORMED'} (review-dates.log)", bool(bad)
+
+
 def soak(binary: Path, out: Path, duration: str) -> dict:
     """One soak run with `binary`, its report as a dict (empty on a harness failure)."""
     subprocess.run([sys.executable, "-m", "dev.pytools.soak", "--duration", duration,
@@ -71,6 +89,16 @@ def self_test() -> int:
     assert soak_regressions(series([1], [50]), failed)
     assert [t for _, t in gate_steps([])] == ["release-oracle-full", "release-oracle-island"]
     assert [t for _, t in gate_steps(["--skip-island"])] == ["release-oracle-full"] and gate_steps(["--skip-gate"]) == []
+    steady = series([1], [50])
+    me = sys.modules[__name__]
+    quiet = subprocess.CompletedProcess([], 0)
+    now = dt.date.today()
+    for day, want in (((now + dt.timedelta(days=30)).isoformat(), 0), ((now - dt.timedelta(days=1)).isoformat(), 1)):
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(me, "ROOT", review_dates.fixture(Path(t), day)), \
+                mock.patch.object(me, "soak", lambda *a: steady), mock.patch.object(me, "subprocess", types.SimpleNamespace(run=lambda *a, **k: quiet)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            got = main(["--skip-gate", "--skip-island"])
+        assert got == want, f"a nightly over a ledger dated {day} exits {want}, got {got}"
     print("nightly self-test: ok")
     return 0
 
@@ -88,6 +116,9 @@ def main(argv: list[str]) -> int:
                            stdout=open(out / f"{label}.log", "w"), stderr=subprocess.STDOUT)
         report.append(f"- {label} ({target}): {'green' if g.returncode == 0 else 'RED'} ({label}.log)")
         rc |= g.returncode != 0
+    line, failed = review_step(out)
+    report.append(line)
+    rc |= failed
     duration = argv[argv.index("--soak") + 1] if "--soak" in argv else "30m"
     prev = Path(os.environ.get("RIVET_PREV_RELEASE_BIN") or next(
         (ROOT / ".gate-baseline").glob("rivet-v*/rivet"), Path("missing")))

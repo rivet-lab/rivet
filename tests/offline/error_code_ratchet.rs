@@ -16,7 +16,7 @@
 // 152 -> 0 (2026-10-15): every remaining site (cli, destination, plan, init, state, preflight,
 // enrich, format, manifest, mcp, types, connect, scalar, workers, the seed tool) carries a
 // registered code (-152). The ceiling stays 0: a new bare `bail!` / `ensure!` / `anyhow!` fails.
-const CEILING: usize = 0; // ratchet-pin: uncoded-bail-sites
+const CEILING: usize = 0; // ratchet-pin: uncoded-bail-sites (review 2027-02-01)
 
 /// Occurrences of a bare `bail!(`, `ensure!(` or `anyhow!(` (not `rivet_bail!` / `config_bail!`) in `text`.
 fn bare_bails(text: &str) -> usize {

@@ -13,6 +13,7 @@ Stdlib only, so the hooks and CI run it on a bare `python3`.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -21,6 +22,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
+
+if __package__:
+    from . import review_dates
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import review_dates  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parents[2]
 GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else (shutil.which("git") or "git")
@@ -34,7 +42,7 @@ TRAILER = re.compile(r"^\s*(co-authored-by|claude-session):", re.I)
 BYTE_SLICE = re.compile(r"\[\s*\.\.\s*[A-Za-z_][\w.]*\.len\(\)\s*\]|\[\s*[A-Za-z_]\w*\s*\.\.\s*[A-Za-z_]\w*\s*\+\s*\w+\s*\]")
 SQL_PARSER = re.compile(r"^\+?\s*(sqlparser|sqlformat|sql-parse|pg_query|sqlparse)\b")
 BINARY = re.compile(r"\.(gif|png|jpg|jpeg|parquet|ico|pdf)$")
-MARK = re.compile(r"ratchet-pin:\s*([\w.-]+)(?:\s+(sum|strings|lines|count))?(?:\s+(min))?")
+MARK = re.compile(review_dates.MARKER + r"(?:\s+(sum|strings|lines|count))?(?:\s+(min))?")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 NUMBER = re.compile(r"(?<!\w)\d\w*")
 # Definitions that look like a pin by name; each must carry a `ratchet-pin:` marker.
@@ -143,7 +151,7 @@ def pins(text: str, path: str, census=None) -> dict[str, tuple[int, bool]]:
         m = MARK.search(line)
         if not m or m.group(1) == "end":
             continue
-        name, measure, floor = m.groups()
+        name, _, measure, floor = m.groups()
         if name in out:
             raise ValueError(f"{path}:{i + 1}: ratchet-pin {name} declared twice")
         where = f"{path}:{i + 1}: ratchet-pin {name}"
@@ -182,13 +190,13 @@ def pin_files(rev: str | None) -> dict[str, str]:
     """Path → text of every tracked file holding a `ratchet-pin:` marker at `rev` (the working tree when None)."""
     out = {}
     if rev is None:
-        for path in git("grep", "-l", "-e", "ratchet-pin:", check=False).splitlines():
-            if path != "dev/pytools/pr_ready.py":
+        for path in git("grep", "-l", "-e", review_dates.WORD, check=False).splitlines():
+            if path not in review_dates.NOT_ENTRIES:
                 out[path] = (ROOT / path).read_text()
         return out
-    for hit in git("grep", "-l", "-e", "ratchet-pin:", rev, check=False).splitlines():
+    for hit in git("grep", "-l", "-e", review_dates.WORD, rev, check=False).splitlines():
         path = hit.split(":", 1)[1]
-        if path != "dev/pytools/pr_ready.py":
+        if path not in review_dates.NOT_ENTRIES:
             out[path] = git("show", f"{rev}:{path}")
     return out
 
@@ -231,7 +239,7 @@ def unmarked_pins() -> list[str]:
         lines = (ROOT / path).read_text(errors="ignore").splitlines() + [""]
         for i, line in enumerate(lines[:-1]):
             # rustfmt moves a trailing comment after `= &[` onto the next line.
-            marked = "ratchet-pin:" in line or lines[i + 1].lstrip().startswith("// ratchet-pin:")
+            marked = review_dates.WORD in line or lines[i + 1].lstrip().startswith("// " + review_dates.WORD)
             if PIN_NAME.match(line) and not marked and not line.lstrip().startswith(("//", "#")):
                 out.append(f"{path}:{i + 1}: {line.strip()[:90]}")
     return out
@@ -288,8 +296,14 @@ def changelog_verdict(changed: list[str], base_log: str, head_log: str, body: st
 # ── the branch checks (CI and local) ────────────────────────────────────────
 
 
-def branch_rows(base: str, body: str | None) -> list[tuple[str, str, str]]:
-    """(check, verdict, line) for every rule graded off git alone."""
+def review_row(expiry: bool) -> tuple[str, str, str]:
+    """The review-dates row; `expiry` also fails a date that has passed (`make pr-ready`), CI grades the shape and the horizon only."""
+    bad, counted = review_dates.tree_problems(ROOT, dt.date.today(), expiry)
+    return "review dates", "FAIL" if bad else "PASS", "; ".join(bad[:5]) or counted
+
+
+def branch_rows(base: str, body: str | None, expiry: bool) -> list[tuple[str, str, str]]:
+    """(check, verdict, line) for every rule graded off git alone; `expiry` also fails a review date that has passed."""
     mb = git("merge-base", base, "HEAD").strip()
     rows = []
     bad = commit_violations(f"{mb}..HEAD")
@@ -302,6 +316,7 @@ def branch_rows(base: str, body: str | None) -> list[tuple[str, str, str]]:
     bad = added_line_violations(diff)
     added = sum(1 for d in diff.splitlines() if d.startswith("+") and not d.startswith("+++ "))
     rows.append(("Cyrillic in added lines", "FAIL" if bad else "PASS", "; ".join(bad[:5]) or f"none in {added} added lines"))
+    rows.append(review_row(expiry))
     loose = unmarked_pins()
     rows.append(("pins carry a marker", "FAIL" if loose else "PASS", "; ".join(loose[:5]) or f"{len(all_pins('HEAD'))} ratchet pins discovered"))
     up = raised(all_pins(mb), all_pins("HEAD"))
@@ -450,7 +465,7 @@ def run_local(args: argparse.Namespace) -> int:
         print("pr-ready: mutants in-diff ...", file=sys.stderr, flush=True)
         rows.append(("mutants in-diff", *mutants(out, args.base, args.jobs)))
     rows.append(("secrets scan", *secrets_tree()))
-    rows += branch_rows(args.base, body)
+    rows += branch_rows(args.base, body, expiry=True)
     sha = git("rev-parse", "--short", "HEAD").strip()
     print_rows(f"make pr-ready @ {sha} (base {args.base}){' --fast' if args.fast else ''}; logs {out}", rows)
     return 1 if any(v == "FAIL" for _, v, _ in rows) else 0
@@ -463,7 +478,7 @@ def run_ci(args: argparse.Namespace) -> int:
     else:
         pr = json.loads(Path(args.event).read_text())["pull_request"]
         body = f"{pr.get('title') or ''}\n\n{pr.get('body') or ''}"
-    rows = branch_rows(args.base, body)
+    rows = branch_rows(args.base, body, expiry=False)
     print_rows(f"PR rules (base {args.base})", rows)
     return 1 if any(v in ("FAIL", "DECLARE") for _, v, _ in rows) else 0
 
@@ -585,6 +600,27 @@ def self_test() -> int:
     assert PIN_NAME.match("const BASELINE: &[(&str, usize)] = &[") and PIN_NAME.match("CONN_CEILING = {")
     assert not PIN_NAME.match("    let ceiling = x;") and not PIN_NAME.match("fn ratchet() {")
     assert not PIN_NAME.match("BASELINE_TARGETS = {") and PIN_NAME.match("const KNOWN_DEFECTS: &[&str] = &[")
+
+    dated = "// ratchet-pin: opt-outs (review 2027-02-01) count tests/live/ \\.no_oracle\\(|NO_ORACLE_ENV\n"
+    assert pins(dated, "r.rs", fake) == {"opt-outs": (32, False)}, "the review date sits between the name and the kind"
+    assert pins("const X: usize = 14; // ratchet-pin: x (review 2027-02-01) min\n", "a.rs") == {"x": (14, True)}
+    assert pins("const T: &[u8] = &[ // ratchet-pin: t (review 2027-02-01) sum\n 1, 2,\n]; // ratchet-pin: end\n", "a.rs") == {"t": (3, False)}
+
+    me = sys.modules[__name__]
+    graded = []
+    stubs = dict(
+        offline_suite=lambda out: ("PASS", "stub"), clippy=lambda *a: ("PASS", "stub"), secrets_tree=lambda: ("PASS", "stub"),
+        target_dir=lambda: Path(tempfile.gettempdir()) / "pr-ready-self-test-none", print_rows=lambda title, rows: None,
+        branch_rows=lambda base, body, expiry: graded.append(expiry) or [],
+    )
+    with mock.patch.multiple(me, **stubs), tempfile.NamedTemporaryFile("w", suffix=".md") as body:
+        run_local(argparse.Namespace(body=None, fast=True, base="origin/main", jobs=1))
+        run_ci(argparse.Namespace(body=body.name, event=None, base="origin/main"))
+    assert graded == [True, False], f"make pr-ready grades a passed review date, the CI job does not: {graded}"
+    asked = []
+    with mock.patch.object(review_dates, "tree_problems", lambda root, today, expiry: asked.append(expiry) or ([], "stub")):
+        names = [r[0] for r in branch_rows("HEAD", None, expiry=True)]
+    assert "review dates" in names and asked == [True], f"the branch rules carry the review-dates row, graded as asked: {names} {asked}"
 
     log = "# C\n\n## Unreleased\n\n### Fixed\n- a\n\n## 0.30.0\n- old\n"
     new = log.replace("- a\n", "- a\n- b\n")

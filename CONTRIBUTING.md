@@ -41,6 +41,10 @@ workflow enforces on the PR itself:
 - a raised ratchet pin (any line or block marked `ratchet-pin:`) is named in a
   `## Ratchets raised` section of the PR body; lowering one needs nothing. A pin whose marker
   names a `count <pathspec> <regex>` is measured from the tree (`pr_ready.py pins`), so there is no number to type;
+- every `ratchet-pin:` marker carries `(review YYYY-MM-DD)` right after its name, before `sum`, `count` or `min`; the date is a
+  calendar day at most 180 days away, and the same rule holds for every `SKIP_ALLOWED` reason (`(review YYYY-MM-DD)`), every known-red
+  entry and every `EXCUSES` entry (their `expires`). A malformed, missing or far date fails the PR rules; a passed one fails
+  `make pr-ready` and the nightly run (`dev/pytools/review_dates.py check`);
 - a change under `src/` adds a changelog fragment, one file under `changelog.d/` in the
   CHANGELOG entry format (see `changelog.d/README.md`), or the PR body says
   `No user-visible change`. Fragments keep open pull requests from conflicting on the top
