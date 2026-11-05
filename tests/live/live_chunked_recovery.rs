@@ -1518,54 +1518,143 @@ fn a_resume_after_a_failed_run_reports_the_rows_it_adopted() {
     );
 }
 
-// Cross-shape manifest guard (graph-surfaced runner-bypass). The two
-// chunk-checkpoint runners were the ONLY batch runners not calling
-// guard_manifest_mode, so a chunked-checkpoint export into a prefix that
-// already held a CDC manifest would silently overwrite it — destroying the CDC
-// export's audit trail. Both runners must now refuse: parallel=1 exercises the
-// sequential checkpoint runner, parallel=4 the parallel one.
+const CDC_MANIFEST: &[u8] =
+    br#"{"manifest_version":1,"run_id":"prior-cdc","mode":"cdc","parts":[]}"#;
+
+/// `(mode, export lines, source rows)` of every batch shape that stores a plan, anchor or cursor before its first part, and the empty-source `skip_empty` shape.
+const FOREIGN_PREFIX_SHAPES: &[(&str, &[&str], u32)] = &[
+    ("full", &[], 24),
+    ("full", &["skip_empty: true"], 0),
+    ("chunked", &["chunk_column: id", "chunk_size: 5"], 24),
+    ("incremental", &["cursor_column: id"], 24),
+    (
+        "chunked",
+        &[
+            "chunk_column: id",
+            "chunk_size: 5",
+            "chunk_checkpoint: true",
+        ],
+        24,
+    ),
+    (
+        "chunked",
+        &[
+            "chunk_column: id",
+            "chunk_size: 5",
+            "chunk_checkpoint: true",
+            "parallel: 4",
+        ],
+        24,
+    ),
+    (
+        "chunked",
+        &[
+            "chunk_by_key: id",
+            "chunk_size: 5",
+            "chunk_checkpoint: true",
+        ],
+        24,
+    ),
+    (
+        "chunked",
+        &[
+            "chunk_by_key: id",
+            "chunk_size: 5",
+            "chunk_checkpoint: true",
+            "parallel: 4",
+        ],
+        24,
+    ),
+    (
+        "chunked",
+        &[
+            "chunk_by_key: id",
+            "chunk_size: 5",
+            "keyset_incremental: true",
+        ],
+        24,
+    ),
+];
+
+/// Run one batch shape over a prefix that holds a CDC manifest: refused by name, and the rig oracle finds no plan, anchor or cursor stored.
+fn assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
+    engine: SqlEngine,
+    tag: &str,
+    mode: &str,
+    shape: &[&str],
+    rows: u32,
+) {
+    engine.alive();
+    let (id, v) = (engine.col("id"), engine.col("v"));
+    let i = engine.int64();
+    let (table, _guard) = engine.create(tag, &format!("{id} {i} PRIMARY KEY, {v} {i} NOT NULL"));
+    if rows > 0 {
+        let values: Vec<String> = (1..=rows).map(|g| format!("({g}, {g})")).collect();
+        engine.exec(&format!("INSERT INTO {table} VALUES {}", values.join(", ")));
+    }
+    let mut rig = engine.rig(&table).mode(mode);
+    for l in shape {
+        rig = rig.export_line(l);
+    }
+    std::fs::create_dir_all(rig.out_dir()).unwrap();
+    std::fs::write(rig.out_dir().join("manifest.json"), CDC_MANIFEST).unwrap();
+    let run = rig.run();
+    assert_refused(&run, Refused::by_code("RIVET_DEST_PREFIX_MODE_MISMATCH", 5));
+}
+
 #[test]
 #[ignore = "live: requires docker compose postgres"]
-fn chunked_checkpoint_refuses_to_clobber_a_cdc_manifest() {
-    require_alive(LiveService::Postgres);
-    let table = seed_pg_numeric_table(150);
-    for parallel in [1usize, 4] {
-        let out = tempfile::tempdir().unwrap();
-        // A prior CDC run's manifest already sits at the destination prefix.
-        std::fs::write(
-            out.path().join("manifest.json"),
-            br#"{"manifest_version":1,"run_id":"prior-cdc","mode":"cdc","parts":[]}"#,
-        )
-        .unwrap();
-        let export = unique_name("cdc_clobber_guard");
-        let mut rig = Rig::pg_batch(&export)
-            .query(&format!("SELECT id, name FROM {}", table.name()))
-            .mode("chunked")
-            .export_line("chunk_column: id")
-            .export_line("chunk_size: 50")
-            .export_line("chunk_checkpoint: true")
-            .export_line(&format!("parallel: {parallel}"))
-            .dest_path(out.path().to_path_buf());
-        if parallel > 1 {
-            rig = rig.oracle_known_defect(
-                "a failed run left: chunk-checkpoint",
-                "known defect: the refusal to overwrite a CDC manifest comes after the chunk plan is stored when `parallel` > 1, and leaves an in_progress chunk_run with pending tasks",
-            );
-        }
-        let run = rig.run_args(&["--export", &export]);
-        assert!(
-            !run.status.success(),
-            "parallel={parallel}: a chunked-checkpoint batch export must REFUSE to \
-             overwrite a CDC manifest"
+fn a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_postgres() {
+    for (n, (mode, shape, rows)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
+        assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
+            SqlEngine::Pg,
+            &format!("xs_pg{n}"),
+            mode,
+            shape,
+            *rows,
         );
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr)
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mysql() {
+    for (n, (mode, shape, rows)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
+        assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
+            SqlEngine::Mysql,
+            &format!("xs_my{n}"),
+            mode,
+            shape,
+            *rows,
         );
-        assert!(
-            combined.contains("already holds a 'cdc' manifest"),
-            "parallel={parallel}: must name the cross-shape collision; got:\n{combined}"
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_mssql() {
+    for (n, (mode, shape, rows)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
+        assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
+            SqlEngine::Mssql,
+            &format!("xs_ms{n}"),
+            mode,
+            shape,
+            *rows,
+        );
+    }
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_oracle() {
+    for (n, (mode, shape, rows)) in FOREIGN_PREFIX_SHAPES.iter().enumerate() {
+        assert_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor(
+            SqlEngine::Oracle,
+            &format!("xs_ora{n}"),
+            mode,
+            shape,
+            *rows,
         );
     }
 }
