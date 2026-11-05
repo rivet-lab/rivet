@@ -1,16 +1,15 @@
-//! The known-red ledger (dev/release_oracle/known_red.py) is held by three ratchets: its
-//! entries never grow unseen, its horizon never moves unseen, and every open-defect entry
-//! names a live cell that exists. A red gate is red ONLY for recorded reasons; this keeps the
+//! The known-red ledger (dev/release_oracle/known_red.py) is held by three guards: every entry
+//! carries a dated reason (its count is the `known-red-entries` pin that pr_ready.py grades
+//! against the base), its horizon never moves unseen, and every open-defect entry names a live
+//! cell that exists. A red gate is red ONLY for recorded reasons; this keeps the
 //! record from quietly becoming a place where reds go to be forgotten.
 
 use std::path::PathBuf;
 
 const LEDGER: &str = "dev/release_oracle/known_red.py";
 
-/// The ledger's entries: `_open(...)` cells and bare `KnownRed(...)` gate rows. Shrink-only.
+// The ledger's entries: `_open(...)` cells and bare `KnownRed(...)` gate rows. History frozen at 2026-11-04; a later raise is a dated entry in the ledger.
 // 25 (2026-10-14): 21 open-defect cells, 4 gate rows (Oracle cdc-load x2, Oracle TIMESTAMP(9) sentinels x2).
-// A new entry is a new acknowledged red: raise this in the same diff, with the entry's reason;
-// a fixed one lowers it.
 // 12 -> 9 (2026-10-15): a stored cursor past the destination's success manifest is refused by code (-3).
 // 9 -> 8 (2026-10-16): the Azure removed-container cell is a plain cell again (fix/azure-missing-container-is-persistent).
 // 8 -> 7 (2026-10-16): the PostgreSQL out-of-descriptors cell is a plain cell again (fix/postgres-client-runtime-is-coded).
@@ -30,10 +29,8 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 28 -> 32 (2026-11-04): VP-8 missing-relation cells on MSSQL, Oracle and Mongo, and the MSSQL lock-timeout cell MT-F-F (close with fix/stop-class-by-code).
 // 32 -> 31 (2026-11-04): the TF-2 cell is green on fix/mysql-enum-label-escapes and its entry is deleted.
 // 31 -> 25 (2026-11-04): the six HDW-1 cells are plain cells again (fix/run-closing-cdc-begin).
-// 31 -> 25 (2026-11-04): the six HDW-1 cells are plain cells again (fix/run-closing-cdc-begin).
 // 25 -> 26 (2026-11-05): the S3 profile-beside-env-keys cell, open defect HFF-2 (closes with fix/destination-credential-every-leg).
-// 26 -> 22 (2026-11-05): VP-8 and MT-F-F closed by fix/stop-class-by-code.
-const ENTRY_CEILING: usize = 22; // ratchet-pin: known-red-entries
+// ratchet-pin: known-red-entries count dev/release_oracle/known_red.py ^    (_open|KnownRed)\(
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
@@ -77,23 +74,76 @@ fn entries(text: &str) -> (Vec<String>, Vec<String>) {
     (open, rows)
 }
 
+/// Run a Python module of the gate from the repo root.
+fn python(args: &[&str]) -> std::process::Output {
+    std::process::Command::new("python3")
+        .args(args)
+        .current_dir(root())
+        .output()
+        .expect("python3 is a prerequisite of every gate script in this repo")
+}
+
+/// The entry count the ledger's own check prints once every reason is dated.
+fn ledger_count() -> usize {
+    let out = python(&["-m", "dev.release_oracle.known_red"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "a known-red entry carries no dated reason (YYYY-MM-DD saying why it is accepted and what closes it):\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    said.trim()
+        .strip_prefix("known_red: ")
+        .and_then(|r| r.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("unreadable ledger check output: {said}"))
+}
+
 #[test]
-fn known_red_entries_never_grow_unseen() {
+fn every_known_red_entry_carries_a_dated_reason() {
     let (open, rows) = entries(&ledger());
     super::nonvacuity::require_enumerated(
         open.len() + rows.len(),
-        // The four gate rows stay until ADR-0037 lands; fewer means the ledger was not read.
         4,
         "known-red entries",
         "the ledger moved or changed shape",
     );
     assert_eq!(
         open.len() + rows.len(),
-        ENTRY_CEILING,
-        "known-red entries: {} open-defect cells + {} gate rows, ceiling {ENTRY_CEILING}. A new acknowledged red \
-         raises the ceiling in the same diff with its reason; a fixed one lowers it.",
-        open.len(),
-        rows.len()
+        ledger_count(),
+        "the entry parser of this guard and the ledger disagree on how many entries there are"
+    );
+}
+
+#[test]
+fn the_ledger_check_grades_its_own_fixture() {
+    let out = python(&["-m", "dev.release_oracle.known_red", "--self-test"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "known_red self-test: ok",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn the_entry_pin_counts_every_ledger_entry() {
+    let out = python(&["dev/pytools/pr_ready.py", "pins"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    let pinned: usize = said
+        .lines()
+        .find_map(|l| l.strip_prefix("tests/offline/known_red_guard.rs:known-red-entries "))
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "pr_ready.py pins lists no known-red-entries pin:\n{said}{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+    assert_eq!(
+        pinned,
+        ledger_count(),
+        "the known-red-entries census (the `ratchet-pin:` line in this file) misses an entry shape the ledger holds"
     );
 }
 
