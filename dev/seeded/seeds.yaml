@@ -4761,3 +4761,20 @@ seeds:
           - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
           - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
           - "lib:two_named_identities_are_refused_by_code"
+
+  - name: pg-temporal-uuid-bytea-array-refused
+    class: "a PostgreSQL date[], time[], timestamp[], timestamptz[], uuid[] or bytea[] column is refused by the batch export instead of being delivered as a native list"
+    history: "type-known-defects cluster C7 (2026-11-05); RED from this patch: the batch export of a date[] column stops with the element-type refusal and the ledger test fails on the six array rows"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-temporal-uuid-bytea-array-refused/postgres.patch
+        cells: [postgres_batch_and_cdc_deliver_every_ledger_row_alike]
+      mysql:
+        na: "the seed edits the PostgreSQL list builder; MySQL has no array column type"
+      mssql:
+        na: "the seed edits the PostgreSQL list builder; SQL Server has no array column type"
+      oracle:
+        na: "the seed edits the PostgreSQL list builder; an Oracle collection column is refused by type, not built as a list"
+      mongo:
+        na: "the seed edits the PostgreSQL list builder; a MongoDB array is a value inside the one document column, never a list column"
