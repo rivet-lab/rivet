@@ -313,42 +313,24 @@ exclude_re = [
     # `(Ok(()), Default::default())` is CAUGHT under `--lib --bins` by
     # a_reusable_plan_extracts_on_every_replay_from_the_stored_cursor and
     # only_an_exit_zero_apply_of_the_same_plan_answers_a_replay.
-    # introspect_all (init/mod.rs) is the whole-schema scan: every arm opens a
-    # live engine connection, so its dispatch mutants (delete match arm
-    # "postgres"/"mysql"/"mssql") are unkillable OFFLINE. The DECISION logic was
-    # extracted into `scan_step` (unit-tested, both guard mutants RED-proven);
-    # the dispatch itself is live-guarded, one schema-wide init test per arm:
-    # init_schema_flag_filters_to_schema (pg), init_mysql_schema_wide_discovers_
-    # seeded_table (mysql), init_mssql_schema_wide_discovers_seeded_table (mssql
-    # — added 2026-08-19 after THIS exclusion's first draft found the arm had no
-    # test at all: deleting it left 15 init tests green). Each proven by deleting
-    # the arm and watching its test go RED.
-    # The body stubs (`-> Ok(vec![])` / `Ok(vec![Default::default()])`) share the
-    # same live oracle: an empty scan scaffolds no exports, and the schema-wide
-    # init tests assert the seeded table APPEARS. Stub proven live-killed by hand
-    # (init_schema_flag_filters_to_schema goes RED on `return Ok(vec![])`).
-    # introspect_all: EXCLUSION LIFTED 2026-08-29, MEASURED not argued — its `Ok(vec![])` stub is CAUGHT offline (the `Ok(vec![Default::default()])` twin is unviable).
-    # The claim "no offline test can execute this body" was false: the offline
-    # battery grew (cli tests spawn the real binary) and nobody re-measured.
-    # Its INNER decisions do still survive and are now graded per-diff by
-    # cargo-mutants directly, which is the stronger contract than the purity
-    # ceiling that stood in for them; the newly-visible survivors are recorded
-    # in docs/mutants-baseline.txt with this date.
-    "delete match arm \"postgres\" in introspect_all",
-    "delete match arm \"mysql\" in introspect_all",
-    "delete match arm \"mssql\" in introspect_all",
-    # The MongoDB arm opens a live connection too; live-guarded by
-    # init_mongo_schema_wide_lists_collections_in_rivets_order (deleting the arm makes a mongodb://
-    # init reach the dispatch's `unreachable!`).
-    "delete match arm \"mongo\" in introspect_all",
-    # The Oracle arms of init's live-only engine dispatch open a real connection, so
-    # they are unkillable offline; each is live-guarded and was RED-proven by renaming
-    # the arm: introspect_all by init_oracle_schema_wide_discovers_seeded_table, the
-    # --discover scope by init_discover_names_the_oracle_table_scope, and
-    # introspect_single_table by an_init_generated_config_keysets_a_number_19_key_past_i64.
-    "delete match arm \"oracle\" in introspect_all",
+    # 2026-11-05 scan_tables arms open a live connection; witness: init_schema_flag_filters_to_schema.
+    "delete match arm \"postgres\" in scan_tables",
+    # 2026-11-05 witness: init_mysql_schema_wide_discovers_seeded_table.
+    "delete match arm \"mysql\" in scan_tables",
+    # 2026-11-05 witness: init_mssql_schema_wide_discovers_seeded_table.
+    "delete match arm \"mssql\" in scan_tables",
+    # 2026-11-05 witness: init_mongo_schema_wide_lists_collections_in_rivets_order.
+    "delete match arm \"mongo\" in scan_tables",
+    # 2026-11-05 witness: init_oracle_schema_wide_discovers_seeded_table.
+    "delete match arm \"oracle\" in scan_tables",
+    # 2026-11-05 witness: init_discover_names_the_oracle_table_scope.
     "delete match arm \"oracle\" in init_discovery_json",
+    # 2026-11-05 introspect_single_table arms open a live connection; witness: an_init_generated_config_keysets_a_number_19_key_past_i64.
     "delete match arm \"oracle\" in introspect_single_table",
+    # 2026-11-05 witness: init_scaffolds_no_keyset_key_for_a_tinyint1_primary_key_mysql.
+    "delete match arm \"mysql\" in introspect_single_table",
+    # 2026-11-05 witness: init_scaffolds_no_keyset_key_for_a_datetime2_7_primary_key_mssql.
+    "delete match arm \"mssql\" in introspect_single_table",
     # density_probe (init/mysql.rs, init/postgres.rs) takes a live DB connection
     # (mysql::PooledConn / postgres::Client) to run MIN/MAX + the windowed COUNTs
     # — unkillable OFFLINE (the --in-diff gate has no DB). Its DECISION logic is

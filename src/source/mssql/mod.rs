@@ -1200,15 +1200,14 @@ pub(crate) fn keyset_keys_sql(schema: &str, table: &str) -> String {
     )
 }
 
-/// SQL for the CHAR(31)-joined `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond.
+/// SQL for the CHAR(31)-joined `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond, through an alias type too.
 pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
     format!(
         "SELECT STRING_AGG(CONVERT(nvarchar(max), c.name), CHAR(31)) FROM sys.columns c \
-         JOIN sys.types t ON t.user_type_id = c.user_type_id \
          JOIN sys.objects o ON o.object_id = c.object_id \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          WHERE s.name = N'{}' AND o.name = N'{}' \
-           AND t.name IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
+           AND TYPE_NAME(c.system_type_id) IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
         schema.replace('\'', "''"),
         table.replace('\'', "''"),
         crate::source::keyset_key::MICROSECOND_DIGITS
@@ -1670,7 +1669,7 @@ mod tests {
 
 #[cfg(test)]
 mod key_probe_sql_tests {
-    use super::{keyset_keys_sql, single_int_pk_sql, split_char31};
+    use super::{finer_than_microsecond_sql, keyset_keys_sql, single_int_pk_sql, split_char31};
 
     /// A catalog list splits on its separator and drops empty members.
     #[test]
@@ -1698,6 +1697,17 @@ mod key_probe_sql_tests {
             sql.contains("HAVING COUNT(*) = 1 AND MAX(CONVERT(int, c.is_nullable)) = 0"),
             "{sql}"
         );
+    }
+
+    /// A column declared through an alias type over datetime2(7) is found by the system type under it, not by the alias name.
+    #[test]
+    fn the_sub_microsecond_probe_reads_the_system_type_under_an_alias() {
+        let sql = finer_than_microsecond_sql("dbo", "orders");
+        assert!(
+            sql.contains("TYPE_NAME(c.system_type_id) IN ('datetime2', 'datetimeoffset')"),
+            "{sql}"
+        );
+        assert!(!sql.contains("sys.types"), "{sql}");
     }
 
     /// H25: a composite PK is one index with COUNT(*) = 2 — grouping per column made each part a

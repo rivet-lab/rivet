@@ -150,6 +150,16 @@ const MSSQL_DT2_7_NS_OVERRIDE: Case = Case {
     rows: 10,
     overrides: Some("columns: {k: timestamp_ns}"),
 };
+const MSSQL_ALIAS_DT2_7: Case = Case {
+    label: "SQL Server alias type over datetime2(7), a tick past each microsecond",
+    key_ddl: "dbo.rivet_ks_ts7",
+    ..MSSQL_DT2_7_DISTINCT_US
+};
+const PG_DOMAIN_BYTEA: Case = Case {
+    label: "PostgreSQL domain over bytea unique key",
+    key_ddl: "rivet_ks_bytea",
+    ..PG_BYTEA
+};
 #[cfg(feature = "oracle")]
 const ORACLE_TS9: Case = Case {
     label: "Oracle TIMESTAMP(9) unique key",
@@ -242,6 +252,41 @@ fn delivered_ids(dir: &std::path::Path) -> Vec<i64> {
     }
     ids.sort();
     ids
+}
+
+/// A column type alias (SQL Server `CREATE TYPE`, PostgreSQL `CREATE DOMAIN`) dropped with this guard.
+struct AliasType {
+    engine: SqlEngine,
+    drop_sql: String,
+}
+
+impl AliasType {
+    /// Create `name` over `base`, replacing a leftover of the same name.
+    fn create(engine: SqlEngine, name: &str, base: &str) -> Self {
+        let (drop_sql, create_sql) = match engine {
+            SqlEngine::Mssql => (
+                format!("DROP TYPE IF EXISTS dbo.{name}"),
+                format!("CREATE TYPE dbo.{name} FROM {base}"),
+            ),
+            SqlEngine::Pg => (
+                format!("DROP DOMAIN IF EXISTS {name}"),
+                format!("CREATE DOMAIN {name} AS {base}"),
+            ),
+            _ => panic!("this engine has no column type alias"),
+        };
+        engine.exec(&drop_sql);
+        engine.exec(&create_sql);
+        AliasType { engine, drop_sql }
+    }
+}
+
+impl Drop for AliasType {
+    fn drop(&mut self) {
+        let (engine, sql) = (self.engine, self.drop_sql.clone());
+        if std::panic::catch_unwind(move || engine.exec(&sql)).is_err() {
+            eprintln!("could not drop the alias type: {}", self.drop_sql);
+        }
+    }
 }
 
 /// Run `check`; a panic in it is recorded in `gaps` under `label`, its first line only.
@@ -432,6 +477,161 @@ fn keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key() {
 #[ignore = "live: requires docker compose mssql"]
 fn keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key() {
     refused_on_a_table_that_fits_one_chunk(SqlEngine::Mssql, MSSQL_DT2_7_DISTINCT_US);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_alias_type_over_datetime2_7() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7", "DATETIME2(7)");
+    refused_over_several_pages(SqlEngine::Mssql, MSSQL_ALIAS_DT2_7);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_on_a_one_chunk_table_mssql_alias_type_over_datetime2_7() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7", "DATETIME2(7)");
+    refused_on_a_table_that_fits_one_chunk(SqlEngine::Mssql, MSSQL_ALIAS_DT2_7);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_is_refused_postgres_domain_over_bytea() {
+    let _alias = AliasType::create(SqlEngine::Pg, "rivet_ks_bytea", "BYTEA");
+    refused_over_several_pages(SqlEngine::Pg, PG_DOMAIN_BYTEA);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn an_alias_type_over_datetime2_6_keyset_key_delivers_the_seeded_ids_once_mssql() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts6", "DATETIME2(6)");
+    key_types_the_cursor_reads_deliver_the_seeded_ids(
+        SqlEngine::Mssql,
+        &[(
+            "SQL Server alias type over datetime2(6)",
+            "dbo.rivet_ks_ts6",
+            |i| format!("DATEADD(MICROSECOND, {i}, CAST('2024-01-01' AS DATETIME2(6)))"),
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_domain_over_text_keyset_key_delivers_the_seeded_ids_once_postgres() {
+    let _alias = AliasType::create(SqlEngine::Pg, "rivet_ks_text", "TEXT");
+    key_types_the_cursor_reads_deliver_the_seeded_ids(
+        SqlEngine::Pg,
+        &[("PostgreSQL domain over text", "rivet_ks_text", |i| {
+            format!("'k{i:03}'")
+        })],
+    );
+}
+
+/// `rivet init --table` scaffolds a keyset key for a primary key the planner admits and none for one it refuses.
+fn init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+    engine: SqlEngine,
+    refused: Case,
+    admitted: Case,
+) {
+    let (_, k) = names(engine);
+    let scaffold = |case: &Case| {
+        let case = Case {
+            primary: true,
+            ..*case
+        };
+        let (table, guard) = seeded(engine, &case, "ks_init");
+        let cfg = InitConfig::generate(engine.url(), &["--table", &table, "--mode", "chunked"]);
+        assert!(
+            cfg.init.status.success(),
+            "init --table {table} ({}): {}",
+            case.label,
+            String::from_utf8_lossy(&cfg.init.stderr)
+        );
+        (cfg.yaml(), guard)
+    };
+    let (yaml, _guard) = scaffold(&admitted);
+    assert!(
+        yaml.contains(&format!("chunk_by_key: {k}")),
+        "init scaffolds the key the planner admits ({}):\n{yaml}",
+        admitted.label
+    );
+    let (yaml, _guard) = scaffold(&refused);
+    assert!(
+        !yaml.contains("chunk_by_key:") && yaml.contains("NOTE: no chunk key"),
+        "init scaffolds no keyset key for the key the planner refuses ({}):\n{yaml}",
+        refused.label
+    );
+}
+
+const MYSQL_VARCHAR16: Case = Case {
+    label: "MySQL VARCHAR(16) primary key",
+    key_ddl: "VARCHAR(16)",
+    key_value: |i| format!("'k{i:03}'"),
+    primary: true,
+    rows: 12,
+    overrides: None,
+};
+const PG_TEXT: Case = Case {
+    label: "PostgreSQL text primary key",
+    key_ddl: "TEXT",
+    key_value: |i| format!("'k{i:03}'"),
+    primary: true,
+    rows: 12,
+    overrides: None,
+};
+const MSSQL_DT2_6: Case = Case {
+    label: "SQL Server datetime2(6) primary key",
+    key_ddl: "DATETIME2(6)",
+    key_value: |i| format!("DATEADD(MICROSECOND, {i}, CAST('2024-01-01' AS DATETIME2(6)))"),
+    primary: true,
+    rows: 12,
+    overrides: None,
+};
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn init_scaffolds_no_keyset_key_for_a_datetime2_7_primary_key_mssql() {
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Mssql,
+        MSSQL_DT2_7_DISTINCT_US,
+        MSSQL_DT2_6,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7", "DATETIME2(7)");
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Mssql,
+        MSSQL_ALIAS_DT2_7,
+        MSSQL_DT2_6,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn init_scaffolds_no_keyset_key_for_a_binary16_primary_key_mysql() {
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Mysql,
+        Case {
+            primary: true,
+            ..MYSQL_BINARY16
+        },
+        MYSQL_VARCHAR16,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn init_scaffolds_no_keyset_key_for_a_bytea_primary_key_postgres() {
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Pg,
+        Case {
+            primary: true,
+            ..PG_BYTEA
+        },
+        PG_TEXT,
+    );
 }
 
 #[test]

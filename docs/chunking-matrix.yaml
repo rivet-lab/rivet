@@ -119,6 +119,30 @@ scenarios:
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
     oracle:   { test: a_timestamp_9_keyset_key_stays_refused_oracle }
 
+  - id: keyset_key_type_alias
+    what: "a keyset key declared through a user-defined type is judged by the base type under it: a SQL Server alias type over datetime2(7) and a PostgreSQL domain over bytea are refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE; an alias over datetime2(6) and a domain over text deliver the seeded ids once"
+    postgres: { test: keyset_key_is_refused_postgres_domain_over_bytea }
+    mysql:    { na: "MySQL has no user-defined column types; a column's type is its own" }
+    mssql:    { test: keyset_key_is_refused_mssql_alias_type_over_datetime2_7 }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { na: "Oracle has no scalar alias types for a column; the sub-microsecond key is pinned by a_timestamp_9_keyset_key_stays_refused_oracle" }
+
+  - id: keyset_key_type_alias_readable
+    what: "the neighbour of keyset_key_type_alias that must not change: an alias over datetime2(6) and a domain over text still deliver the seeded ids once over several pages"
+    postgres: { test: a_domain_over_text_keyset_key_delivers_the_seeded_ids_once_postgres }
+    mysql:    { na: "MySQL has no user-defined column types" }
+    mssql:    { test: an_alias_type_over_datetime2_6_keyset_key_delivers_the_seeded_ids_once_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { na: "Oracle has no scalar alias types for a column" }
+
+  - id: keyset_key_init_scaffold
+    what: "rivet init --table --mode chunked writes chunk_by_key for a primary key the planner admits and none (with the NOTE: no chunk key line) for one the planner refuses, so a scaffold is never a config that check rejects"
+    postgres: { test: init_scaffolds_no_keyset_key_for_a_bytea_primary_key_postgres }
+    mysql:    { test: init_scaffolds_no_keyset_key_for_a_binary16_primary_key_mysql }
+    mssql:    { test: init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { na: "the Oracle refusal is the explicit chunk_by_key check, pinned by a_timestamp_9_keyset_key_stays_refused_oracle; no Oracle init cell yet" }
+
   - id: keyset_unusable_key_on_a_one_chunk_table
     what: "owner decision Q11 (2026-11-03): under mode: chunked a key the cursor cannot advance is refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE even when the table fits one chunk, as a large table is"
     postgres: { test: keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key }

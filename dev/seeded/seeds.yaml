@@ -4769,6 +4769,22 @@ seeds:
         cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
       mongo:
         na: "Mongo always pages by _id; init scaffolds no keyset key for it"
+  - name: keyset-key-alias-type-by-name
+    class: "the sub-microsecond fact about a SQL Server keyset key is read by the column's user type name, so a key declared through an alias type over datetime2(7) is not found finer than a microsecond and the cursor delivers duplicate rows with exit 0"
+    history: "2026-11-05 - found verifying the keyset-key-type seam PR (D1): CREATE TYPE ts7 FROM datetime2(7) has sys.types.name ts7, so the name match in finer_than_microsecond_sql missed it; the probe now reads TYPE_NAME(c.system_type_id)"
+    scope: source
+    patch: keyset-key-alias-type-by-name/shared.patch
+    engines:
+      postgres:
+        na: "a PostgreSQL domain reports its base type on the wire, which is what the seam reads; there is no catalog name match to seed"
+      mysql:
+        na: "MySQL has no user-defined column types"
+      mssql:
+        cells: [keyset_key_is_refused_mssql_alias_type_over_datetime2_7, keyset_key_is_refused_on_a_one_chunk_table_mssql_alias_type_over_datetime2_7, init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql, "lib:the_sub_microsecond_probe_reads_the_system_type_under_an_alias"]
+      oracle:
+        na: "Oracle has no scalar alias types for a column"
+      mongo:
+        na: "Mongo always pages by _id; there is no user chunk_by_key knob and no keyset key to type"
   - name: destination-credential-read-by-one-leg
     class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
     history: "2026-11-03 seam packaging HFF-1 and HFF-2: with `credentials_file:` naming a service-account key every BigQuery request of `rivet load` carried the ambient ADC token; an S3 `aws_profile` beside `access_key_env` and `secret_key_env` signed with the profile alone and `rivet check` exited 0"
