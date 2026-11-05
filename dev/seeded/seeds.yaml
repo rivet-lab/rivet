@@ -4761,3 +4761,20 @@ seeds:
           - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
           - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
           - "lib:two_named_identities_are_refused_by_code"
+
+  - name: number-text-without-its-label
+    class: "an Oracle NUMBER that no fixed-scale decimal holds (bare NUMBER, FLOAT, precision above 38) is written as plain decimal text in a Utf8 column without the rivet.text_form = decimal_plain label, in batch and in CDC alike, so a reader cannot tell the canonical text from a free string"
+    history: "type-known-defects oracle:NUMBER of docs/type-capability-matrix.yaml (ADR-0038 CP5); RED on main 2026-11-05 (the ledger row without its marker fails oracle_batch_and_cdc_deliver_every_ledger_row_alike: delivery text, target decimal_plain)"
+    scope: source
+    engines:
+      postgres:
+        na: "the seed edits the Oracle NUMBER mapping; a PostgreSQL numeric without a declared precision is read by the PostgreSQL mapper, never by the Oracle one"
+      mysql:
+        na: "the seed edits the Oracle NUMBER mapping, which no MySQL column reaches; DECIMAL carries its precision and scale natively"
+      mssql:
+        na: "the seed edits the Oracle NUMBER mapping, which no SQL Server column reaches; decimal carries its precision and scale natively"
+      mongo:
+        na: "the seed edits the Oracle NUMBER mapping, which no MongoDB value reaches; Decimal128 is delivered natively"
+      oracle:
+        patch: number-text-without-its-label/oracle.patch
+        cells: [oracle_batch_and_cdc_deliver_every_ledger_row_alike, "lib:a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not"]

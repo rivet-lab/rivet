@@ -22,7 +22,7 @@ use super::kind::{OraKind, native_label};
 use crate::error::Result;
 use crate::types::decimal::decimal_str_to_scaled_i128;
 use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit, TypeMapping, build_arrow_field,
+    ColumnOverrides, RivetType, SourceColumn, TextForm, TimeUnit, TypeMapping, build_arrow_field,
 };
 
 /// Warning attached to a bare `NUMBER` column `name` (no declared precision) exported as exact text.
@@ -128,14 +128,30 @@ pub(super) fn oracle_type_mappings(
             if overrides.contains_key(m.name()) {
                 mapping
             } else {
+                let kind = OraKind::of(m);
+                let mapping = deliver_number_text(mapping, kind, m.precision(), m.scale());
                 with_oracle_warning(
                     mapping,
-                    is_bare_number(OraKind::of(m), m.precision(), m.scale()),
+                    is_bare_number(kind, m.precision(), m.scale()),
                     sub_microsecond(native, m.scale()),
                 )
             }
         })
         .collect()
+}
+
+/// A NUMBER that no fixed-scale decimal holds, labelled as plain decimal text (ADR-0038 CP5).
+fn deliver_number_text(
+    mapping: TypeMapping,
+    kind: OraKind,
+    precision: u8,
+    scale: i8,
+) -> TypeMapping {
+    if kind == OraKind::Number && number_type(precision, scale) == RivetType::String {
+        mapping.with_text(TextForm::DecimalPlain)
+    } else {
+        mapping
+    }
 }
 
 /// The un-overridden mapping with its Oracle warning: bare NUMBER as text, or sub-µs truncation (lossy).
@@ -618,6 +634,69 @@ mod tests {
         assert_eq!(interval_ym_iso(0, -3), "P-3M");
         assert_eq!(interval_ym_iso(2, 0), "P2Y");
         assert_eq!(interval_ym_iso(0, 0), "PT0S");
+    }
+
+    #[test]
+    fn a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not() {
+        use crate::types::{Delivery, SourceColumn};
+        let delivered = |kind, native: &str, p, sc| {
+            let rivet = autodetect(kind, native, p, sc, "lbl");
+            let m = TypeMapping::from_source(&SourceColumn::simple("C", native, true), rivet);
+            deliver_number_text(m, kind, p, sc)
+        };
+        let label = |m: &TypeMapping| {
+            build_arrow_field(m)
+                .unwrap()
+                .metadata()
+                .get("rivet.text_form")
+                .cloned()
+        };
+        for (p, sc, what) in [
+            (0, 0, "bare NUMBER"),
+            (126, -127, "FLOAT"),
+            (38, 40, "scale past 38"),
+            (38, -5, "negative scale past 38 digits"),
+        ] {
+            let m = delivered(OraKind::Number, "number", p, sc);
+            assert_eq!(m.delivery, Delivery::Text(TextForm::DecimalPlain), "{what}");
+            assert_eq!(
+                m.arrow_type,
+                Some(arrow::datatypes::DataType::Utf8),
+                "{what}"
+            );
+            assert_eq!(label(&m).as_deref(), Some("decimal_plain"), "{what}");
+        }
+        for (kind, native, p, sc, want) in [
+            (OraKind::Number, "number(9)", 9, 0, RivetType::Int32),
+            (OraKind::Number, "number(18)", 18, 0, RivetType::Int64),
+            (
+                OraKind::Number,
+                "number(10,2)",
+                10,
+                2,
+                RivetType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+            ),
+            (
+                OraKind::Number,
+                "number(5,-3)",
+                5,
+                -3,
+                RivetType::Decimal {
+                    precision: 8,
+                    scale: 0,
+                },
+            ),
+            (OraKind::Text, "varchar", 0, 0, RivetType::String),
+            (OraKind::Clob, "clob", 0, 0, RivetType::String),
+        ] {
+            let m = delivered(kind, native, p, sc);
+            assert_eq!(m.rivet_type, want, "{native}");
+            assert_eq!(m.delivery, Delivery::Native, "{native}");
+            assert_eq!(label(&m), None, "{native}");
+        }
     }
 
     #[test]
