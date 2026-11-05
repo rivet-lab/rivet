@@ -4752,3 +4752,29 @@ seeds:
         cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
       mongo:
         cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+
+  - name: destination-credential-read-by-one-leg
+    class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
+    history: "2026-11-03 seam packaging HFF-1 and HFF-2: with `credentials_file:` naming a service-account key every BigQuery request of `rivet load` carried the ambient ADC token; an S3 `aws_profile` beside `access_key_env` and `secret_key_env` signed with the profile alone and `rivet check` exited 0"
+    scope: destination
+    patch: destination-credential-read-by-one-leg/shared.patch
+    engines:
+      local:
+        na: "the seed edits the BigQuery token source and the credential chooser; a local directory names no credential"
+      s3:
+        cells:
+          - "an_s3_profile_beside_env_keys_is_refused"
+          - "lib:two_named_identities_are_refused_by_code"
+      gcs:
+        cells:
+          - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
+          - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
+      azure:
+        na: "the seed edits the BigQuery token source and the S3 arm of the chooser; the Azure arm already refused key beside SAS before the chooser"
+      stdout:
+        na: "the seed edits the BigQuery token source and the credential chooser; stdout names no credential"
+      lib:
+        cells:
+          - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
+          - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
+          - "lib:two_named_identities_are_refused_by_code"

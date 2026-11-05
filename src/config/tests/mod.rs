@@ -3,6 +3,7 @@ mod codes;
 mod columns_from;
 mod compression;
 mod credential_file;
+mod destination_credential;
 mod goldens;
 mod parse_helpers;
 mod secops;
