@@ -1,4 +1,7 @@
 rules:
+  ref-version-mismatch:
+    # 2026-11-05: dtolnay/rust-toolchain `# v1` is a floating tag its owner moves on every Rust release, so the online audit turns every PR red with no change here; closes when it publishes immutable release tags.
+    disable: true
   self-repository:
     ignore:
       # 2026-11-04: `$/` self-repository syntax is not accepted by actionlint; closes when it is.
