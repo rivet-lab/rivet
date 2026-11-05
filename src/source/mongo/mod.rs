@@ -212,11 +212,6 @@ fn uuid_of_listing(listed: &Document) -> Vec<u8> {
     }
 }
 
-/// The lower-case hex of `bytes`.
-fn hex_of(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// The bytes `text` spells in hex; `None` for anything else.
 fn bytes_of_hex(text: &str) -> Option<Vec<u8>> {
     let digits = text.as_bytes();
@@ -274,7 +269,7 @@ impl MongoSession {
             .as_deref()
             .and_then(<[_]>::first)
             .filter(|uuid| !uuid.is_empty())
-            .map(|uuid| hex_of(uuid)))
+            .map(|uuid| crate::types::hex_bytes(uuid)))
     }
 }
 
@@ -1751,7 +1746,7 @@ mod collection_identity_tests {
     fn a_collection_pinned_by_a_stored_cursor_refuses_one_created_again_before_any_read() {
         let fake = FakeMongo::serving(&SECOND, documents(4));
         let mut reader = source(&fake);
-        reader.pin_incarnation("t", &hex_of(&FIRST));
+        reader.pin_incarnation("t", &crate::types::hex_bytes(&FIRST));
         let (outcome, rows) = read(&mut reader, None);
         assert_eq!(code(outcome), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
         assert_eq!((rows, fake.shelf.lock().unwrap().finds), (0, 0));
