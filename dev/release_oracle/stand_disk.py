@@ -22,8 +22,8 @@ except ImportError:  # pragma: no cover - bare sys.path entry
 
 __all__ = ["START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low", "disk_reason"]
 
-START_FLOOR_GIB = 150  # ratchet-pin: gate-start-free-disk-floor
-WATCH_FLOOR_GIB = 20  # ratchet-pin: gate-watchdog-free-disk-floor
+START_FLOOR_GIB = 150  # ratchet-pin: gate-start-free-disk-floor (review 2027-02-01)
+WATCH_FLOOR_GIB = 20  # ratchet-pin: gate-watchdog-free-disk-floor (review 2027-02-01)
 GIB = 1024 ** 3
 
 

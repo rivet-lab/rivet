@@ -82,7 +82,7 @@ SHORT_REPS = 9
 MIB = 1024 * 1024
 # What a bounded CDC run needs: one metadata connection plus the change stream. A MongoDB
 # driver client adds its own monitoring connections (3 per client, measured).
-CONN_CEILING = {  # ratchet-pin: cdc-connection-ceiling sum
+CONN_CEILING = {  # ratchet-pin: cdc-connection-ceiling (review 2027-02-01) sum
     "postgres": 2, "mysql": 2, "mssql": 2, "mongo": 6,
 }  # ratchet-pin: end
 
@@ -692,7 +692,7 @@ def _conns(led: Ledger, prev: Path) -> None:
 
 
 # A batch run needs one metadata connection plus the data read; the chunk planner probes on the first.
-BATCH_CONN_CEILING = {  # ratchet-pin: batch-connection-ceiling sum
+BATCH_CONN_CEILING = {  # ratchet-pin: batch-connection-ceiling (review 2027-02-01) sum
     "full": 2, "chunked": 2,
 }  # ratchet-pin: end
 

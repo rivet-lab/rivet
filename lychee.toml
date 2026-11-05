@@ -1,0 +1,20 @@
+max_redirects = 5
+# 2026-11-05 (review 2026-12-01): dev/docgen/config_md.py links type names to anchors the generated page never defines; closes when it links the section headings
+exclude_path = ['docs/reference/config-reference\.md']
+exclude = [
+  # 2026-11-04 (review 2027-02-01): CHANGELOG history names files deleted since; history is not rewritten
+  'docs/bench/reports/REPORT_mssql\.md',
+  'docs/benchmark_report_v0\.5\.x\.md',
+  'USER_GUIDE\.md',
+  # 2026-11-04 (review 2026-12-01): these hosts refuse scripted requests with 403
+  'dev\.mysql\.com',
+  'claude\.ai',
+  # 2026-11-04 (review 2026-12-01): the Airflow recipe README names the local web UI it starts
+  'localhost:8080',
+  # 2026-11-04 (review 2026-12-01): moved upstream, the new location is not known; closes when someone finds it
+  'airbytehq/airbyte/blob/master/docs/release_notes/upgrading_to_destinations_v2\.md',
+  'www\.stitchdata\.com',
+  'docs\.airbyte\.com/deploying-airbyte',
+  # 2026-11-04 (review 2026-12-01): the site does not answer within 30 s from the dev machines; closes when it does
+  'sqlmesh\.com',
+]
