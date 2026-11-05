@@ -57,3 +57,11 @@ scenarios:
     s3:    { test: an_ambient_aws_profile_that_differs_is_refused_before_any_request, note: "a named `aws_profile` that is missing, overridden by another ambient AWS_PROFILE, or holds no static keys or web-identity role is `RIVET_DEST_CREDENTIALS_INVALID` before any request; siblings in tests/s3_named_profile.rs; a named access_key_env / secret_key_env that is unset is refused by read_credential_env" }
     azure: { test: azure_destination_account_key_env_missing_var_errors }
     stdout:  { na: "stdout names no credential: the bytes go to the caller's pipe, so there is no identity to select or fall back from." }
+
+  - id: one_named_credential_signs_every_leg
+    what: "a destination that names one credential signs every leg of the run with it: the GCS files leg and the BigQuery load use the same `credentials_file` key, and a named key beside another named identity (a static RIVET_BQ_ACCESS_TOKEN, an S3 aws_profile beside access_key_env and secret_key_env) is refused by RIVET_CONFIG_DESTINATION_AUTH_INVALID before any request instead of one identity silently winning."
+    local: { na: "a local directory names no credential, so no leg has an identity to choose." }
+    gcs:   { test: open_defect_a_bigquery_load_signs_with_the_destinations_named_key, note: "twin open_defect_a_named_key_beside_a_static_bigquery_token_is_refused_by_code; neighbour a_destination_with_no_named_key_loads_as_the_ambient_identity_or_the_static_token pins the unnamed destination on main's behaviour" }
+    s3:    { test: open_defect_an_s3_profile_beside_env_keys_is_refused, note: "neighbour an_s3_profile_alone_signs_with_the_profile" }
+    azure: { na: "the Azure adapter already refuses account_key_env beside sas_token_env; it has no second ambient identity a profile or token could shadow." }
+    stdout:  { na: "stdout names no credential: there is no leg to sign." }

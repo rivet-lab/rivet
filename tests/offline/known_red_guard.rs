@@ -30,8 +30,10 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 28 -> 32 (2026-11-04): VP-8 missing-relation cells on MSSQL, Oracle and Mongo, and the MSSQL lock-timeout cell MT-F-F (close with fix/stop-class-by-code).
 // 32 -> 31 (2026-11-04): the TF-2 cell is green on fix/mysql-enum-label-escapes and its entry is deleted.
 // 31 -> 25 (2026-11-04): the six HDW-1 cells are plain cells again (fix/run-closing-cdc-begin).
-// 25 -> 21 (2026-11-05): VP-8 and MT-F-F closed by fix/stop-class-by-code.
-const ENTRY_CEILING: usize = 21; // ratchet-pin: known-red-entries
+// 31 -> 25 (2026-11-04): the six HDW-1 cells are plain cells again (fix/run-closing-cdc-begin).
+// 25 -> 26 (2026-11-05): the S3 profile-beside-env-keys cell, open defect HFF-2 (closes with fix/destination-credential-every-leg).
+// 26 -> 22 (2026-11-05): VP-8 and MT-F-F closed by fix/stop-class-by-code.
+const ENTRY_CEILING: usize = 22; // ratchet-pin: known-red-entries
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
