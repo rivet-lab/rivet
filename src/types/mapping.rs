@@ -186,8 +186,14 @@ pub fn rivet_type_to_arrow(t: &RivetType) -> Option<DataType> {
 
         // One-dimensional array: recursively resolve the inner element type.
         // Returns None if the inner type itself is Unsupported.
-        RivetType::List { inner } => rivet_type_to_arrow(inner)
-            .map(|inner_dt| DataType::List(Arc::new(Field::new("item", inner_dt, true)))),
+        RivetType::List { inner } => rivet_type_to_arrow(inner).map(|inner_dt| {
+            let mut item = Field::new("item", inner_dt, true);
+            if matches!(**inner, RivetType::Uuid) {
+                item.try_with_extension_type(ArrowUuid)
+                    .expect("Uuid extension is valid on FixedSizeBinary(16)");
+            }
+            DataType::List(Arc::new(item))
+        }),
 
         RivetType::Unsupported { .. } => None,
     }
@@ -367,6 +373,27 @@ mod tests {
         };
         assert_eq!(derive_fidelity(&good), TypeFidelity::Compatible);
         assert!(!good.is_unsupported());
+    }
+
+    /// Only a uuid list item carries the `arrow.uuid` extension; other list items stay bare.
+    #[test]
+    fn a_uuid_list_item_carries_the_uuid_extension_and_others_do_not() {
+        let item_of = |inner: RivetType| match rivet_type_to_arrow(&RivetType::List {
+            inner: Box::new(inner),
+        }) {
+            Some(DataType::List(f)) => f,
+            other => panic!("not a list: {other:?}"),
+        };
+        let uuid = item_of(RivetType::Uuid);
+        assert_eq!(uuid.data_type(), &DataType::FixedSizeBinary(16));
+        assert_eq!(
+            uuid.metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str),
+            Some("arrow.uuid")
+        );
+        let int = item_of(RivetType::Int32);
+        assert!(!int.metadata().contains_key("ARROW:extension:name"));
     }
 
     fn col(name: &str, native: &str) -> SourceColumn {

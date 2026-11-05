@@ -288,6 +288,17 @@ fn warehouse_relation(
                 format!("decode({c})")
             } else if d == "List(Utf8)" {
                 format!("list_transform({c}, x -> decode(x))")
+            } else if d == "List(arrow.uuid)" {
+                format!(
+                    "list_transform({c}, x -> CAST(regexp_replace(lower(hex(x)), \
+                     '^(.{{8}})(.{{4}})(.{{4}})(.{{4}})(.{{12}})$', '\\1-\\2-\\3-\\4-\\5') AS UUID))"
+                )
+            } else if d == "List(Time64(µs))" {
+                format!(
+                    "list_transform({c}, x -> TIME '00:00:00' + to_microseconds(CAST(x * 1000000 AS BIGINT)))"
+                )
+            } else if d.starts_with("List(Timestamp(") && !d.contains(',') {
+                format!("list_transform({c}, x -> CAST(x AS TIMESTAMP))")
             } else if d == "arrow.uuid" {
                 format!(
                     "CAST(regexp_replace(lower(hex({c})), \
@@ -443,9 +454,15 @@ fn delivered(schema: &arrow::datatypes::Schema, col: &str) -> String {
             other => format!("{form} on {other}"),
         };
     }
-    md.get("ARROW:extension:name")
-        .cloned()
-        .unwrap_or_else(|| f.data_type().to_string())
+    if let Some(ext) = md.get("ARROW:extension:name") {
+        return ext.clone();
+    }
+    if let arrow::datatypes::DataType::List(item) = f.data_type()
+        && let Some(ext) = item.metadata().get("ARROW:extension:name")
+    {
+        return format!("List({ext})");
+    }
+    f.data_type().to_string()
 }
 
 /// A field's Arrow type when it is nanosecond time: Time64(ns) or Timestamp(ns, any zone).

@@ -723,6 +723,8 @@ def compare(
             return c
         if how.get(i) == "seconds":
             c = canon(v)
+            if isinstance(c, list):
+                return [("num", e[3]) if isinstance(e, tuple) and e[0] == "dur" and e[1] == e[2] == 0 else e for e in c]
             if isinstance(c, tuple) and c[0] == "dur" and c[1] == c[2] == 0:
                 return ("num", c[3])
             return canon(_numtext(v))
@@ -1616,10 +1618,18 @@ def grade_load(spec: dict) -> dict:
             blobs = [c for c, t in _columns(ora, "source_rows") if t == "BLOB" and "String" in wh_types.get(c, "")]
             # A Decimal wider than 38 digits reaches DuckDB as DOUBLE; read it as ClickHouse's exact text.
             wide = {c for c, t in wh_types.items() if (m := re.search(r"Decimal\((\d+)", t)) and int(m.group(1)) > 38}
-            sel = ", ".join(f"hex(`{c}`) AS `{c}`" if c in blobs else f"toString(`{c}`) AS `{c}`" if c in wide else f"`{c}`" for c in wh_types)
+            blob_lists = [c for c, n in native.items() if (rows.get(n) or {}).get("delivery") == "List(Binary)" and "String" in wh_types.get(c, "")]
+            uuid_lists = [c for c, n in native.items() if (rows.get(n) or {}).get("delivery") == "List(arrow.uuid)" and "FixedString" in wh_types.get(c, "")]
+            sel = ", ".join(
+                f"hex(`{c}`) AS `{c}`" if c in blobs else f"arrayMap(x -> hex(x), `{c}`) AS `{c}`" if c in blob_lists + uuid_lists
+                else f"toString(`{c}`) AS `{c}`" if c in wide else f"`{c}`" for c in wh_types
+            )
             rel = _clickhouse(load, password, f"SELECT {sel} FROM `{db}`.`{leaf}`")
-            if blobs:
-                rel = f"(SELECT * REPLACE ({', '.join(f'unhex(CAST({_qi(c)} AS VARCHAR)) AS {_qi(c)}' for c in blobs)}) FROM {rel})"
+            if blobs or blob_lists or uuid_lists:
+                unhexed = [f"unhex(CAST({_qi(c)} AS VARCHAR)) AS {_qi(c)}" for c in blobs]
+                unhexed += [f"list_transform({_qi(c)}, x -> unhex(x)) AS {_qi(c)}" for c in blob_lists]
+                unhexed += [f"list_transform({_qi(c)}, x -> CAST(lower(x[1:8] || '-' || x[9:12] || '-' || x[13:16] || '-' || x[17:20] || '-' || x[21:32]) AS UUID)) AS {_qi(c)}" for c in uuid_lists]
+                rel = f"(SELECT * REPLACE ({', '.join(unhexed)}) FROM {rel})"
             buffered = 0
         elif target == "snowflake":
             sf_db, sf_schema = fq.split(".")[:2]
@@ -1766,7 +1776,7 @@ def grade_load(spec: dict) -> dict:
         canons = {c: _render(r)["canon"] for c, r in row_of.items() if _render(r).get("canon")}
         # A TIME the ledger loads into ClickHouse as Decimal seconds is compared in seconds.
         canons.update({c: "seconds" for c, r in ch_of.items()
-                       if target == "clickhouse" and str(r.get("clickhouse", "")).startswith(("Decimal", "Nullable(Decimal")) and native[c].startswith("TIME")})
+                       if target == "clickhouse" and str(r.get("clickhouse", "")).startswith(("Decimal", "Nullable(Decimal", "Array(Nullable(Decimal")) and native[c].startswith("TIME")})
         duck = {} if engine == "oracle" else {c: _render(r)["duck"] for c, r in row_of.items() if _render(r).get("duck")}
         verbatim = frozenset(
             c for c, n in native.items()
