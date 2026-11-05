@@ -546,6 +546,14 @@ fn init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
             case.label,
             String::from_utf8_lossy(&cfg.init.stderr)
         );
+        let ran = cfg.run_after(&["check"], &[], Pairing::SameRefusal).run;
+        assert!(
+            ran.status.success(),
+            "the config init wrote for {} does not run (exit {:?})\n{}",
+            case.label,
+            ran.status.code(),
+            String::from_utf8_lossy(&ran.stderr)
+        );
         (cfg.yaml(), guard)
     };
     let (yaml, _guard) = scaffold(&admitted);
