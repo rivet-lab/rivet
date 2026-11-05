@@ -5,8 +5,9 @@
     e2e_scope.py --self-test
 
 Conservative by construction: a path is skippable only when it is documentation (`*.md`,
-`changelog.d/`, `docs/gifs/`) that no test or source file reads, or harness code under a
-prefix the E2E lane never imports or calls (`UNUSED_BY_E2E`). Anything else, an unclassified
+`changelog.d/`, `docs/gifs/`) that no test or source file reads, harness code under a
+prefix the E2E lane never imports or calls (`UNUSED_BY_E2E`), or a tool config (`UNUSED_FILES`)
+that nothing the lane runs names by path. Anything else, an unclassified
 path included, and an empty diff, selects the full E2E. Which docs files are read is derived
 from the tree on every run (string literals and `include_str!` under `src/` and `tests/`), never
 from a hand list.
@@ -24,10 +25,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 #: Harness prefixes the E2E lane neither imports nor calls (the self-test greps the lane and the tests for them).
 UNUSED_BY_E2E = ("dev/seeded/", ".github/scripts/", "dev/spikes/")
-#: Single files only the mutation and the offline lanes read.
-UNUSED_FILES = (".cargo/mutants.toml",)
+#: Tool configs only a lint, docs or mutation tool outside the E2E lane reads; one named by anything the lane runs is `full` again.
+UNUSED_FILES = (".cargo/mutants.toml", "deny.toml", ".gitleaks.toml", "book.toml", ".github/dependabot.yml", ".github/FUNDING.yml")
 #: Files under those prefixes that still decide E2E: this script itself.
 ALWAYS_FULL = (".github/scripts/e2e_scope.py", ".github/scripts/e2e_legs.py")
+#: A comment line of Rust, Python or YAML (an attribute `#[` is code).
+COMMENT_LINE = re.compile(r"^\s*(?://|#(?!\[))")
 #: A string literal or `include_str!` that names a file under docs/ (or a top-level *.md).
 READ_DOC = re.compile(r'"((?:\.\./)*(?:docs/[A-Za-z0-9_./-]+|[A-Za-z0-9_-]+\.md))"')
 
@@ -91,6 +94,20 @@ def e2e_python(root: Path = ROOT) -> set[str]:
                     if cand.is_file() and str(cand).startswith(str(root / "dev")):
                         todo.append(cand)
     return {str(f.relative_to(root)) for f in seen}
+
+
+@functools.lru_cache(maxsize=None)
+def lane_code(root: Path = ROOT) -> str:
+    """The code, comments dropped, the E2E lane runs: its jobs, the Rust it builds, the dev/ Python it imports and its leg scripts (not this one)."""
+    texts = [lane_text(root)] + e2e_rust_texts(root)
+    texts += [(root / p).read_text(errors="ignore") for p in e2e_python(root)]
+    texts += [f.read_text(errors="ignore") for f in (root / ".github" / "scripts").glob("e2e_*.py") if f.name != "e2e_scope.py"]
+    return "\n".join(l for t in texts for l in t.splitlines() if not COMMENT_LINE.match(l))
+
+
+def unused_file(path: str, root: Path = ROOT) -> bool:
+    """A listed tool config that nothing the E2E lane runs names by its path."""
+    return path in UNUSED_FILES and path not in lane_code(root)
 
 
 #: An ignored test: the `#[ignore` ATTRIBUTE at the start of a line, never the text inside a string.
@@ -178,7 +195,7 @@ def classify(path: str, read: set[str]) -> str:
     global _E2E_PY
     if path in ALWAYS_FULL or path in read:
         return "full"
-    if path.startswith(UNUSED_BY_E2E) or path in UNUSED_FILES or offline_only(path):
+    if path.startswith(UNUSED_BY_E2E) or unused_file(path) or offline_only(path):
         return "unused"
     if path.startswith(("dev/release_oracle/", "dev/pytools/")) and path.endswith(".py"):
         if _E2E_PY is None:
@@ -413,6 +430,26 @@ def self_test() -> int:
         assert not offline_only("tests/by_path.rs", root), "an ignored test in a #[path] module counts"
         assert not offline_only("tests/lost.rs", root), "a module that cannot be found counts as live"
     assert classify("tests/live_suite.rs", read) == "full" and classify("tests/offline_suite.rs", read) == "full"
+    for tool_config in ("deny.toml", ".gitleaks.toml", "book.toml", ".github/dependabot.yml", ".github/FUNDING.yml"):
+        assert scope([tool_config], read)[0] == "skip", f"{tool_config} is read only by a tool outside the E2E lane"
+    for entry in UNUSED_FILES:
+        assert classify(entry, read) == "unused", f"{entry} is named by something the E2E lane runs: drop it from UNUSED_FILES"
+    for seam in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "docker-compose.yaml", "Dockerfile", ".dockerignore",
+                 "pyproject.toml", "uv.lock", ".python-version", ".config/nextest.toml", "build.rs", "src/main.rs",
+                 "tests/common/mod.rs", ".github/scripts/e2e_legs.py", ".github/workflows/ci.yml"):
+        assert scope([seam], read)[0] == "full", seam
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / ".github" / "workflows").mkdir(parents=True)
+        (root / ".github" / "workflows" / "ci.yml").write_text("jobs:\n  e2e-build:\n    steps: []\n")
+        (root / "src").mkdir()
+        (root / "tests").mkdir()
+        (root / "src" / "a.rs").write_text("// deny.toml in a comment\nfn main() {}\n")
+        assert unused_file("deny.toml", root), "a comment naming a file is not a read"
+        (root / "src" / "a.rs").write_text('fn main() { read("deny.toml"); }\n')
+        lane_code.cache_clear()
+        assert not unused_file("deny.toml", root), "a source file that reads deny.toml makes it full"
+        lane_code.cache_clear()
     mods = module_owners()
     suite = set(re.findall(r"^\s*mod ([a-z0-9_]+);", (ROOT / "tests/live_suite.rs").read_text(), re.M)) - {"common"}
     assert suite == set(mods), ("every live module file is a live_suite module, and back", suite ^ set(mods))
