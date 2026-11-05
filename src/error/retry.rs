@@ -336,6 +336,7 @@ fn classify_mssql_error(err: &tiberius::error::Error) -> Option<RetryClass> {
 }
 
 /// The class of an Oracle server number the driver reports: the numbers that name an invalid statement, identifier, object or privilege are final; any other is left to the text.
+#[cfg(feature = "oracle")]
 pub(crate) fn oracle_number_class(code: usize) -> Option<RetryClass> {
     matches!(code, 900 | 904 | 933 | 936 | 942 | 1031).then_some(PERMANENT)
 }
@@ -1170,6 +1171,7 @@ mod tests {
     }
 
     /// Each Oracle number maps to its class by number, and an untyped one is left to the text.
+    #[cfg(feature = "oracle")]
     #[test]
     fn each_oracle_number_maps_to_its_class() {
         for code in [900, 904, 933, 936, 942, 1031] {
