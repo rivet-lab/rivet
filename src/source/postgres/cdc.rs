@@ -138,6 +138,37 @@ pub(crate) fn slot_created_warning(slot: &str) -> String {
     )
 }
 
+/// Whether the replication slot `slot` exists on the server at `url`.
+pub(crate) fn slot_exists(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<bool> {
+    let mut client = super::connect_client(url, tls)?;
+    Ok(client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+            &[&slot],
+        )?
+        .get(0))
+}
+
+/// Drop the replication slot `slot`, waiting for the server to release a slot the closed stream still holds.
+pub(crate) fn drop_slot(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<()> {
+    let mut client = super::connect_client(url, tls)?;
+    let mut tries = 0;
+    loop {
+        match client.execute(
+            "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        ) {
+            Ok(_) => return Ok(()),
+            Err(e) if tries < 25 => {
+                log::debug!("pg cdc: slot '{slot}' not dropped yet: {e}");
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 /// The refusal for a missing slot, naming exactly the prior-run evidence the caller checked.
 pub(crate) fn pg_slot_missing_refusal(slot: &str, prior: PriorRun) -> String {
     const CKPT: &str = "the checkpoint file holds a position from a prior run";

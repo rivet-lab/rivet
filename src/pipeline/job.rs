@@ -1440,6 +1440,7 @@ fn run_export_job_inner(
                 return (Err(e), summary);
             }
         };
+        let first_run = super::cdc_release::FirstRun::of(config, export, state, config_path);
         let pending = match super::cdc_job::initial_snapshot_pending(
             config,
             export,
@@ -1450,8 +1451,12 @@ fn run_export_job_inner(
             Ok(p) => p,
             Err(e) => {
                 let summary = synthetic_failed_summary(&export.name, &e);
+                let stopped = Err(e);
+                if let Some(first) = first_run {
+                    first.release_after(config, state, &stopped);
+                }
                 crate::notify::maybe_send(config.notifications.as_ref(), &summary);
-                return (Err(e), summary);
+                return (stopped, summary);
             }
         };
         if let Err(e) = super::cdc_job::refuse_lost_file_anchor(config, export, state, config_path)
@@ -1501,6 +1506,9 @@ fn run_export_job_inner(
             super::cdc_job::record_file_anchor(config, export, state, config_path, &outcome.0);
             outcome
         });
+        if let Some(first) = first_run {
+            first.release_after(config, state, &outcome.0);
+        }
         outcome.1.emit_finished();
         return outcome;
     }
