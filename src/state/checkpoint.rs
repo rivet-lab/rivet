@@ -566,8 +566,9 @@ impl StateStore {
         )
     }
 
-    /// Remove the chunk runs and tasks of `export_name` that belong to `source` (one that recorded no source belongs to every source) and the chunked resume anchor of `source` (abandon resume); another source's stay.
+    /// Remove the chunk runs and tasks of `export_name` that belong to `source` (one that recorded no source belongs to every source) and the chunked resume anchor of `source`, a respelling of it re-keyed onto it first (abandon resume); another source's stay.
     pub fn reset_chunk_checkpoint(&self, export_name: &str, source: &str) -> Result<usize> {
+        self.adopt_respelled_source(export_name, source)?;
         let run_ids: Vec<String> = self
             .query(
                 "SELECT run_id, source FROM chunk_run WHERE export_name = ?1",

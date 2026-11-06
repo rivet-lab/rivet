@@ -958,6 +958,40 @@ mod tests {
         );
     }
 
+    /// A unit's crashed chunk run goes with its own source's and with one that recorded no source; another source's stays.
+    #[test]
+    fn a_unit_over_a_new_window_forgets_only_the_chunk_runs_of_its_own_source() {
+        let state = StateStore::open_in_memory().unwrap();
+        let mut giant = sample_export("orders");
+        giant.mode = ExportMode::Chunked;
+        giant.chunk_by_key = Some("id".into());
+        let units = synthesize(&giant, "id", &["10".into(), "20".into()]);
+        let open = |run: &str, unit: &ExportConfig, source: &str| {
+            let key = crate::state::ProgressKey::chunked(&unit.name, source);
+            state.open_chunk_run(&key, run, "h", 3, &[(1, 10)]).unwrap();
+        };
+        open("r_own", &units[0], "pg/a");
+        open("r_other", &units[1], "pg/b");
+        state
+            .create_chunk_run("r_legacy", &units[2].name, "h", 3)
+            .unwrap();
+
+        forget_stale_unit_checkpoints(&state, "pg/a", &units, true).unwrap();
+
+        let in_progress = |unit: &ExportConfig| {
+            state
+                .find_in_progress_chunk_run(&unit.name)
+                .unwrap()
+                .is_some()
+        };
+        assert!(!in_progress(&units[0]), "its own source's run goes");
+        assert!(in_progress(&units[1]), "another source's run stays");
+        assert!(
+            !in_progress(&units[2]),
+            "a run that recorded no source goes"
+        );
+    }
+
     #[test]
     fn seal_writes_the_prefix_marker_only_when_every_unit_succeeded() {
         let dir = tempfile::tempdir().unwrap();

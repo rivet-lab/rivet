@@ -1887,6 +1887,9 @@ exports:
             .unwrap();
     }
 
+    const RESPELLED_OWN: &str = "postgres://localhost/testdb";
+    const ANCHORS: &str = "SELECT prefix || '=' || resume_run_id FROM export_state \
+         WHERE export_name = 'orders' AND resume_run_id IS NOT NULL ORDER BY prefix";
     const RUNS: &str = "SELECT run_id FROM chunk_run ORDER BY run_id";
     const TASKS: &str = "SELECT run_id FROM chunk_task ORDER BY run_id";
 
@@ -1964,10 +1967,40 @@ exports:
         assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
 
         let state = open_state(&dir);
-        open_run(&state, "r_respelled", "postgres://localhost/testdb");
+        open_run(&state, "r_respelled", RESPELLED_OWN);
         drop(state);
         reset_chunk_checkpoints_stuck(&config_path).unwrap();
         assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
+        assert_eq!(
+            chunk_rows(&dir, ANCHORS),
+            [format!("{OTHER_SOURCE}=r_other")]
+        );
+
+        let state = open_state(&dir);
+        open_run(&state, "r_respelled2", RESPELLED_OWN);
+        drop(state);
+        reset_chunk_checkpoint(&config_path, "orders").unwrap();
+        assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
+        assert_eq!(
+            chunk_rows(&dir, ANCHORS),
+            [format!("{OTHER_SOURCE}=r_other")]
+        );
+        let own = Config::load(&config_path).unwrap().source.state_key();
+        assert_eq!(
+            open_state(&dir).get_resume_run_id("orders", &own).unwrap(),
+            None
+        );
+
+        let state = open_state(&dir);
+        open_run(&state, "r_own", &own);
+        open_run(&state, "r_respelled3", RESPELLED_OWN);
+        drop(state);
+        reset_chunk_checkpoint(&config_path, "orders").unwrap();
+        assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
+        assert_eq!(
+            chunk_rows(&dir, ANCHORS),
+            [format!("{OTHER_SOURCE}=r_other")]
+        );
     }
 
     // ── show_progression ─────────────────────────────────────────────────────
