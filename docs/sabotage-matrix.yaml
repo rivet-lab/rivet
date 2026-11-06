@@ -754,6 +754,22 @@ scenarios:
     mongo:    { test: a_state_reset_beside_a_live_run_is_refused_and_walked_out_mongo }
     oracle:   { test: a_state_reset_beside_a_live_run_is_refused_and_walked_out_oracle }
 
+  - id: reset_chunks_other_source_beside_live_run
+    what: "`state reset-chunks` and `--stuck-checkpoints` from a config of the same export name on another source, beside a live checkpointed run: both answer without removing a chunk run or task, and the run delivers every row (RIVET_STATE_CHUNK_CHECKPOINT_GONE is not reached)"
+    postgres: { test: pg_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint }
+    mysql:    { test: mysql_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint }
+    mssql:    { test: mssql_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint for a reset to remove" }
+    oracle:   { test: oracle_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint }
+
+  - id: reset_chunks_unresolved_source_beside_live_run
+    what: "`state reset-chunks` and `--stuck-checkpoints` from the run's own config with its `url_env` unset, beside a live checkpointed run: both stop by code (RIVET_CONFIG_SECRET_UNSET) naming the unresolved source, nothing is removed, and the run delivers every row"
+    postgres: { test: pg_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint }
+    mysql:    { test: mysql_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint }
+    mssql:    { test: mssql_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint for a reset to remove" }
+    oracle:   { test: oracle_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint }
+
   - id: refusal_state_upgrade_beside_live_run
     what: "RIVET_STATE_UPGRADE_BESIDE_LIVE_RUN: this build runs an export beside a run of the previous release paused under its run lease on the SQLite state of its older schema; refused with the schema unchanged and the previous release then runs again and delivers; beside a lease file the cell holds it is refused twice, `rivet state reset` is refused the same way, and `Stop or wait for that run of the older release, then run again` (the cell lets go) migrates the state and delivers the source"
     postgres: { test: the_previous_release_runs_again_after_this_build_was_refused_beside_it_on_sqlite_state_postgres }

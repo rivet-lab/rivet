@@ -594,6 +594,7 @@ pub(crate) struct Realized {
 /// Drop the in-progress checkpoints (keyset anchor + chunk run) of every unit that runs over a new window.
 fn forget_stale_unit_checkpoints(
     state: &StateStore,
+    source: &str,
     units: &[ExportConfig],
     fresh_windows: bool,
 ) -> Result<()> {
@@ -602,7 +603,7 @@ fn forget_stale_unit_checkpoints(
         .filter(|u| fresh_windows || !u.chunk_checkpoint)
     {
         state.clear_resume_run_id_every_scope(&unit.name)?;
-        state.reset_chunk_checkpoint(&unit.name)?;
+        state.reset_chunk_checkpoint(&unit.name, source)?;
     }
     Ok(())
 }
@@ -685,13 +686,13 @@ pub(crate) fn realize(
                 u.len(),
                 state,
             );
-            forget_stale_unit_checkpoints(state, &u, false)?;
+            forget_stale_unit_checkpoints(state, &config.source.state_key(), &u, false)?;
             Some(u)
         }
         None => {
             let fresh = probe_and_synthesize(config, &base, config_dir, n)?;
             if let Some(units) = &fresh {
-                forget_stale_unit_checkpoints(state, units, true)?;
+                forget_stale_unit_checkpoints(state, &config.source.state_key(), units, true)?;
             }
             fresh
         }
@@ -934,7 +935,7 @@ mod tests {
             .create_chunk_run("r1", &units[1].name, "h", 3)
             .unwrap();
 
-        forget_stale_unit_checkpoints(&state, &units, false).unwrap();
+        forget_stale_unit_checkpoints(&state, "pg/a", &units, false).unwrap();
         assert!(
             state
                 .find_in_progress_chunk_run(&units[0].name)
@@ -948,7 +949,7 @@ mod tests {
                 .is_none()
         );
 
-        forget_stale_unit_checkpoints(&state, &units, true).unwrap();
+        forget_stale_unit_checkpoints(&state, "pg/a", &units, true).unwrap();
         assert!(
             state
                 .find_in_progress_chunk_run(&units[0].name)

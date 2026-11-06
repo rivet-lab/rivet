@@ -826,6 +826,8 @@ rivet state reset-chunks --config <PATH> --failed
 
 Then run `rivet run --config <PATH> --resume` (or a normal run without `--resume`) as needed.
 
+Both forms remove the checkpoints this config's source holds and no other source's, so the config's source URL must resolve; with the source unresolved the command stops with the coded error (`RIVET_CONFIG_SECRET_UNSET` for an unset `url_env`, `RIVET_CONFIG_SOURCE_CONNECTION_INVALID` otherwise) and removes nothing. An export of the same name that reads another source through the same state database keeps its checkpoint. A checkpoint written by a release before the source was recorded (state schema older than v34) belongs to no source and is removed by either form. `--stuck-checkpoints` lists the stuck exports of this config's source only.
+
 A run that is still alive is not stuck. `--export <NAME>` against one is refused with `RIVET_STATE_RUN_IN_PROGRESS` (exit 2, retryable), naming the run; `--stuck-checkpoints` leaves that export alone, prints why, and clears the others. A run that was killed does not hold either form back.
 
 ### `rivet state vacuum`

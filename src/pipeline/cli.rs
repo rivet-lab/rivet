@@ -518,14 +518,15 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
             config_path,
         );
     }
+    let source = reset_chunks_source(&config, &format!("export '{export_name}'"))?;
     let state = StateStore::open(config_path)?;
     let _held = super::chunked::claim_export_progress(
         &state,
         export_name,
-        &config.source.state_key(),
+        &source,
         "remove its chunk checkpoint",
     )?;
-    let n = state.reset_chunk_checkpoint(export_name)?;
+    let n = state.reset_chunk_checkpoint(export_name, &source)?;
     // Abandoning the resume also clears the committed/verified boundary, so
     // `rivet state progression` does not report a stale chunk boundary after
     // the chunk_run/chunk_task rows are gone (parity with `state reset`).
@@ -537,18 +538,30 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
     Ok(())
 }
 
+/// The source `state reset-chunks` removes checkpoints of, or the refusal when `config`'s source does not resolve.
+fn reset_chunks_source(config: &Config, scope: &str) -> Result<String> {
+    config.source.try_state_key().map_err(|e| {
+        crate::error::recoded(
+            &e,
+            crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
+            format!("{scope}: `state reset-chunks` removes the chunk checkpoints this config's source holds and no other source's, and the source did not resolve — nothing was removed.\n  {e:#}"),
+        )
+    })
+}
+
 /// Clear chunk checkpoints for every export **named in `config_path`'s YAML** that currently has an
 /// `in_progress` chunk run (`chunk_run.status = 'in_progress'`).
 ///
 /// Names present only in state (removed from config) are skipped with a printed note.
 pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
     let cfg = Config::load(config_path)?;
+    let source = reset_chunks_source(&cfg, "--stuck-checkpoints")?;
     let state = StateStore::open(config_path)?;
-    let stuck = state.list_export_names_with_in_progress_chunk_runs()?;
+    let stuck = state.list_export_names_with_in_progress_chunk_runs(&source)?;
     if stuck.is_empty() {
-        println!("No exports have an in-progress chunk checkpoint run.");
+        println!("No exports have an in-progress chunk checkpoint run for this config's source.");
         println!(
-            "(Nothing with chunk_run.status = 'in_progress' in {}.)",
+            "(Nothing with chunk_run.status = 'in_progress' under `{source}` in {}.)",
             StateStore::state_db_path(config_path).display()
         );
         return Ok(());
@@ -585,7 +598,6 @@ pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
     );
 
     for name in targets {
-        let source = cfg.source.state_key();
         let Some(_held) = super::chunked::try_run_lease(&state, &name, &source)? else {
             println!(
                 "Skipping '{}': {} is in progress in a live rivet process, so its checkpoint is not stuck.",
@@ -594,7 +606,7 @@ pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
             );
             continue;
         };
-        let n = state.reset_chunk_checkpoint(&name)?;
+        let n = state.reset_chunk_checkpoint(&name, &source)?;
         println!("Removed {} chunk run record(s) for export '{}'.", n, name);
     }
     Ok(())
@@ -1732,7 +1744,7 @@ exports:
         );
         assert!(state.find_in_progress_chunk_run("ghost").unwrap().is_some());
         assert_eq!(
-            state.reset_chunk_checkpoint("ghost").unwrap(),
+            state.reset_chunk_checkpoint("ghost", "pg/a").unwrap(),
             1,
             "cleanup ghost row"
         );
@@ -1750,7 +1762,7 @@ exports:
 
         let state = StateStore::open(&config_path).unwrap();
         assert!(state.find_in_progress_chunk_run("ghost").unwrap().is_some());
-        assert_eq!(state.reset_chunk_checkpoint("ghost").unwrap(), 1);
+        assert_eq!(state.reset_chunk_checkpoint("ghost", "pg/a").unwrap(), 1);
     }
 
     /// While a live run holds the export's run lease every reset is refused under its code and
@@ -1841,6 +1853,121 @@ exports:
                 .unwrap()
                 .is_none()
         );
+    }
+
+    // ── reset-chunks is scoped by the export and its source ──────────────────
+
+    const OTHER_SOURCE: &str = "postgres://other.host:5432/db";
+
+    fn write_reset_config(config_path: &str, url_line: &str) {
+        std::fs::write(
+            config_path,
+            format!(
+                "source:\n  type: postgres\n  {url_line}\nexports:\n  - name: orders\n    \
+                 query: \"SELECT 1\"\n    mode: full\n    format: parquet\n    destination:\n      \
+                 type: local\n      path: ./out\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn chunk_rows(dir: &tempfile::TempDir, sql: &str) -> Vec<String> {
+        let c = rusqlite::Connection::open(dir.path().join(".rivet_state.db")).unwrap();
+        let mut q = c.prepare(sql).unwrap();
+        q.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn open_run(state: &StateStore, run: &str, source: &str) {
+        let key = crate::state::ProgressKey::chunked("orders", source);
+        state
+            .open_chunk_run(&key, run, "plan", 3, &[(1, 10)])
+            .unwrap();
+    }
+
+    const RUNS: &str = "SELECT run_id FROM chunk_run ORDER BY run_id";
+    const TASKS: &str = "SELECT run_id FROM chunk_task ORDER BY run_id";
+
+    #[test]
+    fn reset_chunks_removes_only_the_checkpoint_of_its_own_source() {
+        let (dir, config_path) = setup_dir();
+        let state = open_state(&dir);
+        let own = Config::load(&config_path).unwrap().source.state_key();
+        open_run(&state, "r_own", &own);
+        open_run(&state, "r_other", OTHER_SOURCE);
+        drop(state);
+
+        reset_chunk_checkpoint(&config_path, "orders").unwrap();
+
+        assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
+        assert_eq!(chunk_rows(&dir, TASKS), ["r_other"]);
+        let state = open_state(&dir);
+        assert_eq!(
+            state.get_resume_run_id("orders", OTHER_SOURCE).unwrap(),
+            Some("r_other".to_string()),
+            "the other source keeps its resume anchor"
+        );
+        assert_eq!(state.get_resume_run_id("orders", &own).unwrap(), None);
+    }
+
+    #[test]
+    fn stuck_checkpoints_removes_only_the_checkpoint_of_its_own_source() {
+        let (dir, config_path) = setup_dir();
+        let state = open_state(&dir);
+        open_run(&state, "r_other", OTHER_SOURCE);
+        drop(state);
+
+        reset_chunk_checkpoints_stuck(&config_path).unwrap();
+
+        assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
+        assert_eq!(chunk_rows(&dir, TASKS), ["r_other"]);
+    }
+
+    #[test]
+    fn reset_chunks_refuses_a_source_that_does_not_resolve_and_removes_nothing() {
+        let (dir, config_path) = setup_dir();
+        let state = open_state(&dir);
+        open_run(&state, "r_other", OTHER_SOURCE);
+        drop(state);
+        write_reset_config(&config_path, "url_env: RIVET_RESET_CHUNKS_UNSET_URL");
+
+        for refused in [
+            reset_chunk_checkpoint(&config_path, "orders"),
+            reset_chunk_checkpoints_stuck(&config_path),
+        ] {
+            let err = refused.expect_err("an unresolved source");
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_CONFIG_SECRET_UNSET")
+            );
+            assert!(
+                format!("{err:#}").contains("the source did not resolve — nothing was removed"),
+                "{err:#}"
+            );
+        }
+        assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
+        assert_eq!(chunk_rows(&dir, TASKS), ["r_other"]);
+    }
+
+    #[test]
+    fn reset_chunks_still_removes_a_run_that_recorded_no_source_and_a_respelled_one() {
+        let (dir, config_path) = setup_dir();
+        let state = open_state(&dir);
+        state
+            .create_chunk_run("r_legacy", "orders", "plan", 3)
+            .unwrap();
+        open_run(&state, "r_other", OTHER_SOURCE);
+        drop(state);
+        reset_chunk_checkpoint(&config_path, "orders").unwrap();
+        assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
+
+        let state = open_state(&dir);
+        open_run(&state, "r_respelled", "postgres://localhost/testdb");
+        drop(state);
+        reset_chunk_checkpoints_stuck(&config_path).unwrap();
+        assert_eq!(chunk_rows(&dir, RUNS), ["r_other"]);
     }
 
     // ── show_progression ─────────────────────────────────────────────────────
