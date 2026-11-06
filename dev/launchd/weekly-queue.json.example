@@ -1,0 +1,6 @@
+[
+  {"id": "weekly-gate", "tag": "weekly", "every": "week", "weekday": 5, "cwd": "~/wt/weekly-mutants", "timeout_min": 600,
+   "cmd": ["python3", "-m", "dev.pytools.weekly_jobs", "gate"]},
+  {"id": "weekly-hot-mutants", "tag": "weekly", "every": "week", "weekday": 5, "cwd": "~/wt/weekly-mutants", "timeout_min": 720,
+   "after": ["weekly-gate"], "cmd": ["python3", "-m", "dev.pytools.weekly_jobs", "mutants"]}
+]

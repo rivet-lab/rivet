@@ -14,15 +14,18 @@ session, each time producing an empty survivor list that read as a perfect score
 So the completion condition is the LOG's own summary line, never a process check,
 and the script REFUSES to print a verdict without it — an empty `missed.txt` from a
 run that never started is indistinguishable from a clean file otherwise.
+
+cargo-mutants builds in a temp tree: it is pointed at `<out>/tmp`, which is removed with the run, so
+another agent's live mutant tree under the shared temp directory is never touched.
 """
 
 import argparse
+import os
 import pathlib
 import re
 import shutil
 import subprocess
 import sys
-import time
 
 DONE = re.compile(r"(\d+) mutants tested in .*?: (.*)")
 
@@ -39,23 +42,28 @@ def main() -> int:
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     log = out / "run.log"
+    tmp = out / "tmp"
+    tmp.mkdir()
 
     with log.open("w") as fh:
         proc = subprocess.Popen(
             ["cargo", "mutants", "--file", args.file, "-j", str(args.jobs),
              "--output", str(out), "--", "--lib"],
-            stdout=fh, stderr=subprocess.STDOUT,
+            stdout=fh, stderr=subprocess.STDOUT, env={**os.environ, "TMPDIR": str(tmp)},
         )
-        deadline = time.time() + args.timeout_min * 60
-        while proc.poll() is None and time.time() < deadline:
-            time.sleep(15)
-        if proc.poll() is None:
-            proc.kill()
+        try:
+            proc.wait(timeout=args.timeout_min * 60)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
     text = log.read_text(errors="ignore")
     done = DONE.search(text)
-    # The verdict is the SUMMARY LINE, not the exit code and not the file contents:
-    # an aborted run leaves empty result files that look like a clean sweep.
+    shutil.rmtree(tmp, ignore_errors=True)
     if not done:
         print(f"*** RUN DID NOT COMPLETE — no verdict. tail of {log}:", file=sys.stderr)
         print("\n".join(text.splitlines()[-5:]), file=sys.stderr)
@@ -68,9 +76,6 @@ def main() -> int:
         print(f"\n--- {kind.upper()} ({len(rows)} unique) ---")
         for r in rows:
             print("  " + r.replace(args.file + ":", ""))
-
-    for tmp in pathlib.Path("/private/var/folders").glob("*/*/T/cargo-mutants-*.tmp"):
-        shutil.rmtree(tmp, ignore_errors=True)
     return 0
 
 
