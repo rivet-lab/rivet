@@ -5011,9 +5011,9 @@ seeds:
       postgres:
         cells: [postgres_system_store_is_not_a_second_anchor]
       mysql:
-        na: "the mysql driver adds ca_file to the system store and exposes no sole-anchor option, so no rivet line holds the defect to seed; the open defect is the ignored cell mysql_system_store_is_not_a_second_anchor (tests/offline/tls_ca_file_sole_anchor.rs)"
+        na: "the mysql driver adds ca_file to the system store and exposes no sole-anchor option, so no rivet line holds the defect to seed; the open defect #789 has no cell until a driver patch gives a sole-anchor option"
       mssql:
-        na: "the tiberius driver adds ca_file to the system store and exposes no sole-anchor option, so no rivet line holds the defect to seed; the open defect is the ignored cell mssql_system_store_is_not_a_second_anchor (tests/offline/tls_ca_file_sole_anchor.rs)"
+        na: "the tiberius driver adds ca_file to the system store and exposes no sole-anchor option, so no rivet line holds the defect to seed; the open defect #789 has no cell until a driver patch gives a sole-anchor option"
       oracle:
         na: "an Oracle source refuses tls.ca_file by code (src/source/oracle/mod.rs), so no trust anchor is built"
       mongo:
