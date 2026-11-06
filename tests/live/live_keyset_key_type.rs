@@ -165,7 +165,7 @@ const MSSQL_DT2_7_NS_OVERRIDE: Case = Case {
 };
 const MSSQL_ALIAS_DT2_7: Case = Case {
     label: "SQL Server alias type over datetime2(7), a tick past each microsecond",
-    key_ddl: "dbo.rivet_ks_ts7",
+    key_ddl: "DATETIME2(7)",
     ..MSSQL_DT2_7_DISTINCT_US
 };
 
