@@ -20,11 +20,12 @@ try:
 except ImportError:  # pragma: no cover - bare sys.path entry
     from core import ROOT  # type: ignore
 
-__all__ = ["START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low", "disk_reason"]
+__all__ = ["HELPER_IMAGE", "START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low", "disk_reason"]
 
 START_FLOOR_GIB = 150  # ratchet-pin: gate-start-free-disk-floor (review 2027-02-01)
 WATCH_FLOOR_GIB = 20  # ratchet-pin: gate-watchdog-free-disk-floor (review 2027-02-01)
 GIB = 1024 ** 3
+HELPER_IMAGE = "alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
 
 
 def host_free_gib(path: Path = ROOT) -> float | None:
@@ -38,7 +39,7 @@ def host_free_gib(path: Path = ROOT) -> float | None:
 def vm_free_gib() -> float | None:
     """Free GiB on the docker daemon's data disk, read inside a throwaway container; None when unreadable."""
     try:
-        p = subprocess.run(["docker", "run", "--rm", "--pull", "never", "alpine:3", "df", "-Pk", "/"],
+        p = subprocess.run(["docker", "run", "--rm", "--pull", "never", HELPER_IMAGE, "df", "-Pk", "/"],
                            capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return None

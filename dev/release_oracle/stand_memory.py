@@ -18,6 +18,8 @@ from pathlib import Path
 
 import yaml
 
+from .stand_disk import HELPER_IMAGE
+
 __all__ = ["HEAVY", "MSSQL_LIMIT_MB", "MSSQL_MEM_LIMIT", "admitted", "unbounded_mssql"]
 
 HEAVY = frozenset({"oracle", "mssql"})
@@ -45,7 +47,7 @@ def parse_meminfo(text: str) -> float | None:
 def vm_available_gib() -> float | None:
     """Memory the docker VM can still hand out, read inside a throwaway container; None when unreadable."""
     try:
-        p = subprocess.run(["docker", "run", "--rm", "--pull", "never", "alpine:3", "cat", "/proc/meminfo"],
+        p = subprocess.run(["docker", "run", "--rm", "--pull", "never", HELPER_IMAGE, "cat", "/proc/meminfo"],
                            capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return None
