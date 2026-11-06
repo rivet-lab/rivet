@@ -127,6 +127,46 @@ scenarios:
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
     oracle:   { test: a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle }
 
+  - id: keyset_key_oracle_catalog_fact_under_override
+    what: "an Oracle key the catalog declares wider than the cursor holds stays refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE under a columns override, and the message says no override lifts it: a TIMESTAMP(9) key under the timestamp_ns override"
+    postgres: { na: "only the Oracle catalog tells a declared FLOAT, scaled NUMBER or TIMESTAMP(7..9) from the delivered type an override changes" }
+    mysql:    { na: "only the Oracle catalog tells a declared FLOAT, scaled NUMBER or TIMESTAMP(7..9) from the delivered type an override changes" }
+    mssql:    { na: "a SQL Server datetime2(7) under timestamp_ns is admitted; the override is the remedy there (keyset_key_type_readable_types)" }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_timestamp_9_keyset_key_under_the_timestamp_ns_override_stays_refused_oracle }
+
+  - id: keyset_key_oracle_catalog_fact_under_override_number
+    what: "the NUMBER half of keyset_key_oracle_catalog_fact_under_override: FLOAT, NUMBER(12,2), NUMBER(*,2) and NUMBER(5,-2) stay refused under an int64 or string override"
+    postgres: { na: "only the Oracle catalog tells a declared FLOAT or scaled NUMBER from the delivered type an override changes" }
+    mysql:    { na: "only the Oracle catalog tells a declared FLOAT or scaled NUMBER from the delivered type an override changes" }
+    mssql:    { na: "only the Oracle catalog tells a declared FLOAT or scaled NUMBER from the delivered type an override changes" }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_columns_override_oracle }
+
+  - id: keyset_key_composite_catalog_fact
+    what: "a composite keyset key whose second column is declared wider than the cursor holds is refused at check, plan and run by the same function as a single key: an Oracle TIMESTAMP(9) (main delivered 53 rows for 40 ids with exit 0) and a SQL Server datetime2(7)"
+    postgres: { na: "PostgreSQL timestamps stop at microseconds, which the batch keeps exactly" }
+    mysql:    { na: "MySQL DATETIME/TIMESTAMP stop at microseconds, which the batch keeps exactly" }
+    mssql:    { test: a_datetime2_7_composite_keyset_key_is_refused_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_timestamp_9_composite_keyset_key_is_refused_oracle }
+
+  - id: keyset_key_composite_oracle_inexact_number
+    what: "an Oracle composite key whose second column is a FLOAT, or a scaled NUMBER under an int64 or string override, delivers the seeded ids once as on main; the neighbour of keyset_key_composite_catalog_fact"
+    postgres: { na: "only an Oracle FLOAT or scaled NUMBER is held as exact text; a PostgreSQL numeric stays refused as a decimal key" }
+    mysql:    { na: "only an Oracle FLOAT or scaled NUMBER is held as exact text; a MySQL DECIMAL stays refused as a decimal key" }
+    mssql:    { na: "only an Oracle FLOAT or scaled NUMBER is held as exact text; a SQL Server decimal stays refused as a decimal key" }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_float_and_a_scaled_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle }
+
+  - id: keyset_key_type_jsonb
+    what: "a PostgreSQL jsonb keyset key, single and composite, delivers the seeded ids once as on main"
+    postgres: { test: a_jsonb_keyset_key_delivers_the_seeded_ids_once_postgres }
+    mysql:    { na: "the jsonb key is a PostgreSQL type" }
+    mssql:    { na: "the jsonb key is a PostgreSQL type" }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { na: "the jsonb key is a PostgreSQL type" }
+
   - id: keyset_sub_microsecond_key
     what: "a keyset key finer than the microsecond the default batch keeps (MSSQL datetime2(7)/datetimeoffset(7)) is refused at check, plan and run by RIVET_PLAN_CHUNK_KEY_UNUSABLE, whether the rows sit a tick past each microsecond or all inside one; the same key under its timestamp_ns override delivers every row once"
     postgres: { na: "PostgreSQL timestamps stop at microseconds, which the batch keeps exactly" }

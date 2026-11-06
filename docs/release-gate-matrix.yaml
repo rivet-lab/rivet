@@ -424,7 +424,7 @@ infra:
     # 2026-11-05: +4 structural N/A rows from keyset-key-alias-type-by-name (postgres, mysql, oracle and mongo have no catalog name match on a user type to seed).
     # 2026-11-05: +4 structural N/A rows from keyset-key-oracle-exact-number-refused (postgres, mysql, mssql and mongo reach no Oracle NUMBER exemption in the keyset key check).
     # 2026-11-06: +4 structural N/A rows from keyset-key-oracle-inexact-number-admitted (postgres, mysql, mssql and mongo reach no Oracle NUMBER scale fact in the keyset key check).
-    na_ceiling: 516  # ratchet-pin: seeded-na (review 2027-02-01)
+    na_ceiling: 526  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-06 516 -> 526: three keyset seeds, ten rows for engines without the path
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
