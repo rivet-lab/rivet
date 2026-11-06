@@ -1711,13 +1711,14 @@ fn walks_out_of_a_respelled_source(rig: &mut Rig) {
     );
 }
 
-/// RIVET_STATE_CURSOR_SOURCE_RESPELLED: an incremental export that ran once against `127.0.0.1`, then the same server spelled `localhost` and three more source rows.
+/// RIVET_STATE_CURSOR_SOURCE_RESPELLED: an incremental export that ran once against `127.0.0.1`, then the same server reached through a forwarder on another loopback port and three more source rows.
 fn cursor_source_respelled(engine: SqlEngine) {
     let (table, _guard) = seeded(engine, "sab_respell");
     let rig = Shape::Incremental.staged(engine, engine.rig(&table));
     rig.run_ok();
     engine.insert(&table, N + 1..=N + 3, 170, Some(10));
-    let mut rig = rig.source_url(&engine.url().replace("127.0.0.1", "localhost"));
+    let (_forward, url) = respelled_source(engine.url());
+    let mut rig = rig.source_url(&url);
     walks_out_of_a_respelled_source(&mut rig);
 }
 
@@ -1739,7 +1740,8 @@ fn cursor_source_respelled_mongo() {
     for id in N + 1..=N + 3 {
         mongo.upsert_set("respelled", id, "v", "new");
     }
-    let mut rig = rig.source_url(&url.replace("127.0.0.1", "localhost"));
+    let (_forward, respelled) = respelled_source(&url);
+    let mut rig = rig.source_url(&respelled);
     walks_out_of_a_respelled_source(&mut rig);
 }
 
@@ -5101,7 +5103,7 @@ fn plan_and_apply_under_another_host_spelling_are_refused_postgres() {
         .staged(engine, engine.rig(&table))
         .source_url_env("DATABASE_URL");
     let spelled = engine.url().to_string();
-    let respelled = spelled.replace("127.0.0.1", "localhost");
+    let (_forward, respelled) = respelled_source(&spelled);
     let plan = rig.out_dir().with_file_name("respelled-plan.json");
     let early = rig.plan_json_env(&plan, &[], &[("DATABASE_URL", &respelled)]);
     assert!(
@@ -5128,7 +5130,7 @@ fn plan_and_apply_under_another_host_spelling_are_refused_postgres() {
     );
 }
 
-/// Upgrade: a cursor the previous release wrote under `127.0.0.1` is refused by this build under `localhost`, and `state accept` continues it; the cell skips without `RIVET_PREV_RELEASE_BIN`.
+/// Upgrade: a cursor the previous release wrote under `127.0.0.1` is refused by this build under another loopback port of the same server, and `state accept` continues it; the cell skips without `RIVET_PREV_RELEASE_BIN`.
 #[test]
 #[ignore = "live: requires docker compose postgres and RIVET_PREV_RELEASE_BIN"]
 fn a_cursor_written_by_the_previous_release_is_refused_under_another_host_spelling_and_walked_out_postgres()
@@ -5146,7 +5148,8 @@ fn a_cursor_written_by_the_previous_release_is_refused_under_another_host_spelli
     old.run_ok();
     ok(rig.cli(&["state", "show"]));
     engine.insert(&table, N + 1..=N + 3, 170, Some(10));
-    let mut rig = rig.source_url(&engine.url().replace("127.0.0.1", "localhost"));
+    let (_forward, url) = respelled_source(engine.url());
+    let mut rig = rig.source_url(&url);
     walks_out_of_a_respelled_source(&mut rig);
 }
 

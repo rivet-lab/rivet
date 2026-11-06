@@ -47,7 +47,7 @@ from pathlib import Path
 
 from .core import GATE_FAILURES, Ledger, SkipCause, Status, binary_stamp, keep_failure_log, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
 from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
-from ..pytools.shell import find_keg_tools, mysql_client
+from ..pytools.shell import find_keg_tools, loopback_publish, mysql_client
 from . import seed_charset
 from . import (
     bigquery,
@@ -1825,24 +1825,24 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
     if engine == "postgres":
         args += ["--memory", "512m",
                  "-e", "POSTGRES_USER=rivet", "-e", "POSTGRES_PASSWORD=rivet",
-                 "-e", "POSTGRES_DB=rivet", "-p", f"{port}:5432"]
+                 "-e", "POSTGRES_DB=rivet", *loopback_publish(port, 5432)]
     elif engine == "mysql":
         args += ["--memory", "2g",
                  "-e", "MYSQL_ROOT_PASSWORD=rivet", "-e", "MYSQL_DATABASE=rivet",
-                 "-e", "MYSQL_USER=rivet", "-e", "MYSQL_PASSWORD=rivet", "-p", f"{port}:3306"]
+                 "-e", "MYSQL_USER=rivet", "-e", "MYSQL_PASSWORD=rivet", *loopback_publish(port, 3306)]
     elif engine == "mssql":
         from . import stand_memory
         args += ["--memory", stand_memory.MSSQL_MEM_LIMIT, "-e", f"MSSQL_MEMORY_LIMIT_MB={stand_memory.MSSQL_LIMIT_MB}",
-                 "-e", "ACCEPT_EULA=Y", "-e", "MSSQL_SA_PASSWORD=Rivet_Passw0rd!", "-p", f"{port}:1433"]
+                 "-e", "ACCEPT_EULA=Y", "-e", "MSSQL_SA_PASSWORD=Rivet_Passw0rd!", *loopback_publish(port, 1433)]
     elif engine == "mongo":
-        args += ["--memory", "1g", "-p", f"{port}:27017"]
+        args += ["--memory", "1g", *loopback_publish(port, 27017)]
         cmd = ["--wiredTigerCacheSizeGB", "0.5"]
     elif engine == "oracle":
         # The compose `oracle` service's settings, grants script included (harm counters).
         args += ["--memory", "3g", "-e", "ORACLE_PASSWORD=rivet", "-e", "APP_USER=rivet",
                  "-e", "APP_USER_PASSWORD=rivet",
                  "-v", f"{ROOT / 'dev' / 'oracle' / 'init'}:/container-entrypoint-initdb.d:ro",
-                 "-p", f"{port}:1521"]
+                 *loopback_publish(port, 1521)]
     else:
         raise stand_health.BringUpError(f"unknown engine kind {engine!r}")
 
