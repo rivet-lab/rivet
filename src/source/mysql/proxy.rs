@@ -196,7 +196,11 @@ fn proxy_globals<C: Queryable>(conn: &mut C) -> (Option<String>, Option<String>)
     let rows: Vec<(String, String)> = conn
         .query("SHOW GLOBAL VARIABLES WHERE Variable_name IN ('version_comment', 'proxy_version')")
         .unwrap_or_default();
-    let value = |name: &str| rows.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
+    let value = |name: &str| {
+        rows.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    };
     (value("version_comment"), value("proxy_version"))
 }
 
