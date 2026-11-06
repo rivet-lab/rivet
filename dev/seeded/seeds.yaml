@@ -2812,6 +2812,23 @@ seeds:
       oracle:
         cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
 
+  - name: query-password-key-by-suffix-family
+    class: "a credential scrubber that keeps a second, narrower rule for the same key: the URL query path masked `password` only as a bare key or after `_`/`-`, while the keyword path masks every key ending in password/passwd/pwd, so `?sslpassword=…`, `&SSLPassword=…`, `&db.password=…` and `&MYSQL_PWD=…` reached logs, summaries and the journal in clear"
+    history: "issue #781, hand-reproduced on main 2026-11-06: redact_secrets on a URL with `sslpassword=TOPSECRET` left TOPSECRET; closed by routing the query path through is_password_keyword"
+    scope: source
+    patch: query-password-key-by-suffix-family/shared.patch
+    engines:
+      postgres:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mysql:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mssql:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mongo:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      oracle:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+
   - name: mongo-standalone-uncoded
     class: "a server error that names a missing deployment prerequisite is passed up as the driver's raw dump instead of the coded prerequisite refusal"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6, row 808): `mode: cdc` on a standalone MongoDB exited 1 with `Error code 40573 … RawDocumentBuf { data: … }`, while `doctor` named it plainly, through 0.31.0; fixed by `names_standalone` in diagnose_stream_error"
