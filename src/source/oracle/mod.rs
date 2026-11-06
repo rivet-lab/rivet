@@ -812,7 +812,8 @@ pub(crate) fn declared_wider_columns(
     src: &mut OracleSource,
     owner: &str,
     table: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, crate::source::keyset_key::Wider)>> {
+    use crate::source::keyset_key::Wider;
     Ok(src
         .query_rows(&format!(
             "SELECT column_name, data_type, data_precision, data_scale FROM all_tab_columns \
@@ -824,8 +825,14 @@ pub(crate) fn declared_wider_columns(
             [Some(col), Some(ty), precision, scale] => {
                 let precision = precision.as_deref().and_then(|v| v.parse().ok());
                 let scale = scale.as_deref().and_then(|v| v.parse().ok());
-                (is_sub_microsecond_type(ty, scale) || is_inexact_number_type(ty, precision, scale))
-                    .then(|| col.clone())
+                let kind = if is_sub_microsecond_type(ty, scale) {
+                    Wider::FinerTimestamp
+                } else if is_inexact_number_type(ty, precision, scale) {
+                    Wider::InexactNumber
+                } else {
+                    return None;
+                };
+                Some((col.clone(), kind))
             }
             _ => None,
         })

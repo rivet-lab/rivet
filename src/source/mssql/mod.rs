@@ -1214,16 +1214,19 @@ pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
     )
 }
 
-/// The `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond.
+/// The `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond, as the catalog fact the keyset seam reads.
 pub(crate) fn finer_than_microsecond_columns(
     src: &mut MssqlSource,
     schema: &str,
     table: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, crate::source::keyset_key::Wider)>> {
     Ok(src
         .query_scalar(&finer_than_microsecond_sql(schema, table))?
         .map(|s| split_char31(&s))
-        .unwrap_or_default())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| (c, crate::source::keyset_key::Wider::FinerTimestamp))
+        .collect())
 }
 
 /// Splits a CHAR(31)-joined catalog list into its non-empty members.

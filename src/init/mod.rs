@@ -544,7 +544,7 @@ pub(super) fn probe_keyset_refusals(
     source: crate::config::SourceType,
     columns: &mut [ColumnInfo],
     probe: Result<Vec<crate::types::TypeMapping>>,
-    declared_wider: impl FnOnce() -> Result<Vec<String>>,
+    declared_wider: impl FnOnce() -> Result<Vec<(String, crate::source::keyset_key::Wider)>>,
 ) -> Result<Option<String>> {
     match probe {
         Ok(mappings) => {
@@ -564,12 +564,17 @@ pub(super) fn mark_keyset_refusals(
     source: crate::config::SourceType,
     columns: &mut [ColumnInfo],
     mappings: &[crate::types::TypeMapping],
-    declared_wider: &[String],
+    declared_wider: &[(String, crate::source::keyset_key::Wider)],
 ) {
     for c in columns {
-        c.not_keyset =
-            crate::source::keyset_key::column_refusal(source, mappings, declared_wider, &c.name)
-                .is_some();
+        c.not_keyset = crate::source::keyset_key::column_refusal(
+            source,
+            mappings,
+            declared_wider,
+            crate::source::keyset_key::KeyShape::Single,
+            &c.name,
+        )
+        .is_some();
     }
 }
 
@@ -3030,6 +3035,7 @@ mod tests {
     fn init_and_the_planner_refuse_the_same_keyset_keys() {
         use crate::config::SourceType;
         use crate::source::TableIntrospection;
+        use crate::source::keyset_key::Wider;
         use crate::source::keyset_key::samples::{mapping_of, rivet_type_samples};
         for source in [
             SourceType::Postgres,
@@ -3037,7 +3043,11 @@ mod tests {
             SourceType::Mssql,
             SourceType::Oracle,
         ] {
-            for finer in [false, true] {
+            for fact in [
+                None,
+                Some(Wider::FinerTimestamp),
+                Some(Wider::InexactNumber),
+            ] {
                 let mappings: Vec<_> = rivet_type_samples()
                     .into_iter()
                     .enumerate()
@@ -3048,7 +3058,9 @@ mod tests {
                     })
                     .collect();
                 let names: Vec<String> = mappings.iter().map(|m| m.column_name.clone()).collect();
-                let finer_list = if finer { names.clone() } else { Vec::new() };
+                let finer_list: Vec<(String, Wider)> = fact
+                    .map(|w| names.iter().map(|n| (n.clone(), w)).collect())
+                    .unwrap_or_default();
                 let mut columns: Vec<ColumnInfo> = names
                     .iter()
                     .map(|n| ColumnInfo {
@@ -3067,13 +3079,18 @@ mod tests {
                     assert_eq!(
                         !c.not_keyset,
                         planner.is_usable_keyset_key(&c.name),
-                        "{source:?} finer={finer}: init and the planner disagree on {:?}",
+                        "{source:?} fact={fact:?}: init and the planner disagree on {:?}",
                         m.rivet_type
                     );
                 }
                 assert!(
-                    columns.iter().any(|c| c.not_keyset) && columns.iter().any(|c| !c.not_keyset),
-                    "{source:?} finer={finer}: the sweep must hold admitted and refused types"
+                    columns.iter().any(|c| c.not_keyset),
+                    "{source:?} fact={fact:?}: the sweep must hold refused types"
+                );
+                assert!(
+                    source == SourceType::Oracle && fact.is_some()
+                        || columns.iter().any(|c| !c.not_keyset),
+                    "{source:?} fact={fact:?}: the sweep must hold admitted types"
                 );
             }
         }

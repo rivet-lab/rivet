@@ -6,26 +6,44 @@ use crate::types::{Delivery, RivetType, TextForm, TimeUnit, TypeMapping};
 /// The fractional-second digits a microsecond timestamp keeps.
 pub(crate) const MICROSECOND_DIGITS: i32 = 6;
 
-/// The cause an Oracle NUMBER the catalog declares with a scale or as FLOAT cannot key a keyset seek.
-const ORACLE_INEXACT_NUMBER: &str =
-    "is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly";
+/// What the catalog declares a column holds beyond the type the driver delivers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wider {
+    FinerTimestamp,
+    InexactNumber,
+}
 
-/// The cause a column cannot key a keyset seek, or `None` when the cursor reads it and re-binds it exactly; `declared_wider` is the catalog saying the column holds more than the delivered type shows.
+/// Whether the keyset cursor pages one column or a tuple of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyShape {
+    Single,
+    Composite,
+}
+
+/// The cause an Oracle TIMESTAMP finer than a microsecond cannot key a seek, whatever type `columns:` delivers it as.
+const ORACLE_FINER_TIMESTAMP: &str = "is a TIMESTAMP with more than 6 fractional-second digits, which the cursor cannot advance past exactly whatever type `columns:` delivers it as";
+
+/// The cause an Oracle NUMBER with a scale or a FLOAT cannot key a seek, whatever type `columns:` delivers it as.
+const ORACLE_INEXACT_NUMBER: &str = "is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly whatever type `columns:` delivers it as";
+
+/// The cause a column cannot key a keyset seek, or `None` when the cursor reads it and re-binds it exactly; `wider` is the catalog saying the column holds more than the delivered type shows.
 pub(crate) fn keyset_key_refusal(
     source: SourceType,
     mapping: &TypeMapping,
-    declared_wider: bool,
+    wider: Option<Wider>,
+    shape: KeyShape,
 ) -> Option<&'static str> {
+    if source == SourceType::Oracle {
+        match (wider, shape) {
+            (Some(Wider::FinerTimestamp), _) => return Some(ORACLE_FINER_TIMESTAMP),
+            (Some(Wider::InexactNumber), KeyShape::Single) => return Some(ORACLE_INEXACT_NUMBER),
+            _ => {}
+        }
+    }
     let exact_number_text = source == SourceType::Oracle
         && matches!(mapping.delivery, Delivery::Text(TextForm::DecimalPlain));
     if !exact_number_text && !matches!(mapping.delivery, Delivery::Native) {
         return Some("is delivered as text, which does not sort as the stored value");
-    }
-    if declared_wider
-        && source == SourceType::Oracle
-        && (exact_number_text || matches!(mapping.rivet_type, RivetType::Decimal { scale: 0, .. }))
-    {
-        return Some(ORACLE_INEXACT_NUMBER);
     }
     match &mapping.rivet_type {
         RivetType::Float32 | RivetType::Float64 if source == SourceType::Oracle => {
@@ -53,7 +71,7 @@ pub(crate) fn keyset_key_refusal(
         RivetType::Timestamp {
             unit: TimeUnit::Microsecond,
             ..
-        } if declared_wider => Some(
+        } if wider == Some(Wider::FinerTimestamp) => Some(
             "carries more than 6 fractional-second digits, which the microsecond cursor truncates",
         ),
         RivetType::Timestamp {
@@ -68,6 +86,7 @@ pub(crate) fn keyset_key_refusal(
         RivetType::Bool => Some("is a boolean, which the cursor cannot render"),
         RivetType::Time { .. } => Some("is a time of day, which the cursor cannot render"),
         RivetType::Binary => Some("is binary, which the cursor cannot render"),
+        RivetType::Json if source == SourceType::Postgres => None,
         RivetType::Json => Some("is JSON, which does not sort as text"),
         RivetType::Interval => Some("is an interval, which does not sort as text"),
         RivetType::List { .. } => Some("is an array, which the cursor cannot render"),
@@ -79,7 +98,8 @@ pub(crate) fn keyset_key_refusal(
 pub(crate) fn column_refusal(
     source: SourceType,
     mappings: &[TypeMapping],
-    declared_wider: &[String],
+    declared_wider: &[(String, Wider)],
+    shape: KeyShape,
     column: &str,
 ) -> Option<&'static str> {
     let Some(mapping) = mappings
@@ -95,8 +115,9 @@ pub(crate) fn column_refusal(
     };
     let wider = declared_wider
         .iter()
-        .any(|c| c.eq_ignore_ascii_case(column));
-    keyset_key_refusal(source, mapping, wider)
+        .find(|(c, _)| c.eq_ignore_ascii_case(column))
+        .map(|(_, kind)| *kind);
+    keyset_key_refusal(source, mapping, wider, shape)
 }
 
 /// Samples the offline tests that sweep every Rivet type share.
@@ -167,8 +188,19 @@ mod tests {
     use super::*;
     use crate::types::{RivetType, SourceColumn, TimeUnit};
 
+    const ENGINES: [SourceType; 4] = [
+        SourceType::Postgres,
+        SourceType::Mysql,
+        SourceType::Mssql,
+        SourceType::Oracle,
+    ];
+
     fn named(name: &str, rivet_type: RivetType) -> TypeMapping {
         TypeMapping::from_source(&SourceColumn::simple(name, "native", false), rivet_type)
+    }
+
+    fn single(source: SourceType, mapping: &TypeMapping) -> Option<&'static str> {
+        keyset_key_refusal(source, mapping, None, KeyShape::Single)
     }
 
     /// A zone-carrying timestamp keys a seek everywhere except Oracle.
@@ -179,14 +211,10 @@ mod tests {
             timezone: Some("UTC".into()),
         });
         for source in [SourceType::Postgres, SourceType::Mysql, SourceType::Mssql] {
-            assert_eq!(
-                keyset_key_refusal(source, &zoned, false),
-                None,
-                "{source:?}"
-            );
+            assert_eq!(single(source, &zoned), None, "{source:?}");
         }
         assert_eq!(
-            keyset_key_refusal(SourceType::Oracle, &zoned, false),
+            single(SourceType::Oracle, &zoned),
             Some("is a timestamp with a time zone, which is not a keyset key on Oracle")
         );
     }
@@ -203,29 +231,12 @@ mod tests {
             scale: 2,
         });
         for source in [SourceType::Postgres, SourceType::Mysql, SourceType::Mssql] {
-            assert!(
-                keyset_key_refusal(source, &whole, false).is_some(),
-                "{source:?}"
-            );
+            assert!(single(source, &whole).is_some(), "{source:?}");
         }
-        for source in [
-            SourceType::Postgres,
-            SourceType::Mysql,
-            SourceType::Mssql,
-            SourceType::Oracle,
-        ] {
-            assert!(
-                keyset_key_refusal(source, &scaled, false).is_some(),
-                "{source:?}"
-            );
+        for source in ENGINES {
+            assert!(single(source, &scaled).is_some(), "{source:?}");
         }
-        assert_eq!(keyset_key_refusal(SourceType::Oracle, &whole, false), None);
-        assert_eq!(
-            keyset_key_refusal(SourceType::Oracle, &whole, true),
-            Some(
-                "is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly"
-            )
-        );
+        assert_eq!(single(SourceType::Oracle, &whole), None);
     }
 
     /// A NUMBER held as exact decimal text keys a seek on Oracle alone; other text forms never do.
@@ -234,24 +245,119 @@ mod tests {
         let exact = samples::mapping_of(RivetType::String).with_text(TextForm::DecimalPlain);
         let instant = samples::mapping_of(RivetType::String).with_text(TextForm::IsoTimestampNanos);
         let duration = samples::mapping_of(RivetType::String).with_text(TextForm::Iso8601Duration);
-        assert_eq!(keyset_key_refusal(SourceType::Oracle, &exact, false), None);
-        assert_eq!(
-            keyset_key_refusal(SourceType::Oracle, &exact, true),
-            Some(
-                "is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly"
-            )
-        );
+        assert_eq!(single(SourceType::Oracle, &exact), None);
         for source in [SourceType::Postgres, SourceType::Mysql, SourceType::Mssql] {
             assert_eq!(
-                keyset_key_refusal(source, &exact, false),
+                single(source, &exact),
                 Some("is delivered as text, which does not sort as the stored value"),
                 "{source:?}"
             );
         }
         for text in [&instant, &duration] {
             assert_eq!(
-                keyset_key_refusal(SourceType::Oracle, text, false),
+                single(SourceType::Oracle, text),
                 Some("is delivered as text, which does not sort as the stored value")
+            );
+        }
+    }
+
+    /// An Oracle column the catalog declares wider is refused whatever type `columns:` delivers it as.
+    #[test]
+    fn an_oracle_column_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as() {
+        let deliveries = [
+            samples::mapping_of(RivetType::String).with_text(TextForm::DecimalPlain),
+            samples::mapping_of(RivetType::Int64),
+            samples::mapping_of(RivetType::String),
+            samples::mapping_of(RivetType::Float64),
+            samples::mapping_of(RivetType::Decimal {
+                precision: 18,
+                scale: 0,
+            }),
+            samples::mapping_of(RivetType::Timestamp {
+                unit: TimeUnit::Microsecond,
+                timezone: None,
+            }),
+            samples::mapping_of(RivetType::Timestamp {
+                unit: TimeUnit::Nanosecond,
+                timezone: None,
+            }),
+        ];
+        for mapping in &deliveries {
+            let finer = keyset_key_refusal(
+                SourceType::Oracle,
+                mapping,
+                Some(Wider::FinerTimestamp),
+                KeyShape::Single,
+            );
+            assert_eq!(finer, Some(ORACLE_FINER_TIMESTAMP), "{mapping:?}");
+            let composite = keyset_key_refusal(
+                SourceType::Oracle,
+                mapping,
+                Some(Wider::FinerTimestamp),
+                KeyShape::Composite,
+            );
+            assert_eq!(composite, Some(ORACLE_FINER_TIMESTAMP), "{mapping:?}");
+            let inexact = keyset_key_refusal(
+                SourceType::Oracle,
+                mapping,
+                Some(Wider::InexactNumber),
+                KeyShape::Single,
+            );
+            assert_eq!(inexact, Some(ORACLE_INEXACT_NUMBER), "{mapping:?}");
+        }
+    }
+
+    /// A composite Oracle key ignores the inexact-number fact, as main did; a finer timestamp is refused in either shape.
+    #[test]
+    fn an_inexact_oracle_number_is_refused_as_a_single_key_alone() {
+        let exact = samples::mapping_of(RivetType::String).with_text(TextForm::DecimalPlain);
+        assert_eq!(
+            keyset_key_refusal(
+                SourceType::Oracle,
+                &exact,
+                Some(Wider::InexactNumber),
+                KeyShape::Composite
+            ),
+            None
+        );
+    }
+
+    /// Outside Oracle the finer-timestamp fact refuses a microsecond delivery and admits a nanosecond one.
+    #[test]
+    fn a_finer_timestamp_is_admitted_in_nanoseconds_outside_oracle() {
+        let ts = |unit| {
+            samples::mapping_of(RivetType::Timestamp {
+                unit,
+                timezone: None,
+            })
+        };
+        for source in [SourceType::Postgres, SourceType::Mysql, SourceType::Mssql] {
+            let wider = Some(Wider::FinerTimestamp);
+            assert_eq!(
+                keyset_key_refusal(source, &ts(TimeUnit::Microsecond), wider, KeyShape::Single),
+                Some(
+                    "carries more than 6 fractional-second digits, which the microsecond cursor truncates"
+                ),
+                "{source:?}"
+            );
+            assert_eq!(
+                keyset_key_refusal(source, &ts(TimeUnit::Nanosecond), wider, KeyShape::Single),
+                None,
+                "{source:?}"
+            );
+        }
+    }
+
+    /// JSON keys a seek on PostgreSQL alone, where jsonb has its own btree order the server applies to both sides.
+    #[test]
+    fn json_keys_a_seek_on_postgres_alone() {
+        let json = samples::mapping_of(RivetType::Json);
+        assert_eq!(single(SourceType::Postgres, &json), None);
+        for source in [SourceType::Mysql, SourceType::Mssql, SourceType::Oracle] {
+            assert_eq!(
+                single(source, &json),
+                Some("is JSON, which does not sort as text"),
+                "{source:?}"
             );
         }
     }
@@ -263,21 +369,35 @@ mod tests {
             named("flag", RivetType::Bool),
             named("id", RivetType::Int64),
         ];
+        let find = |column| {
+            column_refusal(
+                SourceType::Postgres,
+                &mappings,
+                &[],
+                KeyShape::Single,
+                column,
+            )
+        };
+        assert_eq!(find("id"), None);
+        assert_eq!(find("ID"), None);
         assert_eq!(
-            column_refusal(SourceType::Postgres, &mappings, &[], "id"),
-            None
-        );
-        assert_eq!(
-            column_refusal(SourceType::Postgres, &mappings, &[], "ID"),
-            None
-        );
-        assert_eq!(
-            column_refusal(SourceType::Postgres, &mappings, &[], "flag"),
+            find("flag"),
             Some("is a boolean, which the cursor cannot render")
         );
         assert_eq!(
-            column_refusal(SourceType::Postgres, &mappings, &[], "missing"),
+            find("missing"),
             Some("is not among the columns the export delivers")
+        );
+    }
+
+    /// The catalog fact is matched to the column by name in any case.
+    #[test]
+    fn the_catalog_fact_is_matched_to_the_column_in_any_case() {
+        let mappings = [named("K", RivetType::Int64)];
+        let wider = [("k".to_string(), Wider::InexactNumber)];
+        assert_eq!(
+            column_refusal(SourceType::Oracle, &mappings, &wider, KeyShape::Single, "K"),
+            Some(ORACLE_INEXACT_NUMBER)
         );
     }
 }

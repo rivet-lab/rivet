@@ -558,14 +558,14 @@ mod tests {
     #[test]
     fn an_oracle_catalog_type_keys_a_seek_by_what_it_is_delivered_as() {
         use crate::config::SourceType;
-        use crate::source::keyset_key::keyset_key_refusal;
+        use crate::source::keyset_key::{KeyShape, Wider, keyset_key_refusal};
         use crate::types::SourceColumn;
         let refusal = |kind, native: &str, p, s, wider| {
             let rivet = autodetect(kind, native, p, s, native);
             let mapping =
                 TypeMapping::from_source(&SourceColumn::simple("K", native, false), rivet);
             let mapping = deliver_number_text(mapping, kind, p, s);
-            keyset_key_refusal(SourceType::Oracle, &mapping, wider)
+            keyset_key_refusal(SourceType::Oracle, &mapping, wider, KeyShape::Single)
         };
         for (kind, native, p, s) in [
             (OraKind::Number, "number", 10, 0),
@@ -578,24 +578,48 @@ mod tests {
             (OraKind::Timestamp, "timestamp", 6, 0),
             (OraKind::Timestamp, "timestamp", 6, 6),
         ] {
-            assert_eq!(refusal(kind, native, p, s, false), None, "{native} {p} {s}");
+            assert_eq!(refusal(kind, native, p, s, None), None, "{native} {p} {s}");
         }
         for (kind, native, p, s, wider) in [
-            (OraKind::Number, "number", 12, 2, false),
-            (OraKind::Number, "number", 10, 3, false),
-            (OraKind::Number, "number", 7, -2, true),
-            (OraKind::Number, "number", 38, -5, true),
-            (OraKind::Number, "number", 38, 39, true),
-            (OraKind::Number, "number", 0, 2, true),
-            (OraKind::Number, "number", 126, -127, true),
-            (OraKind::BinaryFloat, "binary_float", 0, 0, false),
-            (OraKind::BinaryDouble, "binary_double", 0, 0, false),
-            (OraKind::Timestamp, "timestamp", 9, 9, true),
-            (OraKind::TimestampTz, "timestamp_tz", 6, 6, false),
-            (OraKind::TimestampLtz, "timestamp_ltz", 6, 6, false),
-            (OraKind::Raw, "raw", 0, 0, false),
-            (OraKind::Boolean, "boolean", 0, 0, false),
-            (OraKind::IntervalDs, "interval_ds", 0, 0, false),
+            (OraKind::Number, "number", 12, 2, None),
+            (OraKind::Number, "number", 10, 3, None),
+            (OraKind::Number, "number", 7, -2, Some(Wider::InexactNumber)),
+            (
+                OraKind::Number,
+                "number",
+                38,
+                -5,
+                Some(Wider::InexactNumber),
+            ),
+            (
+                OraKind::Number,
+                "number",
+                38,
+                39,
+                Some(Wider::InexactNumber),
+            ),
+            (OraKind::Number, "number", 0, 2, Some(Wider::InexactNumber)),
+            (
+                OraKind::Number,
+                "number",
+                126,
+                -127,
+                Some(Wider::InexactNumber),
+            ),
+            (OraKind::BinaryFloat, "binary_float", 0, 0, None),
+            (OraKind::BinaryDouble, "binary_double", 0, 0, None),
+            (
+                OraKind::Timestamp,
+                "timestamp",
+                9,
+                9,
+                Some(Wider::FinerTimestamp),
+            ),
+            (OraKind::TimestampTz, "timestamp_tz", 6, 6, None),
+            (OraKind::TimestampLtz, "timestamp_ltz", 6, 6, None),
+            (OraKind::Raw, "raw", 0, 0, None),
+            (OraKind::Boolean, "boolean", 0, 0, None),
+            (OraKind::IntervalDs, "interval_ds", 0, 0, None),
         ] {
             assert!(
                 refusal(kind, native, p, s, wider).is_some(),
@@ -608,7 +632,7 @@ mod tests {
     #[test]
     fn an_oracle_number_keys_a_seek_exactly_when_the_catalog_filter_it_replaced_admitted_it() {
         use crate::config::SourceType;
-        use crate::source::keyset_key::keyset_key_refusal;
+        use crate::source::keyset_key::{KeyShape, Wider, keyset_key_refusal};
         use crate::source::oracle::is_inexact_number_type;
         use crate::types::SourceColumn;
         let before = |data_type: &str, precision: Option<u32>, scale: Option<i32>| match data_type {
@@ -652,9 +676,9 @@ mod tests {
             let mapping =
                 TypeMapping::from_source(&SourceColumn::simple("K", "number", false), rivet);
             let mapping = deliver_number_text(mapping, OraKind::Number, prec, scale);
-            let wider = is_inexact_number_type(data_type, p, s);
+            let wider = is_inexact_number_type(data_type, p, s).then_some(Wider::InexactNumber);
             assert_eq!(
-                keyset_key_refusal(SourceType::Oracle, &mapping, wider).is_none(),
+                keyset_key_refusal(SourceType::Oracle, &mapping, wider, KeyShape::Single).is_none(),
                 before(data_type, p, s),
                 "{data_type} {p:?} {s:?}"
             );

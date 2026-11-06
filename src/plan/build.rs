@@ -14,10 +14,29 @@ use super::contract::{
 pub use crate::types::parse_column_overrides as parse_column_overrides_pub;
 use crate::types::parse_column_overrides;
 
-/// The remedy every keyset key refusal ends with.
-const KEYSET_KEY_REMEDY: &str = "Key the keyset on an integer, text, uuid, date or timestamp column \
+/// The remedy a keyset key refusal ends with on a source where no timestamp is finer than a microsecond.
+const KEYSET_KEY_REMEDY: &str = "Key the keyset on an integer, text, uuid, date or timestamp column, \
+     range-chunk an integer `chunk_column:`, or use `mode: full`.";
+
+/// The remedy a SQL Server keyset key refusal ends with, where an override delivers a finer timestamp in nanoseconds.
+const MSSQL_KEYSET_KEY_REMEDY: &str = "Key the keyset on an integer, text, uuid, date or timestamp column \
      (a timestamp finer than a microsecond needs the `timestamp_ns` / `timestamp_tz_ns` \
      column override), range-chunk an integer `chunk_column:`, or use `mode: full`.";
+
+/// The remedy an Oracle keyset key refusal ends with, where no `columns:` override lifts the catalog's refusal.
+const ORACLE_KEYSET_KEY_REMEDY: &str = "Key the keyset on an integer, text, uuid, date or timestamp column \
+     (a TIMESTAMP finer than a microsecond, a NUMBER with a scale and a FLOAT stay refused \
+     whatever `columns:` delivers them as: key on a TIMESTAMP(6), a whole-number NUMBER or a text \
+     column), range-chunk an integer `chunk_column:`, or use `mode: full`.";
+
+/// The remedy a keyset key refusal on `source` ends with.
+fn keyset_key_remedy(source: crate::config::SourceType) -> &'static str {
+    match source {
+        crate::config::SourceType::Mssql => MSSQL_KEYSET_KEY_REMEDY,
+        crate::config::SourceType::Oracle => ORACLE_KEYSET_KEY_REMEDY,
+        _ => KEYSET_KEY_REMEDY,
+    }
+}
 
 /// Build a [`ResolvedRunPlan`] from config and CLI flags.
 ///
@@ -1054,7 +1073,7 @@ fn chunked_strategy_from_introspection(
                 tbl,
                 keyset_key_types(source_type),
                 key,
-                KEYSET_KEY_REMEDY
+                keyset_key_remedy(source_type)
             );
         }
         log::info!(
@@ -1630,7 +1649,7 @@ mod tests {
     struct KeyedCatalog {
         mapping: crate::types::TypeMapping,
         single_int_pk: Option<String>,
-        finer: bool,
+        wider: Option<crate::source::keyset_key::Wider>,
         row_estimate: i64,
         queries: Vec<String>,
     }
@@ -1643,7 +1662,7 @@ mod tests {
                     rivet_type,
                 ),
                 single_int_pk: None,
-                finer: false,
+                wider: None,
                 row_estimate,
                 queries: Vec::new(),
             }
@@ -1658,7 +1677,11 @@ mod tests {
             Ok(crate::source::TableIntrospection {
                 keyset_keys: vec!["k".into()],
                 single_int_pk: self.single_int_pk.clone(),
-                declared_wider: if self.finer { vec!["k".into()] } else { vec![] },
+                declared_wider: self
+                    .wider
+                    .map(|w| ("k".to_string(), w))
+                    .into_iter()
+                    .collect(),
                 row_estimate: self.row_estimate,
                 ..Default::default()
             })
@@ -1873,7 +1896,7 @@ mod tests {
                 "is a decimal",
             ),
             (SourceType::Postgres, RivetType::Binary, "is binary"),
-            (SourceType::Postgres, RivetType::Json, "is JSON"),
+            (SourceType::Mysql, RivetType::Json, "is JSON"),
             (SourceType::Mssql, RivetType::Bool, "is a boolean"),
         ];
         for (source, t, cause) in unusable {
@@ -1889,7 +1912,7 @@ mod tests {
                     assert!(text.contains(cause), "{text}");
                     assert!(text.contains("or use `mode: full`"), "{text}");
                     if explicit {
-                        assert!(text.contains(super::KEYSET_KEY_REMEDY), "{text}");
+                        assert!(text.contains(super::keyset_key_remedy(source)), "{text}");
                     }
                 }
             }
@@ -1928,6 +1951,16 @@ mod tests {
         let squash = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
         let docs = squash(include_str!("../../docs/modes/chunked.md"));
         assert!(docs.contains(&squash(&err.to_string())), "{err}");
+        for remedy in [MSSQL_KEYSET_KEY_REMEDY, ORACLE_KEYSET_KEY_REMEDY] {
+            let (from, to) = (
+                remedy.find('(').expect("an engine remedy carries a clause"),
+                remedy
+                    .find("), range-chunk")
+                    .expect("the clause ends before the next remedy"),
+            );
+            let clause = squash(&remedy[from..=to]);
+            assert!(docs.contains(&clause), "{clause}");
+        }
     }
 
     /// A datetime2(7) key is refused unless the `timestamp_ns` override delivers it in nanoseconds.
@@ -1939,7 +1972,7 @@ mod tests {
             timezone: None,
         };
         let mut catalog = KeyedCatalog::of(micro(), 5_000_000);
-        catalog.finer = true;
+        catalog.wider = Some(crate::source::keyset_key::Wider::FinerTimestamp);
         let err = plan_keyed(SourceType::Mssql, catalog, true).expect_err("datetime2(7) refused");
         crate::error::assert_coded(&err, "RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1);
         assert!(
@@ -1954,14 +1987,85 @@ mod tests {
             },
             5_000_000,
         );
-        catalog.finer = true;
+        catalog.wider = Some(crate::source::keyset_key::Wider::FinerTimestamp);
         let plan = plan_keyed(SourceType::Mssql, catalog, true).expect("ns override admitted");
         assert_eq!(keyset_key_of(&plan).as_deref(), Some("k:100000"));
 
         let mut catalog = KeyedCatalog::of(micro(), 5_000_000);
-        catalog.finer = false;
+        catalog.wider = None;
         let plan = plan_keyed(SourceType::Mssql, catalog, true).expect("datetime2(6) admitted");
         assert_eq!(keyset_key_of(&plan).as_deref(), Some("k:100000"));
+    }
+
+    /// An Oracle key the catalog declares wider is refused whatever `columns:` delivers it as, and the remedy offers no override.
+    #[test]
+    fn an_oracle_key_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as() {
+        use crate::source::keyset_key::Wider;
+        use crate::types::{RivetType, TextForm, TimeUnit};
+        let ts = |unit| RivetType::Timestamp {
+            unit,
+            timezone: None,
+        };
+        let delivered = [
+            RivetType::Int64,
+            RivetType::String,
+            RivetType::Float64,
+            RivetType::Decimal {
+                precision: 18,
+                scale: 0,
+            },
+            ts(TimeUnit::Microsecond),
+            ts(TimeUnit::Nanosecond),
+        ];
+        for wider in [Wider::FinerTimestamp, Wider::InexactNumber] {
+            for t in delivered.iter().cloned().chain([RivetType::String]) {
+                for text in [false, true] {
+                    for rows in [10, 5_000_000] {
+                        let mut catalog = KeyedCatalog::of(t.clone(), rows);
+                        if text {
+                            catalog.mapping = catalog.mapping.with_text(TextForm::DecimalPlain);
+                        }
+                        catalog.wider = Some(wider);
+                        let err = plan_keyed(SourceType::Oracle, catalog, true)
+                            .expect_err(&format!("{wider:?} {t:?} text={text} rows={rows}"));
+                        crate::error::assert_coded(&err, "RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1);
+                        let text = format!("{err:#}");
+                        assert!(
+                            text.contains("whatever type `columns:` delivers it as"),
+                            "{text}"
+                        );
+                        assert!(text.contains(ORACLE_KEYSET_KEY_REMEDY), "{text}");
+                        assert!(!text.contains("timestamp_ns"), "{text}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A composite Oracle key refuses a finer timestamp at plan time and keeps an inexact NUMBER it always admitted.
+    #[test]
+    fn a_composite_oracle_key_refuses_a_finer_timestamp_and_keeps_an_inexact_number() {
+        use crate::source::keyset_key::Wider;
+        use crate::types::{RivetType, TextForm, TimeUnit};
+        let composite = chunked_by(Some(&["k", "x"]), None);
+        let mut float = KeyedCatalog::of(RivetType::String, 10);
+        float.mapping = float.mapping.with_text(TextForm::DecimalPlain);
+        float.wider = Some(Wider::InexactNumber);
+        let kept = introspect_table(&mut float, SourceType::Oracle, "t", &composite)
+            .expect("the catalog probe answers");
+        assert_eq!(kept.tuple_cursor_columns, vec!["k".to_string()]);
+
+        let mut finer = KeyedCatalog::of(
+            RivetType::Timestamp {
+                unit: TimeUnit::Microsecond,
+                timezone: None,
+            },
+            10,
+        );
+        finer.wider = Some(Wider::FinerTimestamp);
+        let refused = introspect_table(&mut finer, SourceType::Oracle, "t", &composite)
+            .expect("the catalog probe answers");
+        assert!(refused.tuple_cursor_columns.is_empty());
     }
 
     /// The keys the reader already advances plan exactly as they did before the seam.
@@ -1979,6 +2083,7 @@ mod tests {
             (SourceType::Postgres, RivetType::Uuid),
             (SourceType::Postgres, RivetType::Date),
             (SourceType::Postgres, RivetType::Enum),
+            (SourceType::Postgres, RivetType::Json),
             (SourceType::Postgres, ts(TimeUnit::Microsecond)),
             (SourceType::Mysql, RivetType::Int16),
             (SourceType::Mysql, RivetType::UInt64),

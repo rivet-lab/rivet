@@ -26,6 +26,7 @@ struct Case {
     primary: bool,
     rows: i64,
     overrides: Option<&'static str>,
+    composite: bool,
 }
 
 const ENUM_MEMBERS: [&str; 12] = [
@@ -47,6 +48,7 @@ const MYSQL_BINARY16: Case = Case {
     primary: true,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MYSQL_TIME: Case = Case {
     label: "MySQL TIME unique key",
@@ -55,6 +57,7 @@ const MYSQL_TIME: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MYSQL_TINYINT1: Case = Case {
     label: "MySQL TINYINT(1) unique key",
@@ -63,6 +66,7 @@ const MYSQL_TINYINT1: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MYSQL_ENUM_KEY: Case = Case {
     label: "MySQL ENUM unique key",
@@ -71,6 +75,7 @@ const MYSQL_ENUM_KEY: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const PG_BYTEA: Case = Case {
     label: "PostgreSQL bytea unique key",
@@ -79,6 +84,7 @@ const PG_BYTEA: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const PG_TIME: Case = Case {
     label: "PostgreSQL time unique key",
@@ -87,6 +93,7 @@ const PG_TIME: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MSSQL_VARBINARY: Case = Case {
     label: "SQL Server varbinary unique key",
@@ -95,6 +102,7 @@ const MSSQL_VARBINARY: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MSSQL_TIME: Case = Case {
     label: "SQL Server time unique key",
@@ -103,6 +111,7 @@ const MSSQL_TIME: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DT2_7_DISTINCT_US: Case = Case {
     label: "SQL Server datetime2(7) key, a tick past each microsecond",
@@ -115,6 +124,7 @@ const MSSQL_DT2_7_DISTINCT_US: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DT2_7_ONE_US: Case = Case {
     label: "SQL Server datetime2(7) key, nine ticks inside one microsecond",
@@ -125,6 +135,7 @@ const MSSQL_DT2_7_ONE_US: Case = Case {
     primary: false,
     rows: 9,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DTO_7: Case = Case {
     label: "SQL Server datetimeoffset(7) key, a tick past each microsecond",
@@ -137,6 +148,7 @@ const MSSQL_DTO_7: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DT2_7_NS_OVERRIDE: Case = Case {
     label: "SQL Server datetime2(7) key under the timestamp_ns override",
@@ -149,6 +161,7 @@ const MSSQL_DT2_7_NS_OVERRIDE: Case = Case {
     primary: false,
     rows: 10,
     overrides: Some("columns: {k: timestamp_ns}"),
+    composite: false,
 };
 const MSSQL_ALIAS_DT2_7: Case = Case {
     label: "SQL Server alias type over datetime2(7), a tick past each microsecond",
@@ -176,6 +189,7 @@ const ORACLE_TS9: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 
 #[cfg(feature = "oracle")]
@@ -186,6 +200,7 @@ const ORACLE_BINARY_DOUBLE: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 #[cfg(feature = "oracle")]
 const ORACLE_SCALED_NUMBER: Case = Case {
@@ -195,6 +210,7 @@ const ORACLE_SCALED_NUMBER: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 #[cfg(feature = "oracle")]
 const ORACLE_FLOAT: Case = Case {
@@ -204,6 +220,7 @@ const ORACLE_FLOAT: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 #[cfg(feature = "oracle")]
 const ORACLE_NUMBER_STAR_SCALE: Case = Case {
@@ -213,6 +230,7 @@ const ORACLE_NUMBER_STAR_SCALE: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 #[cfg(feature = "oracle")]
 const ORACLE_NEGATIVE_SCALE_NUMBER: Case = Case {
@@ -222,6 +240,7 @@ const ORACLE_NEGATIVE_SCALE_NUMBER: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 #[cfg(feature = "oracle")]
 const ORACLE_NEGATIVE_SCALE_38: Case = Case {
@@ -231,6 +250,7 @@ const ORACLE_NEGATIVE_SCALE_38: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 #[cfg(feature = "oracle")]
 const ORACLE_SCALE_PAST_38: Case = Case {
@@ -240,6 +260,7 @@ const ORACLE_SCALE_PAST_38: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 #[cfg(feature = "oracle")]
 const ORACLE_LTZ: Case = Case {
@@ -249,7 +270,16 @@ const ORACLE_LTZ: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
+
+/// The lead column of a composite key `(g, k)`, spelled as the engine folds it.
+fn lead(engine: SqlEngine) -> &'static str {
+    match engine.folds_upper() {
+        true => "G",
+        false => "g",
+    }
+}
 
 /// The key columns and their config spelling: Oracle folds bare names up, the rest keep them.
 fn names(engine: SqlEngine) -> (&'static str, &'static str) {
@@ -267,22 +297,34 @@ fn seeded(engine: SqlEngine, case: &Case, tag: &str) -> (String, Box<dyn std::an
         true => "NUMBER(18)",
         false => engine.int64(),
     };
-    let columns = match case.primary {
-        true => format!(
+    let g = lead(engine);
+    let columns = match (case.composite, case.primary) {
+        (true, _) => format!(
+            "{id} {id_ddl} NOT NULL, {g} {id_ddl} NOT NULL, {k} {} NOT NULL, PRIMARY KEY ({g}, {k})",
+            case.key_ddl
+        ),
+        (false, true) => format!(
             "{k} {} NOT NULL PRIMARY KEY, {id} {id_ddl} NOT NULL",
             case.key_ddl
         ),
-        false => format!(
+        (false, false) => format!(
             "{id} {id_ddl} NOT NULL PRIMARY KEY, {k} {} NOT NULL UNIQUE",
             case.key_ddl
         ),
     };
     let (table, guard) = engine.create(tag, &columns);
     for i in 1..=case.rows {
-        engine.exec(&format!(
-            "INSERT INTO {table} ({id}, {k}) VALUES ({i}, {})",
-            (case.key_value)(i)
-        ));
+        let insert = match case.composite {
+            true => format!(
+                "INSERT INTO {table} ({id}, {g}, {k}) VALUES ({i}, 1, {})",
+                (case.key_value)(i)
+            ),
+            false => format!(
+                "INSERT INTO {table} ({id}, {k}) VALUES ({i}, {})",
+                (case.key_value)(i)
+            ),
+        };
+        engine.exec(&insert);
     }
     engine.refresh_row_estimate(&table);
     (table, guard)
@@ -292,7 +334,9 @@ fn seeded(engine: SqlEngine, case: &Case, tag: &str) -> (String, Box<dyn std::an
 fn keyset_rig(engine: SqlEngine, table: &str, case: &Case, chunk_size: i64) -> Rig {
     let (_, k) = names(engine);
     let mut rig = engine.rig(table).mode("chunked");
-    if !case.primary {
+    if case.composite {
+        rig = rig.export_line(&format!("chunk_by_key: [{}, {k}]", lead(engine)));
+    } else if !case.primary {
         rig = rig.export_line(&format!("chunk_by_key: {k}"));
     }
     if let Some(line) = case.overrides {
@@ -454,6 +498,7 @@ fn key_types_deliver_the_seeded_ids_over(
             primary: false,
             rows,
             overrides: None,
+            composite: false,
         };
         let (table, _guard) = seeded(engine, &case, "ks_ok");
         let rig = extra.iter().fold(
@@ -671,6 +716,7 @@ const MYSQL_VARCHAR16: Case = Case {
     primary: true,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const PG_TEXT: Case = Case {
     label: "PostgreSQL text primary key",
@@ -679,6 +725,7 @@ const PG_TEXT: Case = Case {
     primary: true,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DT2_6: Case = Case {
     label: "SQL Server datetime2(6) primary key",
@@ -687,6 +734,7 @@ const MSSQL_DT2_6: Case = Case {
     primary: true,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 
 #[test]
@@ -905,5 +953,163 @@ fn a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay
         ORACLE_LTZ,
     ] {
         a_refused_key_stays_refused(SqlEngine::Oracle, case);
+    }
+}
+
+/// The check output names `phrase` and not `absent`, so the refusal states the cause and the remedy that holds.
+#[cfg(feature = "oracle")]
+fn the_refusal_says(engine: SqlEngine, case: &Case, phrase: &str, absent: &str) {
+    let (table, _guard) = seeded(engine, case, "ks_say");
+    let out = keyset_rig(engine, &table, case, SMALL_PAGE).cli(&["check"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains(phrase), "{}: {text}", case.label);
+    assert!(!text.contains(absent), "{}: {text}", case.label);
+}
+
+#[cfg(feature = "oracle")]
+const ORACLE_TS9_NS: Case = Case {
+    label: "Oracle TIMESTAMP(9) unique key under the timestamp_ns override",
+    overrides: Some("columns: {K: timestamp_ns}"),
+    ..ORACLE_TS9
+};
+#[cfg(feature = "oracle")]
+const ORACLE_TS9_COMPOSITE: Case = Case {
+    label: "Oracle TIMESTAMP(9) as the second column of a composite key",
+    composite: true,
+    ..ORACLE_TS9
+};
+#[cfg(feature = "oracle")]
+const ORACLE_TS9_COMPOSITE_NS: Case = Case {
+    label: "Oracle TIMESTAMP(9) as the second column of a composite key under the timestamp_ns override",
+    composite: true,
+    ..ORACLE_TS9_NS
+};
+#[cfg(feature = "oracle")]
+const ORACLE_FLOAT_COMPOSITE: Case = Case {
+    label: "Oracle FLOAT as the second column of a composite key",
+    composite: true,
+    ..ORACLE_FLOAT
+};
+#[cfg(feature = "oracle")]
+const ORACLE_SCALED_NUMBER_COMPOSITE: Case = Case {
+    label: "Oracle NUMBER(12,2) as the second column of a composite key",
+    key_value: |i| format!("{i}"),
+    composite: true,
+    ..ORACLE_SCALED_NUMBER
+};
+const PG_JSONB: Case = Case {
+    label: "PostgreSQL jsonb unique key",
+    key_ddl: "JSONB",
+    key_value: |i| {
+        format!("'{{\"a\": {{\"b\": [{i}, null, true]}}, \"u\": \"\u{e9}\u{4e2d}{i}\"}}'::jsonb")
+    },
+    primary: false,
+    rows: 12,
+    overrides: None,
+    composite: false,
+};
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_timestamp_9_keyset_key_under_the_timestamp_ns_override_stays_refused_oracle() {
+    the_key_is_refused(
+        SqlEngine::Oracle,
+        &ORACLE_TS9_NS,
+        SMALL_PAGE,
+        "under the override",
+    );
+    the_refusal_says(
+        SqlEngine::Oracle,
+        &ORACLE_TS9_NS,
+        "whatever `columns:` delivers it as",
+        "needs the `timestamp_ns`",
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_timestamp_9_composite_keyset_key_is_refused_oracle() {
+    for case in [ORACLE_TS9_COMPOSITE, ORACLE_TS9_COMPOSITE_NS] {
+        the_key_is_refused(SqlEngine::Oracle, &case, SMALL_PAGE, "as a composite key");
+    }
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_columns_override_oracle()
+ {
+    for base in [
+        ORACLE_SCALED_NUMBER,
+        ORACLE_NUMBER_STAR_SCALE,
+        ORACLE_FLOAT,
+        ORACLE_NEGATIVE_SCALE_NUMBER,
+    ] {
+        for line in ["columns: {K: int64}", "columns: {K: string}"] {
+            let case = Case {
+                overrides: Some(line),
+                ..base
+            };
+            the_key_is_refused(SqlEngine::Oracle, &case, SMALL_PAGE, line);
+        }
+    }
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_float_and_a_whole_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle() {
+    for case in [ORACLE_FLOAT_COMPOSITE, ORACLE_SCALED_NUMBER_COMPOSITE] {
+        let (table, _guard) = seeded(SqlEngine::Oracle, &case, "ks_cmp");
+        let rig = keyset_rig(SqlEngine::Oracle, &table, &case, SMALL_PAGE);
+        let out = rig.run();
+        assert!(
+            out.status.success(),
+            "keyset key {}: {}",
+            case.label,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            delivered_ids(&rig.out_dir()),
+            (1..=case.rows).collect::<Vec<_>>(),
+            "keyset key {}: every row once",
+            case.label
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_jsonb_keyset_key_delivers_the_seeded_ids_once_postgres() {
+    for case in [
+        PG_JSONB,
+        Case {
+            composite: true,
+            ..PG_JSONB
+        },
+    ] {
+        let (table, _guard) = seeded(SqlEngine::Pg, &case, "ks_jb");
+        let rig = keyset_rig(SqlEngine::Pg, &table, &case, SMALL_PAGE);
+        let out = rig.run();
+        assert!(
+            out.status.success(),
+            "keyset key {} (composite {}): {}",
+            case.label,
+            case.composite,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            delivered_ids(&rig.out_dir()),
+            (1..=case.rows).collect::<Vec<_>>(),
+            "keyset key {} (composite {}): every row once",
+            case.label,
+            case.composite
+        );
     }
 }

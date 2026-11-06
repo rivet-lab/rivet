@@ -354,7 +354,7 @@ CDC (change streams) emits the same two-column shape prefixed with the
    more than 6 fractional digits (a bare `datetime2` is `datetime2(7)`), so
    `chunk_by_key:` refuses it with `RIVET_PLAN_CHUNK_KEY_UNUSABLE` unless the
    `timestamp_ns` / `timestamp_tz_ns` override delivers it; for a BigQuery
-   `TIMESTAMP` use a `datetime2(6)`, an integer key or `mode: full` instead.
+   `TIMESTAMP` use a `datetime2(6)`, an integer key or `mode: full` instead. On Oracle no override lifts the refusal of a `TIMESTAMP(7..9)` key.
 
    **Incremental mode:** the default µs cursor on a `datetime2(7)` lands one tick
    below the source max, re-exporting the boundary row every run — use

@@ -634,10 +634,11 @@ mod tests {
     #[test]
     fn a_key_the_seam_admits_is_a_key_the_cursor_renders() {
         use crate::config::SourceType;
-        use crate::source::keyset_key::keyset_key_refusal;
+        use crate::source::keyset_key::{KeyShape, keyset_key_refusal};
         use crate::types::RivetType;
         let renderable_but_refused = |source: SourceType, t: &RivetType| match t {
-            RivetType::Json | RivetType::Interval => true,
+            RivetType::Json => source != SourceType::Postgres,
+            RivetType::Interval => true,
             RivetType::Decimal { scale, .. } => source != SourceType::Oracle || *scale != 0,
             RivetType::Float32 | RivetType::Float64 => source == SourceType::Oracle,
             RivetType::Timestamp {
@@ -658,7 +659,7 @@ mod tests {
                     let array = arrow::array::new_null_array(dt, 1);
                     render_cursor_value(&array, 0)
                 });
-                match keyset_key_refusal(source, &m, false) {
+                match keyset_key_refusal(source, &m, None, KeyShape::Single) {
                     None => assert!(
                         rendered.is_some(),
                         "{source:?} admits {t:?} as a keyset key but the cursor cannot render it"

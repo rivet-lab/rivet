@@ -67,7 +67,7 @@ pub struct TableIntrospection {
     /// Unique single-column candidates the delivered type rules out, each with its cause; filled by `admit_keyset_keys`.
     pub refused_keyset_keys: Vec<(String, &'static str)>,
     /// Columns the catalog declares wider than the type the driver delivers: a timestamp finer than a microsecond, or an Oracle NUMBER with a scale or a FLOAT; filled by an engine that reads the catalog.
-    pub declared_wider: Vec<String>,
+    pub declared_wider: Vec<(String, keyset_key::Wider)>,
     /// Best-effort row count: PG `reltuples`, MySQL `TABLE_ROWS`. `0` means
     /// the table is empty or stats are unavailable.
     pub row_estimate: i64,
@@ -108,7 +108,7 @@ impl TableIntrospection {
         mappings: &[TypeMapping],
     ) {
         for key in std::mem::take(&mut self.keyset_keys) {
-            match self.keyset_key_refusal(source, mappings, &key) {
+            match self.keyset_key_refusal(source, mappings, keyset_key::KeyShape::Single, &key) {
                 None => self.keyset_keys.push(key),
                 Some(cause) => self.refused_keyset_keys.push((key, cause)),
             }
@@ -120,9 +120,10 @@ impl TableIntrospection {
         &self,
         source: crate::config::SourceType,
         mappings: &[TypeMapping],
+        shape: keyset_key::KeyShape,
         column: &str,
     ) -> Option<&'static str> {
-        keyset_key::column_refusal(source, mappings, &self.declared_wider, column)
+        keyset_key::column_refusal(source, mappings, &self.declared_wider, shape, column)
     }
 
     /// The refusal cause recorded for `column`, if `admit_keyset_keys` dropped it.
@@ -189,8 +190,13 @@ impl TableIntrospection {
             .iter()
             .filter(|m| m.arrow_type.as_ref().is_some_and(is_tuple_cursor_type))
             .filter(|m| {
-                self.keyset_key_refusal(source, &mappings, &m.column_name)
-                    .is_none()
+                self.keyset_key_refusal(
+                    source,
+                    &mappings,
+                    keyset_key::KeyShape::Composite,
+                    &m.column_name,
+                )
+                .is_none()
             })
             .map(|m| m.column_name.clone())
             .collect();
