@@ -129,6 +129,34 @@ For non-major releases:
       bumps the crate version vs `main`, so a version-bump push already exercised
       it (this box is the manual backstop if hooks are bypassed).
 
+## 8. Satellite pre-flight
+
+Two light machines check the gate's sha beside the release gate, with `dev/pytools/satellite.py`. Each
+profile writes `verdict.json` and `logs/`; a check is `PASS`, `FAIL` or `NOT-RUN` with its first failing
+line, and a `NOT-RUN` never counts as a `PASS`.
+
+| Profile | Command | Checks |
+|---|---|---|
+| Linux x86_64 | `python3 dev/pytools/satellite.py remote --sha SHA --publish` | checkout, `cargo build --release` (wall time), offline suite, pilot scenario, cleanup |
+| Mac | `python3 dev/pytools/satellite.py mac --sha SHA --repo DIR --release-date YYYY-MM-DD` | `changelog.py assemble` dry run, lychee, agnix, gitleaks, `known_red.py` expiry, BigQuery and Snowflake smoke |
+
+The pilot scenario is the pilot client's shape. The previous release runs an incremental export on SQLite
+state, the binary under test continues on the same state, the previous release runs again; the destination
+is re-read with pyarrow and compared with the source rows, never with rivet's own counters. A second run of
+one export started while the first holds the lease must be refused. The sources are PostgreSQL and MySQL
+containers published on `127.0.0.1` only.
+
+Machines are named by the operator's environment, never in the repo: `RIVET_SATELLITE_HOST` (an ssh alias of
+the Linux machine), `RIVET_GATE_LOGS_HOST` and `RIVET_GATE_LOGS_DIR` (where the gate keeps `<sha>/`; results
+land in `<sha>/satellite-<label>/`). The Linux profile builds and tests into one cargo target dir that persists
+across runs, `RIVET_SATELLITE_TARGET_DIR` (default `~/.cache/rivet-satellite/target`), so only the crate, LTO and
+link remain after the first run; the built binary must still name the sha.
+
+- [ ] A `pilot-*` check that is not `PASS` blocks the release.
+- [ ] A `release-notes-*` check that is not `PASS` (a false release note) blocks the release.
+- [ ] A `cloud-*` smoke that is `FAIL` blocks only when a re-run repeats it; `verdict.json` lists what blocks.
+- [ ] Every other check is reported and decided by the release owner.
+
 ---
 
 ## What this checklist does *not* enforce

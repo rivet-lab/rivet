@@ -158,6 +158,9 @@ pub struct ResolvedRunPlan {
     /// The paging mode a `mode: chunked` export stands for while its table fits in one chunk and `strategy` is one pass; kept out of the artifact seal, so a rivet without the field applies the plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_pass_of: Option<PagedMode>,
+    /// The incarnation of the source collection the run reads, found before the progress claim; never part of a sealed plan.
+    #[serde(skip)]
+    pub collection_incarnation: Option<String>,
     pub strategy: ExtractionStrategy,
     pub format: FormatType,
     pub compression: CompressionType,
@@ -318,8 +321,9 @@ impl ResolvedRunPlan {
             source: self.source.state_key(),
             stream: self.stream(),
             schema: self.source.search_path(),
-            population: crate::sql::row_set(
-                self.query_template.as_deref().unwrap_or(&self.base_query),
+            population: crate::state::population_of(
+                crate::sql::row_set(self.query_template.as_deref().unwrap_or(&self.base_query)),
+                self.collection_incarnation.as_deref(),
             ),
             column: self.strategy.cursor_identity(),
             landing: crate::state::Landing {
