@@ -3659,6 +3659,21 @@ seeds:
       clickhouse:
         na: "the seed edits src/load/bq_rest.rs, which only a BigQuery load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
+  - name: token-endpoint-transient-final
+    class: "an HTTP 5xx, 429 or 408 from Google's OAuth token endpoint is coded RIVET_DEST_CREDENTIALS_INVALID, exit 1, with no retry, so a scheduler fails the task for good on a blip of the endpoint"
+    history: "2026-11-06 - observed live on 0.32.2: a BigQuery load stopped 'ADC token request failed (HTTP 500 Internal Server Error)', exit 1; the next load with the same credential succeeded"
+    scope: target
+    patch: token-endpoint-transient-final/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_bigquery_load_rides_out_a_5xx_from_the_token_endpoint"
+      snowflake:
+        na: "the seed edits src/gcp_auth.rs, which only a BigQuery load or a GCS destination runs; Snowflake loads with its own credentials (src/load/snowflake.rs)"
+      clickhouse:
+        na: "the seed edits src/gcp_auth.rs, which only a BigQuery load or a GCS destination runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
+
   - name: transient-warehouse-code-exits-by-text
     class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
     history: "2026-10-28 - found while fixing #707: the code existed for the REST layer's transient replies but its exit followed the text, which names no transient word, so a scheduler never retried it"

@@ -553,6 +553,30 @@ pub(crate) fn is_transient(err: &anyhow::Error) -> bool {
     classify_error(err).is_transient()
 }
 
+/// The shortest wait between polls or retries of an HTTP request.
+pub(crate) const POLL_MIN: std::time::Duration = std::time::Duration::from_millis(200);
+/// The longest wait between polls or retries of an HTTP request.
+pub(crate) const POLL_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Consecutive transient failures (429 / 5xx / connection error) tolerated on one HTTP request before the caller gives up.
+pub(crate) const MAX_TRANSIENT_RETRIES: u32 = 5;
+
+/// Backoff for poll or retry `attempt`: exponential from [`POLL_MIN`], capped at [`POLL_MAX`].
+pub(crate) fn poll_interval(attempt: u32) -> std::time::Duration {
+    let scaled = POLL_MIN.saturating_mul(1u32 << attempt.min(16));
+    scaled.min(POLL_MAX)
+}
+
+/// HTTP statuses worth retrying an idempotent request on: rate limiting and any server-side fault.
+pub(crate) fn is_transient_status(code: u16) -> bool {
+    code == 429 || (500..600).contains(&code)
+}
+
+/// Whether to wait before `attempt`: every retry backs off, the first try does not.
+pub(crate) fn should_back_off(attempt: u32) -> bool {
+    attempt > 0
+}
+
 #[cfg(test)]
 mod tests {
     /// Round-10 mutants: the `||` chain of transient needles was un-graded —

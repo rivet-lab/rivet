@@ -1617,6 +1617,11 @@ pub mod codes {
         "RIVET_DEST_IO_RUNTIME_UNAVAILABLE",
         "raise the process's thread and open-file limits, or lower the export parallelism, then run again",
     );
+    /// Google's token endpoint answered a grant with a transient failure (HTTP 408, 429 or 5xx) or could not be reached, through every retry.
+    pub const DEST_TOKEN_ENDPOINT_UNAVAILABLE: Code = transient(
+        "RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE",
+        "re-run the same command later; Google's token endpoint failed with a transient error (HTTP 408, 429 or 5xx, or no answer) that rivet's retries did not outlast, and the credential itself was not refused",
+    );
     /// `rivet init -o` would write a CDC checkpoint that exists, or a checkpoint or destination another config names.
     pub const INIT_CDC_NAME_TAKEN: Code = refusal(
         "RIVET_INIT_CDC_NAME_TAKEN",
@@ -1906,6 +1911,7 @@ pub mod codes {
         DEST_CREDENTIALS_INVALID,
         DEST_PREFIX_MODE_MISMATCH,
         DEST_IO_RUNTIME_UNAVAILABLE,
+        DEST_TOKEN_ENDPOINT_UNAVAILABLE,
         INIT_CDC_NAME_TAKEN,
         INIT_CONFIG_EXISTS,
         INIT_TABLE_NOT_FOUND,
