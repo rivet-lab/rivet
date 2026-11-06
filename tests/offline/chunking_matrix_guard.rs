@@ -178,7 +178,8 @@ const MATRICES: &[(&str, usize)] = &[
     // Raised 0 -> 10 (2026-09-26): the Oracle column's honest gaps (batch-only phase 1).
     // Lowered 10 -> 5 (2026-10-08): five Oracle crash rows cite the every_*_runner_hook_loses_nothing_on_oracle cells that already crash at their hooks.
     // Lowered 5 -> 0 (2026-10-08): Oracle clean-state, rapid-run and keyset two-run cells; assert_no_loss now requires each declared row once.
-    ("docs/resilience-matrix.yaml", 0),
+    // Raised 0 -> 3 (2026-11-06): mid-row cut retry unproven on mssql/mongo/oracle; closed by a live cut cell per engine (0.33.1).
+    ("docs/resilience-matrix.yaml", 3),
     // Warehouse-load — the resolver + Parquet→warehouse-AUTOLOAD axis, keyed on the 4
     // ExportTarget variants, not source engines. Caught + fixed 3 resolver bugs
     // (SF/DuckDB/CH decimal ceilings). 0 gaps on THAT axis; most cells are offline
