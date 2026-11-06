@@ -1188,10 +1188,10 @@ scenarios:
     oracle:   { na: "the refusal is the scaffold writer's and does not depend on the source engine: the mysql column carries the row" }
   - id: refusal_init_nothing_exportable
     what: "RIVET_INIT_NOTHING_EXPORTABLE: `rivet init` whose scaffold leaves out every table it found (an Oracle CDC init of tables LogMiner cannot mine, one table or a schema); refused writing nothing, naming each table and its reason, and another `--mode` or a capturable `--include` writes a scaffold that runs"
-    postgres: { na: "the refusal is the scaffold writer's and does not depend on the source engine (a PostgreSQL or MySQL stream or a Mongo init skips a table by name instead): the oracle column carries the row" }
-    mysql:    { na: "the refusal is the scaffold writer's and does not depend on the source engine (a PostgreSQL or MySQL stream or a Mongo init skips a table by name instead): the oracle column carries the row" }
-    mssql:    { na: "the refusal is the scaffold writer's and does not depend on the source engine (a PostgreSQL or MySQL stream or a Mongo init skips a table by name instead): the oracle column carries the row" }
-    mongo:    { na: "the refusal is the scaffold writer's and does not depend on the source engine (a PostgreSQL or MySQL stream or a Mongo init skips a table by name instead): the oracle column carries the row" }
+    postgres: { na: "this engine's init never leaves out every table (a stream init skips a table by name only beside a readable one), so its scaffold cannot reach the refusal" }
+    mysql:    { na: "this engine's init never leaves out every table (a stream init skips a table by name only beside a readable one), so its scaffold cannot reach the refusal" }
+    mssql:    { na: "this engine's init never leaves out every table (a stream init skips a table by name only beside a readable one), so its scaffold cannot reach the refusal" }
+    mongo:    { gap: "a collection whose name fails the `table:` gate is left out in any mode; asserted offline by lib:a_cdc_scaffold_that_leaves_out_every_table_is_refused_by_code, no live Mongo init cell yet" }
     oracle:   { gap: "walked by the plain CLI cell an_oracle_cdc_init_of_only_unmineable_tables_is_refused_and_a_batch_mode_runs (init has no rig, so it cannot enter through refuses_twice_and_walks_out) and asserted offline by lib:a_cdc_scaffold_that_leaves_out_every_table_is_refused_by_code" }
   - id: refusal_init_config_exists
     what: "RIVET_INIT_CONFIG_EXISTS: `rivet init -o <path>` over a config already at the path; the scaffold is written only beside it (`-o <new-path>`) or after the old one is moved aside"

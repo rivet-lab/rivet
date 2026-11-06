@@ -919,7 +919,7 @@ fn skip_reasons(text: &str) -> Vec<String> {
             && *at == indent
         {
             last.push(' ');
-            last.push_str(rest);
+            last.push_str(rest.trim_start());
         } else {
             open = false;
         }

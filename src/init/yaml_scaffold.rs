@@ -2963,6 +2963,23 @@ mod tests {
             assert!(format!("{err:#}").contains(why), "{err:#}");
         }
         assert!(refused(&schema(&[blob, long, plain]), 3).is_none());
+        let mut coll = make_table(vec![col("_id", "text")]);
+        coll.table = "my-coll".into();
+        let mongo = scaffold_table(
+            &coll,
+            "mongodb://u@localhost/db",
+            &crate::init::SourceProvenance::Inline,
+            &InitYamlDestination::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        let err = refused(&mongo, 1).expect("a lone collection the gate refuses is refused");
+        crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
+        assert!(
+            format!("{err:#}").contains("`table:` identifier gate"),
+            "{err:#}"
+        );
     }
 
     #[test]
