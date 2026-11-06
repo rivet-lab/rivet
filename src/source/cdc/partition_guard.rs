@@ -431,6 +431,7 @@ mod tests {
             nullable: true,
             warnings: vec![],
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         }]
     }
 

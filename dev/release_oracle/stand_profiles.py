@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..pytools import registry
+from ..pytools.shell import tcp_open
 from . import stand_health
 from .core import ROOT, run
 
@@ -138,12 +139,16 @@ def settled(check: Callable[[], str], sleep: Callable[[float], None] = time.slee
     return why
 
 
-def unusable(replica: bool, port_open: Callable[[int], bool] | None = None, roles: Callable[[], dict[str, str]] = ag_roles,
+def port_up(port: int) -> bool:
+    """Does 127.0.0.1:port accept a connection within two seconds (one probe; `settled` retries)?"""
+    return tcp_open("127.0.0.1", port, timeout=2.0)
+
+
+def unusable(replica: bool, port_open: Callable[[int], bool] = port_up, roles: Callable[[], dict[str, str]] = ag_roles,
              store: Callable[[str], bool] | None = None, sleep: Callable[[float], None] = time.sleep) -> dict[str, str]:
     """The checks the stand must pass before any cell (`replica` only when replica rows run): name -> why, empty when usable."""
     from . import scenarios
 
-    port_open = port_open or (lambda port: tcp_open("127.0.0.1", port, timeout=2.0))
     store = store or scenarios.store_up
     found = {"replica": settled(lambda: replica_problem(port_open, roles), sleep) if replica else "",
              "stores": settled(lambda: stores_problem(store), sleep)}
@@ -184,6 +189,16 @@ def check_self_test() -> None:
     naps.clear()
     flaky = lambda port: (seen.append(port), len(seen) > len(replica_ports()))[1]  # noqa: E731
     assert unusable(True, **{**every, "port_open": flaky}) == {} and naps, "a stand that answers on the retry is usable"
+    import socket
+
+    with socket.socket() as held, socket.socket() as spare:
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        spare.bind(("127.0.0.1", 0))
+        gone = spare.getsockname()[1]
+        spare.close()
+        assert port_up(held.getsockname()[1]) and not port_up(gone), "the default probe tells a listening port from a closed one"
+    assert isinstance(unusable(True, **{k: v for k, v in every.items() if k != "port_open"}), dict), "the default probe runs"
     text = refusal(gate)
     assert text.startswith("STAND-PROFILE-DOWN: replica: ") and "dev/mssql-ag/setup.sh" in text and "docker compose" in text, text
 

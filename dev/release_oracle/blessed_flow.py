@@ -1566,21 +1566,21 @@ FLAG_EXCUSED = {
     "--strict": "needs a column whose mapping is lossy, which the blessed postgres chain has none of. "
                 "Carried INSIDE the gate by blessed_flow.verify_run_strict: an Oracle TIMESTAMP(9) "
                 "export is refused by `run --strict` with RIVET_TYPE_UNSAFE_MAPPING and no part, "
-                "and without --strict it warns naming the column and delivers the row.",
+                "and refused the same way without --strict until the column is declared.",
 }
 
 #: `run --strict` (ADR-0038 step 2), carried by tests/live/live_type_policy.rs.
 STRICT_CELLS = {
-    "oracle_batch_timestamp9_warns_by_default_and_strict_refuses_before_export": "run:strict",
+    "oracle_batch_timestamp9_is_refused_until_declared_under_every_policy": "run:strict",
     "check_strict_and_run_strict_refuse_the_same_config_with_the_same_code": "run:strict=check",
 }
 
 
 def verify_run_strict(led: Ledger) -> None:
-    """`run --strict` refuses an unsafe mapping with RIVET_TYPE_UNSAFE_MAPPING; without it the run warns and delivers."""
+    """`run --strict` refuses an unsafe mapping with RIVET_TYPE_UNSAFE_MAPPING, and an undeclared Oracle TIMESTAMP(9) is refused with or without it."""
     from .shared_state import run_rig_tests
 
-    led.phase("run --strict — an unsafe type mapping refused, or warned and delivered")
+    led.phase("run --strict — an unsafe type mapping refused")
     run_rig_tests(
         led, "run_strict", tuple(STRICT_CELLS),
         cell=STRICT_CELLS.__getitem__,

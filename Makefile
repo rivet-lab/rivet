@@ -16,7 +16,7 @@ LIVE_ALL = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --all --
 
 .PHONY: pr-ready live
 pr-ready:  ## Everything a PR must pass before it is opened; paste the summary block into the PR body. ARGS=--fast skips mutants (reported NOT RUN); ARGS='--body FILE' grades the PR body's declarations.
-	python3 dev/pytools/pr_ready.py run $(ARGS)
+	. ./.githooks/repo-venv && python3 dev/pytools/pr_ready.py run $(ARGS)
 
 .PHONY: error-sites
 error-sites:  ## Regenerate docs/error-sites.md: the offline battery and the live suite under cargo llvm-cov (needs the stand; about an hour).

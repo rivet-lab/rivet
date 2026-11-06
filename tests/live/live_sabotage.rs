@@ -2769,6 +2769,7 @@ fn hostile_dates(engine: SqlEngine) -> Vec<(&'static str, &'static str)> {
             ("DATE", "DATE '9999-12-31'"),
             ("DATE", "DATE '-4712-01-01'"),
             ("TIMESTAMP(9)", "TIMESTAMP '9999-12-31 23:59:59.999999999'"),
+            ("TIMESTAMP(6)", "TIMESTAMP '9999-12-31 23:59:59.999999'"),
         ],
     }
 }

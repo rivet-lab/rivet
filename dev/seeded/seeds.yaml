@@ -4748,6 +4748,40 @@ seeds:
       oracle:
         cells: ["lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
 
+  - name: cdc-run-start-marker
+    class: "a CDC run uploads a table's first part before any manifest names the run, so a load from a foreign state DB with gc_orphans removes that part as an orphan and the next load refuses the run's manifest"
+    history: "2026-11-05 - cluster C4 CDC-RUN-START: the open-defect cells live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_{mysql,postgres} were RED on main (LOAD FAILED: declare parts that are no longer under); fixed by the running marker the CDC sink writes before a table's first upload"
+    scope: source
+    patch: cdc-run-start-marker/shared.patch
+    engines:
+      postgres:
+        cells: [a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres, "lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_postgres]
+      mysql:
+        cells: [a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql, "lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mysql]
+      mssql:
+        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mssql]
+      mongo:
+        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mongo]
+      oracle:
+        cells: ["lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_oracle]
+
+  - name: cdc-run-close-marker
+    class: "a CDC run that fails before any part reached the store rewrites its running marker as a Failed manifest over no parts instead of removing it, so the prefix holds a manifest of a run that wrote nothing"
+    history: "2026-11-05 - cluster C4 CDC-RUN-START: the failed-run leg of the running marker; the marker is removed when no part of the table reached the store and rewritten Failed only over the parts that did"
+    scope: source
+    patch: cdc-run-close-marker/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+      mysql:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+      mssql:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+      mongo:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+      oracle:
+        cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
+
   - name: config-knob-range-unchecked
     class: "a count or ratio knob is read without its range: a `chunk_size` of 2^63 or more wraps to a zero window and the run ends exit 0 with 0 rows, `--rollover 0`, Mongo `page_size: 0` and a `quality.null_ratio_max` of NaN, infinity or outside 0 to 1 are accepted"
     history: "2026-11-03 - found by the seam packaging (HCF-1, HCF-3, HCF-4): chunk_size 2^63 planned 0 windows and exited 0 with 0 rows on every SQL engine; fixed by src/config/quantity.rs::Knob"
@@ -4842,6 +4876,26 @@ seeds:
           - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
           - "lib:two_named_identities_are_refused_by_code"
 
+  - name: oracle-timestamp-ns-undeclared-truncated
+    class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
+    history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"
+    scope: source
+    engines:
+      oracle:
+        patch: oracle-timestamp-ns-undeclared-truncated/oracle.patch
+        cells:
+          - an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delivers_every_digit
+          - oracle_batch_timestamp9_is_refused_until_declared_under_every_policy
+          - oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row
+          - "lib:a_sub_microsecond_timestamp_is_refused_and_a_bare_number_warns_by_name"
+      postgres:
+        na: "PostgreSQL timestamp is microsecond-exact, so no column maps with a refusal and there is no truncation to seed"
+      mysql:
+        na: "MySQL DATETIME/TIMESTAMP carry at most six fractional digits, so no column maps with a refusal"
+      mssql:
+        na: "SQL Server datetime2(7) stays a warn-only Lossy mapping by an earlier decision; the mapping refusal is raised only by the Oracle source"
+      mongo:
+        na: "a document source has no declared column wire type, so no mapping carries a refusal"
   - name: pg-temporal-uuid-bytea-array-refused
     class: "a PostgreSQL date[], time[], timestamp[], timestamptz[], uuid[] or bytea[] column is refused by the batch export instead of being delivered as a native list"
     history: "type-known-defects cluster C7 (2026-11-05); RED from this patch: the batch export of a date[] column stops with the element-type refusal and the ledger test fails on the six array rows"
