@@ -403,7 +403,7 @@ with `N`.
 
 **Limitations (current):**
 
-- **Single-column keys only** — composite unique keys are not yet supported.
+- **Composite keys must be the primary key** — a `chunk_by_key` list is accepted only when it is exactly the primary key's columns in key order; a composite unique key that is not the primary key is refused with `RIVET_PLAN_CHUNK_KEY_UNUSABLE`.
 - **Decimal (`numeric`) keys and `partition_by` are rejected for ALL keyset
   exports, sequential included**: a decimal key is refused at plan time because
   the keyset cursor cannot read/advance past it, and `partition_by` is
