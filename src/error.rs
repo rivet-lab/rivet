@@ -1640,7 +1640,7 @@ pub mod codes {
     /// `rivet init` left out every table it found, so the scaffold would hold no export.
     pub const INIT_NOTHING_EXPORTABLE: Code = refusal(
         "RIVET_INIT_NOTHING_EXPORTABLE",
-        "fix what each skip reason names (an Oracle CDC skip clears with a batch `--mode`), or `--include` a table it can export",
+        "fix what each skip reason names (an Oracle CDC skip clears with a batch `--mode`), or init the schema with `--include` naming a table it can export",
     );
     /// A Full load over a `--pool --split` prefix whose parts span more than one split generation.
     pub const LOAD_SPLIT_GENERATIONS_MIXED: Code = refusal(

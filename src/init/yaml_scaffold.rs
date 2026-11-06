@@ -32,6 +32,8 @@ pub(crate) struct ScaffoldDecisions {
     pub decimal_review: bool,
     /// Tables left out of the config, in config order.
     pub skipped: Vec<String>,
+    /// Each left-out table with its reason, one line each, in config order.
+    pub skip_reasons: Vec<String>,
     /// Exports with no cursor / time column, in config order.
     pub needs_cursor: Vec<String>,
     /// Incremental exports whose cursor misses updates, in config order.
@@ -211,14 +213,14 @@ pub(super) fn scaffold_schema(
         );
         lines.push("exports:".to_string());
         for info in &skipped {
-            d.skipped.push(info.table.clone());
-            lines.push(format!(
-                "  # SKIPPED {}: its name cannot be a `table:` shortcut (letters/digits/_ \
-                 segments, its own case-fold on PostgreSQL), so it cannot be a backfill \
-                 recipe and is not in the stream — export it with `query:` in its own \
-                 batch export, or capture it in a second `mode: cdc` export with \
-                 `initial: snapshot`.",
-                yaml_quote_if_needed(&info.table)
+            lines.push(skip_line(
+                &mut d,
+                "",
+                &info.table,
+                "its name cannot be a `table:` shortcut (letters/digits/_ segments, its own \
+                 case-fold on PostgreSQL), so it cannot be a backfill recipe and is not in the \
+                 stream — export it with `query:` in its own batch export, or capture it in a \
+                 second `mode: cdc` export with `initial: snapshot`.",
             ));
         }
         for info in &readable {
@@ -278,6 +280,14 @@ pub(super) fn scaffold_schema(
 
 /// Maximum column width for scaffolded comment lines.
 const COMMENT_WRAP_WIDTH: usize = 100;
+
+/// The `# SKIPPED` comment for `table`, recording the table and its reason in `d`.
+fn skip_line(d: &mut ScaffoldDecisions, kind: &str, table: &str, reason: &str) -> String {
+    let name = yaml_quote_if_needed(table);
+    d.skipped.push(table.to_string());
+    d.skip_reasons.push(format!("{kind}{name}: {reason}"));
+    format!("  # SKIPPED {kind}{name}: {reason}")
+}
 
 /// `text` as one comment line: every line break or control character, including the Unicode line separators, becomes a space.
 fn one_line_comment(text: &str) -> String {
@@ -990,12 +1000,7 @@ fn export_block_lines(
         // The capture refuses this table by the same predicate (`oracle::cdc::unmineable`): a
         // CDC export of it would be a config whose first run stops, so it is left out, said so.
         if let Some(why) = info.cdc_unmineable.as_deref() {
-            d.skipped.push(info.table.clone());
-            return vec![format!(
-                "  # SKIPPED {}: {}",
-                yaml_quote_if_needed(&info.table),
-                one_line_comment(why)
-            )];
+            return vec![skip_line(d, "", &info.table, &one_line_comment(why))];
         }
         let ident = ident.map_or_else(|| cdc_ident(&info.table), str::to_string);
         return cdc_export_lines(
@@ -1042,16 +1047,14 @@ fn export_block_lines(
         // Unexportable in ANY form today: `table:` is Mongo's only export form
         // and the config gate refuses this name (while its "use query:" remedy
         // is a form Mongo refuses — the circular pair round-9 live-proved).
-        d.skipped.push(info.table.clone());
-        return vec![
-            format!(
-                "  # SKIPPED collection {}: its name cannot pass the `table:`",
-                yaml_quote_if_needed(&info.table)
-            ),
-            "  #   identifier gate (letters/digits/_ segments, at most one dot), and".to_string(),
-            "  #   `table:` is the only export form MongoDB supports — rename the".to_string(),
-            "  #   collection or export it with another tool.".to_string(),
-        ];
+        return vec![skip_line(
+            d,
+            "collection ",
+            &info.table,
+            "its name cannot pass the `table:` identifier gate (letters/digits/_ segments, at \
+             most one dot), and `table:` is the only export form MongoDB supports — rename the \
+             collection or export it with another tool.",
+        )];
     }
     if recipe
         || table_form_safe
@@ -2160,6 +2163,7 @@ mod tests {
             needs_cursor: marked(INIT_CURSOR_REVIEW_MARKER),
             insert_only: marked(INIT_INSERT_ONLY_MARKER),
             no_chunk_key: marked(INIT_NO_CHUNK_KEY_MARKER),
+            skip_reasons: Vec::new(),
         }
     }
 
@@ -2241,7 +2245,12 @@ mod tests {
             ),
         ];
         for s in &scaffolds {
-            assert_eq!(s.decisions, decisions_read_from(&s.text), "{}", s.text);
+            assert_eq!(s.decisions.skip_reasons.len(), s.decisions.skipped.len());
+            let shown = ScaffoldDecisions {
+                skip_reasons: Vec::new(),
+                ..s.decisions.clone()
+            };
+            assert_eq!(shown, decisions_read_from(&s.text), "{}", s.text);
         }
         let flips = |f: fn(&ScaffoldDecisions) -> bool| {
             let on = scaffolds.iter().filter(|s| f(&s.decisions)).count();
@@ -2930,7 +2939,7 @@ mod tests {
         let mut plain = make_table(vec![col("ID", "bigint")]);
         plain.table = "ORDERS".into();
         let refused = |s: &Scaffold, tables: usize| {
-            crate::init::refuse_nothing_exportable(&s.text, &s.decisions, tables).err()
+            crate::init::refuse_nothing_exportable(&s.decisions, tables).err()
         };
         let schema = |infos: &[TableInfo]| {
             scaffold_schema(
@@ -2962,6 +2971,16 @@ mod tests {
         for why in ["B BLOB", "over 30 bytes"] {
             assert!(format!("{err:#}").contains(why), "{err:#}");
         }
+        let huge = unmineable(&"X".repeat(100), "name over 30 bytes");
+        let err = refused(&schema(&[huge.clone(), blob.clone()]), 2).expect("refused");
+        let text = format!("{err:#}");
+        let reasons: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(reasons.len(), 2, "{text}");
+        assert!(
+            reasons[0].starts_with(&format!("  {}: oracle cdc:", huge.table)),
+            "{text}"
+        );
+        assert!(reasons[1].starts_with("  DOCS: oracle cdc:"), "{text}");
         assert!(refused(&schema(&[blob, long, plain]), 3).is_none());
         let mut coll = make_table(vec![col("_id", "text")]);
         coll.table = "my-coll".into();

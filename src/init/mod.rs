@@ -835,7 +835,7 @@ pub fn init(
     });
 
     if matches!(format, InitFormat::Yaml) {
-        refuse_nothing_exportable(&text, &decisions, snapshots.len())?;
+        refuse_nothing_exportable(&decisions, snapshots.len())?;
     }
     if let Some(notice) = cursor_notice(&decisions, mode_override, table.is_none()) {
         eprintln!("{notice}");
@@ -887,11 +887,7 @@ pub fn init(
 }
 
 /// Refuse a scaffold that left out every table it found, naming each table with its reason.
-fn refuse_nothing_exportable(
-    text: &str,
-    d: &yaml_scaffold::ScaffoldDecisions,
-    tables: usize,
-) -> Result<()> {
+fn refuse_nothing_exportable(d: &yaml_scaffold::ScaffoldDecisions, tables: usize) -> Result<()> {
     if tables == 0 || d.skipped.len() < tables {
         return Ok(());
     }
@@ -900,31 +896,8 @@ fn refuse_nothing_exportable(
         "init left out every table it found ({}), so the config would hold no export; nothing was \
          written:\n  {}",
         d.skipped.join(", "),
-        skip_reasons(text).join("\n  ")
+        d.skip_reasons.join("\n  ")
     );
-}
-
-/// Each `# SKIPPED` comment of a scaffold, its wrapped continuation lines joined back into one.
-fn skip_reasons(text: &str) -> Vec<String> {
-    let mut reasons: Vec<(usize, String)> = Vec::new();
-    let mut open = false;
-    for line in text.lines() {
-        let comment = line.trim_start();
-        let indent = line.len() - comment.len();
-        if comment.starts_with("# SKIPPED ") {
-            reasons.push((indent, comment.to_string()));
-            open = true;
-        } else if let (true, Some(rest), Some((at, last))) =
-            (open, comment.strip_prefix("# "), reasons.last_mut())
-            && *at == indent
-        {
-            last.push(' ');
-            last.push_str(rest.trim_start());
-        } else {
-            open = false;
-        }
-    }
-    reasons.into_iter().map(|(_, r)| r).collect()
 }
 
 /// The next-steps line for a scaffold that left its `load:` block out because the loader refuses it.
