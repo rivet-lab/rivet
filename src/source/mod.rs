@@ -397,6 +397,9 @@ pub trait Source: Send {
     /// Execute `request.query` and stream batches into `sink`.
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()>;
 
+    /// Read `collection` only as the incarnation a stored cursor was written against; a source without incarnations ignores it.
+    fn pin_incarnation(&mut self, _collection: &str, _incarnation: &str) {}
+
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>>;
 
     /// The chunk planner's catalog probe of `qualified_table`, on this connection.

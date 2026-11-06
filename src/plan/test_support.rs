@@ -13,6 +13,7 @@ pub(crate) fn test_plan() -> ResolvedRunPlan {
         bytes_read: Default::default(),
         parts_landed: Default::default(),
         single_pass_of: None,
+        collection_incarnation: None,
         export_name: "orders".into(),
         partition_rollover: None,
         source_table: None,
