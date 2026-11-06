@@ -2273,7 +2273,7 @@ fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
             .clone()
     };
     assert_eq!(fidelity("IV9"), "lossy");
-    assert_eq!(fidelity("IV6"), "compatible");
+    assert_eq!(fidelity("IV6"), "logical_string");
 }
 
 /// The `columns:` override types beyond the autodetected ones, one column each.
