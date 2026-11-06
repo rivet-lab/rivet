@@ -1,0 +1,11 @@
+diff --git a/src/connect/tls.rs b/src/connect/tls.rs
+--- a/src/connect/tls.rs
++++ b/src/connect/tls.rs
+@@ -41,7 +41,6 @@ pub(crate) fn build_native_tls(cfg: &TlsConfig) -> Result<native_tls::TlsConnect
+                 format!("tls: ca_file is not valid PEM: {}", e),
+             )
+         })?;
+-        builder.disable_built_in_roots(true);
+         builder.add_root_certificate(cert);
+     }
+ 
