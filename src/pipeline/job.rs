@@ -1101,6 +1101,14 @@ fn execute_resolved_plan(
         let summary = synthetic_failed_summary(&plan.export_name, &e);
         return (Err(e), summary);
     }
+    let bound = match super::incarnation::bound_to_collection(plan) {
+        Ok(bound) => bound,
+        Err(e) => {
+            let summary = synthetic_failed_summary(&plan.export_name, &e);
+            return (Err(e), summary);
+        }
+    };
+    let plan = bound.as_ref().unwrap_or(plan);
     let lease = chunked::claim_run(state, plan).map_err(|e| match crate::error::error_code(&e) {
         Some(_) => e,
         None => state_not_writable(&plan.export_name, &e),

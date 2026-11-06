@@ -108,7 +108,7 @@ services:
     profiles: ["batch"]
     restart: unless-stopped
     environment: *pg-env
-    ports: ["5514:5432"]
+    ports: ["127.0.0.1:5514:5432"]
     volumes:
       - pg14_batch_data:/var/lib/postgresql/data
       - ./seeds/common/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
@@ -119,7 +119,7 @@ services:
     profiles: ["batch"]
     restart: unless-stopped
     environment: *pg-env
-    ports: ["5518:5432"]
+    ports: ["127.0.0.1:5518:5432"]
     volumes:
       # 18+ images moved the data volume up a level (PGDATA=/var/lib/postgresql/18/docker)
       - pg18_batch_data:/var/lib/postgresql
@@ -133,7 +133,7 @@ services:
     restart: unless-stopped
     command: ["--default-authentication-plugin=mysql_native_password", "--max-allowed-packet=67108864"]
     environment: *mysql-env
-    ports: ["3557:3306"]
+    ports: ["127.0.0.1:3557:3306"]
     volumes:
       - mysql57_batch_data:/var/lib/mysql
       - ./seeds/common/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
@@ -145,7 +145,7 @@ services:
     restart: unless-stopped
     command: ["--default-authentication-plugin=mysql_native_password"]
     environment: *mysql-env
-    ports: ["3580:3306"]
+    ports: ["127.0.0.1:3580:3306"]
     volumes:
       - mysql80_batch_data:/var/lib/mysql
       - ./seeds/common/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
@@ -157,7 +157,7 @@ services:
     restart: unless-stopped
     <<: *mssql-limits
     environment: *mssql-env
-    ports: ["1519:1433"]
+    ports: ["127.0.0.1:1519:1433"]
     volumes:
       - mssql2019_batch_data:/var/opt/mssql
     healthcheck: *mssql-health
@@ -168,7 +168,7 @@ services:
     restart: unless-stopped
     <<: *mssql-limits
     environment: *mssql-env
-    ports: ["1522:1433"]
+    ports: ["127.0.0.1:1522:1433"]
     volumes:
       - mssql2022_batch_data:/var/opt/mssql
     healthcheck: *mssql-health
@@ -181,7 +181,7 @@ services:
     image: *img-mongo44
     profiles: ["batch"]
     restart: unless-stopped
-    ports: ["27104:27017"]
+    ports: ["127.0.0.1:27104:27017"]
     volumes:
       - mongo44_batch_data:/data/db
     healthcheck: *mongo-health
@@ -190,7 +190,7 @@ services:
     image: *img-mongo50
     profiles: ["batch"]
     restart: unless-stopped
-    ports: ["27105:27017"]
+    ports: ["127.0.0.1:27105:27017"]
     volumes:
       - mongo50_batch_data:/data/db
     healthcheck: *mongo-health
@@ -199,7 +199,7 @@ services:
     image: *img-mongo80
     profiles: ["batch"]
     restart: unless-stopped
-    ports: ["27108:27017"]
+    ports: ["127.0.0.1:27108:27017"]
     volumes:
       - mongo80_batch_data:/data/db
     healthcheck: *mongo-health
@@ -215,7 +215,7 @@ services:
     restart: unless-stopped
     command: ["-c", "wal_level=logical", "-c", "max_replication_slots=32"]
     environment: *pg-env
-    ports: ["5614:5432"]
+    ports: ["127.0.0.1:5614:5432"]
     volumes:
       - pg14_cdc_data:/var/lib/postgresql/data
       - ./seeds/cdc/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
@@ -227,7 +227,7 @@ services:
     restart: unless-stopped
     command: ["-c", "wal_level=logical", "-c", "max_replication_slots=32"]
     environment: *pg-env
-    ports: ["5618:5432"]
+    ports: ["127.0.0.1:5618:5432"]
     volumes:
       # 18+ images moved the data volume up a level (PGDATA=/var/lib/postgresql/18/docker)
       - pg18_cdc_data:/var/lib/postgresql
@@ -248,7 +248,7 @@ services:
       - "--log-bin=binlog"
       - "--binlog-format=ROW"
     environment: *mysql-env
-    ports: ["3657:3306"]
+    ports: ["127.0.0.1:3657:3306"]
     volumes:
       - mysql57_cdc_data:/var/lib/mysql
       - ./seeds/cdc/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
@@ -265,7 +265,7 @@ services:
       - "--binlog-format=ROW"
       - "--binlog-row-metadata=FULL"
     environment: *mysql-env
-    ports: ["3680:3306"]
+    ports: ["127.0.0.1:3680:3306"]
     volumes:
       - mysql80_cdc_data:/var/lib/mysql
       - ./seeds/cdc/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
@@ -279,7 +279,7 @@ services:
     environment:
       <<: *mssql-env
       MSSQL_AGENT_ENABLED: "true"   # the Agent runs the CDC capture job
-    ports: ["1619:1433"]
+    ports: ["127.0.0.1:1619:1433"]
     volumes:
       - mssql2019_cdc_data:/var/opt/mssql
     healthcheck: *mssql-health
@@ -292,7 +292,7 @@ services:
     environment:
       <<: *mssql-env
       MSSQL_AGENT_ENABLED: "true"
-    ports: ["1622:1433"]
+    ports: ["127.0.0.1:1622:1433"]
     volumes:
       - mssql2022_cdc_data:/var/opt/mssql
     healthcheck: *mssql-health
@@ -306,7 +306,7 @@ services:
     profiles: ["cdc"]
     restart: unless-stopped
     command: ["--replSet", "rs0", "--bind_ip_all"]
-    ports: ["27204:27017"]
+    ports: ["127.0.0.1:27204:27017"]
     volumes:
       - mongo44_cdc_data:/data/db
     healthcheck: *mongo-rs-health
@@ -316,7 +316,7 @@ services:
     profiles: ["cdc"]
     restart: unless-stopped
     command: ["--replSet", "rs0", "--bind_ip_all"]
-    ports: ["27205:27017"]
+    ports: ["127.0.0.1:27205:27017"]
     volumes:
       - mongo50_cdc_data:/data/db
     healthcheck: *mongo-rs-health
@@ -326,7 +326,7 @@ services:
     profiles: ["cdc"]
     restart: unless-stopped
     command: ["--replSet", "rs0", "--bind_ip_all"]
-    ports: ["27208:27017"]
+    ports: ["127.0.0.1:27208:27017"]
     volumes:
       - mongo80_cdc_data:/data/db
     healthcheck: *mongo-rs-health

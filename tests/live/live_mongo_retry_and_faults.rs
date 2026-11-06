@@ -53,7 +53,16 @@ fn mongo_export_survives_transient_latency_added_via_toxiproxy() {
     toxi_add_latency("mongo", 25);
 
     let rig = proxied(&db);
+    let t0 = std::time::Instant::now();
     rig.run_ok();
+    let took = t0.elapsed();
+    assert!(
+        took >= Duration::from_millis(3 * 25),
+        "the 25 ms toxic must have slowed at least three sequential round trips; took {took:?}"
+    );
+    let ran =
+        recorded_run_outcome(&rig.config_path(), rig.export_name()).expect("the run's metrics row");
+    assert_eq!(ran.retries, 0, "latency must not cost a retry: {ran:?}");
     assert_eq!(
         duckdb_dir_parquet_distinct_strings(&rig.out_dir(), "_id").len(),
         8000,
@@ -63,60 +72,52 @@ fn mongo_export_survives_transient_latency_added_via_toxiproxy() {
 
 #[test]
 #[ignore = "live: requires docker compose up -d mongo toxiproxy"]
-fn mongo_export_recovers_after_mid_stream_proxy_disable_then_enable_with_retries() {
+fn mongo_export_recovers_after_mid_stream_connection_cut_with_retries() {
     let _g = toxiproxy_guard();
     require_alive(LiveService::Toxiproxy);
     reset_mongo_proxy();
     let db = unique_name("rt_mid");
-    // Large enough (100K / 2K page = 50 pages) that the scan is still in flight
-    // when the proxy drops at 80 ms — so a real mid-scan socket death is retried.
     MongoTest::connect(DIRECT_PORT, &db).seed_int_id("t", 100_000);
 
-    let bg = std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(80));
-        toxi_disable("mongo"); // kill in-flight connections → ErrorKind::Io
-        std::thread::sleep(Duration::from_millis(600));
-        toxi_enable("mongo"); // rivet's retry reconnects here
-    });
-
-    let rig = proxied(&db).a_failed_run_may_leave(
-        &[
-            Leftover::OrphanPart,
-            Leftover::FileLog,
-            Leftover::ObservedSchema,
-        ],
-        "an outage after committed parts is refused loudly; the parts stay for the clean re-run",
-    );
-    let out = rig.run(); // may retry through the outage, or safely refuse — both valid
-    let _ = bg.join();
-
-    // rivet has TWO correct responses to a mid-stream outage, and WHICH one fires
-    // is timing-dependent (did the socket die before or after the first part
-    // committed?) — so the test must accept both. Asserting only the in-place-retry
-    // path was flaky across the version matrix (5.0/8.0 committed parts faster, so
-    // the retry was correctly refused and the run failed loud):
-    //   1. outage before any part committed → retry on a fresh connection → done;
-    //   2. outage after parts committed → REFUSE the retry (re-reading would
-    //      duplicate committed rows) and fail LOUDLY — never a silent partial —
-    //      then a clean re-run over the healthy link completes the export.
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("cannot safely retry"),
-            "a mid-stream outage must surface as the safe-retry refusal, not another \
-             failure:\n{stderr}"
-        );
-        reset_mongo_proxy(); // link healthy again
-        rig.run_ok(); // clean re-run completes the export
+    let rig = Rig::mongo_batch("t")
+        .source_url(&mongo_toxi_url(&db))
+        .mongo("page_size: 2000")
+        .export_line("tuning: { max_retries: 4, retry_backoff_ms: 1500 }");
+    let cut = toxi_add_limit_data("mongo", 30_000, "downstream");
+    let mut run = rig.spawn_args_env(&[], &[]);
+    let t0 = std::time::Instant::now();
+    while !run.stderr_so_far().contains("retry 1/")
+        && !matches!(run.try_wait(), Ok(Some(_)))
+        && t0.elapsed() < Duration::from_secs(90)
+    {
+        std::thread::sleep(Duration::from_millis(25));
     }
+    toxi_remove_toxic("mongo", &cut);
+    let out = run.wait_with_output().expect("reap the run");
 
-    // Either path ends with every row present. The refuse-then-rerun path is
-    // at-least-once (committed parts + a full re-export can leave duplicate ROWS),
-    // so assert on the DISTINCT _id set — the completeness oracle, dup-immune.
+    assert!(
+        out.status.success(),
+        "a cut before any part is durable must be retried on a fresh connection; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ran =
+        recorded_run_outcome(&rig.config_path(), rig.export_name()).expect("the run's metrics row");
+    assert!(
+        ran.status == "success" && ran.retries >= 1,
+        "the run must have retried the cut; recorded: {ran:?}"
+    );
+    let rows: usize = read_all_parts(&rig.out_dir())
+        .iter()
+        .map(|b| b.num_rows())
+        .sum();
+    assert_eq!(
+        rows, 100_000,
+        "a retried cut must deliver every document exactly once"
+    );
     assert_eq!(
         duckdb_dir_parquet_distinct_strings(&rig.out_dir(), "_id").len(),
         100_000,
-        "a mid-stream outage must never lose a row — recovered in place or safely re-run",
+        "no document may be lost or doubled across the retry"
     );
 }
 
@@ -131,7 +132,12 @@ fn mongo_export_fails_cleanly_when_proxy_is_disabled_before_run() {
 
     toxi_disable("mongo"); // upstream unreachable for the whole run
 
-    // A permanently-dead upstream must fail (a non-zero exit), not hang — the
-    // retry budget is finite and server-selection failure is terminal after it.
-    let _stderr = proxied(&db).run_expect_fail();
+    let rig = proxied(&db);
+    let _stderr = rig.run_expect_fail();
+    toxi_enable("mongo");
+    assert_recorded_failure(
+        &rig.config_path(),
+        rig.export_name(),
+        &["no answer from", "server selection timeout"],
+    );
 }
