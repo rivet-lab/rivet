@@ -1912,7 +1912,11 @@ mod tests {
                     assert!(text.contains(cause), "{text}");
                     assert!(text.contains("or use `mode: full`"), "{text}");
                     if explicit {
-                        assert!(text.contains(super::keyset_key_remedy(source)), "{text}");
+                        let remedy = match source {
+                            SourceType::Mssql => MSSQL_KEYSET_KEY_REMEDY,
+                            _ => KEYSET_KEY_REMEDY,
+                        };
+                        assert!(text.contains(remedy), "{text}");
                     }
                 }
             }
