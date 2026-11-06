@@ -1255,7 +1255,7 @@ pub mod codes {
     /// `run --validate` could not read the destination back.
     pub const VALIDATE_UNVERIFIED: Code = environment(
         "RIVET_VALIDATE_UNVERIFIED",
-        "restore read access to the destination and run `rivet validate`; the export itself completed",
+        "restore read access to the destination and run `rivet validate`; if the export completed, its parts are already written",
     );
     pub const INTERNAL_VALUE_CONVERTER: Code = internal(
         "RIVET_INTERNAL_VALUE_CONVERTER",
@@ -1605,7 +1605,7 @@ pub mod codes {
     /// A destination credential that is malformed, expired or refused by the provider's token endpoint.
     pub const DEST_CREDENTIALS_INVALID: Code = environment(
         "RIVET_DEST_CREDENTIALS_INVALID",
-        "issue the destination a fresh, complete credential (a new SAS, service-account key or `gcloud auth application-default login`)",
+        "issue the destination a fresh, complete credential: a new SAS, or name a service-account key file as `credentials_file` (leave `credentials_file` out to use gcloud ADC)",
     );
     /// The destination prefix holds a manifest of another export mode (batch beside CDC).
     pub const DEST_PREFIX_MODE_MISMATCH: Code = refusal(

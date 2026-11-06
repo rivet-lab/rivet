@@ -389,7 +389,7 @@ guarantees:
   - id: validate_never_queries_the_source
     stated:
       - file: docs/cloud-destinations.md
-        sentence: "**never queries the source**: only `HEAD` / `GET _SUCCESS` / `GET manifest.json` against the resolved destination."
+        sentence: "For an export without `partition_by`, it **never queries the source**: only `HEAD` / `GET _SUCCESS` / `GET manifest.json` against the resolved destination."
     held_by:
       postgres: { test: validate_never_queries_the_source_postgres, asserts: "validate opened {during_validate} connection(s) to the source" }
       mysql: { test: validate_never_queries_the_source_mysql, asserts: "validate opened {during_validate} connection(s) to the source" }
