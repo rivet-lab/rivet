@@ -1481,7 +1481,7 @@ fn load_one_cdc_base(
                 changes_table: loader.fqtn(&format!("{}__changes", plan.table)),
                 target: loader.fqtn(&plan.table),
                 target_kind: load::ChangelogTarget::Base,
-                source_cleaned: false,
+                source_cleaned: baseline_leg.as_ref().is_some_and(|b| b.source_cleaned),
                 baseline: None,
             });
             report.baseline = baseline_leg;
@@ -3561,6 +3561,31 @@ mod load_ledger_tests {
             .expect("the baseline loads");
         assert!(report.baseline.as_ref().is_some_and(|b| b.source_cleaned));
         assert!(!dir.path().join("p/part-r-base.parquet").exists());
+        assert!(
+            cdc_ok_line(&report).ends_with(" (source cleaned)"),
+            "{}",
+            cdc_ok_line(&report)
+        );
+    }
+
+    /// A baseline whose stream also buffers leaves the cleanup to the buffer leg, so the stream's parts outlive the baseline leg.
+    #[test]
+    fn a_baseline_followed_by_a_buffer_leg_leaves_the_cleanup_to_that_leg() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open_in_memory().unwrap();
+        let mut plan = base_plan(&dir, "buffer_cleans");
+        plan.load.cleanup_source = true;
+        finished_row(&state, "r-base");
+        finished_row(&state, "r-cdc");
+        stage_run(&dir, "r-base", "full");
+        stage_run(&dir, "r-cdc", "cdc");
+        let mut job = cdc_job(&dir, &state, &plan);
+        job.loader = Box::new(load::tests::fake_loader(1));
+        let report = load_one_cdc_base(job, &["id".to_string()], false, Some(&state))
+            .unwrap()
+            .expect("both legs load");
+        assert!(report.baseline.as_ref().is_some_and(|b| !b.source_cleaned));
+        assert!(report.source_cleaned);
     }
 
     /// Stage a successful baseline leg that exported no rows and wrote no part.
