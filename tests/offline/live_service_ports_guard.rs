@@ -149,8 +149,9 @@ fn every_compose_port_binds_loopback() {
             }
         }
     }
-    assert!(
-        offenders.is_empty(),
+    assert_eq!(
+        offenders,
+        Vec::<String>::new(),
         "compose ports published without the {LOOPBACK} host IP (reachable from the LAN): {offenders:#?}"
     );
 }
@@ -223,8 +224,9 @@ fn every_runtime_publish_binds_loopback() {
             offenders.push(format!("{}: {spec}", file.display()));
         }
     }
-    assert!(
-        offenders.is_empty(),
+    assert_eq!(
+        offenders,
+        Vec::<String>::new(),
         "`docker run` publishes without the {LOOPBACK} host IP (use shell.loopback_publish): {offenders:#?}"
     );
 }
@@ -297,8 +299,9 @@ fn every_live_service_port_is_mapped_by_a_compose_file() {
         .iter()
         .filter(|(_, p)| *p != 0 && !mapped.contains(p))
         .collect();
-    assert!(
-        orphans.is_empty(),
+    assert_eq!(
+        orphans,
+        Vec::<&(String, u16)>::new(),
         "LiveService arms claim ports no compose file maps: {orphans:?}. Either the \
          service moved in docker-compose.yaml and env.rs was not updated (every \
          require_alive for it now probes a dead port and reports the service down), or \
