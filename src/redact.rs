@@ -196,27 +196,10 @@ fn unescaped_whitespace(text: &str) -> usize {
     text.len()
 }
 
-/// Redact SECRET-BEARING QUERY PARAMETERS: `?token=…`, `&password=…`,
-/// `sig=…` (SAS), `api_key=…`, `secret=…`, `sas=…`, `sv=…` values become
-/// `***`. Round-8 made this boundary load-bearing, not hypothetical: a Slack
-/// webhook keeps its credential in the URL *path*, and reqwest's error
-/// Display prints the URL — userinfo-only redaction shipped the token to
-/// every log aggregator on a delivery failure. Path secrets have no
-/// recognizable shape (handled at the notify site via `without_url`); query
-/// keys DO, so they are scrubbed here for every error path.
+/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling.
 pub(crate) fn redact_query_secrets(s: &str) -> String {
-    // SUFFIX-FAMILY matching (round-10, rebuilt from the start-anchored key
-    // list): real secret params are compounds ENDING in the secret word —
-    // access_token, sas_token, client_secret, X-Amz-Signature — so `token=`
-    // covered while `*_token=` leaked, systematically. A param whose lowercased
-    // name ends in one of these families is redacted; `sv` left the list (it is
-    // Azure's service VERSION — redacting it destroyed the one field that
-    // diagnoses version-mismatch errors). The matched key keeps its ORIGINAL
-    // spelling, and the value stop-set includes the `)`/`:`/`,`/`;` that
-    // reqwest's ` for url (…)` rendering puts right after the URL.
-    const FAMILIES: [&str; 8] = [
+    const FAMILIES: [&str; 7] = [
         "token",
-        "password",
         "apikey",
         "api_key",
         "api-key",
@@ -226,10 +209,12 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
     ];
     fn is_secret_key(key: &str) -> bool {
         let lower = key.to_ascii_lowercase();
-        FAMILIES.iter().any(|f| {
-            lower == *f
-                || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
-        }) || lower == "sas"
+        is_password_keyword(key)
+            || FAMILIES.iter().any(|f| {
+                lower == *f
+                    || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
+            })
+            || lower == "sas"
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -237,7 +222,7 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
         out.push_str(&rest[..=q]);
         rest = &rest[q + 1..];
         let key_end = rest
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .find(|c: char| !c.is_ascii() || !is_keyword_byte(c as u8))
             .unwrap_or(rest.len());
         if key_end < rest.len()
             && rest.as_bytes()[key_end] == b'='
@@ -247,9 +232,6 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
             out.push_str("=***");
             let after = &rest[key_end + 1..];
             let val_end = after
-                // `)` closes reqwest's ` for url (…)`; `:`/`,` deliberately NOT
-                // stops (round-10 refuter: they truncated redaction mid-secret —
-                // `password=abc:def` leaked `:def`).
                 .find(|c: char| matches!(c, '&' | '\'' | '"' | ')' | ';') || c.is_whitespace())
                 .map(|i| key_end + 1 + i)
                 .unwrap_or(rest.len());
@@ -555,6 +537,7 @@ mod tests {
             // NEGATIVE: the same family GLUED to the prefix (no separator) is
             // not a match — the documented FP-avoidance boundary.
             let glued = format!("postgresql://u@h/db?{prefix}{family}={secret}");
+            proptest::prop_assume!(family != "password");
             proptest::prop_assert_eq!(
                 redact_query_secrets(&glued),
                 glued.clone(),

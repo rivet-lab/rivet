@@ -1,0 +1,39 @@
+--- a/src/redact.rs
++++ b/src/redact.rs
+@@ -198,8 +198,9 @@
+ 
+ /// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling.
+ pub(crate) fn redact_query_secrets(s: &str) -> String {
+-    const FAMILIES: [&str; 7] = [
++    const FAMILIES: [&str; 8] = [
+         "token",
++        "password",
+         "apikey",
+         "api_key",
+         "api-key",
+@@ -209,12 +210,10 @@
+     ];
+     fn is_secret_key(key: &str) -> bool {
+         let lower = key.to_ascii_lowercase();
+-        is_password_keyword(key)
+-            || FAMILIES.iter().any(|f| {
+-                lower == *f
+-                    || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
+-            })
+-            || lower == "sas"
++        FAMILIES.iter().any(|f| {
++            lower == *f
++                || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
++        }) || lower == "sas"
+     }
+     let mut out = String::with_capacity(s.len());
+     let mut rest = s;
+@@ -222,7 +221,7 @@
+         out.push_str(&rest[..=q]);
+         rest = &rest[q + 1..];
+         let key_end = rest
+-            .find(|c: char| !c.is_ascii() || !is_keyword_byte(c as u8))
++            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+             .unwrap_or(rest.len());
+         if key_end < rest.len()
+             && rest.as_bytes()[key_end] == b'='
