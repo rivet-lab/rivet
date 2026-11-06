@@ -17,7 +17,9 @@ use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
 use openssl::ssl::{SslAcceptor, SslMethod};
-use openssl::x509::extension::{BasicConstraints, KeyUsage, SubjectAlternativeName};
+use openssl::x509::extension::{
+    BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
+};
 use openssl::x509::{X509, X509NameBuilder};
 
 struct Cert {
@@ -78,6 +80,8 @@ fn issue(cn: &str, issuer: Option<&Cert>) -> Cert {
                     .unwrap()
             };
             b.append_extension(san).unwrap();
+            b.append_extension(ExtendedKeyUsage::new().server_auth().build().unwrap())
+                .unwrap();
         }
     }
     b.sign(issuer.map_or(&key, |i| &i.key), MessageDigest::sha256())
@@ -269,14 +273,14 @@ fn listen(engine: Engine, server: &Cert) -> Listener {
     Listener { port, trusted }
 }
 
-/// Whether the client of `rivet init --tls <mode> [--tls-ca ca]` sent data after the handshake.
+/// Whether the client of `rivet init --tls <mode> [--tls-ca ca]` sent data after the handshake, with its stderr.
 fn client_trusted(
     engine: Engine,
     server: &Cert,
     mode: &str,
     ca: Option<&Path>,
     system_roots: Option<&Path>,
-) -> bool {
+) -> (bool, String) {
     let l = listen(engine, server);
     let cwd = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rivet"));
@@ -291,7 +295,7 @@ fn client_trusted(
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn rivet");
     let start = Instant::now();
@@ -302,8 +306,12 @@ fn client_trusted(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    let mut said = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        err.read_to_string(&mut said).ok();
+    }
     child.wait().ok();
-    l.trusted.load(Ordering::SeqCst)
+    (l.trusted.load(Ordering::SeqCst), said)
 }
 
 struct Pki {
@@ -325,9 +333,10 @@ fn wrong_ca_is_refused(engine: Engine) {
     let ca_a = write_pem(p.dir.path(), "a.pem", &p.ca_a);
     let by_b = issue("localhost", Some(&p.ca_b));
     for mode in ["verify-ca", "verify-full"] {
+        let (trusted, said) = client_trusted(engine, &by_b, mode, Some(&ca_a), None);
         assert!(
-            !client_trusted(engine, &by_b, mode, Some(&ca_a), None),
-            "{engine:?} {mode}: a certificate signed by a CA other than ca_file must be refused"
+            !trusted,
+            "{engine:?} {mode}: a certificate signed by a CA other than ca_file must be refused:\n{said}"
         );
     }
 }
@@ -337,9 +346,10 @@ fn right_ca_is_accepted(engine: Engine) {
     let ca_a = write_pem(p.dir.path(), "a.pem", &p.ca_a);
     let by_a = issue("localhost", Some(&p.ca_a));
     for mode in ["verify-ca", "verify-full"] {
+        let (trusted, said) = client_trusted(engine, &by_a, mode, Some(&ca_a), None);
         assert!(
-            client_trusted(engine, &by_a, mode, Some(&ca_a), None),
-            "{engine:?} {mode}: a certificate signed by the ca_file CA must be accepted"
+            trusted,
+            "{engine:?} {mode}: a certificate signed by the ca_file CA must be accepted:\n{said}"
         );
     }
 }
@@ -350,9 +360,10 @@ fn system_store_is_not_a_second_anchor(engine: Engine) {
     let ca_a = write_pem(p.dir.path(), "a.pem", &p.ca_a);
     let ca_b = write_pem(p.dir.path(), "b.pem", &p.ca_b);
     let by_b = issue("localhost", Some(&p.ca_b));
+    let (trusted, said) = client_trusted(engine, &by_b, "verify-ca", Some(&ca_a), Some(&ca_b));
     assert!(
-        !client_trusted(engine, &by_b, "verify-ca", Some(&ca_a), Some(&ca_b)),
-        "{engine:?}: a certificate the system store trusts must be refused when ca_file names another CA"
+        !trusted,
+        "{engine:?}: a certificate the system store trusts must be refused when ca_file names another CA:\n{said}"
     );
 }
 
@@ -361,9 +372,10 @@ fn system_store_still_decides_without_a_ca_file(engine: Engine) {
     let p = pki();
     let ca_b = write_pem(p.dir.path(), "b.pem", &p.ca_b);
     let by_b = issue("localhost", Some(&p.ca_b));
+    let (trusted, said) = client_trusted(engine, &by_b, "verify-full", None, Some(&ca_b));
     assert!(
-        client_trusted(engine, &by_b, "verify-full", None, Some(&ca_b)),
-        "{engine:?}: with no ca_file the system store keeps deciding"
+        trusted,
+        "{engine:?}: with no ca_file the system store keeps deciding:\n{said}"
     );
 }
 
