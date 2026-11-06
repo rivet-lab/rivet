@@ -42,6 +42,7 @@ impl LoadSpecColumn {
             nullable: self.nullable,
             warnings: self.warnings.clone(),
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         }
     }
 }

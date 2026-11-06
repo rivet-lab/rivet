@@ -31,14 +31,6 @@ _ORACLE_CDC_LOAD = (
 )
 
 
-_TS9 = (
-    "Oracle TIMESTAMP(9) is delivered at microseconds today: docs/type-capability-matrix.yaml's oracle TIMESTAMP(9) row is a known_defect "
-    "(exact native is Timestamp(ns), ADR-0038 CP1, Oracle engine step), so the 1 ns sentinel lands truncated. "
-    "Renewed 2026-11-01: still live (target/triage/sent_oracle_alone.log); closes when the Oracle engine step lands Timestamp(ns). "
-    "Pinned 2026-11-01 to the whole symptom: a NULL, epoch or other wrong value no longer matches"
-)
-
-
 def _open(cell: str, symptom: str, reason: str) -> KnownRed:
     """The entry of one `open_defect_*` live cell: its test path and the first line of its panic."""
     return KnownRed(f"{cell} — {symptom}", reason, _EXPIRES)
@@ -63,12 +55,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              _EXPIRES),
     KnownRed("upgrade[oracle/cdc-load/tz=Asia/Tokyo]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
-             _EXPIRES),
-    KnownRed("sentinels[rivet_sent_ts9/full]: SUCCEEDED WITH A CHANGED VALUE: `V` differs at ID=('num', '1'): source ' 2024-01-01 00:00:00.000000001' vs warehouse datetime.datetime(2024, 1, 1, 0, 0)",
-             _TS9,
-             _EXPIRES),
-    KnownRed("sentinels[rivet_sent_ts9/keyset]: SUCCEEDED WITH A CHANGED VALUE: `V` differs at ID=('num', '1'): source ' 2024-01-01 00:00:00.000000001' vs warehouse datetime.datetime(2024, 1, 1, 0, 0)",
-             _TS9,
              _EXPIRES),
 )
 

@@ -33,7 +33,9 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 26 -> 25 (2026-11-05): the TF-1 cell closed with fix/mysql-binlog-time-fraction.
 // ratchet-pin: known-red-entries (review 2027-02-01) count dev/release_oracle/known_red.py ^    (_open|KnownRed)\(
 // 25 -> 24 (2026-11-05): the HFF-2 cell is green on fix/destination-credential-every-leg and its entry is deleted.
-// 24 -> 8 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type) and the two CDC-RUN-START cells are plain again on main (fix/cdc-run-start-marker, #801); merged from both sides.
+// 24 -> 22 (2026-11-05): the two Oracle TIMESTAMP(9) sentinel gate rows are deleted; an undeclared TIMESTAMP(7..9) is refused by code (c5-oracle-ts9).
+// 22 -> 20 (2026-11-05): the two CDC-RUN-START cells are plain cells again (fix/cdc-run-start-marker).
+// 20 -> 6 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
