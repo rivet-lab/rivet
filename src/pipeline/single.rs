@@ -82,7 +82,15 @@ pub(crate) fn run_with_reconnect(
         }
 
         let mut src = match source::create_source(&plan.source) {
-            Ok(s) => s,
+            Ok(mut s) => {
+                if let (Some(collection), Some(incarnation)) = (
+                    crate::sql::strip_select_star_from(&plan.base_query),
+                    plan.collection_incarnation.as_deref(),
+                ) {
+                    s.pin_incarnation(collection, incarnation);
+                }
+                s
+            }
             Err(e) => {
                 // A closed port / unroutable host / DNS failure will never come
                 // up on its own — retrying just spams ~14s of escalating backoff
