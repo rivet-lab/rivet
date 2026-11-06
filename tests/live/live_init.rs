@@ -434,6 +434,83 @@ fn init_mongo_of_only_ungated_collections_is_refused_writing_nothing() {
     );
 }
 
+// ─── MongoDB: a CDC init of only gate-refused collections is refused too ──
+
+/// A `--mode cdc` init whose every collection fails the `table:` gate, one collection or the database,
+/// is refused by code writing no file; beside a gated name it leaves that name out and the config runs.
+#[test]
+#[ignore = "live: requires docker compose mongo-rs"]
+fn init_mongo_cdc_of_only_ungated_collections_is_refused_writing_nothing() {
+    let port = mongo_rs_port();
+    let db = unique_name("minit_cdcgate");
+    let _guard = MongoDbGuard {
+        port,
+        db: db.clone(),
+    };
+    MongoTest::connect(port, &db).seed_int_id("my-coll", 2);
+    let url = MongoTest::url(port, &db);
+    for extra in [&[][..], &["--table", "my-coll"][..]] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = vec![
+            "init",
+            "--source",
+            &url,
+            "--mode",
+            "cdc",
+            "--output",
+            "rivet.yaml",
+        ];
+        args.extend(extra);
+        let out = run_rivet_in_dir(dir.path(), &args, &[]);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(5), "{extra:?}: {said}");
+        assert!(
+            said.contains("[RIVET_INIT_NOTHING_EXPORTABLE]"),
+            "{extra:?}: {said}"
+        );
+        assert!(
+            said.contains("my-coll") && said.contains("`table:` identifier gate"),
+            "{extra:?}: {said}"
+        );
+        assert!(!dir.path().join("rivet.yaml").exists(), "{extra:?}: {said}");
+    }
+    MongoTest::connect(port, &db).seed_int_id("good_coll", 2);
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_rivet_in_dir(
+        dir.path(),
+        &[
+            "init",
+            "--source",
+            &url,
+            "--mode",
+            "cdc",
+            "--output",
+            "rivet.yaml",
+        ],
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let config = std::fs::read_to_string(dir.path().join("rivet.yaml")).unwrap();
+    assert!(
+        config.contains("good_coll") && config.contains("# SKIPPED collection my-coll"),
+        "{config}"
+    );
+    let out = run_rivet_in_dir(
+        dir.path(),
+        &["run", "-c", "rivet.yaml"],
+        &[("DATABASE_URL", url.as_str())],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // ─── MongoDB: a forced mode the source cannot run is refused, never rewritten ──
 
 #[test]
