@@ -577,6 +577,11 @@ pub struct Spawned<'a> {
 }
 
 impl Spawned<'_> {
+    /// What the child has printed to stderr so far.
+    pub fn stderr_so_far(&self) -> String {
+        String::from_utf8_lossy(&std::fs::read(&self.said[1]).unwrap_or_default()).into_owned()
+    }
+
     /// [`std::process::Child::wait`], then grade the run.
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait()?;

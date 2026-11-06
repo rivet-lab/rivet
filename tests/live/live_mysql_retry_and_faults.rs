@@ -230,3 +230,98 @@ fn mysql_permanent_sql_error_fails_fast_without_exhausting_retries() {
         "stderr must include the driver's error text; got:\n{stderr}"
     );
 }
+
+const CUT_ROWS: i64 = 100;
+const CUT_PAD_BYTES: usize = 60_000;
+const CUT_AFTER_BYTES: u64 = 5 * CUT_PAD_BYTES as u64 + (CUT_PAD_BYTES / 2) as u64;
+
+/// A table of `rows` rows, each holding `pad_bytes` of text, so one result row is one large packet.
+fn seed_mysql_padded_table(rows: i64, pad_bytes: usize) -> MysqlTable {
+    use mysql::prelude::Queryable;
+
+    let name = unique_name("rivet_qa_cut");
+    let mut c = mysql_connect();
+    c.query_drop(format!(
+        "CREATE TABLE {name} (id BIGINT PRIMARY KEY, pad LONGTEXT NOT NULL) ENGINE=InnoDB"
+    ))
+    .expect("create padded mysql table");
+    let table = MysqlTable::adopt(name.clone());
+    c.query_drop(format!(
+        "INSERT INTO {name} (id, pad) \
+         WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < {rows}) \
+         SELECT n, REPEAT('x', {pad_bytes}) FROM s"
+    ))
+    .expect("seed padded mysql rows");
+    table
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql + toxiproxy + duckdb"]
+fn mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once() {
+    let _g = toxiproxy_guard();
+    require_alive(LiveService::Mysql);
+    require_alive(LiveService::DuckDb);
+    require_alive(LiveService::Toxiproxy);
+    reset_mysql_proxy();
+
+    let table = seed_mysql_padded_table(CUT_ROWS, CUT_PAD_BYTES);
+    let export_name = unique_name("my_cut_midrow");
+    let (out_host, out_container) = duckdb_shared_workdir("my_cut_midrow_oracle");
+    let rig = Rig::mysql_batch(&export_name)
+        .source_url(MYSQL_TOXI_URL)
+        .query(&format!("SELECT id, pad FROM {}", table.name()))
+        .mode("full")
+        .export_line("tuning:")
+        .export_line("  max_retries: 3")
+        .export_line("  retry_backoff_ms: 3000")
+        .dest_path(out_host.clone());
+
+    toxi_add_limit_data("mysql", CUT_AFTER_BYTES, "downstream");
+    let mut run = rig.spawn_args_env(&["--export", &export_name], &[]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
+        if run.stderr_so_far().contains("retry 1/") {
+            toxi_reset_toxics("mysql");
+            break;
+        }
+        if run.try_wait().expect("poll the run").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out_run = run.wait_with_output().expect("reap the run");
+    toxi_reset_toxics("mysql");
+
+    let stderr = String::from_utf8_lossy(&out_run.stderr);
+    assert!(
+        out_run.status.success(),
+        "a connection cut mid-row must be retried and the run must exit 0; stderr:\n{stderr}"
+    );
+    let state = StateDb::next_to_config(&rig.config_path());
+    let metrics = state.metrics_row(&state.latest_run_id(&export_name));
+    assert!(
+        metrics.retries.unwrap_or(0) >= 1,
+        "export_metrics.retries must record the retry; got {:?}; stderr:\n{stderr}",
+        metrics.retries
+    );
+    duckdb_declared_assert_complete(
+        &out_container,
+        "id",
+        CUT_ROWS,
+        "a retry across a connection cut in the middle of a row",
+    );
+    assert_eq!(
+        duckdb_declared_distinct_set(&out_container, "id"),
+        (1..=CUT_ROWS).map(|i| i.to_string()).collect(),
+        "the delivered id set must equal the source id set"
+    );
+    let intact = duckdb_run_sql_json(&format!(
+        "SELECT count(*) FROM read_parquet('{out_container}/**/*.parquet') \
+         WHERE length(pad) = {CUT_PAD_BYTES}"
+    ));
+    assert_eq!(
+        intact["rows"][0][0].as_str(),
+        Some(CUT_ROWS.to_string().as_str()),
+        "every delivered pad must be whole"
+    );
+}

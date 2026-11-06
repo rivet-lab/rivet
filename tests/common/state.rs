@@ -36,6 +36,7 @@ pub struct MetricsRow {
     pub batch_size_memory_mb: Option<i64>,
     pub skip_reason: Option<String>,
     pub peak_rss_mb: Option<i64>,
+    pub retries: Option<i64>,
 }
 
 /// A handle to one run's state DB. Open once, query many.
@@ -197,7 +198,7 @@ impl StateDb {
                         rivet_version, batch_size, chunk_size, parallel, files_committed, \
                         longest_chunk_ms, pg_temp_bytes_delta, source_count, reconciled, validated, \
                         schema_fingerprint, quality_passed, batch_size_memory_mb, skip_reason, \
-                        peak_rss_mb \
+                        peak_rss_mb, retries \
                  FROM export_metrics WHERE run_id = ?1",
                 [run_id],
                 |r| {
@@ -222,6 +223,7 @@ impl StateDb {
                         batch_size_memory_mb: r.get(17)?,
                         skip_reason: r.get(18)?,
                         peak_rss_mb: r.get(19)?,
+                        retries: r.get(20)?,
                     })
                 },
             )
