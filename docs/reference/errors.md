@@ -47,7 +47,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CONFIG_PATH_UNSAFE` | usage | 1 | use a plain name and a bucket-relative path: no `/`, `\`, `..`, NUL, leading `.` or URI scheme |
 | `RIVET_CONFIG_ROW_HASH_INVALID` | usage | 1 | list each column of one table once under `meta_columns.row_hash`, or use `row_hash: true` |
 | `RIVET_CONFIG_COLUMN_OVERRIDE_TABLE_UNKNOWN` | usage | 1 | use a bare column key, or qualify it with a table this export captures |
-| `RIVET_TYPE_UNSAFE_MAPPING` | usage | 1 | add a `columns:` override the engine delivers exactly, CAST or drop the column in the export's `query:`, or run without `--strict` to accept it with a warning |
+| `RIVET_TYPE_UNSAFE_MAPPING` | usage | 1 | add a `columns:` override the engine delivers exactly (or one that names the loss), or CAST or drop the column in the export's `query:` |
 | `RIVET_SOURCE_STATEMENT_TIMEOUT` | environment | 2 if transient, else 1 | raise `tuning.statement_timeout_s`, or narrow the chunk |
 | `RIVET_SOURCE_CURSOR_FINER_THAN_MICROSECOND` | refusal | 5 | cursor on a column at microsecond precision or coarser, or cast the cursor to TIMESTAMP(6) in a curated query |
 | `RIVET_SOURCE_CDC_FOREIGN_CHECKPOINT` | refusal | 5 | re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
@@ -138,7 +138,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_LOAD_WAREHOUSE_ANSWER_UNREADABLE` | internal | 6 | the warehouse answered in a shape rivet does not read — report it with the message |
 | `RIVET_INTERNAL_LOAD_INVARIANT` | internal | 6 | a load invariant did not hold — a bug; report it with the message |
 | `RIVET_VALIDATE_FAILED` | integrity | 3 | run `rivet validate` on the prefix and settle each failed part before loading it; the export itself completed |
-| `RIVET_VALIDATE_UNVERIFIED` | environment | 2 if transient, else 1 | restore read access to the destination and run `rivet validate`; the export itself completed |
+| `RIVET_VALIDATE_UNVERIFIED` | environment | 2 if transient, else 1 | restore read access to the destination and run `rivet validate`; if the export completed, its parts are already written |
 | `RIVET_INTERNAL_VALUE_CONVERTER` | internal | 6 | a value changed between the source and the written part — a bug; report it with the column's type |
 | `RIVET_INTERNAL_SPILL` | internal | 6 | the CDC spill log is inconsistent — a bug or a damaged spill directory; report it and re-run |
 | `RIVET_INTERNAL_TYPE_BUILDER` | internal | 6 | a column builder got a type it cannot build — a bug; report it with the column's type |
@@ -208,7 +208,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CONFIG_QUALITY_COLUMN_UNKNOWN` | usage | 1 | name columns the export projects under `quality:`, or add them to the query |
 | `RIVET_CONFIG_COLUMN_OVERRIDE_TYPE_INVALID` | usage | 1 | give the `columns:` override one of the type names the message lists, with `decimal(precision,scale)` in range |
 | `RIVET_CONFIG_DESTINATION_SETTING_MISSING` | usage | 1 | set the destination key the message names |
-| `RIVET_DEST_CREDENTIALS_INVALID` | environment | 2 if transient, else 1 | issue the destination a fresh, complete credential (a new SAS, service-account key or `gcloud auth application-default login`) |
+| `RIVET_DEST_CREDENTIALS_INVALID` | environment | 2 if transient, else 1 | issue the destination a fresh, complete credential: a new SAS, or name a service-account key file as `credentials_file` (leave `credentials_file` out to use gcloud ADC) |
 | `RIVET_DEST_PREFIX_MODE_MISMATCH` | refusal | 5 | give the export its own destination prefix; a batch and a CDC export must not share one |
 | `RIVET_DEST_IO_RUNTIME_UNAVAILABLE` | environment | 2 if transient, else 1 | raise the process's thread and open-file limits, or lower the export parallelism, then run again |
 | `RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE` | transient | 2 | re-run the same command later; Google's token endpoint failed with a transient error (HTTP 408, 429 or 5xx, or no answer) that rivet's retries did not outlast, and the credential itself was not refused |

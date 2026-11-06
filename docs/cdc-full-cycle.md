@@ -148,7 +148,7 @@ Check:
   ```
 
   Both equal the source's `COUNT(*)`; `orders__changes` is gone until the next load.
-- Under `load.layout: log_view` (a capture-only stream, or written explicitly)
+- Under `load.layout: log_view` (deprecated in 0.33, still works; a capture-only stream, or written explicitly)
   there is no compaction: `orders` is a **view** over `orders__changes`, which
   keeps every change, and the same `WHERE NOT __is_deleted` reads live state.
 - On **Snowflake**, base + buffer is the default (no `layout:` to write; `load.layout:
