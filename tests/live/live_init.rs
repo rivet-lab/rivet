@@ -373,7 +373,7 @@ fn init_mongo_schema_wide_lists_collections_in_rivets_order() {
 // ─── MongoDB: a database whose every collection fails the `table:` gate is refused ──
 
 /// A batch init whose every collection name fails the `table:` gate, one collection or the database,
-/// is refused by code writing no file and naming the collection with its reason.
+/// is refused by code writing no file and naming the collection with its reason; beside a gated name it scaffolds and runs.
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn init_mongo_of_only_ungated_collections_is_refused_writing_nothing() {
@@ -405,6 +405,33 @@ fn init_mongo_of_only_ungated_collections_is_refused_writing_nothing() {
         );
         assert!(!dir.path().join("rivet.yaml").exists(), "{extra:?}: {said}");
     }
+    MongoTest::connect(27017, &db).seed_int_id("good_coll", 2);
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_rivet_in_dir(
+        dir.path(),
+        &["init", "--source", &url, "--output", "rivet.yaml"],
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let config = std::fs::read_to_string(dir.path().join("rivet.yaml")).unwrap();
+    assert!(
+        config.contains("good_coll") && config.contains("# SKIPPED collection my-coll"),
+        "{config}"
+    );
+    let out = run_rivet_in_dir(
+        dir.path(),
+        &["run", "-c", "rivet.yaml"],
+        &[("DATABASE_URL", url.as_str())],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 // ─── MongoDB: a forced mode the source cannot run is refused, never rewritten ──
