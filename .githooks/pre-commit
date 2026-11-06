@@ -9,6 +9,7 @@
 #
 # Bypass in an emergency with `git commit --no-verify` (CI still enforces it).
 set -euo pipefail
+. "$(dirname "$0")/repo-venv"
 
 # STEP 0, before anything trusts cargo: drop a `cargo package` snapshot.
 #

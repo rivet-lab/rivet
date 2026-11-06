@@ -35,9 +35,25 @@ pub(super) fn bare_number_warning(name: &str) -> String {
     )
 }
 
-/// Warning attached to a `TIMESTAMP(7..9)` column truncated to microseconds.
-pub(super) const TIMESTAMP_NS_WARNING: &str = "TIMESTAMP(7..9) / INTERVAL DAY TO SECOND(7..9) → microseconds: the sub-microsecond \
+/// Warning attached to an `INTERVAL DAY TO SECOND(7..9)` column truncated to microseconds.
+pub(super) const INTERVAL_NS_WARNING: &str = "INTERVAL DAY TO SECOND(7..9) → microseconds: the sub-microsecond \
      digits are truncated; a fractional precision of 0..6 is exact.";
+
+/// The refusal for an undeclared `TIMESTAMP(7..9)`, naming the two declarations (`zoned` picks the `_tz` forms).
+pub(super) fn timestamp_ns_refusal(name: &str, zoned: bool) -> String {
+    let (ns, us) = if zoned {
+        ("timestamp_tz_ns", "timestamp_tz")
+    } else {
+        ("timestamp_ns", "timestamp")
+    };
+    format!(
+        "TIMESTAMP(7..9) is read at microseconds, so its sub-microsecond digits would be dropped. \
+         Declare the column under `columns:` of the export: `{name}: {ns}` keeps all nine digits \
+         (batch modes; years 1677-09-21..2262-04-11 only; BigQuery holds it as INT64 nanoseconds), \
+         or `{name}: {us}` drops them knowingly (the only form `mode: cdc` reads; the ad-hoc \
+         `rivet cdc` has no `columns:`, so use a `mode: cdc` export)"
+    )
+}
 
 /// The Rivet type for one re-projected column; `native` is its DECLARED type
 /// (re-projection turns a zoned timestamp into a UTC `TIMESTAMP`, JSON into text).
@@ -154,17 +170,25 @@ fn deliver_number_text(
     }
 }
 
-/// The un-overridden mapping with its Oracle warning: bare NUMBER as text, or sub-µs truncation (lossy).
+/// The un-overridden mapping with its Oracle warning: bare NUMBER as text, sub-µs interval (lossy), or sub-µs TIMESTAMP (refused).
 fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) -> TypeMapping {
     if bare_number {
         let name = mapping.column_name.clone();
         mapping.with_warning(bare_number_warning(&name))
     } else if sub_us {
-        TypeMapping {
+        let timestamp = mapping.source_native_type.starts_with("timestamp");
+        let zoned = mapping.source_native_type.starts_with("timestamp_tz")
+            || mapping.source_native_type.starts_with("timestamp_ltz");
+        let name = mapping.column_name.clone();
+        let lossy = TypeMapping {
             fidelity: crate::types::TypeFidelity::Lossy,
             ..mapping
+        };
+        if timestamp {
+            lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
+        } else {
+            lossy.with_warning(INTERVAL_NS_WARNING)
         }
-        .with_warning(TIMESTAMP_NS_WARNING)
     } else {
         mapping
     }
@@ -554,23 +578,54 @@ pub(super) fn rows_to_batch(
 mod tests {
     use super::*;
 
+    fn mapping(native: &str) -> TypeMapping {
+        use crate::types::SourceColumn;
+        TypeMapping::from_source(
+            &SourceColumn::simple("TS9", native, true),
+            RivetType::String,
+        )
+    }
+
     #[test]
-    fn a_sub_microsecond_column_is_marked_lossy_and_a_bare_number_warns_by_name() {
-        use crate::types::{SourceColumn, TypeFidelity};
-        let ts = || {
-            TypeMapping::from_source(
-                &SourceColumn::simple("TS9", "timestamp(9)", true),
-                RivetType::String,
-            )
-        };
-        let plain = with_oracle_warning(ts(), false, false);
+    fn a_sub_microsecond_timestamp_is_refused_and_a_bare_number_warns_by_name() {
+        use crate::types::TypeFidelity;
+        let plain = with_oracle_warning(mapping("timestamp(9)"), false, false);
         assert_ne!(plain.fidelity, TypeFidelity::Lossy);
         assert!(plain.warnings.is_empty());
-        let lossy = with_oracle_warning(ts(), false, true);
-        assert_eq!(lossy.fidelity, TypeFidelity::Lossy);
-        assert_eq!(lossy.warnings, vec![TIMESTAMP_NS_WARNING.to_string()]);
-        let bare = with_oracle_warning(ts(), true, false);
+        assert_eq!(plain.refusal, None);
+        let refused = with_oracle_warning(mapping("timestamp(9)"), false, true);
+        assert_eq!(refused.fidelity, TypeFidelity::Lossy);
+        assert!(refused.warnings.is_empty());
+        assert_eq!(refused.refusal, Some(timestamp_ns_refusal("TS9", false)));
+        let bare = with_oracle_warning(mapping("timestamp(9)"), true, false);
         assert_eq!(bare.warnings, vec![bare_number_warning("TS9")]);
+        assert_eq!(bare.refusal, None);
+    }
+
+    #[test]
+    fn a_sub_microsecond_interval_stays_lossy_with_its_warning_and_no_refusal() {
+        use crate::types::TypeFidelity;
+        let iv = with_oracle_warning(mapping("interval_ds(9)"), false, true);
+        assert_eq!(iv.fidelity, TypeFidelity::Lossy);
+        assert_eq!(iv.warnings, vec![INTERVAL_NS_WARNING.to_string()]);
+        assert_eq!(iv.refusal, None);
+    }
+
+    #[test]
+    fn the_refusal_names_the_column_and_the_declarations_for_each_zone_form() {
+        for native in ["timestamp(7)", "timestamp(9)"] {
+            let m = with_oracle_warning(mapping(native), false, true);
+            let r = m.refusal.expect("refused");
+            assert!(r.contains("`TS9: timestamp_ns`"), "{r}");
+            assert!(r.contains("`TS9: timestamp`"), "{r}");
+            assert!(r.contains("1677-09-21..2262-04-11"), "{r}");
+        }
+        for native in ["timestamp_tz(9)", "timestamp_ltz(9)"] {
+            let m = with_oracle_warning(mapping(native), false, true);
+            let r = m.refusal.expect("refused");
+            assert!(r.contains("`TS9: timestamp_tz_ns`"), "{r}");
+            assert!(r.contains("`TS9: timestamp_tz`"), "{r}");
+        }
     }
 
     #[test]

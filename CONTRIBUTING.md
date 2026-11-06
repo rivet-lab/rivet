@@ -41,6 +41,10 @@ workflow enforces on the PR itself:
 - a raised ratchet pin (any line or block marked `ratchet-pin:`) is named in a
   `## Ratchets raised` section of the PR body; lowering one needs nothing. A pin whose marker
   names a `count <pathspec> <regex>` is measured from the tree (`pr_ready.py pins`), so there is no number to type;
+- every `ratchet-pin:` marker carries `(review YYYY-MM-DD)` right after its name, before `sum`, `count` or `min`; the date is a
+  calendar day at most 180 days away, and the same rule holds for every `SKIP_ALLOWED` reason (`(review YYYY-MM-DD)`), every known-red
+  entry and every `EXCUSES` entry (their `expires`). A malformed, missing or far date fails the PR rules; a passed one fails
+  `make pr-ready` and the nightly run (`dev/pytools/review_dates.py check`);
 - a change under `src/` adds a changelog fragment, one file under `changelog.d/` in the
   CHANGELOG entry format (see `changelog.d/README.md`), or the PR body says
   `No user-visible change`. Fragments keep open pull requests from conflicting on the top
@@ -58,6 +62,9 @@ git config core.hooksPath .githooks
 
 With the hooks enabled:
 
+- **Every hook** (and `make pr-ready`) puts the checkout's own `.venv/bin` first on `PATH` (`.githooks/repo-venv`), so
+  `python3` and the tests the hooks run use the locked packages (yaml among them) whatever `python3` your shell finds first.
+  A checkout without `.venv` is refused with the remedy: `uv sync --frozen --python 3.12`. `dev/pytools/hooks_venv.py --self-test` grades it.
 - **`pre-commit`** mirrors the CI fmt + clippy + audit gates and keeps
   code-derived docs in sync: it runs cargo fmt/clippy, builds the rivet binary,
   regenerates the JSON schema + reference docs and stages them into your commit

@@ -53,16 +53,16 @@ FIRST_RUN = {"SKIP": "the stream's first run delivered nothing", "PARTIAL": "the
 #: 2026-10-29 (#719): skip 53 -> 59 (CI measured 56 on main): 3 column-grants cells grade nothing by design (2 backfill recipes whose stream carries the rows, 1 `time_window`); closes when the oracle reads a relative window.
 VERDICT_CEILINGS: dict[str, dict[str, tuple[int, int]]] = {
     "ci": {
-        "first-run": (0,  # ratchet-pin: rig-oracle-first-run
+        "first-run": (0,  # ratchet-pin: rig-oracle-first-run (review 2027-02-01)
                       0),
-        "skip": (59,  # ratchet-pin: rig-oracle-skip
+        "skip": (59,  # ratchet-pin: rig-oracle-skip (review 2027-02-01)
                  3),
-        "partial": (24,  # ratchet-pin: rig-oracle-partial
+        "partial": (24,  # ratchet-pin: rig-oracle-partial (review 2027-02-01)
                     3),
-        "deferred": (9,  # ratchet-pin: rig-oracle-deferred
+        "deferred": (9,  # ratchet-pin: rig-oracle-deferred (review 2027-02-01)
                      0),
     },
-    "gate": {"first-run": (0,  # ratchet-pin: rig-oracle-first-run-gate
+    "gate": {"first-run": (0,  # ratchet-pin: rig-oracle-first-run-gate (review 2027-02-01)
                            0)},
 }
 
@@ -79,7 +79,7 @@ def verdict_counts(text: str) -> Counter:
 
 
 #: Reads repeated in one lane after the reader crashed in native code (tests/common/verify.rs); more means the reader is broken, not unlucky.
-RERUN_CEILING = 3  # ratchet-pin: rig-oracle-rerun
+RERUN_CEILING = 3  # ratchet-pin: rig-oracle-rerun (review 2027-02-01)
 
 #: The verdicts that grade a deferred run's remainder: the stream's next run compared with the source.
 GRADED = ("PASS", "FAIL", "XFAIL", "PARTIAL")

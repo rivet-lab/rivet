@@ -53,6 +53,19 @@ WIDTH = "wid" + "ht"
 FRAGMENTS = "t" + "hs"
 CHECKPT = "checkp" + "ont"
 
+MD_ARGS = ("--no-progress", "--config", "lychee.toml", "docs/**/*.md", "*.md")
+LYCHEE = "https://github.com/lycheeverse/lychee/releases/download/lychee-v{v}/lychee-%s.tar.gz"
+LYCHEE_PINS = {
+    "darwin-arm64": (LYCHEE % "aarch64-apple-darwin", "af111b5890746a863e60b4929720ab383337843ed15b701515871aa6e8817c2b"),
+    "linux-x86_64": (LYCHEE % "x86_64-unknown-linux-gnu", "87e6e75195df5753f08c53b5c0a13694b8328edd8df009914ae9e29b5000162d"),
+}
+AGNIX = "https://github.com/agent-sh/agnix/releases/download/v{v}/agnix-%s.tar.gz"
+AGENT = ".claude/agents/tidy-agent.md"
+AGENT_OK = "---\nname: tidy-agent\ndescription: Tidies a file when asked.\ntools: Read, Edit\nmodel: sonnet\n---\nTidy the file named in the task.\n"
+AGENT_BROKEN = "---\ndescription: Tidies a file when asked.\ntools: Read, Edit\nTidy the file named in the task.\n"
+MCP_PINNED = "{\"mcpServers\": {\"graph\": {\"command\": \"uvx\", \"args\": [\"code-review-graph==2.3.9\", \"serve\"], \"type\": \"stdio\"}}}\n"
+MCP_UNPINNED = MCP_PINNED.replace("==2.3.9", "")
+
 TOOLS = {
     "typos": Tool(
         "typos",
@@ -77,6 +90,47 @@ TOOLS = {
             ({"_typos.toml": REPO, "src/a.rs": f"let my_{CHECKPT} = 1;\n"}, CHECKPT),
             ({"_typos.toml": REPO, "dev/a.py": f"# A recipient {MISSPELT} the message.\n"}, MISSPELT),
             ({"_typos.toml": REPO, "a.md": f"Read {FRAGMENTS} page f" + "o details n" + "d more.\n"}, FRAGMENTS),
+        ),
+    ),
+    "lychee": Tool(
+        "lychee",
+        "0.24.2",
+        LYCHEE_PINS,
+        ("--offline", "--include-fragments", *MD_ARGS),
+        "pr",
+        {"lychee.toml": REPO, "a.md": "[b](b.md#top)\n", "b.md": "# Top\n", "docs/d/c.md": "[a](../../a.md)\n"},
+        (
+            ({"lychee.toml": REPO, "a.md": "[b](b.md#no-such-heading)\n", "b.md": "# Top\n"}, "no-such-heading"),
+            ({"lychee.toml": REPO, "docs/d/c.md": "[x](no-such-file.md)\n"}, "docs/d/no-such-file.md"),
+        ),
+        900,
+    ),
+    "lychee-web": Tool(
+        "lychee",
+        "0.24.2",
+        LYCHEE_PINS,
+        ("--max-retries", "3", "--timeout", "30", *MD_ARGS),
+        "nightly",
+        {"lychee.toml": REPO, "a.md": "No links here.\n", "docs/d/c.md": "No links here.\n"},
+        (
+            ({"lychee.toml": REPO, "a.md": "[dead](http://127.0.0.1:9/unreachable)\n"}, "127.0.0.1:9"),
+            ({"lychee.toml": REPO, "docs/d/c.md": "[dead](http://127.0.0.1:9/unreachable)\n"}, "127.0.0.1:9"),
+        ),
+        900,
+    ),
+    "agnix": Tool(
+        "agnix",
+        "0.59.0",
+        {
+            "darwin-arm64": (AGNIX % "aarch64-apple-darwin", "ce148e30e1a40e980bbe2478e52395d92e297bcb8985a88ee65a02dc3524a256"),
+            "linux-x86_64": (AGNIX % "x86_64-unknown-linux-gnu", "567bada1d4859e80571f46a9294deada4e09fc176105a3945c6f05313199862a"),
+        },
+        ("--strict", "."),
+        "pr",
+        {AGENT: AGENT_OK, ".mcp.json": MCP_PINNED},
+        (
+            ({AGENT: AGENT_BROKEN}, "no 'name' field"),
+            ({".mcp.json": MCP_UNPINNED}, "without a pinned version"),
         ),
     ),
     "gitleaks": Tool(

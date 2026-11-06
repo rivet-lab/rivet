@@ -1,0 +1,10 @@
+# Sourced by every hook and by `make pr-ready`: this checkout's .venv/bin leads PATH, or the caller refuses.
+_top=$(git rev-parse --show-toplevel) || { echo "repo-venv: REFUSING - not inside a git work tree, so there is no checkout to take .venv from." >&2; exit 1; }
+if [ ! -x "$_top/.venv/bin/python3" ]; then
+    echo "repo-venv: REFUSING - $_top/.venv/bin/python3 is missing or broken. The hooks and the tests they run need the locked Python packages (yaml), not whichever python3 is first on PATH." >&2
+    echo "           Create it once: (cd $_top && uv sync --frozen --python 3.12)" >&2
+    exit 1
+fi
+PATH="$_top/.venv/bin:$PATH"
+export PATH
+unset _top

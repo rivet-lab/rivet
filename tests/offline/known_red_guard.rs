@@ -31,8 +31,10 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 31 -> 25 (2026-11-04): the six HDW-1 cells are plain cells again (fix/run-closing-cdc-begin).
 // 25 -> 26 (2026-11-05): the S3 profile-beside-env-keys cell, open defect HFF-2 (closes with fix/destination-credential-every-leg).
 // 26 -> 25 (2026-11-05): the TF-1 cell closed with fix/mysql-binlog-time-fraction.
-// ratchet-pin: known-red-entries count dev/release_oracle/known_red.py ^    (_open|KnownRed)\(
+// ratchet-pin: known-red-entries (review 2027-02-01) count dev/release_oracle/known_red.py ^    (_open|KnownRed)\(
 // 25 -> 24 (2026-11-05): the HFF-2 cell is green on fix/destination-credential-every-leg and its entry is deleted.
+// 24 -> 22 (2026-11-05): the two Oracle TIMESTAMP(9) sentinel gate rows are deleted; an undeclared TIMESTAMP(7..9) is refused by code (c5-oracle-ts9).
+// 22 -> 20 (2026-11-05): the two CDC-RUN-START cells are plain cells again (fix/cdc-run-start-marker).
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
