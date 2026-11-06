@@ -138,7 +138,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_LOAD_WAREHOUSE_ANSWER_UNREADABLE` | internal | 6 | the warehouse answered in a shape rivet does not read — report it with the message |
 | `RIVET_INTERNAL_LOAD_INVARIANT` | internal | 6 | a load invariant did not hold — a bug; report it with the message |
 | `RIVET_VALIDATE_FAILED` | integrity | 3 | run `rivet validate` on the prefix and settle each failed part before loading it; the export itself completed |
-| `RIVET_VALIDATE_UNVERIFIED` | environment | 2 if transient, else 1 | restore read access to the destination and run `rivet validate`; the export itself completed |
+| `RIVET_VALIDATE_UNVERIFIED` | environment | 2 if transient, else 1 | restore read access to the destination and run `rivet validate`; if the export completed, its parts are already written |
 | `RIVET_INTERNAL_VALUE_CONVERTER` | internal | 6 | a value changed between the source and the written part — a bug; report it with the column's type |
 | `RIVET_INTERNAL_SPILL` | internal | 6 | the CDC spill log is inconsistent — a bug or a damaged spill directory; report it and re-run |
 | `RIVET_INTERNAL_TYPE_BUILDER` | internal | 6 | a column builder got a type it cannot build — a bug; report it with the column's type |
@@ -208,7 +208,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CONFIG_QUALITY_COLUMN_UNKNOWN` | usage | 1 | name columns the export projects under `quality:`, or add them to the query |
 | `RIVET_CONFIG_COLUMN_OVERRIDE_TYPE_INVALID` | usage | 1 | give the `columns:` override one of the type names the message lists, with `decimal(precision,scale)` in range |
 | `RIVET_CONFIG_DESTINATION_SETTING_MISSING` | usage | 1 | set the destination key the message names |
-| `RIVET_DEST_CREDENTIALS_INVALID` | environment | 2 if transient, else 1 | issue the destination a fresh, complete credential (a new SAS, service-account key or `gcloud auth application-default login`) |
+| `RIVET_DEST_CREDENTIALS_INVALID` | environment | 2 if transient, else 1 | issue the destination a fresh, complete credential: a new SAS, or name a service-account key file as `credentials_file` (leave `credentials_file` out to use gcloud ADC) |
 | `RIVET_DEST_PREFIX_MODE_MISMATCH` | refusal | 5 | give the export its own destination prefix; a batch and a CDC export must not share one |
 | `RIVET_DEST_IO_RUNTIME_UNAVAILABLE` | environment | 2 if transient, else 1 | raise the process's thread and open-file limits, or lower the export parallelism, then run again |
 | `RIVET_INIT_CDC_NAME_TAKEN` | refusal | 5 | write the config under another `-o` name: the stem names its checkpoint and destination |

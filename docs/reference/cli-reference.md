@@ -556,7 +556,7 @@ Targeted repair of chunks flagged by reconcile: emit a repair plan, or re-export
 
 Re-run manifest-aware verification against an existing destination, no extraction.
 
-The same file-manifest checks `rivet run --validate` performs at end-of-run, exposed as a standalone command for between-run polling and triage.  Reads manifest.json + _SUCCESS at the destination, head-checks every committed part for presence and recorded size_bytes.  Source is not queried — use `rivet reconcile` for a source-vs-export row audit.
+The same file-manifest checks `rivet run --validate` performs at end-of-run, exposed as a standalone command for between-run polling and triage.  Reads manifest.json + _SUCCESS at the destination, head-checks every committed part for presence and recorded size_bytes.  Without `partition_by` the source is not queried; with it, the source is read once for the partition list.  Use `rivet reconcile` for a source-vs-export row audit.
 
 By default `validate` resolves the destination prefix the same way `run` does — `{date}` becomes today's UTC date.  Use `--date`, `--run-id`, or `--prefix` to point at a prior run instead of today.
 
