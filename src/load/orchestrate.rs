@@ -2819,7 +2819,6 @@ mod load_ledger_tests {
     }
 
     /// A CDC load plan for `table` whose prefix `gs://b/p/` is the `p/` directory under `dir`.
-    /// Each test names its own table: the in-memory state's lease is a process-wide flock per table.
     fn cdc_plan(dir: &tempfile::TempDir, table: &str) -> load::plan::LoadPlan {
         use load::plan::{CdcLayout, LoadMode, LoadPlan, LoadSection, LoadTarget};
         LoadPlan {
