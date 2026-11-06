@@ -771,10 +771,10 @@ pub mod codes {
         "RIVET_CONFIG_COLUMN_OVERRIDE_TABLE_UNKNOWN",
         "use a bare column key, or qualify it with a table this export captures",
     );
-    /// A column whose mapping is lossy or unsupported, refused under `--strict`.
+    /// A column whose mapping is lossy or unsupported (refused under `--strict`), or needs a `columns:` declaration (always).
     pub const TYPE_UNSAFE_MAPPING: Code = usage(
         "RIVET_TYPE_UNSAFE_MAPPING",
-        "add a `columns:` override the engine delivers exactly, CAST or drop the column in the export's `query:`, or run without `--strict` to accept it with a warning",
+        "add a `columns:` override the engine delivers exactly (or one that names the loss), or CAST or drop the column in the export's `query:`",
     );
     /// A statement that ran past the configured duration cap, carried by the existing
     /// `source::StatementDurationTimeout` marker (recognised in [`super::error_code`]).
@@ -1255,7 +1255,7 @@ pub mod codes {
     /// `run --validate` could not read the destination back.
     pub const VALIDATE_UNVERIFIED: Code = environment(
         "RIVET_VALIDATE_UNVERIFIED",
-        "restore read access to the destination and run `rivet validate`; the export itself completed",
+        "restore read access to the destination and run `rivet validate`; if the export completed, its parts are already written",
     );
     pub const INTERNAL_VALUE_CONVERTER: Code = internal(
         "RIVET_INTERNAL_VALUE_CONVERTER",
@@ -1605,7 +1605,7 @@ pub mod codes {
     /// A destination credential that is malformed, expired or refused by the provider's token endpoint.
     pub const DEST_CREDENTIALS_INVALID: Code = environment(
         "RIVET_DEST_CREDENTIALS_INVALID",
-        "issue the destination a fresh, complete credential (a new SAS, service-account key or `gcloud auth application-default login`)",
+        "issue the destination a fresh, complete credential: a new SAS, or name a service-account key file as `credentials_file` (leave `credentials_file` out to use gcloud ADC)",
     );
     /// The destination prefix holds a manifest of another export mode (batch beside CDC).
     pub const DEST_PREFIX_MODE_MISMATCH: Code = refusal(

@@ -78,6 +78,9 @@ pub struct PolicyViolation {
     pub message: String,
     /// Whether this violation is fatal under the active policy.
     pub fatal: bool,
+    /// The mapping itself refuses the column, whatever the policy.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub refused: bool,
 }
 
 impl TypePolicy {
@@ -85,6 +88,19 @@ impl TypePolicy {
     pub fn validate(&self, mappings: &[TypeMapping]) -> Vec<PolicyViolation> {
         let mut out = Vec::new();
         for m in mappings {
+            if let Some(remedy) = &m.refusal {
+                out.push(PolicyViolation {
+                    column_name: m.column_name.clone(),
+                    fidelity: m.fidelity,
+                    message: format!(
+                        "column '{}' (source type '{}'): {remedy}",
+                        m.column_name, m.source_native_type
+                    ),
+                    fatal: true,
+                    refused: true,
+                });
+                continue;
+            }
             let (action, fidelity) = match m.fidelity {
                 TypeFidelity::Lossy => (self.on_lossy_mapping, TypeFidelity::Lossy),
                 TypeFidelity::Unsupported => (self.on_unsupported_type, TypeFidelity::Unsupported),
@@ -108,6 +124,7 @@ impl TypePolicy {
                     detail
                 ),
                 fatal: action == PolicyAction::Fail,
+                refused: false,
             });
         }
         out
@@ -139,20 +156,27 @@ pub fn warnings(violations: &[PolicyViolation], subject: &str) -> Vec<String> {
 
 /// `Err` naming every fatal violation (`RIVET_TYPE_UNSAFE_MAPPING`), `Ok` when none is fatal.
 pub fn refuse_fatal(violations: &[PolicyViolation], subject: &str) -> crate::error::Result<()> {
-    let fatal: Vec<&str> = violations
+    let fatal: Vec<&PolicyViolation> = violations.iter().filter(|v| v.fatal).collect();
+    if fatal.is_empty() {
+        return Ok(());
+    }
+    let lines = fatal
         .iter()
-        .filter(|v| v.fatal)
         .map(|v| v.message.as_str())
-        .collect();
-    if !fatal.is_empty() {
+        .collect::<Vec<_>>()
+        .join("\n");
+    if fatal.iter().all(|v| v.refused) {
         crate::rivet_bail!(
             crate::error::codes::TYPE_UNSAFE_MAPPING,
-            "{subject}: strict mode: {} unsafe type mapping(s):\n{}",
-            fatal.len(),
-            fatal.join("\n")
+            "{subject}: {} column(s) need a `columns:` declaration:\n{lines}",
+            fatal.len()
         );
     }
-    Ok(())
+    crate::rivet_bail!(
+        crate::error::codes::TYPE_UNSAFE_MAPPING,
+        "{subject}: strict mode: {} unsafe type mapping(s):\n{lines}",
+        fatal.len()
+    );
 }
 
 #[cfg(test)]
@@ -295,10 +319,82 @@ mod tests {
             fidelity: TypeFidelity::Lossy,
             message: format!("m-{c}"),
             fatal,
+            refused: false,
         };
         assert_eq!(
             warnings(&[v("a", false), v("b", true), v("c", false)], "export 'e'"),
             vec!["export 'e': m-a".to_string(), "export 'e': m-c".to_string()]
+        );
+    }
+
+    fn refused_mapping(name: &str) -> TypeMapping {
+        lossy_mapping(name).with_refusal("declare it under `columns:`")
+    }
+
+    #[test]
+    fn a_mapping_that_refuses_itself_is_fatal_under_every_policy() {
+        let allow = TypePolicy {
+            on_lossy_mapping: PolicyAction::Allow,
+            on_unsupported_type: PolicyAction::Allow,
+        };
+        for policy in [TypePolicy::strict(), TypePolicy::warn_only(), allow] {
+            let v = policy.validate(&[refused_mapping("ts")]);
+            assert_eq!(v.len(), 1);
+            assert!(v[0].fatal && v[0].refused, "{:?}", v[0]);
+            assert_eq!(
+                v[0].message,
+                "column 'ts' (source type 'timestamp(9)'): declare it under `columns:`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_lossy_mapping_is_still_only_a_warning_under_warn_only() {
+        let v = TypePolicy::warn_only().validate(&[lossy_mapping("ts")]);
+        assert_eq!(v.len(), 1);
+        assert!(!v[0].fatal && !v[0].refused);
+    }
+
+    #[test]
+    fn a_refusal_without_strict_names_no_strict_mode_and_carries_the_code() {
+        let err = plan_columns(
+            vec![refused_mapping("ts")],
+            &TypePolicy::from_strict(false),
+            "export 'e'",
+        )
+        .expect_err("a refusal is raised without --strict");
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_TYPE_UNSAFE_MAPPING")
+        );
+        assert_eq!(crate::error::classify_exit(&err), 1);
+        let msg = format!("{err:#}");
+        assert!(
+            msg.starts_with("export 'e': 1 column(s) need a `columns:` declaration:\n"),
+            "{msg}"
+        );
+        assert!(!msg.contains("strict mode"), "{msg}");
+    }
+
+    #[test]
+    fn a_refusal_beside_a_strict_violation_keeps_the_strict_header_and_lists_both() {
+        let err = plan_columns(
+            vec![
+                refused_mapping("ts"),
+                unsupported_mapping("amount", "numeric"),
+            ],
+            &TypePolicy::from_strict(true),
+            "export 'e'",
+        )
+        .expect_err("refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.starts_with("export 'e': strict mode: 2 unsafe type mapping(s):"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("column 'ts'") && msg.contains("column 'amount'"),
+            "{msg}"
         );
     }
 }
