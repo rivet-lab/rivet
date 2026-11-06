@@ -1658,7 +1658,7 @@ mod tests {
             Ok(crate::source::TableIntrospection {
                 keyset_keys: vec!["k".into()],
                 single_int_pk: self.single_int_pk.clone(),
-                finer_than_microsecond: if self.finer { vec!["k".into()] } else { vec![] },
+                declared_wider: if self.finer { vec!["k".into()] } else { vec![] },
                 row_estimate: self.row_estimate,
                 ..Default::default()
             })

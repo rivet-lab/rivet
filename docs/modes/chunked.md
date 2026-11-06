@@ -312,11 +312,15 @@ uuid, date or timestamp column (a timestamp finer than a microsecond needs the
 
 One seam decides which delivered types can key a keyset, for every engine and
 for the explicit key, the key MySQL picks by itself and a composite key alike.
-The cause is named after the column. Refused: `decimal`/`numeric` (except an
-Oracle `NUMBER`), binary, boolean (`TINYINT(1)`, `BIT(1)`), a time of day, JSON,
-an interval, an array, a MySQL `ENUM`/`SET` (it sorts by member position, not by
-the label the cursor binds), a column delivered as text (an Oracle `NUMBER` held as exact
-text keys a seek, the cursor binds it back to the number), and a SQL Server
+The cause is named after the column. Refused: `decimal`/`numeric` on PostgreSQL,
+MySQL and SQL Server, on Oracle a `NUMBER` with a scale (`NUMBER(12,2)`,
+`NUMBER(5,-2)`, `NUMBER(*,2)`, `NUMBER(38,39)`) or a `FLOAT` (an integer
+`NUMBER(p)` and a bare `NUMBER` key a seek), binary, boolean (`TINYINT(1)`,
+`BIT(1)`), a time of day, JSON, an interval, an array, a MySQL `ENUM`/`SET` (it
+sorts by member position, not by the label the cursor binds), a column
+delivered as text (the one exception is a bare Oracle `NUMBER`, which is
+delivered as exact `decimal_plain` text and keys a seek: the cursor binds the
+text back to the number), and a SQL Server
 `datetime2`/`datetimeoffset` finer than a microsecond unless the
 `timestamp_ns` / `timestamp_tz_ns` override delivers it in nanoseconds. The
 refusal comes at plan time, so a table that fits in one chunk is refused too

@@ -1318,7 +1318,7 @@ fn introspect_mssql_on(src: &mut MssqlSource, qualified_table: &str) -> Result<T
         int_columns,
         ..Default::default()
     };
-    introspection.finer_than_microsecond = finer_than_microsecond;
+    introspection.declared_wider = finer_than_microsecond;
     Ok(introspection)
 }
 

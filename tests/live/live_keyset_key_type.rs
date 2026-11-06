@@ -197,6 +197,51 @@ const ORACLE_SCALED_NUMBER: Case = Case {
     overrides: None,
 };
 #[cfg(feature = "oracle")]
+const ORACLE_FLOAT: Case = Case {
+    label: "Oracle FLOAT unique key",
+    key_ddl: "FLOAT",
+    key_value: |i| i.to_string(),
+    primary: false,
+    rows: 10,
+    overrides: None,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_NUMBER_STAR_SCALE: Case = Case {
+    label: "Oracle NUMBER(*,2) unique key",
+    key_ddl: "NUMBER(*,2)",
+    key_value: |i| format!("{i} + 0.25"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_NEGATIVE_SCALE_NUMBER: Case = Case {
+    label: "Oracle NUMBER(5,-2) unique key",
+    key_ddl: "NUMBER(5,-2)",
+    key_value: |i| format!("{i} * 100"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_NEGATIVE_SCALE_38: Case = Case {
+    label: "Oracle NUMBER(38,-5) unique key",
+    key_ddl: "NUMBER(38,-5)",
+    key_value: |i| format!("{i} * 100000"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_SCALE_PAST_38: Case = Case {
+    label: "Oracle NUMBER(38,39) unique key",
+    key_ddl: "NUMBER(38,39)",
+    key_value: |i| format!("{i}E-39"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+};
+#[cfg(feature = "oracle")]
 const ORACLE_LTZ: Case = Case {
     label: "Oracle TIMESTAMP(6) WITH LOCAL TIME ZONE unique key",
     key_ddl: "TIMESTAMP(6) WITH LOCAL TIME ZONE",
@@ -848,8 +893,17 @@ fn a_timestamp_9_keyset_key_stays_refused_oracle() {
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn a_binary_double_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle() {
-    for case in [ORACLE_BINARY_DOUBLE, ORACLE_SCALED_NUMBER, ORACLE_LTZ] {
+fn a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle() {
+    for case in [
+        ORACLE_BINARY_DOUBLE,
+        ORACLE_SCALED_NUMBER,
+        ORACLE_NUMBER_STAR_SCALE,
+        ORACLE_FLOAT,
+        ORACLE_NEGATIVE_SCALE_NUMBER,
+        ORACLE_NEGATIVE_SCALE_38,
+        ORACLE_SCALE_PAST_38,
+        ORACLE_LTZ,
+    ] {
         a_refused_key_stays_refused(SqlEngine::Oracle, case);
     }
 }

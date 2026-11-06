@@ -544,12 +544,12 @@ pub(super) fn probe_keyset_refusals(
     source: crate::config::SourceType,
     columns: &mut [ColumnInfo],
     probe: Result<Vec<crate::types::TypeMapping>>,
-    finer_than_microsecond: impl FnOnce() -> Result<Vec<String>>,
+    declared_wider: impl FnOnce() -> Result<Vec<String>>,
 ) -> Result<Option<String>> {
     match probe {
         Ok(mappings) => {
-            let finer = finer_than_microsecond()?;
-            mark_keyset_refusals(source, columns, &mappings, &finer);
+            let wider = declared_wider()?;
+            mark_keyset_refusals(source, columns, &mappings, &wider);
             Ok(None)
         }
         Err(e) => {
@@ -564,16 +564,12 @@ pub(super) fn mark_keyset_refusals(
     source: crate::config::SourceType,
     columns: &mut [ColumnInfo],
     mappings: &[crate::types::TypeMapping],
-    finer_than_microsecond: &[String],
+    declared_wider: &[String],
 ) {
     for c in columns {
-        c.not_keyset = crate::source::keyset_key::column_refusal(
-            source,
-            mappings,
-            finer_than_microsecond,
-            &c.name,
-        )
-        .is_some();
+        c.not_keyset =
+            crate::source::keyset_key::column_refusal(source, mappings, declared_wider, &c.name)
+                .is_some();
     }
 }
 
@@ -3063,7 +3059,7 @@ mod tests {
                 mark_keyset_refusals(source, &mut columns, &mappings, &finer_list);
                 let mut planner = TableIntrospection {
                     keyset_keys: names.clone(),
-                    finer_than_microsecond: finer_list.clone(),
+                    declared_wider: finer_list.clone(),
                     ..Default::default()
                 };
                 planner.admit_keyset_keys(source, &mappings);

@@ -66,8 +66,8 @@ pub struct TableIntrospection {
     pub keyset_keys: Vec<String>,
     /// Unique single-column candidates the delivered type rules out, each with its cause; filled by `admit_keyset_keys`.
     pub refused_keyset_keys: Vec<(String, &'static str)>,
-    /// Columns whose source type is finer than a microsecond although the driver delivers microseconds; filled by an engine that reads the catalog scale.
-    pub finer_than_microsecond: Vec<String>,
+    /// Columns the catalog declares wider than the type the driver delivers: a timestamp finer than a microsecond, or an Oracle NUMBER with a scale or a FLOAT; filled by an engine that reads the catalog.
+    pub declared_wider: Vec<String>,
     /// Best-effort row count: PG `reltuples`, MySQL `TABLE_ROWS`. `0` means
     /// the table is empty or stats are unavailable.
     pub row_estimate: i64,
@@ -122,7 +122,7 @@ impl TableIntrospection {
         mappings: &[TypeMapping],
         column: &str,
     ) -> Option<&'static str> {
-        keyset_key::column_refusal(source, mappings, &self.finer_than_microsecond, column)
+        keyset_key::column_refusal(source, mappings, &self.declared_wider, column)
     }
 
     /// The refusal cause recorded for `column`, if `admit_keyset_keys` dropped it.

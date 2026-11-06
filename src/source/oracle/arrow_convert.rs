@@ -560,21 +560,18 @@ mod tests {
         use crate::config::SourceType;
         use crate::source::keyset_key::keyset_key_refusal;
         use crate::types::SourceColumn;
-        let refusal = |kind, native: &str, p, s, finer| {
+        let refusal = |kind, native: &str, p, s, wider| {
             let rivet = autodetect(kind, native, p, s, native);
             let mapping =
                 TypeMapping::from_source(&SourceColumn::simple("K", native, false), rivet);
             let mapping = deliver_number_text(mapping, kind, p, s);
-            keyset_key_refusal(SourceType::Oracle, &mapping, finer)
+            keyset_key_refusal(SourceType::Oracle, &mapping, wider)
         };
         for (kind, native, p, s) in [
             (OraKind::Number, "number", 10, 0),
             (OraKind::Number, "number", 38, 0),
-            (OraKind::Number, "number", 7, -2),
             (OraKind::Number, "number", 0, 0),
             (OraKind::Number, "number", 0, -127),
-            (OraKind::Number, "number", 126, -127),
-            (OraKind::Number, "number", 38, 39),
             (OraKind::Text, "varchar", 0, 0),
             (OraKind::Text, "nchar", 0, 0),
             (OraKind::Date, "date", 0, 0),
@@ -583,9 +580,14 @@ mod tests {
         ] {
             assert_eq!(refusal(kind, native, p, s, false), None, "{native} {p} {s}");
         }
-        for (kind, native, p, s, finer) in [
+        for (kind, native, p, s, wider) in [
             (OraKind::Number, "number", 12, 2, false),
             (OraKind::Number, "number", 10, 3, false),
+            (OraKind::Number, "number", 7, -2, true),
+            (OraKind::Number, "number", 38, -5, true),
+            (OraKind::Number, "number", 38, 39, true),
+            (OraKind::Number, "number", 0, 2, true),
+            (OraKind::Number, "number", 126, -127, true),
             (OraKind::BinaryFloat, "binary_float", 0, 0, false),
             (OraKind::BinaryDouble, "binary_double", 0, 0, false),
             (OraKind::Timestamp, "timestamp", 9, 9, true),
@@ -596,8 +598,65 @@ mod tests {
             (OraKind::IntervalDs, "interval_ds", 0, 0, false),
         ] {
             assert!(
-                refusal(kind, native, p, s, finer).is_some(),
+                refusal(kind, native, p, s, wider).is_some(),
                 "{native} {p} {s} cannot key a seek"
+            );
+        }
+    }
+
+    /// Every NUMBER and FLOAT catalog shape keys a seek exactly when the catalog filter the seam replaced admitted it.
+    #[test]
+    fn an_oracle_number_keys_a_seek_exactly_when_the_catalog_filter_it_replaced_admitted_it() {
+        use crate::config::SourceType;
+        use crate::source::keyset_key::keyset_key_refusal;
+        use crate::source::oracle::is_inexact_number_type;
+        use crate::types::SourceColumn;
+        let before = |data_type: &str, precision: Option<u32>, scale: Option<i32>| match data_type {
+            "NUMBER" => scale == Some(0) || (precision.is_none() && scale.is_none()),
+            _ => false,
+        };
+        let mut shapes: Vec<(&str, Option<u32>, Option<i32>)> = vec![("FLOAT", Some(126), None)];
+        for p in [
+            None,
+            Some(1),
+            Some(5),
+            Some(9),
+            Some(10),
+            Some(18),
+            Some(19),
+            Some(38),
+        ] {
+            for s in [
+                None,
+                Some(0),
+                Some(2),
+                Some(-2),
+                Some(-5),
+                Some(38),
+                Some(39),
+                Some(127),
+            ] {
+                if p.is_some() && s.is_none() {
+                    continue;
+                }
+                shapes.push(("NUMBER", p, s));
+            }
+        }
+        for (data_type, p, s) in shapes {
+            let (prec, scale) = match (data_type, p, s) {
+                ("FLOAT", ..) => (126u8, -127i8),
+                (_, None, None) => (0, -127),
+                (_, p, s) => (p.unwrap_or(0) as u8, s.unwrap_or(0) as i8),
+            };
+            let rivet = autodetect(OraKind::Number, "number", prec, scale, "number");
+            let mapping =
+                TypeMapping::from_source(&SourceColumn::simple("K", "number", false), rivet);
+            let mapping = deliver_number_text(mapping, OraKind::Number, prec, scale);
+            let wider = is_inexact_number_type(data_type, p, s);
+            assert_eq!(
+                keyset_key_refusal(SourceType::Oracle, &mapping, wider).is_none(),
+                before(data_type, p, s),
+                "{data_type} {p:?} {s:?}"
             );
         }
     }

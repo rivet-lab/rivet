@@ -6,16 +6,26 @@ use crate::types::{Delivery, RivetType, TextForm, TimeUnit, TypeMapping};
 /// The fractional-second digits a microsecond timestamp keeps.
 pub(crate) const MICROSECOND_DIGITS: i32 = 6;
 
-/// The cause a column cannot key a keyset seek, or `None` when the cursor reads it and re-binds it exactly.
+/// The cause an Oracle NUMBER the catalog declares with a scale or as FLOAT cannot key a keyset seek.
+const ORACLE_INEXACT_NUMBER: &str =
+    "is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly";
+
+/// The cause a column cannot key a keyset seek, or `None` when the cursor reads it and re-binds it exactly; `declared_wider` is the catalog saying the column holds more than the delivered type shows.
 pub(crate) fn keyset_key_refusal(
     source: SourceType,
     mapping: &TypeMapping,
-    finer_than_microsecond: bool,
+    declared_wider: bool,
 ) -> Option<&'static str> {
     let exact_number_text = source == SourceType::Oracle
         && matches!(mapping.delivery, Delivery::Text(TextForm::DecimalPlain));
     if !exact_number_text && !matches!(mapping.delivery, Delivery::Native) {
         return Some("is delivered as text, which does not sort as the stored value");
+    }
+    if declared_wider
+        && source == SourceType::Oracle
+        && (exact_number_text || matches!(mapping.rivet_type, RivetType::Decimal { scale: 0, .. }))
+    {
+        return Some(ORACLE_INEXACT_NUMBER);
     }
     match &mapping.rivet_type {
         RivetType::Float32 | RivetType::Float64 if source == SourceType::Oracle => {
@@ -43,7 +53,7 @@ pub(crate) fn keyset_key_refusal(
         RivetType::Timestamp {
             unit: TimeUnit::Microsecond,
             ..
-        } if finer_than_microsecond => Some(
+        } if declared_wider => Some(
             "carries more than 6 fractional-second digits, which the microsecond cursor truncates",
         ),
         RivetType::Timestamp {
@@ -69,7 +79,7 @@ pub(crate) fn keyset_key_refusal(
 pub(crate) fn column_refusal(
     source: SourceType,
     mappings: &[TypeMapping],
-    finer_than_microsecond: &[String],
+    declared_wider: &[String],
     column: &str,
 ) -> Option<&'static str> {
     let Some(mapping) = mappings
@@ -83,10 +93,10 @@ pub(crate) fn column_refusal(
     else {
         return Some("is not among the columns the export delivers");
     };
-    let finer = finer_than_microsecond
+    let wider = declared_wider
         .iter()
         .any(|c| c.eq_ignore_ascii_case(column));
-    keyset_key_refusal(source, mapping, finer)
+    keyset_key_refusal(source, mapping, wider)
 }
 
 /// Samples the offline tests that sweep every Rivet type share.
@@ -210,6 +220,12 @@ mod tests {
             );
         }
         assert_eq!(keyset_key_refusal(SourceType::Oracle, &whole, false), None);
+        assert_eq!(
+            keyset_key_refusal(SourceType::Oracle, &whole, true),
+            Some(
+                "is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly"
+            )
+        );
     }
 
     /// A NUMBER held as exact decimal text keys a seek on Oracle alone; other text forms never do.
@@ -219,6 +235,12 @@ mod tests {
         let instant = samples::mapping_of(RivetType::String).with_text(TextForm::IsoTimestampNanos);
         let duration = samples::mapping_of(RivetType::String).with_text(TextForm::Iso8601Duration);
         assert_eq!(keyset_key_refusal(SourceType::Oracle, &exact, false), None);
+        assert_eq!(
+            keyset_key_refusal(SourceType::Oracle, &exact, true),
+            Some(
+                "is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly"
+            )
+        );
         for source in [SourceType::Postgres, SourceType::Mysql, SourceType::Mssql] {
             assert_eq!(
                 keyset_key_refusal(source, &exact, false),

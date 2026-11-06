@@ -1,0 +1,15 @@
+diff --git a/src/source/oracle/mod.rs b/src/source/oracle/mod.rs
+index 4489cf2..509de7f 100644
+--- a/src/source/oracle/mod.rs
++++ b/src/source/oracle/mod.rs
+@@ -801,8 +801,8 @@ pub(crate) fn is_inexact_number_type(
+     scale: Option<i32>,
+ ) -> bool {
+     match data_type {
+-        "FLOAT" => true,
+-        "NUMBER" => scale != Some(0) && (precision.is_some() || scale.is_some()),
++        "FLOAT" => false,
++        "NUMBER" => false && scale != Some(0) && (precision.is_some() || scale.is_some()),
+         _ => false,
+     }
+ }

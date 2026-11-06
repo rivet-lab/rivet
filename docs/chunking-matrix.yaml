@@ -112,12 +112,20 @@ scenarios:
     oracle:   { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle }
 
   - id: keyset_key_type_oracle_bare_number
-    what: "an Oracle NUMBER with no precision (held as exact text) keeps keying a keyset seek exactly as before the type check: integers, fractions across zero, 35 digits and both exponent extremes deliver the seeded ids once, sequential and parallel; a BINARY_DOUBLE, a NUMBER(12,2) and a TIMESTAMP WITH LOCAL TIME ZONE key stay refused"
+    what: "an Oracle NUMBER with no precision (held as exact text) keeps keying a keyset seek exactly as before the type check: integers, fractions across zero, 35 digits and both exponent extremes deliver the seeded ids once, sequential and parallel"
     postgres: { na: "only an Oracle NUMBER is held as exact text and keys a seek; a PostgreSQL numeric stays refused as a decimal key" }
     mysql:    { na: "only an Oracle NUMBER is held as exact text and keys a seek; a MySQL DECIMAL stays refused as a decimal key" }
     mssql:    { na: "only an Oracle NUMBER is held as exact text and keys a seek; a SQL Server decimal stays refused as a decimal key" }
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
     oracle:   { test: a_bare_number_keyset_key_delivers_the_seeded_ids_once_oracle }
+
+  - id: keyset_key_type_oracle_inexact_number
+    what: "an Oracle key main refused stays refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE at check, plan and run, with no file written: FLOAT, NUMBER(12,2), NUMBER(*,2), NUMBER(5,-2), NUMBER(38,-5), NUMBER(38,39), BINARY_DOUBLE and TIMESTAMP WITH LOCAL TIME ZONE; the neighbour of keyset_key_type_oracle_bare_number"
+    postgres: { na: "only an Oracle NUMBER is held as exact text and the catalog tells a FLOAT or a scaled NUMBER from a bare one; a PostgreSQL numeric stays refused as a decimal key" }
+    mysql:    { na: "only an Oracle NUMBER is held as exact text and the catalog tells a FLOAT or a scaled NUMBER from a bare one; a MySQL DECIMAL stays refused as a decimal key" }
+    mssql:    { na: "only an Oracle NUMBER is held as exact text and the catalog tells a FLOAT or a scaled NUMBER from a bare one; a SQL Server decimal stays refused as a decimal key" }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle }
 
   - id: keyset_sub_microsecond_key
     what: "a keyset key finer than the microsecond the default batch keeps (MSSQL datetime2(7)/datetimeoffset(7)) is refused at check, plan and run by RIVET_PLAN_CHUNK_KEY_UNUSABLE, whether the rows sit a tick past each microsecond or all inside one; the same key under its timestamp_ns override delivers every row once"

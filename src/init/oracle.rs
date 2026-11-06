@@ -95,7 +95,7 @@ pub(super) fn introspect(
         &ColumnOverrides::default(),
     );
     let unreadable = super::probe_keyset_refusals(SourceType::Oracle, &mut columns, probe, || {
-        crate::source::oracle::finer_than_microsecond_columns(
+        crate::source::oracle::declared_wider_columns(
             conn,
             &format!("'{}'", lit(&schema)),
             &format!("'{}'", lit(&table)),
