@@ -514,7 +514,7 @@ def fixture(*, container: str = PK_CONTAINER, port: int = PK_PORT) -> int:
         "run", "-d", "--name", container,
         "-e", "MYSQL_ROOT_PASSWORD=rivet", "-e", "MYSQL_DATABASE=bench",
         "-e", "MYSQL_USER=rivet", "-e", "MYSQL_PASSWORD=rivet",
-        "-p", f"{port}:3306", PK_IMAGE,
+        *shell.loopback_publish(port, 3306), PK_IMAGE,
         timeout=None,
     ).check(f"docker run {PK_IMAGE}")
 

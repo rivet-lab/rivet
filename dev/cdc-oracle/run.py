@@ -18,6 +18,8 @@ them) while applying them before the SLOT exists is not.
 import argparse, json, os, re, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
+from dev.pytools.shell import loopback_publish  # noqa: E402
 # The stands do not all share one docker network: the SQL engines sit in
 # `rivet_default`, the Mongo stands in `stand_default`. The sink must join the
 # SAME network as the source, or Debezium cannot resolve either of them.
@@ -58,7 +60,7 @@ def fresh_mysql_source(net: str) -> None:
     # like the rest of the harness.
     subprocess.run(["docker", "rm", "-f", MYSQL_FRESH_NAME], capture_output=True)
     sh("docker", "run", "-d", "--name", MYSQL_FRESH_NAME, "--network", net,
-       "-p", f"{MYSQL_FRESH_PORT}:3306",
+       *loopback_publish(MYSQL_FRESH_PORT, 3306),
        "-e", "MYSQL_ROOT_PASSWORD=rivet", "-e", "MYSQL_DATABASE=rivet",
        "-e", "MYSQL_USER=rivet", "-e", "MYSQL_PASSWORD=rivet",
        # binlog-row-metadata=FULL mirrors the stand (docker-compose.yaml pins it
