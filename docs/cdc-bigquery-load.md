@@ -167,7 +167,7 @@ buffer holds no history — `__is_deleted` in the base is the record that a row
 was deleted.
 
 Snowflake takes the same layout by default for every incremental and CDC export; `load.layout: log_view`
-keeps the changelog and view. A Snowflake CDC stream with neither `cdc.backfill:` nor
+keeps the changelog and view (deprecated in 0.33, still works). A Snowflake CDC stream with neither `cdc.backfill:` nor
 `cdc.initial: snapshot` would start an empty base, so the config is refused at load; add a baseline
 or write `log_view`. `rivet compact` there runs one
 script per table, one warehouse resume: the buffer is renamed to `<table>__changes__merging`, its

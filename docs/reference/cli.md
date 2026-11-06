@@ -388,7 +388,7 @@ Re-run manifest-aware verification against an existing destination — **no extr
 rivet validate --config <PATH> [OPTIONS]
 ```
 
-The same M5/M6 checks `rivet run --validate` performs at end-of-run, exposed as a standalone command for between-run polling and triage. Reads `manifest.json` + `_SUCCESS` at the destination and head-checks every committed part for presence and recorded `size_bytes`. The **source is not queried** (use `rivet reconcile` for that). See [ADR-0013](../adr/0013-trust-flag-contract.md) §"Subcommand carveouts" and [ADR-0012](../adr/0012-cloud-manifest-contract.md) M5/M6.
+The same M5/M6 checks `rivet run --validate` performs at end-of-run, exposed as a standalone command for between-run polling and triage. Reads `manifest.json` + `_SUCCESS` at the destination and head-checks every committed part for presence and recorded `size_bytes`. Without `partition_by` the **source is not queried**; with `partition_by` it is read once for the partition list (use `rivet reconcile` for that). See [ADR-0013](../adr/0013-trust-flag-contract.md) §"Subcommand carveouts" and [ADR-0012](../adr/0012-cloud-manifest-contract.md) M5/M6.
 
 By default `validate` resolves the destination prefix the same way `run` does (`{date}` becomes today's UTC date). Use `--date`, `--run-id`, or `--prefix` to point at a prior run instead.
 

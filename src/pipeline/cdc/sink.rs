@@ -1456,6 +1456,7 @@ mod partition_budget_tests {
             nullable: true,
             warnings: vec![],
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         };
         let arrays: Vec<ArrayRef> = (0..5i64)
             .map(|k| {
@@ -1488,6 +1489,7 @@ mod partition_budget_tests {
             nullable: true,
             warnings: vec![],
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         };
         let r = crate::plan::rollover::PartitionRollover {
             column: "created_at".into(),
@@ -2498,6 +2500,7 @@ mod tests {
             nullable: true,
             warnings: vec![],
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         }]
     }
 
@@ -2514,6 +2517,7 @@ mod tests {
             nullable: true,
             warnings: vec![],
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         }];
         let day = |n: u32| {
             let mut e = insert(i64::from(n));
@@ -3072,6 +3076,7 @@ mod tests {
             nullable: true,
             warnings: Vec::new(),
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         }
     }
 
@@ -3681,6 +3686,7 @@ mod tests {
             nullable: true,
             warnings: vec![],
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         }];
         let day = |n: u32| {
             let mut e = insert(i64::from(n));
