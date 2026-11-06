@@ -1271,6 +1271,22 @@ jobs:
           uv run --frozen python -m dev.release_oracle.value_diff
           uv run --frozen python -m dev.release_oracle.rig_oracle
 
+  lint-tools:
+    name: Pinned lint tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the pinned tools (sha256 of the binary)
+        run: |
+          python3 dev/pytools/lint_tools.py install "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: The verifier and every fixture self-test, none skipped
+        run: |
+          python3 dev/pytools/lint_tools.py --self-test --require
+          python3 dev/pytools/secrets_scan.py --self-test --require
+      - name: Every pr-tier tool over the tree
+        run: python3 dev/pytools/lint_tools.py tier pr
+
   test:
     name: Tests
     runs-on: ubuntu-latest
