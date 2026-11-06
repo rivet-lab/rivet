@@ -483,7 +483,7 @@ def devbox_run(
 # ── dev/parallel_keyset/fixture.sh ─────────────────────────────────────────────
 PK_CONTAINER = "pk-mysql"
 PK_PORT = 3310
-PK_IMAGE = "mysql:8.4"
+PK_IMAGE = "mysql:8.4.13@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7"
 PK_SQL = """DROP TABLE IF EXISTS big;
 CREATE TABLE big (id BIGINT PRIMARY KEY, payload VARCHAR(120) NOT NULL, n INT NOT NULL) ENGINE=InnoDB;
 INSERT INTO big (id, payload, n)
