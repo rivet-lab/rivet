@@ -59,7 +59,7 @@ trigger that makes the session linguistic).
 | `chunked` keyset (`chunk_by_key`) | single-column unique NOT NULL key: integer `NUMBER` of any precision, bare `NUMBER`, `VARCHAR2`/`CHAR`, `DATE`, `TIMESTAMP(0..6)`; also `parallel > 1`; or the primary key's columns in order (`chunk_by_key: [a, b]`, sequential) |
 | `time_window`, `partition_by` | ANSI `TIMESTAMP '…'` / `DATE '…'` bounds |
 
-`TIMESTAMP(7..9)` is not a keyset key (rivet reads it at microseconds, so a page
+A `TIMESTAMP(7..9)` column needs a `columns:` declaration (see Types); it is not a keyset key (rivet reads it at microseconds, so a page
 could not advance), and it is refused as an incremental cursor
 (`RIVET_SOURCE_CURSOR_FINER_THAN_MICROSECOND`): the saved cursor would fall below
 its own row and every run would export that row again. Read it as
@@ -105,7 +105,7 @@ stops the query at the budget.
 | `BINARY_FLOAT` / `BINARY_DOUBLE` | Float32 / Float64 (NaN, ±Inf kept) |
 | `BOOLEAN` (23ai and later) | Boolean |
 | `DATE`, `TIMESTAMP(0..6)` | Timestamp(µs) |
-| `TIMESTAMP(7..9)` | Timestamp(µs), sub-microsecond digits truncated (reported Lossy) |
+| `TIMESTAMP(7..9)`, zoned or not | refused until declared: `columns: {COL: timestamp_ns}` (`timestamp_tz_ns` for a zoned one) keeps every digit, `timestamp` (`timestamp_tz`) reads microseconds and drops the sub-microsecond digits on purpose |
 | `TIMESTAMP WITH [LOCAL] TIME ZONE` | Timestamp(µs, UTC) — converted on the server (`SYS_EXTRACT_UTC`) |
 | `INTERVAL YEAR TO MONTH` / `DAY TO SECOND` | ISO 8601 duration text |
 | `VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `CLOB`, `NCLOB`, `LONG` | Utf8 (a zero-length LOB stays `''`, not NULL) |
@@ -126,8 +126,13 @@ Parquet); dates before 1582-10-15 are not converted from Oracle's Julian calenda
 - TLS verifies the server against the public CA bundle compiled into the driver
   (`webpki-roots`) only: no system trust store, no `tls.ca_file` (refused), no
   Oracle wallet.
-- `TIMESTAMP(7..9)` values are truncated to microseconds (reported Lossy, with a
-  warning); such a column is refused as an incremental cursor.
+- A `TIMESTAMP(7..9)` column is refused with `RIVET_TYPE_UNSAFE_MAPPING`, with or
+  without `--strict`, until a `columns:` entry declares it: `timestamp_ns` keeps
+  all nine digits (range 1677-09-21..2262-04-11), `timestamp` reads microseconds.
+  A change-data-capture export reads microseconds only, so there `timestamp` is the
+  one remedy. Such a column is also refused as an incremental cursor.
+- An `INTERVAL DAY TO SECOND(7..9)` column is still read at microseconds, reported
+  Lossy with a warning.
 - CDC (LogMiner) is a preview and runs only as a bounded drain to files, to the SCN
   current at open; continuous CDC (`until_current: false`, `rivet cdc --stream`) is refused at config load
   (`RIVET_CONFIG_CDC_CONTINUOUS_UNSUPPORTED`), and an Oracle CDC export cannot feed a

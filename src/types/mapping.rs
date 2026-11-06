@@ -77,6 +77,9 @@ pub struct TypeMapping {
     /// Native, or the canonical text form the column is delivered in (ADR-0038 CP2).
     #[serde(skip_serializing_if = "Delivery::is_native")]
     pub delivery: Delivery,
+    /// Set when the default mapping may not be delivered without a `columns:` declaration; the text names the declarations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 impl TypeMapping {
@@ -99,12 +102,19 @@ impl TypeMapping {
             nullable: source.nullable,
             warnings: Vec::new(),
             delivery: Delivery::Native,
+            refusal: None,
         };
         if interval {
             mapping.with_text(TextForm::Iso8601Duration)
         } else {
             mapping
         }
+    }
+
+    /// Refuse this column unless the operator declares it under `columns:`; `remedy` names the declarations.
+    pub fn with_refusal(mut self, remedy: impl Into<String>) -> Self {
+        self.refusal = Some(remedy.into());
+        self
     }
 
     /// Deliver this column as canonical text: `Utf8`, `LogicalString`, `rivet.text_form` metadata.

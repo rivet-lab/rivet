@@ -161,7 +161,9 @@ fn oracle_full_export_matches_the_databases_own_rendering_for_every_type() {
     require_alive(LiveService::Oracle);
     let t = type_matrix_table();
     let out = tempfile::tempdir().unwrap();
-    let rig = Rig::oracle_batch(t.name()).dest_path(out.path().to_path_buf());
+    let rig = Rig::oracle_batch(t.name())
+        .export_line("columns: {TS9: timestamp}")
+        .dest_path(out.path().to_path_buf());
     let run = rig.run_args(&[]);
     assert!(
         run.status.success(),
@@ -205,7 +207,6 @@ fn oracle_full_export_matches_the_databases_own_rendering_for_every_type() {
         assert_eq!(got, want, "{col}: parquet vs the database's own {expr}");
     }
 
-    // TIMESTAMP(9): microseconds, the sub-µs digits truncated (the documented warning).
     let ts9 = parquet_cells(out.path(), "TS9");
     assert_eq!(
         ts9[&1].as_deref(),
@@ -608,6 +609,18 @@ fn an_init_generated_config_runs_on_a_key_the_oracle_planner_cannot_seek() {
             !yaml.contains("chunk_by_key: K"),
             "{ty} is no keyset key:\n{yaml}"
         );
+        let yaml = if tag == "t9" {
+            let declared = yaml.replacen(
+                "    format: parquet",
+                "    format: parquet\n    columns: {K: timestamp_ns}",
+                1,
+            );
+            assert_ne!(declared, yaml, "the declaration lands in the export");
+            std::fs::write(dir.path().join("rivet.yaml"), &declared).unwrap();
+            declared
+        } else {
+            yaml
+        };
         let run = run_rivet_in_dir(dir.path(), &["run", "-c", "rivet.yaml"], &env);
         assert!(
             run.status.success(),
@@ -2034,39 +2047,50 @@ fn check_on_an_init_scaffold_finds_the_cursor_index() {
     assert_eq!(d["diagnostic"]["uses_index"], true, "{d}");
 }
 
-/// The type report calls a TIMESTAMP(9) column lossy: rivet keeps microseconds.
+/// The type report refuses an undeclared TIMESTAMP(9) column with the run's own code and passes once it is declared.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn the_type_report_marks_a_timestamp_9_column_lossy() {
+fn the_type_report_refuses_an_undeclared_timestamp_9_column_as_the_run_does() {
     require_alive(LiveService::Oracle);
     let t = OracleTable::create(
         "ora_ts9r",
         "id NUMBER(10) PRIMARY KEY, t9 TIMESTAMP(9), t6 TIMESTAMP(6)",
     );
-    let check = Rig::oracle_batch(t.name())
+    let refused = Rig::oracle_batch(t.name()).run_after(
+        &["check", "--type-report", "--json"],
+        &[],
+        Pairing::SameRefusal,
+    );
+    assert!(!refused.green, "the report vouches for nothing it refuses");
+    let said = String::from_utf8_lossy(&refused.preflight.stderr).to_string()
+        + &String::from_utf8_lossy(&refused.preflight.stdout);
+    assert!(said.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{said}");
+    assert!(said.contains("column 'T9'"), "{said}");
+    assert!(
+        !said.contains("column 'T6'"),
+        "TIMESTAMP(6) is exact:\n{said}"
+    );
+    let declared = Rig::oracle_batch(t.name())
+        .export_line("columns: {T9: timestamp}")
         .run_after(
             &["check", "--type-report", "--json"],
             &[],
             Pairing::SameRefusal,
-        )
-        .preflight;
+        );
     assert!(
-        check.status.success(),
+        declared.green,
         "stderr:\n{}",
-        String::from_utf8_lossy(&check.stderr)
+        String::from_utf8_lossy(&declared.preflight.stderr)
     );
-    let d: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
-    let fidelity = |col: &str| {
-        d["columns"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["column"] == col)
-            .unwrap()["fidelity"]
-            .clone()
-    };
-    assert_eq!(fidelity("T9"), "lossy");
-    assert_eq!(fidelity("T6"), "exact");
+    let d: serde_json::Value = serde_json::from_slice(&declared.preflight.stdout).unwrap();
+    let fidelity = d["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["column"] == "T6")
+        .unwrap()["fidelity"]
+        .clone();
+    assert_eq!(fidelity, "exact");
 }
 
 /// A coalesce-mode incremental cursor advances on Oracle: run 2 over an unchanged table
@@ -2130,7 +2154,8 @@ fn an_incremental_cursor_on_a_nanosecond_timestamp_is_refused_before_it_re_expor
     ));
     let rig = Rig::oracle_batch(t.name())
         .mode("incremental")
-        .export_line("cursor_column: TS");
+        .export_line("cursor_column: TS")
+        .export_line("columns: {TS: timestamp}");
     let said = rig.run_expect_fail();
     assert!(
         said.contains("oracle: incremental cursor column TS is TIMESTAMP(9)"),
@@ -2141,6 +2166,114 @@ fn an_incremental_cursor_on_a_nanosecond_timestamp_is_refused_before_it_re_expor
         files.is_empty(),
         "the refusal comes before any part: {files:?}"
     );
+}
+
+/// A table with one column per fractional-precision boundary and zone form, rows holding nine-digit fractions.
+fn nanosecond_boundary_table() -> OracleTable {
+    let t = OracleTable::create(
+        "ora_tsb",
+        "id NUMBER(10) PRIMARY KEY, t6 TIMESTAMP(6), t7 TIMESTAMP(7), t9 TIMESTAMP(9), \
+         tz9 TIMESTAMP(9) WITH TIME ZONE, ltz9 TIMESTAMP(9) WITH LOCAL TIME ZONE",
+    );
+    for row in [
+        "1, TIMESTAMP '2024-02-29 13:14:15.123456', TIMESTAMP '2024-02-29 13:14:15.1234567', \
+         TIMESTAMP '2024-02-29 13:14:15.123456789', \
+         TO_TIMESTAMP_TZ('2024-02-29 10:00:00.987654321 +02:00','YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'), \
+         TO_TIMESTAMP_TZ('2024-02-29 10:00:00.000000001 -03:00','YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')",
+        "2, NULL, NULL, TIMESTAMP '2024-01-01 00:00:00.000000001', NULL, NULL",
+    ] {
+        ora_exec(&format!("INSERT INTO {} VALUES ({row})", t.name()));
+    }
+    t
+}
+
+/// An undeclared TIMESTAMP(7..9), zoned or not, is refused naming each such column and not TIMESTAMP(6); declaring it as `timestamp_ns` delivers every digit.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delivers_every_digit() {
+    require_alive(LiveService::Oracle);
+    let t = nanosecond_boundary_table();
+    let out = tempfile::tempdir().unwrap();
+    let mut rig = Rig::oracle_batch(t.name()).dest_path(out.path().to_path_buf());
+    let said = rig.refuses_twice_then(
+        &["run"],
+        &[],
+        Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1),
+        vec![Remedy::new(
+            "timestamp_ns` keeps all nine digits",
+            Then::DeliversTheSource,
+            |r| {
+                r.rebuilt(|rig| {
+                    rig.export_line(
+                        "columns: {T7: timestamp_ns, T9: timestamp_ns, TZ9: timestamp_tz_ns, LTZ9: timestamp_tz_ns}",
+                    )
+                })
+            },
+        )],
+    );
+    for col in ["T7", "T9", "TZ9", "LTZ9"] {
+        assert!(said.contains(&format!("column '{col}'")), "{col}:\n{said}");
+    }
+    assert!(
+        !said.contains("column 'T6'"),
+        "TIMESTAMP(6) is exact:\n{said}"
+    );
+    let ns = |c: &str| format!("TO_CHAR({c}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')");
+    let utc9 = |c: &str| format!("TO_CHAR(SYS_EXTRACT_UTC({c}), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')");
+    for (col, expr) in [
+        ("T7", ns("t7")),
+        ("T9", ns("t9")),
+        ("TZ9", utc9("tz9")),
+        ("LTZ9", utc9("ltz9")),
+    ] {
+        let want = oracle_cells(t.name(), &expr);
+        let got = parquet_cells(out.path(), col);
+        assert_eq!(
+            got.iter()
+                .map(|(k, v)| (*k, v.as_deref().map(canon_ts)))
+                .collect::<BTreeMap<_, _>>(),
+            want.iter()
+                .map(|(k, v)| (*k, v.as_deref().map(|s| canon_ts(s.trim()))))
+                .collect::<BTreeMap<_, _>>(),
+            "{col}: parquet vs the database's own nine-digit rendering"
+        );
+    }
+}
+
+/// An `INTERVAL DAY TO SECOND(9)` column, unlike `TIMESTAMP(9)`, stays a warning in the type report and the run it vouches for delivers.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_iv9",
+        "id NUMBER(10) PRIMARY KEY, iv9 INTERVAL DAY TO SECOND(9), iv6 INTERVAL DAY TO SECOND(6)",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} VALUES (1, INTERVAL '1 02:03:04.123456789' DAY TO SECOND(9), INTERVAL '1 02:03:04.123456' DAY TO SECOND(6))",
+        t.name()
+    ));
+    let out = tempfile::tempdir().unwrap();
+    let check = Rig::oracle_batch(t.name())
+        .dest_path(out.path().to_path_buf())
+        .run_after(
+            &["check", "--type-report", "--json"],
+            &[],
+            Pairing::GreenOnly,
+        );
+    assert!(check.green, "the report vouches for the run");
+    let d: serde_json::Value = serde_json::from_slice(&check.preflight.stdout).unwrap();
+    let fidelity = |col: &str| {
+        d["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["column"] == col)
+            .unwrap()["fidelity"]
+            .clone()
+    };
+    assert_eq!(fidelity("IV9"), "lossy");
+    assert_eq!(fidelity("IV6"), "compatible");
 }
 
 /// The `columns:` override types beyond the autodetected ones, one column each.

@@ -1063,8 +1063,8 @@ fn a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_postgr
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect CDC-RUN-START; closes with fix/cdc-run-start-marker"]
-fn open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql() {
+#[ignore = "live: requires clickhouse + fake-gcs + mysql-cdc"]
+fn a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql() {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(BUCKET);
@@ -1100,8 +1100,8 @@ fn open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_p
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect CDC-RUN-START; closes with fix/cdc-run-start-marker"]
-fn open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres() {
+#[ignore = "live: requires clickhouse + fake-gcs + postgres-cdc"]
+fn a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres() {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(BUCKET);

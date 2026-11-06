@@ -39,6 +39,12 @@ MD_ARGS = ("--no-progress", "--config", "lychee.toml", "docs/**/*.md", "*.md")
 INSTALL = "brew install lychee, or the release lychee-v{version}"
 TIMEOUT = 900
 
+AGENT = ".claude/agents/tidy-agent.md"
+AGENT_OK = "---\nname: tidy-agent\ndescription: Tidies a file when asked.\ntools: Read, Edit\nmodel: sonnet\n---\nTidy the file named in the task.\n"
+AGENT_BROKEN = "---\ndescription: Tidies a file when asked.\ntools: Read, Edit\nTidy the file named in the task.\n"
+MCP_PINNED = "{\"mcpServers\": {\"graph\": {\"command\": \"uvx\", \"args\": [\"code-review-graph==2.3.9\", \"serve\"], \"type\": \"stdio\"}}}\n"
+MCP_UNPINNED = MCP_PINNED.replace("==2.3.9", "")
+
 TOOLS = {
     "lychee": Tool(
         "lychee",
@@ -62,6 +68,18 @@ TOOLS = {
         (
             ({"lychee.toml": REPO, "a.md": "[dead](http://127.0.0.1:9/unreachable)\n"}, "127.0.0.1:9"),
             ({"lychee.toml": REPO, "docs/d/c.md": "[dead](http://127.0.0.1:9/unreachable)\n"}, "127.0.0.1:9"),
+        ),
+    ),
+    "agnix": Tool(
+        "agnix",
+        "0.59.0",
+        ("--strict", "."),
+        "the release v{version} of agent-sh/agnix, or cargo install agnix-cli --version {version}",
+        "pr",
+        {AGENT: AGENT_OK, ".mcp.json": MCP_PINNED},
+        (
+            ({AGENT: AGENT_BROKEN}, "no 'name' field"),
+            ({".mcp.json": MCP_UNPINNED}, "without a pinned version"),
         ),
     ),
 }

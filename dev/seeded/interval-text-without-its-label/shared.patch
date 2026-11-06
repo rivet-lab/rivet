@@ -1,8 +1,8 @@
 diff --git a/src/types/mapping.rs b/src/types/mapping.rs
 --- a/src/types/mapping.rs
 +++ b/src/types/mapping.rs
-@@ -101,7 +101,7 @@ impl TypeMapping {
-             delivery: Delivery::Native,
+@@ -105,7 +105,7 @@ impl TypeMapping {
+             refusal: None,
          };
          if interval {
 -            mapping.with_text(TextForm::Iso8601Duration)
