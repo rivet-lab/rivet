@@ -18,6 +18,8 @@ them) while applying them before the SLOT exists is not.
 import argparse, json, os, re, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
+from dev.pytools.shell import loopback_publish  # noqa: E402
 # The stands do not all share one docker network: the SQL engines sit in
 # `rivet_default`, the Mongo stands in `stand_default`. The sink must join the
 # SAME network as the source, or Debezium cannot resolve either of them.
@@ -43,6 +45,9 @@ MYSQL_EXEC = ["docker", "exec", os.environ.get("CDC_ORACLE_MYSQL_CONTAINER", "ri
 MYSQL_FRESH = "CDC_ORACLE_MYSQL_HOST" not in os.environ
 MYSQL_FRESH_NAME = "mysql-diff-oracle"
 MYSQL_FRESH_PORT = 13317
+MYSQL_IMAGE = "mysql:8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b"
+SINK_IMAGE = "python:3.12.13-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf"
+DEBEZIUM_IMAGE = "quay.io/debezium/server:3.0.0.Final@sha256:11a759a438270574ff3a5f1aea3c781e8a5e11bf944765e2853df2273679ac6c"
 
 
 def fresh_mysql_source(net: str) -> None:
@@ -58,16 +63,10 @@ def fresh_mysql_source(net: str) -> None:
     # like the rest of the harness.
     subprocess.run(["docker", "rm", "-f", MYSQL_FRESH_NAME], capture_output=True)
     sh("docker", "run", "-d", "--name", MYSQL_FRESH_NAME, "--network", net,
-       "-p", f"{MYSQL_FRESH_PORT}:3306",
+       *loopback_publish(MYSQL_FRESH_PORT, 3306),
        "-e", "MYSQL_ROOT_PASSWORD=rivet", "-e", "MYSQL_DATABASE=rivet",
        "-e", "MYSQL_USER=rivet", "-e", "MYSQL_PASSWORD=rivet",
-       # binlog-row-metadata=FULL mirrors the stand (docker-compose.yaml pins it
-       # with eight lines of rationale). MySQL's OWN default is MINIMAL, so
-       # WITHOUT this the differential silently graded the POSITIONAL mapping
-       # path while the stand — and rivet's own recommendation — is the
-       # by-NAME path: measured, rivet warned "binlog_row_metadata = MINIMAL …
-       # maps values by POSITION" and the harness swallowed it.
-       "mysql:8.0", "--server-id=7001", "--binlog_format=ROW",
+       MYSQL_IMAGE, "--server-id=7001", "--binlog_format=ROW",
        "--binlog-row-metadata=FULL")
     # TCP, not the socket: mysql's entrypoint runs a TEMPORARY init server that
     # listens on the SOCKET ONLY, so a socket probe reports ready, the init
@@ -408,7 +407,7 @@ def main() -> int:
         subprocess.run(["cp", os.path.join(HERE, "sink.py"), work], check=True)
         sh("docker", "run", "-d", "--name", sink, "--network", net,
            "-v", f"{work}:/data", "-e", "DBZ_SINK_OUT=/data/debezium.jsonl", "-e", "DBZ_SINK_HEADERS=1",
-           "python:3.12-slim", "python", "/data/sink.py")
+           SINK_IMAGE, "python", "/data/sink.py")
 
         # Per-engine connector config. The two differ in more than credentials:
         # PostgreSQL needs a publication and a slot name; MySQL needs a server id
@@ -487,7 +486,7 @@ quarkus.log.level=WARN
             f.write(props)
         started_ms = int(mongo("Date.now()")) if a.engine == "mongo" else 0
         sh("docker", "create", "--name", srv, "--network", net,
-           "-v", f"{work}:/data", "quay.io/debezium/server:3.0.0.Final")
+           "-v", f"{work}:/data", DEBEZIUM_IMAGE)
         sh("docker", "cp", os.path.join(work, "application.properties"),
            f"{srv}:/debezium/config/application.properties")
         sh("docker", "start", srv)

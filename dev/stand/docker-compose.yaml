@@ -23,6 +23,17 @@
 # Local object stores (MinIO 9000, fake-gcs 4443, azurite 10000) live in the
 # canonical rivet compose project — not duplicated here.
 
+x-images:
+  postgres14: &img-postgres14 postgres:14.23@sha256:caf49e3b10d377aa2cfee478591d623808527beb27125d38797b418013f72d81
+  postgres18: &img-postgres18 postgres:18.4@sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a
+  mysql57: &img-mysql57 mysql:5.7.44@sha256:4bc6bc963e6d8443453676cae56536f4b8156d78bae03c0145cbe47c2aad73bb
+  mysql80: &img-mysql80 mysql:8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+  mssql2019: &img-mssql2019 mcr.microsoft.com/mssql/server:2019-CU32-GDR10-ubuntu-20.04@sha256:46f719fd3457d4e7e8e5845fe00c35c20e7bae7ff1e8b9fe595f2a81029f5ba8
+  mssql2022: &img-mssql2022 mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04@sha256:e07b9699a2b749969f19d86563ceeea22bd3a69f7f1db85a8d1ac4bdaf0c6f56
+  mongo44: &img-mongo44 mongo:4.4.30-focal@sha256:4be76f674fc4b27859816811b8baa3c51830eb1dbf4ca81a51e26b79edd662ef
+  mongo50: &img-mongo50 mongo:5.0.33-focal@sha256:41108d183e972dcbf98d09ed83f6cfc89a471a3f15d06f9d64a95e45d9db8dd2
+  mongo80: &img-mongo80 mongo:8.0.13-noble@sha256:cf340b1e5283843c63eb12999922f20c463ae31285f746d30f05dcc21cd1d47c
+
 x-pg-env: &pg-env
   POSTGRES_USER: rivet
   POSTGRES_PASSWORD: rivet
@@ -93,22 +104,22 @@ services:
   # an empty volume only.
 
   pg14-batch:
-    image: postgres:14
+    image: *img-postgres14
     profiles: ["batch"]
     restart: unless-stopped
     environment: *pg-env
-    ports: ["5514:5432"]
+    ports: ["127.0.0.1:5514:5432"]
     volumes:
       - pg14_batch_data:/var/lib/postgresql/data
       - ./seeds/common/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck: *pg-health
 
   pg18-batch:
-    image: postgres:18
+    image: *img-postgres18
     profiles: ["batch"]
     restart: unless-stopped
     environment: *pg-env
-    ports: ["5518:5432"]
+    ports: ["127.0.0.1:5518:5432"]
     volumes:
       # 18+ images moved the data volume up a level (PGDATA=/var/lib/postgresql/18/docker)
       - pg18_batch_data:/var/lib/postgresql
@@ -116,48 +127,48 @@ services:
     healthcheck: *pg-health
 
   mysql57-batch:
-    image: mysql:5.7
+    image: *img-mysql57
     platform: linux/amd64   # no arm64 image; Rosetta
     profiles: ["batch"]
     restart: unless-stopped
     command: ["--default-authentication-plugin=mysql_native_password", "--max-allowed-packet=67108864"]
     environment: *mysql-env
-    ports: ["3557:3306"]
+    ports: ["127.0.0.1:3557:3306"]
     volumes:
       - mysql57_batch_data:/var/lib/mysql
       - ./seeds/common/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck: *mysql-health
 
   mysql80-batch:
-    image: mysql:8.0
+    image: *img-mysql80
     profiles: ["batch"]
     restart: unless-stopped
     command: ["--default-authentication-plugin=mysql_native_password"]
     environment: *mysql-env
-    ports: ["3580:3306"]
+    ports: ["127.0.0.1:3580:3306"]
     volumes:
       - mysql80_batch_data:/var/lib/mysql
       - ./seeds/common/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck: *mysql-health
 
   mssql2019-batch:
-    image: mcr.microsoft.com/mssql/server:2019-latest
+    image: *img-mssql2019
     profiles: ["batch"]
     restart: unless-stopped
     <<: *mssql-limits
     environment: *mssql-env
-    ports: ["1519:1433"]
+    ports: ["127.0.0.1:1519:1433"]
     volumes:
       - mssql2019_batch_data:/var/opt/mssql
     healthcheck: *mssql-health
 
   mssql2022-batch:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: *img-mssql2022
     profiles: ["batch"]
     restart: unless-stopped
     <<: *mssql-limits
     environment: *mssql-env
-    ports: ["1522:1433"]
+    ports: ["127.0.0.1:1522:1433"]
     volumes:
       - mssql2022_batch_data:/var/opt/mssql
     healthcheck: *mssql-health
@@ -167,28 +178,28 @@ services:
   # required to match it row-for-row). Seeded by up.sh: seeds/mongo_seed.py →
   # mongoimport (no initdb hook so the seed pipeline stays python+bash).
   mongo44-batch:
-    image: mongo:4.4
+    image: *img-mongo44
     profiles: ["batch"]
     restart: unless-stopped
-    ports: ["27104:27017"]
+    ports: ["127.0.0.1:27104:27017"]
     volumes:
       - mongo44_batch_data:/data/db
     healthcheck: *mongo-health
 
   mongo50-batch:
-    image: mongo:5.0
+    image: *img-mongo50
     profiles: ["batch"]
     restart: unless-stopped
-    ports: ["27105:27017"]
+    ports: ["127.0.0.1:27105:27017"]
     volumes:
       - mongo50_batch_data:/data/db
     healthcheck: *mongo-health
 
   mongo80-batch:
-    image: mongo:8.0.13 # 8.0.14+ kernel gate (SERVER-121912) refuses kernel >=6.19; 7.0.14+ kernels are fixed (SERVER-125742)
+    image: *img-mongo80
     profiles: ["batch"]
     restart: unless-stopped
-    ports: ["27108:27017"]
+    ports: ["127.0.0.1:27108:27017"]
     volumes:
       - mongo80_batch_data:/data/db
     healthcheck: *mongo-health
@@ -199,24 +210,24 @@ services:
   # the Agent (MSSQL), a single-node replica set (Mongo change streams).
 
   pg14-cdc:
-    image: postgres:14
+    image: *img-postgres14
     profiles: ["cdc"]
     restart: unless-stopped
     command: ["-c", "wal_level=logical", "-c", "max_replication_slots=32"]
     environment: *pg-env
-    ports: ["5614:5432"]
+    ports: ["127.0.0.1:5614:5432"]
     volumes:
       - pg14_cdc_data:/var/lib/postgresql/data
       - ./seeds/cdc/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck: *pg-health
 
   pg18-cdc:
-    image: postgres:18
+    image: *img-postgres18
     profiles: ["cdc"]
     restart: unless-stopped
     command: ["-c", "wal_level=logical", "-c", "max_replication_slots=32"]
     environment: *pg-env
-    ports: ["5618:5432"]
+    ports: ["127.0.0.1:5618:5432"]
     volumes:
       # 18+ images moved the data volume up a level (PGDATA=/var/lib/postgresql/18/docker)
       - pg18_cdc_data:/var/lib/postgresql
@@ -224,7 +235,7 @@ services:
     healthcheck: *pg-health
 
   mysql57-cdc:
-    image: mysql:5.7
+    image: *img-mysql57
     platform: linux/amd64
     profiles: ["cdc"]
     restart: unless-stopped
@@ -237,14 +248,14 @@ services:
       - "--log-bin=binlog"
       - "--binlog-format=ROW"
     environment: *mysql-env
-    ports: ["3657:3306"]
+    ports: ["127.0.0.1:3657:3306"]
     volumes:
       - mysql57_cdc_data:/var/lib/mysql
       - ./seeds/cdc/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck: *mysql-health
 
   mysql80-cdc:
-    image: mysql:8.0
+    image: *img-mysql80
     profiles: ["cdc"]
     restart: unless-stopped
     command:
@@ -254,34 +265,34 @@ services:
       - "--binlog-format=ROW"
       - "--binlog-row-metadata=FULL"
     environment: *mysql-env
-    ports: ["3680:3306"]
+    ports: ["127.0.0.1:3680:3306"]
     volumes:
       - mysql80_cdc_data:/var/lib/mysql
       - ./seeds/cdc/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
     healthcheck: *mysql-health
 
   mssql2019-cdc:
-    image: mcr.microsoft.com/mssql/server:2019-latest
+    image: *img-mssql2019
     profiles: ["cdc"]
     restart: unless-stopped
     <<: *mssql-limits
     environment:
       <<: *mssql-env
       MSSQL_AGENT_ENABLED: "true"   # the Agent runs the CDC capture job
-    ports: ["1619:1433"]
+    ports: ["127.0.0.1:1619:1433"]
     volumes:
       - mssql2019_cdc_data:/var/opt/mssql
     healthcheck: *mssql-health
 
   mssql2022-cdc:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: *img-mssql2022
     profiles: ["cdc"]
     restart: unless-stopped
     <<: *mssql-limits
     environment:
       <<: *mssql-env
       MSSQL_AGENT_ENABLED: "true"
-    ports: ["1622:1433"]
+    ports: ["127.0.0.1:1622:1433"]
     volumes:
       - mssql2022_cdc_data:/var/opt/mssql
     healthcheck: *mssql-health
@@ -291,31 +302,31 @@ services:
   # applied by up.sh AFTER the healthcheck turns green. Clients connect with
   # ?directConnection=true.
   mongo44-cdc:
-    image: mongo:4.4
+    image: *img-mongo44
     profiles: ["cdc"]
     restart: unless-stopped
     command: ["--replSet", "rs0", "--bind_ip_all"]
-    ports: ["27204:27017"]
+    ports: ["127.0.0.1:27204:27017"]
     volumes:
       - mongo44_cdc_data:/data/db
     healthcheck: *mongo-rs-health
 
   mongo50-cdc:
-    image: mongo:5.0
+    image: *img-mongo50
     profiles: ["cdc"]
     restart: unless-stopped
     command: ["--replSet", "rs0", "--bind_ip_all"]
-    ports: ["27205:27017"]
+    ports: ["127.0.0.1:27205:27017"]
     volumes:
       - mongo50_cdc_data:/data/db
     healthcheck: *mongo-rs-health
 
   mongo80-cdc:
-    image: mongo:8.0.13 # 8.0.14+ kernel gate (SERVER-121912) refuses kernel >=6.19; 7.0.14+ kernels are fixed (SERVER-125742)
+    image: *img-mongo80
     profiles: ["cdc"]
     restart: unless-stopped
     command: ["--replSet", "rs0", "--bind_ip_all"]
-    ports: ["27208:27017"]
+    ports: ["127.0.0.1:27208:27017"]
     volumes:
       - mongo80_cdc_data:/data/db
     healthcheck: *mongo-rs-health
