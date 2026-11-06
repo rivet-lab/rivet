@@ -99,8 +99,8 @@ scenarios:
   - id: ca_file_is_the_only_trust_anchor
     what: "`tls.ca_file` is the only trust anchor: a server certificate a system-trusted CA signed is refused when ca_file names another CA (libpq sslrootcert semantics); without ca_file the system store decides"
     postgres: { test: postgres_system_store_is_not_a_second_anchor }
-    mysql:    { gap: "the mysql driver trusts ca_file beside the system store and exposes no sole-anchor option; open defect #789, no cell until a driver patch gives a sole-anchor option" }
-    mssql:    { gap: "the tiberius driver trusts ca_file beside the system store and exposes no sole-anchor option; open defect #789, no cell until a driver patch gives a sole-anchor option" }
+    mysql:    { test: mysql_system_store_is_not_a_second_anchor }
+    mssql:    { test: mssql_system_store_is_not_a_second_anchor }
     mongo:    { test: mongo_system_store_is_not_a_second_anchor }
     oracle:   { na: "an Oracle source refuses tls.ca_file by code (src/source/oracle/mod.rs), so no trust anchor is built" }
 

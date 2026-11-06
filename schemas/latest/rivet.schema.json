@@ -397,7 +397,7 @@
           "default": "verify-full"
         },
         "ca_file": {
-          "description": "PEM CA certificate for server verification: the only trust anchor on Postgres and MongoDB, trusted beside the system store on MySQL and SQL Server.",
+          "description": "PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set.",
           "type": [
             "string",
             "null"
