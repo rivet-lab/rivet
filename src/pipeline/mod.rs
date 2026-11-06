@@ -24,6 +24,7 @@ pub(crate) use sink::batch_partition_buckets;
 mod fan_in;
 pub(crate) mod frame;
 mod governor;
+mod incarnation;
 pub(crate) mod ipc;
 mod job;
 mod keyset;

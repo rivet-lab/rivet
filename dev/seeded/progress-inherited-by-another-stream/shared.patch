@@ -1,4 +1,3 @@
-diff --git a/src/state/cursor.rs b/src/state/cursor.rs
 --- a/src/state/cursor.rs
 +++ b/src/state/cursor.rs
 @@ -28,7 +28,11 @@
@@ -13,4 +12,4 @@ diff --git a/src/state/cursor.rs b/src/state/cursor.rs
 +        && stored.is_empty()
  }
  
- /// Whether two recorded row sets are one: the same text, or a query as written and a substituted query that fills its `${...}` placeholders (what a plan sealed before templates were recorded carries).
+ /// What follows the rows in a population that names the collection incarnation its progress was written against.
