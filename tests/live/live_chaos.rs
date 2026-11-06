@@ -18,10 +18,6 @@ use crate::common::*;
 #[test]
 #[ignore = "live: requires docker compose postgres + toxiproxy"]
 fn high_latency_does_not_cause_false_positive_transient_classification() {
-    // 200ms per-packet latency significantly slows the query, but it must
-    // NOT be interpreted as a timeout/transient failure because the driver
-    // never actually returns an error.  This pins the contract that slow
-    // networks are tolerated.
     let _g = toxiproxy_guard();
     require_alive(LiveService::Postgres);
     require_alive(LiveService::Toxiproxy);
@@ -36,18 +32,22 @@ fn high_latency_does_not_cause_false_positive_transient_classification() {
         .query(&format!("SELECT id FROM {}", table.name()))
         .mode("full")
         .export_line("tuning: {max_retries: 0}");
+    let t0 = std::time::Instant::now();
     let out_run = rig.run_args(&["--export", &export_name]);
+    let took = t0.elapsed();
     toxi_reset_toxics("postgres");
 
     assert!(
         out_run.status.success(),
         "200ms latency must not be classified as transient failure"
     );
-    // …and the export must have DELIVERED. Exit 0 alone was the whole oracle
-    // here until the batch gate asked (2026-08-29): a run that classified the
-    // latency correctly and then shipped nothing exits 0 too, so the test
-    // could not tell "tolerated the slow network" from "tolerated it and
-    // delivered an empty file". Three seeded rows, read back off the parquet.
+    assert!(
+        took >= Duration::from_millis(3 * 200),
+        "the 200 ms toxic must have slowed at least three sequential round trips; took {took:?}"
+    );
+    let ran =
+        recorded_run_outcome(&rig.config_path(), &export_name).expect("the run's metrics row");
+    assert_eq!(ran.retries, 0, "latency must not cost a retry: {ran:?}");
     let rows = read_all_parts(&rig.out_dir())
         .iter()
         .map(|b| b.num_rows())
@@ -60,21 +60,17 @@ fn high_latency_does_not_cause_false_positive_transient_classification() {
 
 #[test]
 #[ignore = "live: requires docker compose postgres + toxiproxy"]
-fn chunked_export_completes_through_temporary_proxy_disable() {
-    // Chunked mode must converge through a mid-stream proxy disable.  Each
-    // chunk is a separate query, so in-process retry reconnects on the next
-    // attempt once the proxy is back; if the outage straddles a chunk-commit
-    // boundary the run instead fails safely and `--resume` finishes it from the
-    // last committed chunk (hence `chunk_checkpoint: true`).  The assertion
-    // below pins convergence + integrity, not the timing-dependent one-shot.
+fn chunked_export_recovers_after_mid_stream_connection_reset() {
     let _g = toxiproxy_guard();
     require_alive(LiveService::Postgres);
+    require_alive(LiveService::DuckDb);
     require_alive(LiveService::Toxiproxy);
     ensure_toxi_proxy("postgres", 15432, "postgres:5432");
     toxi_reset_toxics("postgres");
 
     let table = seed_pg_numeric_table(40);
     let export_name = unique_name("qa4A4_chunk");
+    let (out_host, out_container) = duckdb_shared_workdir("qa4A4_chunk_oracle");
     let rig = Rig::pg_batch(&export_name)
         .source_url(POSTGRES_TOXI_URL)
         .query(&format!("SELECT id, name FROM {}", table.name()))
@@ -82,56 +78,50 @@ fn chunked_export_completes_through_temporary_proxy_disable() {
         .export_line("chunk_column: id")
         .export_line("chunk_size: 10")
         .export_line("chunk_checkpoint: true")
-        .export_line("tuning: {max_retries: 3, retry_backoff_ms: 200}");
-    let cfg = rig.config_path();
+        .export_line("tuning: {max_retries: 3, retry_backoff_ms: 1500}")
+        .dest_path(out_host);
 
-    let bg = std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(60));
-        toxi_disable("postgres");
-        std::thread::sleep(Duration::from_millis(400));
-        toxi_enable("postgres");
+    let marker = std::env::temp_dir().join(format!("rivet-{export_name}.paused"));
+    let _ = std::fs::remove_file(&marker);
+    let marker_env = marker.to_string_lossy().into_owned();
+    let mut run = rig.spawn_args_env(
+        &["--export", &export_name],
+        &[
+            ("RIVET_TEST_PAUSE_AT", "pg_after_snapshot_open:1500"),
+            ("RIVET_TEST_PAUSE_MARKER", &marker_env),
+        ],
+    );
+    let reset = reset_peer_until("postgres", &marker, || {
+        run.stderr_so_far().contains("retry 2/") || matches!(run.try_wait(), Ok(Some(_)))
     });
-
-    let out_run = rig.run_args(&["--export", &export_name]);
-    let _ = bg.join();
+    let out_run = run.wait_with_output().expect("reap the run");
+    let _ = std::fs::remove_file(&marker);
     toxi_reset_toxics("postgres");
 
-    // Chunked mode's contract for a mid-stream blip is *convergence*, not
-    // one-shot success.  In-process retry recovers the common case, but if the
-    // outage straddles a chunk-commit boundary the run fails SAFELY — it refuses
-    // to re-run a chunk whose file already committed (that would duplicate rows)
-    // and points the operator at `--resume`.  That safe-fail is correct
-    // behaviour, not a regression, so asserting one-shot success made this test
-    // timing-dependent.  Assert the real guarantee instead: a transient blip
-    // never corrupts; the export reaches a complete, duplicate-free state,
-    // via `--resume` if the single shot bailed.
-    let cfg_str = cfg.to_str().unwrap();
-    if !out_run.status.success() {
-        let stderr = String::from_utf8_lossy(&out_run.stderr);
-        assert!(
-            stderr.contains("cannot safely retry")
-                || stderr.contains("reconcile")
-                || stderr.contains("resume"),
-            "a transient blip must fail safely (resumable), not crash; stderr:\n{stderr}"
-        );
-        let resume = run_rivet(&[
-            "run",
-            "--config",
-            cfg_str,
-            "--export",
-            &export_name,
-            "--resume",
-        ]);
-        assert!(
-            resume.status.success(),
-            "--resume must converge after a transient mid-stream blip; stderr:\n{}",
-            String::from_utf8_lossy(&resume.stderr)
-        );
-    }
-
-    // No data loss and no duplicates: rivet's own reconcile (source COUNT(*) vs
-    // committed rows) must agree exactly, whichever recovery path was taken.
-    let reconcile = run_rivet(&["reconcile", "--config", cfg_str, "--export", &export_name]);
+    assert!(
+        reset,
+        "the run never paused after its snapshot: nothing was cut"
+    );
+    assert!(
+        out_run.status.success(),
+        "the first chunk holds no durable part, so the cut and the refused reconnect are retried in place; stderr:\n{}",
+        String::from_utf8_lossy(&out_run.stderr)
+    );
+    let ran =
+        recorded_run_outcome(&rig.config_path(), &export_name).expect("the run's metrics row");
+    assert!(
+        ran.status == "success" && ran.retries >= 2,
+        "the run must have retried the cut and the refused reconnect; recorded: {ran:?}"
+    );
+    duckdb_assert_complete(&out_container, "id", 40, "a chunked run cut mid-stream");
+    let cfg = rig.config_path();
+    let reconcile = run_rivet(&[
+        "reconcile",
+        "--config",
+        cfg.to_str().unwrap(),
+        "--export",
+        &export_name,
+    ]);
     assert!(
         reconcile.status.success(),
         "reconcile must confirm the export is complete and duplicate-free; stderr:\n{}",
@@ -144,13 +134,11 @@ fn chunked_export_completes_through_temporary_proxy_disable() {
 #[test]
 #[ignore = "live: requires docker compose postgres + minio"]
 fn s3_export_fails_cleanly_when_bucket_does_not_exist() {
-    // Missing bucket is a permanent error.  Must surface as non-zero exit
-    // with a recognisable error message (not a panic, not an empty log).
     require_alive(LiveService::Postgres);
     require_alive(LiveService::Minio);
 
     let table = seed_pg_numeric_table(3);
-    let bucket = unique_name("rivet-qa-nope"); // never created
+    let bucket = unique_name("rivet-qa-nope").replace('_', "-");
     let export_name = unique_name("qa62_nobucket");
 
     let rig = Rig::pg_batch(&export_name)
@@ -171,10 +159,15 @@ fn s3_export_fails_cleanly_when_bucket_does_not_exist() {
         !out.status.success(),
         "missing bucket must not silently succeed"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.is_empty(),
-        "missing bucket must produce a non-empty stderr diagnostic"
+    let failed = assert_recorded_failure(
+        &rig.config_path(),
+        &export_name,
+        &["bucket or container does not exist"],
+    );
+    assert_eq!(
+        failed.error_class.as_deref(),
+        Some("relation_not_found"),
+        "{failed:?}"
     );
 }
 
