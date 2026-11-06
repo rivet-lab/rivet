@@ -1764,6 +1764,16 @@ mod collection_identity_tests {
     }
 
     #[test]
+    fn a_collection_pinned_through_the_source_trait_refuses_one_created_again() {
+        let fake = FakeMongo::serving(&SECOND, documents(4));
+        let mut reader = source(&fake);
+        Source::pin_incarnation(&mut reader, "t", &crate::types::hex_bytes(&FIRST));
+        let (outcome, rows) = read(&mut reader, None);
+        assert_eq!(code(outcome), Some("RIVET_SOURCE_COLLECTION_NOT_FOUND"));
+        assert_eq!((rows, fake.shelf.lock().unwrap().finds), (0, 0));
+    }
+
+    #[test]
     fn the_incarnation_of_a_collection_is_its_uuid_in_hex_and_a_view_has_none() {
         let fake = FakeMongo::serving(&FIRST, documents(1));
         let session = MongoSession::connect(&fake.url("shop"), None).expect("connect");
