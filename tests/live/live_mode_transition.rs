@@ -973,8 +973,7 @@ fn two_hosts_with_an_at_in_the_query_are_two_sources(e: SqlEngine, tail: &str) {
     );
     rig.run_ok();
     assert_eq!(delivered_ids(e, first.path()), (1..=10).collect::<Vec<_>>());
-    let other = e.url().replace("127.0.0.1", "localhost");
-    assert_ne!(other, e.url(), "the stand URL names 127.0.0.1");
+    let (_forward, other) = respelled_source(e.url());
     rig.source_url(&format!("{other}{tail}"))
         .dest_path(second.path().to_path_buf())
         .run_ok();
