@@ -918,20 +918,20 @@ RAN_LIVE_MODULES: set[str] = set()
 #: fails its cell: libtest counts a skip green, so an unlisted one is a row that graded nothing.
 SKIP_ALLOWED: dict[str, str] = {
     "live_cdc::regenerate_the_pgoutput_fixture_from_the_rig_scenarios":
-        "a fixture GENERATOR (RIVET_REGENERATE_FIXTURES=1), not a check",
+        "a fixture GENERATOR (RIVET_REGENERATE_FIXTURES=1), not a check (review 2027-02-01)",
     "live_cdc_mbt::cdc_destination_disk_full_is_loud_and_lossless":
-        "needs a mounted tiny filesystem (RIVET_TINYFS_DIR) the stand does not provision",
+        "needs a mounted tiny filesystem (RIVET_TINYFS_DIR) the stand does not provision (review 2027-02-01)",
     "live_keyset_parallel::parallel_keyset_incremental_survives_no_backslash_escapes_mysql":
-        "sets @@global.sql_mode, which needs SUPER; the stand's test user has none",
+        "sets @@global.sql_mode, which needs SUPER; the stand's test user has none (review 2027-02-01)",
     "live_clickhouse_load::a_rolled_back_state_loads_the_tables_the_newer_release_created_once_they_are_dropped":
         "skips only when the previous release writes this tree's state schema: nothing migrates, so no copy is left "
-        "to roll back to; it runs again with the next migration",
+        "to roll back to; it runs again with the next migration (review 2027-02-01)",
     "live_destination_parity::a_relative_destination_path_moved_by_the_upgrade_is_refused_until_the_files_follow":
         "skips only when the previous release already anchors a relative destination.path beside its config "
-        "(0.32.0 on): the move it refuses arises from a release before 0.32 only",
+        "(0.32.0 on): the move it refuses arises from a release before 0.32 only (review 2027-02-01)",
     "live_clickhouse_load::a_cdc_stream_staged_on_real_gcs_is_pulled_by_clickhouse":
         "2026-11-02: needs a GCS HMAC key pair (RIVET_TEST_GCS_HMAC_ID / _SECRET) that no gate host holds, "
-        "and minting one is an owner action; closes when the keys are provisioned and the gate env exports them",
+        "and minting one is an owner action; closes when the keys are provisioned and the gate env exports them (review 2027-02-01)",
 }
 
 

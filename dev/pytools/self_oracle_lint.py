@@ -54,7 +54,7 @@ GENERIC = frozenset(
 )
 
 #: `file::test` → why it is allowed today. Shrink-only.
-SELF_ONLY: dict[str, str] = {  # ratchet-pin: self-only-tests strings
+SELF_ONLY: dict[str, str] = {  # ratchet-pin: self-only-tests (review 2027-02-01) strings
     "audit_repair.rs::audit_repair_then_reconcile_converges": "listed 2026-09-27",
     "live_cdc.rs::cdc_initial_snapshot_of_an_empty_table_converges_despite_skip_empty": "listed 2026-09-27",
     "live_cdc.rs::mysql_cdc_refuses_a_compressed_binlog_instead_of_capturing_nothing": "listed 2026-09-27",
@@ -90,7 +90,7 @@ R_STATE = "listed 2026-11-03: a refusal on an unreachable state store; closes wh
 R_DELEGATED = "listed 2026-11-04: delegated self-oracle via InitConfig::generate; the scaffold is the only reader, closes with a per-field scaffold oracle"
 
 #: `file::test` → why a preflight verdict stands without its consequence today. Shrink-only.
-BLIND_PREFLIGHT: dict[str, str] = {  # ratchet-pin: blind-preflight-tests strings
+BLIND_PREFLIGHT: dict[str, str] = {  # ratchet-pin: blind-preflight-tests (review 2027-02-01) strings
     "live_audit_suspects.rs::mssql_check_reports_a_row_estimate_for_a_read_only_login": R_DISAGREES,
     "audit_column_validation.rs::audit_type_report_flags_lossy_scale_reduction": R_DATA,
     "audit_doctor_fastfail.rs::audit_doctor_fastfails_against_unreachable_cloud_endpoint": R_MESSAGE,
