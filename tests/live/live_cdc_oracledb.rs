@@ -680,11 +680,14 @@ fn oracle_cdc_non_utc_session_matches_batch() {
     let d = tempfile::tempdir().unwrap();
     let t = type_table();
     let ckpt = d.path().join("cdc.ckpt");
-    rig(&t, &ckpt, &d.path().join("anchor")).run_ok();
+    let declared = "columns: {TS9: timestamp}";
+    rig(&t, &ckpt, &d.path().join("anchor"))
+        .export_line(declared)
+        .run_ok();
     seed_types(t.name());
     let cdc_out = d.path().join("cdc");
-    rig(&t, &ckpt, &cdc_out).run_ok();
-    let batch = Rig::oracle_batch(t.name());
+    rig(&t, &ckpt, &cdc_out).export_line(declared).run_ok();
+    let batch = Rig::oracle_batch(t.name()).export_line(declared);
     batch.run_ok();
     let cdc = duckdb_run_sql_json(&cells_sql(&cdc_out, true));
     let batch = duckdb_run_sql_json(&cells_sql(&batch.out_dir(), false));

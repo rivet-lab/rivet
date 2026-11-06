@@ -816,10 +816,7 @@ guarantees:
     held_by:
       strict: { test: check_strict_and_run_strict_refuse_the_same_config_with_the_same_code, asserts: "run --strict wrote a part" }
 
-      default_policy: { gap: "the refusal cells run under --strict; no cell runs a lossy mapping under the default policy and asserts the run aborts" }
-    contradicted_by:
-      known_red:
-        - "sentinels[rivet_sent_ts9/full]: SUCCEEDED WITH A CHANGED VALUE"
+      default_policy: { test: oracle_batch_timestamp9_is_refused_until_declared_under_every_policy, asserts: "a refused run wrote a part" }
   - id: uuid_and_json_keep_native_types
     stated:
       - file: docs/type-mapping.md

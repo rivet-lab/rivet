@@ -596,6 +596,7 @@ mod tests {
                 nullable: false,
                 warnings: vec![],
                 delivery: crate::types::Delivery::Native,
+                refusal: None,
             }])
         }
     }
