@@ -184,7 +184,8 @@ def post(text: str) -> None:
         return
     req = urllib.request.Request(url, data=json.dumps({"content": text[:1990]}).encode(),
                                  headers={"Content-Type": "application/json", "User-Agent": "night-queue"})
-    urllib.request.urlopen(req, timeout=15).read()
+    with urllib.request.urlopen(req, timeout=15) as r:
+        r.read()
 
 
 def summary(results: list[dict], skipped: list[str], spent: float, run_dir: Path) -> str:
