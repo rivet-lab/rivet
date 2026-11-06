@@ -3552,6 +3552,7 @@ mod load_ledger_tests {
         let state = StateStore::open_in_memory().unwrap();
         let mut plan = base_plan(&dir, "alone_cleaned");
         plan.load.cleanup_source = true;
+        plan.gcs_prefix = "gs://alone-cleaned/p/".into();
         finished_row(&state, "r-base");
         stage_run(&dir, "r-base", "full");
         let mut job = cdc_job(&dir, &state, &plan);
@@ -3568,13 +3569,14 @@ mod load_ledger_tests {
         );
     }
 
-    /// A baseline whose stream also buffers leaves the cleanup to the buffer leg, so the stream's parts outlive the baseline leg.
+    /// A baseline whose stream also buffers leaves the cleanup to the buffer leg, which reports it.
     #[test]
     fn a_baseline_followed_by_a_buffer_leg_leaves_the_cleanup_to_that_leg() {
         let dir = tempfile::tempdir().unwrap();
         let state = StateStore::open_in_memory().unwrap();
         let mut plan = base_plan(&dir, "buffer_cleans");
         plan.load.cleanup_source = true;
+        plan.gcs_prefix = "gs://buffer-cleans/p/".into();
         finished_row(&state, "r-base");
         finished_row(&state, "r-cdc");
         stage_run(&dir, "r-base", "full");
