@@ -1,3 +1,30 @@
+x-images:
+  postgres12: &img-postgres12 postgres:12.22@sha256:2f2a8c2a7d10862e7fba2602e304523554f9df8244c632dafe2628ccb398fb5c
+  postgres13: &img-postgres13 postgres:13.23@sha256:4689940c683801b4ab839ab3b0a0a3555a5fe425371422310944e89eca7d8068
+  postgres14: &img-postgres14 postgres:14.23@sha256:caf49e3b10d377aa2cfee478591d623808527beb27125d38797b418013f72d81
+  postgres15: &img-postgres15 postgres:15.19@sha256:1149d80408a63791782d07a0e2bd3b06a7adbcdc86e8dcc18d6ee01bacfe04ab
+  postgres16: &img-postgres16 postgres:16.14@sha256:f8e2cc2a36ddb8700e639570f0bc70d0c1495951ba61df903a015dc87db07d02
+  postgres-cdc: &img-postgres-cdc postgres:${POSTGRES_CDC_TAG:-16.14@sha256:f8e2cc2a36ddb8700e639570f0bc70d0c1495951ba61df903a015dc87db07d02}
+  mysql80: &img-mysql80 mysql:8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+  mysql84: &img-mysql84 mysql:8.4.13@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7
+  mysql57: &img-mysql57 mysql:5.7.44@sha256:4bc6bc963e6d8443453676cae56536f4b8156d78bae03c0145cbe47c2aad73bb
+  mysql-cdc: &img-mysql-cdc mysql:${MYSQL_CDC_TAG:-8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b}
+  mssql2022: &img-mssql2022 mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04@sha256:e07b9699a2b749969f19d86563ceeea22bd3a69f7f1db85a8d1ac4bdaf0c6f56
+  oracle-free: &img-oracle-free gvenzl/oracle-free:23-slim-faststart@sha256:f5ff19033860d662c821cb04eb10483fa94f14f78eae252d054291ea07028093
+  minio: &img-minio cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
+  fake-gcs: &img-fake-gcs fsouza/fake-gcs-server:1.55.0@sha256:2845d1504bb4a5a4fe54b16dd70e398814eb139af49b01b07839e016120ff123
+  azurite: &img-azurite mcr.microsoft.com/azure-storage/azurite@sha256:37493d0f2e764467421ffe16eb3caa39277e5fa7f6adea18eb5bbfb3c5247f98
+  postgres-exporter: &img-postgres-exporter prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
+  prometheus: &img-prometheus prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
+  grafana: &img-grafana grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+  pgbouncer: &img-pgbouncer edoburu/pgbouncer@sha256:4c1ca296ef525f108f5d3552cc337c0c09587cf8dae7f0067fd93349e47dc1cd
+  proxysql: &img-proxysql proxysql/proxysql:2.5.5@sha256:37eb7e46d947abe0f7b1bb87552ba909ddd5e76f874810dffa518b63e49e2992
+  toxiproxy: &img-toxiproxy ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+  python-duckdb: &img-python-duckdb python:3.12.13-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
+  clickhouse: &img-clickhouse clickhouse/clickhouse-server:${RIVET_CLICKHOUSE_TAG:-24.8.14.39@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b}
+  clickhouse-tz: &img-clickhouse-tz clickhouse/clickhouse-server:24.8.14.39@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b
+  mongo: &img-mongo mongo:${MONGO_VERSION:-7.0.37-jammy@sha256:b0c1f837c31921c93689559d5848fd14b7c421afb92d9b5a11e5a8769f98cad1}
+
 x-mssql-env: &mssql-env
   ACCEPT_EULA: "Y"
   MSSQL_SA_PASSWORD: "Rivet_Passw0rd!"
@@ -9,13 +36,13 @@ x-mssql-limits: &mssql-limits
 
 services:
   postgres:
-    image: postgres:16
+    image: *img-postgres16
     environment:
       POSTGRES_USER: rivet
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -29,13 +56,13 @@ services:
   # the data being extracted.  Connect with:
   #   RIVET_STATE_URL=postgresql://rivet:rivet@localhost:5433/rivet_state
   postgres-state:
-    image: postgres:16
+    image: *img-postgres16
     environment:
       POSTGRES_USER: rivet
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet_state
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_state_data:/var/lib/postgresql/data
     healthcheck:
@@ -53,14 +80,14 @@ services:
   # Postgres 11 so every supported version can run it.
 
   postgres-12:
-    image: postgres:12
+    image: *img-postgres12
     profiles: ["legacy"]
     environment:
       POSTGRES_USER: rivet
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5412:5432"
+      - "127.0.0.1:5412:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -70,14 +97,14 @@ services:
       retries: 10
 
   postgres-13:
-    image: postgres:13
+    image: *img-postgres13
     profiles: ["legacy"]
     environment:
       POSTGRES_USER: rivet
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5413:5432"
+      - "127.0.0.1:5413:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -87,14 +114,14 @@ services:
       retries: 10
 
   postgres-14:
-    image: postgres:14
+    image: *img-postgres14
     profiles: ["legacy"]
     environment:
       POSTGRES_USER: rivet
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5414:5432"
+      - "127.0.0.1:5414:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -104,14 +131,14 @@ services:
       retries: 10
 
   postgres-15:
-    image: postgres:15
+    image: *img-postgres15
     profiles: ["legacy"]
     environment:
       POSTGRES_USER: rivet
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5415:5432"
+      - "127.0.0.1:5415:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -121,7 +148,7 @@ services:
       retries: 10
 
   mysql:
-    image: mysql:8.0
+    image: *img-mysql80
     # `mysql_native_password` is required so the `pool` profile's ProxySQL
     # service can authenticate to MySQL as `rivet`. ProxySQL 2.5 talks to
     # backend MySQL over plain TCP, where MySQL 8's default
@@ -137,7 +164,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     volumes:
       - ./dev/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -152,12 +179,12 @@ services:
   # seeded after the container is healthy via `dev/mssql/init.sql`
   # (`make seed-mssql` / the live-test harness pipes it through sqlcmd).
   mssql:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: *img-mssql2022
     <<: *mssql-limits
     environment:
       <<: *mssql-env
     ports:
-      - "1433:1433"
+      - "127.0.0.1:1433:1433"
     healthcheck:
       # sqlcmd lives at tools18 on the 2022 image; `-C` trusts the self-signed
       # server cert the container generates on first boot.
@@ -177,13 +204,13 @@ services:
   # the catalog role rivet's row estimates and harm counters read. Seeded by
   # `make seed-oracle` (seeds/common/oracle.sql).
   oracle:
-    image: gvenzl/oracle-free:23-slim-faststart
+    image: *img-oracle-free
     environment:
       ORACLE_PASSWORD: rivet
       APP_USER: rivet
       APP_USER_PASSWORD: rivet
     ports:
-      - "1521:1521"
+      - "127.0.0.1:1521:1521"
     volumes:
       - ./dev/oracle/init:/container-entrypoint-initdb.d:ro
     healthcheck:
@@ -196,12 +223,12 @@ services:
   # non-Unicode character-type tests. Its own container: a PDB of another character set in
   # the CDC stand's CDB makes LogMiner refuse every mining session (ORA-01305).
   oracle-latin1:
-    image: gvenzl/oracle-free:23-slim-faststart
+    image: *img-oracle-free
     environment:
       ORACLE_PASSWORD: rivet
       RIVET_STAND_LATIN1_PDB: "1"
     ports:
-      - "1531:1521"
+      - "127.0.0.1:1531:1521"
     volumes:
       - ./dev/oracle/init:/container-entrypoint-initdb.d:ro
     healthcheck:
@@ -218,7 +245,7 @@ services:
   # shared port + 1: PostgreSQL 5434, MySQL 3307, SQL Server 1434. Brought up
   # with `docker compose --profile cdc up -d postgres-cdc mysql-cdc mssql-cdc`.
   postgres-cdc:
-    image: postgres:${POSTGRES_CDC_TAG:-16}
+    image: *img-postgres-cdc
     profiles: ["cdc"]
     command: ["-c", "wal_level=logical", "-c", "max_replication_slots=32"]
     environment:
@@ -226,7 +253,7 @@ services:
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rivet"]
       interval: 5s
@@ -240,7 +267,7 @@ services:
   # connect for replication over the docker network. Brought up by
   # `python3 -m dev.pytools.cdc_stand standby`.
   pg-cdc-primary:
-    image: postgres:${POSTGRES_CDC_TAG:-16}
+    image: *img-postgres-cdc
     profiles: ["cdc-standby"]
     command: ["-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=8"]
     environment:
@@ -249,7 +276,7 @@ services:
       POSTGRES_DB: rivet
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - "5437:5432"
+      - "127.0.0.1:5437:5432"
     # trust auth covers `host all all` but NOT the `replication` pseudo-database;
     # this init hook adds the replication line so pg_basebackup can connect.
     volumes:
@@ -260,7 +287,7 @@ services:
       timeout: 3s
       retries: 10
   pg-cdc-standby:
-    image: postgres:${POSTGRES_CDC_TAG:-16}
+    image: *img-postgres-cdc
     profiles: ["cdc-standby"]
     depends_on:
       pg-cdc-primary:
@@ -268,7 +295,7 @@ services:
     environment:
       PGPASSWORD: rivet
     ports:
-      - "5436:5432"
+      - "127.0.0.1:5436:5432"
     user: postgres
     entrypoint:
       - bash
@@ -293,9 +320,7 @@ services:
       retries: 30
 
   mysql-cdc:
-    # Version-matrix knob (staff class #3): nightly runs the CDC
-    # conformance lane against other tags via MYSQL_CDC_TAG.
-    image: mysql:${MYSQL_CDC_TAG:-8.0}
+    image: *img-mysql-cdc
     profiles: ["cdc"]
     # binlog is ON by default in MySQL 8 (ROW format); set a server id and grant
     # the REPLICATION privileges the binlog dump (`COM_BINLOG_DUMP`) needs.
@@ -317,7 +342,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3307:3306"
+      - "127.0.0.1:3307:3306"
     volumes:
       - ./dev/cdc/mysql-grant.sql:/docker-entrypoint-initdb.d/grant.sql
     healthcheck:
@@ -327,7 +352,7 @@ services:
       retries: 10
 
   mysql-reset:
-    image: mysql:8.0
+    image: *img-mysql80
     profiles: ["cdc"]
     command:
       - "--default-authentication-plugin=mysql_native_password"
@@ -341,7 +366,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3317:3306"
+      - "127.0.0.1:3317:3306"
     volumes:
       - ./dev/cdc/mysql-grant.sql:/docker-entrypoint-initdb.d/grant.sql
     healthcheck:
@@ -351,14 +376,14 @@ services:
       retries: 10
 
   mssql-cdc:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: *img-mssql2022
     profiles: ["cdc"]
     <<: *mssql-limits
     environment:
       <<: *mssql-env
       MSSQL_AGENT_ENABLED: "true"
     ports:
-      - "1434:1433"
+      - "127.0.0.1:1434:1433"
     healthcheck:
       test:
         [
@@ -372,7 +397,7 @@ services:
   # A read-scale Always On availability group (no cluster) whose readable SECONDARY rivet
   # reads CDC from. dev/mssql-ag/setup.sh builds the group, the database and its capture.
   mssql-ag-primary:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: *img-mssql2022
     profiles: ["replica"]
     hostname: mssql-ag-primary
     <<: *mssql-limits
@@ -381,7 +406,7 @@ services:
       MSSQL_AGENT_ENABLED: "true"
       MSSQL_ENABLE_HADR: "1"
     ports:
-      - "1440:1433"
+      - "127.0.0.1:1440:1433"
     healthcheck:
       test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
       interval: 10s
@@ -389,7 +414,7 @@ services:
       retries: 20
 
   mssql-ag-secondary:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: *img-mssql2022
     profiles: ["replica"]
     hostname: mssql-ag-secondary
     <<: *mssql-limits
@@ -398,7 +423,7 @@ services:
       MSSQL_AGENT_ENABLED: "true"
       MSSQL_ENABLE_HADR: "1"
     ports:
-      - "1441:1433"
+      - "127.0.0.1:1441:1433"
     healthcheck:
       test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
       interval: 10s
@@ -425,13 +450,13 @@ services:
   # No Agent here: these tests do not use CDC, and a capture job would be one
   # more thing moving the log.
   mssql-governor:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: *img-mssql2022
     profiles: ["governor"]
     <<: *mssql-limits
     environment:
       <<: *mssql-env
     ports:
-      - "1435:1433"
+      - "127.0.0.1:1435:1433"
     healthcheck:
       test:
         [
@@ -449,7 +474,7 @@ services:
   # REPLICATION SOURCE / START REPLICA). GTID so SOURCE_AUTO_POSITION=1 needs no
   # manual coordinates. Ports: primary 3308, replica 3309.
   mysql-primary:
-    image: mysql:8.0
+    image: *img-mysql80
     profiles: ["replica"]
     command:
       - "--default-authentication-plugin=mysql_native_password"
@@ -465,7 +490,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3308:3306"
+      - "127.0.0.1:3308:3306"
     volumes:
       - ./dev/cdc/replica-primary-init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -475,7 +500,7 @@ services:
       retries: 10
 
   mysql-replica:
-    image: mysql:8.0
+    image: *img-mysql80
     profiles: ["replica"]
     command:
       - "--default-authentication-plugin=mysql_native_password"
@@ -492,7 +517,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3309:3306"
+      - "127.0.0.1:3309:3306"
     volumes:
       - ./dev/cdc/replica-grant.sql:/docker-entrypoint-initdb.d/grant.sql
     healthcheck:
@@ -504,7 +529,7 @@ services:
   # A replica that applies but does NOT re-log (the MySQL default): its binlog holds none
   # of the primary's changes, which rivet must refuse rather than read as "no changes".
   mysql-replica-nolog:
-    image: mysql:8.0
+    image: *img-mysql80
     profiles: ["replica"]
     command:
       - "--default-authentication-plugin=mysql_native_password"
@@ -521,7 +546,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3310:3306"
+      - "127.0.0.1:3310:3306"
     volumes:
       - ./dev/cdc/replica-grant.sql:/docker-entrypoint-initdb.d/grant.sql
     healthcheck:
@@ -536,7 +561,7 @@ services:
   # pre-caching-sha2 path) connect without tweaks. Listens on 3357.
 
   mysql-57:
-    image: mysql:5.7
+    image: *img-mysql57
     profiles: ["legacy"]
     # MySQL 5.7 has no official arm64 image; run it under x86_64 emulation on
     # Apple Silicon hosts. Native amd64 hosts ignore this field.
@@ -550,7 +575,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3357:3306"
+      - "127.0.0.1:3357:3306"
     volumes:
       # Dedicated 5.7 init that skips MySQL 8-only features (window functions
       # in `orders_sparse_for_export`). See dev/mysql/init_57.sql.
@@ -562,21 +587,20 @@ services:
       retries: 10
 
   minio:
-    # Chainguard's build: `minio/minio` (Docker Hub) and `quay.io/minio/minio` both answer "unauthorized" since 2026-09.
-    image: cgr.dev/chainguard/minio:latest
+    image: *img-minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
 
   # GCS JSON API emulator (OpenDAL uses /storage/v1/... under this base URL).
   fake-gcs:
-    image: fsouza/fake-gcs-server:latest
+    image: *img-fake-gcs
     ports:
-      - "4443:4443"
+      - "127.0.0.1:4443:4443"
     command:
       - "-scheme"
       - "http"
@@ -590,7 +614,7 @@ services:
   # http://127.0.0.1:10000/devstoreaccount1. `--skipApiVersionCheck` keeps it
   # tolerant of the OpenDAL/azure REST version rivet sends.
   azurite:
-    image: mcr.microsoft.com/azure-storage/azurite:latest
+    image: *img-azurite
     command:
       - "azurite-blob"
       - "--blobHost"
@@ -599,33 +623,33 @@ services:
       - "10000"
       - "--skipApiVersionCheck"
     ports:
-      - "10000:10000"
+      - "127.0.0.1:10000:10000"
 
   # --- Monitoring stack (Postgres metrics under load) ---
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:latest
+    image: *img-postgres-exporter
     # Dashboards only: no test or gate reads these. Start them by name or with --profile observability.
     profiles: ["observability"]
     environment:
       DATA_SOURCE_NAME: "postgresql://rivet:rivet@postgres:5432/rivet?sslmode=disable"
     ports:
-      - "9187:9187"
+      - "127.0.0.1:9187:9187"
     depends_on:
       - postgres
 
   prometheus:
-    image: prom/prometheus:latest
+    image: *img-prometheus
     # Dashboards only: no test or gate reads these. Start them by name or with --profile observability.
     profiles: ["observability"]
     volumes:
       - ./dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - postgres-exporter
 
   grafana:
-    image: grafana/grafana:latest
+    image: *img-grafana
     # Dashboards only: no test or gate reads these. Start them by name or with --profile observability.
     profiles: ["observability"]
     environment:
@@ -637,7 +661,7 @@ services:
       - ./dev/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./dev/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
 
@@ -648,9 +672,7 @@ services:
   # is always reused — makes session-state leak tests deterministic.
   # Opt in: docker compose --profile pool up -d pgbouncer
   pgbouncer:
-    # edoburu/pgbouncer is the working community image after bitnami yanked
-    # `bitnami/pgbouncer:latest` (manifest unknown upstream as of 2026-05).
-    image: edoburu/pgbouncer:latest
+    image: *img-pgbouncer
     profiles: ["pool"]
     environment:
       DATABASE_URL: "postgres://rivet:rivet@postgres:5432/rivet"
@@ -660,7 +682,7 @@ services:
       AUTH_TYPE: plain
       LISTEN_PORT: 6432
     ports:
-      - "6432:6432"
+      - "127.0.0.1:6432:6432"
     depends_on:
       postgres:
         condition: service_healthy
@@ -675,7 +697,7 @@ services:
   # state (advisory locks, SET) does not survive between transactions here, so the gate can grade
   # what rivet's run lease does behind one. Opt in: docker compose --profile pool up -d pgbouncer-state
   pgbouncer-state:
-    image: edoburu/pgbouncer:latest
+    image: *img-pgbouncer
     profiles: ["pool"]
     environment:
       # No database name: the image then routes EVERY database name to postgres-state (`* =`), so a
@@ -687,7 +709,7 @@ services:
       AUTH_TYPE: plain
       LISTEN_PORT: 6433
     ports:
-      - "6433:6433"
+      - "127.0.0.1:6433:6433"
     depends_on:
       postgres-state:
         condition: service_healthy
@@ -709,12 +731,12 @@ services:
   # The mysql:3306 service is depends_on so it must already exist (it is the
   # default profile, started by `docker compose up -d mysql`).
   proxysql:
-    image: proxysql/proxysql:2.5.5
+    image: *img-proxysql
     profiles: ["pool"]
     ports:
       # 6033: client-facing MySQL protocol port; 6032: ProxySQL admin SQL.
-      - "6033:6033"
-      - "6032:6032"
+      - "127.0.0.1:6033:6033"
+      - "127.0.0.1:6032:6032"
     depends_on:
       mysql:
         condition: service_healthy
@@ -736,7 +758,7 @@ services:
   # (0.32.1, D5): rivet's UTC session never reached the backend that read, and every
   # TIMESTAMP landed 3 h off as UTC. Opt in: `docker compose --profile tz up -d proxysql-tz`.
   mysql-tz:
-    image: mysql:8.0
+    image: *img-mysql80
     profiles: ["tz"]
     command:
       - "--default-authentication-plugin=mysql_native_password"
@@ -747,7 +769,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3397:3306"
+      - "127.0.0.1:3397:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-privet"]
       interval: 5s
@@ -755,10 +777,10 @@ services:
       retries: 20
 
   proxysql-tz:
-    image: proxysql/proxysql:2.5.5
+    image: *img-proxysql
     profiles: ["tz"]
     ports:
-      - "6097:6033"
+      - "127.0.0.1:6097:6033"
     depends_on:
       mysql-tz:
         condition: service_healthy
@@ -771,18 +793,18 @@ services:
       retries: 20
 
   toxiproxy:
-    image: ghcr.io/shopify/toxiproxy:latest
+    image: *img-toxiproxy
     ports:
-      - "8474:8474"   # HTTP API
-      - "15432:15432"  # proxied Postgres
-      - "13306:13306"  # proxied MySQL
-      - "13307:13307"  # proxied mysql-cdc (gremlin: binlog cut mid-drain)
-      - "14443:14443"  # proxied fake-gcs (gremlin: upload cut mid-part)
-      - "27019:27019"  # proxied Mongo (retry/faults: RST + latency mid-scan)
+      - "127.0.0.1:8474:8474"   # HTTP API
+      - "127.0.0.1:15432:15432"  # proxied Postgres
+      - "127.0.0.1:13306:13306"  # proxied MySQL
+      - "127.0.0.1:13307:13307"  # proxied mysql-cdc (gremlin: binlog cut mid-drain)
+      - "127.0.0.1:14443:14443"  # proxied fake-gcs (gremlin: upload cut mid-part)
+      - "127.0.0.1:27019:27019"  # proxied Mongo (retry/faults: RST + latency mid-scan)
       # proxied postgres-STATE (not the source): `rivet load --pool N` never touches
       # the source, so the only thing that can throttle or drop under it is the
       # LEDGER — every worker opens its own connection to it.
-      - "15433:15433"  # proxied postgres-state (load pool: ledger latency/outage)
+      - "127.0.0.1:15433:15433"  # proxied postgres-state (load pool: ledger latency/outage)
     depends_on:
       - postgres
       - mysql
@@ -799,7 +821,7 @@ services:
   # Parquet file there from the host, then `docker exec` reads it inside the
   # container at the same path under `/work`.
   duckdb:
-    image: python:3.12-slim
+    image: *img-python-duckdb
     # Holds a `duckdb` Python install — talked to via `docker exec rivet-duckdb
     # python -c "..."`. No port is published; tests reach it through `docker
     # exec`, not over TCP.
@@ -836,7 +858,7 @@ services:
       start_period: 30s
 
   clickhouse:
-    image: clickhouse/clickhouse-server:${RIVET_CLICKHOUSE_TAG:-24.8}
+    image: *img-clickhouse
     container_name: rivet-clickhouse
     # `ulimits` are required by the official image at runtime.
     ulimits:
@@ -851,9 +873,9 @@ services:
       # MinIO already publishes 9000 (S3) and 9001 (console), so the ClickHouse
       # native protocol is exposed on 9002 to avoid collisions. Tests use the
       # HTTP interface on 8123 anyway.
-      - "8123:8123"
-      - "9002:9000"
-      - "8443:8443"
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9002:9000"
+      - "127.0.0.1:8443:8443"
     volumes:
       - ./tests/.live-tmp:/work
       # Allow the `file()` table function to read Parquet from /work — by
@@ -873,7 +895,7 @@ services:
       start_period: 15s
 
   clickhouse-tz:
-    image: clickhouse/clickhouse-server:24.8
+    image: *img-clickhouse-tz
     profiles: ["tz"]
     ulimits:
       nofile:
@@ -885,7 +907,7 @@ services:
       CLICKHOUSE_PASSWORD: rivet
       CLICKHOUSE_DB: rivet
     ports:
-      - "8125:8123"
+      - "127.0.0.1:8125:8123"
     volumes:
       - ./dev/clickhouse/rivet_user.xml:/etc/clickhouse-server/users.d/rivet_user.xml:ro
     healthcheck:
@@ -899,9 +921,9 @@ services:
   # MongoDB source engine (batch JSON-blob export). Standalone is enough for the
   # batch read path; change-stream CDC needs the replica set below.
   mongo:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     healthcheck:
       # `mongosh` on 5.0+, `mongo` on 4.x — try mongosh, fall back to mongo.
       test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'"]
@@ -914,10 +936,10 @@ services:
   # connect with `?directConnection=true` — the set advertises the in-container
   # host, which a port-mapped host client can't re-resolve.
   mongo-rs:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
-      - "${MONGO_RS_HOST_PORT:-27018}:27017"
+      - "127.0.0.1:${MONGO_RS_HOST_PORT:-27018}:27017"
     healthcheck:
       # Healthy ONLY when this node is an elected PRIMARY, so `--wait` blocks until
       # `db.watch()` can actually run (else error 13436 NotPrimaryOrSecondary).
@@ -936,11 +958,11 @@ services:
   # Separate from mongo-rs, whose single member is addressed as localhost and cannot take
   # a second one. rs2-b has priority 0, so it is always the secondary.
   mongo-rs2-a:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     profiles: ["replica"]
     command: ["--replSet", "rs2", "--bind_ip_all"]
     ports:
-      - "27022:27017"
+      - "127.0.0.1:27022:27017"
     healthcheck:
       # `mongo` is the 4.4 fallback (no mongosh there), as on mongo-rs.
       test: ["CMD-SHELL", "mongosh --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"rs2\",members:[{_id:0,host:\"mongo-rs2-a:27017\",priority:1},{_id:1,host:\"mongo-rs2-b:27017\",priority:0}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)' || mongo --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"rs2\",members:[{_id:0,host:\"mongo-rs2-a:27017\",priority:1},{_id:1,host:\"mongo-rs2-b:27017\",priority:0}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)'"]
@@ -950,11 +972,11 @@ services:
       start_period: 10s
 
   mongo-rs2-b:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     profiles: ["replica"]
     command: ["--replSet", "rs2", "--bind_ip_all"]
     ports:
-      - "27023:27017"
+      - "127.0.0.1:27023:27017"
     healthcheck:
       test: ["CMD-SHELL", "mongosh --quiet --eval 'db.isMaster().secondary?quit(0):quit(1)' || mongo --quiet --eval 'db.isMaster().secondary?quit(0):quit(1)'"]
       interval: 5s
@@ -967,9 +989,9 @@ services:
   # clusterMonitor cannot run serverStatus, so the source-harm probe must degrade
   # to absent rather than fail the export.
   mongo-auth:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     ports:
-      - "27020:27017"
+      - "127.0.0.1:27020:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: rootpass
@@ -983,7 +1005,7 @@ services:
 
   # Two-shard cluster behind mongos :27991 (profile `shard`).
   mongo-shard-cfg:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     profiles: ["shard"]
     command: ["mongod", "--configsvr", "--port", "27017", "--replSet", "shardcfg", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
     tmpfs: ["/data/db", "/data/configdb"]
@@ -995,7 +1017,7 @@ services:
       start_period: 5s
 
   mongo-shard-a:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     profiles: ["shard"]
     command: ["mongod", "--shardsvr", "--port", "27017", "--replSet", "sharda", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
     tmpfs: ["/data/db", "/data/configdb"]
@@ -1007,7 +1029,7 @@ services:
       start_period: 5s
 
   mongo-shard-b:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     profiles: ["shard"]
     command: ["mongod", "--shardsvr", "--port", "27017", "--replSet", "shardb", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
     tmpfs: ["/data/db", "/data/configdb"]
@@ -1019,11 +1041,11 @@ services:
       start_period: 5s
 
   mongos:
-    image: mongo:${MONGO_VERSION:-7}
+    image: *img-mongo
     profiles: ["shard"]
     command: ["mongos", "--configdb", "shardcfg/mongo-shard-cfg:27017", "--bind_ip_all"]
     ports:
-      - "27991:27017"
+      - "127.0.0.1:27991:27017"
     tmpfs: ["/data/db", "/data/configdb"]
     depends_on:
       mongo-shard-cfg: {condition: service_healthy}
@@ -1037,7 +1059,7 @@ services:
       start_period: 5s
   # ---- MySQL statement-truth stand: dev/pytools/statement_truth.py (docs/statement-truth.md) ----
   mysql-stmt-80: &mysql-stmt
-    image: mysql:8.0
+    image: *img-mysql80
     profiles: ["mysql-stmt"]
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
@@ -1057,13 +1079,13 @@ services:
 
   mysql-stmt-84:
     <<: *mysql-stmt
-    image: mysql:8.4
+    image: *img-mysql84
     ports:
       - "127.0.0.1:3332:3306"
 
   mysql-stmt-84-lctn1:
     <<: *mysql-stmt
-    image: mysql:8.4
+    image: *img-mysql84
     command: ["--lower-case-table-names=1"]
     ports:
       - "127.0.0.1:3333:3306"

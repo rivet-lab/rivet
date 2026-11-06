@@ -12,8 +12,6 @@
 # The gate is RED if any non-skipped cell fails.
 
 # ── Engines × pinned versions ───────────────────────────────────────────────
-# image = the exact tag the gate pins (reproducible on any docker host, not the
-# devbox's ad-hoc stands). port = host port the driver connects on.
 engines:
   postgres:
     driver: postgres
@@ -26,9 +24,9 @@ engines:
     # rather than coverage. NOT a support change — 12..18 stay supported; see
     # docs/reference/compatibility.md, which now says which set the gate runs.
     versions:
-      - { tag: "14", image: "postgres:14", port: 55014 }
-      - { tag: "16", image: "postgres:16", port: 55016 }
-      - { tag: "18", image: "postgres:18", port: 55018 }
+      - { tag: "14", image: "postgres:14.23@sha256:caf49e3b10d377aa2cfee478591d623808527beb27125d38797b418013f72d81", port: 55014 }
+      - { tag: "16", image: "postgres:16.14@sha256:f8e2cc2a36ddb8700e639570f0bc70d0c1495951ba61df903a015dc87db07d02", port: 55016 }
+      - { tag: "18", image: "postgres:18.4@sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a", port: 55018 }
   mysql:
     # 5.7 is NOT in the list below — this note claimed it was "IN as of
     # 2026-08-30" and nothing ever added the row (corrected 2026-09-20). What
@@ -41,8 +39,8 @@ engines:
     url: "mysql://rivet:rivet@127.0.0.1:%PORT%/rivet"
     seed: seeds/common/mysql.sql
     versions:
-      - { tag: "8.0", image: "mysql:8.0", port: 55080 }
-      - { tag: "8.4", image: "mysql:8.4", port: 55084 }
+      - { tag: "8.0", image: "mysql:8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b", port: 55080 }
+      - { tag: "8.4", image: "mysql:8.4.13@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7", port: 55084 }
   mssql:
     # 2019 is NOT in the list below — this note claimed it was "IN as of
     # 2026-08-30" and nothing ever added the row (corrected 2026-09-20). What
@@ -56,17 +54,17 @@ engines:
     tls: accept_invalid_certs
     seed: seeds/common/mssql.sql
     versions:
-      - { tag: "2022", image: "mcr.microsoft.com/mssql/server:2022-latest", port: 55022 }
+      - { tag: "2022", image: "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04@sha256:e07b9699a2b749969f19d86563ceeea22bd3a69f7f1db85a8d1ac4bdaf0c6f56", port: 55022 }
   mongo:
     driver: mongo
     url: "mongodb://127.0.0.1:%PORT%/rivet"
     seed: seeds/mongo_seed.py
     versions:
-      - { tag: "4.4", image: "mongo:4.4", port: 55044 }
-      - { tag: "5",   image: "mongo:5",   port: 55005 }
-      - { tag: "6",   image: "mongo:6",   port: 55006 }
-      - { tag: "7",   image: "mongo:7",   port: 55007 }
-      - { tag: "8",   image: "mongo:8",   port: 55008 }
+      - { tag: "4.4", image: "mongo:4.4.30-focal@sha256:4be76f674fc4b27859816811b8baa3c51830eb1dbf4ca81a51e26b79edd662ef", port: 55044 }
+      - { tag: "5",   image: "mongo:5.0.31-focal@sha256:54bcd8da3ea5eec561b68c605046c55c6b304387dc4c2bf5b3a5f5064fbb7495",   port: 55005 }
+      - { tag: "6",   image: "mongo:6.0.28-jammy@sha256:8b6d8f5bbedb25cb73517b65cf99f13aeb75ad5b157a56c479287a840bbad3ac",   port: 55006 }
+      - { tag: "7",   image: "mongo:7.0.37-jammy@sha256:b0c1f837c31921c93689559d5848fd14b7c421afb92d9b5a11e5a8769f98cad1",   port: 55007 }
+      - { tag: "8",   image: "mongo:8.3.13-noble@sha256:e16e606f792ea89d2b4907b54e5e31eb86a7a23e27231dce3a982cc8f2d73cd2",   port: 55008 }
   oracle:
     # Batch cells only: the gate's CDC stage (dev/release_oracle/cdc.py `_ENGINES`) has
     # no Oracle arm yet. Oracle CDC (LogMiner, preview) runs as a bounded drain; only
@@ -83,7 +81,7 @@ engines:
     url: "oracle://rivet:rivet@127.0.0.1:%PORT%/FREEPDB1"
     seed: seeds/common/oracle.sql
     versions:
-      - { tag: "23-free", image: "gvenzl/oracle-free:23-slim-faststart", port: 55023 }
+      - { tag: "23-free", image: "gvenzl/oracle-free:23-slim-faststart@sha256:f5ff19033860d662c821cb04eb10483fa94f14f78eae252d054291ea07028093", port: 55023 }
 
 # ── Object-store backends (local fakes) ─────────────────────────────────────
 # One CloudDestination impl (src/destination/cloud.rs) serves all three; the gate

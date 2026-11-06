@@ -19,6 +19,16 @@ pub const POSTGRES_PASSWORD: &str = "rivet";
 pub const POSTGRES_DB: &str = "rivet";
 pub const POSTGRES_URL: &str = "postgresql://rivet:rivet@127.0.0.1:5432/rivet";
 
+/// A spelling of 127.0.0.1 that rivet reads as a remote host and every resolver maps back to it.
+pub const REMOTE_SPELLING_OF_LOOPBACK: &str = "127.1";
+
+/// `url` with its 127.0.0.1 host spelled [`REMOTE_SPELLING_OF_LOOPBACK`]: the stand server as a remote host.
+pub fn remote_spelling_of_loopback(url: &str) -> String {
+    let respelled = url.replacen("127.0.0.1", REMOTE_SPELLING_OF_LOOPBACK, 1);
+    assert_ne!(respelled, url, "the URL names 127.0.0.1: {url}");
+    respelled
+}
+
 /// The PG **18** batch stand (`dev/stand`, :5518) — a MODERN catalog where
 /// `pg_stat_bgwriter.checkpoints_req` no longer exists and the counter lives on
 /// `pg_stat_checkpointer.num_requested`. The main stack is postgres:16, so this
