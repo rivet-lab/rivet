@@ -62,6 +62,9 @@ git config core.hooksPath .githooks
 
 With the hooks enabled:
 
+- **Every hook** (and `make pr-ready`) puts the checkout's own `.venv/bin` first on `PATH` (`.githooks/repo-venv`), so
+  `python3` and the tests the hooks run use the locked packages (yaml among them) whatever `python3` your shell finds first.
+  A checkout without `.venv` is refused with the remedy: `uv sync --frozen --python 3.12`. `dev/pytools/hooks_venv.py --self-test` grades it.
 - **`pre-commit`** mirrors the CI fmt + clippy + audit gates and keeps
   code-derived docs in sync: it runs cargo fmt/clippy, builds the rivet binary,
   regenerates the JSON schema + reference docs and stages them into your commit
