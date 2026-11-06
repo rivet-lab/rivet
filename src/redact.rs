@@ -1282,6 +1282,80 @@ mod tests {
         );
     }
 
+    const PASSWORD_KEYS: [&str; 12] = [
+        "password",
+        "PASSWORD",
+        "sslpassword",
+        "SSLPassword",
+        "ssl_password",
+        "db.password",
+        "x-passwd",
+        "passwd",
+        "pwd",
+        "Pwd",
+        "MYSQL_PWD",
+        "svc.admin.pwd",
+    ];
+
+    /// The URL query path masks the value of every key the keyword path calls a password, in any case.
+    #[test]
+    fn a_query_pair_whose_key_names_a_password_is_masked_in_any_case() {
+        assert_eq!(
+            redact_secrets(
+                "postgres://u:p@h:5432/db?sslmode=require&sslpassword=TOPSECRET&SSLPassword=OTHER"
+            ),
+            "postgres://REDACTED@h:5432/db?sslmode=require&sslpassword=***&SSLPassword=***"
+        );
+        for key in PASSWORD_KEYS {
+            for lead in ['?', '&'] {
+                let text = format!("postgres://h/db{lead}a=1&{key}=S3cr3tPw&b=2");
+                let want = format!("postgres://h/db{lead}a=1&{key}=***&b=2");
+                assert_eq!(redact_secrets(&text), want, "{text:?}");
+                assert_eq!(redact_query_secrets(&text), want, "{text:?}");
+            }
+        }
+    }
+
+    /// One rule governs both paths: a key the keyword path masks is masked in a URL query, and a key it ignores stays.
+    #[test]
+    fn the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords() {
+        for key in PASSWORD_KEYS {
+            let keyword = redact_keyword_passwords(&format!("host=h {key}=S3cr3tPw dbname=d"));
+            assert!(
+                !keyword.contains("S3cr3tPw"),
+                "keyword path leaked for {key}"
+            );
+            let query = redact_secrets(&format!("mysql://h/d?{key}=S3cr3tPw"));
+            assert!(!query.contains("S3cr3tPw"), "query path leaked for {key}");
+        }
+        for key in [
+            "sslmode",
+            "passwordless",
+            "pass",
+            "application_name",
+            "pwd2",
+        ] {
+            let keyword = format!("host=h {key}=visible dbname=d");
+            assert_eq!(redact_keyword_passwords(&keyword), keyword, "{key}");
+            let query = format!("mysql://h/d?{key}=visible");
+            assert_eq!(redact_secrets(&query), query, "{key}");
+        }
+    }
+
+    /// Query pairs that name no secret keep their text byte for byte.
+    #[test]
+    fn query_pairs_that_name_no_secret_are_left_intact() {
+        for text in [
+            "postgres://h/db?sslmode=require&application_name=svc&connect_timeout=10",
+            "postgres://h/db?sslrootcert=/etc/ca.pem&sslcert=/etc/c.pem&sslkey=/etc/k.pem",
+            "postgres://h/db?passwordless=1&user.name=bob&a.b.c=1",
+            "https://acc.blob/x?sv=2020-08-04&se=2030&sp=r",
+            "postgres://h/db?mypass=visible&keypwdx=visible",
+        ] {
+            assert_eq!(redact_secrets(text), text, "{text:?}");
+        }
+    }
+
     // ── redact_error ───────────────────────────────────────────────────────
 
     #[test]
