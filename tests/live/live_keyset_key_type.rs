@@ -995,9 +995,17 @@ const ORACLE_FLOAT_COMPOSITE: Case = Case {
     ..ORACLE_FLOAT
 };
 #[cfg(feature = "oracle")]
-const ORACLE_SCALED_NUMBER_COMPOSITE: Case = Case {
-    label: "Oracle NUMBER(12,2) as the second column of a composite key",
-    key_value: |i| format!("{i}"),
+const ORACLE_SCALED_NUMBER_INT64_COMPOSITE: Case = Case {
+    label: "Oracle NUMBER(12,2) of whole numbers under an int64 override as the second column of a composite key",
+    key_value: |i| i.to_string(),
+    overrides: Some("columns: {K: int64}"),
+    composite: true,
+    ..ORACLE_SCALED_NUMBER
+};
+#[cfg(feature = "oracle")]
+const ORACLE_SCALED_NUMBER_STRING_COMPOSITE: Case = Case {
+    label: "Oracle NUMBER(12,2) of fractions under a string override as the second column of a composite key",
+    overrides: Some("columns: {K: string}"),
     composite: true,
     ..ORACLE_SCALED_NUMBER
 };
@@ -1026,7 +1034,7 @@ fn a_timestamp_9_keyset_key_under_the_timestamp_ns_override_stays_refused_oracle
     the_refusal_says(
         SqlEngine::Oracle,
         &ORACLE_TS9_NS,
-        "whatever `columns:` delivers it as",
+        "whatever type `columns:` delivers it as",
         "needs the `timestamp_ns`",
     );
 }
@@ -1064,8 +1072,12 @@ fn a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn a_float_and_a_whole_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle() {
-    for case in [ORACLE_FLOAT_COMPOSITE, ORACLE_SCALED_NUMBER_COMPOSITE] {
+fn a_float_and_a_scaled_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle() {
+    for case in [
+        ORACLE_FLOAT_COMPOSITE,
+        ORACLE_SCALED_NUMBER_INT64_COMPOSITE,
+        ORACLE_SCALED_NUMBER_STRING_COMPOSITE,
+    ] {
         let (table, _guard) = seeded(SqlEngine::Oracle, &case, "ks_cmp");
         let rig = keyset_rig(SqlEngine::Oracle, &table, &case, SMALL_PAGE);
         let out = rig.run();
@@ -1112,4 +1124,17 @@ fn a_jsonb_keyset_key_delivers_the_seeded_ids_once_postgres() {
             case.composite
         );
     }
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_datetime2_7_composite_keyset_key_is_refused_mssql() {
+    refused_over_several_pages(
+        SqlEngine::Mssql,
+        Case {
+            label: "SQL Server datetime2(7) as the second column of a composite key",
+            composite: true,
+            ..MSSQL_DT2_7_DISTINCT_US
+        },
+    );
 }

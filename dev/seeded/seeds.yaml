@@ -4895,3 +4895,55 @@ seeds:
       oracle:
         patch: keyset-key-oracle-inexact-number-admitted/oracle.patch
         cells: [a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle, "lib:an_oracle_number_keys_a_seek_exactly_when_the_catalog_filter_it_replaced_admitted_it", "lib:a_catalog_number_with_a_scale_or_a_float_is_inexact_and_nothing_else"]
+
+  - name: keyset-key-oracle-override-lifts-the-catalog-fact
+    class: "the Oracle keyset key check consults the catalog fact (a TIMESTAMP finer than a microsecond, a NUMBER with a scale, a FLOAT) only for the type the driver delivers, so a columns: override that delivers the column as timestamp_ns, int64 or string lifts a refusal main kept: a TIMESTAMP(9) key under timestamp_ns passes check and is refused by the reader with exit 5, a NUMBER(12,2) key under int64 passes check and fails the run with an uncoded error"
+    history: "2026-11-06 - found re-verifying the keyset-key-type seam PR (findings 1 and 5): the seam trusted the delivered mapping, which an override changes; the typed catalog fact now binds before the mapping is read"
+    scope: source
+    engines:
+      postgres:
+        na: "the seed edits an Oracle-only early return; no PostgreSQL catalog fact outranks the delivered type"
+      mysql:
+        na: "the seed edits an Oracle-only early return; no MySQL catalog fact outranks the delivered type"
+      mssql:
+        na: "the seed edits an Oracle-only early return; a SQL Server key delivered in nanoseconds under the override is admitted by design (a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql)"
+      mongo:
+        na: "the seed edits an Oracle-only early return; MongoDB pages by _id and has no chunk_by_key"
+      oracle:
+        patch: keyset-key-oracle-override-lifts-the-catalog-fact/oracle.patch
+        cells: [a_timestamp_9_keyset_key_under_the_timestamp_ns_override_stays_refused_oracle, a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_columns_override_oracle, "lib:an_oracle_key_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as", "lib:an_oracle_column_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as"]
+
+  - name: keyset-key-refuses-what-main-paged-correctly
+    class: "the keyset key check refuses a key main paged to every row once: a PostgreSQL jsonb key (single or composite) or an Oracle composite key whose second column is a FLOAT, a config that ran correctly before the upgrade stops with RIVET_PLAN_CHUNK_KEY_UNUSABLE"
+    history: "2026-11-06 - found re-verifying the keyset-key-type seam PR (findings 3 and 4): probed on main 40 of 40 ids on 8 jsonb value shapes and on a composite FLOAT, the seam refused both; they stay admitted"
+    scope: source
+    engines:
+      postgres:
+        patch: keyset-key-refuses-what-main-paged-correctly/postgres.patch
+        cells: [a_jsonb_keyset_key_delivers_the_seeded_ids_once_postgres, "lib:json_keys_a_seek_on_postgres_alone", "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders"]
+      mysql:
+        na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; a MySQL JSON key is refused on main and on this branch"
+      mssql:
+        na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; SQL Server has neither type"
+      mongo:
+        na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; MongoDB pages by _id and has no chunk_by_key"
+      oracle:
+        patch: keyset-key-refuses-what-main-paged-correctly/oracle.patch
+        cells: [a_float_and_a_scaled_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle, "lib:a_composite_oracle_key_refuses_a_finer_timestamp_and_keeps_an_inexact_number", "lib:an_inexact_oracle_number_is_refused_as_a_single_key_alone"]
+
+  - name: keyset-key-composite-ignores-the-catalog-fact
+    class: "the composite keyset key check does not read the catalog fact the single-key check reads, so a composite key whose second column is a TIMESTAMP(7..9) (Oracle) or a datetime2(7) (SQL Server) passes check and pages on microseconds: duplicate rows with exit 0 (53 rows for 40 distinct ids on Oracle)"
+    history: "2026-11-06 - found re-verifying the keyset-key-type seam PR: main delivered 53 rows for 40 ids on an Oracle composite TIMESTAMP(9) key; the composite check now passes the catalog fact into the same function"
+    scope: source
+    patch: keyset-key-composite-ignores-the-catalog-fact/shared.patch
+    engines:
+      postgres:
+        na: "no PostgreSQL catalog fact says a column holds more than it delivers; the composite check has nothing to omit"
+      mysql:
+        na: "no MySQL catalog fact says a column holds more than it delivers; the composite check has nothing to omit"
+      mssql:
+        cells: [a_datetime2_7_composite_keyset_key_is_refused_mssql]
+      oracle:
+        cells: [a_timestamp_9_composite_keyset_key_is_refused_oracle, "lib:a_composite_oracle_key_refuses_a_finer_timestamp_and_keeps_an_inexact_number"]
+      mongo:
+        na: "MongoDB pages by _id and has no chunk_by_key"

@@ -1,14 +1,19 @@
 diff --git a/src/init/mod.rs b/src/init/mod.rs
-index fac6139..76eac1b 100644
+index 70a89165..5f09bd84 100644
 --- a/src/init/mod.rs
 +++ b/src/init/mod.rs
-@@ -567,9 +567,9 @@ pub(super) fn mark_keyset_refusals(
-     declared_wider: &[String],
+@@ -567,14 +567,9 @@ pub(super) fn mark_keyset_refusals(
+     declared_wider: &[(String, crate::source::keyset_key::Wider)],
  ) {
      for c in columns {
--        c.not_keyset =
--            crate::source::keyset_key::column_refusal(source, mappings, declared_wider, &c.name)
--                .is_some();
+-        c.not_keyset = crate::source::keyset_key::column_refusal(
+-            source,
+-            mappings,
+-            declared_wider,
+-            crate::source::keyset_key::KeyShape::Single,
+-            &c.name,
+-        )
+-        .is_some();
 +        c.not_keyset = mappings.iter().any(|m| {
 +            m.column_name == c.name && matches!(m.rivet_type, crate::types::RivetType::Decimal { .. })
 +        });
