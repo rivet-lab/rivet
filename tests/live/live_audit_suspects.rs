@@ -612,12 +612,10 @@ fn mongo_cdc_dropping_another_collection_does_not_stop_capture() {
     );
 }
 
-/// Keyset over a DATETIME2(7) primary key (100 ns ticks, finer than the microsecond the
-/// seek cursor keeps) either reads every row once or refuses — it must not loop or
-/// re-read a page.
+/// Keyset over a DATETIME2(7) primary key (100 ns ticks, finer than the microsecond the seek cursor keeps) is refused by code before any read.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn keyset_over_an_mssql_datetime2_7_key_reads_every_row_once_or_refuses() {
+fn keyset_over_an_mssql_datetime2_7_key_is_refused_before_any_read() {
     let table = unique_name("dt2_key");
     mssql_exec(&format!(
         "IF OBJECT_ID('dbo.{table}') IS NOT NULL DROP TABLE dbo.{table}; \
@@ -627,41 +625,19 @@ fn keyset_over_an_mssql_datetime2_7_key_reads_every_row_once_or_refuses() {
            ('2024-01-01 00:00:03.1234567', 4)"
     ));
     let rig = Rig::mssql_batch(&table)
-        .duckdb_oracle()
         .mode("chunked")
-        .a_failed_run_may_leave(
-            &[Leftover::OrphanPart, Leftover::FileLog],
-            "the keyset run refuses once the seek cannot advance, after two pages are written; they carry no manifest",
-        )
         .export_line("chunk_by_key: ts")
         .export_line("chunk_size: 1");
-    let out = rig
-        .run_with_envs_bounded(&[], std::time::Duration::from_secs(60))
-        .expect("a keyset run over four rows must finish, not loop");
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
-    let refused = !out.status.success();
-    let got = if refused {
-        None
-    } else {
-        Some(duckdb_distinct_i64_set(rig.oracle_dir(), "id"))
-    };
-    let rows = if refused {
-        0
-    } else {
-        duckdb_parquet_rows(rig.oracle_dir())
-    };
+    let out = rig.run();
+    let parts = files_with_extension(&rig.out_dir(), "parquet").len();
     mssql_exec(&format!("DROP TABLE dbo.{table}"));
-    match got {
-        None => assert!(
-            said.contains("ended on the same 'ts' value it started after")
-                && said.contains("the seek cannot advance"),
-            "the refusal says why the seek cannot advance:\n{said}"
-        ),
-        Some(ids) => {
-            assert_eq!(ids, (1..=4).collect(), "every row");
-            assert_eq!(rows, 4, "exactly once");
-        }
-    }
+    assert_refused(&out, Refused::by_code("RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1));
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("more than 6 fractional-second digits"),
+        "the refusal names the cause:\n{said}"
+    );
+    assert_eq!(parts, 0, "nothing is written before the refusal");
 }
 
 /// Keyset over a `varchar` key under SQL Server's default SQL collation: the page is
@@ -824,14 +800,18 @@ fn parallel_keyset_incremental_on_a_timestamptz_key_reads_each_row_once_in_a_tok
     );
 }
 
-/// Parallel keyset incremental over an MSSQL datetime key whose newest row has a sub-second
-/// part: the open-time ceiling must include it, so run 1 exports every row.
+/// Parallel keyset incremental over an MSSQL datetime key whose newest row has a sub-second part: the open-time ceiling includes it, so run 1 exports every row; a `datetime2(7)` key does so under `timestamp_ns`.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row() {
-    for (ty, base) in [
-        ("DATETIME2(7)", "2024-01-01 00:00:00.5"),
-        ("DATETIME", "2024-01-01 00:00:00.997"),
+    for (ty, base, overrides) in [
+        ("DATETIME2(6)", "2024-01-01 00:00:00.5", None),
+        (
+            "DATETIME2(7)",
+            "2024-01-01 00:00:00.5",
+            Some("columns: {ts: timestamp_ns}"),
+        ),
+        ("DATETIME", "2024-01-01 00:00:00.997", None),
     ] {
         let table = unique_name("ks_dtinc");
         let values = (1..=200)
@@ -843,7 +823,7 @@ fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row()
              CREATE TABLE dbo.{table} (ts {ty} NOT NULL PRIMARY KEY, id INT NOT NULL); \
              INSERT INTO dbo.{table} VALUES {values}"
         ));
-        let rig = Rig::mssql_batch(&table)
+        let mut rig = Rig::mssql_batch(&table)
             .duckdb_oracle()
             .mode("chunked")
             .export_line("chunk_by_key: ts")
@@ -851,6 +831,9 @@ fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row()
             .export_line("chunk_checkpoint: true")
             .export_line("keyset_incremental: true")
             .export_line("chunk_size: 40");
+        if let Some(line) = overrides {
+            rig = rig.export_line(line);
+        }
         let out = rig.run_with_envs_bounded(&[], std::time::Duration::from_secs(120));
         let rows = duckdb_parquet_rows(rig.oracle_dir());
         mssql_exec(&format!("DROP TABLE dbo.{table}"));
@@ -861,6 +844,36 @@ fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row()
             "{ty}: the newest row is inside the open-time ceiling"
         );
     }
+}
+
+/// Parallel keyset incremental over a `datetime2(7)` key without the `timestamp_ns` override is refused by code before any read.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn parallel_keyset_incremental_on_an_mssql_datetime2_7_key_is_refused_without_the_override() {
+    let table = unique_name("ks_dt7ref");
+    let values = (1..=200)
+        .map(|i| {
+            format!("(DATEADD(MINUTE, {i}, CAST('2024-01-01 00:00:00.5' AS DATETIME2(7))), {i})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    mssql_exec(&format!(
+        "IF OBJECT_ID('dbo.{table}') IS NOT NULL DROP TABLE dbo.{table}; \
+         CREATE TABLE dbo.{table} (ts DATETIME2(7) NOT NULL PRIMARY KEY, id INT NOT NULL); \
+         INSERT INTO dbo.{table} VALUES {values}"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: ts")
+        .export_line("parallel: 3")
+        .export_line("chunk_checkpoint: true")
+        .export_line("keyset_incremental: true")
+        .export_line("chunk_size: 40");
+    let out = rig.run();
+    let parts = files_with_extension(&rig.out_dir(), "parquet").len();
+    mssql_exec(&format!("DROP TABLE dbo.{table}"));
+    assert_refused(&out, Refused::by_code("RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1));
+    assert_eq!(parts, 0, "nothing is written before the refusal");
 }
 
 /// `rivet check` under a `db_datareader` login still reports the MSSQL row estimate: it

@@ -415,13 +415,18 @@ infra:
     # 2026-11-03: +1 structural N/A row from key-span-read-in-i64 (a Mongo collection has no range chunking).
     # 2026-11-03: +1 structural N/A row from check-override-wire-not-refused (MongoDB declares no column wire type, so its check has no probe).
     # 2026-11-03: +4 structural N/A rows from mysql-enum-label-escapes-unread (postgres, mssql, oracle, mongo carry no catalog-escaped ENUM or SET label).
+    # 2026-11-04: +1 structural N/A row from keyset-key-type-unchecked (MongoDB always pages by _id, there is no keyset key to type).
+    # 2026-11-04: +1 structural N/A row from keyset-key-init-mirror (MongoDB init scaffolds no keyset key).
     # 2026-11-04: +4 structural N/A rows from mysql-binlog-negative-time-fraction (PostgreSQL, SQL Server, MongoDB and Oracle have no MySQL binlog TIME decoder).
     # 2026-11-05: +3 structural N/A rows from destination-credential-read-by-one-leg (local, azure, stdout name no credential this seed reaches).
     # 2026-11-05: +4 structural N/A rows from oracle-timestamp-ns-undeclared-truncated (PostgreSQL, MySQL, SQL Server and MongoDB map no column with a refusal).
     # 2026-11-05: +4 structural N/A rows from pg-temporal-uuid-bytea-array-refused (MySQL, SQL Server, Oracle and MongoDB have no PostgreSQL array element builder).
     # 2026-11-05: +4 structural N/A rows from number-text-without-its-label (PostgreSQL, MySQL, SQL Server and MongoDB reach no Oracle NUMBER mapping).
+    # 2026-11-05: +4 structural N/A rows from keyset-key-alias-type-by-name (postgres, mysql, oracle and mongo have no catalog name match on a user type to seed).
+    # 2026-11-05: +4 structural N/A rows from keyset-key-oracle-exact-number-refused (postgres, mysql, mssql and mongo reach no Oracle NUMBER exemption in the keyset key check).
+    # 2026-11-06: +4 structural N/A rows from keyset-key-oracle-inexact-number-admitted (postgres, mysql, mssql and mongo reach no Oracle NUMBER scale fact in the keyset key check).
     # 2026-11-06: +1 structural N/A row from reset-chunks-by-export-name (a MongoDB export has no range-chunk checkpoint for a reset to remove).
-    na_ceiling: 507  # ratchet-pin: seeded-na (review 2027-02-01)
+    na_ceiling: 531  # ratchet-pin: seeded-na (review 2027-02-01)
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

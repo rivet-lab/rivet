@@ -1,0 +1,17 @@
+diff --git a/src/source/mod.rs b/src/source/mod.rs
+index 94f71798..1c72695d 100644
+--- a/src/source/mod.rs
++++ b/src/source/mod.rs
+@@ -123,7 +123,11 @@ impl TableIntrospection {
+         shape: keyset_key::KeyShape,
+         column: &str,
+     ) -> Option<&'static str> {
+-        keyset_key::column_refusal(source, mappings, &self.declared_wider, shape, column)
++        let wider = match shape {
++            keyset_key::KeyShape::Single => &self.declared_wider[..],
++            keyset_key::KeyShape::Composite => &[],
++        };
++        keyset_key::column_refusal(source, mappings, wider, shape, column)
+     }
+ 
+     /// The refusal cause recorded for `column`, if `admit_keyset_keys` dropped it.

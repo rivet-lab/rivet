@@ -458,7 +458,7 @@
   },
   {
     "expect": "full",
-    "note": "NON-INT single-column PK #3 \u2014 DECIMAL(20,0) PK, ~150K rows. Init correctly scaffolds `full`, NOT keyset: a DECIMAL keyset key is refused at plan time (the keyset cursor excludes decimal/numeric), so init must NOT scaffold chunk_by_key on it (would fail the run). is_keysettable_type excludes decimal, so a decimal PK stays full (or range-chunks an integer column if present). Locks that the keyset fix does NOT over-reach to decimal.",
+    "note": "NON-INT single-column PK #3 \u2014 DECIMAL(20,0) PK, ~150K rows. Init correctly scaffolds `full`, NOT keyset: a DECIMAL keyset key is refused at plan time (the keyset cursor excludes decimal/numeric), so init must NOT scaffold chunk_by_key on it (would fail the run). the keyset seam refuses a decimal key (the fixture sets not_keyset as init's server probe does), so a decimal PK stays full (or range-chunks an integer column if present). Locks that the keyset fix does NOT over-reach to decimal.",
     "table": {
       "schema": "s",
       "table": "decimal_pk_150k",
@@ -471,7 +471,8 @@
           "is_primary_key": true,
           "is_nullable": false,
           "numeric_precision": 20,
-          "numeric_scale": 0
+          "numeric_scale": 0,
+          "not_keyset": true
         },
         {
           "name": "name",
@@ -499,7 +500,8 @@
           "is_primary_key": true,
           "is_nullable": false,
           "numeric_precision": 20,
-          "numeric_scale": 0
+          "numeric_scale": 0,
+          "not_keyset": true
         },
         {
           "name": "seq",
