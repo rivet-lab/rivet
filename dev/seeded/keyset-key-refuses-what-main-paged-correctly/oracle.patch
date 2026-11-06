@@ -1,0 +1,13 @@
+diff --git a/src/source/keyset_key.rs b/src/source/keyset_key.rs
+index 8442ceb5..8497a0e7 100644
+--- a/src/source/keyset_key.rs
++++ b/src/source/keyset_key.rs
+@@ -36,7 +36,7 @@ pub(crate) fn keyset_key_refusal(
+     if source == SourceType::Oracle {
+         match (wider, shape) {
+             (Some(Wider::FinerTimestamp), _) => return Some(ORACLE_FINER_TIMESTAMP),
+-            (Some(Wider::InexactNumber), KeyShape::Single) => return Some(ORACLE_INEXACT_NUMBER),
++            (Some(Wider::InexactNumber), _) => return Some(ORACLE_INEXACT_NUMBER),
+             _ => {}
+         }
+     }

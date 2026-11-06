@@ -261,6 +261,32 @@ fn correct_innodb_avg_row_length(raw_bytes: i64) -> i64 {
     }
 }
 
+/// The delivered type of every column of `query`, read from the server's description of the statement.
+pub(crate) fn type_mappings_on(
+    conn: &mut mysql::PooledConn,
+    query: &str,
+    column_overrides: &ColumnOverrides,
+) -> Result<Vec<crate::types::TypeMapping>> {
+    let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
+    let result = conn.exec_iter(&wrapped, ())?;
+    let columns = result.columns().as_ref().to_vec();
+    drop(result);
+    Ok(columns
+        .iter()
+        .map(|col| {
+            let rivet = crate::types::resolve_or(column_overrides, col.name_str().as_ref(), || {
+                mysql_type_to_rivet(col)
+            });
+            let source = crate::types::SourceColumn::simple(
+                col.name_str().as_ref(),
+                mysql_native_type_name(col),
+                true,
+            );
+            crate::types::TypeMapping::from_source(&source, rivet)
+        })
+        .collect())
+}
+
 /// Probe `information_schema` for stats chunked-mode planning needs.
 ///
 /// MySQL analogue of the Postgres chunk-planner probe:
@@ -381,7 +407,6 @@ fn introspect_mysql_on(
               AND c.COLUMN_NAME = s.COLUMN_NAME \
          WHERE s.TABLE_SCHEMA = ? AND s.TABLE_NAME = ? AND s.NON_UNIQUE = 0 \
            AND s.SEQ_IN_INDEX = 1 \
-           AND c.DATA_TYPE NOT IN ('decimal', 'numeric') \
            AND NOT EXISTS ( \
              SELECT 1 FROM information_schema.STATISTICS s2 \
              WHERE s2.TABLE_SCHEMA = s.TABLE_SCHEMA AND s2.TABLE_NAME = s.TABLE_NAME \
@@ -1045,27 +1070,8 @@ impl super::Source for MysqlSource {
         query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<crate::types::TypeMapping>> {
-        let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
         let mut conn = self.pool.get_conn()?;
-        let result = conn.exec_iter(&wrapped, ())?;
-        let columns = result.columns().as_ref().to_vec();
-        drop(result);
-        let mappings = columns
-            .iter()
-            .map(|col| {
-                let rivet =
-                    crate::types::resolve_or(column_overrides, col.name_str().as_ref(), || {
-                        mysql_type_to_rivet(col)
-                    });
-                let source = crate::types::SourceColumn::simple(
-                    col.name_str().as_ref(),
-                    mysql_native_type_name(col),
-                    true,
-                );
-                crate::types::TypeMapping::from_source(&source, rivet)
-            })
-            .collect();
-        Ok(mappings)
+        type_mappings_on(&mut conn, query, column_overrides)
     }
 
     /// Governor FOREIGN-pressure proxy: `Innodb_log_waits` (redo-write

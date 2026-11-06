@@ -257,6 +257,26 @@ fn avg_row_bytes(row_estimate: i64, rel_size_bytes: i64) -> Option<i64> {
     (row_estimate > 0).then(|| rel_size_bytes / row_estimate)
 }
 
+/// The delivered type of every column of `query`, read from the server's description of the statement.
+pub(crate) fn type_mappings_on(
+    client: &mut Client,
+    query: &str,
+    column_overrides: &ColumnOverrides,
+) -> Result<Vec<TypeMapping>> {
+    let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
+    let stmt = prepare_fresh(client, &wrapped)?;
+    let hints = pg_numeric_catalog_hints_opt(client, query);
+    Ok(stmt
+        .columns()
+        .iter()
+        .map(|col| {
+            let rivet = rivet_type_for_pg_column(col, column_overrides, hints.as_ref());
+            let source = SourceColumn::simple(col.name(), col.type_().name(), true);
+            TypeMapping::from_source(&source, rivet)
+        })
+        .collect())
+}
+
 fn introspect_pg_on(
     client: &mut Client,
     qualified_table: &str,
@@ -315,12 +335,6 @@ fn introspect_pg_on(
     // binds to a real column (not an expression index); `attnotnull` removes
     // NULL-ordering ambiguity. Index-backed + unique ⇒ keyset's `ORDER BY key
     // LIMIT n` is a range scan and `WHERE key > last` never skips dup keys.
-    // The keyset cursor (extract_last_cursor_value) reads only integer / float /
-    // string / timestamp / date / uuid keys — NOT `numeric`/`decimal`. Excluding
-    // it here refuses a DECIMAL keyset key at PLAN time (loud bail) instead of
-    // failing at runtime AFTER a partial write, and stops `rivet check` from
-    // green-lighting it (#dogfood: keyset on a DECIMAL PK check=ACCEPTABLE, run
-    // failed after 100/250 rows "could not read the key value … unsupported type").
     // `indpred IS NULL` excludes a PARTIAL index and `indisvalid` an INVALID one.
     // Keyset's whole correctness argument is that the key is GLOBALLY unique, so
     // `WHERE k > <last> ORDER BY k LIMIT n` cannot skip a row sharing the
@@ -336,11 +350,9 @@ fn introspect_pg_on(
         "SELECT a.attname::text, i.indisprimary \
          FROM pg_index i \
          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
-         JOIN pg_type t ON t.oid = a.atttypid \
          WHERE i.indrelid = (($1::text || '.' || $2::text)::regclass) \
            AND i.indisunique AND i.indnkeyatts = 1 AND a.attnotnull \
-           AND i.indpred IS NULL AND i.indisvalid \
-           AND t.typname <> 'numeric'",
+           AND i.indpred IS NULL AND i.indisvalid",
         &[&schema, &table],
     )?;
     let keyset_columns: Vec<(String, bool)> = keyset_rows
@@ -680,19 +692,7 @@ impl super::Source for PostgresSource {
         query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
-        let stmt = prepare_fresh(&mut self.client, &wrapped)?;
-        let hints = pg_numeric_catalog_hints_opt(&mut self.client, query);
-        let mappings = stmt
-            .columns()
-            .iter()
-            .map(|col| {
-                let rivet = rivet_type_for_pg_column(col, column_overrides, hints.as_ref());
-                let source = SourceColumn::simple(col.name(), col.type_().name(), true);
-                TypeMapping::from_source(&source, rivet)
-            })
-            .collect();
-        Ok(mappings)
+        type_mappings_on(&mut self.client, query, column_overrides)
     }
 
     /// Snapshot the source-harm counters from `pg_stat_database` for the current
