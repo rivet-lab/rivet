@@ -313,7 +313,7 @@ impl PlanArtifact {
         }
     }
 
-    /// When this plan stops being appliable without `--force`: its `expires_at`, or never for a reusable plan.
+    /// When this plan stops being applicable without `--force`: its `expires_at`, or never for a reusable plan.
     fn expiry_text(&self) -> String {
         if self.is_reusable() {
             "never (an incremental plan is reusable)".into()

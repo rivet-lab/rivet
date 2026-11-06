@@ -16,7 +16,7 @@
 //! the v0.7.1 lineage carried two divergent substitution paths
 //! (`plan::build::apply_destination_placeholders` and inline `replace()`
 //! calls scattered through validate/doctor wiring).  The v0.7.2 cloud-landing
-//! pass makes the resolver explicit and overrideable so `validate --date`
+//! pass makes the resolver explicit and overridable so `validate --date`
 //! and `validate --run-id` can re-target an *earlier* run's prefix without
 //! re-running the export.
 //!
