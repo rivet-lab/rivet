@@ -15,4 +15,5 @@ paths = [
   '''^dev/clickhouse/tls/server\.key$''',
   '''^src/gcp_auth\.rs$''',
   '''^src/load/snowflake_rest\.rs$''',
+  '''^tests/fixtures/destination_credential/test_rsa_pkcs8\.pem$''',
 ]
