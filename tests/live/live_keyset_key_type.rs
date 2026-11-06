@@ -1,8 +1,6 @@
 //! Keyset key type and precision (docs/chunking-matrix.yaml, keyset_key_type_admission and
 //! keyset_sub_microsecond_key): the planner accepts a keyset key only when the cursor reader can
-//! advance it, so a key it cannot advance is refused by code before any read. A cell asserts the
-//! correct behaviour; one that fails today is an `open_defect_*` cell acknowledged in
-//! dev/release_oracle/known_red.py.
+//! advance it, so a key it cannot advance is refused by code before any read.
 //!
 //! Oracles: the exit and `Error:` line of the real binary, the parts under the destination, and the
 //! ids the destination holds against the ids the source holds.
@@ -28,6 +26,7 @@ struct Case {
     primary: bool,
     rows: i64,
     overrides: Option<&'static str>,
+    composite: bool,
 }
 
 const ENUM_MEMBERS: [&str; 12] = [
@@ -49,6 +48,7 @@ const MYSQL_BINARY16: Case = Case {
     primary: true,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MYSQL_TIME: Case = Case {
     label: "MySQL TIME unique key",
@@ -57,6 +57,7 @@ const MYSQL_TIME: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MYSQL_TINYINT1: Case = Case {
     label: "MySQL TINYINT(1) unique key",
@@ -65,6 +66,7 @@ const MYSQL_TINYINT1: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MYSQL_ENUM_KEY: Case = Case {
     label: "MySQL ENUM unique key",
@@ -73,6 +75,7 @@ const MYSQL_ENUM_KEY: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const PG_BYTEA: Case = Case {
     label: "PostgreSQL bytea unique key",
@@ -81,6 +84,7 @@ const PG_BYTEA: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const PG_TIME: Case = Case {
     label: "PostgreSQL time unique key",
@@ -89,6 +93,7 @@ const PG_TIME: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MSSQL_VARBINARY: Case = Case {
     label: "SQL Server varbinary unique key",
@@ -97,6 +102,7 @@ const MSSQL_VARBINARY: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MSSQL_TIME: Case = Case {
     label: "SQL Server time unique key",
@@ -105,6 +111,7 @@ const MSSQL_TIME: Case = Case {
     primary: false,
     rows: 12,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DT2_7_DISTINCT_US: Case = Case {
     label: "SQL Server datetime2(7) key, a tick past each microsecond",
@@ -117,6 +124,7 @@ const MSSQL_DT2_7_DISTINCT_US: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DT2_7_ONE_US: Case = Case {
     label: "SQL Server datetime2(7) key, nine ticks inside one microsecond",
@@ -127,6 +135,7 @@ const MSSQL_DT2_7_ONE_US: Case = Case {
     primary: false,
     rows: 9,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DTO_7: Case = Case {
     label: "SQL Server datetimeoffset(7) key, a tick past each microsecond",
@@ -139,6 +148,7 @@ const MSSQL_DTO_7: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
 const MSSQL_DT2_7_NS_OVERRIDE: Case = Case {
     label: "SQL Server datetime2(7) key under the timestamp_ns override",
@@ -151,6 +161,25 @@ const MSSQL_DT2_7_NS_OVERRIDE: Case = Case {
     primary: false,
     rows: 10,
     overrides: Some("columns: {k: timestamp_ns}"),
+    composite: false,
+};
+const MSSQL_ALIAS_DT2_7: Case = Case {
+    label: "SQL Server alias type over datetime2(7), a tick past each microsecond",
+    key_ddl: "DATETIME2(7)",
+    ..MSSQL_DT2_7_DISTINCT_US
+};
+
+/// The alias case over its own type `name`, so cells that run in parallel never share a server type.
+fn alias_dt2_7(name: &'static str) -> Case {
+    Case {
+        key_ddl: name,
+        ..MSSQL_ALIAS_DT2_7
+    }
+}
+const PG_DOMAIN_BYTEA: Case = Case {
+    label: "PostgreSQL domain over bytea unique key",
+    key_ddl: "rivet_ks_bytea",
+    ..PG_BYTEA
 };
 #[cfg(feature = "oracle")]
 const ORACLE_TS9: Case = Case {
@@ -160,7 +189,97 @@ const ORACLE_TS9: Case = Case {
     primary: false,
     rows: 10,
     overrides: None,
+    composite: false,
 };
+
+#[cfg(feature = "oracle")]
+const ORACLE_BINARY_DOUBLE: Case = Case {
+    label: "Oracle BINARY_DOUBLE unique key",
+    key_ddl: "BINARY_DOUBLE",
+    key_value: |i| format!("{i}.5d"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+    composite: false,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_SCALED_NUMBER: Case = Case {
+    label: "Oracle NUMBER(12,2) unique key",
+    key_ddl: "NUMBER(12,2)",
+    key_value: |i| format!("{i} + 0.25"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+    composite: false,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_FLOAT: Case = Case {
+    label: "Oracle FLOAT unique key",
+    key_ddl: "FLOAT",
+    key_value: |i| i.to_string(),
+    primary: false,
+    rows: 10,
+    overrides: None,
+    composite: false,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_NUMBER_STAR_SCALE: Case = Case {
+    label: "Oracle NUMBER(*,2) unique key",
+    key_ddl: "NUMBER(*,2)",
+    key_value: |i| format!("{i} + 0.25"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+    composite: false,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_NEGATIVE_SCALE_NUMBER: Case = Case {
+    label: "Oracle NUMBER(5,-2) unique key",
+    key_ddl: "NUMBER(5,-2)",
+    key_value: |i| format!("{i} * 100"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+    composite: false,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_NEGATIVE_SCALE_38: Case = Case {
+    label: "Oracle NUMBER(38,-5) unique key",
+    key_ddl: "NUMBER(38,-5)",
+    key_value: |i| format!("{i} * 100000"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+    composite: false,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_SCALE_PAST_38: Case = Case {
+    label: "Oracle NUMBER(38,39) unique key",
+    key_ddl: "NUMBER(38,39)",
+    key_value: |i| format!("{i}E-39"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+    composite: false,
+};
+#[cfg(feature = "oracle")]
+const ORACLE_LTZ: Case = Case {
+    label: "Oracle TIMESTAMP(6) WITH LOCAL TIME ZONE unique key",
+    key_ddl: "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    key_value: |i| format!("TIMESTAMP '2024-01-01 00:00:00' + NUMTODSINTERVAL({i}, 'SECOND')"),
+    primary: false,
+    rows: 10,
+    overrides: None,
+    composite: false,
+};
+
+/// The lead column of a composite key `(g, k)`, spelled as the engine folds it.
+fn lead(engine: SqlEngine) -> &'static str {
+    match engine.folds_upper() {
+        true => "G",
+        false => "g",
+    }
+}
 
 /// The key columns and their config spelling: Oracle folds bare names up, the rest keep them.
 fn names(engine: SqlEngine) -> (&'static str, &'static str) {
@@ -178,22 +297,34 @@ fn seeded(engine: SqlEngine, case: &Case, tag: &str) -> (String, Box<dyn std::an
         true => "NUMBER(18)",
         false => engine.int64(),
     };
-    let columns = match case.primary {
-        true => format!(
+    let g = lead(engine);
+    let columns = match (case.composite, case.primary) {
+        (true, _) => format!(
+            "{id} {id_ddl} NOT NULL, {g} {id_ddl} NOT NULL, {k} {} NOT NULL, PRIMARY KEY ({g}, {k})",
+            case.key_ddl
+        ),
+        (false, true) => format!(
             "{k} {} NOT NULL PRIMARY KEY, {id} {id_ddl} NOT NULL",
             case.key_ddl
         ),
-        false => format!(
+        (false, false) => format!(
             "{id} {id_ddl} NOT NULL PRIMARY KEY, {k} {} NOT NULL UNIQUE",
             case.key_ddl
         ),
     };
     let (table, guard) = engine.create(tag, &columns);
     for i in 1..=case.rows {
-        engine.exec(&format!(
-            "INSERT INTO {table} ({id}, {k}) VALUES ({i}, {})",
-            (case.key_value)(i)
-        ));
+        let insert = match case.composite {
+            true => format!(
+                "INSERT INTO {table} ({id}, {g}, {k}) VALUES ({i}, 1, {})",
+                (case.key_value)(i)
+            ),
+            false => format!(
+                "INSERT INTO {table} ({id}, {k}) VALUES ({i}, {})",
+                (case.key_value)(i)
+            ),
+        };
+        engine.exec(&insert);
     }
     engine.refresh_row_estimate(&table);
     (table, guard)
@@ -203,7 +334,9 @@ fn seeded(engine: SqlEngine, case: &Case, tag: &str) -> (String, Box<dyn std::an
 fn keyset_rig(engine: SqlEngine, table: &str, case: &Case, chunk_size: i64) -> Rig {
     let (_, k) = names(engine);
     let mut rig = engine.rig(table).mode("chunked");
-    if !case.primary {
+    if case.composite {
+        rig = rig.export_line(&format!("chunk_by_key: [{}, {k}]", lead(engine)));
+    } else if !case.primary {
         rig = rig.export_line(&format!("chunk_by_key: {k}"));
     }
     if let Some(line) = case.overrides {
@@ -244,6 +377,41 @@ fn delivered_ids(dir: &std::path::Path) -> Vec<i64> {
     }
     ids.sort();
     ids
+}
+
+/// A column type alias (SQL Server `CREATE TYPE`, PostgreSQL `CREATE DOMAIN`) dropped with this guard.
+struct AliasType {
+    engine: SqlEngine,
+    drop_sql: String,
+}
+
+impl AliasType {
+    /// Create `name` over `base`, replacing a leftover of the same name.
+    fn create(engine: SqlEngine, name: &str, base: &str) -> Self {
+        let (drop_sql, create_sql) = match engine {
+            SqlEngine::Mssql => (
+                format!("DROP TYPE IF EXISTS dbo.{name}"),
+                format!("CREATE TYPE dbo.{name} FROM {base}"),
+            ),
+            SqlEngine::Pg => (
+                format!("DROP DOMAIN IF EXISTS {name}"),
+                format!("CREATE DOMAIN {name} AS {base}"),
+            ),
+            _ => panic!("this engine has no column type alias"),
+        };
+        engine.exec(&drop_sql);
+        engine.exec(&create_sql);
+        AliasType { engine, drop_sql }
+    }
+}
+
+impl Drop for AliasType {
+    fn drop(&mut self) {
+        let (engine, sql) = (self.engine, self.drop_sql.clone());
+        if std::panic::catch_unwind(move || engine.exec(&sql)).is_err() {
+            eprintln!("could not drop the alias type: {}", self.drop_sql);
+        }
+    }
 }
 
 /// Run `check`; a panic in it is recorded in `gaps` under `label`, its first line only.
@@ -312,17 +480,31 @@ fn refused_on_a_table_that_fits_one_chunk(engine: SqlEngine, case: Case) {
 
 /// Every key type the cursor reads delivers the source's ids once over several pages.
 fn key_types_the_cursor_reads_deliver_the_seeded_ids(engine: SqlEngine, keys: &[KeyKind]) {
+    key_types_deliver_the_seeded_ids_over(engine, keys, 12, &[]);
+}
+
+/// Every key type in `keys` delivers the source's `rows` ids once, with the export lines `extra` added.
+fn key_types_deliver_the_seeded_ids_over(
+    engine: SqlEngine,
+    keys: &[KeyKind],
+    rows: i64,
+    extra: &[&str],
+) {
     for (label, ddl, value) in keys {
         let case = Case {
             label,
             key_ddl: ddl,
             key_value: *value,
             primary: false,
-            rows: 12,
+            rows,
             overrides: None,
+            composite: false,
         };
         let (table, _guard) = seeded(engine, &case, "ks_ok");
-        let rig = keyset_rig(engine, &table, &case, SMALL_PAGE);
+        let rig = extra.iter().fold(
+            keyset_rig(engine, &table, &case, SMALL_PAGE),
+            |rig, line| rig.export_line(line),
+        );
         let out = rig.run();
         assert!(
             out.status.success(),
@@ -353,87 +535,253 @@ fn a_refused_key_stays_refused(engine: SqlEngine, case: Case) {
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mysql_binary16_primary_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_mysql_binary16_primary_key() {
     refused_over_several_pages(SqlEngine::Mysql, MYSQL_BINARY16);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mysql_time_unique_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_mysql_time_unique_key() {
     refused_over_several_pages(SqlEngine::Mysql, MYSQL_TIME);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mysql_tinyint1_unique_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_mysql_tinyint1_unique_key() {
     refused_over_several_pages(SqlEngine::Mysql, MYSQL_TINYINT1);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-6; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mysql_enum_unique_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_mysql_enum_unique_key() {
     refused_over_several_pages(SqlEngine::Mysql, MYSQL_ENUM_KEY);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_postgres_bytea_unique_key() {
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_is_refused_postgres_bytea_unique_key() {
     refused_over_several_pages(SqlEngine::Pg, PG_BYTEA);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_postgres_time_unique_key() {
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_is_refused_postgres_time_unique_key() {
     refused_over_several_pages(SqlEngine::Pg, PG_TIME);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_varbinary_unique_key() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_varbinary_unique_key() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_VARBINARY);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-3; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_time_unique_key() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_time_unique_key() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_TIME);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-1; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_DT2_7_DISTINCT_US);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-1; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_DT2_7_ONE_US);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect ER-1; closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds() {
     refused_over_several_pages(SqlEngine::Mssql, MSSQL_DTO_7);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect RHS-3 (owner decision Q11); closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key() {
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key() {
     refused_on_a_table_that_fits_one_chunk(SqlEngine::Mysql, MYSQL_BINARY16);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect RHS-3 (owner decision Q11); closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key() {
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key() {
     refused_on_a_table_that_fits_one_chunk(SqlEngine::Pg, PG_BYTEA);
 }
 
 #[test]
-#[ignore = "live+gate-only: open defect RHS-3 (owner decision Q11); closes with fix/seam-keyset-key-type"]
-fn open_defect_keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key() {
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key() {
     refused_on_a_table_that_fits_one_chunk(SqlEngine::Mssql, MSSQL_DT2_7_DISTINCT_US);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_mssql_alias_type_over_datetime2_7() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_pages", "DATETIME2(7)");
+    refused_over_several_pages(SqlEngine::Mssql, alias_dt2_7("dbo.rivet_ks_ts7_pages"));
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_is_refused_on_a_one_chunk_table_mssql_alias_type_over_datetime2_7() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_one", "DATETIME2(7)");
+    refused_on_a_table_that_fits_one_chunk(SqlEngine::Mssql, alias_dt2_7("dbo.rivet_ks_ts7_one"));
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_is_refused_postgres_domain_over_bytea() {
+    let _alias = AliasType::create(SqlEngine::Pg, "rivet_ks_bytea", "BYTEA");
+    refused_over_several_pages(SqlEngine::Pg, PG_DOMAIN_BYTEA);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn an_alias_type_over_datetime2_6_keyset_key_delivers_the_seeded_ids_once_mssql() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts6", "DATETIME2(6)");
+    key_types_the_cursor_reads_deliver_the_seeded_ids(
+        SqlEngine::Mssql,
+        &[(
+            "SQL Server alias type over datetime2(6)",
+            "dbo.rivet_ks_ts6",
+            |i| format!("DATEADD(MICROSECOND, {i}, CAST('2024-01-01' AS DATETIME2(6)))"),
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_domain_over_text_keyset_key_delivers_the_seeded_ids_once_postgres() {
+    let _alias = AliasType::create(SqlEngine::Pg, "rivet_ks_text", "TEXT");
+    key_types_the_cursor_reads_deliver_the_seeded_ids(
+        SqlEngine::Pg,
+        &[("PostgreSQL domain over text", "rivet_ks_text", |i| {
+            format!("'k{i:03}'")
+        })],
+    );
+}
+
+/// `rivet init --table` scaffolds a keyset key for a primary key the planner admits and none for one it refuses.
+fn init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+    engine: SqlEngine,
+    refused: Case,
+    admitted: Case,
+) {
+    let (_, k) = names(engine);
+    let scaffold = |case: &Case| {
+        let case = Case {
+            primary: true,
+            ..*case
+        };
+        let (table, guard) = seeded(engine, &case, "ks_init");
+        let cfg = InitConfig::generate(engine.url(), &["--table", &table, "--mode", "chunked"]);
+        assert!(
+            cfg.init.status.success(),
+            "init --table {table} ({}): {}",
+            case.label,
+            String::from_utf8_lossy(&cfg.init.stderr)
+        );
+        let ran = cfg.run_after(&["check"], &[], Pairing::SameRefusal).run;
+        assert!(
+            ran.status.success(),
+            "the config init wrote for {} does not run (exit {:?})\n{}",
+            case.label,
+            ran.status.code(),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        (cfg.yaml(), guard)
+    };
+    let (yaml, _guard) = scaffold(&admitted);
+    assert!(
+        yaml.contains(&format!("chunk_by_key: {k}")),
+        "init scaffolds the key the planner admits ({}):\n{yaml}",
+        admitted.label
+    );
+    let (yaml, _guard) = scaffold(&refused);
+    assert!(
+        !yaml.contains("chunk_by_key:") && yaml.contains("NOTE: no chunk key"),
+        "init scaffolds no keyset key for the key the planner refuses ({}):\n{yaml}",
+        refused.label
+    );
+}
+
+const MYSQL_VARCHAR16: Case = Case {
+    label: "MySQL VARCHAR(16) primary key",
+    key_ddl: "VARCHAR(16)",
+    key_value: |i| format!("'k{i:03}'"),
+    primary: true,
+    rows: 12,
+    overrides: None,
+    composite: false,
+};
+const PG_TEXT: Case = Case {
+    label: "PostgreSQL text primary key",
+    key_ddl: "TEXT",
+    key_value: |i| format!("'k{i:03}'"),
+    primary: true,
+    rows: 12,
+    overrides: None,
+    composite: false,
+};
+const MSSQL_DT2_6: Case = Case {
+    label: "SQL Server datetime2(6) primary key",
+    key_ddl: "DATETIME2(6)",
+    key_value: |i| format!("DATEADD(MICROSECOND, {i}, CAST('2024-01-01' AS DATETIME2(6)))"),
+    primary: true,
+    rows: 12,
+    overrides: None,
+    composite: false,
+};
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn init_scaffolds_no_keyset_key_for_a_datetime2_7_primary_key_mssql() {
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Mssql,
+        MSSQL_DT2_7_DISTINCT_US,
+        MSSQL_DT2_6,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_init", "DATETIME2(7)");
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Mssql,
+        alias_dt2_7("dbo.rivet_ks_ts7_init"),
+        MSSQL_DT2_6,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn init_scaffolds_no_keyset_key_for_a_binary16_primary_key_mysql() {
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Mysql,
+        Case {
+            primary: true,
+            ..MYSQL_BINARY16
+        },
+        MYSQL_VARCHAR16,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn init_scaffolds_no_keyset_key_for_a_bytea_primary_key_postgres() {
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Pg,
+        Case {
+            primary: true,
+            ..PG_BYTEA
+        },
+        PG_TEXT,
+    );
 }
 
 #[test]
@@ -503,8 +851,16 @@ fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle() {
         SqlEngine::Oracle,
         &[
             ("Oracle NUMBER(18)", "NUMBER(18)", |i| i.to_string()),
+            ("Oracle NUMBER(38)", "NUMBER(38)", |i| i.to_string()),
             ("Oracle VARCHAR2(16)", "VARCHAR2(16)", |i| {
                 format!("'k{i:03}'")
+            }),
+            ("Oracle NVARCHAR2(16)", "NVARCHAR2(16)", |i| {
+                format!("'k{i:03}'")
+            }),
+            ("Oracle CHAR(8)", "CHAR(8)", |i| format!("'k{i:03}'")),
+            ("Oracle DATE", "DATE", |i| {
+                format!("DATE '2024-01-01' + {i}")
             }),
             ("Oracle TIMESTAMP(6)", "TIMESTAMP(6)", |i| {
                 format!(
@@ -512,6 +868,43 @@ fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle() {
                 )
             }),
         ],
+    );
+}
+
+/// The bare `NUMBER` keys a seek must page: integers, fractions across zero, 35 digits, and both ends of the exponent range.
+#[cfg(feature = "oracle")]
+const ORACLE_BARE_NUMBER_KEYS: [KeyKind; 5] = [
+    ("Oracle bare NUMBER", "NUMBER", |i| i.to_string()),
+    ("Oracle bare NUMBER fractions across zero", "NUMBER", |i| {
+        format!("{i} - 6.5")
+    }),
+    ("Oracle bare NUMBER of 35 digits", "NUMBER", |i| {
+        format!("{i} * 100000000000000000000000000000 + {i} / 8")
+    }),
+    ("Oracle bare NUMBER of a large exponent", "NUMBER", |i| {
+        format!("{i}E100")
+    }),
+    ("Oracle bare NUMBER of a small exponent", "NUMBER", |i| {
+        format!("{i}E-100")
+    }),
+];
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_bare_number_keyset_key_delivers_the_seeded_ids_once_oracle() {
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Oracle, &ORACLE_BARE_NUMBER_KEYS);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_bare_number_keyset_key_delivers_the_seeded_ids_once_in_parallel_oracle() {
+    key_types_deliver_the_seeded_ids_over(
+        SqlEngine::Oracle,
+        &ORACLE_BARE_NUMBER_KEYS,
+        40,
+        &["parallel: 3"],
     );
 }
 
@@ -543,4 +936,205 @@ fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_onc
 #[ignore = "live: requires docker compose oracle"]
 fn a_timestamp_9_keyset_key_stays_refused_oracle() {
     a_refused_key_stays_refused(SqlEngine::Oracle, ORACLE_TS9);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle() {
+    for case in [
+        ORACLE_BINARY_DOUBLE,
+        ORACLE_SCALED_NUMBER,
+        ORACLE_NUMBER_STAR_SCALE,
+        ORACLE_FLOAT,
+        ORACLE_NEGATIVE_SCALE_NUMBER,
+        ORACLE_NEGATIVE_SCALE_38,
+        ORACLE_SCALE_PAST_38,
+        ORACLE_LTZ,
+    ] {
+        a_refused_key_stays_refused(SqlEngine::Oracle, case);
+    }
+}
+
+/// The check output names `phrase` and not `absent`, so the refusal states the cause and the remedy that holds.
+#[cfg(feature = "oracle")]
+fn the_refusal_says(engine: SqlEngine, case: &Case, phrase: &str, absent: &str) {
+    let (table, _guard) = seeded(engine, case, "ks_say");
+    let out = keyset_rig(engine, &table, case, SMALL_PAGE).cli(&["check"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains(phrase), "{}: {text}", case.label);
+    assert!(!text.contains(absent), "{}: {text}", case.label);
+}
+
+#[cfg(feature = "oracle")]
+const ORACLE_TS9_NS: Case = Case {
+    label: "Oracle TIMESTAMP(9) unique key under the timestamp_ns override",
+    overrides: Some("columns: {K: timestamp_ns}"),
+    ..ORACLE_TS9
+};
+#[cfg(feature = "oracle")]
+const ORACLE_TS9_COMPOSITE: Case = Case {
+    label: "Oracle TIMESTAMP(9) as the second column of a composite key",
+    composite: true,
+    ..ORACLE_TS9
+};
+#[cfg(feature = "oracle")]
+const ORACLE_TS9_COMPOSITE_NS: Case = Case {
+    label: "Oracle TIMESTAMP(9) as the second column of a composite key under the timestamp_ns override",
+    composite: true,
+    ..ORACLE_TS9_NS
+};
+#[cfg(feature = "oracle")]
+const ORACLE_FLOAT_COMPOSITE: Case = Case {
+    label: "Oracle FLOAT as the second column of a composite key",
+    composite: true,
+    ..ORACLE_FLOAT
+};
+#[cfg(feature = "oracle")]
+const ORACLE_SCALED_NUMBER_INT64_COMPOSITE: Case = Case {
+    label: "Oracle NUMBER(12,2) of whole numbers under an int64 override as the second column of a composite key",
+    key_value: |i| i.to_string(),
+    overrides: Some("columns: {K: int64}"),
+    composite: true,
+    ..ORACLE_SCALED_NUMBER
+};
+#[cfg(feature = "oracle")]
+const ORACLE_SCALED_NUMBER_STRING_COMPOSITE: Case = Case {
+    label: "Oracle NUMBER(12,2) of fractions under a string override as the second column of a composite key",
+    overrides: Some("columns: {K: string}"),
+    composite: true,
+    ..ORACLE_SCALED_NUMBER
+};
+const PG_JSONB: Case = Case {
+    label: "PostgreSQL jsonb unique key",
+    key_ddl: "JSONB",
+    key_value: |i| {
+        format!("'{{\"a\": {{\"b\": [{i}, null, true]}}, \"u\": \"\u{e9}\u{4e2d}{i}\"}}'::jsonb")
+    },
+    primary: false,
+    rows: 12,
+    overrides: None,
+    composite: false,
+};
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_timestamp_9_keyset_key_under_the_timestamp_ns_override_stays_refused_oracle() {
+    the_key_is_refused(
+        SqlEngine::Oracle,
+        &ORACLE_TS9_NS,
+        SMALL_PAGE,
+        "under the override",
+    );
+    the_refusal_says(
+        SqlEngine::Oracle,
+        &ORACLE_TS9_NS,
+        "whatever type `columns:` delivers it as",
+        "needs the `timestamp_ns`",
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_timestamp_9_composite_keyset_key_is_refused_oracle() {
+    for case in [ORACLE_TS9_COMPOSITE, ORACLE_TS9_COMPOSITE_NS] {
+        the_key_is_refused(SqlEngine::Oracle, &case, SMALL_PAGE, "as a composite key");
+    }
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_columns_override_oracle()
+ {
+    for base in [
+        ORACLE_SCALED_NUMBER,
+        ORACLE_NUMBER_STAR_SCALE,
+        ORACLE_FLOAT,
+        ORACLE_NEGATIVE_SCALE_NUMBER,
+    ] {
+        for line in ["columns: {K: int64}", "columns: {K: string}"] {
+            let case = Case {
+                overrides: Some(line),
+                ..base
+            };
+            the_key_is_refused(SqlEngine::Oracle, &case, SMALL_PAGE, line);
+        }
+    }
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_float_and_a_scaled_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle() {
+    for case in [
+        ORACLE_FLOAT_COMPOSITE,
+        ORACLE_SCALED_NUMBER_INT64_COMPOSITE,
+        ORACLE_SCALED_NUMBER_STRING_COMPOSITE,
+    ] {
+        let (table, _guard) = seeded(SqlEngine::Oracle, &case, "ks_cmp");
+        let rig = keyset_rig(SqlEngine::Oracle, &table, &case, SMALL_PAGE);
+        let out = rig.run();
+        assert!(
+            out.status.success(),
+            "keyset key {}: {}",
+            case.label,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            delivered_ids(&rig.out_dir()),
+            (1..=case.rows).collect::<Vec<_>>(),
+            "keyset key {}: every row once",
+            case.label
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_jsonb_keyset_key_delivers_the_seeded_ids_once_postgres() {
+    for case in [
+        PG_JSONB,
+        Case {
+            composite: true,
+            ..PG_JSONB
+        },
+    ] {
+        let (table, _guard) = seeded(SqlEngine::Pg, &case, "ks_jb");
+        let rig = keyset_rig(SqlEngine::Pg, &table, &case, SMALL_PAGE);
+        let out = rig.run();
+        assert!(
+            out.status.success(),
+            "keyset key {} (composite {}): {}",
+            case.label,
+            case.composite,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            delivered_ids(&rig.out_dir()),
+            (1..=case.rows).collect::<Vec<_>>(),
+            "keyset key {} (composite {}): every row once",
+            case.label,
+            case.composite
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_datetime2_7_composite_keyset_key_is_refused_mssql() {
+    refused_over_several_pages(
+        SqlEngine::Mssql,
+        Case {
+            label: "SQL Server datetime2(7) as the second column of a composite key",
+            composite: true,
+            ..MSSQL_DT2_7_DISTINCT_US
+        },
+    );
 }

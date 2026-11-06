@@ -1,7 +1,8 @@
 use postgres::Client;
 
-use crate::config::TlsConfig;
+use crate::config::{SourceType, TlsConfig};
 use crate::error::Result;
+use crate::types::ColumnOverrides;
 
 use super::{ColumnInfo, TableInfo};
 
@@ -50,7 +51,11 @@ const LEADING_BTREE_KEY_SQL: &str = "SELECT a.attname
        AND i.indisvalid AND i.indisready
        AND i.indpred IS NULL";
 
-pub(super) fn introspect(client: &mut Client, schema: &str, table: &str) -> Result<TableInfo> {
+pub(super) fn introspect(
+    client: &mut Client,
+    schema: &str,
+    table: &str,
+) -> Result<super::Introspected> {
     // Row estimate from pg_class (fast, no COUNT(*))
     let row_estimate: i64 = client
         .query_opt(
@@ -110,7 +115,7 @@ pub(super) fn introspect(client: &mut Client, schema: &str, table: &str) -> Resu
         return Err(super::table_not_found(&format!("{schema}.{table}")));
     }
 
-    let columns = col_rows
+    let mut columns: Vec<ColumnInfo> = col_rows
         .iter()
         .map(|row| {
             let name: String = row.get(0);
@@ -132,8 +137,18 @@ pub(super) fn introspect(client: &mut Client, schema: &str, table: &str) -> Resu
             }
         })
         .collect();
+    let unreadable = super::probe_keyset_refusals(
+        SourceType::Postgres,
+        &mut columns,
+        crate::source::postgres::type_mappings_on(
+            client,
+            &super::select_all(SourceType::Postgres, &[schema, table]),
+            &ColumnOverrides::default(),
+        ),
+        || Ok(Vec::new()),
+    )?;
 
-    Ok(TableInfo {
+    let info = TableInfo {
         cdc_capture_instance: None,
         cdc_unmineable: None,
         density: None,
@@ -142,7 +157,8 @@ pub(super) fn introspect(client: &mut Client, schema: &str, table: &str) -> Resu
         row_estimate,
         total_bytes,
         columns,
-    })
+    };
+    Ok((info, unreadable))
 }
 
 /// First-run density probe (#148), PostgreSQL leg: `reltuples` after
