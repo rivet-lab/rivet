@@ -848,6 +848,13 @@ A failed run leaves its durable parts in the destination but **no `manifest.json
 `_SUCCESS`** — that pair marks a *clean* end, so a missing `_SUCCESS` is how you (and
 `rivet validate`) tell a partial run from a complete one.
 
+Before its first part, a run writes a `running` manifest for each table
+(`manifest-<run id>.json`, no parts), so a `rivet load` with `gc_orphans` from
+another state DB sees the run and spares its parts. A run killed mid-flight leaves
+that marker, and the next run that ends cleanly supersedes it. A run that fails
+cleanly removes the marker when no part of the table reached the destination, and
+rewrites it as `failed` over the parts that did.
+
 ### PostgreSQL — the slot fills / the source disk fills
 
 A logical slot pins WAL until rivet advances it (`confirmed_flush_lsn`). The
@@ -1029,10 +1036,11 @@ engines. What remains:
   before-images need `binlog_row_image=FULL` (MySQL) / `REPLICA IDENTITY FULL`
   (PostgreSQL); otherwise only key columns are carried.
 - **Type parity with the batch export**: every type both modes deliver —
-  including PostgreSQL arrays of text and numbers (real `List` columns, inner
-  NULLs preserved) and `NUMERIC`/`DECIMAL` above precision 38 (`Decimal256`) —
-  is byte-identical to the batch export. Where the modes differ today (PostgreSQL
-  bare `numeric`, `money`, `inet`, `cidr` and temporal/uuid/bytea/numeric arrays:
+  including PostgreSQL arrays of text, numbers, dates, times, timestamps, uuids
+  and bytea (real `List` columns, inner NULLs preserved) and `NUMERIC`/`DECIMAL`
+  above precision 38 (`Decimal256`) — is byte-identical to the batch export.
+  Where the modes differ today (PostgreSQL
+  bare `numeric`, `money`, `inet`, `cidr` and numeric arrays:
   batch refuses the column, CDC carries the server's text) the difference is
   declared in `docs/type-capability-matrix.yaml`. Enforced per engine by the live
   `*_batch_and_cdc_deliver_every_ledger_row_alike` tests, generated from that

@@ -37,19 +37,19 @@ const CORPUS_EXTENSIONS: &[&str] = &[
 
 /// Python modules under dev/ that no other file references and that are not entry points.
 // 0 (2026-10-31): first measurement on main ff0a4f2c after #744 deleted the last orphans.
-const PYTHON_ORPHAN_CEILING: usize = 0; // ratchet-pin: python-orphans
+const PYTHON_ORPHAN_CEILING: usize = 0; // ratchet-pin: python-orphans (review 2027-02-01)
 
 /// Blanket module-level `#![allow(dead_code)]` in src/.
 // 0 -> 8 (2026-10-31): first measurement on main ff0a4f2c; the plan/ and CDC reader modules, each closes when its dead items are deleted.
-const SRC_BLANKET_ALLOW_CEILING: usize = 8; // ratchet-pin: src-blanket-dead-code-allows
+const SRC_BLANKET_ALLOW_CEILING: usize = 8; // ratchet-pin: src-blanket-dead-code-allows (review 2027-02-01)
 
 /// Blanket module-level `#![allow(dead_code)]` in tests/common.
 // 0 -> 17 (2026-10-31): first measurement on main ff0a4f2c; the helper modules are shared across test binaries that each use a subset.
-const COMMON_BLANKET_ALLOW_CEILING: usize = 17; // ratchet-pin: tests-common-blanket-dead-code-allows
+const COMMON_BLANKET_ALLOW_CEILING: usize = 17; // ratchet-pin: tests-common-blanket-dead-code-allows (review 2027-02-01)
 
 /// Groups of functions in different files of src/ with identical bodies of `DUPLICATE_MIN_LINES` lines or more.
 // 0 -> 1 (2026-10-31): first measurement on main ff0a4f2c; pipeline/mod.rs::clamp_line and pipeline/summary.rs::clamp_chars, closes when one calls the other.
-const DUPLICATE_BODY_CEILING: usize = 1; // ratchet-pin: duplicate-fn-bodies
+const DUPLICATE_BODY_CEILING: usize = 1; // ratchet-pin: duplicate-fn-bodies (review 2027-02-01)
 
 /// Every text file under `dir` that may hold a reference, as (repo-relative path, text).
 fn corpus(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {

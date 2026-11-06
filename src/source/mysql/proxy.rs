@@ -173,8 +173,7 @@ pub(super) fn detect_proxy_on_conn<C: Queryable>(conn: &mut C) -> MysqlProxyKind
     let proxysql_internal_accepted: bool = conn.query_drop("PROXYSQL INTERNAL SESSION").is_ok();
     // `SHOW GLOBAL VARIABLES`, never `SELECT @@…`: ProxySQL stops multiplexing a session that
     // reads a `@@` variable, and this probe runs on the pool's own first connection.
-    let version_comment = global_variable(conn, "version_comment");
-    let proxy_version = global_variable(conn, "proxy_version");
+    let (version_comment, proxy_version) = proxy_globals(conn);
     // CONNECTION_ID() is server-side: comparing two consecutive calls on the
     // same `Conn` detects transaction-mode multiplexers that hand each
     // statement to a different backend connection.
@@ -192,12 +191,17 @@ pub(super) fn detect_proxy_on_conn<C: Queryable>(conn: &mut C) -> MysqlProxyKind
     )
 }
 
-/// The value of global variable `name` through `SHOW GLOBAL VARIABLES` (no `@@` read), or `None`.
-fn global_variable<C: Queryable>(conn: &mut C, name: &str) -> Option<String> {
-    conn.query_first::<(String, String), _>(format!("SHOW GLOBAL VARIABLES LIKE '{name}'"))
-        .ok()
-        .flatten()
-        .map(|(_, v)| v)
+/// `version_comment` and `proxy_version` in one `SHOW GLOBAL VARIABLES` by name (no `@@`, no `LIKE` scan).
+fn proxy_globals<C: Queryable>(conn: &mut C) -> (Option<String>, Option<String>) {
+    let rows: Vec<(String, String)> = conn
+        .query("SHOW GLOBAL VARIABLES WHERE Variable_name IN ('version_comment', 'proxy_version')")
+        .unwrap_or_default();
+    let value = |name: &str| {
+        rows.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    };
+    (value("version_comment"), value("proxy_version"))
 }
 
 /// The proxy kind of `url`, probed once per process on `pool`'s own connection: no dial of its own.
@@ -229,6 +233,7 @@ pub(super) fn warn_proxy_kind(kind: MysqlProxyKind) {
 #[cfg(test)]
 mod tests {
     use super::{MysqlProxyKind, classify_mysql_proxy};
+    use mysql::prelude::Queryable;
 
     #[test]
     fn proxy_classify_direct_when_no_signals() {
@@ -404,5 +409,27 @@ mod tests {
             labels,
             ["direct", "proxysql", "maxscale", "proxy-multiplexed"]
         );
+    }
+
+    /// The probe reads its two global variables in one indexed statement: two `LIKE` scans cost ~1270 rows (#694).
+    #[test]
+    #[ignore = "live: requires docker compose mysql"]
+    fn the_probe_reads_its_globals_without_a_full_variables_scan() {
+        let mut c = mysql::Conn::new(
+            mysql::Opts::from_url("mysql://rivet:rivet@127.0.0.1:3306/rivet").unwrap(),
+        )
+        .unwrap();
+        let scanned = |c: &mut mysql::Conn| -> u64 {
+            c.query_first::<(String, u64), _>("SHOW SESSION STATUS LIKE 'Handler_read_rnd_next'")
+                .unwrap()
+                .unwrap()
+                .1
+        };
+        let before = scanned(&mut c);
+        assert_eq!(super::detect_proxy_on_conn(&mut c), MysqlProxyKind::Direct);
+        let rows = scanned(&mut c) - before;
+        assert!(rows < 50, "the proxy probe scanned {rows} rows");
+        let (comment, proxy) = super::proxy_globals(&mut c);
+        assert!(comment.is_some_and(|v| v.contains("MySQL")) && proxy.is_none());
     }
 }

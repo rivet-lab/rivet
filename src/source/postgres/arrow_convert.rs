@@ -1058,13 +1058,20 @@ fn pg_array_decode_error(rows: &[Row], col_idx: usize, e: &postgres::Error) -> a
         .unwrap_or("?");
     crate::error::coded(
         crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-        format!(
-            "column '{col}': a PostgreSQL array value could not be decoded as a one-dimensional \
+        array_decode_message(col, e),
+    )
+}
+
+/// The refusal text for an array cell that does not decode: names the column, the causes and the query-side remedy.
+fn array_decode_message(col: &str, e: &dyn std::fmt::Display) -> String {
+    format!(
+        "column '{col}': a PostgreSQL array value could not be decoded as a one-dimensional \
          Arrow List ({e}). The usual cause is a MULTI-dimensional (nested) array value — an \
          `integer[]` column may legally hold 2-D+ matrices, but Arrow's List is one-dimensional \
          and has no flat mapping. Cast the column to text in the export query (e.g. `{col}::text`) \
-         to export the array literal, or flatten it to a 1-D array."
-        ),
+         to export the array literal, or flatten it to a 1-D array. In a date, time or timestamp \
+         array an element of `infinity`, `-infinity` or `24:00:00` fails the same way: map it \
+         to a real bound in the query."
     )
 }
 
@@ -1079,8 +1086,8 @@ fn build_pg_list_array(
     col_idx: usize,
     rows: &[Row],
 ) -> Result<Arc<dyn Array>> {
-    let inner_dt = if let DataType::List(field_ref) = target_type {
-        field_ref.data_type()
+    let (field_ref, inner_dt) = if let DataType::List(field_ref) = target_type {
+        (field_ref, field_ref.data_type())
     } else {
         crate::rivet_bail!(
             crate::error::codes::INTERNAL_TYPE_BUILDER,
@@ -1122,6 +1129,31 @@ fn build_pg_list_array(
         }};
     }
 
+    macro_rules! list_mapped {
+        ($T:ty, $builder:expr, $b:ident, $x:ident => $push:expr) => {{
+            let mut lb = ListBuilder::new($builder).with_field(field_ref.clone());
+            for row in rows {
+                match row.try_get::<_, Option<Vec<Option<$T>>>>(col_idx) {
+                    Ok(Some(v)) => {
+                        for elem in v {
+                            match elem {
+                                Some($x) => {
+                                    let $b = lb.values();
+                                    $push;
+                                }
+                                None => lb.values().append_null(),
+                            }
+                        }
+                        lb.append(true);
+                    }
+                    Ok(None) => lb.append(false),
+                    Err(e) => return Err(pg_array_decode_error(rows, col_idx, &e)),
+                }
+            }
+            Ok(Arc::new(lb.finish()))
+        }};
+    }
+
     match inner_dt {
         DataType::Boolean => list_of!(bool, BooleanBuilder),
         DataType::Int16 => list_of!(i16, Int16Builder),
@@ -1148,14 +1180,37 @@ fn build_pg_list_array(
             }
             Ok(Arc::new(lb.finish()))
         }
-        // Round-5: a "write null list" fallback here silently NULLed 100% of a
-        // column the TYPE layer promised was supported (pg_type_to_rivet maps every
-        // `x[]` to List{inner}, and rivet_type_to_arrow accepts List(Date32/Time64/
-        // Timestamp/FixedSizeBinary/Binary)), and no integrity gate sees it — the
-        // exact silent-loss class the repo bans. Fail LOUDLY like the scalar
-        // build_array `_ =>` arm, so the operator learns the array element type isn't
-        // decoded yet (cast the column to text[] upstream, or omit it) instead of
-        // shipping an all-null column.
+        DataType::Date32 => list_mapped!(
+            chrono::NaiveDate,
+            Date32Builder::new(),
+            b,
+            d => {
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+                b.append_value((d - epoch).num_days() as i32)
+            }
+        ),
+        DataType::Time64(_) => {
+            list_mapped!(PgTimeMicros, Time64MicrosecondBuilder::new(), b, t => b.append_value(t.0))
+        }
+        DataType::Timestamp(_, Some(tz)) => list_mapped!(
+            chrono::DateTime<chrono::Utc>,
+            TimestampMicrosecondBuilder::new().with_timezone(tz.as_ref()),
+            b,
+            ts => b.append_value(ts.timestamp_micros())
+        ),
+        DataType::Timestamp(_, None) => list_mapped!(
+            chrono::NaiveDateTime,
+            TimestampMicrosecondBuilder::new(),
+            b,
+            ts => b.append_value(ts.and_utc().timestamp_micros())
+        ),
+        DataType::FixedSizeBinary(16) => list_mapped!(
+            PgUuidBytes,
+            FixedSizeBinaryBuilder::new(16),
+            b,
+            u => b.append_value(u.0).expect("a uuid is 16 bytes")
+        ),
+        DataType::Binary => list_mapped!(Vec<u8>, BinaryBuilder::new(), b, v => b.append_value(v)),
         other => {
             let col = rows
                 .first()
@@ -1164,9 +1219,8 @@ fn build_pg_list_array(
             crate::rivet_bail!(
                 crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
                 "column '{col}': PG array column has element type {other:?} which the list \
-                 builder cannot decode (temporal/uuid/bytea array elements are not yet \
-                 supported) — it would export as 100% NULL. Cast the column to text[] in the \
-                 source query, or exclude it."
+                 builder cannot decode — it would export as 100% NULL. Cast the column to \
+                 text[] in the source query, or exclude it."
             )
         }
     }
@@ -1829,5 +1883,23 @@ mod renderer_twins {
         for b in [[0u8; 16], [0xFF; 16], mixed] {
             assert_eq!(uuid::Uuid::from_bytes(b).to_string(), uuid36(&b));
         }
+    }
+}
+
+#[cfg(test)]
+mod array_decode_message_text {
+    use super::array_decode_message;
+
+    /// The refusal names the column, the nested-array cause, the cast remedy and the temporal bounds remedy.
+    #[test]
+    fn the_refusal_text_names_cause_and_remedy() {
+        let m = array_decode_message("tags", &"wire error");
+        assert!(m.starts_with("column 'tags': a PostgreSQL array value could not be decoded"));
+        assert!(m.contains("(wire error)"));
+        assert!(m.contains("MULTI-dimensional"));
+        assert!(m.contains("`tags::text`"));
+        assert!(m.contains(
+            "In a date, time or timestamp array an element of `infinity`, `-infinity` or `24:00:00` fails the same way: map it to a real bound in the query."
+        ));
     }
 }

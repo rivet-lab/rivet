@@ -1935,14 +1935,21 @@ mod mod_decisions {
             native_type: "numeric".into(),
             reason: "no precision".into(),
         };
-        let date_list = RivetType::List {
-            inner: Box::new(RivetType::Date),
+        let numeric_list = RivetType::List {
+            inner: Box::new(numeric.clone()),
         };
-        for t in [numeric, date_list] {
+        for t in [numeric, numeric_list] {
             let m = plan_cdc_delivery(col("numeric", t.clone()), false).unwrap();
             assert_eq!(m.delivery, Delivery::Text(TextForm::ServerText), "{t:?}");
             assert_eq!(m.arrow_type, Some(arrow::datatypes::DataType::Utf8));
             assert_eq!(m.fidelity, TypeFidelity::LogicalString);
+        }
+        for inner in [RivetType::Date, RivetType::Uuid, RivetType::Binary] {
+            let list = RivetType::List {
+                inner: Box::new(inner),
+            };
+            let m = plan_cdc_delivery(col("date", list.clone()), false).unwrap();
+            assert_eq!(m.delivery, Delivery::Native, "{list:?}");
         }
 
         let ns = RivetType::Timestamp {
