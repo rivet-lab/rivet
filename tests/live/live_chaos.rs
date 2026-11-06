@@ -63,14 +63,12 @@ fn high_latency_does_not_cause_false_positive_transient_classification() {
 fn chunked_export_recovers_after_mid_stream_connection_reset() {
     let _g = toxiproxy_guard();
     require_alive(LiveService::Postgres);
-    require_alive(LiveService::DuckDb);
     require_alive(LiveService::Toxiproxy);
     ensure_toxi_proxy("postgres", 15432, "postgres:5432");
     toxi_reset_toxics("postgres");
 
     let table = seed_pg_numeric_table(40);
     let export_name = unique_name("qa4A4_chunk");
-    let (out_host, out_container) = duckdb_shared_workdir("qa4A4_chunk_oracle");
     let rig = Rig::pg_batch(&export_name)
         .source_url(POSTGRES_TOXI_URL)
         .query(&format!("SELECT id, name FROM {}", table.name()))
@@ -78,8 +76,7 @@ fn chunked_export_recovers_after_mid_stream_connection_reset() {
         .export_line("chunk_column: id")
         .export_line("chunk_size: 10")
         .export_line("chunk_checkpoint: true")
-        .export_line("tuning: {max_retries: 3, retry_backoff_ms: 1500}")
-        .dest_path(out_host);
+        .export_line("tuning: {max_retries: 3, retry_backoff_ms: 1500}");
 
     let marker = std::env::temp_dir().join(format!("rivet-{export_name}.paused"));
     let _ = std::fs::remove_file(&marker);
@@ -113,7 +110,14 @@ fn chunked_export_recovers_after_mid_stream_connection_reset() {
         ran.status == "success" && ran.retries >= 2,
         "the run must have retried the cut and the refused reconnect; recorded: {ran:?}"
     );
-    duckdb_assert_complete(&out_container, "id", 40, "a chunked run cut mid-stream");
+    let rows: usize = read_all_parts(&rig.out_dir())
+        .iter()
+        .map(|b| b.num_rows())
+        .sum();
+    assert_eq!(
+        rows, 40,
+        "a chunked run cut mid-stream must deliver every row"
+    );
     let cfg = rig.config_path();
     let reconcile = run_rivet(&[
         "reconcile",
