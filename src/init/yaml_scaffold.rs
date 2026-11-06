@@ -3710,6 +3710,27 @@ mod tests {
         assert_eq!(cfg.exports.len(), 3, "two recipes + the stream");
     }
 
+    /// The ungated-name skip comment names a collection for MongoDB and a plain table elsewhere.
+    #[test]
+    fn the_ungated_name_skip_comment_names_a_collection_only_on_mongo() {
+        let info = TableInfo {
+            cdc_capture_instance: None,
+            cdc_unmineable: None,
+            density: None,
+            schema: "app".into(),
+            table: "my-coll".into(),
+            row_estimate: 1,
+            total_bytes: None,
+            columns: vec![],
+        };
+        let mut d = ScaffoldDecisions::default();
+        let mongo = skip_ungated_name(&mut d, &info, "mongo");
+        assert!(mongo.contains("# SKIPPED collection my-coll:"), "{mongo}");
+        let mysql = skip_ungated_name(&mut d, &info, "mysql");
+        assert!(mysql.contains("# SKIPPED my-coll:"), "{mysql}");
+        assert!(!mysql.contains("collection"), "{mysql}");
+    }
+
     /// With BigQuery (day), ClickHouse (month) or Snowflake (day), the whole-DB scaffold's partition guesses sit where
     /// the LOAD reads them for a stream — `load.tables.<name>` on the stream — not on
     /// the recipes, which the load never reads (the bases came out unpartitioned under
