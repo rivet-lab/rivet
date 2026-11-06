@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/repo-venv"
 python3 "$(dirname "$0")/../dev/pytools/post_merge_clean.py" --after-commit
 # Rebuild the exact Rust call edges for code-review-graph in the background (~45 s).
 if [ -d .code-review-graph ] && command -v rust-analyzer >/dev/null 2>&1; then
