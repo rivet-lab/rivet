@@ -3670,9 +3670,70 @@ seeds:
           - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
           - "lib:a_bigquery_load_rides_out_a_5xx_from_the_token_endpoint"
       snowflake:
-        na: "the seed edits src/gcp_auth.rs, which only a BigQuery load or a GCS destination runs; Snowflake loads with its own credentials (src/load/snowflake.rs)"
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_transient_token_reply_through_opendal_mints_and_the_write_lands"
       clickhouse:
-        na: "the seed edits src/gcp_auth.rs, which only a BigQuery load or a GCS destination runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_transient_token_reply_through_opendal_mints_and_the_write_lands"
+
+  - name: token-loader-stop-lost-in-opendal
+    class: "a refusal the GCS token loader raises (RIVET_DEST_CREDENTIALS_INVALID, RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE) is wrapped by opendal and read back with no code: the run stops with no code and exit 1 or 2 by opendal's flag, not by the code"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: a 401 from the token endpoint through real opendal Gcs read back code=None; code_of looked only at the anyhow layers, never at the std source chain"
+    scope: target
+    patch: token-loader-stop-lost-in-opendal/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+      snowflake:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+      clickhouse:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+
+  - name: token-grant-asked-again-by-opendal-retries
+    class: "a grant the token endpoint refused (401) or an endpoint that kept failing is asked again by every backon and RetryLayer retry of the same write: 24 to 144 asks and minutes of backoff for one answer"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: 401 through Gcs plus the RetryLayer asked the token endpoint 24 times in 67 s"
+    scope: target
+    patch: token-grant-asked-again-by-opendal-retries/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+      snowflake:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+      clickhouse:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+
+  - name: opendal-temporary-flag-overrides-nested-refusal
+    class: "an opendal error flagged temporary that carries a refused grant is retried as a blip: the exit is 2 for a refusal that no retry can fix"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: a 401 through Gcs without the RetryLayer exited 2 because opendal marks every loader error temporary"
+    scope: target
+    patch: opendal-temporary-flag-overrides-nested-refusal/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+      snowflake:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+      clickhouse:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
 
   - name: transient-warehouse-code-exits-by-text
     class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"

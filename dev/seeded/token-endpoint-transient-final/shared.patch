@@ -1,6 +1,8 @@
+diff --git a/src/gcp_auth.rs b/src/gcp_auth.rs
+index b6a99b29..caf8914c 100644
 --- a/src/gcp_auth.rs
 +++ b/src/gcp_auth.rs
-@@ -559,7 +559,7 @@
+@@ -616,7 +616,7 @@ fn judge_status(status: reqwest::StatusCode) -> Result<(), GrantFailure> {
      if status.is_success() {
          return Ok(());
      }

@@ -318,8 +318,23 @@ pub(crate) fn opendal_error<'a>(
     })
 }
 
+/// Whether a coded stop from the credential loader sits in an opendal error's source chain.
+fn carries_coded_stop(e: &opendal::Error) -> bool {
+    let mut cur = std::error::Error::source(e);
+    while let Some(c) = cur {
+        if c.is::<super::CodedError>() {
+            return true;
+        }
+        cur = c.source();
+    }
+    false
+}
+
 /// opendal's verdict on a store answer: a temporary one is a blip the destination side rides out, any other is final.
 fn classify_opendal(e: &opendal::Error) -> RetryClass {
+    if carries_coded_stop(e) {
+        return PERMANENT;
+    }
     if e.is_temporary() {
         transient(false, 500)
     } else {

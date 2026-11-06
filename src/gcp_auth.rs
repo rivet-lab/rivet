@@ -421,6 +421,48 @@ pub struct AdcUserTokenLoader {
 struct SharedToken {
     token: Mutex<Option<MintedToken>>,
     mint_gate: tokio::sync::Mutex<()>,
+    stopped: Mutex<Option<Stopped>>,
+}
+
+/// The stop a mint ended with, replayed to the callers that ask next so the endpoint is not asked again for the same answer.
+struct Stopped {
+    at: Instant,
+    code: crate::error::Code,
+    message: String,
+}
+
+/// How long an exhausted-transient stop is replayed; a refused grant is replayed for the life of the process.
+const TRANSIENT_STOP_MEMORY: Duration = Duration::from_secs(5 * 60);
+
+impl SharedToken {
+    /// The remembered stop to hand back instead of asking the endpoint again, if one is still in force at `now`.
+    fn replay_stop(&self, now: Instant) -> Option<anyhow::Error> {
+        let stopped = self.stopped.lock().expect("ADC stop memory poisoned");
+        let stop = stopped.as_ref()?;
+        let in_force = stop.code.id == crate::error::codes::DEST_CREDENTIALS_INVALID.id
+            || now.saturating_duration_since(stop.at) < TRANSIENT_STOP_MEMORY;
+        in_force.then(|| crate::error::coded(stop.code, stop.message.clone()))
+    }
+
+    /// Remember `err` when it is a refused grant or an endpoint that kept failing; any other error is not a verdict on the credential.
+    fn remember_stop(&self, err: &anyhow::Error, now: Instant) {
+        let Some(code) = crate::error::code_of(err).filter(|c| {
+            c.id == crate::error::codes::DEST_CREDENTIALS_INVALID.id
+                || c.id == crate::error::codes::DEST_TOKEN_ENDPOINT_UNAVAILABLE.id
+        }) else {
+            return;
+        };
+        *self.stopped.lock().expect("ADC stop memory poisoned") = Some(Stopped {
+            at: now,
+            code,
+            message: err.to_string(),
+        });
+    }
+
+    /// Forget the remembered stop after a mint succeeded.
+    fn forget_stop(&self) {
+        *self.stopped.lock().expect("ADC stop memory poisoned") = None;
+    }
 }
 
 struct MintedToken {
@@ -519,7 +561,19 @@ impl GoogleTokenLoad for AdcUserTokenLoader {
             if let Some(token) = self.cached_token(Instant::now()) {
                 return Ok(Some(token));
             }
-            Ok(Some(self.mint_token(&client).await?))
+            if let Some(stop) = self.minted.replay_stop(Instant::now()) {
+                return Err(stop);
+            }
+            match self.mint_token(&client).await {
+                Ok(token) => {
+                    self.minted.forget_stop();
+                    Ok(Some(token))
+                }
+                Err(err) => {
+                    self.minted.remember_stop(&err, Instant::now());
+                    Err(err)
+                }
+            }
         })
     }
 }
@@ -545,13 +599,16 @@ fn token_status_is_transient(code: u16) -> bool {
 
 /// The failure of a send: transient when the transport failed, final when the request could never be made.
 fn send_failed(e: reqwest::Error) -> GrantFailure {
-    let transient = e.is_timeout() || e.is_connect() || e.is_request();
-    let err = anyhow::Error::new(e).context("ADC token request failed");
-    if transient {
-        GrantFailure::Transient(err)
-    } else {
-        GrantFailure::Final(err)
+    if e.is_timeout() || e.is_connect() || e.is_request() {
+        return GrantFailure::Transient(anyhow::Error::new(e).context("ADC token request failed"));
     }
+    GrantFailure::Final(crate::error::coded(
+        crate::error::codes::DEST_CREDENTIALS_INVALID,
+        crate::redact::redact_secrets(&format!(
+            "ADC token request could not be made ({})",
+            e.without_url()
+        )),
+    ))
 }
 
 /// `Ok` for a success status; a transient status or a refused grant otherwise. The body is never surfaced: Google's OAuth errors can echo the submitted `client_secret`.
@@ -582,7 +639,16 @@ fn after_failed_attempt(attempt: u32, url: &str, failure: GrantFailure) -> Resul
                 )),
             ))
         }
-        GrantFailure::Transient(_) => Ok(attempt + 1),
+        GrantFailure::Transient(last) => {
+            log::warn!(
+                "{}",
+                crate::redact::redact_secrets(&format!(
+                    "Google's token endpoint {url} failed (retry {} of {MAX_TRANSIENT_RETRIES}): {last:#}",
+                    attempt + 1
+                ))
+            );
+            Ok(attempt + 1)
+        }
     }
 }
 
@@ -609,7 +675,17 @@ async fn request_grant(
 /// Parse the OAuth token-endpoint response, capturing the access token and
 /// its TTL (see [`TokenResponse`] for the absent-`expires_in` contract).
 pub(crate) fn parse_token_response(data: &str) -> Result<(String, u64)> {
-    let token: TokenResponse = serde_json::from_str(data).context("parsing token response")?;
+    let token: TokenResponse = serde_json::from_str(data).map_err(|e| {
+        crate::error::coded(
+            crate::error::codes::DEST_CREDENTIALS_INVALID,
+            format!(
+                "Google's token endpoint answered with a body that is not a token response (parsing token response: {:?} at line {} column {})",
+                e.classify(),
+                e.line(),
+                e.column()
+            ),
+        )
+    })?;
     Ok((token.access_token, token.expires_in))
 }
 
@@ -1972,5 +2048,145 @@ mod token_endpoint_tests {
             crate::error::assert_coded(&err, UNAVAILABLE, 2);
             assert!(format!("{err:#}").contains(&url), "{err:#}");
         }
+    }
+
+    fn gcs_write_through_production_layers(
+        creds: AdcCredentials,
+        stand: &Stand,
+        max_times: usize,
+    ) -> Result<()> {
+        let loader = AdcUserTokenLoader {
+            creds,
+            minted: Arc::new(SharedToken::default()),
+        };
+        let builder = opendal::services::Gcs::default()
+            .bucket("b")
+            .endpoint(stand.endpoint())
+            .disable_vm_metadata()
+            .customized_token_loader(Box::new(loader));
+        let op = opendal::Operator::new(builder)
+            .unwrap()
+            .finish()
+            .layer(crate::destination::retry_layer(max_times));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(op.write("k", vec![1u8]))
+            .map(|_| ())
+            .map_err(anyhow::Error::from)
+    }
+
+    fn gcs_stand(token: impl Fn(usize) -> (u16, String) + Send + 'static) -> Stand {
+        Stand::start(move |seen, nth| {
+            if seen.path.ends_with("/token") {
+                token(nth)
+            } else {
+                json(
+                    200,
+                    r#"{"name":"k","bucket":"b","size":"1","updated":"2026-11-06T10:00:00Z","timeCreated":"2026-11-06T10:00:00Z","etag":"e","md5Hash":"","generation":"1"}"#,
+                )
+            }
+        })
+    }
+
+    fn a_refused_grant_through_opendal_stops_invalid_and_asks_once(max_times: usize) {
+        let stand = gcs_stand(|_| json(401, SECRET_ECHO));
+        let err = gcs_write_through_production_layers(user_at(&url_of(&stand)), &stand, max_times)
+            .expect_err("a refused grant");
+        crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+        assert!(!format!("{err:#}").contains("ECHOED-SECRET"), "{err:#}");
+        assert_eq!(stand.asked("/token"), 1, "RetryLayer max {max_times}");
+    }
+
+    fn an_endpoint_that_never_recovers_through_opendal_stops_unavailable(max_times: usize) {
+        let stand = gcs_stand(|_| json(500, SECRET_ECHO));
+        let url = url_of(&stand);
+        let err = gcs_write_through_production_layers(user_at(&url), &stand, max_times)
+            .expect_err("an endpoint that never recovers");
+        crate::error::assert_coded(&err, UNAVAILABLE, 2);
+        let text = format!("{err:#}");
+        assert!(text.contains(&url) && text.contains("500"), "{text}");
+        assert!(!text.contains("ECHOED-SECRET"), "{text}");
+        assert_eq!(stand.asked("/token"), 6, "RetryLayer max {max_times}");
+    }
+
+    #[test]
+    fn a_refused_grant_through_opendal_and_the_export_retry_layer_stops_invalid_and_asks_once() {
+        a_refused_grant_through_opendal_stops_invalid_and_asks_once(5);
+    }
+
+    #[test]
+    fn a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once() {
+        a_refused_grant_through_opendal_stops_invalid_and_asks_once(3);
+    }
+
+    #[test]
+    fn a_transient_token_reply_through_opendal_mints_and_the_write_lands() {
+        let stand = gcs_stand(|nth| match nth {
+            0 => json(500, SECRET_ECHO),
+            _ => json(200, TOKEN_BODY),
+        });
+        gcs_write_through_production_layers(user_at(&url_of(&stand)), &stand, 5)
+            .expect("the write lands after the token endpoint recovers");
+        assert_eq!(stand.asked("/token"), 2);
+    }
+
+    #[test]
+    fn an_endpoint_that_never_recovers_through_opendal_and_the_export_retry_layer_stops_unavailable()
+     {
+        an_endpoint_that_never_recovers_through_opendal_stops_unavailable(5);
+    }
+
+    #[test]
+    fn an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable()
+    {
+        an_endpoint_that_never_recovers_through_opendal_stops_unavailable(3);
+    }
+
+    #[test]
+    fn a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage() {
+        let t0 = Instant::now();
+        let day = Duration::from_secs(24 * 3600);
+        let shared = SharedToken::default();
+        assert!(shared.replay_stop(t0).is_none());
+        shared.remember_stop(&anyhow::anyhow!("a reset"), t0);
+        assert!(
+            shared.replay_stop(t0).is_none(),
+            "an uncoded error is no verdict"
+        );
+        shared.remember_stop(
+            &crate::error::coded(crate::error::codes::DEST_TOKEN_ENDPOINT_UNAVAILABLE, "down"),
+            t0,
+        );
+        let replayed = shared.replay_stop(t0 + Duration::from_secs(60)).unwrap();
+        crate::error::assert_coded(&replayed, UNAVAILABLE, 2);
+        assert!(shared.replay_stop(t0 + TRANSIENT_STOP_MEMORY).is_none());
+        shared.remember_stop(
+            &crate::error::coded(crate::error::codes::DEST_CREDENTIALS_INVALID, "refused"),
+            t0,
+        );
+        let replayed = shared.replay_stop(t0 + day).unwrap();
+        crate::error::assert_coded(&replayed, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+        shared.forget_stop();
+        assert!(shared.replay_stop(t0).is_none());
+    }
+
+    #[test]
+    fn an_unsendable_request_and_an_unreadable_reply_are_coded_without_the_reply_text() {
+        let err = reqwest::blocking::Client::new()
+            .post("http://127.0.0.1:1/token?client_secret=URL-SECRET")
+            .header("Bad\nHeader", "x")
+            .send()
+            .expect_err("a header that cannot be built");
+        let GrantFailure::Final(err) = send_failed(err) else {
+            panic!("a request that cannot be built is final");
+        };
+        crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+        assert!(!format!("{err:#}").contains("URL-SECRET"), "{err:#}");
+        let err = parse_token_response(r#"{"access_token":"ECHOED-SECRET","expires_in":"x"}"#)
+            .expect_err("expires_in is not a number");
+        crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+        assert!(!format!("{err:#}").contains("ECHOED-SECRET"), "{err:#}");
     }
 }

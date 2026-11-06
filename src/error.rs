@@ -482,7 +482,7 @@ pub fn recoded(inner: &anyhow::Error, fallback: Code, message: impl Into<String>
 /// JSON `code` field and a `[CODE]` prefix on the text error line.
 pub fn error_code(err: &anyhow::Error) -> Option<&'static str> {
     let err = stop_cause(err);
-    if let Some(c) = err.downcast_ref::<CodedError>() {
+    if let Some(c) = coded_error(err) {
         return Some(c.code());
     }
     // The existing source-side statement-timeout marker also gets a stable code,
@@ -496,7 +496,13 @@ pub fn error_code(err: &anyhow::Error) -> Option<&'static str> {
 
 /// The registered [`Code`] a failure carries through [`CodedError`], if any.
 pub(crate) fn code_of(err: &anyhow::Error) -> Option<Code> {
-    stop_cause(err).downcast_ref::<CodedError>().map(|c| c.code)
+    coded_error(stop_cause(err)).map(|c| c.code)
+}
+
+/// The [`CodedError`] in the anyhow context layers, else the first one nested in a std `source()` link (an `opendal::Error` carrying the loader's refusal).
+fn coded_error(err: &anyhow::Error) -> Option<&CodedError> {
+    err.downcast_ref::<CodedError>()
+        .or_else(|| err.chain().find_map(|e| e.downcast_ref::<CodedError>()))
 }
 
 /// Map an error to its process exit code per the [`ExitClass`] taxonomy.
@@ -556,7 +562,7 @@ pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
     }
     // An environment failure still goes through the transient check (a dropped
     // connection retries, a denied permission does not).
-    match err.downcast_ref::<CodedError>()?.kind() {
+    match coded_error(err)?.kind() {
         ErrorKind::Refusal => Some(ExitClass::Refusal),
         ErrorKind::Busy | ErrorKind::Transient => Some(ExitClass::Retryable),
         ErrorKind::Internal => Some(ExitClass::Internal),
@@ -2436,7 +2442,10 @@ mod representative_failure_tests {
 
 #[cfg(test)]
 mod stop_marker_tests {
-    use super::{JobWaitTimeout, ManifestInconsistency, Refused};
+    use super::{
+        CodedError, JobWaitTimeout, ManifestInconsistency, Refused, assert_coded, classify_exit,
+        coded, codes, error_code,
+    };
 
     #[test]
     fn a_job_wait_timeout_names_the_job_and_how_long_it_waited() {
@@ -2509,5 +2518,61 @@ mod stop_marker_tests {
             format!("open: {plain:#}"),
         );
         assert_coded(&out, "RIVET_STATE_NOT_WRITABLE", 1);
+    }
+
+    fn opendal_carrying(source: Option<anyhow::Error>, temporary: bool) -> anyhow::Error {
+        let mut e = opendal::Error::new(opendal::ErrorKind::Unexpected, "write");
+        if let Some(source) = source {
+            e = e.set_source(source);
+        }
+        if temporary {
+            e = e.set_temporary();
+        }
+        anyhow::Error::from(e)
+    }
+
+    #[test]
+    fn a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class() {
+        let invalid = coded(codes::DEST_CREDENTIALS_INVALID, "refused");
+        assert_coded(
+            &opendal_carrying(Some(invalid), true),
+            "RIVET_DEST_CREDENTIALS_INVALID",
+            1,
+        );
+        let down = coded(codes::DEST_TOKEN_ENDPOINT_UNAVAILABLE, "down");
+        assert_coded(
+            &opendal_carrying(Some(down), false),
+            "RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE",
+            2,
+        );
+        let outage = opendal_carrying(
+            Some(coded(codes::DEST_TOKEN_ENDPOINT_UNAVAILABLE, "d")),
+            true,
+        );
+        assert!(!super::retry::classify_error(&outage).is_transient());
+        let wrapped = opendal_carrying(Some(coded(codes::DEST_CREDENTIALS_INVALID, "x")), true)
+            .context("writing the part");
+        assert_coded(&wrapped, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+    }
+
+    #[test]
+    fn an_opendal_error_without_a_nested_code_stays_as_it_was() {
+        let temporary = opendal_carrying(Some(anyhow::anyhow!("a reset")), true);
+        assert_eq!(
+            (error_code(&temporary), classify_exit(&temporary)),
+            (None, 2)
+        );
+        let persistent = opendal_carrying(None, false);
+        assert_eq!(
+            (error_code(&persistent), classify_exit(&persistent)),
+            (None, 1)
+        );
+    }
+
+    #[test]
+    fn the_outer_code_wins_over_a_nested_one() {
+        let outer = opendal_carrying(Some(coded(codes::DEST_CREDENTIALS_INVALID, "in")), true)
+            .context(CodedError::new(codes::STATE_NOT_WRITABLE, "out"));
+        assert_eq!(error_code(&outer), Some("RIVET_STATE_NOT_WRITABLE"));
     }
 }
