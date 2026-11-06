@@ -1,0 +1,16 @@
+diff --git a/src/source/mssql/mod.rs b/src/source/mssql/mod.rs
+--- a/src/source/mssql/mod.rs
++++ b/src/source/mssql/mod.rs
+@@ -1204,10 +1204,11 @@
+ pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
+     format!(
+         "SELECT STRING_AGG(CONVERT(nvarchar(max), c.name), CHAR(31)) FROM sys.columns c \
++         JOIN sys.types t ON t.user_type_id = c.user_type_id \
+          JOIN sys.objects o ON o.object_id = c.object_id \
+          JOIN sys.schemas s ON s.schema_id = o.schema_id \
+          WHERE s.name = N'{}' AND o.name = N'{}' \
+-           AND TYPE_NAME(c.system_type_id) IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
++           AND t.name IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
+         schema.replace('\'', "''"),
+         table.replace('\'', "''"),
+         crate::source::keyset_key::MICROSECOND_DIGITS

@@ -214,6 +214,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_INIT_CDC_NAME_TAKEN` | refusal | 5 | write the config under another `-o` name: the stem names its checkpoint and destination |
 | `RIVET_INIT_CONFIG_EXISTS` | refusal | 5 | move the existing config aside, or write elsewhere with `-o <new-path>` |
 | `RIVET_INIT_TABLE_NOT_FOUND` | usage | 1 | correct `--table` (and `--schema`), or grant the user SELECT on the table |
+| `RIVET_INIT_TABLE_UNREADABLE` | usage | 1 | grant SELECT on the table or leave it out of init (a schema scan only warns, unless no table in it could be read) |
 | `RIVET_INIT_NO_TABLES` | usage | 1 | point `--schema` at a schema the user can read, and loosen `--include` / `--exclude` |
 | `RIVET_LOAD_SPLIT_GENERATIONS_MIXED` | refusal | 5 | load from a fresh destination prefix, or clear the stale split generation, and run again |
 | `RIVET_LOAD_SPEC_MISSING` | refusal | 5 | run `rivet run` for the export the message names so its column types are recorded, then load again |

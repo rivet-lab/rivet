@@ -1,5 +1,6 @@
 pub(crate) mod batch_controller;
 pub(crate) mod cdc;
+pub(crate) mod keyset_key;
 pub mod mongo;
 pub mod mssql;
 pub mod mysql;
@@ -61,16 +62,12 @@ pub struct TableIntrospection {
     /// range-chunk. `None` when the table has no PK, has a composite PK, or
     /// the PK type is not an integer family (text, uuid, decimal, …).
     pub single_int_pk: Option<String>,
-    /// Single-column, NOT NULL, **unique** index columns usable as a keyset
-    /// (seek) pagination key — PK first, then other UNIQUE indexes (OPT-4).
-    /// Index-backed and unique by construction, so `ORDER BY key LIMIT n` is a
-    /// bounded index range scan (never a filesort) and `WHERE key > last` never
-    /// skips a duplicate key. Restricted to types the keyset CURSOR can read
-    /// (`extract_last_cursor_value`: integer / float / string / timestamp / date /
-    /// uuid) — `decimal`/`numeric` keys are EXCLUDED here so the planner refuses
-    /// them up front rather than failing mid-run after a partial write (#dogfood).
-    /// Empty when the table has no such key.
+    /// Single-column, NOT NULL, **unique** index columns of the table, PK first then the rest by name (OPT-4); [`TableIntrospection::admit_keyset_keys`] keeps only those the keyset cursor can advance.
     pub keyset_keys: Vec<String>,
+    /// Unique single-column candidates the delivered type rules out, each with its cause; filled by `admit_keyset_keys`.
+    pub refused_keyset_keys: Vec<(String, &'static str)>,
+    /// Columns the catalog declares wider than the type the driver delivers: a timestamp finer than a microsecond, or an Oracle NUMBER with a scale or a FLOAT; filled by an engine that reads the catalog.
+    pub declared_wider: Vec<(String, keyset_key::Wider)>,
     /// Best-effort row count: PG `reltuples`, MySQL `TABLE_ROWS`. `0` means
     /// the table is empty or stats are unavailable.
     pub row_estimate: i64,
@@ -102,6 +99,39 @@ impl TableIntrospection {
     /// index-backed). Used to validate an explicit `chunk_by_key`.
     pub fn is_usable_keyset_key(&self, col: &str) -> bool {
         self.keyset_keys.iter().any(|k| k == col)
+    }
+
+    /// Keep the keyset candidates whose delivered type the cursor advances, recording the cause for each one dropped.
+    pub fn admit_keyset_keys(
+        &mut self,
+        source: crate::config::SourceType,
+        mappings: &[TypeMapping],
+    ) {
+        for key in std::mem::take(&mut self.keyset_keys) {
+            match self.keyset_key_refusal(source, mappings, keyset_key::KeyShape::Single, &key) {
+                None => self.keyset_keys.push(key),
+                Some(cause) => self.refused_keyset_keys.push((key, cause)),
+            }
+        }
+    }
+
+    /// The cause `column`, as the export delivers it, cannot key a keyset seek; `None` when it can.
+    fn keyset_key_refusal(
+        &self,
+        source: crate::config::SourceType,
+        mappings: &[TypeMapping],
+        shape: keyset_key::KeyShape,
+        column: &str,
+    ) -> Option<&'static str> {
+        keyset_key::column_refusal(source, mappings, &self.declared_wider, shape, column)
+    }
+
+    /// The refusal cause recorded for `column`, if `admit_keyset_keys` dropped it.
+    pub fn refused_keyset_key(&self, column: &str) -> Option<&'static str> {
+        self.refused_keyset_keys
+            .iter()
+            .find(|(c, _)| c.eq_ignore_ascii_case(column))
+            .map(|(_, cause)| *cause)
     }
 
     /// Whether `key` is the table's primary key in order with every column of a type the tuple cursor reads.
@@ -148,17 +178,27 @@ impl TableIntrospection {
     /// Fill the primary key and the tuple-cursor-readable columns of `base` a composite `chunk_by_key` is checked against.
     pub fn read_composite_key(
         &mut self,
+        source: crate::config::SourceType,
         src: &mut dyn Source,
         table: &str,
         base: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<()> {
         self.primary_key = src.primary_key(table)?.unwrap_or_default();
-        self.tuple_cursor_columns = src
-            .type_mappings(base, column_overrides)?
-            .into_iter()
+        let mappings = src.type_mappings(base, column_overrides)?;
+        self.tuple_cursor_columns = mappings
+            .iter()
             .filter(|m| m.arrow_type.as_ref().is_some_and(is_tuple_cursor_type))
-            .map(|m| m.column_name)
+            .filter(|m| {
+                self.keyset_key_refusal(
+                    source,
+                    &mappings,
+                    keyset_key::KeyShape::Composite,
+                    &m.column_name,
+                )
+                .is_none()
+            })
+            .map(|m| m.column_name.clone())
             .collect();
         Ok(())
     }
