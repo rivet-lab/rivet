@@ -370,6 +370,43 @@ fn init_mongo_schema_wide_lists_collections_in_rivets_order() {
     assert_eq!(names(), first, "the same order on every init");
 }
 
+// ─── MongoDB: a database whose every collection fails the `table:` gate is refused ──
+
+/// A batch init whose every collection name fails the `table:` gate, one collection or the database,
+/// is refused by code writing no file and naming the collection with its reason.
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn init_mongo_of_only_ungated_collections_is_refused_writing_nothing() {
+    let db = unique_name("minit_gate");
+    let _guard = MongoDbGuard {
+        port: 27017,
+        db: db.clone(),
+    };
+    MongoTest::connect(27017, &db).seed_int_id("my-coll", 2);
+    let url = MongoTest::url(27017, &db);
+    for extra in [
+        &[][..],
+        &["--table", "my-coll"][..],
+        &["--table", "my-coll", "--mode", "full"][..],
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = vec!["init", "--source", &url, "--output", "rivet.yaml"];
+        args.extend(extra);
+        let out = run_rivet_in_dir(dir.path(), &args, &[]);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(5), "{extra:?}: {said}");
+        assert!(
+            said.contains("[RIVET_INIT_NOTHING_EXPORTABLE]"),
+            "{extra:?}: {said}"
+        );
+        assert!(
+            said.contains("my-coll") && said.contains("`table:` identifier gate"),
+            "{extra:?}: {said}"
+        );
+        assert!(!dir.path().join("rivet.yaml").exists(), "{extra:?}: {said}");
+    }
+}
+
 // ─── MongoDB: a forced mode the source cannot run is refused, never rewritten ──
 
 #[test]
