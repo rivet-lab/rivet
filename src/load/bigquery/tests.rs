@@ -1946,10 +1946,10 @@ fn a_named_key_bigquery_cannot_mint_is_refused_not_replaced() {
     assert_eq!(api_authorizations(&stand), Vec::<String>::new());
 }
 
-/// A stand whose token endpoint answers `token_status(nth)` to the nth request for a token (a token on 200) and any other path as a failing BigQuery.
+/// A stand whose token endpoint answers `token_status(nth)` to the nth request for a token (a token on 200, and from the 50th ask on) and any other path as a failing BigQuery.
 fn token_status_stand(token_status: impl Fn(usize) -> u16 + Send + 'static) -> Stand {
     Stand::start(move |seen, nth| match seen.path.strip_suffix("/token") {
-        Some(who) => match token_status(nth) {
+        Some(who) => match if nth >= 50 { 200 } else { token_status(nth) } {
             200 => json(
                 200,
                 &format!(

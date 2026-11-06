@@ -1892,23 +1892,37 @@ mod token_endpoint_tests {
 
     type Mint = fn(AdcCredentials) -> Result<String>;
 
+    /// Runs `work` on a thread and fails the test when it has not ended in 120 s.
+    fn within<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        rx.recv_timeout(Duration::from_secs(120))
+            .expect("the grant never ended: its retry loop does not terminate")
+    }
+
     fn mint_blocking(creds: AdcCredentials) -> Result<String> {
-        let source = BlockingAdcTokenSource::new(creds, reqwest::blocking::Client::new());
-        source.access_token().map(|t| t.to_string())
+        within(move || {
+            let source = BlockingAdcTokenSource::new(creds, reqwest::blocking::Client::new());
+            source.access_token().map(|t| t.to_string())
+        })
     }
 
     fn mint_async(creds: AdcCredentials) -> Result<String> {
-        let loader = AdcUserTokenLoader {
-            creds,
-            minted: Arc::new(SharedToken::default()),
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let token = rt.block_on(loader.load(reqwest::Client::new()))?;
-        token.expect("the loader mints a token");
-        Ok("tok".to_string())
+        within(move || {
+            let loader = AdcUserTokenLoader {
+                creds,
+                minted: Arc::new(SharedToken::default()),
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let token = rt.block_on(loader.load(reqwest::Client::new()))?;
+            token.expect("the loader mints a token");
+            Ok("tok".to_string())
+        })
     }
 
     const SITES: [(&str, Mint); 2] = [("blocking", mint_blocking), ("async", mint_async)];
@@ -2055,26 +2069,29 @@ mod token_endpoint_tests {
         stand: &Stand,
         max_times: usize,
     ) -> Result<()> {
-        let loader = AdcUserTokenLoader {
-            creds,
-            minted: Arc::new(SharedToken::default()),
-        };
-        let builder = opendal::services::Gcs::default()
-            .bucket("b")
-            .endpoint(stand.endpoint())
-            .disable_vm_metadata()
-            .customized_token_loader(Box::new(loader));
-        let op = opendal::Operator::new(builder)
-            .unwrap()
-            .finish()
-            .layer(crate::destination::retry_layer(max_times));
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(op.write("k", vec![1u8]))
-            .map(|_| ())
-            .map_err(anyhow::Error::from)
+        let endpoint = stand.endpoint().to_string();
+        within(move || {
+            let loader = AdcUserTokenLoader {
+                creds,
+                minted: Arc::new(SharedToken::default()),
+            };
+            let builder = opendal::services::Gcs::default()
+                .bucket("b")
+                .endpoint(&endpoint)
+                .disable_vm_metadata()
+                .customized_token_loader(Box::new(loader));
+            let op = opendal::Operator::new(builder)
+                .unwrap()
+                .finish()
+                .layer(crate::destination::retry_layer(max_times));
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(op.write("k", vec![1u8]))
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        })
     }
 
     fn gcs_stand(token: impl Fn(usize) -> (u16, String) + Send + 'static) -> Stand {
@@ -2170,6 +2187,117 @@ mod token_endpoint_tests {
         crate::error::assert_coded(&replayed, "RIVET_DEST_CREDENTIALS_INVALID", 1);
         shared.forget_stop();
         assert!(shared.replay_stop(t0).is_none());
+    }
+
+    const ENDPOINT: &str = "https://oauth2.example/token";
+
+    /// Whether the failure is one that is retried.
+    fn is_transient(failure: GrantFailure) -> bool {
+        matches!(failure, GrantFailure::Transient(_))
+    }
+
+    /// A local endpoint that writes `reply` (nothing when empty) and then stalls or drops the connection.
+    fn silent_listener(reply: &'static [u8]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(reply);
+                if !reply.is_empty() {
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_send_that_timed_out_alone_is_transient() {
+        let url = silent_listener(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc");
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let err = client.get(url).send().unwrap().text().unwrap_err();
+        assert!(err.is_timeout() && !err.is_connect() && !err.is_request());
+        assert!(is_transient(send_failed(err)));
+    }
+
+    #[test]
+    fn a_send_that_could_not_connect_alone_is_transient() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let err = reqwest::blocking::Client::new()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .unwrap_err();
+        assert!(err.is_connect() && !err.is_timeout());
+        assert!(is_transient(send_failed(err)));
+    }
+
+    #[test]
+    fn a_send_that_failed_as_a_request_alone_is_transient() {
+        let url = silent_listener(b"");
+        let err = reqwest::blocking::Client::new()
+            .get(url)
+            .send()
+            .unwrap_err();
+        assert!(err.is_request() && !err.is_connect() && !err.is_timeout());
+        assert!(is_transient(send_failed(err)));
+    }
+
+    #[test]
+    fn a_final_failure_ends_the_grant_with_its_own_error_at_any_attempt() {
+        for attempt in [0, 1, MAX_TRANSIENT_RETRIES - 1, MAX_TRANSIENT_RETRIES, 99] {
+            let err = after_failed_attempt(
+                attempt,
+                ENDPOINT,
+                GrantFailure::Final(crate::error::coded(
+                    crate::error::codes::DEST_CREDENTIALS_INVALID,
+                    "refused",
+                )),
+            )
+            .expect_err("a final failure is not retried");
+            crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+        }
+    }
+
+    #[test]
+    fn a_transient_failure_before_the_last_retry_moves_to_the_next_attempt() {
+        for attempt in 0..MAX_TRANSIENT_RETRIES {
+            let next = after_failed_attempt(
+                attempt,
+                ENDPOINT,
+                GrantFailure::Transient(anyhow::anyhow!("HTTP 503")),
+            )
+            .expect("a retry is left");
+            assert_eq!(next, attempt + 1);
+        }
+    }
+
+    #[test]
+    fn a_transient_failure_at_the_last_retry_stops_unavailable_naming_endpoint_and_cause() {
+        for attempt in [MAX_TRANSIENT_RETRIES, MAX_TRANSIENT_RETRIES + 1] {
+            let err = after_failed_attempt(
+                attempt,
+                ENDPOINT,
+                GrantFailure::Transient(anyhow::anyhow!("HTTP 503")),
+            )
+            .expect_err("the retries are spent");
+            crate::error::assert_coded(&err, UNAVAILABLE, 2);
+            let text = format!("{err:#}");
+            assert!(text.contains(ENDPOINT), "{text}");
+            assert!(
+                text.contains(&format!("after {MAX_TRANSIENT_RETRIES} retries")),
+                "{text}"
+            );
+            assert!(text.contains("HTTP 503"), "{text}");
+        }
     }
 
     #[test]
