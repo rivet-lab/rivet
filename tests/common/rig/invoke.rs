@@ -593,6 +593,11 @@ impl Spawned<'_> {
         Ok(status)
     }
 
+    /// What the child has written to stderr so far.
+    pub fn stderr_so_far(&self) -> String {
+        String::from_utf8_lossy(&std::fs::read(&self.said[1]).unwrap_or_default()).into_owned()
+    }
+
     /// [`Spawned::wait`] with everything the child printed.
     pub fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
         let status = self.wait()?;

@@ -1,0 +1,13 @@
+--- a/src/pipeline/mongo_parallel.rs
++++ b/src/pipeline/mongo_parallel.rs
+@@ -145,8 +145,8 @@ fn range_worker_pages(
+ ) -> Result<()> {
+     let unit = commit::UnitId::Chunk(worker as i64);
+     let mut src = MongoSource::connect(url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?
+-        .with_id_range(lo, hi)
+-        .with_pinned(pinned);
++        .with_id_range(lo, hi);
++    let _ = pinned;
+ 
+     let mut last: Option<String> = None;
+     let mut page = 0usize;

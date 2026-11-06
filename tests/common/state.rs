@@ -396,6 +396,61 @@ pub fn recorded_export_runs(
     out
 }
 
+/// The newest `export_metrics` row of one export: how the run ended and what it recorded.
+#[derive(Debug)]
+pub struct RunOutcome {
+    pub status: String,
+    pub retries: i64,
+    pub error_class: Option<String>,
+    pub error_message: Option<String>,
+}
+
+/// The newest `export_metrics` row of `export` (a retried run is one row), from the backend the run used.
+pub fn recorded_run_outcome(cfg: &std::path::Path, export: &str) -> Option<RunOutcome> {
+    const SQL: &str = "SELECT status, COALESCE(retries, 0), error_class, error_message \
+                       FROM export_metrics WHERE export_name = $1 ORDER BY id DESC LIMIT 1";
+    match state_url_under_test() {
+        Some(url) => {
+            let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap_or_else(|e| {
+                panic!("connect to the Postgres state at RIVET_GATE_STATE_URL: {e}")
+            });
+            let r = client
+                .query_opt(SQL, &[&export])
+                .expect("query export_metrics")?;
+            Some(RunOutcome {
+                status: r.get(0),
+                retries: r.get(1),
+                error_class: r.get(2),
+                error_message: r.get(3),
+            })
+        }
+        None => StateDb::next_to_config(cfg)
+            .conn
+            .query_row(&SQL.replace("$1", "?1"), [export], |r| {
+                Ok(RunOutcome {
+                    status: r.get(0)?,
+                    retries: r.get(1)?,
+                    error_class: r.get(2)?,
+                    error_message: r.get(3)?,
+                })
+            })
+            .optional()
+            .expect("query export_metrics"),
+    }
+}
+
+/// The newest recorded run of `export` failed and its recorded error holds every `cause` (case-insensitive).
+pub fn assert_recorded_failure(cfg: &std::path::Path, export: &str, causes: &[&str]) -> RunOutcome {
+    let out = recorded_run_outcome(cfg, export)
+        .unwrap_or_else(|| panic!("the failed run of '{export}' recorded no export_metrics row"));
+    let said = out.error_message.clone().unwrap_or_default().to_lowercase();
+    assert!(
+        out.status == "failed" && causes.iter().all(|c| said.contains(&c.to_lowercase())),
+        "the recorded run must be failed with an error naming {causes:?}; recorded: {out:?}"
+    );
+    out
+}
+
 /// The column names and primary key of one `export_load_spec` row, as stored (JSON text).
 fn parse_load_spec(
     columns: Option<String>,

@@ -11,11 +11,19 @@ const GROUPS: &[(&str, &str)] = &[
     ("pgbouncer", "pgbouncer_alone()"),
 ];
 
-/// `(module::test, body)` for every `#[test]` under tests/live.
-fn live_tests(root: &std::path::Path) -> Vec<(String, String)> {
+/// A top-level fn of a test source file.
+struct Item {
+    module: String,
+    name: String,
+    is_test: bool,
+    calls: String,
+}
+
+/// Every top-level fn under `dir`, with its comment-free body below the signature line.
+fn items_in(root: &std::path::Path, dir: &str) -> Vec<Item> {
     let mut out = Vec::new();
-    for e in std::fs::read_dir(root.join("tests/live"))
-        .expect("read tests/live")
+    for e in std::fs::read_dir(root.join(dir))
+        .unwrap_or_else(|e| panic!("read {dir}: {e}"))
         .flatten()
     {
         let p = e.path();
@@ -25,17 +33,101 @@ fn live_tests(root: &std::path::Path) -> Vec<(String, String)> {
         ) else {
             continue;
         };
-        let text = std::fs::read_to_string(&p).expect("read a live test");
-        for body in text.split("#[test]").skip(1) {
-            let name = body
-                .split_once("fn ")
-                .and_then(|(_, rest)| rest.split_once('('))
-                .map(|(n, _)| n.trim().to_string())
-                .expect("a #[test] is followed by its fn");
-            out.push((format!("{stem}::{name}"), body.to_string()));
+        let text = std::fs::read_to_string(&p).expect("read a test source");
+        let mut lines = text.lines();
+        let mut test_next = false;
+        while let Some(line) = lines.next() {
+            if line.trim() == "#[test]" {
+                test_next = true;
+                continue;
+            }
+            let sig = ["fn ", "pub fn ", "pub(crate) fn ", "async fn "]
+                .iter()
+                .find_map(|k| line.strip_prefix(k));
+            let Some(sig) = sig else {
+                if !line.trim_start().starts_with("#[") {
+                    test_next = false;
+                }
+                continue;
+            };
+            let name = sig.split(['(', '<']).next().unwrap().trim().to_string();
+            let mut calls = String::new();
+            if !line.ends_with('}') {
+                for l in lines.by_ref() {
+                    if l == "}" {
+                        break;
+                    }
+                    if !l.trim_start().starts_with("//") {
+                        calls.push_str(l);
+                        calls.push('\n');
+                    }
+                }
+            }
+            out.push(Item {
+                module: stem.to_string(),
+                name,
+                is_test: std::mem::take(&mut test_next),
+                calls,
+            });
         }
     }
     out
+}
+
+/// `(module::test, body)` for every `#[test]` under tests/live.
+fn live_tests(root: &std::path::Path) -> Vec<(String, String)> {
+    items_in(root, "tests/live")
+        .into_iter()
+        .filter(|i| i.is_test)
+        .map(|i| (format!("{}::{}", i.module, i.name), i.calls))
+        .collect()
+}
+
+/// Every `pub fn` of tests/common/toxi.rs that changes the admin API's state: all but the guard.
+fn toxi_mutators(root: &std::path::Path) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(root.join("tests/common/toxi.rs")).expect("toxi.rs");
+    let out: BTreeSet<String> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("pub fn "))
+        .filter_map(|l| l.split_once('(').map(|(n, _)| n.to_string()))
+        .filter(|n| n != "toxiproxy_guard")
+        .collect();
+    assert!(out.len() >= 6, "found {out:?} — the toxi.rs scan is broken");
+    out
+}
+
+/// True when `body` calls `name(` as a whole identifier.
+fn calls_fn(body: &str, name: &str) -> bool {
+    let pat = format!("{name}(");
+    body.match_indices(&pat).any(|(i, _)| {
+        !body[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// `module::test` for every live test whose body reaches a toxi mutator, directly or through a helper fn.
+fn mutator_users(root: &std::path::Path) -> BTreeSet<String> {
+    let mut mutating = toxi_mutators(root);
+    let mut items = items_in(root, "tests/live");
+    items.extend(items_in(root, "tests/common"));
+    loop {
+        let before = mutating.len();
+        for i in items.iter().filter(|i| !i.is_test) {
+            if mutating.iter().any(|m| calls_fn(&i.calls, m)) {
+                mutating.insert(i.name.clone());
+            }
+        }
+        if mutating.len() == before {
+            break;
+        }
+    }
+    items
+        .iter()
+        .filter(|i| i.is_test && mutating.iter().any(|m| calls_fn(&i.calls, m)))
+        .map(|i| format!("{}::{}", i.module, i.name))
+        .collect()
 }
 
 /// `module::test` for every `#[test]` under tests/live whose body holds `call`.
@@ -66,7 +158,10 @@ fn every_flock_test_group_names_every_flock_user_and_nothing_else() {
     let root = super::nonvacuity::repo_root();
     let toml = std::fs::read_to_string(root.join(".config/nextest.toml")).expect("nextest.toml");
     for (group, call) in GROUPS {
-        let users = guard_users(&root, call);
+        let mut users = guard_users(&root, call);
+        if *group == "toxiproxy" {
+            users.extend(mutator_users(&root));
+        }
         assert!(
             users.len() >= 2,
             "found {} `{call}` users — the scan is broken",
@@ -83,6 +178,18 @@ fn every_flock_test_group_names_every_flock_user_and_nothing_else() {
             "the `{group}` test-group must run one test at a time: its users share one flock"
         );
     }
+}
+
+/// A live test that changes the Toxiproxy admin state holds the suite-wide guard.
+#[test]
+fn every_toxi_mutating_test_holds_the_guard() {
+    let root = super::nonvacuity::repo_root();
+    let holders = guard_users(&root, "toxiproxy_guard()");
+    let bare: Vec<String> = mutator_users(&root).difference(&holders).cloned().collect();
+    assert!(
+        bare.is_empty(),
+        "these tests call a toxi mutator without `toxiproxy_guard()` and can delete a toxic another test armed: {bare:?}"
+    );
 }
 
 /// Every cell nextest runs alone names a live test that exists.

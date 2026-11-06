@@ -660,15 +660,6 @@ fn check_doctor_and_init_refuse_a_state_that_does_not_answer() {
     );
 }
 
-/// This host's address on its outbound interface, which other hosts reach it at; the PG
-/// state stand publishes its port on every interface. A UDP `connect` sends nothing.
-fn non_loopback_ip() -> Option<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?;
-    let ip = socket.local_addr().ok()?.ip();
-    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
-}
-
 /// A PostgreSQL state on a non-loopback address of a server without TLS: a URL that names no
 /// `sslmode` is refused `RIVET_STATE_URL_TLS_REQUIRED` (exit 5) with the state's remedies,
 /// and `?sslmode=disable` is the operator's opt-out, honoured with one warning line. Before
@@ -679,13 +670,7 @@ fn a_remote_pg_state_without_tls_is_refused_by_code_and_sslmode_disable_opts_out
     let Some(url) = crate::common::pg_state_url() else {
         return;
     };
-    let ip = non_loopback_ip().expect("this host has a non-loopback address");
-    let remote = url.replacen("@127.0.0.1:", &format!("@{ip}:"), 1).replacen(
-        "@localhost:",
-        &format!("@{ip}:"),
-        1,
-    );
-    assert_ne!(remote, url, "the state URL names a loopback host: {url}");
+    let remote = crate::common::remote_spelling_of_loopback(&url);
     let mut c = crate::common::pg_connect();
     let tbl = crate::common::unique_name("rivet_state_tls");
     c.batch_execute(&format!(

@@ -165,6 +165,11 @@ def docker(*args: str, **kw) -> Proc:
     return run(["docker", *args], **kw)
 
 
+def loopback_publish(host_port: int, container_port: int) -> list[str]:
+    """The `docker run` flag pair publishing a container port on the loopback interface only."""
+    return ["-p", f"127.0.0.1:{host_port}:{container_port}"]
+
+
 def compose(*args: str, file: Path | None = None, **kw) -> Proc:
     """`docker compose` (v2 plugin form). The bash scripts mixed `docker-compose`
     and `docker compose`; only one of them exists on a modern install."""
@@ -355,6 +360,7 @@ def _self_test() -> int:
     """`capture` overlays env and raises on timeout; `psql_state` and `duckdb_list` build their argv."""
     import tempfile
 
+    assert loopback_publish(5432, 5433) == ["-p", "127.0.0.1:5432:5433"]
     assert capture(["sh", "-c", "echo $SHELL_SELF_TEST"], env={"SHELL_SELF_TEST": "x"}).stdout == "x\n"
     latin1 = run(["printf", r"a\350b"])
     assert latin1.ok and latin1.stdout == "a\ufffdb", "a byte that is not UTF-8 must be read, not crash the caller"

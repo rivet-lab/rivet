@@ -196,27 +196,10 @@ fn unescaped_whitespace(text: &str) -> usize {
     text.len()
 }
 
-/// Redact SECRET-BEARING QUERY PARAMETERS: `?token=…`, `&password=…`,
-/// `sig=…` (SAS), `api_key=…`, `secret=…`, `sas=…`, `sv=…` values become
-/// `***`. Round-8 made this boundary load-bearing, not hypothetical: a Slack
-/// webhook keeps its credential in the URL *path*, and reqwest's error
-/// Display prints the URL — userinfo-only redaction shipped the token to
-/// every log aggregator on a delivery failure. Path secrets have no
-/// recognizable shape (handled at the notify site via `without_url`); query
-/// keys DO, so they are scrubbed here for every error path.
+/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling.
 pub(crate) fn redact_query_secrets(s: &str) -> String {
-    // SUFFIX-FAMILY matching (round-10, rebuilt from the start-anchored key
-    // list): real secret params are compounds ENDING in the secret word —
-    // access_token, sas_token, client_secret, X-Amz-Signature — so `token=`
-    // covered while `*_token=` leaked, systematically. A param whose lowercased
-    // name ends in one of these families is redacted; `sv` left the list (it is
-    // Azure's service VERSION — redacting it destroyed the one field that
-    // diagnoses version-mismatch errors). The matched key keeps its ORIGINAL
-    // spelling, and the value stop-set includes the `)`/`:`/`,`/`;` that
-    // reqwest's ` for url (…)` rendering puts right after the URL.
-    const FAMILIES: [&str; 8] = [
+    const FAMILIES: [&str; 7] = [
         "token",
-        "password",
         "apikey",
         "api_key",
         "api-key",
@@ -226,10 +209,12 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
     ];
     fn is_secret_key(key: &str) -> bool {
         let lower = key.to_ascii_lowercase();
-        FAMILIES.iter().any(|f| {
-            lower == *f
-                || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
-        }) || lower == "sas"
+        is_password_keyword(key)
+            || FAMILIES.iter().any(|f| {
+                lower == *f
+                    || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
+            })
+            || lower == "sas"
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -237,7 +222,7 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
         out.push_str(&rest[..=q]);
         rest = &rest[q + 1..];
         let key_end = rest
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .find(|c: char| !c.is_ascii() || !is_keyword_byte(c as u8))
             .unwrap_or(rest.len());
         if key_end < rest.len()
             && rest.as_bytes()[key_end] == b'='
@@ -247,9 +232,6 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
             out.push_str("=***");
             let after = &rest[key_end + 1..];
             let val_end = after
-                // `)` closes reqwest's ` for url (…)`; `:`/`,` deliberately NOT
-                // stops (round-10 refuter: they truncated redaction mid-secret —
-                // `password=abc:def` leaked `:def`).
                 .find(|c: char| matches!(c, '&' | '\'' | '"' | ')' | ';') || c.is_whitespace())
                 .map(|i| key_end + 1 + i)
                 .unwrap_or(rest.len());
@@ -555,6 +537,7 @@ mod tests {
             // NEGATIVE: the same family GLUED to the prefix (no separator) is
             // not a match — the documented FP-avoidance boundary.
             let glued = format!("postgresql://u@h/db?{prefix}{family}={secret}");
+            proptest::prop_assume!(family != "password");
             proptest::prop_assert_eq!(
                 redact_query_secrets(&glued),
                 glued.clone(),
@@ -1280,6 +1263,80 @@ mod tests {
             redact_query_secrets(&format!("?{key}=S3cr3tPw&x=1")),
             format!("?{key}=***&x=1")
         );
+    }
+
+    const PASSWORD_KEYS: [&str; 12] = [
+        "password",
+        "PASSWORD",
+        "sslpassword",
+        "SSLPassword",
+        "ssl_password",
+        "db.password",
+        "x-passwd",
+        "passwd",
+        "pwd",
+        "Pwd",
+        "MYSQL_PWD",
+        "svc.admin.pwd",
+    ];
+
+    /// The URL query path masks the value of every key the keyword path calls a password, in any case.
+    #[test]
+    fn a_query_pair_whose_key_names_a_password_is_masked_in_any_case() {
+        assert_eq!(
+            redact_secrets(
+                "postgres://u:p@h:5432/db?sslmode=require&sslpassword=TOPSECRET&SSLPassword=OTHER"
+            ),
+            "postgres://REDACTED@h:5432/db?sslmode=require&sslpassword=***&SSLPassword=***"
+        );
+        for key in PASSWORD_KEYS {
+            for lead in ['?', '&'] {
+                let text = format!("postgres://h/db{lead}a=1&{key}=S3cr3tPw&b=2");
+                let want = format!("postgres://h/db{lead}a=1&{key}=***&b=2");
+                assert_eq!(redact_secrets(&text), want, "{text:?}");
+                assert_eq!(redact_query_secrets(&text), want, "{text:?}");
+            }
+        }
+    }
+
+    /// One rule governs both paths: a key the keyword path masks is masked in a URL query, and a key it ignores stays.
+    #[test]
+    fn the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords() {
+        for key in PASSWORD_KEYS {
+            let keyword = redact_keyword_passwords(&format!("host=h {key}=S3cr3tPw dbname=d"));
+            assert!(
+                !keyword.contains("S3cr3tPw"),
+                "keyword path leaked for {key}"
+            );
+            let query = redact_secrets(&format!("mysql://h/d?{key}=S3cr3tPw"));
+            assert!(!query.contains("S3cr3tPw"), "query path leaked for {key}");
+        }
+        for key in [
+            "sslmode",
+            "passwordless",
+            "pass",
+            "application_name",
+            "pwd2",
+        ] {
+            let keyword = format!("host=h {key}=visible dbname=d");
+            assert_eq!(redact_keyword_passwords(&keyword), keyword, "{key}");
+            let query = format!("mysql://h/d?{key}=visible");
+            assert_eq!(redact_secrets(&query), query, "{key}");
+        }
+    }
+
+    /// Query pairs that name no secret keep their text byte for byte.
+    #[test]
+    fn query_pairs_that_name_no_secret_are_left_intact() {
+        for text in [
+            "postgres://h/db?sslmode=require&application_name=svc&connect_timeout=10",
+            "postgres://h/db?sslrootcert=/etc/ca.pem&sslcert=/etc/c.pem&sslkey=/etc/k.pem",
+            "postgres://h/db?passwordless=1&user.name=bob&a.b.c=1",
+            "https://acc.blob/x?sv=2020-08-04&se=2030&sp=r",
+            "postgres://h/db?mypass=visible&keypwdx=visible",
+        ] {
+            assert_eq!(redact_secrets(text), text, "{text:?}");
+        }
     }
 
     // ── redact_error ───────────────────────────────────────────────────────

@@ -1417,6 +1417,70 @@ scenarios:
     mongo:    { test: a_collection_dropped_after_its_run_delivered_is_graded_against_it_put_back_mongo }
     oracle:   { na: "the SQL cells slow their run to ten rows per 150 ms, so the statement always lands while it reads" }
 
+  - id: ddl_table_dropped_before_a_keyset_page
+    what: "the collection of a MongoDB export dropped while a wire proxy holds a later keyset page (the find then returns 0 documents with no error): the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the drop, leaves the marker and manifests of the run before it as they were, and with the collection put back a run delivers the source"
+    postgres: { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mysql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mssql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mongo:    { test: a_collection_dropped_before_a_keyset_page_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+
+  - id: ddl_table_dropped_before_a_full_scan
+    what: "the collection of a MongoDB export dropped while a wire proxy holds its full-scan find: the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the drop, leaves the marker and manifests of the run before it as they were, and with the collection put back a run delivers the source"
+    postgres: { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mysql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mssql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mongo:    { test: a_collection_dropped_before_a_full_scan_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+
+  - id: ddl_table_dropped_before_an_id_range_read
+    what: "the collection of a parallel MongoDB export dropped while a wire proxy holds every worker's `_id`-range find: the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the drop, leaves the marker and manifests of the run before it as they were, and with the collection put back a run delivers the source"
+    postgres: { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mysql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mssql:    { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+    mongo:    { test: a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL page query of a dropped table fails with the engine's missing-relation error (ddl_table_dropped, dropped_source_table_is_coded), never an empty page that reads as an exhausted range" }
+
+  - id: ddl_table_created_again_under_a_keyset_page
+    what: "a MongoDB keyset export whose collection is dropped and created again with the same documents (a new UUID) while a wire proxy holds a later page: the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the change although the page returned documents"
+    postgres: { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mysql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mssql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mongo:    { test: a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+
+  - id: ddl_table_created_again_under_a_full_scan
+    what: "a MongoDB full-scan export whose collection is dropped and created again with the same documents while a wire proxy holds the find: the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the change, leaves the previous marker and manifests as they were"
+    postgres: { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mysql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mssql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mongo:    { test: a_collection_created_again_under_a_full_scan_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+
+  - id: ddl_table_created_again_under_an_id_range_read
+    what: "a parallel MongoDB export whose collection is dropped and created again while a wire proxy holds every worker's `_id`-range find: the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND naming the change, leaves the previous marker and manifests as they were"
+    postgres: { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mysql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mssql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mongo:    { test: a_collection_created_again_under_an_id_range_read_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+
+  - id: ddl_table_created_again_before_the_workers_connect
+    what: "a parallel MongoDB export whose collection is dropped and created again while a wire proxy holds the run's `$sample` of `_id` boundaries: every worker reads under the UUID the run pinned, so the run is refused RIVET_SOURCE_COLLECTION_NOT_FOUND instead of a worker pinning the new collection"
+    postgres: { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mysql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mssql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mongo:    { test: a_collection_created_again_before_the_workers_connect_is_refused_by_code_mongo }
+    oracle:   { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+
+  - id: ddl_table_created_again_after_a_refused_resume
+    what: "a resumable keyset MongoDB export refused after its first page because its collection was dropped and created again with other `_id`s: the next run is refused by the code of the stored progress until `rivet state reset`, then delivers exactly the new collection, never exit 0 over zero rows from the old anchor"
+    postgres: { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mysql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mssql:    { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+    mongo:    { test: a_collection_created_again_with_other_ids_after_a_refused_resume_is_read_whole_mongo }
+    oracle:   { na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so this class is unguarded on SQL (reported as its own defect, not closed by this cell)" }
+
   - id: hostile_text
     what: "text with a NUL (where the engine stores one: not PostgreSQL), control characters, quotes and a backslash, characters outside the basic plane, right-to-left text and the empty string; each value alone in a table of its own, exported whole twice: both runs deliver it as the source holds it (the default oracle compares the value) and `validate` passes, or both fail loudly"
     postgres: { test: hostile_text_is_delivered_or_fails_loudly_postgres }

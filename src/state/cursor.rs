@@ -31,9 +31,31 @@ pub(super) fn streams_differ(stored: &str, now: &str) -> bool {
     !stored.is_empty() && !now.is_empty() && !qualifies(stored, now) && !qualifies(now, stored)
 }
 
-/// Whether two recorded row sets are one: the same text, or a query as written and a substituted query that fills its `${...}` placeholders (what a plan sealed before templates were recorded carries).
+/// What follows the rows in a population that names the collection incarnation its progress was written against.
+const INCARNATION: &str = " ; collection created as ";
+
+/// The population `rows` names, bound to the collection incarnation `incarnation` when the source has one.
+pub(crate) fn population_of(rows: String, incarnation: Option<&str>) -> String {
+    match incarnation {
+        Some(incarnation) => format!("{rows}{INCARNATION}{incarnation}"),
+        None => rows,
+    }
+}
+
+/// A population split into its rows and the collection incarnation it names, if any.
+fn rows_and_incarnation(population: &str) -> (&str, Option<&str>) {
+    match population.rsplit_once(INCARNATION) {
+        Some((rows, incarnation)) => (rows, Some(incarnation)),
+        None => (population, None),
+    }
+}
+
+/// Whether two recorded row sets are one: the same text, or a query as written and a substituted query that fills its `${...}` placeholders (what a plan sealed before templates were recorded carries); a population with no incarnation is one with any, and two incarnations are one only when equal.
 fn same_rows(a: &str, b: &str) -> bool {
-    a == b || fills(a, b) || fills(b, a)
+    let ((a_rows, a_incarnation), (b_rows, b_incarnation)) =
+        (rows_and_incarnation(a), rows_and_incarnation(b));
+    let one_incarnation = !matches!((a_incarnation, b_incarnation), (Some(x), Some(y)) if x != y);
+    one_incarnation && (a_rows == b_rows || fills(a_rows, b_rows) || fills(b_rows, a_rows))
 }
 
 /// Whether `text` holds no placeholder and is `template` with each of its placeholders replaced by some text.
@@ -645,7 +667,9 @@ impl StateStore {
                  `{was}`, but this export reads `{now}` — continuing from it would \
                  skip rows of `{now}`; nothing was read or written.\n  \
                  Hint: two exports sharing a name in one state database need their own names \
-                 (or their own state). If this export was edited, restore what it read to \
+                 (or their own state). A MongoDB collection dropped and created again is another \
+                 stream: its documents are not the ones the progress was written for. If this \
+                 export was edited, restore what it read to \
                  continue from the stored progress, or \
                  `rivet state reset -c <config> --export {export_name}` starts `{now}` over \
                  with a full pass — it discards the progress '{export_name}' holds on this \
@@ -2283,6 +2307,67 @@ mod tests {
                 "RIVET_STATE_CURSOR_STREAM_MISMATCH",
             );
         }
+    }
+
+    /// A MongoDB collection dropped and created again is another stream: refused by code with both incarnations worded, then accepted on the operator's word.
+    #[test]
+    fn a_collection_created_again_is_refused_until_it_is_accepted_or_reset() {
+        let rows = "select * from ?";
+        let (first, second) = (
+            population_of(rows.into(), Some("aa")),
+            population_of(rows.into(), Some("bb")),
+        );
+        let s = store();
+        s.update_with_column(&reading("orders", "", &first), "10")
+            .unwrap();
+        s.claim(reading("orders", "", &first))
+            .expect("the same collection");
+        let said = refusal(
+            s.claim(reading("orders", "", &second)),
+            "RIVET_STATE_CURSOR_STREAM_MISMATCH",
+        );
+        for part in [
+            "orders (select * from ? ; collection created as aa)",
+            "orders (select * from ? ; collection created as bb)",
+            "dropped and created again is another stream",
+            "rivet state reset",
+            "rivet state accept",
+        ] {
+            assert!(said.contains(part), "{part}: {said}");
+        }
+        assert!(matches!(
+            s.accept(&reading("orders", "", &second)).unwrap(),
+            Accepted::Rebound { .. }
+        ));
+        s.claim(reading("orders", "", &second))
+            .expect("accepted as the collection it reads now");
+        refusal(
+            s.claim(reading("orders", "", &first)),
+            "RIVET_STATE_CURSOR_STREAM_MISMATCH",
+        );
+    }
+
+    /// Progress written before incarnations were recorded is adopted by a run that names one, and the next write binds it.
+    #[test]
+    fn progress_written_before_incarnations_were_recorded_is_adopted_then_bound() {
+        let rows = "select * from ?";
+        let (first, second) = (
+            population_of(rows.into(), Some("aa")),
+            population_of(rows.into(), Some("bb")),
+        );
+        let s = store();
+        s.update_with_column(&reading("orders", "", rows), "10")
+            .unwrap();
+        s.claim(reading("orders", "", &first))
+            .expect("adopted once");
+        s.update_with_column(&reading("orders", "", &first), "20")
+            .unwrap();
+        refusal(
+            s.claim(reading("orders", "", &second)),
+            "RIVET_STATE_CURSOR_STREAM_MISMATCH",
+        );
+        s.claim(reading("orders", "", rows))
+            .expect("a run that names none still continues");
     }
 
     /// The stream parts and the cursor the one `export_state` row holds.
