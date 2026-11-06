@@ -1643,10 +1643,20 @@ pub mod codes {
         "RIVET_INIT_TABLE_NOT_FOUND",
         "correct `--table` (and `--schema`), or grant the user SELECT on the table",
     );
+    /// `rivet init` could not read the column types of a table: a schema scan warns and scaffolds it without a keyset key; a named `--table`, or a scan in which no table could be read, stops.
+    pub const INIT_TABLE_UNREADABLE: Code = usage(
+        "RIVET_INIT_TABLE_UNREADABLE",
+        "grant SELECT on the table or leave it out of init (a schema scan only warns, unless no table in it could be read)",
+    );
     /// `rivet init` found no table or view to scaffold.
     pub const INIT_NO_TABLES: Code = usage(
         "RIVET_INIT_NO_TABLES",
         "point `--schema` at a schema the user can read, and loosen `--include` / `--exclude`",
+    );
+    /// `rivet init` left out every table it found, so the scaffold would hold no export.
+    pub const INIT_NOTHING_EXPORTABLE: Code = refusal(
+        "RIVET_INIT_NOTHING_EXPORTABLE",
+        "fix what each skip reason names (an Oracle CDC skip clears with a batch `--mode`), or init the schema with `--include` naming a table it can export",
     );
     /// A Full load over a `--pool --split` prefix whose parts span more than one split generation.
     pub const LOAD_SPLIT_GENERATIONS_MIXED: Code = refusal(
@@ -1921,7 +1931,9 @@ pub mod codes {
         INIT_CDC_NAME_TAKEN,
         INIT_CONFIG_EXISTS,
         INIT_TABLE_NOT_FOUND,
+        INIT_TABLE_UNREADABLE,
         INIT_NO_TABLES,
+        INIT_NOTHING_EXPORTABLE,
         LOAD_SPLIT_GENERATIONS_MIXED,
         LOAD_SPEC_MISSING,
         MCP_REQUEST_INVALID,

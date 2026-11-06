@@ -33,6 +33,8 @@ Rivet emits **one** export block: `SELECT` of all columns, a suggested `mode` (`
 
 Omit `--table`. All **base tables and views** in the target schema are introspected; the file contains **one export per object**, sorted by name.
 
+Init reads the column types the server delivers for each table. A table whose types cannot be read (the user has no `SELECT` on it, or the view is broken) stays in the scan without a keyset key and init prints `rivet: WARN [RIVET_INIT_TABLE_UNREADABLE] ...` naming the table, the cause and the remedy (grant `SELECT` on the table or leave it out of init). Init stops with `RIVET_INIT_TABLE_UNREADABLE` (exit 1) only for a `--table` it cannot read, or when it can read none of the tables of the scan.
+
 - **`--schema`** — PostgreSQL schema name (default: `public`).
 
 ```bash

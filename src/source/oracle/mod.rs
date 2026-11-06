@@ -786,25 +786,57 @@ impl Source for OracleSource {
     }
 }
 
-/// Whether a catalog column type `(data_type, precision, scale)` can key a keyset seek: integer or bare NUMBER, strings, DATE, zone-less TIMESTAMP(0..6).
-pub(crate) fn is_keyset_key_type(
-    data_type: &str,
-    precision: Option<u32>,
-    scale: Option<i32>,
-) -> bool {
-    match data_type {
-        "NUMBER" => scale == Some(0) || (precision.is_none() && scale.is_none()),
-        "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" | "DATE" => true,
-        t => t.starts_with("TIMESTAMP") && !t.contains("ZONE") && scale.is_some_and(|s| s <= 6),
-    }
-}
-
 /// Whether a catalog column type is a timestamp finer than the microsecond, which the run refuses as a cursor.
 pub(crate) fn is_sub_microsecond_type(data_type: &str, scale: Option<i32>) -> bool {
     arrow_convert::sub_microsecond(
         &data_type.to_lowercase(),
         scale.map_or(0, |s| s.clamp(0, i8::MAX as i32) as i8),
     )
+}
+
+/// Whether a catalog `(data_type, precision, scale)` is a NUMBER with a scale or a FLOAT: an integer or bare NUMBER is neither.
+pub(crate) fn is_inexact_number_type(
+    data_type: &str,
+    precision: Option<u32>,
+    scale: Option<i32>,
+) -> bool {
+    match data_type {
+        "FLOAT" => true,
+        "NUMBER" => scale != Some(0) && (precision.is_some() || scale.is_some()),
+        _ => false,
+    }
+}
+
+/// The columns of the table named by the catalog literals `owner` and `table` that the catalog declares wider than the type the driver delivers: a TIMESTAMP finer than a microsecond, a NUMBER with a scale, a FLOAT.
+pub(crate) fn declared_wider_columns(
+    src: &mut OracleSource,
+    owner: &str,
+    table: &str,
+) -> Result<Vec<(String, crate::source::keyset_key::Wider)>> {
+    use crate::source::keyset_key::Wider;
+    Ok(src
+        .query_rows(&format!(
+            "SELECT column_name, data_type, data_precision, data_scale FROM all_tab_columns \
+             WHERE owner = {owner} AND table_name = {table} \
+               AND (data_type LIKE 'TIMESTAMP%' OR data_type IN ('NUMBER', 'FLOAT'))"
+        ))?
+        .into_iter()
+        .filter_map(|r| match r.as_slice() {
+            [Some(col), Some(ty), precision, scale] => {
+                let precision = precision.as_deref().and_then(|v| v.parse().ok());
+                let scale = scale.as_deref().and_then(|v| v.parse().ok());
+                let kind = if is_sub_microsecond_type(ty, scale) {
+                    Wider::FinerTimestamp
+                } else if is_inexact_number_type(ty, precision, scale) {
+                    Wider::InexactNumber
+                } else {
+                    return None;
+                };
+                Some((col.clone(), kind))
+            }
+            _ => None,
+        })
+        .collect())
 }
 
 /// Catalog facts the planner needs to chunk or keyset-page `qualified_table`.
@@ -833,10 +865,9 @@ fn introspect_oracle_on(
              WHERE c.constraint_type = 'P' AND c.owner = {owner} AND c.table_name = {table} \
              HAVING COUNT(*) = 1 AND MIN(CASE WHEN {int_pred} THEN 1 ELSE 0 END) = 1"
         ))?;
-    // Keyset keys: single-column UNIQUE indexes on NOT NULL columns whose type passes [`is_keyset_key_type`]; PK first.
     let keyset_keys = src
         .query_rows(&format!(
-            "SELECT ic.column_name, tc.data_type, tc.data_precision, tc.data_scale, \
+            "SELECT ic.column_name, \
                     MAX(CASE WHEN c.constraint_type = 'P' THEN 1 ELSE 0 END) is_pk \
              FROM all_indexes i \
              JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name \
@@ -848,69 +879,31 @@ fn introspect_oracle_on(
                AND tc.nullable = 'N' \
                AND (SELECT COUNT(*) FROM all_ind_columns x \
                     WHERE x.index_owner = i.owner AND x.index_name = i.index_name) = 1 \
-             GROUP BY ic.column_name, tc.data_type, tc.data_precision, tc.data_scale \
+             GROUP BY ic.column_name \
              ORDER BY is_pk DESC, ic.column_name"
         ))?
         .into_iter()
-        .filter_map(|r| match r.as_slice() {
-            [Some(col), Some(ty), p, s, _] => is_keyset_key_type(
-                ty,
-                p.as_deref().and_then(|v| v.parse().ok()),
-                s.as_deref().and_then(|v| v.parse().ok()),
-            )
-            .then(|| col.clone()),
-            _ => None,
-        })
+        .filter_map(|r| r.into_iter().next().flatten())
         .collect();
-    Ok(crate::source::TableIntrospection {
+    let declared_wider = declared_wider_columns(src, &owner, &table)?;
+    let mut introspection = crate::source::TableIntrospection {
         single_int_pk,
         keyset_keys,
         row_estimate,
         avg_row_bytes: None,
         int_columns,
         ..Default::default()
-    })
+    };
+    introspection.declared_wider = declared_wider;
+    Ok(introspection)
 }
 
 #[cfg(test)]
 mod tests {
 
-    /// The keyset key rule over catalog `(data_type, precision, scale)` triples.
+    /// A catalog TIMESTAMP is finer than a microsecond from its seventh fractional digit.
     #[test]
-    fn keyset_key_types_are_integer_numbers_strings_dates_and_zoneless_timestamps_to_the_microsecond()
-     {
-        use super::is_keyset_key_type as k;
-        for (t, p, s) in [
-            ("NUMBER", Some(10), Some(0)),
-            ("NUMBER", Some(38), Some(0)),
-            ("NUMBER", None, None),
-            ("NUMBER", None, Some(0)),
-            ("VARCHAR2", None, None),
-            ("NVARCHAR2", None, None),
-            ("CHAR", None, None),
-            ("NCHAR", None, None),
-            ("DATE", None, None),
-            ("TIMESTAMP(0)", None, Some(0)),
-            ("TIMESTAMP(6)", None, Some(6)),
-        ] {
-            assert!(k(t, p, s), "{t} {p:?} {s:?} keys a seek");
-        }
-        for (t, p, s) in [
-            ("NUMBER", Some(12), Some(2)),
-            ("NUMBER", None, Some(2)),
-            ("NUMBER", Some(12), None),
-            ("BINARY_FLOAT", None, None),
-            ("BINARY_DOUBLE", None, None),
-            ("FLOAT", Some(126), None),
-            ("TIMESTAMP(9)", None, Some(9)),
-            ("TIMESTAMP(7)", None, Some(7)),
-            ("TIMESTAMP(6) WITH TIME ZONE", None, Some(6)),
-            ("TIMESTAMP(6) WITH LOCAL TIME ZONE", None, Some(6)),
-            ("RAW", None, None),
-            ("CLOB", None, None),
-        ] {
-            assert!(!k(t, p, s), "{t} {p:?} {s:?} cannot key a seek");
-        }
+    fn a_catalog_timestamp_is_finer_than_a_microsecond_from_its_seventh_digit() {
         assert!(super::is_sub_microsecond_type(
             "TIMESTAMP(9) WITH TIME ZONE",
             Some(9)
@@ -918,6 +911,33 @@ mod tests {
         assert!(super::is_sub_microsecond_type("TIMESTAMP(7)", Some(7)));
         assert!(!super::is_sub_microsecond_type("TIMESTAMP(6)", Some(6)));
         assert!(!super::is_sub_microsecond_type("DATE", None));
+    }
+
+    /// A catalog NUMBER with a scale and a FLOAT are inexact; an integer or bare NUMBER and every other type are not.
+    #[test]
+    fn a_catalog_number_with_a_scale_or_a_float_is_inexact_and_nothing_else() {
+        use super::is_inexact_number_type as w;
+        for (t, p, s) in [
+            ("NUMBER", Some(10), Some(0)),
+            ("NUMBER", Some(38), Some(0)),
+            ("NUMBER", None, None),
+            ("NUMBER", None, Some(0)),
+            ("VARCHAR2", None, None),
+            ("DATE", None, None),
+            ("BINARY_DOUBLE", None, None),
+            ("TIMESTAMP(6)", None, Some(6)),
+        ] {
+            assert!(!w(t, p, s), "{t} {p:?} {s:?}");
+        }
+        for (t, p, s) in [
+            ("NUMBER", Some(12), Some(2)),
+            ("NUMBER", None, Some(2)),
+            ("NUMBER", Some(5), Some(-2)),
+            ("NUMBER", Some(38), Some(39)),
+            ("FLOAT", Some(126), None),
+        ] {
+            assert!(w(t, p, s), "{t} {p:?} {s:?}");
+        }
     }
 
     /// Only a cursor (primary or coalesce fallback) finer than the microsecond is refused.

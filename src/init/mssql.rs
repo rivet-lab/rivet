@@ -14,9 +14,12 @@
 //! Server identifier and never appear in `information_schema` type names, so the
 //! split back apart is unambiguous.
 
+use crate::config::SourceType;
 use crate::error::Result;
 use crate::source::Source;
 use crate::source::mssql::MssqlSource;
+
+use crate::types::ColumnOverrides;
 
 use super::{ColumnInfo, TableInfo};
 
@@ -68,7 +71,11 @@ pub(super) fn list_tables(
     Ok(names)
 }
 
-pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> Result<TableInfo> {
+pub(super) fn introspect(
+    conn: &mut MssqlSource,
+    schema: &str,
+    table: &str,
+) -> Result<super::Introspected> {
     let schema_lit = schema.replace('\'', "''");
     let table_lit = table.replace('\'', "''");
 
@@ -136,13 +143,20 @@ pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> R
         .flatten();
 
     let agg = conn.query_scalar(&columns_sql)?;
-    let columns: Vec<ColumnInfo> = agg.as_deref().map(parse_columns_agg).unwrap_or_default();
+    let mut columns: Vec<ColumnInfo> = agg.as_deref().map(parse_columns_agg).unwrap_or_default();
 
     if columns.is_empty() {
         return Err(super::table_not_found(&format!("{schema}.{table}")));
     }
+    let probe = conn.type_mappings(
+        &super::select_all(SourceType::Mssql, &[schema, table]),
+        &ColumnOverrides::default(),
+    );
+    let unreadable = super::probe_keyset_refusals(SourceType::Mssql, &mut columns, probe, || {
+        crate::source::mssql::finer_than_microsecond_columns(conn, schema, table)
+    })?;
 
-    Ok(TableInfo {
+    let info = TableInfo {
         cdc_capture_instance,
         cdc_unmineable: None,
         density: None,
@@ -151,7 +165,8 @@ pub(super) fn introspect(conn: &mut MssqlSource, schema: &str, table: &str) -> R
         row_estimate,
         total_bytes: None,
         columns,
-    })
+    };
+    Ok((info, unreadable))
 }
 
 /// Split the `RS`/`US`-delimited column aggregate back into [`ColumnInfo`]s.

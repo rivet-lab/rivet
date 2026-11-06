@@ -38,23 +38,30 @@ jobs:
       matrix:
         target: [config_from_yaml, pg_test_decoding, mongo_resume_token, spill_frame_decode, sql_query_text, redact_text]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install nightly + cargo-fuzz
         run: |
           rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
           cargo install cargo-fuzz --locked
       - name: Seed the corpus
         run: |
-          mkdir -p "fuzz/corpus/${{ matrix.target }}"
-          cp -n "fuzz/seeds/${{ matrix.target }}"/* "fuzz/corpus/${{ matrix.target }}/" || true
+          mkdir -p "fuzz/corpus/${TARGET}"
+          cp -n "fuzz/seeds/${TARGET}"/* "fuzz/corpus/${TARGET}/" || true
+        env:
+          TARGET: ${{ matrix.target }}
       - name: Fuzz ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+          MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '300' }}
         run: |
-          cargo "+$FUZZ_NIGHTLY" fuzz run "${{ matrix.target }}" -- \
-            -max_total_time="${{ github.event.inputs.max_total_time || '300' }}" \
+          cargo "+$FUZZ_NIGHTLY" fuzz run "${TARGET}" -- \
+            -max_total_time="${MAX_TOTAL_TIME}" \
             -rss_limit_mb=4096
       - name: Upload crash reproducer on failure
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-crash-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}/

@@ -32,6 +32,8 @@ pub(crate) struct ScaffoldDecisions {
     pub decimal_review: bool,
     /// Tables left out of the config, in config order.
     pub skipped: Vec<String>,
+    /// Each left-out table with its reason, one line each, in config order.
+    pub skip_reasons: Vec<String>,
     /// Exports with no cursor / time column, in config order.
     pub needs_cursor: Vec<String>,
     /// Incremental exports whose cursor misses updates, in config order.
@@ -211,14 +213,14 @@ pub(super) fn scaffold_schema(
         );
         lines.push("exports:".to_string());
         for info in &skipped {
-            d.skipped.push(info.table.clone());
-            lines.push(format!(
-                "  # SKIPPED {}: its name cannot be a `table:` shortcut (letters/digits/_ \
-                 segments, its own case-fold on PostgreSQL), so it cannot be a backfill \
-                 recipe and is not in the stream — export it with `query:` in its own \
-                 batch export, or capture it in a second `mode: cdc` export with \
-                 `initial: snapshot`.",
-                yaml_quote_if_needed(&info.table)
+            lines.push(skip_line(
+                &mut d,
+                "",
+                &info.table,
+                "its name cannot be a `table:` shortcut (letters/digits/_ segments, its own \
+                 case-fold on PostgreSQL), so it cannot be a backfill recipe and is not in the \
+                 stream — export it with `query:` in its own batch export, or capture it in a \
+                 second `mode: cdc` export with `initial: snapshot`.",
             ));
         }
         for info in &readable {
@@ -278,6 +280,36 @@ pub(super) fn scaffold_schema(
 
 /// Maximum column width for scaffolded comment lines.
 const COMMENT_WRAP_WIDTH: usize = 100;
+
+/// The `# SKIPPED` comment for `table`, recording the table and its reason in `d`.
+fn skip_line(d: &mut ScaffoldDecisions, kind: &str, table: &str, reason: &str) -> String {
+    let name = yaml_quote_if_needed(table);
+    d.skipped.push(table.to_string());
+    d.skip_reasons.push(format!("{kind}{name}: {reason}"));
+    format!("  # SKIPPED {kind}{name}: {reason}")
+}
+
+/// The `# SKIPPED` comment for a table whose name cannot be a `table:` shortcut, naming the gate and the way out.
+fn skip_ungated_name(d: &mut ScaffoldDecisions, info: &TableInfo, source_type: &str) -> String {
+    if source_type == "mongo" {
+        return skip_line(
+            d,
+            "collection ",
+            &info.table,
+            "its name cannot pass the `table:` identifier gate (letters/digits/_ segments, at \
+             most one dot), and `table:` is the only export form MongoDB supports — rename the \
+             collection or export it with another tool.",
+        );
+    }
+    skip_line(
+        d,
+        "",
+        &info.table,
+        "its name cannot pass the `table:` identifier gate (letters/digits/_ segments, at most \
+         one dot), and a CDC export reads its baseline through `table:` — rename the table, or \
+         export it with `query:` in a batch mode.",
+    )
+}
 
 /// `text` as one comment line: every line break or control character, including the Unicode line separators, becomes a space.
 fn one_line_comment(text: &str) -> String {
@@ -990,12 +1022,10 @@ fn export_block_lines(
         // The capture refuses this table by the same predicate (`oracle::cdc::unmineable`): a
         // CDC export of it would be a config whose first run stops, so it is left out, said so.
         if let Some(why) = info.cdc_unmineable.as_deref() {
-            d.skipped.push(info.table.clone());
-            return vec![format!(
-                "  # SKIPPED {}: {}",
-                yaml_quote_if_needed(&info.table),
-                one_line_comment(why)
-            )];
+            return vec![skip_line(d, "", &info.table, &one_line_comment(why))];
+        }
+        if !table_shortcut_shape_ok(&qualified_table) {
+            return vec![skip_ungated_name(d, info, source_type)];
         }
         let ident = ident.map_or_else(|| cdc_ident(&info.table), str::to_string);
         return cdc_export_lines(
@@ -1042,16 +1072,7 @@ fn export_block_lines(
         // Unexportable in ANY form today: `table:` is Mongo's only export form
         // and the config gate refuses this name (while its "use query:" remedy
         // is a form Mongo refuses — the circular pair round-9 live-proved).
-        d.skipped.push(info.table.clone());
-        return vec![
-            format!(
-                "  # SKIPPED collection {}: its name cannot pass the `table:`",
-                yaml_quote_if_needed(&info.table)
-            ),
-            "  #   identifier gate (letters/digits/_ segments, at most one dot), and".to_string(),
-            "  #   `table:` is the only export form MongoDB supports — rename the".to_string(),
-            "  #   collection or export it with another tool.".to_string(),
-        ];
+        return vec![skip_ungated_name(d, info, source_type)];
     }
     if recipe
         || table_form_safe
@@ -2160,6 +2181,7 @@ mod tests {
             needs_cursor: marked(INIT_CURSOR_REVIEW_MARKER),
             insert_only: marked(INIT_INSERT_ONLY_MARKER),
             no_chunk_key: marked(INIT_NO_CHUNK_KEY_MARKER),
+            skip_reasons: Vec::new(),
         }
     }
 
@@ -2241,7 +2263,12 @@ mod tests {
             ),
         ];
         for s in &scaffolds {
-            assert_eq!(s.decisions, decisions_read_from(&s.text), "{}", s.text);
+            assert_eq!(s.decisions.skip_reasons.len(), s.decisions.skipped.len());
+            let shown = ScaffoldDecisions {
+                skip_reasons: Vec::new(),
+                ..s.decisions.clone()
+            };
+            assert_eq!(shown, decisions_read_from(&s.text), "{}", s.text);
         }
         let flips = |f: fn(&ScaffoldDecisions) -> bool| {
             let on = scaffolds.iter().filter(|s| f(&s.decisions)).count();
@@ -2269,15 +2296,7 @@ mod tests {
     /// Per-table CDC scaffolds whose names sanitise to one identifier still load: slots and checkpoints stay distinct.
     #[test]
     fn per_table_cdc_scaffold_gives_colliding_names_distinct_slots_and_checkpoints() {
-        let names = [
-            "заказы",
-            "товары",
-            "Orders",
-            "orders",
-            "order-items",
-            "order_items",
-            "plain",
-        ];
+        let names = ["Orders", "orders", "ORDERS", "order_items", "plain"];
         for (url, key) in [
             ("postgresql://u:p@localhost/db", "slot: "),
             ("sqlserver://u:p@localhost/db", "checkpoint: "),
@@ -2912,6 +2931,178 @@ mod tests {
         assert!(!batch.text.contains("SKIPPED"), "{}", batch.text);
     }
 
+    /// A CDC scaffold that leaves out every table it was given, one table or a schema, is refused by
+    /// code naming each table and its reason; one table it can capture lets the scaffold through.
+    #[test]
+    fn a_cdc_scaffold_that_leaves_out_every_table_is_refused_by_code() {
+        let url = "oracle://u@localhost:1521/FREEPDB1";
+        let unmineable = |name: &str, why: &str| {
+            let mut t = make_table(vec![col("ID", "bigint")]);
+            t.table = name.into();
+            t.cdc_unmineable = Some(format!(
+                "oracle cdc: `APP.{name}` cannot be captured: {why}"
+            ));
+            t
+        };
+        let blob = unmineable("DOCS", "B BLOB");
+        let long = unmineable("A_NAME_LONGER_THAN_LOGMINER_READS", "over 30 bytes");
+        let mut plain = make_table(vec![col("ID", "bigint")]);
+        plain.table = "ORDERS".into();
+        let refused = |s: &Scaffold, tables: usize| {
+            crate::init::refuse_nothing_exportable(&s.decisions, tables).err()
+        };
+        let schema = |infos: &[TableInfo]| {
+            scaffold_schema(
+                infos,
+                url,
+                &crate::init::SourceProvenance::Inline,
+                "schema APP",
+                &InitYamlDestination::default(),
+                Some("cdc"),
+                None,
+            )
+            .unwrap()
+        };
+        let one = scaffold_table(
+            &blob,
+            url,
+            &crate::init::SourceProvenance::Inline,
+            &InitYamlDestination::default(),
+            Some("cdc"),
+            None,
+        )
+        .unwrap();
+        let err = refused(&one, 1).expect("a lone unmineable table is refused");
+        crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
+        assert!(format!("{err:#}").contains("DOCS: oracle cdc:"), "{err:#}");
+        let all = schema(&[blob.clone(), long.clone()]);
+        let err = refused(&all, 2).expect("a schema of unmineable tables is refused");
+        crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
+        for why in ["B BLOB", "over 30 bytes"] {
+            assert!(format!("{err:#}").contains(why), "{err:#}");
+        }
+        let huge = unmineable(&"X".repeat(100), "name over 30 bytes");
+        let err = refused(&schema(&[huge.clone(), blob.clone()]), 2).expect("refused");
+        let text = format!("{err:#}");
+        let reasons: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(reasons.len(), 2, "{text}");
+        assert!(
+            reasons[0].starts_with(&format!("  {}: oracle cdc:", huge.table)),
+            "{text}"
+        );
+        assert!(reasons[1].starts_with("  DOCS: oracle cdc:"), "{text}");
+        assert!(refused(&schema(&[blob, long, plain]), 3).is_none());
+        let mut coll = make_table(vec![col("_id", "text")]);
+        coll.table = "my-coll".into();
+        let mongo = scaffold_table(
+            &coll,
+            "mongodb://u@localhost/db",
+            &crate::init::SourceProvenance::Inline,
+            &InitYamlDestination::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        let err = refused(&mongo, 1).expect("a lone collection the gate refuses is refused");
+        crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
+        assert!(
+            format!("{err:#}").contains("`table:` identifier gate"),
+            "{err:#}"
+        );
+    }
+
+    /// A CDC scaffold leaves out a table whose name fails the `table:` gate on every engine, names the gate, and is refused
+    /// when that leaves nothing; the same names in a batch mode and the names that pass are scaffolded as before.
+    #[test]
+    fn a_cdc_scaffold_leaves_out_a_name_the_table_gate_refuses_on_every_engine() {
+        let engines = [
+            ("postgresql://u@h/db", "orders"),
+            ("mysql://u@h/db", "orders"),
+            ("sqlserver://u@h/db", "orders"),
+            ("mongodb://u@h/db", "orders"),
+            ("oracle://u@h:1521/F", "ORDERS"),
+        ];
+        let table = |schema: &str, name: &str| {
+            let mut t = make_table(vec![col("id", "bigint")]);
+            t.schema = schema.into();
+            t.table = name.into();
+            t
+        };
+        let one = |url: &str, t: &TableInfo, mode: Option<&str>| {
+            scaffold_table(
+                t,
+                url,
+                &crate::init::SourceProvenance::Inline,
+                &InitYamlDestination::default(),
+                mode,
+                None,
+            )
+            .unwrap()
+        };
+        for (url, good) in engines {
+            for bad in ["my-coll", "My Table", "1tbl", "a b"] {
+                let cdc = one(url, &table("public", bad), Some("cdc"));
+                assert_eq!(cdc.decisions.skipped, [bad], "{url}: {}", cdc.text);
+                assert!(
+                    cdc.text.contains(&format!("{bad}: its name cannot pass")),
+                    "{url}: {}",
+                    cdc.text
+                );
+                assert!(
+                    cdc.decisions.skip_reasons[0].contains("`table:` identifier gate"),
+                    "{url}: {:?}",
+                    cdc.decisions.skip_reasons
+                );
+                assert!(!cdc.text.contains("mode: cdc"), "{url}: {}", cdc.text);
+                let err = crate::init::refuse_nothing_exportable(&cdc.decisions, 1)
+                    .expect_err("a lone refused name leaves nothing");
+                crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
+                assert!(format!("{err:#}").contains(bad), "{url}: {err:#}");
+            }
+            let three = table("a", "b.c.d");
+            if url.starts_with("sqlserver")
+                || url.starts_with("oracle")
+                || url.starts_with("postgresql")
+            {
+                let cdc = one(url, &three, Some("cdc"));
+                assert_eq!(cdc.decisions.skipped, ["b.c.d"], "{url}: {}", cdc.text);
+            }
+            let ok = one(url, &table("public", good), Some("cdc"));
+            assert!(ok.decisions.skipped.is_empty(), "{url}: {}", ok.text);
+            assert!(ok.text.contains("mode: cdc"), "{url}: {}", ok.text);
+            crate::config::Config::from_yaml(&ok.text)
+                .unwrap_or_else(|e| panic!("{e:#}\n{}", ok.text));
+            if !url.starts_with("mongodb") {
+                for mode in [None, Some("full")] {
+                    let batch = one(url, &table("public", "my-coll"), mode);
+                    assert!(
+                        batch.decisions.skipped.is_empty(),
+                        "{url} {mode:?}: {}",
+                        batch.text
+                    );
+                }
+            }
+        }
+        let url = "mysql://u@h/db";
+        let tables = [
+            table("public", "a_ok"),
+            table("public", "B-bad"),
+            table("public", "c_ok"),
+        ];
+        let mixed = scaffold_schema(
+            &tables,
+            url,
+            &crate::init::SourceProvenance::Inline,
+            "schema x",
+            &InitYamlDestination::default(),
+            Some("cdc"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(mixed.decisions.skipped, ["B-bad"], "{}", mixed.text);
+        assert!(crate::init::refuse_nothing_exportable(&mixed.decisions, 3).is_ok());
+    }
+
     #[test]
     fn a_skip_reason_holding_line_breaks_stays_one_comment_and_injects_no_yaml() {
         let url = "oracle://u@localhost:1521/FREEPDB1";
@@ -3519,6 +3710,27 @@ mod tests {
         assert_eq!(cfg.exports.len(), 3, "two recipes + the stream");
     }
 
+    /// The ungated-name skip comment names a collection for MongoDB and a plain table elsewhere.
+    #[test]
+    fn the_ungated_name_skip_comment_names_a_collection_only_on_mongo() {
+        let info = TableInfo {
+            cdc_capture_instance: None,
+            cdc_unmineable: None,
+            density: None,
+            schema: "app".into(),
+            table: "my-coll".into(),
+            row_estimate: 1,
+            total_bytes: None,
+            columns: vec![],
+        };
+        let mut d = ScaffoldDecisions::default();
+        let mongo = skip_ungated_name(&mut d, &info, "mongo");
+        assert!(mongo.contains("# SKIPPED collection my-coll:"), "{mongo}");
+        let mysql = skip_ungated_name(&mut d, &info, "mysql");
+        assert!(mysql.contains("# SKIPPED my-coll:"), "{mysql}");
+        assert!(!mysql.contains("collection"), "{mysql}");
+    }
+
     /// With BigQuery (day), ClickHouse (month) or Snowflake (day), the whole-DB scaffold's partition guesses sit where
     /// the LOAD reads them for a stream — `load.tables.<name>` on the stream — not on
     /// the recipes, which the load never reads (the bases came out unpartitioned under
@@ -3621,11 +3833,9 @@ mod tests {
         }
     }
 
-    /// The MySQL twin of the fallback below: N per-table CDC exports need N distinct
-    /// replica ids, or the second binlog client evicts the first (the consolidated
-    /// stream avoided this by having ONE id; the fallback must not bring it back).
+    /// A MySQL schema whose every table fails the `table:` gate has no per-table fallback left: each is left out and the run refuses by code.
     #[test]
-    fn whole_db_cdc_fallback_on_mysql_gives_every_export_its_own_server_id() {
+    fn whole_db_cdc_on_mysql_of_only_ungated_tables_leaves_every_one_out_and_is_refused() {
         let mk = |table: &str| TableInfo {
             cdc_capture_instance: None,
             cdc_unmineable: None,
@@ -3639,8 +3849,7 @@ mod tests {
                 ..col("id", "bigint")
             }],
         };
-        // Leading digits: legal on MySQL, never a `table:` shortcut, so no recipe.
-        let yaml = generate_schema_config(
+        let out = scaffold_schema(
             &[mk("2024_orders"), mk("2025_orders")],
             "mysql://rivet:rivet@localhost/app",
             &crate::init::SourceProvenance::Inline,
@@ -3650,15 +3859,11 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(
-            yaml.matches("mode: cdc").count(),
-            2,
-            "per-table fallback:\n{yaml}"
-        );
-        assert!(
-            yaml.contains("server_id: 4271") && yaml.contains("server_id: 4272"),
-            "two exports, two replica ids:\n{yaml}"
-        );
+        assert_eq!(out.decisions.skipped, ["2024_orders", "2025_orders"]);
+        assert!(!out.text.contains("mode: cdc"), "{}", out.text);
+        let err = crate::init::refuse_nothing_exportable(&out.decisions, 2)
+            .expect_err("every table left out");
+        crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
     }
 
     /// PostgreSQL accepts only lowercase letters, digits and `_` in a slot name: a
