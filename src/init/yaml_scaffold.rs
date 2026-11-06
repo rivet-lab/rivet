@@ -2912,6 +2912,59 @@ mod tests {
         assert!(!batch.text.contains("SKIPPED"), "{}", batch.text);
     }
 
+    /// A CDC scaffold that leaves out every table it was given, one table or a schema, is refused by
+    /// code naming each table and its reason; one table it can capture lets the scaffold through.
+    #[test]
+    fn a_cdc_scaffold_that_leaves_out_every_table_is_refused_by_code() {
+        let url = "oracle://u@localhost:1521/FREEPDB1";
+        let unmineable = |name: &str, why: &str| {
+            let mut t = make_table(vec![col("ID", "bigint")]);
+            t.table = name.into();
+            t.cdc_unmineable = Some(format!(
+                "oracle cdc: `APP.{name}` cannot be captured: {why}"
+            ));
+            t
+        };
+        let blob = unmineable("DOCS", "B BLOB");
+        let long = unmineable("A_NAME_LONGER_THAN_LOGMINER_READS", "over 30 bytes");
+        let mut plain = make_table(vec![col("ID", "bigint")]);
+        plain.table = "ORDERS".into();
+        let refused = |s: &Scaffold, tables: usize| {
+            crate::init::refuse_nothing_exportable(&s.text, &s.decisions, tables).err()
+        };
+        let schema = |infos: &[TableInfo]| {
+            scaffold_schema(
+                infos,
+                url,
+                &crate::init::SourceProvenance::Inline,
+                "schema APP",
+                &InitYamlDestination::default(),
+                Some("cdc"),
+                None,
+            )
+            .unwrap()
+        };
+        let one = scaffold_table(
+            &blob,
+            url,
+            &crate::init::SourceProvenance::Inline,
+            &InitYamlDestination::default(),
+            Some("cdc"),
+            None,
+        )
+        .unwrap();
+        let err = refused(&one, 1).expect("a lone unmineable table is refused");
+        crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
+        assert!(format!("{err:#}").contains("DOCS: oracle cdc:"), "{err:#}");
+        let all = schema(&[blob.clone(), long.clone()]);
+        let err = refused(&all, 2).expect("a schema of unmineable tables is refused");
+        crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
+        for why in ["B BLOB", "over 30 bytes"] {
+            assert!(format!("{err:#}").contains(why), "{err:#}");
+        }
+        assert!(refused(&schema(&[blob, long, plain]), 3).is_none());
+    }
+
     #[test]
     fn a_skip_reason_holding_line_breaks_stays_one_comment_and_injects_no_yaml() {
         let url = "oracle://u@localhost:1521/FREEPDB1";
