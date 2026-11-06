@@ -380,7 +380,8 @@ const MATRICES: &[(&str, usize)] = &[
     // collection reaches the refusal; init has no rig, so a plain CLI cell walks it.
     // 106 -> 109 (2026-11-06): a CDC init of only gate-refused names is refused on every engine, so the
     // postgres, mysql and mssql cells of refusal_init_nothing_exportable are gaps (offline test only, no plain CLI cell).
-    ("docs/sabotage-matrix.yaml", 109),
+    // 109 -> 108 (2026-11-06): the SQL Server cell of refusal_source_value_unrepresentable is written with the nanosecond-override fix.
+    ("docs/sabotage-matrix.yaml", 108),
     // Pool-split — `apply --pool --split` per (strategy × source engine). Split is a
     // scheduler layer above the runners (each unit runs through chunked/keyset), so its
     // per-engine behaviour (boundary probe, crash-recovery, finding-2 exact-partition
