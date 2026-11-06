@@ -46,6 +46,7 @@ import time
 import traceback
 import urllib.request
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 PASS, FAIL, NOT_RUN = "PASS", "FAIL", "NOT-RUN"
@@ -326,7 +327,8 @@ def uv_binary(cache: Path) -> str:
         return uv
     tarball = cache / "uv.tar.gz"
     download(UV_ASSET, tarball)
-    want = urllib.request.urlopen(UV_ASSET + ".sha256", timeout=60).read().decode().split()[0]
+    with urllib.request.urlopen(UV_ASSET + ".sha256", timeout=60) as r:
+        want = r.read().decode().split()[0]
     if sha256_of(tarball) != want:
         raise RuntimeError("the uv tarball does not match its published sha256")
     with tarfile.open(tarball) as tf:
@@ -550,11 +552,8 @@ def state_running(cfg: Path) -> bool:
     if not db.exists():
         return False
     try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1)
-        try:
+        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1)) as con:
             return con.execute("SELECT COUNT(*) FROM run_status WHERE status = 'running'").fetchone()[0] > 0
-        finally:
-            con.close()
     except sqlite3.Error:
         return False
 
