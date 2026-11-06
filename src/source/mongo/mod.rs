@@ -1168,6 +1168,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bytes_of_hex_reads_hex_pairs_and_nothing_else() {
+        assert_eq!(bytes_of_hex("ab01"), Some(vec![0xab, 0x01]));
+        assert_eq!(bytes_of_hex("AB"), Some(vec![0xab]));
+        assert_eq!(bytes_of_hex(""), Some(Vec::new()));
+        assert_eq!(bytes_of_hex("abc"), None);
+        assert_eq!(bytes_of_hex("zz"), None);
+        assert_eq!(bytes_of_hex("a\u{e9}b"), None);
+        assert_eq!(bytes_of_hex("\u{e9}12"), None);
+    }
+
+    #[test]
     fn server_selection_defaults_to_ten_seconds_but_the_url_wins() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let sel = |url: &str| {
