@@ -377,7 +377,7 @@ const MATRICES: &[(&str, usize)] = &[
     // 104 -> 105 (2026-11-06): RIVET_INIT_NOTHING_EXPORTABLE gets its `refusal_*` row; init has no rig,
     // so a plain CLI cell walks it on Oracle and the row stays a gap.
     // 105 -> 106 (2026-11-06): the Mongo cell of refusal_init_nothing_exportable is a gap: a gate-refused
-    // collection reaches the refusal, asserted offline only.
+    // collection reaches the refusal; init has no rig, so a plain CLI cell walks it.
     ("docs/sabotage-matrix.yaml", 106),
     // Pool-split — `apply --pool --split` per (strategy × source engine). Split is a
     // scheduler layer above the runners (each unit runs through chunked/keyset), so its
