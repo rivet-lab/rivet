@@ -35,10 +35,6 @@ def _open(cell: str, symptom: str, reason: str) -> KnownRed:
     """The entry of one `open_defect_*` live cell: its test path and the first line of its panic."""
     return KnownRed(f"{cell} — {symptom}", reason, _EXPIRES)
 
-_CDC_START = (
-    "CDC-RUN-START (seam run-still-writing, 2026-11-03): a CDC run writes no running marker and no manifest before its first roll, so a load from another state DB with gc_orphans removes the part the run uploaded and has not manifested yet; closes with fix/cdc-run-start-marker, which writes a running manifest under the run's own key at start"
-)
-
 _KEYSET_KEY_CURSOR = (
     "ER-3/ER-6 (seam keyset-key-type, 2026-11-03): the probes admit every unique NOT NULL key but decimal, while the cursor reader (extract_last_cursor_value) has no Binary, Boolean or Time64 arm and a MySQL ENUM orders by member index but seeks by string; the run writes page 0 and stops with exit 5 RIVET_SOURCE_PROBE_UNREADABLE (or skips rows); closes with fix/seam-keyset-key-type, which refuses the key at plan with RIVET_PLAN_CHUNK_KEY_UNUSABLE"
 )
@@ -69,12 +65,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("upgrade[oracle/cdc-load/tz=Asia/Tokyo]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
-    _open("live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_mysql",
-          "the load beside the rolling run:",
-          _CDC_START),
-    _open("live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres",
-          "the load beside the rolling run:",
-          _CDC_START),
     _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_binary16_primary_key",
           "keyset key MySQL BINARY(16) primary key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
           _KEYSET_KEY_CURSOR),

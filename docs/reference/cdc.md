@@ -848,6 +848,13 @@ A failed run leaves its durable parts in the destination but **no `manifest.json
 `_SUCCESS`** — that pair marks a *clean* end, so a missing `_SUCCESS` is how you (and
 `rivet validate`) tell a partial run from a complete one.
 
+Before its first part, a run writes a `running` manifest for each table
+(`manifest-<run id>.json`, no parts), so a `rivet load` with `gc_orphans` from
+another state DB sees the run and spares its parts. A run killed mid-flight leaves
+that marker, and the next run that ends cleanly supersedes it. A run that fails
+cleanly removes the marker when no part of the table reached the destination, and
+rewrites it as `failed` over the parts that did.
+
 ### PostgreSQL — the slot fills / the source disk fills
 
 A logical slot pins WAL until rivet advances it (`confirmed_flush_lsn`). The

@@ -712,6 +712,17 @@ guarantees:
       mongo: { test: a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mongo, asserts: "a failed CDC run leaves no manifest.json and no _SUCCESS" }
       oracle: { test: a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_oracle, asserts: "a failed CDC run leaves no manifest.json and no _SUCCESS" }
 
+  - id: a_cdc_run_writes_a_running_manifest_before_its_first_part
+    stated:
+      - file: docs/reference/cdc.md
+        sentence: "Before its first part, a run writes a `running` manifest for each table (`manifest-<run id>.json`, no parts), so a `rivet load` with `gc_orphans` from another state DB sees the run and spares its parts."
+    held_by:
+      postgres: { test: a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_postgres, asserts: "a run killed before its first manifest leaves the running marker it wrote before its first part" }
+      mysql: { test: a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mysql, asserts: "a run killed before its first manifest leaves the running marker it wrote before its first part" }
+      mssql: { test: a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mssql, asserts: "a run killed before its first manifest leaves the running marker it wrote before its first part" }
+      mongo: { test: a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_mongo, asserts: "a run killed before its first manifest leaves the running marker it wrote before its first part" }
+      oracle: { test: a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_oracle, asserts: "a run killed before its first manifest leaves the running marker it wrote before its first part" }
+
   - id: each_release_is_diffed_against_debezium
     stated:
       - file: README.md

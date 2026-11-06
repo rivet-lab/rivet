@@ -32,6 +32,20 @@ fn files_under(dir: &Path, keep: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
     out
 }
 
+/// The `(status, declared parts)` of every run-unique manifest under `dir`.
+fn run_unique_manifests(dir: &Path) -> Vec<(String, usize)> {
+    files_under(dir, &|n| n.starts_with("manifest-") && n.ends_with(".json"))
+        .iter()
+        .map(|p| {
+            let m: serde_json::Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+            (
+                m["status"].as_str().unwrap().to_string(),
+                m["parts"].as_array().unwrap().len(),
+            )
+        })
+        .collect()
+}
+
 /// The schema and the sorted rows of every part in `parts`, each cell as Arrow renders it.
 fn events(parts: &[PathBuf]) -> (Vec<String>, Vec<Vec<String>>) {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -91,6 +105,11 @@ fn a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike(s:
         files_under(&failed_dir, &|n| n == "manifest.json" || n == "_SUCCESS"),
         Vec::<PathBuf>::new(),
         "a failed CDC run leaves no manifest.json and no _SUCCESS"
+    );
+    assert_eq!(
+        run_unique_manifests(&failed_dir),
+        vec![("running".to_string(), 0)],
+        "a run killed before its first manifest leaves the running marker it wrote before its first part"
     );
 
     let again_dir = s.rig.resume_into_fresh_dest();

@@ -189,6 +189,8 @@ struct TableSink<'a> {
     column_sums: std::collections::BTreeMap<String, u64>,
     /// How many of `parts` the last per-roll manifest already declared.
     manifested_parts: usize,
+    /// Whether this table's `running` marker is already at the destination.
+    marked: bool,
     /// The open transaction's moved-in keys, which order a statement's key moves.
     moved: partition_guard::MovedIn,
     /// Names a change carried that the table's catalog no longer has (renamed or dropped).
@@ -208,6 +210,39 @@ struct SinkRun<'a> {
 }
 
 impl TableSink<'_> {
+    /// This table's `running` marker: its manifest before any part exists, under the run's own key.
+    fn running_marker(&self, run: &SinkRun<'_>) -> RunManifest {
+        RunManifest {
+            status: ManifestStatus::Running,
+            finished_at: String::new(),
+            ..self.manifest(run)
+        }
+    }
+
+    /// Closes this table's `running` marker of a failed run: removed when no part reached the store, rewritten `Failed` over the parts that did.
+    fn close_marker(&self, run: &SinkRun<'_>) -> Result<()> {
+        let marker = self.running_marker(run);
+        if !self.parts.is_empty() {
+            let failed = RunManifest {
+                status: ManifestStatus::Failed,
+                ..marker
+            };
+            return write_manifest_without_success_marker(self.out.dest, &failed).map(|_| ());
+        }
+        if !self
+            .out
+            .dest
+            .capabilities()
+            .commit_protocol
+            .leaves_objects_at_rest()
+        {
+            return Ok(());
+        }
+        self.out
+            .dest
+            .remove(&crate::manifest::run_unique_manifest_name(&marker.run_id))
+    }
+
     /// This table's run manifest over the parts it has so far.
     fn manifest(&self, run: &SinkRun<'_>) -> RunManifest {
         build_manifest(
@@ -369,6 +404,24 @@ fn roll_all(
     for &i in &pending {
         sinks[i].prepare_schema()?;
     }
+    let unmarked: Vec<usize> = pending
+        .iter()
+        .copied()
+        .filter(|&i| !sinks[i].marked)
+        .collect();
+    let markers: Vec<(&dyn crate::destination::Destination, RunManifest)> = unmarked
+        .iter()
+        .map(|&i| (sinks[i].out.dest, sinks[i].running_marker(run)))
+        .collect();
+    crate::workers::run_each(&markers, |(dest, marker)| {
+        write_manifest_without_success_marker(*dest, marker).map(|_| ())
+    })
+    .into_iter()
+    .collect::<Result<()>>()?;
+    drop(markers);
+    for i in unmarked {
+        sinks[i].marked = true;
+    }
     let uploaded = {
         let view: Vec<&TableSink<'_>> = pending.iter().map(|&i| &sinks[i]).collect();
         let (engine, format, run_token) = (run.engine, run.format, run.run_token);
@@ -490,6 +543,7 @@ pub(crate) fn run_to_files(
             seq: 0,
             column_sums: std::collections::BTreeMap::new(),
             manifested_parts: 0,
+            marked: false,
             moved: Default::default(),
             gone: Default::default(),
         })
@@ -768,6 +822,14 @@ pub(crate) fn run_to_files(
         .collect::<Result<()>>()
         .err()
     } else {
+        for s in sinks.iter().filter(|s| s.marked && s.manifested_parts == 0) {
+            if let Err(e) = s.close_marker(&run) {
+                log::warn!(
+                    "cdc: could not close the running marker of '{}': {e:#}",
+                    s.out.table
+                );
+            }
+        }
         None
     };
     match (drain, write_err) {
@@ -3099,6 +3161,7 @@ mod tests {
     /// sibling-gating never run.
     struct ManifestFailingDest {
         inner: Box<dyn crate::destination::Destination>,
+        marker_through: std::sync::atomic::AtomicBool,
     }
     impl crate::destination::Destination for ManifestFailingDest {
         fn write(
@@ -3107,7 +3170,11 @@ mod tests {
             key: &str,
         ) -> Result<crate::destination::WriteOutcome> {
             let name = key.rsplit('/').next().unwrap_or(key);
-            if name.starts_with("manifest") || name == "_SUCCESS" {
+            let marker = name.starts_with("manifest-")
+                && !self
+                    .marker_through
+                    .swap(true, std::sync::atomic::Ordering::SeqCst);
+            if !marker && (name.starts_with("manifest") || name == "_SUCCESS") {
                 anyhow::bail!("injected: terminal write of '{key}' refused");
             }
             self.inner.write(local, key)
@@ -3134,6 +3201,154 @@ mod tests {
         fn capabilities(&self) -> crate::destination::DestinationCapabilities {
             self.inner.capabilities()
         }
+    }
+
+    /// Reads the run-unique manifests under `dir` at every part write; part writes after the first `ok_parts` fail.
+    struct AtPartWriteDest {
+        inner: Box<dyn crate::destination::Destination>,
+        dir: std::path::PathBuf,
+        ok_parts: usize,
+        parts_seen: std::sync::atomic::AtomicUsize,
+        seen: std::sync::Mutex<Vec<Vec<RunManifest>>>,
+        removed: std::sync::Mutex<Vec<String>>,
+    }
+    impl AtPartWriteDest {
+        fn new(dir: &tempfile::TempDir, ok_parts: usize) -> Self {
+            Self {
+                inner: local_dest(dir),
+                dir: dir.path().to_path_buf(),
+                ok_parts,
+                parts_seen: Default::default(),
+                seen: Default::default(),
+                removed: Default::default(),
+            }
+        }
+        fn statuses_seen(&self) -> Vec<Vec<ManifestStatus>> {
+            let seen = self.seen.lock().unwrap();
+            seen.iter()
+                .map(|at| at.iter().map(|m| m.status).collect())
+                .collect()
+        }
+    }
+    impl crate::destination::Destination for AtPartWriteDest {
+        fn write(
+            &self,
+            local: &std::path::Path,
+            key: &str,
+        ) -> Result<crate::destination::WriteOutcome> {
+            if key.ends_with(".parquet") {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(run_unique_manifests(&self.dir));
+                let n = self
+                    .parts_seen
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n >= self.ok_parts {
+                    anyhow::bail!("injected: part write of '{key}' refused");
+                }
+            }
+            self.inner.write(local, key)
+        }
+        fn remove(&self, key: &str) -> Result<()> {
+            self.removed.lock().unwrap().push(key.to_string());
+            self.inner.remove(key)
+        }
+        fn capabilities(&self) -> crate::destination::DestinationCapabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    fn run_unique_manifests(dir: &std::path::Path) -> Vec<RunManifest> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                crate::manifest::is_run_unique_manifest_name(&e.file_name().to_string_lossy())
+            })
+            .map(|e| {
+                serde_json::from_slice::<RunManifest>(&std::fs::read(e.path()).unwrap()).unwrap()
+            })
+            .collect()
+    }
+
+    fn run_unique_statuses(dir: &std::path::Path) -> Vec<ManifestStatus> {
+        run_unique_manifests(dir).iter().map(|m| m.status).collect()
+    }
+
+    /// A CDC table's `running` marker is at the destination, unfinished, before its first part is written.
+    #[test]
+    fn a_cdc_table_marks_itself_running_before_its_first_part_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = AtPartWriteDest::new(&dir, usize::MAX);
+        let cols = int_col();
+        let mut stream = FakeStream {
+            events: VecDeque::from(vec![insert(1), insert(2), insert(3)]),
+            acked: Vec::new(),
+        };
+        let (_, r) = run_to_files(&mut stream, cfg(&dest, &cols, FormatType::Parquet, 2));
+        r.unwrap();
+        assert_eq!(
+            dest.statuses_seen(),
+            vec![vec![ManifestStatus::Running], vec![ManifestStatus::Success]],
+            "the first part lands beside a running marker, the second beside the roll's Success manifest"
+        );
+        let first = dest.seen.lock().unwrap()[0][0].clone();
+        assert_eq!(first.finished_at, "", "a running marker has not finished");
+        assert_eq!(first.parts.len(), 0, "a running marker declares no part");
+        assert_eq!(
+            run_unique_statuses(dir.path()),
+            vec![ManifestStatus::Success]
+        );
+        assert!(dest.removed.lock().unwrap().is_empty());
+    }
+
+    /// A run that fails before any part reached the store leaves no manifest: its marker is removed, not rewritten `Failed`.
+    #[test]
+    fn a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = AtPartWriteDest::new(&dir, 0);
+        let cols = int_col();
+        let mut stream = FakeStream {
+            events: VecDeque::from(vec![insert(1), insert(2)]),
+            acked: Vec::new(),
+        };
+        let (m, r) = run_to_files(&mut stream, cfg(&dest, &cols, FormatType::Parquet, 2));
+        assert!(r.is_err(), "the part write was refused");
+        assert_eq!(
+            dest.statuses_seen(),
+            vec![vec![ManifestStatus::Running]],
+            "the marker was there when the part write failed"
+        );
+        assert_eq!(m[0].parts.len(), 0);
+        assert_eq!(
+            run_unique_statuses(dir.path()),
+            Vec::<ManifestStatus>::new()
+        );
+        assert_eq!(dest.removed.lock().unwrap().len(), 1);
+        assert!(!dir.path().join("_SUCCESS").exists());
+    }
+
+    /// A later roll's failure keeps the earlier roll's `Success` manifest: the marker is closed only for a table with nothing manifested.
+    #[test]
+    fn a_cdc_run_that_fails_after_a_manifested_roll_keeps_that_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = AtPartWriteDest::new(&dir, 1);
+        let cols = int_col();
+        let mut stream = FakeStream {
+            events: VecDeque::from(vec![insert(1), insert(2)]),
+            acked: Vec::new(),
+        };
+        let (m, r) = run_to_files(&mut stream, cfg(&dest, &cols, FormatType::Parquet, 1));
+        assert!(r.is_err(), "the second part write was refused");
+        assert_eq!(m[0].parts.len(), 1, "fixture is inert — one part landed");
+        let kept = run_unique_manifests(dir.path());
+        assert_eq!(
+            kept.iter().map(|k| k.status).collect::<Vec<_>>(),
+            vec![ManifestStatus::Success]
+        );
+        assert_eq!(kept[0].parts.len(), 1);
+        assert!(dest.removed.lock().unwrap().is_empty());
     }
 
     /// A roll rewrites the run-unique manifest only for a table that gained a part since the
@@ -3201,14 +3416,14 @@ mod tests {
         };
         assert_eq!(
             run_unique(&idle),
-            2,
-            "b gained its part on the first roll and stayed idle for the next three: one \
-             per-roll manifest plus the terminal one, not one per roll of the whole stream"
+            3,
+            "b gained its part on the first roll and stayed idle for the next three: its running \
+             marker, one per-roll manifest and the terminal one, not one per roll of the whole stream"
         );
         assert_eq!(
             run_unique(&busy),
-            4,
-            "a gained a part on every roll, then the terminal"
+            5,
+            "a wrote its running marker, gained a part on every roll, then the terminal"
         );
     }
 
@@ -3271,6 +3486,9 @@ mod tests {
                 anyhow::bail!("injected: part upload of '{key}' refused");
             }
             self.inner.write(local, key)
+        }
+        fn remove(&self, key: &str) -> Result<()> {
+            self.inner.remove(key)
         }
         fn capabilities(&self) -> crate::destination::DestinationCapabilities {
             self.inner.capabilities()
@@ -3419,6 +3637,18 @@ mod tests {
             logged.iter().any(|f| f.file_name.starts_with("b/")),
             "b's durable part never reached the ledger: {logged:?}"
         );
+        assert_eq!(
+            run_unique_statuses(da.path()),
+            Vec::<ManifestStatus>::new(),
+            "a's marker declared nothing and is removed"
+        );
+        let closed = run_unique_manifests(db.path());
+        assert_eq!(
+            closed.iter().map(|m| m.status).collect::<Vec<_>>(),
+            vec![ManifestStatus::Failed],
+            "b's marker is rewritten Failed over the part that reached the store"
+        );
+        assert_eq!(closed[0].parts.len(), 1);
     }
 
     /// Fails every data-part upload after the first `ok` of them.
@@ -3599,6 +3829,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let dest = ManifestFailingDest {
             inner: local_dest(&d),
+            marker_through: Default::default(),
         };
         let cols = int_col();
         let mut e1 = insert(1);
