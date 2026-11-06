@@ -14,7 +14,7 @@
 //! | `clean_postgres_via_toxi_works_as_a_baseline_and_exports_successfully`   | `mysql_clean_via_toxi_works_as_a_baseline_and_exports_successfully`                |
 //! | `export_survives_transient_latency_added_via_toxiproxy`                  | `mysql_export_survives_transient_latency_added_via_toxiproxy`                      |
 //! | `export_fails_cleanly_when_toxiproxy_is_disabled_before_run`             | `mysql_export_fails_cleanly_when_toxiproxy_is_disabled_before_run`                 |
-//! | `export_recovers_after_mid_stream_proxy_disable_then_enable_with_retries`| `mysql_export_recovers_after_mid_stream_proxy_disable_then_enable_with_retries`    |
+//! | `export_recovers_after_mid_stream_connection_reset_with_retries`         | `mysql_export_recovers_after_mid_stream_proxy_disable_then_enable_with_retries`    |
 //! | `permanent_sql_error_fails_fast_without_exhausting_retries`              | `mysql_permanent_sql_error_fails_fast_without_exhausting_retries`                  |
 
 use std::time::Duration;
@@ -117,16 +117,10 @@ fn mysql_export_fails_cleanly_when_toxiproxy_is_disabled_before_run() {
         !out_run.status.success(),
         "mysql export through a disabled proxy must exit non-zero"
     );
-    let stderr = String::from_utf8_lossy(&out_run.stderr);
-    let low = stderr.to_lowercase();
-    assert!(
-        low.contains("connection")
-            || low.contains("refused")
-            || low.contains("reset")
-            || low.contains("timeout")
-            || low.contains("failed")
-            || low.contains("broken"),
-        "stderr must include a network-level diagnostic; got:\n{stderr}"
+    let failed = assert_recorded_failure(&rig.config_path(), &export_name, &["connectivity error"]);
+    assert_eq!(
+        failed.retries, 0,
+        "a closed port is not retried: {failed:?}"
     );
 }
 
@@ -223,10 +217,9 @@ fn mysql_permanent_sql_error_fails_fast_without_exhausting_retries() {
         elapsed < Duration::from_secs(15),
         "permanent error must short-circuit retry loop; elapsed={elapsed:?}"
     );
-    let stderr = String::from_utf8_lossy(&out_run.stderr);
-    let low = stderr.to_lowercase();
-    assert!(
-        low.contains("syntax") || low.contains("error") || low.contains("sql"),
-        "stderr must include the driver's error text; got:\n{stderr}"
+    let failed = assert_recorded_failure(&rig.config_path(), &export_name, &["1064"]);
+    assert_eq!(
+        failed.retries, 0,
+        "a permanent error is not retried: {failed:?}"
     );
 }
