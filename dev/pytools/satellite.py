@@ -58,8 +58,8 @@ UV_ASSET = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/uv-x
 LABEL = "rivet.satellite=1"
 PREFIX = "rivet-satellite"
 ENGINES = {
-    "postgres": {"port": 55432, "inner": 5432, "image": "postgres:16"},
-    "mysql": {"port": 53306, "inner": 3306, "image": "mysql:8.0"},
+    "postgres": {"port": 0, "inner": 5432, "image": "postgres:16"},
+    "mysql": {"port": 0, "inner": 3306, "image": "mysql:8.0"},
 }
 SEED_ROWS, DELTA_A, DELTA_B = 500, (501, 700), (701, 800)
 CLOUD_CELLS = {
@@ -362,8 +362,14 @@ def docker_run_argv(engine: str) -> list[str]:
     env = (["-e", "POSTGRES_USER=rivet", "-e", "POSTGRES_PASSWORD=rivet", "-e", "POSTGRES_DB=rivet"] if engine == "postgres"
            else ["-e", "MYSQL_ROOT_PASSWORD=root", "-e", "MYSQL_USER=rivet", "-e", "MYSQL_PASSWORD=rivet", "-e", "MYSQL_DATABASE=rivet"])
     data = "/var/lib/postgresql/data" if engine == "postgres" else "/var/lib/mysql"
-    return ["docker", "run", "-d", "--name", container(engine), "--label", LABEL, "-p", f"127.0.0.1:{e['port']}:{e['inner']}",
+    return ["docker", "run", "-d", "--name", container(engine), "--label", LABEL, "-p", f"127.0.0.1::{e['inner']}",
             "-v", f"{container(engine)}-data:{data}", *env, e["image"]]
+
+
+def published_port(text: str) -> int | None:
+    """The host port of a `docker port` answer bound on 127.0.0.1; None when no line is."""
+    m = re.search(r"^127\.0\.0\.1:(\d+)$", text, re.M)
+    return int(m.group(1)) if m else None
 
 
 def source_url(engine: str) -> str:
@@ -428,6 +434,10 @@ def stand_up(run: Run) -> tuple[str, str]:
         rc, text = sh(docker_run_argv(engine), log)
         if rc:
             return FAIL, f"{engine}: {first_failing_line(text)}"
+        port = published_port(sh(["docker", "port", container(engine), f"{ENGINES[engine]['inner']}/tcp"], log)[1])
+        if port is None:
+            return FAIL, f"{engine}: docker published no 127.0.0.1 port"
+        ENGINES[engine]["port"] = port
     for engine in ENGINES:
         deadline = time.monotonic() + 240
         while True:
@@ -863,6 +873,8 @@ def self_test() -> int:
         ports = [argv[i + 1] for i, a in enumerate(argv) if a == "-p"]
         assert ports and all(p.startswith("127.0.0.1:") for p in ports), "a pilot port must be published on 127.0.0.1 only"
         assert LABEL in argv
+    assert published_port("127.0.0.1:49153\n[exit 0]") == 49153
+    assert published_port("0.0.0.0:49153\n") is None and published_port("") is None, "only a 127.0.0.1 binding is a pilot port"
     assert expiry_verdict([["a", "2026-11-15"]], "2026-11-09")[0] == PASS
     assert expiry_verdict([["a", "2026-11-09"]], "2026-11-09")[0] == PASS, "an entry is in date through its expiry day"
     assert expiry_verdict([["a", "2026-11-08"]], "2026-11-09")[0] == FAIL, "an expired entry fails"
