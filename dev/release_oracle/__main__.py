@@ -71,6 +71,7 @@ from . import (
     shared_state,
     skip_census,
     stand_health,
+    stand_images,
     state_parity,
     tls_downgrade,
     upgrade,
@@ -926,11 +927,14 @@ def _self_test() -> int:
     failure.self_test()
     stand_disk.self_test()
     stand_health.self_test()
+    stand_images.self_test()
     stand_memory.self_test()
     stand_profiles.self_test()
     import inspect
     assert "stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))" in inspect.getsource(main), \
         "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
+    assert inspect.getsource(main).count("stand_images.record_to_target()") == 2 and "stand_images.record_to_target()" in inspect.getsource(bring_up), \
+        "the gate must record the stand's images at the start, after every bring-up and at the end"
     _stand_down_self_test()
     sunk = Ledger(colour=False)
     sunk._buf = []
@@ -1466,6 +1470,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "previous-release differential, field symptom replay, scale memory, flat RSS) and record a `release-oracle-island` "
              "verdict line; every other run leaves them out. A tag needs this record green for the same commit "
              "(`make release-oracle-island`).")
+    ap.add_argument("--images-file", default="",
+                    help="JSON file the gate records every running container's image and RepoDigest into "
+                         "(default: release-oracle-images.json in the cargo target directory)")
     ap.add_argument("--no-cloud", action="store_true", help="local stage only (skip BigQuery)")
     ap.add_argument("--keep", action="store_true", help="leave engine containers up (debug)")
     ap.add_argument(
@@ -1842,6 +1849,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
     started = docker(*args, image, *cmd)
     if not started.ok:
         raise stand_health.BringUpError(f"could not start ({image}): {started.stderr.strip()[-200:]}")
+    stand_images.record_to_target()
 
     # One engine may need SEVERAL probe spellings across the versions this gate
     # pins. Mongo is the case: `mongosh` exists from 5.0 on, while 4.4 ships only
@@ -2232,6 +2240,10 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["WORK"] = str(work)
     # Every live test this gate starts appends its rig oracle verdict here; verify_oracle_verdict_census grades it.
     os.environ["RIVET_ORACLE_LOG"] = str(work / "rivet-oracle.log")
+    images_file = Path(ns.images_file) if ns.images_file else target_dir() / "release-oracle-images.json"
+    images_file.unlink(missing_ok=True)
+    stand_images.set_target(images_file)
+    stand_images.record_to_target()
     try:
         from datetime import datetime, timezone
 
@@ -2346,6 +2358,7 @@ def main(argv: list[str] | None = None) -> int:
             print(footer)
         return rc
     finally:
+        stand_images.record_to_target()
         if not ns.keep:
             remove_engine_containers()
             shutil.rmtree(work, ignore_errors=True)
