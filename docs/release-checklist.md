@@ -148,7 +148,9 @@ containers published on `127.0.0.1` only.
 
 Machines are named by the operator's environment, never in the repo: `RIVET_SATELLITE_HOST` (an ssh alias of
 the Linux machine), `RIVET_GATE_LOGS_HOST` and `RIVET_GATE_LOGS_DIR` (where the gate keeps `<sha>/`; results
-land in `<sha>/satellite-<label>/`).
+land in `<sha>/satellite-<label>/`). The Linux profile builds and tests into one cargo target dir that persists
+across runs, `RIVET_SATELLITE_TARGET_DIR` (default `~/.cache/rivet-satellite/target`), so only the crate, LTO and
+link remain after the first run; the built binary must still name the sha.
 
 - [ ] A `pilot-*` check that is not `PASS` blocks the release.
 - [ ] A `release-notes-*` check that is not `PASS` (a false release note) blocks the release.

@@ -18,7 +18,8 @@ Release-blocking policy (verdict.json lists what blocks):
 The pilot scenario is the pilot client's shape: SQLite state, incremental exports, a Linux x86_64 binary. The previous
 release runs first, the binary under test continues on the same state, the previous release runs again; the destination
 is re-read with pyarrow and compared with the source, never with rivet's own counters. A second run of one export,
-started while the first holds the lease, must be refused. The host comes from RIVET_SATELLITE_HOST (an ssh alias), the
+started while the first holds the lease, must be refused. The Linux builds share one cargo target dir, RIVET_SATELLITE_TARGET_DIR (default ~/.cache/rivet-satellite/target).
+The host comes from RIVET_SATELLITE_HOST (an ssh alias), the
 gate's log host from RIVET_GATE_LOGS_HOST and its directory from RIVET_GATE_LOGS_DIR; nothing about a machine is stored here.
 Stdlib only; runs on Python 3.10.
 """
@@ -237,25 +238,37 @@ def binary_version(binary: Path, log: Path) -> str:
     return text.splitlines()[0].strip() if rc == 0 and text.strip() else ""
 
 
-def build_release(run: Run, repo: Path, sha: str) -> tuple[str, str]:
-    """`cargo build --release`; the line carries the wall time and the version of the binary, which must name the sha."""
-    t = time.monotonic()
-    rc, text = sh([cargo_bin(), "build", "--release"], run.log("build-release"), cwd=repo)
-    wall = time.monotonic() - t
-    binary = repo / "target" / "release" / "rivet"
+def target_dir() -> Path:
+    """The cargo target dir every Linux build and test run shares, so dependencies compile once."""
+    return Path(os.environ.get("RIVET_SATELLITE_TARGET_DIR") or Path.home() / ".cache" / "rivet-satellite" / "target").expanduser().resolve()
+
+
+def built_verdict(binary: Path, sha: str, rc: int, wall: float, text: str, log: Path) -> tuple[str, str]:
+    """PASS only when the build succeeded and the binary names `sha`; a binary left in the shared target dir by another sha is FAIL."""
     if rc or not binary.exists():
         return FAIL, f"cargo build --release exit {rc} after {wall:.0f}s: {first_failing_line(text)}"
-    version = binary_version(binary, run.log("build-release"))
+    version = binary_version(binary, log)
     if sha[:7] not in version:
         return FAIL, f"built in {wall:.0f}s but `{version}` does not name {sha[:7]}: a stale binary"
     return PASS, f"built in {wall:.0f}s: {version}"
+
+
+def build_release(run: Run, repo: Path, sha: str) -> tuple[str, str]:
+    """`cargo build --release` into the shared target dir; the line carries the wall time and the version, which must name the sha."""
+    target = target_dir()
+    target.mkdir(parents=True, exist_ok=True)
+    t = time.monotonic()
+    rc, text = sh([cargo_bin(), "build", "--release"], run.log("build-release"), cwd=repo, env={**os.environ, "CARGO_TARGET_DIR": str(target)})
+    return built_verdict(target / "release" / "rivet", sha, rc, time.monotonic() - t, text, run.log("build-release"))
 
 
 def offline_suite(run: Run, repo: Path, py: Path | None) -> tuple[str, str]:
     """The repo's own offline suite (pr_ready.offline_suite) with the locked python first on PATH."""
     code = "import sys; from pathlib import Path; from dev.pytools import pr_ready; v, l = pr_ready.offline_suite(Path(sys.argv[1])); print(v); print(l); sys.exit(0 if v == 'PASS' else 1)"
     (run.out / "offline").mkdir(exist_ok=True)
-    env = {**os.environ, "PATH": f"{py.parent}{os.pathsep}{os.environ['PATH']}"} if py else None
+    env = {**os.environ, "CARGO_TARGET_DIR": str(target_dir())}
+    if py:
+        env["PATH"] = f"{py.parent}{os.pathsep}{os.environ['PATH']}"
     rc, text = sh([sys.executable, "-c", code, str(run.out / "offline")], run.log("offline-suite"), cwd=repo, env=env)
     lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("[exit")]
     tail = lines[-1] if lines else "no output"
@@ -584,7 +597,7 @@ def run_linux(args: argparse.Namespace) -> int:
     else:
         run.step("build-release", lambda: build_release(run, repo, args.sha))
     built = run.checks[-1].status == PASS
-    new = Path(args.new_bin).expanduser().resolve() if args.new_bin else repo / "target" / "release" / "rivet"
+    new = Path(args.new_bin).expanduser().resolve() if args.new_bin else target_dir() / "release" / "rivet"
     state: dict = {}
 
     def locked_python() -> tuple[str, str]:
@@ -856,6 +869,13 @@ def self_test() -> int:
     assert expiry_verdict([["a", "2026-11-08"]], "2026-11-09")[0] == FAIL, "an expired entry fails"
     one = "     Summary [   1.2s] 1 test run: 1 passed, 5 skipped"
     assert nextest_verdict(one, "")[0] == PASS
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = Path(tmp) / "rivet"
+        fake.write_text("#!/bin/sh\necho 'rivet 0.32.2 (aaaaaaa11)'\n")
+        fake.chmod(0o755)
+        assert built_verdict(fake, "aaaaaaa1" + "0" * 32, 0, 1.0, "", Path(tmp) / "v.log")[0] == PASS
+        assert built_verdict(fake, "bbbbbbb2" + "0" * 32, 0, 1.0, "", Path(tmp) / "v.log")[0] == FAIL, "a binary of another sha is stale"
+        assert built_verdict(Path(tmp) / "absent", "aaaaaaa1" + "0" * 32, 0, 1.0, "", Path(tmp) / "v.log")[0] == FAIL
     assert not stand_pg_alive("127.0.0.1", fake_pg_port(None)), "a closed port is not a live postgres"
     for reply, alive in ((b"N", True), (b"S", True), (b"", False)):
         assert stand_pg_alive("127.0.0.1", fake_pg_port(reply)) is alive, f"reply {reply!r}"
