@@ -1992,6 +1992,86 @@ fn an_oracle_cdc_scaffold_leaves_out_the_tables_the_capture_refuses_and_runs() {
     assert_eq!(ids_in(&snap), (1..=10).collect::<Vec<i64>>());
 }
 
+/// A CDC init whose every table the Oracle capture refuses, one table or a schema, is refused by code
+/// writing no file and naming each table's reason; a batch init of the same tables writes a config that runs.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires the Oracle CDC stand"]
+fn an_oracle_cdc_init_of_only_unmineable_tables_is_refused_and_a_batch_mode_runs() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let blob = crate::live_cdc_oracledb::cdc_table(
+        "init_ora_all_blob",
+        "id NUMBER(18) PRIMARY KEY, body BLOB",
+    );
+    let long = crate::live_cdc_oracledb::cdc_table(
+        "init_ora_all_a_name_longer_than_logminer_reads",
+        "id NUMBER(18) PRIMARY KEY",
+    );
+    assert!(long.name().len() > 30, "{}", long.name());
+    let db = [("DATABASE_URL", ORACLE_CDC_URL)];
+    let schema_args = |mode: Option<&str>| {
+        let mut a = vec![
+            "init",
+            "--source",
+            ORACLE_CDC_URL,
+            "--schema",
+            "RIVET",
+            "--include",
+            blob.name(),
+            long.name(),
+            "--output",
+            "rivet.yaml",
+        ];
+        if let Some(m) = mode {
+            a.extend(["--mode", m]);
+        }
+        a.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    let one_args: Vec<String> = [
+        "init",
+        "--source",
+        ORACLE_CDC_URL,
+        "--schema",
+        "RIVET",
+        "--table",
+        blob.name(),
+        "--mode",
+        "cdc",
+        "--output",
+        "rivet.yaml",
+    ]
+    .map(str::to_string)
+    .to_vec();
+    for (args, named) in [
+        (
+            schema_args(Some("cdc")),
+            vec![(&blob, "BODY BLOB"), (&long, "over 30 bytes")],
+        ),
+        (one_args, vec![(&blob, "BODY BLOB")]),
+    ] {
+        let dir = tempfile::tempdir().expect("config dir");
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run_rivet_in_dir(dir.path(), &args, &[]);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(5), "{said}");
+        assert!(said.contains("[RIVET_INIT_NOTHING_EXPORTABLE]"), "{said}");
+        for (t, why) in named {
+            assert!(
+                said.contains(t.name()) && said.contains(why),
+                "{} is named with `{why}`: {said}",
+                t.name()
+            );
+        }
+        assert!(!dir.path().join("rivet.yaml").exists(), "{said}");
+    }
+    let dir = tempfile::tempdir().expect("config dir");
+    let args = schema_args(None);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    rivet_ok_in(dir.path(), &args, &[]);
+    rivet_ok_in(dir.path(), &["check", "-c", "rivet.yaml"], &db);
+    rivet_ok_in(dir.path(), &["run", "-c", "rivet.yaml"], &db);
+}
+
 /// A copy into a PostgreSQL state that already holds state rows (the same SQLite state copied a
 /// second time) is refused by code, on every attempt, before a row is written; a schema of its
 /// own, the refusal's remedy, takes the copy.

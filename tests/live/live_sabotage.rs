@@ -2167,7 +2167,7 @@ fn state_volume_fills_up_sql(engine: SqlEngine) {
     if not_sqlite_state("a SQLite state on a volume that fills up") {
         return;
     }
-    let (_table, rig, _guard) = shaped(engine, "sab_statefull", Shape::RangeCheckpoint);
+    let (_table, rig, _guard) = shaped(engine, "sab_stateful", Shape::RangeCheckpoint);
     state_volume_fills_up(
         stopped_mid_run(rig, STATE_FULL).slowed(150),
         Rig::has_a_part,
@@ -5792,7 +5792,7 @@ fn a_run_whose_state_volume_fills_up_delivers_or_fails_loudly_mongo() {
         if not_sqlite_state("a SQLite state on a volume that fills up") {
             return;
         }
-        let (rig, _m, _guard) = mongo_live_leaving("sab_statefull", STATE_FULL);
+        let (rig, _m, _guard) = mongo_live_leaving("sab_stateful", STATE_FULL);
         state_volume_fills_up(rig, Rig::has_a_part);
     }
 }

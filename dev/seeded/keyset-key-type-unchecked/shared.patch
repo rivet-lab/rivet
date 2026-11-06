@@ -1,0 +1,24 @@
+diff --git a/src/source/keyset_key.rs b/src/source/keyset_key.rs
+index 8442ceb5..ef170f70 100644
+--- a/src/source/keyset_key.rs
++++ b/src/source/keyset_key.rs
+@@ -71,7 +71,7 @@ pub(crate) fn keyset_key_refusal(
+         RivetType::Timestamp {
+             unit: TimeUnit::Microsecond,
+             ..
+-        } if wider == Some(Wider::FinerTimestamp) => Some(
++        } if false && wider == Some(Wider::FinerTimestamp) => Some(
+             "carries more than 6 fractional-second digits, which the microsecond cursor truncates",
+         ),
+         RivetType::Timestamp {
+@@ -83,9 +83,7 @@ pub(crate) fn keyset_key_refusal(
+             "is an ENUM or SET, which sorts by member position, not by the label the cursor binds",
+         ),
+         RivetType::Enum => None,
+-        RivetType::Bool => Some("is a boolean, which the cursor cannot render"),
+-        RivetType::Time { .. } => Some("is a time of day, which the cursor cannot render"),
+-        RivetType::Binary => Some("is binary, which the cursor cannot render"),
++        RivetType::Bool | RivetType::Time { .. } | RivetType::Binary => None,
+         RivetType::Json if source == SourceType::Postgres => None,
+         RivetType::Json => Some("is JSON, which does not sort as text"),
+         RivetType::Interval => Some("is an interval, which does not sort as text"),
