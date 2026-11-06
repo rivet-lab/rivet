@@ -22,10 +22,9 @@
   replaying it leaves the base unchanged. The buffer is a transient table with
   `DATA_RETENTION_TIME_IN_DAYS = 0` (no time travel, no fail-safe). `base_rows_after` is the base's
   `COUNT(*)` (Snowflake answers it from metadata). `load.layout: log_view` keeps the changelog and its
-  current-state view; a `full` export is unchanged. **Behaviour changes, with the remedy:**
+  current-state view; a `full` export is unchanged. `load.layout: log_view` (changelog + current-state view) is deprecated: it keeps working unchanged in 0.33, including as the BigQuery default for incremental exports and CDC streams without a backfill; a later release moves these to base + buffer with a way to convert existing tables. New configs should use the base + buffer layout (add `cdc.backfill:` or `cdc.initial: snapshot` to a CDC stream). **Behaviour changes, with the remedy:**
   - a Snowflake incremental or CDC export that writes no `load.layout:` now gets the base and the buffer
-    where it got the changelog and view. No Snowflake table in use had the view layout, so nothing is
-    migrated; to keep the changelog and view for a config, write `load.layout: log_view` (section, export
+    where it got the changelog and view. To keep the changelog and view for a config, write `load.layout: log_view` (section, export
     or `load.tables.<t>`);
   - **a `mode: cdc` export on Snowflake that names neither `cdc.backfill:` nor `cdc.initial: snapshot`
     is refused at config load** with `RIVET_CONFIG_LOAD_BLOCK_INVALID` (exit 1, nothing runs), because
