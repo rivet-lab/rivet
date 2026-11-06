@@ -56,7 +56,7 @@ fn table_of(ty: &str, values: &[&str]) -> (String, MssqlTable) {
 
 fn rig_for(table: &str, ovr: &str) -> Rig {
     Rig::mssql_batch(table)
-        .no_oracle("the subject is the override's nanosecond reading, graded below by the server's DATEDIFF_BIG and DATEPART against epoch_ns()")
+        .no_oracle("the subject is the override's nanosecond reading, graded below by the server's DATEDIFF_BIG and DATEPART against the parquet nanosecond values")
         .export_line(&format!("columns: {{v: {ovr}}}"))
 }
 
@@ -129,20 +129,9 @@ fn in_range_values_under_the_override_keep_every_digit_and_null_stays_null() {
                  + DATEPART(NANOSECOND, v) AS varchar(40)), 'NULL')) FROM dbo.{table} ORDER BY id"
             ),
         );
-        let c = stage_for_duckdb(&rig.out_dir());
-        let got: Vec<String> = duckdb_run_sql_json(&format!(
-            "SELECT id, epoch_ns(v) FROM read_parquet('{c}/**/*.parquet') ORDER BY id"
-        ))["rows"]
-            .as_array()
-            .expect("duckdb rows")
-            .iter()
-            .map(|r| {
-                format!(
-                    "{}|{}",
-                    r[0].as_str().unwrap(),
-                    r[1].as_str().filter(|s| *s != "None").unwrap_or("NULL")
-                )
-            })
+        let got: Vec<String> = dir_parquet_id_and_nanos(&rig.out_dir(), "v")
+            .into_iter()
+            .map(|(id, v)| format!("{id}|{}", v.map_or("NULL".to_string(), |n| n.to_string())))
             .collect();
         assert_eq!(got.len(), case.in_range.len() + 1, "{}: {got:?}", case.ty);
         assert_eq!(got, want, "{}", case.ty);
