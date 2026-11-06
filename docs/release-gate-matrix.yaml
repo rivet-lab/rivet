@@ -346,7 +346,7 @@ preflights:
     backends: [sqlite]
     status: test        # verify_nextest_grading (dev/release_oracle/core.py) — runs at the start of every gate; also `--self-test`
   - id: run_strict
-    what: "`rivet run --strict` (ADR-0038 step 2), the one `run` flag the blessed postgres chain cannot carry because it has no lossy column: an Oracle TIMESTAMP(9) export is refused before any part with RIVET_TYPE_UNSAFE_MAPPING naming the column, with the exit class `check --type-report --strict` gives; without --strict the run warns naming the column and the row lands. Oracles: the Parquet on disk read by DuckDB — never rivet's report."
+    what: "`rivet run --strict` (ADR-0038 step 2), the one `run` flag the blessed postgres chain cannot carry because it has no lossy column: an Oracle TIMESTAMP(9) export is refused before any part with RIVET_TYPE_UNSAFE_MAPPING naming the column, with the exit class `check --type-report --strict` gives, and is refused the same way without --strict until the column is declared (`timestamp_ns` or `timestamp`), after which the row lands. Oracles: the Parquet on disk read by DuckDB — never rivet's report."
     backends: [sqlite]
     status: test        # verify_run_strict (dev/release_oracle/blessed_flow.py) — runs tests/live/live_type_policy.rs's batch cells through the Rig against the gate binary; needs cargo and the stand's oracle (:1521), SKIP naming it when down
   - id: clickhouse_load
@@ -417,10 +417,11 @@ infra:
     # 2026-11-03: +4 structural N/A rows from mysql-enum-label-escapes-unread (postgres, mssql, oracle, mongo carry no catalog-escaped ENUM or SET label).
     # 2026-11-04: +4 structural N/A rows from mysql-binlog-negative-time-fraction (PostgreSQL, SQL Server, MongoDB and Oracle have no MySQL binlog TIME decoder).
     # 2026-11-05: +3 structural N/A rows from destination-credential-read-by-one-leg (local, azure, stdout name no credential this seed reaches).
+    # 2026-11-05: +4 structural N/A rows from oracle-timestamp-ns-undeclared-truncated (PostgreSQL, MySQL, SQL Server and MongoDB map no column with a refusal).
     # 2026-11-05: +4 structural N/A rows from pg-temporal-uuid-bytea-array-refused (MySQL, SQL Server, Oracle and MongoDB have no PostgreSQL array element builder).
     # 2026-11-05: +4 structural N/A rows from number-text-without-its-label (PostgreSQL, MySQL, SQL Server and MongoDB reach no Oracle NUMBER mapping).
     # 2026-11-06: +2 structural N/A rows from token-endpoint-transient-final (Snowflake and ClickHouse mint no Google OAuth token).
-    na_ceiling: 504  # ratchet-pin: seeded-na (review 2027-02-01)
+    na_ceiling: 508  # ratchet-pin: seeded-na (review 2027-02-01)
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

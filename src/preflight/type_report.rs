@@ -70,6 +70,10 @@ impl ExportTypeReport {
         self.violations.iter().any(|v| v.fatal)
     }
 
+    pub fn has_refused(&self) -> bool {
+        self.violations.iter().any(|v| v.refused)
+    }
+
     pub fn has_target_fail(&self) -> bool {
         self.target_failures
     }
@@ -618,6 +622,7 @@ pub fn report_from_mappings(
                         m.column_name
                     ),
                     fatal,
+                    refused: false,
                 });
             }
         }
@@ -996,6 +1001,7 @@ mod tests {
             nullable: true,
             warnings: vec![],
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         }
     }
 
@@ -1539,6 +1545,7 @@ exports:
                 fidelity: TypeFidelity::Lossy,
                 message: "payload is lossy".into(),
                 fatal: false,
+                refused: false,
             }],
             target_failures: false,
             recovery_sql: None,

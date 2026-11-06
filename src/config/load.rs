@@ -106,7 +106,7 @@ struct RawLoadSection {
     /// key `rivet run` recorded), `none`, or explicit columns; ignored for `full`.
     #[serde(default)]
     pk: KeyColumns,
-    /// `log_view` or `base_buffer` — where the current state lives. Absent derives
+    /// `log_view` or `base_buffer` — where the current state lives (`log_view` is deprecated). Absent derives
     /// it from the target: on Snowflake an incremental or CDC export is base+buffer
     /// (`log_view` keeps the changelog and its view); on BigQuery a CDC stream with a
     /// `backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs

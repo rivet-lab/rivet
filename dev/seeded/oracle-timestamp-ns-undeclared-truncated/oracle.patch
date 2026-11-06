@@ -1,0 +1,12 @@
+diff --git a/src/source/oracle/arrow_convert.rs b/src/source/oracle/arrow_convert.rs
+--- a/src/source/oracle/arrow_convert.rs
++++ b/src/source/oracle/arrow_convert.rs
+@@ -169,7 +169,7 @@
+             ..mapping
+         };
+         if timestamp {
+-            lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
++            lossy.with_warning(timestamp_ns_refusal(&name, zoned))
+         } else {
+             lossy.with_warning(INTERVAL_NS_WARNING)
+         }
