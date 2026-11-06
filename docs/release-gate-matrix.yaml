@@ -419,7 +419,8 @@ infra:
     # 2026-11-05: +3 structural N/A rows from destination-credential-read-by-one-leg (local, azure, stdout name no credential this seed reaches).
     # 2026-11-05: +4 structural N/A rows from pg-temporal-uuid-bytea-array-refused (MySQL, SQL Server, Oracle and MongoDB have no PostgreSQL array element builder).
     # 2026-11-05: +4 structural N/A rows from number-text-without-its-label (PostgreSQL, MySQL, SQL Server and MongoDB reach no Oracle NUMBER mapping).
-    na_ceiling: 502  # ratchet-pin: seeded-na (review 2027-02-01)
+    # 2026-11-06: +1 structural N/A row from reset-chunks-by-export-name (a MongoDB export has no range-chunk checkpoint for a reset to remove).
+    na_ceiling: 503  # ratchet-pin: seeded-na (review 2027-02-01)
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
