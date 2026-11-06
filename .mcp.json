@@ -3,7 +3,7 @@
     "code-review-graph": {
       "command": "uvx",
       "args": [
-        "code-review-graph",
+        "code-review-graph==2.3.9",
         "serve"
       ],
       "cwd": "/Users/andriipanchenko/rivet",
