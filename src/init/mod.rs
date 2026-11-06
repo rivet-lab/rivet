@@ -889,6 +889,9 @@ pub fn init(
         pg_in_recovery(source_url, tls)
     });
 
+    if matches!(format, InitFormat::Yaml) {
+        refuse_nothing_exportable(&decisions, snapshots.len())?;
+    }
     if let Some(notice) = cursor_notice(&decisions, mode_override, table.is_none()) {
         eprintln!("{notice}");
     }
@@ -936,6 +939,20 @@ pub fn init(
     }
 
     Ok(())
+}
+
+/// Refuse a scaffold that left out every table it found, naming each table with its reason.
+fn refuse_nothing_exportable(d: &yaml_scaffold::ScaffoldDecisions, tables: usize) -> Result<()> {
+    if tables == 0 || d.skipped.len() < tables {
+        return Ok(());
+    }
+    crate::rivet_bail!(
+        crate::error::codes::INIT_NOTHING_EXPORTABLE,
+        "init left out every table it found ({}), so the config would hold no export; nothing was \
+         written:\n  {}",
+        d.skipped.join(", "),
+        d.skip_reasons.join("\n  ")
+    );
 }
 
 /// The next-steps line for a scaffold that left its `load:` block out because the loader refuses it.

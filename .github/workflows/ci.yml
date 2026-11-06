@@ -81,6 +81,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # How many in-diff mutants the `mutants-in-diff` budget can grade
@@ -106,8 +109,8 @@ jobs:
     runs-on: ubuntu-latest
     if: contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
     steps:
-      - uses: actions/checkout@v7
-        with: { fetch-depth: 0 }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0, persist-credentials: false }
       - name: New schema keys must appear in tests
         run: |
           # `fetch-depth: 0` above normally means the base is already here; fetch
@@ -136,7 +139,9 @@ jobs:
     name: OSS must not depend on rivet-pro (one-way seam, ADR-0026)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: No rivet-pro references in OSS sources
         # The paid tier (rivet-pro, private/BSL) depends on this engine — never
         # the reverse. A `use rivet_pro` or a Cargo.toml dependency would make
@@ -159,15 +164,17 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
           components: rustfmt
       # `cargo fmt --check` only needs the source tree, but we share a
       # cache key with the other jobs so a cold runner doesn't pay the
       # toolchain-extract cost twice on the same PR.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: fmt
           # `cargo fmt` doesn't touch `target/`; skip caching it to keep
@@ -179,12 +186,14 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --all-targets -- -D warnings
       - name: Clippy without the optional oracle driver
         run: cargo clippy --all-targets --no-default-features --features jemalloc -- -D warnings
@@ -228,9 +237,10 @@ jobs:
       shard_n: ${{ steps.plan.outputs.shard_n }}
       outcome: ${{ steps.plan.outcome }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Any non-docs changes?
         id: scope
         run: |
@@ -260,11 +270,11 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Docs-only PR — skipping mutation testing."
           fi
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: steps.scope.outputs.code == 'true'
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.scope.outputs.code == 'true'
         with:
           key: mutants-reach
@@ -276,13 +286,13 @@ jobs:
       # the first grading of a change.
       - name: Restore mutation outcomes
         if: steps.scope.outputs.code == 'true'
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .mutants-cache
           key: mutants-outcomes-v2-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
       # Prebuilt binaries: `cargo install` compiled cargo-mutants from source
       # on every cold cache (68s on PR #314).
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         if: steps.scope.outputs.code == 'true'
         with:
           tool: cargo-mutants,cargo-llvm-cov
@@ -501,7 +511,7 @@ jobs:
           say shards "$(python3 -c "import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))" "$SHARD_N")"
       - name: Hand the plan to the shards
         if: steps.plan.outputs.state == 'in-budget'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutants-plan
           include-hidden-files: true
@@ -532,17 +542,19 @@ jobs:
       # Mutants never need debuginfo — halves build dirs, speeds links.
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: mutants
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-mutants
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: mutants-plan
       # cargo-mutants builds in a COPY of the tree; `--copy-target` hands that
@@ -553,6 +565,7 @@ jobs:
       - name: Mutate shard ${{ matrix.shard }}
         env:
           SHARD_N: ${{ needs.mutants-plan.outputs.shard_n }}
+          MATRIX_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           DROP_P2=()
@@ -563,13 +576,13 @@ jobs:
           # scope never silently narrows if a module moves back.
           rc=0
           cargo mutants --in-diff pr.diff ${DROP_P2[@]+"${DROP_P2[@]}"} \
-            --shard "${{ matrix.shard }}/$SHARD_N" --copy-target=true -j 2 -- --lib --bins || rc=$?
+            --shard "${MATRIX_SHARD}/$SHARD_N" --copy-target=true -j 2 -- --lib --bins || rc=$?
           mkdir -p mutants.out
           echo "$rc" > mutants.out/rc
-          echo "shard ${{ matrix.shard }}/$SHARD_N: cargo-mutants exit $rc"
+          echo "shard ${MATRIX_SHARD}/$SHARD_N: cargo-mutants exit $rc"
       - name: Record this shard's outcomes
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutants-shard-${{ matrix.shard }}
           path: |
@@ -624,12 +637,14 @@ jobs:
       timeout: ${{ steps.grade.outputs.timeout }}
       unviable: ${{ steps.grade.outputs.unviable }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: needs.mutants-plan.outputs.state == 'in-budget'
         with:
           name: mutants-plan
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: needs.mutants-plan.outputs.state == 'in-budget' && needs.mutants-plan.outputs.cache == 'miss'
         with:
           pattern: mutants-shard-*
@@ -722,7 +737,7 @@ jobs:
         # that measurement is exactly what a re-run of the same commit should
         # not have to pay for again.
         if: always() && needs.mutants-plan.outputs.cache == 'miss' && hashFiles('.mutants-cache/outcomes.json') != ''
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .mutants-cache
           key: mutants-outcomes-v2-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
@@ -772,9 +787,10 @@ jobs:
       in_scope: ${{ steps.graded.outputs.in_scope }}
       excluded: ${{ steps.graded.outputs.excluded }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       # Byte-identical to `mutants-plan`'s scope step, and for the same
       # reason: a swallowed fetch failure used to make an unresolvable base read
       # as "docs-only", skipping every step of this BLOCKING job under a green
@@ -810,15 +826,15 @@ jobs:
             echo "expected_state=docs-only" >> "$GITHUB_OUTPUT"
             echo "::notice::Docs-only PR — nothing to grade."
           fi
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: steps.scope.outputs.code == 'true'
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.scope.outputs.code == 'true'
         with:
           key: mutants
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         if: steps.scope.outputs.code == 'true'
         with:
           tool: cargo-mutants
@@ -943,6 +959,7 @@ jobs:
           # set — merge-base(base, HEAD)..HEAD — so one expression serves both
           # events, and the gate grades the PR's own changes in the queue too.
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          STEPS_GRADED_OUTPUTS_GRADED: ${{ steps.graded.outputs.graded }}
         run: |
           set -euo pipefail
           state() { echo "expected_state=$1" >> "$GITHUB_OUTPUT"; }
@@ -963,7 +980,7 @@ jobs:
               exit 1
             fi
           }
-          graded='${{ steps.graded.outputs.graded }}'
+          graded="${STEPS_GRADED_OUTPUTS_GRADED}"
           if [ -z "$graded" ]; then
             state tool-error
             echo "::error::the previous step recorded no in-diff mutant count — it did not complete, so there is nothing to audit."
@@ -1162,7 +1179,9 @@ jobs:
     continue-on-error: true
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Unset inputs are passed through as EMPTY, and the emitter records an
       # empty count as `null` — never 0. A docs-only PR, a skipped mutation job
       # or a timed-out one must leave a HOLE in the trend, because "0 missed"
@@ -1172,30 +1191,43 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/harness_metrics.py emit --out harness-metrics.json \
-            state='${{ needs.mutants-in-diff.outputs.state }}' \
-            reach='${{ needs.mutants-in-diff.outputs.reach }}' \
-            report_only_audit='${{ needs.mutants-in-diff.outputs.p2_audit }}' \
-            in_scope='${{ needs.mutants-gate-sanity.outputs.in_scope }}' \
-            excluded='${{ needs.mutants-gate-sanity.outputs.excluded }}' \
-            graded='${{ needs.mutants-gate-sanity.outputs.graded }}' \
-            offline_reachable='${{ needs.mutants-in-diff.outputs.p1 }}' \
-            live_only='${{ needs.mutants-in-diff.outputs.p2 }}' \
-            caught='${{ needs.mutants-in-diff.outputs.caught }}' \
-            missed='${{ needs.mutants-in-diff.outputs.missed }}' \
-            unviable='${{ needs.mutants-in-diff.outputs.unviable }}' \
-            timeout='${{ needs.mutants-in-diff.outputs.timeout }}' \
+            state="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_STATE}" \
+            reach="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_REACH}" \
+            report_only_audit="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_P2_AUDIT}" \
+            in_scope="${NEEDS_MUTANTS_GATE_SANITY_OUTPUTS_IN_SCOPE}" \
+            excluded="${NEEDS_MUTANTS_GATE_SANITY_OUTPUTS_EXCLUDED}" \
+            graded="${NEEDS_MUTANTS_GATE_SANITY_OUTPUTS_GRADED}" \
+            offline_reachable="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_P1}" \
+            live_only="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_P2}" \
+            caught="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_CAUGHT}" \
+            missed="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_MISSED}" \
+            unviable="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_UNVIABLE}" \
+            timeout="${NEEDS_MUTANTS_IN_DIFF_OUTPUTS_TIMEOUT}" \
             | tee summary.txt
           # …and into the run's UI, where a human actually passes by. The line
           # is read back off the artifact's own `summary` field by the emitter,
           # so the log and the JSON cannot drift.
           echo "::notice::$(cat summary.txt)"
+        env:
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_STATE: ${{ needs.mutants-in-diff.outputs.state }}
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_REACH: ${{ needs.mutants-in-diff.outputs.reach }}
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_P2_AUDIT: ${{ needs.mutants-in-diff.outputs.p2_audit }}
+          NEEDS_MUTANTS_GATE_SANITY_OUTPUTS_IN_SCOPE: ${{ needs.mutants-gate-sanity.outputs.in_scope }}
+          NEEDS_MUTANTS_GATE_SANITY_OUTPUTS_EXCLUDED: ${{ needs.mutants-gate-sanity.outputs.excluded }}
+          NEEDS_MUTANTS_GATE_SANITY_OUTPUTS_GRADED: ${{ needs.mutants-gate-sanity.outputs.graded }}
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_P1: ${{ needs.mutants-in-diff.outputs.p1 }}
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_P2: ${{ needs.mutants-in-diff.outputs.p2 }}
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_CAUGHT: ${{ needs.mutants-in-diff.outputs.caught }}
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_MISSED: ${{ needs.mutants-in-diff.outputs.missed }}
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_UNVIABLE: ${{ needs.mutants-in-diff.outputs.unviable }}
+          NEEDS_MUTANTS_IN_DIFF_OUTPUTS_TIMEOUT: ${{ needs.mutants-in-diff.outputs.timeout }}
       # When was each live cell last green? A report beside the metrics, never a gate:
       # the ledger is written by whoever runs the stand (gate, nightly, a developer).
       - name: Evidence freshness of the live cells (report, not a gate)
         run: |
           python3 dev/pytools/evidence.py report --json evidence-report.json | tee evidence-report.txt
           echo "::notice::$(head -1 evidence-report.txt)"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: harness-metrics
@@ -1219,7 +1251,9 @@ jobs:
     name: Gate scripts (self-tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Every gate script's own self-test (found, not listed)
         run: python3 .github/scripts/gate_self_tests.py
       - name: No live test grades rivet by rivet's own report alone (shrink-only)
@@ -1229,7 +1263,7 @@ jobs:
       - name: The release oracle's env-flag grammar is one grammar
         run: python3 -m dev.release_oracle --self-test
       # uv: the rig oracle's self-test writes and reads parquet through the pinned duckdb/pyarrow.
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: uv
       - name: The value canon and the rig oracle's graders self-test
@@ -1237,15 +1271,33 @@ jobs:
           uv run --frozen python -m dev.release_oracle.value_diff
           uv run --frozen python -m dev.release_oracle.rig_oracle
 
+  lint-tools:
+    name: Pinned lint tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the pinned tools (sha256 of the binary)
+        run: |
+          python3 dev/pytools/lint_tools.py install "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: The verifier and every fixture self-test, none skipped
+        run: |
+          python3 dev/pytools/lint_tools.py --self-test --require
+          python3 dev/pytools/secrets_scan.py --self-test --require
+      - name: Every pr-tier tool over the tree
+        run: python3 dev/pytools/lint_tools.py tier pr
+
   test:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The release publishes with `cargo publish --locked`; mirror that here on
       # the clean checkout — BEFORE any `cargo test`/`build` silently reconciles
       # the working-tree lock — so a Cargo.toml version bump that forgot to commit
@@ -1309,11 +1361,13 @@ jobs:
     name: Release build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --release
 
   # The E2E check is four jobs' worth of runners instead of one 50-minute job (measured 49-52 min:
@@ -1334,9 +1388,10 @@ jobs:
       reason: ${{ steps.scope.outputs.reason }}
       filter: ${{ steps.scope.outputs.filter }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Classify the changed paths
         id: scope
         env:
@@ -1357,16 +1412,21 @@ jobs:
     if: needs.e2e-scope.outputs.scope != 'skip'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # One cache for this job and the `pre` leg below, saved here only.
           shared-key: e2e-debug
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest
       - name: Build rivet and every test binary (debug), once
@@ -1394,14 +1454,14 @@ jobs:
             ${FILTER:+-E "$FILTER"} --message-format json > "$RUNNER_TEMP/e2e-list.json"
           python3 .github/scripts/e2e_legs.py --list "$RUNNER_TEMP/e2e-list.json" --junit "$RUNNER_TEMP/junit" \
             --legs 3 --out "$RUNNER_TEMP/e2e-legs.json"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name == 'pull_request'
         with:
           name: e2e-legs
           path: ${{ runner.temp }}/e2e-legs.json
           if-no-files-found: ignore
           retention-days: 1
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-nextest-archive
           path: ${{ runner.temp }}/e2e-nextest.tar.zst
@@ -1434,7 +1494,9 @@ jobs:
       RIVET_SKIP_LOG: ${{ github.workspace }}/target/rivet-skips.log
       RIVET_ORACLE_LOG: ${{ github.workspace }}/target/rivet-oracle.log
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/free-disk
 
       - name: Start services (in the background)
@@ -1462,17 +1524,17 @@ jobs:
           # the dominant E2E flake through 2026-08-16/17.
           ( docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle mysql-stmt-84-lctn1 > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: ${{ matrix.leg == 'pre' }}
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: ${{ matrix.leg == 'pre' }}
         with:
           shared-key: e2e-debug
           save-if: false
       # uv runs the rig's default oracle (dev/release_oracle/rig_oracle.py, pinned by uv.lock).
-      - uses: taiki-e/install-action@v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest,uv
 
@@ -1493,12 +1555,12 @@ jobs:
           cargo build
           cargo test --no-run
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ matrix.leg != 'pre' }}
         with:
           name: e2e-nextest-archive
           path: ${{ runner.temp }}
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ matrix.leg != 'pre' && github.event_name == 'pull_request' }}
         continue-on-error: true
         with:
@@ -1642,7 +1704,7 @@ jobs:
 
       - name: Upload matrix logs on failure
         if: ${{ failure() && matrix.leg == 'pre' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: matrices-pr-logs
           path: |
@@ -1756,7 +1818,7 @@ jobs:
           --skip a_read_blocked_longer_than_thirty_seconds_still_completes \
           --skip open_defect_
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() && github.event_name == 'push' && matrix.leg != 'pre' }}
         with:
           name: e2e-junit-${{ strategy.job-index }}
@@ -1777,7 +1839,7 @@ jobs:
         # An absent file is an empty one: a leg that skipped nothing still hands over both.
         if: ${{ !cancelled() }}
         run: mkdir -p target && touch "$RIVET_SKIP_LOG" "$RIVET_ORACLE_LOG"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
           name: e2e-logs-${{ strategy.job-index }}
@@ -1833,9 +1895,11 @@ jobs:
           fi
           echo "e2e legs: ${{ needs.e2e.result }}"
           [ "${{ needs.e2e.result }}" = success ]
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ !cancelled() && needs.e2e-scope.outputs.scope != 'skip' }}
-      - uses: actions/download-artifact@v8
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ !cancelled() && needs.e2e-scope.outputs.scope != 'skip' }}
         with:
           pattern: e2e-logs-*
@@ -1909,7 +1973,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny check
+
+  workflow-lint:
+    name: Workflow lint (actionlint + zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: zizmor@1.31.1
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: actionlint
+        run: |
+          "$(go env GOPATH)/bin/actionlint" -color
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --no-progress .
