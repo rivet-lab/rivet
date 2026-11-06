@@ -560,7 +560,9 @@ fn judge_status(status: reqwest::StatusCode) -> Result<(), GrantFailure> {
         return Ok(());
     }
     if token_status_is_transient(status.as_u16()) {
-        return Err(GrantFailure::Transient(anyhow::anyhow!("HTTP {status}")));
+        return Err(GrantFailure::Transient(anyhow::Error::msg(format!(
+            "HTTP {status}"
+        ))));
     }
     Err(GrantFailure::Final(crate::error::coded(
         crate::error::codes::DEST_CREDENTIALS_INVALID,

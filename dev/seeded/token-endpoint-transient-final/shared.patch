@@ -1,11 +1,11 @@
 --- a/src/gcp_auth.rs
 +++ b/src/gcp_auth.rs
-@@ -557,7 +557,7 @@
+@@ -559,7 +559,7 @@
      if status.is_success() {
          return Ok(());
      }
 -    if token_status_is_transient(status.as_u16()) {
 +    if token_status_is_transient(status.as_u16()) && false {
-         return Err(GrantFailure::Transient(anyhow::anyhow!("HTTP {status}")));
-     }
-     Err(GrantFailure::Final(crate::error::coded(
+         return Err(GrantFailure::Transient(anyhow::Error::msg(format!(
+             "HTTP {status}"
+         ))));
