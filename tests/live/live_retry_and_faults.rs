@@ -252,3 +252,50 @@ fn permanent_sql_error_fails_fast_without_exhausting_retries() {
         "stderr must include the driver's error text; got:\n{stderr}"
     );
 }
+
+const CUT_ROWS: i64 = 100;
+const CUT_PAD_BYTES: usize = 60_000;
+const CUT_AFTER_BYTES: u64 = 5 * CUT_PAD_BYTES as u64 + (CUT_PAD_BYTES / 2) as u64;
+
+/// A table of `rows` rows, each holding `pad_bytes` of text, so one result row is one large message.
+fn seed_pg_padded_table(rows: i64, pad_bytes: usize) -> PgTable {
+    let name = unique_name("rivet_qa_cut");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "CREATE TABLE {name} (id BIGINT PRIMARY KEY, pad TEXT NOT NULL); \
+         INSERT INTO {name} SELECT g, repeat('x', {pad_bytes}) FROM generate_series(1, {rows}) g;"
+    ))
+    .expect("seed padded postgres table");
+    PgTable::adopt(name)
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres + toxiproxy + duckdb"]
+fn postgres_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once() {
+    let _g = toxiproxy_guard();
+    require_alive(LiveService::Postgres);
+    require_alive(LiveService::DuckDb);
+    require_alive(LiveService::Toxiproxy);
+    reset_postgres_proxy();
+
+    let table = seed_pg_padded_table(CUT_ROWS, CUT_PAD_BYTES);
+    let export_name = unique_name("pg_cut_midrow");
+    let (out_host, out_container) = duckdb_shared_workdir("pg_cut_midrow_oracle");
+    let rig = Rig::pg_batch(&export_name)
+        .source_url(POSTGRES_TOXI_URL)
+        .query(&format!("SELECT id, pad FROM {}", table.name()))
+        .mode("full")
+        .export_line("tuning:")
+        .export_line("  max_retries: 3")
+        .export_line("  retry_backoff_ms: 3000")
+        .dest_path(out_host.clone());
+    assert_midrow_cut_retried_and_delivered_exactly_once(
+        &rig,
+        &export_name,
+        "postgres",
+        CUT_AFTER_BYTES,
+        CUT_ROWS,
+        CUT_PAD_BYTES,
+        &out_container,
+    );
+}

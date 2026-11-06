@@ -276,52 +276,13 @@ fn mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exa
         .export_line("  retry_backoff_ms: 3000")
         .dest_path(out_host.clone());
 
-    toxi_add_limit_data("mysql", CUT_AFTER_BYTES, "downstream");
-    let mut run = rig.spawn_args_env(&["--export", &export_name], &[]);
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    while std::time::Instant::now() < deadline {
-        if run.stderr_so_far().contains("retry 1/") {
-            toxi_reset_toxics("mysql");
-            break;
-        }
-        if run.try_wait().expect("poll the run").is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let out_run = run.wait_with_output().expect("reap the run");
-    toxi_reset_toxics("mysql");
-
-    let stderr = String::from_utf8_lossy(&out_run.stderr);
-    assert!(
-        out_run.status.success(),
-        "a connection cut mid-row must be retried and the run must exit 0; stderr:\n{stderr}"
-    );
-    let state = StateDb::next_to_config(&rig.config_path());
-    let metrics = state.metrics_row(&state.latest_run_id(&export_name));
-    assert!(
-        metrics.retries.unwrap_or(0) >= 1,
-        "export_metrics.retries must record the retry; got {:?}; stderr:\n{stderr}",
-        metrics.retries
-    );
-    duckdb_declared_assert_complete(
-        &out_container,
-        "id",
+    assert_midrow_cut_retried_and_delivered_exactly_once(
+        &rig,
+        &export_name,
+        "mysql",
+        CUT_AFTER_BYTES,
         CUT_ROWS,
-        "a retry across a connection cut in the middle of a row",
-    );
-    assert_eq!(
-        duckdb_declared_distinct_set(&out_container, "id"),
-        (1..=CUT_ROWS).map(|i| i.to_string()).collect(),
-        "the delivered id set must equal the source id set"
-    );
-    let intact = duckdb_run_sql_json(&format!(
-        "SELECT count(*) FROM read_parquet('{out_container}/**/*.parquet') \
-         WHERE length(pad) = {CUT_PAD_BYTES}"
-    ));
-    assert_eq!(
-        intact["rows"][0][0].as_str(),
-        Some(CUT_ROWS.to_string().as_str()),
-        "every delivered pad must be whole"
+        CUT_PAD_BYTES,
+        &out_container,
     );
 }

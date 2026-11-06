@@ -1623,7 +1623,7 @@ def verify_network_faults(led: Ledger) -> None:
         return
     _drive_live_tests(
         led, "infra", "network", "faults",
-        "Network faults (toxiproxy: latency retry, dead proxy, CDC mid-stream cut)",
+        "Network faults (toxiproxy: latency retry, dead proxy, mid-row cut, CDC mid-stream cut)",
         # Every engine sibling by its own whole name: the filter matches whole names since
         # 2026-09-26, so the MySQL and Mongo variants the old suffix match pulled in are listed.
         [
@@ -1633,6 +1633,8 @@ def verify_network_faults(led: Ledger) -> None:
             "export_fails_cleanly_when_toxiproxy_is_disabled_before_run",
             "mysql_export_fails_cleanly_when_toxiproxy_is_disabled_before_run",
             "gremlin_cdc_binlog_cut_mid_drain_fails_loud_then_recovers",
+            "postgres_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once",
+            "mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once",
         ],
         "network_faults.log",
         "network faults under toxiproxy",

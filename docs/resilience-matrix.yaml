@@ -120,6 +120,14 @@ scenarios:
     mongo:    { na: "same engine-agnostic destination seam; pinned once on PostgreSQL" }
     oracle:   { na: "same engine-agnostic destination seam; pinned once on PostgreSQL" }
 
+  - id: source_connection_cut_mid_row_retried
+    what: "a source connection cut while a row is being read is retried on a fresh connection and the export delivers every source row exactly once"
+    postgres: { test: postgres_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once }
+    mysql:    { test: mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once }
+    mssql:    { gap: "no live cut cell yet: the SQL Server source lifts a tiberius streaming error into text (src/source/mssql/mod.rs, SOURCE_QUERY_FAILED), so a peer closing the socket inside a token reads "bytes remaining on stream" and the retry classifier has no type to read; not reproduced live on 2026-11-06" }
+    mongo:    { gap: "no live mid-stream cut cell: live_mongo_retry_and_faults covers latency only; retries were never observed on a Mongo cut even with retry disabled; not reproduced on 2026-11-06" }
+    oracle:   { gap: "no live mid-stream cut cell: the Oracle source lifts oracledb errors into text read by is_oracle_lost_session; not reproduced live on 2026-11-06" }
+
   - id: state_store_write_fail_loud
     what: "an unwritable state store (SQLite rivet_state.db) fails the run LOUD, never a silent success that skips persisting the cursor"
     postgres: { test: incremental_export_with_unwritable_state_db_fails_loud_not_silent }

@@ -375,7 +375,9 @@ infra:
     status: test
     note: "verify_network_faults drives export_survives_transient_latency_added_via_toxiproxy +
       export_fails_cleanly_when_toxiproxy_is_disabled_before_run +
-      gremlin_cdc_binlog_cut_mid_drain_fails_loud_then_recovers through the release binary;
+      gremlin_cdc_binlog_cut_mid_drain_fails_loud_then_recovers +
+      the postgres_ and mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once
+      pair through the release binary;
       probes toxiproxy :8474 itself and SKIPs loudly when down"
   - id: state_upgrade
     status: test
