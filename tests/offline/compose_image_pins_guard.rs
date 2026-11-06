@@ -245,11 +245,11 @@ fn all_images() -> Vec<(String, String)> {
 #[test]
 fn every_stand_image_is_pinned_by_digest() {
     let bad = problems(&all_images(), DIGEST_ONLY);
-    assert!(
-        bad.is_empty(),
-        "stand images off the digest pin:\n  {}\nPin as `tag@sha256:<index digest>` of the image the gate host runs; \
-         a repo that publishes no version tag goes in DIGEST_ONLY with a dated reason.",
-        bad.join("\n  ")
+    assert_eq!(
+        bad,
+        Vec::<String>::new(),
+        "stand images off the digest pin; pin as `tag@sha256:<index digest>` of the image the gate host runs, \
+         and list a repo that publishes no version tag in DIGEST_ONLY with a dated reason"
     );
 }
 
