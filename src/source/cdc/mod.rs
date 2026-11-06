@@ -3281,6 +3281,7 @@ mod tests {
                 nullable: true,
                 warnings: vec![],
                 delivery: crate::types::Delivery::Native,
+                refusal: None,
             })
             .collect();
         let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();

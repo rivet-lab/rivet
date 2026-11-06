@@ -184,7 +184,7 @@ the last whole dataset; a resume that wrote a part and then failed removes
 ## Validate behavior
 
 `rivet validate` is the standalone counterpart to `rivet run --validate`
-(see [docs/destinations/](destinations/) for the per-backend nuance).  It
+(see [docs/destinations/](destinations/) for the per-backend nuance).  For an export without `partition_by`, it
 **never queries the source**: only `HEAD` / `GET _SUCCESS` /
 `GET manifest.json` against the resolved destination.
 

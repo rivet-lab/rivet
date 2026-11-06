@@ -22,10 +22,9 @@
   replaying it leaves the base unchanged. The buffer is a transient table with
   `DATA_RETENTION_TIME_IN_DAYS = 0` (no time travel, no fail-safe). `base_rows_after` is the base's
   `COUNT(*)` (Snowflake answers it from metadata). `load.layout: log_view` keeps the changelog and its
-  current-state view; a `full` export is unchanged. **Behaviour changes, with the remedy:**
+  current-state view; a `full` export is unchanged. `load.layout: log_view` (changelog + current-state view) is deprecated: it keeps working unchanged in 0.33, including as the BigQuery default for incremental exports and CDC streams without a backfill; a later release moves these to base + buffer with a way to convert existing tables. New configs should use the base + buffer layout (add `cdc.backfill:` or `cdc.initial: snapshot` to a CDC stream). **Behaviour changes, with the remedy:**
   - a Snowflake incremental or CDC export that writes no `load.layout:` now gets the base and the buffer
-    where it got the changelog and view. No Snowflake table in use had the view layout, so nothing is
-    migrated; to keep the changelog and view for a config, write `load.layout: log_view` (section, export
+    where it got the changelog and view. To keep the changelog and view for a config, write `load.layout: log_view` (section, export
     or `load.tables.<t>`);
   - **a `mode: cdc` export on Snowflake that names neither `cdc.backfill:` nor `cdc.initial: snapshot`
     is refused at config load** with `RIVET_CONFIG_LOAD_BLOCK_INVALID` (exit 1, nothing runs), because
@@ -38,9 +37,12 @@
     used to append to the buffer behind the view and leave a buffer `rivet compact` refuses. The message
     names the two ways out: drop the view and `<table>__changes` and load again for a base, or write
     `load.layout: log_view` to stay on the view;
-  - `rivet compact` on a Snowflake table that writes `load.layout: log_view` says "a changelog + view
-    table (`load.layout: log_view` is written); nothing to merge" where it said it "never compacts"; scripts
-    that match the old words should match `nothing to merge`;
+  - `rivet compact` on a Snowflake table that writes `load.layout: log_view` now prints
+    ``compact [<table>]: skipped — a changelog + view table (`load.layout: log_view` is written); delete the key
+    to give it a base to merge into``, where 0.32.2 printed ``...never compacts; nothing to merge``. Its `--json`
+    result is `status: skipped` with `skip_reason: log_view`, where 0.32.2 gave `skip_reason:
+    warehouse_never_compacts`: scripts must key on the JSON `skip_reason`, which changed for these tables, not on
+    the text;
   - a Snowflake base loaded from a baseline file that carries no `__is_deleted` (a baseline staged under
     `load.layout: log_view`, then loaded under the default) now lands the flag FALSE on every row; read as
     NULL it hid every row from `WHERE NOT __is_deleted`. Nothing to migrate: no Snowflake base existed

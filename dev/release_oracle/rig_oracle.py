@@ -449,8 +449,15 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         )}
         if not query and not declared:
             raise LookupError(f"table {table} does not exist (no column in all_tab_columns)")
-        by_col = {c: renders.get(f"source:{n}") for c, n in declared.items()}
+        exact_ns = {c.upper() for c, t in (spec.get("overrides") or {}).items() if (t or "").lower() in ("timestamp_ns", "timestamp_tz_ns")}
+        by_col = {c: None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
         sql = query.rstrip().rstrip(";") if query else oracle_table_select(spec["url"], table, {c: e for c, e in by_col.items() if e})
+        if query and exact_ns:
+            from .value_diff import oracle_result
+
+            names = oracle_result(spec["url"], f"SELECT * FROM ({sql}) WHERE 1 = 0")[0]
+            proj = [f"TO_CHAR(\"{n}\", 'SYYYY-MM-DD HH24:MI:SS.FF9') AS \"{n}\"" if n.upper() in exact_ns else f'"{n}"' for n in names]
+            sql = f"SELECT {', '.join(proj)} FROM ({sql})"
         native = {c: "NUMBER (by value)" for c in _oracle_register(ora, spec["url"], sql, frozenset(c for c, t in declared.items() if t == "JSON"))}
         native.update(declared)
         rel = "ora_src"

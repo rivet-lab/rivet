@@ -3106,6 +3106,7 @@ mod tests {
             nullable: true,
             warnings: Vec::new(),
             delivery: crate::types::Delivery::Native,
+            refusal: None,
         };
         let mappings = [
             mapping("id", "bigint", RivetType::Int64),
