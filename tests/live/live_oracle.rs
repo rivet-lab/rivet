@@ -2218,7 +2218,7 @@ fn an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delive
     }
 }
 
-/// An `INTERVAL DAY TO SECOND(9)` column, unlike `TIMESTAMP(9)`, stays a warning in the type report and is not refused.
+/// An `INTERVAL DAY TO SECOND(9)` column, unlike `TIMESTAMP(9)`, stays a warning in the type report and the run it vouches for delivers.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
@@ -2227,13 +2227,20 @@ fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
         "ora_iv9",
         "id NUMBER(10) PRIMARY KEY, iv9 INTERVAL DAY TO SECOND(9), iv6 INTERVAL DAY TO SECOND(6)",
     );
-    let check = Rig::oracle_batch(t.name()).cli(&["check", "--type-report", "--json"]);
-    assert!(
-        check.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&check.stderr)
-    );
-    let d: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    ora_exec(&format!(
+        "INSERT INTO {} VALUES (1, INTERVAL '1 02:03:04.123456789' DAY TO SECOND(9), INTERVAL '1 02:03:04.123456' DAY TO SECOND(6))",
+        t.name()
+    ));
+    let out = tempfile::tempdir().unwrap();
+    let check = Rig::oracle_batch(t.name())
+        .dest_path(out.path().to_path_buf())
+        .run_after(
+            &["check", "--type-report", "--json"],
+            &[],
+            Pairing::GreenOnly,
+        );
+    assert!(check.green, "the report vouches for the run");
+    let d: serde_json::Value = serde_json::from_slice(&check.preflight.stdout).unwrap();
     let fidelity = |col: &str| {
         d["columns"]
             .as_array()
