@@ -14,6 +14,7 @@ mod load_lease;
 // Named so a caller can HOLD a lease across a scope it owns — the cleanup delete
 // needs one that outlives the call that took it. Every other holder infers the type.
 pub(crate) use cdc_snapshot_store::joins_capture;
+pub(crate) use cursor::population_of;
 pub use cursor::{Accepted, Landing, ProgressClaim, ProgressKey};
 pub use load_lease::{LoadLease, lock_wait_s, set_lock_wait};
 mod load_spec_store;

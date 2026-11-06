@@ -1,0 +1,11 @@
+--- a/src/source/mongo/mod.rs
++++ b/src/source/mongo/mod.rs
+@@ -893,8 +893,6 @@ impl Source for MongoSource {
+             Ok::<usize, anyhow::Error>(total)
+         })?;
+ 
+-        self.confirm_collection(coll_name)?;
+-
+         log::info!("total: {total} documents (collection '{coll_name}')");
+         Ok(())
+     }

@@ -42,7 +42,7 @@ services:
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -62,7 +62,7 @@ services:
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet_state
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_state_data:/var/lib/postgresql/data
     healthcheck:
@@ -87,7 +87,7 @@ services:
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5412:5432"
+      - "127.0.0.1:5412:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -104,7 +104,7 @@ services:
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5413:5432"
+      - "127.0.0.1:5413:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -121,7 +121,7 @@ services:
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5414:5432"
+      - "127.0.0.1:5414:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -138,7 +138,7 @@ services:
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5415:5432"
+      - "127.0.0.1:5415:5432"
     volumes:
       - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -164,7 +164,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     volumes:
       - ./dev/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -184,7 +184,7 @@ services:
     environment:
       <<: *mssql-env
     ports:
-      - "1433:1433"
+      - "127.0.0.1:1433:1433"
     healthcheck:
       # sqlcmd lives at tools18 on the 2022 image; `-C` trusts the self-signed
       # server cert the container generates on first boot.
@@ -210,7 +210,7 @@ services:
       APP_USER: rivet
       APP_USER_PASSWORD: rivet
     ports:
-      - "1521:1521"
+      - "127.0.0.1:1521:1521"
     volumes:
       - ./dev/oracle/init:/container-entrypoint-initdb.d:ro
     healthcheck:
@@ -228,7 +228,7 @@ services:
       ORACLE_PASSWORD: rivet
       RIVET_STAND_LATIN1_PDB: "1"
     ports:
-      - "1531:1521"
+      - "127.0.0.1:1531:1521"
     volumes:
       - ./dev/oracle/init:/container-entrypoint-initdb.d:ro
     healthcheck:
@@ -253,7 +253,7 @@ services:
       POSTGRES_PASSWORD: rivet
       POSTGRES_DB: rivet
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rivet"]
       interval: 5s
@@ -276,7 +276,7 @@ services:
       POSTGRES_DB: rivet
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - "5437:5432"
+      - "127.0.0.1:5437:5432"
     # trust auth covers `host all all` but NOT the `replication` pseudo-database;
     # this init hook adds the replication line so pg_basebackup can connect.
     volumes:
@@ -295,7 +295,7 @@ services:
     environment:
       PGPASSWORD: rivet
     ports:
-      - "5436:5432"
+      - "127.0.0.1:5436:5432"
     user: postgres
     entrypoint:
       - bash
@@ -342,7 +342,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3307:3306"
+      - "127.0.0.1:3307:3306"
     volumes:
       - ./dev/cdc/mysql-grant.sql:/docker-entrypoint-initdb.d/grant.sql
     healthcheck:
@@ -366,7 +366,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3317:3306"
+      - "127.0.0.1:3317:3306"
     volumes:
       - ./dev/cdc/mysql-grant.sql:/docker-entrypoint-initdb.d/grant.sql
     healthcheck:
@@ -383,7 +383,7 @@ services:
       <<: *mssql-env
       MSSQL_AGENT_ENABLED: "true"
     ports:
-      - "1434:1433"
+      - "127.0.0.1:1434:1433"
     healthcheck:
       test:
         [
@@ -406,7 +406,7 @@ services:
       MSSQL_AGENT_ENABLED: "true"
       MSSQL_ENABLE_HADR: "1"
     ports:
-      - "1440:1433"
+      - "127.0.0.1:1440:1433"
     healthcheck:
       test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
       interval: 10s
@@ -423,7 +423,7 @@ services:
       MSSQL_AGENT_ENABLED: "true"
       MSSQL_ENABLE_HADR: "1"
     ports:
-      - "1441:1433"
+      - "127.0.0.1:1441:1433"
     healthcheck:
       test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
       interval: 10s
@@ -456,7 +456,7 @@ services:
     environment:
       <<: *mssql-env
     ports:
-      - "1435:1433"
+      - "127.0.0.1:1435:1433"
     healthcheck:
       test:
         [
@@ -490,7 +490,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3308:3306"
+      - "127.0.0.1:3308:3306"
     volumes:
       - ./dev/cdc/replica-primary-init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -517,7 +517,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3309:3306"
+      - "127.0.0.1:3309:3306"
     volumes:
       - ./dev/cdc/replica-grant.sql:/docker-entrypoint-initdb.d/grant.sql
     healthcheck:
@@ -546,7 +546,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3310:3306"
+      - "127.0.0.1:3310:3306"
     volumes:
       - ./dev/cdc/replica-grant.sql:/docker-entrypoint-initdb.d/grant.sql
     healthcheck:
@@ -575,7 +575,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3357:3306"
+      - "127.0.0.1:3357:3306"
     volumes:
       # Dedicated 5.7 init that skips MySQL 8-only features (window functions
       # in `orders_sparse_for_export`). See dev/mysql/init_57.sql.
@@ -593,14 +593,14 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
 
   # GCS JSON API emulator (OpenDAL uses /storage/v1/... under this base URL).
   fake-gcs:
     image: *img-fake-gcs
     ports:
-      - "4443:4443"
+      - "127.0.0.1:4443:4443"
     command:
       - "-scheme"
       - "http"
@@ -623,7 +623,7 @@ services:
       - "10000"
       - "--skipApiVersionCheck"
     ports:
-      - "10000:10000"
+      - "127.0.0.1:10000:10000"
 
   # --- Monitoring stack (Postgres metrics under load) ---
   postgres-exporter:
@@ -633,7 +633,7 @@ services:
     environment:
       DATA_SOURCE_NAME: "postgresql://rivet:rivet@postgres:5432/rivet?sslmode=disable"
     ports:
-      - "9187:9187"
+      - "127.0.0.1:9187:9187"
     depends_on:
       - postgres
 
@@ -644,7 +644,7 @@ services:
     volumes:
       - ./dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - postgres-exporter
 
@@ -661,7 +661,7 @@ services:
       - ./dev/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./dev/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
 
@@ -682,7 +682,7 @@ services:
       AUTH_TYPE: plain
       LISTEN_PORT: 6432
     ports:
-      - "6432:6432"
+      - "127.0.0.1:6432:6432"
     depends_on:
       postgres:
         condition: service_healthy
@@ -709,7 +709,7 @@ services:
       AUTH_TYPE: plain
       LISTEN_PORT: 6433
     ports:
-      - "6433:6433"
+      - "127.0.0.1:6433:6433"
     depends_on:
       postgres-state:
         condition: service_healthy
@@ -735,8 +735,8 @@ services:
     profiles: ["pool"]
     ports:
       # 6033: client-facing MySQL protocol port; 6032: ProxySQL admin SQL.
-      - "6033:6033"
-      - "6032:6032"
+      - "127.0.0.1:6033:6033"
+      - "127.0.0.1:6032:6032"
     depends_on:
       mysql:
         condition: service_healthy
@@ -769,7 +769,7 @@ services:
       MYSQL_PASSWORD: rivet
       MYSQL_DATABASE: rivet
     ports:
-      - "3397:3306"
+      - "127.0.0.1:3397:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-privet"]
       interval: 5s
@@ -780,7 +780,7 @@ services:
     image: *img-proxysql
     profiles: ["tz"]
     ports:
-      - "6097:6033"
+      - "127.0.0.1:6097:6033"
     depends_on:
       mysql-tz:
         condition: service_healthy
@@ -795,16 +795,16 @@ services:
   toxiproxy:
     image: *img-toxiproxy
     ports:
-      - "8474:8474"   # HTTP API
-      - "15432:15432"  # proxied Postgres
-      - "13306:13306"  # proxied MySQL
-      - "13307:13307"  # proxied mysql-cdc (gremlin: binlog cut mid-drain)
-      - "14443:14443"  # proxied fake-gcs (gremlin: upload cut mid-part)
-      - "27019:27019"  # proxied Mongo (retry/faults: RST + latency mid-scan)
+      - "127.0.0.1:8474:8474"   # HTTP API
+      - "127.0.0.1:15432:15432"  # proxied Postgres
+      - "127.0.0.1:13306:13306"  # proxied MySQL
+      - "127.0.0.1:13307:13307"  # proxied mysql-cdc (gremlin: binlog cut mid-drain)
+      - "127.0.0.1:14443:14443"  # proxied fake-gcs (gremlin: upload cut mid-part)
+      - "127.0.0.1:27019:27019"  # proxied Mongo (retry/faults: RST + latency mid-scan)
       # proxied postgres-STATE (not the source): `rivet load --pool N` never touches
       # the source, so the only thing that can throttle or drop under it is the
       # LEDGER — every worker opens its own connection to it.
-      - "15433:15433"  # proxied postgres-state (load pool: ledger latency/outage)
+      - "127.0.0.1:15433:15433"  # proxied postgres-state (load pool: ledger latency/outage)
     depends_on:
       - postgres
       - mysql
@@ -873,9 +873,9 @@ services:
       # MinIO already publishes 9000 (S3) and 9001 (console), so the ClickHouse
       # native protocol is exposed on 9002 to avoid collisions. Tests use the
       # HTTP interface on 8123 anyway.
-      - "8123:8123"
-      - "9002:9000"
-      - "8443:8443"
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9002:9000"
+      - "127.0.0.1:8443:8443"
     volumes:
       - ./tests/.live-tmp:/work
       # Allow the `file()` table function to read Parquet from /work — by
@@ -907,7 +907,7 @@ services:
       CLICKHOUSE_PASSWORD: rivet
       CLICKHOUSE_DB: rivet
     ports:
-      - "8125:8123"
+      - "127.0.0.1:8125:8123"
     volumes:
       - ./dev/clickhouse/rivet_user.xml:/etc/clickhouse-server/users.d/rivet_user.xml:ro
     healthcheck:
@@ -923,7 +923,7 @@ services:
   mongo:
     image: *img-mongo
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     healthcheck:
       # `mongosh` on 5.0+, `mongo` on 4.x — try mongosh, fall back to mongo.
       test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'"]
@@ -939,7 +939,7 @@ services:
     image: *img-mongo
     command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
-      - "${MONGO_RS_HOST_PORT:-27018}:27017"
+      - "127.0.0.1:${MONGO_RS_HOST_PORT:-27018}:27017"
     healthcheck:
       # Healthy ONLY when this node is an elected PRIMARY, so `--wait` blocks until
       # `db.watch()` can actually run (else error 13436 NotPrimaryOrSecondary).
@@ -962,7 +962,7 @@ services:
     profiles: ["replica"]
     command: ["--replSet", "rs2", "--bind_ip_all"]
     ports:
-      - "27022:27017"
+      - "127.0.0.1:27022:27017"
     healthcheck:
       # `mongo` is the 4.4 fallback (no mongosh there), as on mongo-rs.
       test: ["CMD-SHELL", "mongosh --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"rs2\",members:[{_id:0,host:\"mongo-rs2-a:27017\",priority:1},{_id:1,host:\"mongo-rs2-b:27017\",priority:0}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)' || mongo --quiet --eval 'var st; try{st=rs.status()}catch(e){st={ok:0}}; if(!st.ok){try{rs.initiate({_id:\"rs2\",members:[{_id:0,host:\"mongo-rs2-a:27017\",priority:1},{_id:1,host:\"mongo-rs2-b:27017\",priority:0}]})}catch(e){}}; db.isMaster().ismaster?quit(0):quit(1)'"]
@@ -976,7 +976,7 @@ services:
     profiles: ["replica"]
     command: ["--replSet", "rs2", "--bind_ip_all"]
     ports:
-      - "27023:27017"
+      - "127.0.0.1:27023:27017"
     healthcheck:
       test: ["CMD-SHELL", "mongosh --quiet --eval 'db.isMaster().secondary?quit(0):quit(1)' || mongo --quiet --eval 'db.isMaster().secondary?quit(0):quit(1)'"]
       interval: 5s
@@ -991,7 +991,7 @@ services:
   mongo-auth:
     image: *img-mongo
     ports:
-      - "27020:27017"
+      - "127.0.0.1:27020:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: rootpass
@@ -1045,7 +1045,7 @@ services:
     profiles: ["shard"]
     command: ["mongos", "--configdb", "shardcfg/mongo-shard-cfg:27017", "--bind_ip_all"]
     ports:
-      - "27991:27017"
+      - "127.0.0.1:27991:27017"
     tmpfs: ["/data/db", "/data/configdb"]
     depends_on:
       mongo-shard-cfg: {condition: service_healthy}

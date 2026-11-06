@@ -1711,13 +1711,14 @@ fn walks_out_of_a_respelled_source(rig: &mut Rig) {
     );
 }
 
-/// RIVET_STATE_CURSOR_SOURCE_RESPELLED: an incremental export that ran once against `127.0.0.1`, then the same server spelled `localhost` and three more source rows.
+/// RIVET_STATE_CURSOR_SOURCE_RESPELLED: an incremental export that ran once against `127.0.0.1`, then the same server reached through a forwarder on another loopback port and three more source rows.
 fn cursor_source_respelled(engine: SqlEngine) {
     let (table, _guard) = seeded(engine, "sab_respell");
     let rig = Shape::Incremental.staged(engine, engine.rig(&table));
     rig.run_ok();
     engine.insert(&table, N + 1..=N + 3, 170, Some(10));
-    let mut rig = rig.source_url(&engine.url().replace("127.0.0.1", "localhost"));
+    let (_forward, url) = respelled_source(engine.url());
+    let mut rig = rig.source_url(&url);
     walks_out_of_a_respelled_source(&mut rig);
 }
 
@@ -1739,7 +1740,8 @@ fn cursor_source_respelled_mongo() {
     for id in N + 1..=N + 3 {
         mongo.upsert_set("respelled", id, "v", "new");
     }
-    let mut rig = rig.source_url(&url.replace("127.0.0.1", "localhost"));
+    let (_forward, respelled) = respelled_source(&url);
+    let mut rig = rig.source_url(&respelled);
     walks_out_of_a_respelled_source(&mut rig);
 }
 
@@ -2283,6 +2285,210 @@ fn collection_dropped_under_it() {
     recovers(&rig, &[]);
 }
 
+/// Documents of the collection a held read finds dropped.
+const HELD_READ_DOCS: i64 = 1_500;
+
+/// The MongoDB options of a resumable keyset export, whose progress is bound to the collection it was written for.
+const KEYSET_RESUME: &str = "page_size: 1000, resume: true";
+
+/// What happens to the collection while the proxy holds the reads.
+#[derive(Clone, Copy)]
+enum UnderHold {
+    Dropped,
+    DroppedAndCreatedAgain,
+}
+
+/// A MongoDB export of `HELD_READ_DOCS` documents delivered once, then run again while a wire proxy holds `held` reads `pick` accepts and the collection is dropped, or dropped and created again with the same documents, under them: the second run is refused by code and leaves the first run's marker and manifests as they were, and with the collection put back a run delivers the source (a resumable keyset export first needs `rivet state reset`, its stored cursor being another stream's).
+fn collection_changed_under_a_held_read(
+    opts: Option<&str>,
+    parallel: Option<usize>,
+    pick: fn(&mongodb::bson::Document) -> bool,
+    held: usize,
+    under: UnderHold,
+) {
+    require_alive(LiveService::Mongo);
+    let db = unique_name("sab_ddl_held");
+    let _guard = MongoDbGuard {
+        port: MONGO_PORT,
+        db: db.clone(),
+    };
+    let m = MongoTest::connect(MONGO_PORT, &db);
+    m.seed_int_id("t", HELD_READ_DOCS);
+    let hold = WireHold::holding(MONGO_PORT, pick);
+    let mut rig = Rig::mongo_batch("t").source_url(&MongoTest::url(hold.port(), &db));
+    if let Some(opts) = opts {
+        rig = rig.mongo(opts);
+    }
+    if let Some(workers) = parallel {
+        rig = rig.export_line(&format!("parallel: {workers}"));
+    }
+    let rig = stopped_mid_run(rig, &[]);
+    rig.run_ok();
+    let delivered = markers_and_manifests(&rig);
+    assert!(
+        !delivered.is_empty(),
+        "fixture: the first run left no marker or manifest"
+    );
+    hold.arm();
+    let met = rig.beside_a_live_run_over_a_source_taken(
+        &[],
+        |_| hold.holds(held),
+        |_| {
+            match under {
+                UnderHold::Dropped => m.drop_collection("t"),
+                UnderHold::DroppedAndCreatedAgain => m.seed_int_id("t", HELD_READ_DOCS),
+            }
+            hold.release();
+        },
+        |_, ()| m.seed_int_id("t", HELD_READ_DOCS),
+    );
+    let (run, ()) = met.answered_while_alive();
+    assert_refused(
+        &run,
+        Refused::by_code("RIVET_SOURCE_COLLECTION_NOT_FOUND", 1),
+    );
+    let named = match under {
+        UnderHold::Dropped => "was dropped while the run read it",
+        UnderHold::DroppedAndCreatedAgain => "was dropped and created again while the run read it",
+    };
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains(named),
+        "the refusal names the change ({named}):\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        markers_and_manifests(&rig) == delivered,
+        "the run whose collection was dropped before a read changed the marker or manifests of the run before it"
+    );
+    m.seed_int_id("t", HELD_READ_DOCS);
+    match opts {
+        Some(KEYSET_RESUME) => refused_as_another_stream_then_reset_recovers(&rig),
+        _ => recovers(&rig, &[]),
+    }
+}
+
+/// A run over a collection put back after the one a stored keyset cursor was written for is refused `RIVET_STATE_CURSOR_STREAM_MISMATCH`, every time, and after `rivet state reset` a run delivers the source.
+fn refused_as_another_stream_then_reset_recovers(rig: &Rig) {
+    for _ in 0..2 {
+        assert_refused(
+            &rig.run(),
+            Refused::by_code("RIVET_STATE_CURSOR_STREAM_MISMATCH", 5),
+        );
+    }
+    state(rig, "reset", rig.export_name());
+    recovers(rig, &[]);
+}
+
+/// The `_id` of every document the rig's manifests declare, as text, sorted.
+fn declared_text_ids(rig: &Rig) -> Vec<String> {
+    let mut ids: Vec<String> = rig
+        .read_declared_parts()
+        .iter()
+        .flat_map(|b| {
+            let at = b.schema().index_of("_id").expect("an _id column");
+            let text = arrow::compute::cast(b.column(at), &arrow::datatypes::DataType::Utf8)
+                .expect("an _id column casts to text");
+            let text = text
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .expect("text");
+            text.iter()
+                .flatten()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// First `_id` of the documents a collection holds once it is created again with ids the old one never held.
+const OTHER_FIRST_ID: i64 = 1_000_000;
+
+/// Documents of the collection created again with other ids.
+const OTHER_DOCS: i64 = 10;
+
+/// A resumable keyset MongoDB export refused after its first page because its collection was dropped and created again with other ids: the next run delivers exactly the new collection, or is refused by code until the operator's remedy, after which a run delivers exactly the new collection.
+fn collection_created_again_with_other_ids_after_a_refused_resume() {
+    require_alive(LiveService::Mongo);
+    let db = unique_name("sab_ddl_other");
+    let _guard = MongoDbGuard {
+        port: MONGO_PORT,
+        db: db.clone(),
+    };
+    let m = MongoTest::connect(MONGO_PORT, &db);
+    m.seed_int_id("t", HELD_READ_DOCS);
+    let hold = WireHold::holding(MONGO_PORT, a_later_keyset_page);
+    let rig = Rig::mongo_batch("t")
+        .source_url(&MongoTest::url(hold.port(), &db))
+        .mongo(KEYSET_RESUME);
+    let rig = stopped_mid_run(rig, &[Leftover::ResumePoint]);
+    hold.arm();
+    let met = rig.beside_a_live_run_over_a_source_taken(
+        &[],
+        |_| hold.holds(1),
+        |_| {
+            m.seed_int_id_from("t", OTHER_FIRST_ID, OTHER_DOCS);
+            hold.release();
+        },
+        |_, ()| (),
+    );
+    let (run, ()) = met.answered_while_alive();
+    assert_refused(
+        &run,
+        Refused::by_code("RIVET_SOURCE_COLLECTION_NOT_FOUND", 1),
+    );
+    let new_ids: Vec<String> = {
+        let mut ids: Vec<String> = (OTHER_FIRST_ID..OTHER_FIRST_ID + OTHER_DOCS)
+            .map(|i| i.to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    match rig.delivers_or_refuses(&["run"], &[]) {
+        Survived::Delivered => {}
+        Survived::Refused(said) => {
+            assert!(
+                said.contains("RIVET_STATE_CURSOR_STREAM_MISMATCH"),
+                "the run after the refusal is refused by the code of the stored progress:
+{said}"
+            );
+            state(&rig, "reset", rig.export_name());
+            ok(rig.run());
+        }
+    }
+    let delivered = declared_text_ids(&rig);
+    assert!(
+        delivered == new_ids,
+        "the run after the refusal exited 0 over a manifest declaring {} document(s) ({} .. {}) for a collection of {} created again as {} .. {}",
+        delivered.len(),
+        delivered.first().map_or("-", String::as_str),
+        delivered.last().map_or("-", String::as_str),
+        OTHER_DOCS,
+        OTHER_FIRST_ID,
+        OTHER_FIRST_ID + OTHER_DOCS - 1
+    );
+    ok(rig.cli(&["validate"]));
+}
+
+/// Every `_SUCCESS` marker and manifest under the rig's destination with its bytes.
+fn markers_and_manifests(rig: &Rig) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut found: Vec<_> = files_under(&rig.out_dir())
+        .into_iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "_SUCCESS" || n.starts_with("manifest"))
+        })
+        .map(|p| {
+            let bytes = std::fs::read(&p).expect("read a marker or manifest");
+            (p, bytes)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// The collection of a MongoDB export dropped only after its run has delivered and exited 0: the run is graded against the collection put back, never against the one that is gone.
 fn collection_dropped_after_the_run_ended() {
     const DOCS: i64 = 2_000;
@@ -2291,11 +2497,9 @@ fn collection_dropped_after_the_run_ended() {
     let met = rig.beside_a_live_run_over_a_source_taken(
         &[],
         |_| true,
-        |_| {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            m.drop_collection("t");
-        },
+        |_| (),
         |_, ()| {
+            m.drop_collection("t");
             m.seed_int_id("t", DOCS);
             restored.set(true);
         },
@@ -5101,7 +5305,7 @@ fn plan_and_apply_under_another_host_spelling_are_refused_postgres() {
         .staged(engine, engine.rig(&table))
         .source_url_env("DATABASE_URL");
     let spelled = engine.url().to_string();
-    let respelled = spelled.replace("127.0.0.1", "localhost");
+    let (_forward, respelled) = respelled_source(&spelled);
     let plan = rig.out_dir().with_file_name("respelled-plan.json");
     let early = rig.plan_json_env(&plan, &[], &[("DATABASE_URL", &respelled)]);
     assert!(
@@ -5128,7 +5332,7 @@ fn plan_and_apply_under_another_host_spelling_are_refused_postgres() {
     );
 }
 
-/// Upgrade: a cursor the previous release wrote under `127.0.0.1` is refused by this build under `localhost`, and `state accept` continues it; the cell skips without `RIVET_PREV_RELEASE_BIN`.
+/// Upgrade: a cursor the previous release wrote under `127.0.0.1` is refused by this build under another loopback port of the same server, and `state accept` continues it; the cell skips without `RIVET_PREV_RELEASE_BIN`.
 #[test]
 #[ignore = "live: requires docker compose postgres and RIVET_PREV_RELEASE_BIN"]
 fn a_cursor_written_by_the_previous_release_is_refused_under_another_host_spelling_and_walked_out_postgres()
@@ -5146,7 +5350,8 @@ fn a_cursor_written_by_the_previous_release_is_refused_under_another_host_spelli
     old.run_ok();
     ok(rig.cli(&["state", "show"]));
     engine.insert(&table, N + 1..=N + 3, 170, Some(10));
-    let mut rig = rig.source_url(&engine.url().replace("127.0.0.1", "localhost"));
+    let (_forward, url) = respelled_source(engine.url());
+    let mut rig = rig.source_url(&url);
     walks_out_of_a_respelled_source(&mut rig);
 }
 
@@ -5713,6 +5918,90 @@ fn a_table_dropped_under_a_live_run_delivers_or_fails_loudly_oracle() {
 #[ignore = "live: requires docker compose mongo"]
 fn a_table_dropped_under_a_live_run_delivers_or_fails_loudly_mongo() {
     collection_dropped_under_it();
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_dropped_before_a_keyset_page_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        Some(KEYSET_RESUME),
+        None,
+        a_later_keyset_page,
+        1,
+        UnderHold::Dropped,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_dropped_before_a_full_scan_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(None, None, the_full_scan, 1, UnderHold::Dropped);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        Some("page_size: 1000"),
+        Some(4),
+        an_id_range_worker,
+        4,
+        UnderHold::Dropped,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        Some(KEYSET_RESUME),
+        None,
+        a_later_keyset_page,
+        1,
+        UnderHold::DroppedAndCreatedAgain,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_with_other_ids_after_a_refused_resume_is_read_whole_mongo() {
+    collection_created_again_with_other_ids_after_a_refused_resume();
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_under_a_full_scan_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        None,
+        None,
+        the_full_scan,
+        1,
+        UnderHold::DroppedAndCreatedAgain,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_under_an_id_range_read_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        Some("page_size: 1000"),
+        Some(4),
+        an_id_range_worker,
+        4,
+        UnderHold::DroppedAndCreatedAgain,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn a_collection_created_again_before_the_workers_connect_is_refused_by_code_mongo() {
+    collection_changed_under_a_held_read(
+        Some("page_size: 1000"),
+        Some(4),
+        the_id_sample,
+        1,
+        UnderHold::DroppedAndCreatedAgain,
+    );
 }
 
 #[test]

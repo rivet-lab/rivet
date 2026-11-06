@@ -109,7 +109,7 @@ NO_CHECK: dict[str, str] = {  # ratchet-pin: tests-without-a-check (review 2027-
     "tests/offline/state_compat.rs::random_bytes_as_state_db_produces_error_not_panic": "totality",
 }  # ratchet-pin: end
 
-WEAK_ONLY_CEILING = 190  # ratchet-pin: tests-with-only-weak-assertions (review 2027-02-01)
+WEAK_ONLY_CEILING = 188  # ratchet-pin: tests-with-only-weak-assertions (review 2027-02-01)
 
 #: Fewer tests than this means the scan stopped matching, not that the tree shrank.
 TESTS_FLOOR = 6000  # ratchet-pin: test-checks-scan-sees-the-tree (review 2027-02-01) min

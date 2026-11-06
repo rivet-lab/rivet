@@ -175,6 +175,15 @@ impl MongoTest {
         self.insert_many(name, docs);
     }
 
+    /// Fresh collection of `n` docs `{_id: first..first+n, v: "row<i>"}` (integer `_id`).
+    pub fn seed_int_id_from(&self, name: &str, first: i64, n: i64) {
+        self.drop_collection(name);
+        let docs = (first..first + n)
+            .map(|i| doc! { "_id": i, "v": format!("row{i}") })
+            .collect();
+        self.insert_many(name, docs);
+    }
+
     /// Fresh collection of `n` docs with string `_id` `sku-00001`…
     pub fn seed_string_id(&self, name: &str, n: i64) {
         self.drop_collection(name);
