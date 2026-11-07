@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import shutil
 import subprocess
@@ -28,19 +29,20 @@ GATE_WORKTREE = Path.home() / "wt" / "gate"
 STAND_WORKTREE = Path.home() / "wt" / "stand"
 GATE_LOGS = Path.home() / "wt" / "gate-logs"
 GATE_MODULE = "dev.release_oracle"
-GATE_TARGETS = ("release-oracle-full", "release-oracle-island")
+GATE_TARGETS = ("release-oracle", "release-oracle-full", "release-oracle-island")
+LAUNCHER_PATTERN = "gate-*-launch.py"
 BUSY_EXIT = 3
 
 
 def is_gate(argv: list[str]) -> bool:
-    """Whether this command line is the release gate: its main module or the make target that starts it, never a self-test."""
+    """Whether this command line is the release gate: its main module, the make target that starts it, or its launcher script; never a self-test."""
     if not argv or "--self-test" in argv:
         return False
     prog = Path(argv[0]).name.lower()
-    if prog == "make":
+    if prog in ("make", "gmake"):
         return any(t in argv for t in GATE_TARGETS)
     if prog.startswith(("python", "uv")):
-        return any(a == "-m" and b == GATE_MODULE for a, b in zip(argv, argv[1:]))
+        return any(a == "-m" and b == GATE_MODULE for a, b in zip(argv, argv[1:])) or any(fnmatch.fnmatch(Path(a).name, LAUNCHER_PATTERN) for a in argv[1:])
     return False
 
 
@@ -150,6 +152,13 @@ def self_test() -> int:
     framework = "/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -m dev.release_oracle"
     assert is_gate(framework.split()), "macOS framework python shows as Python.app/Contents/MacOS/Python"
     assert gate_pids([(1, gate), (2, "grep dev.release_oracle"), (3, "make release-oracle-full")]) == [1, 3]
+    launcher = "python3 /h/wt/gate-logs/launchers/gate-ab12cd34-launch.py"
+    assert is_gate(launcher.split()) and is_gate(("uv run " + launcher).split()) and not is_gate((launcher + " --self-test").split()), "the launcher process lives for the whole run"
+    assert not is_gate("python3 /h/wt/gate-logs/launchers/gate-launch.py x".split()) and not is_gate("vim /h/gate-ab12cd34-launch.py".split()) and not is_gate("python3 gate-ab-launch.pyc".split())
+    assert is_gate("make release-oracle".split()) and is_gate("gmake release-oracle-full".split()) and is_gate("/opt/homebrew/bin/gmake release-oracle-island".split())
+    assert not is_gate("make release-oracle-x".split()) and not is_gate("gmake sweep-test-db sweep-test-cloud".split())
+    phases = [(5, "uv sync --frozen"), (6, "make sweep-test-db sweep-test-cloud"), (7, launcher)]
+    assert gate_pids(phases) == [7], "uv sync and the sweeps between phases are covered by the launcher process alone"
     assert protection("/h/wt/gate/target/seeded/w1/tree", Path("/h/wt/gate"), Path("/h/wt/stand")) == "the gate worktree"
     assert protection("/h/wt/stand", Path("/h/wt/gate"), Path("/h/wt/stand")) == "the stand worktree"
     assert protection("/h/wt/gate2", Path("/h/wt/gate"), Path("/h/wt/stand")) == "" and protection("/h/wt/other", Path("/h/wt/gate"), Path("/h/wt/stand")) == ""

@@ -121,7 +121,7 @@ def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: Callable
         return verdict(True, f"already graded green at {sha}: {log}")
     why = devbox_load.wait_gate_quiet(snap, quiet_load, 0.0, poll_s)
     if why:
-        return busy(why)
+        return verdict(False, f"refused: {why}; it appeared after the wait and nothing was moved; run the gate again")
     git(wt, "checkout", "-q", "--detach", "origin/main")
     moved = f"moved {wt} from {head} to {sha}; recreate the rivet-duckdb container (uv.lock pins may have changed), as after a manual checkout\n" if head != sha else ""
     logdir.mkdir(parents=True, exist_ok=True)
@@ -517,7 +517,7 @@ def gate_selftest(t: Path, snap: dict) -> None:
     subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c3"], check=True)
     calls = iter(range(99))
     rc, out = go(ok, lambda: {**snap, "gates": [7] if next(calls) else []}, switch=True)
-    assert rc != 0 and "another release gate" in out and "wait for it" in out and git(wt, "rev-parse", "--short=8", "HEAD") == head, f"a gate that starts after the first check stops the move: {out}"
+    assert rc != 0 and "another release gate" in out and "after the wait" in out and git(wt, "rev-parse", "--short=8", "HEAD") == head, f"a gate that starts after the first check stops the move: {out}"
     rc, out = go(ok, switch=True)
     assert rc == 0 and git(wt, "rev-parse", "--short=8", "HEAD") != head, out
     git(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "candidate")
