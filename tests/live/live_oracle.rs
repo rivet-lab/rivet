@@ -11,6 +11,21 @@ use arrow::datatypes::{DataType, TimeUnit};
 
 use crate::common::*;
 
+/// The `rivet.text_form` label on a column of the first part under `dir`.
+fn parquet_text_form(dir: &Path, col: &str) -> Option<String> {
+    let p = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "parquet"))
+        .expect("a parquet part");
+    let bytes = bytes::Bytes::from(std::fs::read(p).unwrap());
+    let builder =
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    let field = builder.schema().field_with_name(col).unwrap().clone();
+    field.metadata().get("rivet.text_form").cloned()
+}
+
 /// One Parquet column, every file in `dir`, keyed by the `ID` column, rendered canonically.
 fn parquet_cells(dir: &Path, col: &str) -> BTreeMap<i64, Option<String>> {
     let mut out = BTreeMap::new();
@@ -702,6 +717,13 @@ fn edge_oracle_types_export_losslessly() {
     assert_eq!(ids[&1].as_deref(), Some("P1DT2H3M4.000005S"));
     assert_eq!(ids[&2].as_deref(), Some("PT0S"));
     assert_eq!(ids[&3], None);
+    for col in ["IYM", "IDS"] {
+        assert_eq!(
+            parquet_text_form(out.path(), col).as_deref(),
+            Some("iso8601_duration"),
+            "{col} carries its text-form label"
+        );
+    }
     // DuckDB renders the calendar date (with its own BC marker); Oracle renders the same.
     let want_d: BTreeSet<String> = ora_text_rows(&format!(
         "SELECT TO_CHAR(d, 'YYYY-MM-DD') || CASE WHEN d < DATE '0001-01-01' THEN ' (BC)' END FROM {}",
@@ -2316,7 +2338,7 @@ fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
             .clone()
     };
     assert_eq!(fidelity("IV9"), "lossy");
-    assert_eq!(fidelity("IV6"), "compatible");
+    assert_eq!(fidelity("IV6"), "logical_string");
 }
 
 /// The `columns:` override types beyond the autodetected ones, one column each.

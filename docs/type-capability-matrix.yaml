@@ -185,7 +185,7 @@ engines:
       - {native_type: "DOUBLE PRECISION", sample: ["2.5", "1.5"], delivery: "Float64", clickhouse: {type: "Nullable(Float64)"}}
       - {native_type: "DATE", sample: ["'2024-03-15'"], delivery: "Date32", clickhouse: {type: "Nullable(Date32)"}}
       - {native_type: "TIME", sample: ["'14:30:00.123456'"], delivery: "Time64(µs)", clickhouse: {type: "Nullable(Decimal(18, 6))"}}
-      - {native_type: "INTERVAL", sample: ["INTERVAL '1 year 2 mons 3 days'"], delivery: "iso8601_duration", today_delivery: "Utf8", known_defect: "ISO 8601 text without the rivet.text_form label (ADR-0038 CP2/CP5, PostgreSQL engine step)", clickhouse: {type: "Nullable(String)", today: "Nullable(String)"}}
+      - {native_type: "INTERVAL", sample: ["INTERVAL '1 year 2 mons 3 days'"], delivery: "iso8601_duration", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "rivet_status", sample: ["'active'"], delivery: "Utf8", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "rivet_status_typed", sample: ["'off'"], delivery: "Utf8", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "JSON", sample: ["'{\"k\": [1, 2]}'::json"], delivery: "arrow.json", clickhouse: {type: "Nullable(String)"}}
