@@ -241,3 +241,65 @@ pub fn toxiproxy_guard() -> ToxiproxyGuard {
     }
     ToxiproxyGuard { file }
 }
+
+/// Run `rig` with a byte-budget cut armed on `proxy`, lift the cut once the first retry starts, and grade exactly-once delivery.
+pub fn assert_midrow_cut_retried_and_delivered_exactly_once(
+    rig: &super::Rig,
+    export: &str,
+    proxy: &str,
+    cut_after_bytes: u64,
+    rows: i64,
+    pad_bytes: usize,
+    out_container: &str,
+) {
+    use std::time::{Duration, Instant};
+
+    toxi_add_limit_data(proxy, cut_after_bytes, "downstream");
+    let mut run = rig.spawn_args_env(&["--export", export], &[]);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if run.stderr_so_far().contains("retry 1/") {
+            toxi_reset_toxics(proxy);
+            break;
+        }
+        if run.try_wait().expect("poll the run").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out_run = run.wait_with_output().expect("reap the run");
+    toxi_reset_toxics(proxy);
+
+    let stderr = String::from_utf8_lossy(&out_run.stderr);
+    assert!(
+        out_run.status.success(),
+        "a connection cut mid-row must be retried and the run must exit 0; stderr:\n{stderr}"
+    );
+    let state = super::StateDb::next_to_config(&rig.config_path());
+    let metrics = state.metrics_row(&state.latest_run_id(export));
+    assert!(
+        metrics.retries.unwrap_or(0) >= 1,
+        "export_metrics.retries must record the retry; got {:?}; stderr:\n{stderr}",
+        metrics.retries
+    );
+    super::duckdb_declared_assert_complete(
+        out_container,
+        "id",
+        rows,
+        "a retry across a connection cut in the middle of a row",
+    );
+    assert_eq!(
+        super::duckdb_declared_distinct_set(out_container, "id"),
+        (1..=rows).map(|i| i.to_string()).collect(),
+        "the delivered id set must equal the source id set"
+    );
+    let intact = super::duckdb_run_sql_json(&format!(
+        "SELECT count(*) FROM read_parquet('{out_container}/**/*.parquet') \
+         WHERE length(pad) = {pad_bytes}"
+    ));
+    assert_eq!(
+        intact["rows"][0][0].as_str(),
+        Some(rows.to_string().as_str()),
+        "every delivered pad must be whole"
+    );
+}

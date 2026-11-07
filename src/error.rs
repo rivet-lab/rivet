@@ -1055,6 +1055,12 @@ pub mod codes {
         Retry::ByCause,
         "apply the setup statement the message names, then re-run (docs/reference/cdc.md)",
     );
+    /// A CDC export stopped on its first run and a part of the anchor that run created could not be released.
+    pub const SOURCE_CDC_ANCHOR_NOT_RELEASED: Code = environment(
+        "RIVET_SOURCE_CDC_ANCHOR_NOT_RELEASED",
+        Retry::ByCause,
+        "remove the slot, checkpoint file or `export_state` row the warning names, or leave it for the next run of the export to reuse",
+    );
     /// A source value the column's Arrow type has no faithful reading for (PG `infinity`, `24:00:00`).
     pub const SOURCE_VALUE_UNREPRESENTABLE: Code = refusal(
         "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
@@ -1876,6 +1882,7 @@ pub mod codes {
         SOURCE_CDC_UNDECODABLE,
         SOURCE_CDC_CELL_UNSUPPORTED,
         SOURCE_CDC_PREREQUISITE,
+        SOURCE_CDC_ANCHOR_NOT_RELEASED,
         SOURCE_VALUE_UNREPRESENTABLE,
         SOURCE_PROBE_UNREADABLE,
         SOURCE_COLUMNS_CHANGED_UNDER_READ,
