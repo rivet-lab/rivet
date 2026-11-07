@@ -1251,7 +1251,7 @@ mod tests {
             s.claim(repointed).is_ok(),
             "a chunk run is compared by its plan hash, not by the stream"
         );
-        s.reset_chunk_checkpoint("orders").unwrap();
+        s.reset_chunk_checkpoint("orders", "pg/db").unwrap();
         assert!(s.claim(as_mode("incremental", "pg/db")).is_ok());
 
         s.open_chunk_run(&chunked, "run_d", "h", 3, &[(1, 10)])
@@ -1279,7 +1279,7 @@ mod tests {
                 "(`chunk_checkpoint: true`)",
                 "`rivet state reset-chunks -c <config> --export orders` abandons it",
                 |s| {
-                    s.reset_chunk_checkpoint("orders").unwrap();
+                    s.reset_chunk_checkpoint("orders", "pg/db").unwrap();
                 },
             ),
             (
@@ -1439,7 +1439,7 @@ mod tests {
                 "cycle {cycle}: a refusal changes nothing"
             );
         }
-        s.reset_chunk_checkpoint("orders").unwrap();
+        s.reset_chunk_checkpoint("orders", "pg/a").unwrap();
         assert!(s.claim(chunked.clone()).is_ok(), "the remedy lifts it");
 
         s.open_chunk_run(&chunked, "run_s", "h", 3, &[(1, 10)])
@@ -1541,7 +1541,7 @@ mod tests {
                     "{other} cycle {cycle}: a refusal changes nothing"
                 );
             }
-            s.reset_chunk_checkpoint("orders").unwrap();
+            s.reset_chunk_checkpoint("orders", "pg/a").unwrap();
             assert_eq!(a.chunk_run().unwrap(), None, "{other}: the remedy lifts it");
         }
     }
@@ -3287,7 +3287,7 @@ mod tests {
         );
         s.reset("orders", "pg/db").unwrap();
         refusal(s.claim(writes("chunked", "csv")), OWNER);
-        s.reset_chunk_checkpoint("orders").unwrap();
+        s.reset_chunk_checkpoint("orders", "pg/db").unwrap();
         assert!(s.claim(writes("chunked", "csv")).is_ok(), "abandoned");
 
         let k = store();

@@ -128,6 +128,15 @@ impl Scenario {
         [("RIVET_STATE_URL", self.url.as_str())]
     }
 
+    /// The tasks the state holds for this export's chunk runs.
+    fn chunk_tasks(&self) -> i64 {
+        self.count(&format!(
+            "SELECT COUNT(*) FROM chunk_task WHERE run_id IN \
+             (SELECT run_id FROM chunk_run WHERE export_name = '{}')",
+            self.rig.export_name()
+        ))
+    }
+
     fn count(&self, sql: &str) -> i64 {
         self.state.count(&self.rig.config_path(), sql)
     }
@@ -142,7 +151,14 @@ impl Scenario {
 
     /// Start the run and return once it is mid-export: its ledger row is `running` and a part is on disk.
     fn spawn_mid_run(&self) -> Spawned<'_> {
-        let mut owner = self.rig.spawn_args_env(&[], &self.env());
+        self.spawn_mid_run_with(&[])
+    }
+
+    /// [`Self::spawn_mid_run`] with `extra` beside the state URL in the run's environment.
+    fn spawn_mid_run_with(&self, extra: &[(&str, &str)]) -> Spawned<'_> {
+        let mut envs = self.env().to_vec();
+        envs.extend_from_slice(extra);
+        let mut owner = self.rig.spawn_args_env(&[], &envs);
         let t0 = std::time::Instant::now();
         let running = format!(
             "SELECT COUNT(*) FROM run_status WHERE status = 'running' AND export_name = '{}'",
@@ -317,6 +333,97 @@ fn a_reset_is_refused_while_the_run_is_alive_and_works_after_it(
     s.assert_every_row_delivered_once("after the refused resets");
 
     s.assert_uncontested_resets_answer_as_before(runs_before);
+}
+
+const SOURCE_VAR: &str = "RIVET_RESET_CHUNKS_SOURCE_URL";
+
+/// While a checkpointed run is alive, `reset-chunks` (both forms) from a config of the same export name on another source, or from the run's own config with its source unresolved, removes nothing and the run delivers every row.
+fn a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+    engine: SqlEngine,
+    other_source: bool,
+    state: State,
+) {
+    let mut s = Scenario::new(engine, RANGE, state);
+    s.rig = s.rig.source_url_env(SOURCE_VAR);
+    let export = s.rig.export_name().to_string();
+    let mut owner = s.spawn_mid_run_with(&[(SOURCE_VAR, engine.url())]);
+    let (runs, tasks) = (s.chunk_runs(), s.chunk_tasks());
+    assert_eq!(runs, 1, "fixture: a range run keeps one chunk run");
+    assert!(tasks > 1, "fixture: the run holds its chunk tasks");
+
+    let (server, _) = engine.url().rsplit_once('/').expect("a database path");
+    let elsewhere = engine
+        .rig(&s.table)
+        .export_named(&export)
+        .mode("chunked")
+        .export_line(RANGE)
+        .export_line("chunk_size: 20")
+        .export_line("chunk_checkpoint: true")
+        .source_url(&format!("{server}/rivet_other_source"));
+    let reset = |args: &[&str]| {
+        let mut argv = vec!["state", "reset-chunks"];
+        argv.extend_from_slice(args);
+        let out = match other_source {
+            true => elsewhere.cli_env(&argv, &s.env()),
+            false => s.rig.cli_env(&argv, &s.env()),
+        };
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.code(), said)
+    };
+
+    for args in [
+        vec!["--export", export.as_str()],
+        vec!["--stuck-checkpoints"],
+    ] {
+        let (code, said) = reset(&args);
+        assert!(
+            owner.try_wait().unwrap().is_none(),
+            "fixture: the run must still be alive when `reset-chunks {args:?}` answers"
+        );
+        match other_source {
+            true => {
+                assert_eq!(
+                    code,
+                    Some(0),
+                    "reset-chunks {args:?} on another source:\n{said}"
+                );
+                assert!(
+                    !said.contains(&format!("{runs} chunk run record(s)")),
+                    "reset-chunks {args:?} on another source reports a removal:\n{said}"
+                );
+            }
+            false => {
+                assert_eq!(
+                    code,
+                    Some(1),
+                    "reset-chunks {args:?}, source unresolved:\n{said}"
+                );
+                assert!(
+                    said.contains("[RIVET_CONFIG_SECRET_UNSET]")
+                        && said.contains("the source did not resolve — nothing was removed"),
+                    "reset-chunks {args:?}, source unresolved:\n{said}"
+                );
+            }
+        }
+        assert_eq!(
+            (s.chunk_runs(), s.chunk_tasks()),
+            (runs, tasks),
+            "reset-chunks {args:?} removed the checkpoint of a live run it does not own"
+        );
+    }
+
+    let out = owner.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "the run whose checkpoint a reset of another source (or of an unresolved one) must leave alone:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(s.rig.out_dir().join("_SUCCESS").exists());
+    s.assert_every_row_delivered_once("after the resets that did not name its source");
 }
 
 /// A SIGKILLed holder does not keep the lease: the reset works at once, and the next run delivers every row.
@@ -698,4 +805,86 @@ fn pg_state_a_killed_range_run_does_not_block_the_reset() {
 #[ignore = "live: requires postgres + postgres-state"]
 fn pg_state_a_range_run_whose_checkpoint_rows_vanish_fails_loudly() {
     a_run_whose_checkpoint_rows_vanish_fails_loudly(SqlEngine::Pg, State::postgres("reset_vanish"));
+}
+
+#[test]
+#[ignore = "live: requires postgres + postgres-state"]
+fn pg_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint() {
+    a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+        SqlEngine::Pg,
+        true,
+        State::postgres("reset_other"),
+    );
+}
+
+#[test]
+#[ignore = "live: requires postgres + postgres-state"]
+fn pg_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint() {
+    a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+        SqlEngine::Pg,
+        false,
+        State::postgres("reset_unres"),
+    );
+}
+
+#[test]
+#[ignore = "live: requires mysql + postgres-state"]
+fn mysql_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint() {
+    a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+        SqlEngine::Mysql,
+        true,
+        State::postgres("reset_other_mysql"),
+    );
+}
+
+#[test]
+#[ignore = "live: requires mysql + postgres-state"]
+fn mysql_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint() {
+    a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+        SqlEngine::Mysql,
+        false,
+        State::postgres("reset_unres_mysql"),
+    );
+}
+
+#[test]
+#[ignore = "live: requires mssql + postgres-state"]
+fn mssql_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint() {
+    a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+        SqlEngine::Mssql,
+        true,
+        State::postgres("reset_other_mssql"),
+    );
+}
+
+#[test]
+#[ignore = "live: requires mssql + postgres-state"]
+fn mssql_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint() {
+    a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+        SqlEngine::Mssql,
+        false,
+        State::postgres("reset_unres_mssql"),
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires oracle + postgres-state"]
+fn oracle_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint() {
+    a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+        SqlEngine::Oracle,
+        true,
+        State::postgres("reset_other_oracle"),
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires oracle + postgres-state"]
+fn oracle_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint() {
+    a_reset_that_does_not_name_the_runs_source_leaves_its_checkpoint(
+        SqlEngine::Oracle,
+        false,
+        State::postgres("reset_unres_oracle"),
+    );
 }
