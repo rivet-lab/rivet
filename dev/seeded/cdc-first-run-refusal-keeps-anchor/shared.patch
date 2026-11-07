@@ -1,0 +1,12 @@
+diff --git a/src/pipeline/cdc_release.rs b/src/pipeline/cdc_release.rs
+--- a/src/pipeline/cdc_release.rs
++++ b/src/pipeline/cdc_release.rs
+@@ -135,7 +135,7 @@
+ 
+     /// [`FirstRun::release_after`] against `server` for the slot.
+     fn release(self, state: &StateStore, outcome: &Result<()>, server: Option<&dyn SlotServer>) {
+-        if outcome.is_ok() {
++        if true {
+             return;
+         }
+         match state.cdc_delivery_recorded(&self.export) {

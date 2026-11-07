@@ -102,7 +102,7 @@ snapshot read, a change landing mid-snapshot appears in **both** the snapshot
 and the stream — an overlap the PK + `__op` dedupe absorbs, never a gap.
 Subsequent runs skip the snapshot because the state DB records it as done (`cdc_snapshot` — the authoritative signal; the `snapshot/_SUCCESS` marker remains a legacy co-signal, so re-snapshotting requires clearing BOTH) and go straight to draining;
 a run that crashes mid-snapshot re-snapshots on retry (the anchor stays put, so
-nothing is lost). Once any snapshot completed, a MISSING server-side anchor
+nothing is lost). A first run that ends in an error before anything was delivered (no baseline done, no part written) releases the anchor it created: it drops the PostgreSQL slot, deletes the checkpoint file and forgets the captured-tables record, so the next run starts the stream clean; a slot or checkpoint that existed before the run is never touched. If the release itself fails the run keeps its exit code and prints `RIVET_SOURCE_CDC_ANCHOR_NOT_RELEASED` with the object and the command that removes it. Once any snapshot completed, a MISSING server-side anchor
 (a dropped PostgreSQL slot) is a loud error, never a silent re-anchor — see
 "A vanished slot" below. Load order downstream: the snapshot prefix as the base table,
 then MERGE the CDC parts. MySQL / SQL Server require `cdc.checkpoint:` with
@@ -814,8 +814,7 @@ capture instance with fewer columns than its table, with or without `--table`), 
 printed or written as positional values, by `--output`, `mode: cdc` and stdout alike: the
 drain stops with `RIVET_SOURCE_CDC_PREREQUISITE` (exit 1) before that line or row and the
 checkpoint does not move past it, so a repeat is refused the same way. On MySQL the refusal of
-a change already in the binlog prints the re-baseline steps (`Re-baseline the stream in
-one run: delete the checkpoint file`, exactly as `--output` and `mode: cdc` do). The
+a change already in the binlog prints the re-baseline steps, the same ones `--output` and `mode: cdc` print (`Re-baseline the stream in one run:`). For `rivet cdc` alone the short form is enough: delete the checkpoint file and drain once. `rivet run` with `mode: cdc` follows every printed step, because deleting the checkpoint file alone is refused with `RIVET_SOURCE_CDC_CHECKPOINT_INVALID` (exit 5). The
 refusal at open prints the setting to change instead: for a global `MINIMAL` or `NOBLOB`,
 to set `binlog_row_image = FULL` and re-run; for an SQL Server capture instance that omits
 a column, to re-enable the table with the full column list (`Re-enable the table with the

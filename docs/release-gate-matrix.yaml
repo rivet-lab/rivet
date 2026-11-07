@@ -440,7 +440,7 @@ infra:
     # 2026-11-05: +2 structural N/A rows from stop-class-number (PostgreSQL decides every error by its SQLSTATE, MongoDB reads whole documents and refuses no column).
     # 2026-11-07: +7 structural N/A rows from cdc-stdout-partial-image (postgres, mongo, oracle) and cdc-stdout-partial-before-image (postgres, mssql, mongo, oracle): the partial image the stdout loop prints is a MySQL binlog and SQL Server capture-instance shape only.
     # 2026-11-06: +3 N/A rows from connection-cut-mid-row-not-retried (mssql lifts tiberius errors into text, mongo classifies a typed driver error, oracle lifts oracledb errors into text: none reaches the removed arm).
-    na_ceiling: 572  # ratchet-pin: seeded-na (review 2027-02-01)
+    na_ceiling: 573  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 raised 566 -> 573 by #882: the 7 structural N/A rows of cdc-stdout-partial-image (postgres, mongo, oracle) and cdc-stdout-partial-before-image (postgres, mssql, mongo, oracle), each with its reason in dev/seeded/seeds.yaml
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

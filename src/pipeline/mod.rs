@@ -14,6 +14,7 @@ mod apply_cmd;
 // One definition of where a table's parts live, not one per reader.
 pub(crate) mod cdc;
 pub(crate) mod cdc_job;
+pub(crate) mod cdc_release;
 pub(crate) mod chunked;
 #[doc(hidden)]
 pub use chunked::run_lease_key;
