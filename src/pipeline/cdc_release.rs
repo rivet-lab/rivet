@@ -248,11 +248,26 @@ mod tests {
         }
     }
 
+    const PG_SOURCE: &str = "type: postgres\n  url: \"postgres://u:p@localhost/app\"";
+    const PG_DOWN_SOURCE: &str = "type: postgres\n  url: \"postgres://u:p@127.0.0.1:1/app\"";
+    const MYSQL_SOURCE: &str = "type: mysql\n  url: \"mysql://u:p@localhost/app\"";
+
     /// A `mode: cdc` config in `dir` with checkpoint `./cdc/o.ckpt` and slot `s_o`; its path, config and export.
     fn config_in(dir: &std::path::Path) -> (String, Config, ExportConfig) {
-        let yaml = "source:\n  type: postgres\n  url: \"postgres://u:p@localhost/app\"\nexports:\n  - name: o\n    \
-             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      slot: s_o\n      checkpoint: ./cdc/o.ckpt\n    \
-             destination: { type: local, path: ./out }\n";
+        config_with(dir, "o", PG_SOURCE)
+    }
+
+    /// [`config_in`] for the export `name` over the `source:` body `source`.
+    fn config_with(
+        dir: &std::path::Path,
+        name: &str,
+        source: &str,
+    ) -> (String, Config, ExportConfig) {
+        let yaml = format!(
+            "source:\n  {source}\nexports:\n  - name: {name}\n    table: orders\n    mode: cdc\n    \
+             format: parquet\n    cdc:\n      slot: s_o\n      checkpoint: ./cdc/o.ckpt\n    \
+             destination: {{ type: local, path: ./out }}\n"
+        );
         let path = dir.join("rivet.yaml");
         std::fs::write(&path, yaml).unwrap();
         let path = path.display().to_string();
@@ -430,11 +445,109 @@ mod tests {
         );
     }
 
-    /// A checkpoint that is already gone counts as released.
+    /// A checkpoint that is already gone counts as released; one that is there is deleted; any other failure is surfaced.
     #[test]
     fn removing_an_absent_file_is_released_already() {
         let dir = tempfile::tempdir().unwrap();
         assert!(remove_file(&dir.path().join("none")).is_ok());
         assert!(remove_file(dir.path()).is_err());
+        let there = dir.path().join("there");
+        std::fs::write(&there, b"x").unwrap();
+        remove_file(&there).unwrap();
+        assert!(!there.exists());
+    }
+
+    /// An engine with no slot to probe is still proven a first run, and its slot stays absent from the proof.
+    #[test]
+    fn an_engine_without_slots_is_proven_a_first_run_by_the_real_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = config_with(dir.path(), "o", MYSQL_SOURCE);
+        let state = StateStore::open_in_memory().unwrap();
+        let first = FirstRun::of(&config, &export, &state, &path).unwrap();
+        assert_eq!(first.slot, None);
+        assert_eq!(first.checkpoint, Some(dir.path().join("./cdc/o.ckpt")));
+        assert_eq!(first.export, "o");
+        write_checkpoint(dir.path());
+        assert!(FirstRun::of(&config, &export, &state, &path).is_none());
+    }
+
+    /// A PostgreSQL source whose server cannot be asked is not proven a first run.
+    #[test]
+    fn a_postgres_source_that_cannot_be_probed_is_not_proven_a_first_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = config_with(dir.path(), "o", PG_DOWN_SOURCE);
+        let state = StateStore::open_in_memory().unwrap();
+        assert!(FirstRun::of(&config, &export, &state, &path).is_none());
+    }
+
+    /// The server handle reports a server it cannot reach as an error, never as a slot that is there or gone.
+    #[test]
+    fn an_unreachable_server_is_an_error_for_both_slot_calls() {
+        let server = PgSlots {
+            url: "postgres://u:p@127.0.0.1:1/app".to_string(),
+            tls: None,
+        };
+        assert!(server.exists("s_o").is_err());
+        assert!(server.drop_slot("s_o").is_err());
+    }
+
+    /// The real release on an engine with no slot deletes the checkpoint and forgets the capture on a stop, and keeps both on `Ok`.
+    #[test]
+    fn the_real_release_on_an_engine_without_slots_follows_the_outcome() {
+        for outcome_is_stop in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, config, export) = config_with(dir.path(), "o", MYSQL_SOURCE);
+            let state = StateStore::open_in_memory().unwrap();
+            let first = FirstRun::of(&config, &export, &state, &path).unwrap();
+            write_checkpoint(dir.path());
+            let key = key_of(&config, &export);
+            let dest = export.destination.state_key();
+            state.record_captured_tables(&key, &dest).unwrap();
+            let outcome = if outcome_is_stop { stopped() } else { Ok(()) };
+            first.release_after(&config, &state, &outcome);
+            let kept = !outcome_is_stop;
+            assert_eq!(dir.path().join("cdc/o.ckpt").exists(), kept);
+            assert_eq!(state.captured_tables(&key, &dest).unwrap().is_some(), kept);
+        }
+    }
+
+    /// A slot the real server handle cannot reach is warned with its code and remedy, and the rest is still released.
+    #[test]
+    fn the_real_release_warns_for_a_slot_it_cannot_reach_and_releases_the_rest() {
+        use crate::pipeline::run::run_tail_tests::{
+            captured_warnings_mentioning, install_warn_capture,
+        };
+        install_warn_capture();
+        let dir = tempfile::tempdir().unwrap();
+        let (_, config, export) = config_with(dir.path(), "anchor_release_warn", PG_DOWN_SOURCE);
+        let state = StateStore::open_in_memory().unwrap();
+        let first = FirstRun {
+            slot: Some("s_o".to_string()),
+            checkpoint: Some(dir.path().join("cdc/o.ckpt")),
+            key: key_of(&config, &export),
+            destination: export.destination.state_key(),
+            export: export.name.clone(),
+        };
+        write_checkpoint(dir.path());
+        let key = key_of(&config, &export);
+        let dest = export.destination.state_key();
+        state.record_captured_tables(&key, &dest).unwrap();
+        first.release_after(&config, &state, &stopped());
+        let said = captured_warnings_mentioning("export 'anchor_release_warn'");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].starts_with("[RIVET_SOURCE_CDC_ANCHOR_NOT_RELEASED] "),
+            "{said:?}"
+        );
+        assert!(
+            said[0].contains("its replication slot 's_o' could not be released"),
+            "{said:?}"
+        );
+        assert!(
+            said[0].contains("SELECT pg_drop_replication_slot('s_o')"),
+            "{said:?}"
+        );
+        assert!(!dir.path().join("cdc/o.ckpt").exists());
+        assert!(state.captured_tables(&key, &dest).unwrap().is_none());
     }
 }
