@@ -3841,6 +3841,177 @@ fn cdc_to_stdout_refuses_a_partial_image_mysql() {
     cdc_stdout_refuses_a_partial_image_mysql("MINIMAL", "id = id, a = 'A1x', b = 'B1x', c = 'C1x'");
 }
 
+#[derive(Clone, Copy, Debug)]
+enum FileSurface {
+    CdcOutputCsv,
+    RunModeCdc,
+}
+
+/// Every cell of columns a, b and c delivered under `dir` (CSV text, or Parquet parts), as one string.
+fn delivered_abc(surface: FileSurface, dir: &std::path::Path) -> String {
+    if !dir.exists() {
+        return String::new();
+    }
+    let files = crate::common::files_under(dir);
+    match surface {
+        FileSurface::CdcOutputCsv => files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|x| x == "csv"))
+            .map(|f| std::fs::read_to_string(f).unwrap())
+            .collect(),
+        FileSurface::RunModeCdc => {
+            let mut dirs: Vec<_> = files
+                .iter()
+                .filter(|f| f.extension().is_some_and(|x| x == "parquet"))
+                .filter_map(|f| f.parent().map(std::path::Path::to_path_buf))
+                .collect();
+            dirs.sort();
+            dirs.dedup();
+            let mut cells = Vec::new();
+            for batch in dirs.iter().flat_map(|d| read_all_parts(d)) {
+                for c in ["a", "b", "c"] {
+                    if let Some(col) = batch.column_by_name(c) {
+                        for i in 0..batch.num_rows() {
+                            cells
+                                .push(arrow::util::display::array_value_to_string(col, i).unwrap());
+                        }
+                    }
+                }
+            }
+            cells.join(",")
+        }
+    }
+}
+
+/// A MySQL change written by `set` under a partial `binlog_row_image` is refused `RIVET_SOURCE_CDC_PREREQUISITE` by the file sink (`rivet cdc --output`, then `run` with `mode: cdc`) with none of its values delivered, again on the repeat, and the remedy it names delivers the next change whole.
+fn cdc_files_refuse_a_partial_image_mysql(
+    surface: FileSurface,
+    image: &str,
+    set: &str,
+    marker: &str,
+) {
+    use mysql::prelude::Queryable as _;
+    let what = format!("{surface:?} {image} {set}");
+    let mut s = CdcScenario::mysql_with(
+        "oc_files_part",
+        "id INT PRIMARY KEY, a VARCHAR(20), b TEXT, c VARCHAR(20)",
+        |r, _| r,
+    );
+    let table = s.table.clone();
+    let csv_out = tempfile::tempdir().unwrap();
+    let csv_arg = csv_out.path().display().to_string();
+    let drain = |s: &CdcScenario| match surface {
+        FileSurface::CdcOutputCsv => s
+            .rig
+            .cli_cdc_raw(true, &["--output", &csv_arg, "--format", "csv"]),
+        FileSurface::RunModeCdc => s.rig.run(),
+    };
+    let dir = |s: &CdcScenario| match surface {
+        FileSurface::CdcOutputCsv => csv_out.path().to_path_buf(),
+        FileSurface::RunModeCdc => s.rig.out_dir(),
+    };
+    let ok = |out: std::process::Output, what: &str| {
+        assert!(out.status.success(), "{what}: {out:?}");
+    };
+    ok(drain(&s), &format!("{what}: the anchor run"));
+    s.sql(&format!(
+        "INSERT INTO {table} VALUES (1, 'a1', 'b1', 'c1'), (2, 'a2', 'b2', 'c2')"
+    ));
+    ok(drain(&s), &format!("{what}: the whole inserts"));
+    let whole = delivered_abc(surface, &dir(&s));
+    for v in ["a1", "b1", "c1", "a2", "b2", "c2"] {
+        assert!(
+            whole.contains(v),
+            "{what}: whole image cell {v} delivered: {whole}"
+        );
+    }
+    let ckpt = s.rig.checkpoint();
+    assert!(ckpt.exists(), "{what}: the anchor wrote a checkpoint");
+    let mut writer = mysql::Conn::new(
+        mysql::Opts::from_url(&MYSQL_CDC_URL.replace("rivet:rivet@", "root:rivet@")).unwrap(),
+    )
+    .expect("connect as root");
+    writer
+        .query_drop(format!("SET SESSION binlog_row_image = '{image}'"))
+        .unwrap();
+    writer
+        .query_drop(format!("UPDATE {table} SET {set} WHERE id = 1"))
+        .unwrap();
+    for _ in 0..2 {
+        let out = drain(&s);
+        eprintln!("{what}: exit {:?}", out.status.code());
+        assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_PREREQUISITE", 1));
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            said.contains("a PARTIAL image") && said.contains("binlog_row_image = FULL"),
+            "{what}: the refusal names the cause and the setting:\n{said}"
+        );
+        assert!(
+            !delivered_abc(surface, &dir(&s)).contains(marker),
+            "{what}: a refused image delivers none of its values ({marker})"
+        );
+        assert!(
+            ckpt.exists(),
+            "{what}: the refused run keeps the checkpoint, so the repeat is refused the same way"
+        );
+    }
+    writer
+        .query_drop("SET SESSION binlog_row_image = 'FULL'")
+        .unwrap();
+    writer
+        .query_drop(format!(
+            "UPDATE {table} SET id = 1, a = 'a1', b = 'b1', c = 'c1' WHERE id IN (1, 11)"
+        ))
+        .unwrap();
+    match surface {
+        FileSurface::CdcOutputCsv => {
+            std::fs::remove_file(&ckpt).expect("the remedy deletes the checkpoint");
+            ok(drain(&s), &format!("{what}: the re-baseline run"));
+        }
+        FileSurface::RunModeCdc => follow_rebaseline_remedy(&mut s.rig, false),
+    }
+    s.sql(&format!("UPDATE {table} SET c = 'C1y' WHERE id = 1"));
+    ok(drain(&s), &format!("{what}: the run after the re-baseline"));
+    let after = delivered_abc(surface, &dir(&s));
+    assert!(
+        after.contains("C1y") && !after.contains(marker),
+        "{what}: after the remedy the next change is delivered whole and the refused one never: {after}"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn cdc_to_files_refuses_a_partial_before_image_mysql() {
+    for surface in [FileSurface::CdcOutputCsv, FileSurface::RunModeCdc] {
+        cdc_files_refuse_a_partial_image_mysql(surface, "NOBLOB", "b = 'B1x'", "B1x");
+        cdc_files_refuse_a_partial_image_mysql(
+            surface,
+            "MINIMAL",
+            "id = id, a = 'A1x', b = 'B1x', c = 'C1x'",
+            "B1x",
+        );
+        cdc_files_refuse_a_partial_image_mysql(
+            surface,
+            "MINIMAL",
+            "id = 11, a = 'A1x', b = 'B1x', c = 'C1x'",
+            "B1x",
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn cdc_to_files_still_refuses_a_partial_after_image_mysql() {
+    for surface in [FileSurface::CdcOutputCsv, FileSurface::RunModeCdc] {
+        cdc_files_refuse_a_partial_image_mysql(surface, "MINIMAL", "c = 'C1x'", "C1x");
+        cdc_files_refuse_a_partial_image_mysql(surface, "NOBLOB", "c = 'C1x'", "C1x");
+    }
+}
+
 /// A four-column SQL Server table with two rows and a capture instance over `captured` (all columns when `None`); its name, instance and guard.
 fn mssql_stdout_table(tag: &str, captured: Option<&str>) -> (String, String, MssqlCdcTable) {
     let table = unique_name(tag);

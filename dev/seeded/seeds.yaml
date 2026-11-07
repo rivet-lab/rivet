@@ -4008,24 +4008,24 @@ seeds:
         patch: cdc-stdout-partial-image/mssql.patch
         cells: [cdc_to_stdout_refuses_a_partial_image_mssql]
       mongo:
-        na: "a MongoDB change carries a document, not positional values under column names, so no arity can disagree"
+        na: "every MongoDB image is the fixed pair [_id, document] under the two IMAGE_NAMES (mongo/cdc.rs), so its values and its names cannot differ in length"
       oracle:
         na: "every Oracle event carries image_names from ALL_TAB_COLS and the open refuses a table without ALL COLUMNS supplemental logging (oracle_cdc_table_without_all_column_logging_is_refused)"
 
   - name: cdc-stdout-partial-before-image
-    class: "`rivet cdc` without `--output` prints an update whose BEFORE image is partial under a whole after image (MySQL `binlog_row_image` NOBLOB with only a TEXT column changed, MINIMAL with every column set) as positional values, exits 0 and advances the checkpoint"
-    history: "found 2026-11-07 reviewing PR #880: the stdout check read `after.or(before)` only, so a short before image under a whole after image printed `before:[1,10,'c1'] after:[1,'B1x',10,'c1']`; RED from this patch"
+    class: "a change whose BEFORE image is partial under a whole after image (MySQL `binlog_row_image` NOBLOB with only a TEXT column changed, MINIMAL with every column set) is printed by `rivet cdc` without `--output` as positional values, or written by `rivet cdc --output` and `mode: cdc` under its after image, exits 0 and advances the checkpoint"
+    history: "found 2026-11-07 reviewing PR #880: the shared arity check read `after.or(before)` only, so a short before image under a whole after image printed `before:[1,10,'c1'] after:[1,'B1x',10,'c1']` and the file sink wrote the row; one patch drops the before check from the one function every sink calls; RED from this patch"
     scope: source
     patch: cdc-stdout-partial-before-image/shared.patch
     engines:
       postgres:
         na: "a PostgreSQL before image is named by before_names (the replica identity's columns) or is as wide as its relation (pgoutput), so a key-only pre-image is whole under its own names (the_ndjson_driver_refuses_a_partial_before_image_and_prints_a_named_or_whole_one)"
       mysql:
-        cells: [cdc_to_stdout_refuses_a_partial_image_mysql, "lib:the_ndjson_driver_refuses_a_partial_before_image_and_prints_a_named_or_whole_one"]
+        cells: [cdc_to_stdout_refuses_a_partial_image_mysql, cdc_to_files_refuses_a_partial_before_image_mysql, "lib:the_ndjson_driver_refuses_a_partial_before_image_and_prints_a_named_or_whole_one", "lib:flush_refuses_a_partial_before_image_and_writes_a_named_or_whole_one"]
       mssql:
         na: "a SQL Server update is delivered as its after image only: the before image (operation 3) is skipped, so no short before image reaches the stdout loop (map_op_maps_the_three_ops_and_skips_the_before_image)"
       mongo:
-        na: "a MongoDB change carries a document, not positional values under column names, so no arity can disagree"
+        na: "every MongoDB image is the fixed pair [_id, document] under the two IMAGE_NAMES (mongo/cdc.rs), so its values and its names cannot differ in length"
       oracle:
         na: "every Oracle before image is the whole row under image_names (ALL COLUMNS supplemental logging is required at open, oracle_cdc_table_without_all_column_logging_is_refused)"
 

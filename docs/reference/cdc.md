@@ -811,9 +811,9 @@ lines again: a consumer of the pipe must tolerate a repeated line.
 A change whose row image is partial, in its `after` or in its `before` (MySQL
 `binlog_row_image` = `MINIMAL` or `NOBLOB`, a session override included; an SQL Server
 capture instance with fewer columns than its table, with or without `--table`), is never
-printed as positional values: the drain stops with `RIVET_SOURCE_CDC_PREREQUISITE`
-(exit 1) before that line and the checkpoint does not move past it, so a repeat is refused
-the same way. On MySQL the refusal of
+printed or written as positional values, by `--output`, `mode: cdc` and stdout alike: the
+drain stops with `RIVET_SOURCE_CDC_PREREQUISITE` (exit 1) before that line or row and the
+checkpoint does not move past it, so a repeat is refused the same way. On MySQL the refusal of
 a change already in the binlog prints the re-baseline steps (`Re-baseline the stream in
 one run: delete the checkpoint file`, exactly as `--output` and `mode: cdc` do). The
 refusal at open prints the setting to change instead: for a global `MINIMAL` or `NOBLOB`,

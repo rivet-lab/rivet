@@ -87,18 +87,17 @@ pub(crate) fn open_partial_image_refusal(engine: CdcEngine, why: &str) -> anyhow
     )
 }
 
-/// `Some((values, names))` when a named image carries a different number of values than names, a PARTIAL image.
+/// `Some((values, names))` when the image an event prints or writes, or its before image, carries a different number of values than the names it travels under, a PARTIAL image.
 pub(crate) fn named_image_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usize)> {
-    let names = ev.image_names.as_deref()?;
-    let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
-    (n != names.len()).then_some((n, names.len()))
-}
-
-/// `Some((values, names))` when a printed before image carries a different number of values than the names it travels under: its own `before_names`, else the event's `image_names`.
-pub(crate) fn named_before_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usize)> {
-    let names = ev.before_names.as_deref().or(ev.image_names.as_deref())?;
-    let n = ev.before.as_ref()?.len();
-    (n != names.len()).then_some((n, names.len()))
+    let image = ev.image_names.as_deref().and_then(|names| {
+        let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
+        (n != names.len()).then_some((n, names.len()))
+    });
+    image.or_else(|| {
+        let names = ev.before_names.as_deref().or(ev.image_names.as_deref())?;
+        let n = ev.before.as_ref()?.len();
+        (n != names.len()).then_some((n, names.len()))
+    })
 }
 
 /// Default row cap — 5M rows, far above any real OLTP transaction.
@@ -745,9 +744,7 @@ fn emit_ndjson(
         // corruption). An uncaptured table's poison was already dropped above.
         ev.raise_poison()?;
         ev.raise_before_poison()?;
-        if let Some((n, names)) =
-            named_image_arity_mismatch(&ev).or_else(|| named_before_arity_mismatch(&ev))
-        {
+        if let Some((n, names)) = named_image_arity_mismatch(&ev) {
             return Err(partial_image_refusal(&ev.schema, &ev.table, n, names));
         }
         println!("{}", ndjson_line(&ev));
