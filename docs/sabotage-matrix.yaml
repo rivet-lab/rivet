@@ -414,9 +414,9 @@ scenarios:
     what: "RIVET_SOURCE_VALUE_UNREPRESENTABLE: a source value the output type cannot hold"
     postgres: { test: an_unrepresentable_value_is_refused_by_code_postgres }
     mysql:    { test: an_unrepresentable_value_is_refused_by_code_mysql }
-    mssql:    { gap: "asserted by its code, once, in live_cdc; the walk is not written: refuse twice, `map the value in the export's query:` and `exclude the column` each applied, and one wrong remedy" }
-    mongo:    { na: "raised by the PostgreSQL, MySQL and SQL Server converters (src/source/*/arrow_convert.rs) and the MySQL TIME fix of the CDC value seam; no MongoDB site (documents are carried as JSON)" }
-    oracle:   { na: "raised by the PostgreSQL, MySQL and SQL Server converters (src/source/*/arrow_convert.rs) and the MySQL TIME fix of the CDC value seam; no Oracle site" }
+    mssql:    { test: a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null }
+    mongo:    { na: "raised by the PostgreSQL, MySQL, SQL Server and Oracle converters (src/source/*/arrow_convert.rs) and the MySQL TIME fix of the CDC value seam; no MongoDB site (documents are carried as JSON)" }
+    oracle:   { test: a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code }
 
   - id: refusal_source_probe_unreadable
     what: "RIVET_SOURCE_PROBE_UNREADABLE: a chunk, page or partition key of a type the min/max probe cannot read"

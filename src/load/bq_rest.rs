@@ -43,6 +43,8 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::config::DestinationCredential;
+use crate::error::retry::MAX_TRANSIENT_RETRIES;
+pub(super) use crate::error::retry::{is_transient_status, poll_interval, should_back_off};
 use crate::gcp_auth::{self, BlockingAdcTokenSource};
 
 /// BigQuery's JSON API root. Overridable so a live check can be pointed at a
@@ -57,16 +59,6 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// One second in the unit tests, where a request is watched reaching the ceiling.
 #[cfg(test)]
 const HTTP_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Poll backoff bounds. Starts tight so a metadata `COUNT(*)` (sub-second)
-/// returns promptly, and widens so a multi-minute load costs a handful of
-/// requests rather than hundreds.
-const POLL_MIN: Duration = Duration::from_millis(200);
-const POLL_MAX: Duration = Duration::from_secs(5);
-
-/// Consecutive transient failures (429 / 5xx / connection error) tolerated on
-/// one polling GET before the load gives up.
-const MAX_TRANSIENT_RETRIES: u32 = 5;
 
 /// How long the poll loop waits for ONE job before giving up on it.
 ///
@@ -1119,33 +1111,6 @@ fn location_query(location: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-/// Backoff for poll attempt `n`: exponential from [`POLL_MIN`], capped at
-/// [`POLL_MAX`]. Attempt 0 waits the minimum, so a sub-second metadata job is
-/// not billed a full second of latency.
-pub(super) fn poll_interval(attempt: u32) -> Duration {
-    let scaled = POLL_MIN.saturating_mul(1u32 << attempt.min(16));
-    scaled.min(POLL_MAX)
-}
-
-/// HTTP statuses worth retrying an IDEMPOTENT request on: rate limiting and
-/// any server-side fault. Everything else (401, 403, 404, 400) is a decision
-/// BigQuery has made and repeating it changes nothing.
-pub(super) fn is_transient_status(code: u16) -> bool {
-    code == 429 || (500..600).contains(&code)
-}
-
-/// Whether to wait before `attempt`: every retry backs off, the first try does not.
-///
-/// Named rather than written inline at the two retry loops, because mutation
-/// testing showed the inline `attempt > 0` ungraded at BOTH sites: `>` → `<` makes
-/// every retry fire IMMEDIATELY (no backoff at all, which on a 429 is precisely
-/// wrong) and `>` → `>=` pays `POLL_MIN` before the first request of every call.
-/// Neither is visible to any test while the decision lives inside a body that only
-/// a real HTTP round trip reaches.
-pub(super) fn should_back_off(attempt: u32) -> bool {
-    attempt > 0
-}
-
 /// Whether a `tables.get` resource describes a TABLE — a view (or anything else)
 /// is not one.
 ///
@@ -1246,6 +1211,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::error::retry::{POLL_MAX, POLL_MIN};
 
     /// The compaction probe reads one row of mixed cells: text stays text, a
     /// number renders as its digits, a NULL cell is `None`, and a response with

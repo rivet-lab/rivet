@@ -135,7 +135,12 @@ print(json.dumps({{"fields": fields, "stats": stats}}))
     assert_md("uid", "uuid", "exact", Some("uuid"));
     assert_md("attrs", "jsonb", "logical_string", Some("json"));
     assert_md("attrs_json", "json", "logical_string", Some("json"));
-    assert_md("interval_col", "interval", "compatible", Some("interval"));
+    assert_md(
+        "interval_col",
+        "interval",
+        "logical_string",
+        Some("interval"),
+    );
 
     // ─── Row-group statistics sanity ──────────────────────────────────────
     // Every leaf column must have stats (Parquet writer default).

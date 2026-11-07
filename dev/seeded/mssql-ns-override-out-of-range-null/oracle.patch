@@ -1,0 +1,15 @@
+diff --git a/src/source/oracle/arrow_convert.rs b/src/source/oracle/arrow_convert.rs
+--- a/src/source/oracle/arrow_convert.rs
++++ b/src/source/oracle/arrow_convert.rs
+@@ -458,7 +458,10 @@ fn build_column(
+             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
+             for r in rows {
+                 match r.get::<Option<OracleTimestamp>>(idx).ora()? {
+-                    Some(t) => b.append_value(timestamp_nanos(&t, name)?),
++                    Some(t) => match timestamp_nanos(&t, name) {
++                        Ok(n) => b.append_value(n),
++                        Err(_) => b.append_null(),
++                    },
+                     None => b.append_null(),
+                 }
+             }

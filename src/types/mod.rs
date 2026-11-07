@@ -73,6 +73,25 @@ pub fn is_time_of_day(us: i64) -> bool {
     (0..MICROS_PER_DAY).contains(&us)
 }
 
+/// Nanoseconds since the Unix epoch of `dt` read as UTC, or the coded refusal naming `column` when `dt` is outside Arrow's 1677-09-21..2262-04-11.
+pub fn timestamp_nanos_or_refuse(
+    dt: chrono::NaiveDateTime,
+    source: &str,
+    column: &str,
+) -> anyhow::Result<i64> {
+    dt.and_utc().timestamp_nanos_opt().ok_or_else(|| {
+        crate::error::coded(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            format!(
+                "{source}: column `{column}` holds {dt}, outside the nanosecond timestamp range \
+                 (1677-09-21..2262-04-11) its `timestamp_ns` / `timestamp_tz_ns` override declares, \
+                 and writing it as NULL would lose the value. Declare the column `timestamp` \
+                 (microseconds, full range) or `timestamp_tz` instead, or CAST it in the export's `query:`."
+            ),
+        )
+    })
+}
+
 /// Narrow a parsed override map to ONE table: bare keys (`amount`) apply to
 /// every table; qualified keys (`orders.amount`) apply only to their table and
 /// WIN over a bare key for the same column. Foreign-qualified keys are
@@ -294,5 +313,49 @@ mod tests {
             Some(DataType::Decimal128(18, 2))
         ));
         assert_eq!(derive_fidelity(&dec), TypeFidelity::Exact);
+    }
+
+    fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32, sec: u32, ns: u32) -> chrono::NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(y, mo, d)
+            .unwrap()
+            .and_hms_nano_opt(h, mi, sec, ns)
+            .unwrap()
+    }
+
+    #[test]
+    fn nanoseconds_hold_both_representable_ends_and_refuse_one_past_each() {
+        let (min, max) = (
+            at(1677, 9, 21, 0, 12, 43, 145_224_192),
+            at(2262, 4, 11, 23, 47, 16, 854_775_807),
+        );
+        assert_eq!(
+            timestamp_nanos_or_refuse(min, "mssql", "c").unwrap(),
+            i64::MIN
+        );
+        assert_eq!(
+            timestamp_nanos_or_refuse(max, "mssql", "c").unwrap(),
+            i64::MAX
+        );
+        assert_eq!(
+            timestamp_nanos_or_refuse(at(1970, 1, 1, 0, 0, 1, 123_456_700), "mssql", "c").unwrap(),
+            1_123_456_700
+        );
+        for past in [
+            min - chrono::TimeDelta::nanoseconds(1),
+            max + chrono::TimeDelta::nanoseconds(1),
+            at(1600, 1, 1, 0, 0, 0, 0),
+            at(2300, 1, 1, 0, 0, 0, 0),
+            at(9999, 12, 31, 23, 59, 59, 999_999_900),
+            at(1, 1, 1, 0, 0, 0, 0),
+        ] {
+            let err = timestamp_nanos_or_refuse(past, "mssql", "event_ts").unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("column `event_ts` holds ")
+                    && text.contains("Declare the column `timestamp`"),
+                "{text}"
+            );
+        }
     }
 }
