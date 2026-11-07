@@ -1,0 +1,16 @@
+diff --git a/src/source/mssql/cdc.rs b/src/source/mssql/cdc.rs
+--- a/src/source/mssql/cdc.rs
++++ b/src/source/mssql/cdc.rs
+@@ -895,8 +895,11 @@
+ }
+ 
+ impl ChangeStream for MssqlChangeStream {
+-    fn row_image(&mut self, _tables: &[String]) -> crate::source::cdc::RowImage {
++    fn row_image(&mut self, tables: &[String]) -> crate::source::cdc::RowImage {
+         use crate::source::cdc::RowImage;
++        if tables.is_empty() {
++            return RowImage::Whole;
++        }
+         let sql = row_image_sql(&self.capture_instance);
+         let Self { rt, client, .. } = self;
+         let rows = rt.block_on(async { client.simple_query(sql).await?.into_first_result().await });

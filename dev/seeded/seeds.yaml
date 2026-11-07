@@ -4171,21 +4171,39 @@ seeds:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on MongoDB at config load (columns_from_grants_is_refused_by_every_command_mongo)"
 
   - name: cdc-stdout-partial-image
-    class: "`rivet cdc` without `--output` prints a change whose row image is partial (MySQL `binlog_row_image` MINIMAL or NOBLOB, an MSSQL capture instance with fewer columns than the table) as positional values with no column names, exits 0 and advances the checkpoint"
-    history: "found 2026-11-07 hunting the stdout loop of `rivet cdc`; `rivet run` mode cdc and `rivet cdc --output` already refused these by code; RED from this patch: the update prints `after:[\"C1x\"]` for a four-column table and exits 0"
+    class: "`rivet cdc` without `--output` prints a change whose row image is partial (MySQL `binlog_row_image` MINIMAL or NOBLOB, an MSSQL capture instance with fewer columns than the table, with or without `--table`) as positional values with no column names, exits 0 and advances the checkpoint"
+    history: "found 2026-11-07 hunting the stdout loop of `rivet cdc`; `rivet run` mode cdc and `rivet cdc --output` already refused these by code; RED from this patch: the update prints `after:[\"C1x\"]` for a four-column table and exits 0; SQL Server without `--table` printed `after:[1, 10, 1000]` for a three-of-four-column instance"
     scope: source
-    patch: cdc-stdout-partial-image/shared.patch
     engines:
       postgres:
-        cells: ["lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
+        na: "a PostgreSQL image is whole or key-only on deletes, never partial: the stdout loop prints key-only deletes as before (the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images)"
       mysql:
+        patch: cdc-stdout-partial-image/shared.patch
         cells: [cdc_to_stdout_refuses_a_partial_image_mysql, "lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
       mssql:
-        cells: [cdc_to_stdout_refuses_a_partial_image_mssql, "lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
-      oracle:
-        cells: ["lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
+        patch: cdc-stdout-partial-image/mssql.patch
+        cells: [cdc_to_stdout_refuses_a_partial_image_mssql]
       mongo:
-        cells: ["lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
+        na: "every MongoDB image is the fixed pair [_id, document] under the two IMAGE_NAMES (mongo/cdc.rs), so its values and its names cannot differ in length"
+      oracle:
+        na: "every Oracle event carries image_names from ALL_TAB_COLS and the open refuses a table without ALL COLUMNS supplemental logging (oracle_cdc_table_without_all_column_logging_is_refused)"
+
+  - name: cdc-stdout-partial-before-image
+    class: "a change whose BEFORE image is partial under a whole after image (MySQL `binlog_row_image` NOBLOB with only a TEXT column changed, MINIMAL with every column set) is printed by `rivet cdc` without `--output` as positional values, or written by `rivet cdc --output` and `mode: cdc` under its after image, exits 0 and advances the checkpoint"
+    history: "found 2026-11-07 reviewing PR #880: the shared arity check read `after.or(before)` only, so a short before image under a whole after image printed `before:[1,10,'c1'] after:[1,'B1x',10,'c1']` and the file sink wrote the row; one patch drops the before check from the one function every sink calls; RED from this patch"
+    scope: source
+    patch: cdc-stdout-partial-before-image/shared.patch
+    engines:
+      postgres:
+        na: "a PostgreSQL before image is named by before_names (the replica identity's columns) or is as wide as its relation (pgoutput), so a key-only pre-image is whole under its own names (the_ndjson_driver_refuses_a_partial_before_image_and_prints_a_named_or_whole_one)"
+      mysql:
+        cells: [cdc_to_stdout_refuses_a_partial_image_mysql, cdc_to_files_refuses_a_partial_before_image_mysql, "lib:the_ndjson_driver_refuses_a_partial_before_image_and_prints_a_named_or_whole_one", "lib:flush_refuses_a_partial_before_image_and_writes_a_named_or_whole_one"]
+      mssql:
+        na: "a SQL Server update is delivered as its after image only: the before image (operation 3) is skipped, so no short before image reaches the stdout loop (map_op_maps_the_three_ops_and_skips_the_before_image)"
+      mongo:
+        na: "every MongoDB image is the fixed pair [_id, document] under the two IMAGE_NAMES (mongo/cdc.rs), so its values and its names cannot differ in length"
+      oracle:
+        na: "every Oracle before image is the whole row under image_names (ALL COLUMNS supplemental logging is required at open, oracle_cdc_table_without_all_column_logging_is_refused)"
 
   - name: qualified-table-matches-a-literal-dotted-name
     class: "a qualified `table: schema.table` also captures a table literally named `schema.table` in another schema or database: its rows are delivered into the export"

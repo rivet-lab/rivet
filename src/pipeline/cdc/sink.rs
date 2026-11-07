@@ -2477,6 +2477,75 @@ mod tests {
         );
     }
 
+    /// The file sink's `flush` refuses a before image short of its names under a whole after image (the stdout loop's rule), and writes a key-only one named by `before_names` and a whole one.
+    #[test]
+    fn flush_refuses_a_partial_before_image_and_writes_a_named_or_whole_one() {
+        use std::sync::Arc;
+        let names = |v: &[&str]| -> Arc<[String]> {
+            Arc::from(v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        let update = |before: Vec<i64>, before_names: Option<Arc<[String]>>| ChangeEvent {
+            op: ChangeOp::Update,
+            before: Some(before.into_iter().map(RivetValue::Int).collect()),
+            before_names,
+            after: Some(vec![RivetValue::Int(1), RivetValue::Int(2)]),
+            image_names: Some(names(&["a", "b"])),
+            ..insert(0)
+        };
+        let mut cols = int_col();
+        cols[0].column_name = "a".into();
+        cols.push(TypeMapping {
+            column_name: "b".into(),
+            ..int_col().remove(0)
+        });
+        let drive = |ev: ChangeEvent| {
+            let mut schema = None;
+            let mut cols = cols.clone();
+            let sch = ensure_schema(
+                &mut schema,
+                &mut cols,
+                std::slice::from_ref(&ev),
+                &crate::config::RowHash::default(),
+            )
+            .unwrap();
+            flush(
+                std::slice::from_ref(&ev),
+                &sch,
+                &cols,
+                crate::source::cdc::CdcEngine::Mysql,
+                &crate::config::RowHash::default(),
+                None,
+                &Default::default(),
+            )
+            .map(|_| ())
+        };
+        let err = drive(update(vec![1], None)).expect_err("one before value under two names");
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_CDC_PREREQUISITE)
+        );
+        assert!(
+            format!("{err:#}").contains("carries 1 value(s) under 2 column name(s)"),
+            "{err:#}"
+        );
+        assert!(
+            drive(update(vec![1, 2, 3], None)).is_err(),
+            "wider than its names"
+        );
+        assert!(
+            drive(update(vec![1, 2], None)).is_ok(),
+            "a whole before image is written"
+        );
+        assert!(
+            drive(update(vec![1], Some(names(&["a"])))).is_ok(),
+            "a key-only before image named by before_names is written"
+        );
+        assert!(
+            drive(update(vec![1, 2], Some(names(&["a"])))).is_err(),
+            "a before image wider than its own names is refused"
+        );
+    }
+
     fn int_col() -> Vec<TypeMapping> {
         vec![TypeMapping {
             column_name: "v".into(),
