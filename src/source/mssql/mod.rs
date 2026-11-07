@@ -394,17 +394,19 @@ impl MssqlSource {
                 )
                 .await
                 .map_err(|e| {
-                    crate::error::coded(
+                    crate::error::coded_driver(
                         crate::error::codes::SOURCE_QUERY_FAILED,
-                        format!("mssql: reading the database isolation options failed: {e}"),
+                        "mssql: reading the database isolation options failed",
+                        e,
                     )
                 })?
                 .into_row()
                 .await
                 .map_err(|e| {
-                    crate::error::coded(
+                    crate::error::coded_driver(
                         crate::error::codes::SOURCE_QUERY_FAILED,
-                        format!("mssql: reading the database isolation options failed: {e}"),
+                        "mssql: reading the database isolation options failed",
+                        e,
                     )
                 })?
                 .ok_or_else(|| {
@@ -493,17 +495,19 @@ impl MssqlSource {
                 .query(sql.as_str(), &[])
                 .await
                 .map_err(|e| {
-                    crate::error::coded(
+                    crate::error::coded_driver(
                         crate::error::codes::SOURCE_QUERY_FAILED,
-                        format!("mssql: sys.columns probe failed: {e}"),
+                        "mssql: sys.columns probe failed",
+                        e,
                     )
                 })?
                 .into_first_result()
                 .await
                 .map_err(|e| {
-                    crate::error::coded(
+                    crate::error::coded_driver(
                         crate::error::codes::SOURCE_QUERY_FAILED,
-                        format!("mssql: reading sys.columns rows failed: {e}"),
+                        "mssql: reading sys.columns rows failed",
+                        e,
                     )
                 })
         })?;
@@ -628,19 +632,19 @@ impl Source for MssqlSource {
             if lock_timeout_ms > 0 {
                 session_set(client, &format!("SET LOCK_TIMEOUT {lock_timeout_ms}"))
                     .await
-                    .map_err(|e| crate::error::coded(crate::error::codes::SOURCE_QUERY_FAILED, format!("mssql: SET LOCK_TIMEOUT failed: {e}")))?;
+                    .map_err(|e| crate::error::coded_driver(crate::error::codes::SOURCE_QUERY_FAILED, "mssql: SET LOCK_TIMEOUT failed", e))?;
             }
             if snapshot_read {
                 session_set(client, "SET TRANSACTION ISOLATION LEVEL SNAPSHOT")
                     .await
-                    .map_err(|e| crate::error::coded(crate::error::codes::SOURCE_QUERY_FAILED, format!("mssql: SET TRANSACTION ISOLATION LEVEL SNAPSHOT failed: {e}")))?;
+                    .map_err(|e| crate::error::coded_driver(crate::error::codes::SOURCE_QUERY_FAILED, "mssql: SET TRANSACTION ISOLATION LEVEL SNAPSHOT failed", e))?;
             }
 
             let started = std::time::Instant::now();
             let mut stream = client
                 .query(sql.as_str(), &[])
                 .await
-                .map_err(|e| crate::error::coded(crate::error::codes::SOURCE_QUERY_FAILED, format!("mssql: query failed: {e}")))?;
+                .map_err(|e| crate::error::coded_driver(crate::error::codes::SOURCE_QUERY_FAILED, "mssql: query failed", e))?;
 
             let mut columns: Vec<tiberius::Column> = Vec::new();
             let mut buf: Vec<tiberius::Row> = Vec::with_capacity(ctl.target());
@@ -653,7 +657,7 @@ impl Source for MssqlSource {
             while let Some(item) = stream
                 .try_next()
                 .await
-                .map_err(|e| crate::error::coded(crate::error::codes::SOURCE_QUERY_FAILED, format!("mssql: streaming rows failed: {e}")))?
+                .map_err(|e| crate::error::coded_driver(crate::error::codes::SOURCE_QUERY_FAILED, "mssql: streaming rows failed", e))?
             {
                 if let Some(budget) = stmt_timeout
                     && started.elapsed() > budget
@@ -759,7 +763,7 @@ impl Source for MssqlSource {
             if snapshot_read {
                 session_set(client, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
                     .await
-                    .map_err(|e| crate::error::coded(crate::error::codes::SOURCE_QUERY_FAILED, format!("mssql: resetting the isolation level failed: {e}")))?;
+                    .map_err(|e| crate::error::coded_driver(crate::error::codes::SOURCE_QUERY_FAILED, "mssql: resetting the isolation level failed", e))?;
             }
             Ok::<_, anyhow::Error>(())
         })?;
@@ -786,17 +790,19 @@ impl Source for MssqlSource {
                 .query(sql, &[])
                 .await
                 .map_err(|e| {
-                    crate::error::coded(
+                    crate::error::coded_driver(
                         crate::error::codes::SOURCE_QUERY_FAILED,
-                        format!("mssql: scalar query failed: {e}"),
+                        "mssql: scalar query failed",
+                        e,
                     )
                 })?
                 .into_row()
                 .await
                 .map_err(|e| {
-                    crate::error::coded(
+                    crate::error::coded_driver(
                         crate::error::codes::SOURCE_QUERY_FAILED,
-                        format!("mssql: reading scalar row failed: {e}"),
+                        "mssql: reading scalar row failed",
+                        e,
                     )
                 })?;
             Ok(row.and_then(|r| scalar_to_string(&r)))
@@ -818,18 +824,20 @@ impl Source for MssqlSource {
         let Self { rt, client, .. } = self;
         rt.block_on(async {
             let mut stream = client.query(wrapped.as_str(), &[]).await.map_err(|e| {
-                crate::error::coded(
+                crate::error::coded_driver(
                     crate::error::codes::SOURCE_QUERY_FAILED,
-                    format!("mssql: type-probe query failed: {e}"),
+                    "mssql: type-probe query failed",
+                    e,
                 )
             })?;
             let columns = stream
                 .columns()
                 .await
                 .map_err(|e| {
-                    crate::error::coded(
+                    crate::error::coded_driver(
                         crate::error::codes::SOURCE_QUERY_FAILED,
-                        format!("mssql: type-probe metadata failed: {e}"),
+                        "mssql: type-probe metadata failed",
+                        e,
                     )
                 })?
                 .map(<[_]>::to_vec)

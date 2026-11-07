@@ -4960,6 +4960,40 @@ seeds:
       mongo:
         na: "a document source has no declared column wire type: the probe returns before it reads a row (source_type == Mongo)"
 
+  - name: stop-class
+    class: "an environment stop (a code of kind Environment, or a wrapper over a driver error) exits by the word its message holds, not by its declaration and the typed verdict of its cause: a relation named login_timeouts or deadlock_log exits 2 retryable for good, a blocked read past its lock timeout exits 1, and a retryable stop recoded by an outer layer loses its verdict"
+    history: "2026-11-03 seam stop-class - VP-8, MT-F-A, MT-F-B, MT-F-F, RC-C5, RER-2, RER-3; RED on main 2026-11-04 (a missing MSSQL, Oracle or MongoDB relation named for a failure exited 2 where its code says 1, an MSSQL read past lock_timeout_s exited 1 where the lock clears and the remedy is to run again)"
+    scope: source
+    patch: stop-class/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+      mysql:
+        cells: ["lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+      mssql:
+        cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql, an_mssql_read_blocked_past_its_lock_timeout_exits_retryable, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+      oracle:
+        cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+      mongo:
+        cells: [a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo, "lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
+
+  - name: stop-class-number
+    class: "a driver error number that names a missing or forbidden object, column or statement is not typed permanent, so a column or table called login_timeout, dns_cache or deadlock_flag falls to the words of the message and exits 2 retryable on SQL Server (207, 229), MySQL (1054, 1142) and Oracle (ORA-00904)"
+    history: "2026-11-05 finding D1 of the stop-class verification (VP-8 class); RED on main 2026-11-05 (a missing column named login_timeout exited 2 where its number says 1)"
+    scope: source
+    patch: stop-class-number/shared.patch
+    engines:
+      postgres:
+        na: "classify_pg_sqlstate decides every PostgreSQL error by its SQLSTATE and leaves no word-matching for an undefined column; a_missing_column_exits_by_its_code_whatever_its_name_holds_postgres is its unchanged neighbour"
+      mysql:
+        cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_mysql, "lib:each_mysql_code_maps_to_its_class", "lib:a_permanent_mysql_number_exits_1_whatever_the_name_it_quotes_holds"]
+      mssql:
+        cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_mssql, "lib:each_mssql_number_maps_to_its_class"]
+      oracle:
+        cells: [a_missing_column_exits_by_its_code_whatever_its_name_holds_oracle, "lib:each_oracle_number_maps_to_its_class", "lib:a_typed_permanent_oracle_number_exits_1_whatever_the_name_it_quotes_holds"]
+      mongo:
+        na: "a MongoDB export reads whole documents; a field the documents do not hold is a null, not a refused read, so no driver number names a missing column"
+
   - name: keyset-key-type-unchecked
     class: "the planner accepts a keyset key by a type list kept apart from what the cursor reader can advance: a MySQL BINARY(16), TIME or TINYINT(1) unique key is auto-picked and stops the run with exit 5 after page 0 (exit 0 as a snapshot on one chunk), a PostgreSQL bytea or time and a SQL Server varbinary or time chunk_by_key are accepted, and an MSSQL datetime2(7) chunk_by_key reads microseconds from 100 ns ticks and delivers duplicates with exit 0"
     history: "2026-11-03 - found by the seam packaging (ER-1, ER-3, ER-6, RHS-3): the MSSQL datetime2(7) key re-read the row at the end of every page; fixed by src/source/keyset_key.rs::keyset_key_refusal; owner decision Q11: a one-chunk table is refused too"

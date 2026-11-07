@@ -435,7 +435,8 @@ infra:
     # 2026-11-06: +2 N/A rows from ca-file-second-trust-anchor (oracle refuses ca_file; mongo's driver takes ca_file as its whole root store); mysql and mssql carry patches that restore the registry driver.
     # 2026-11-05: +1 N/A row, progress-inherited-by-another-stream x mongo: the collection incarnation in the stored population refuses the repoint before the rows comparison the seed breaks.
     # 2026-11-06: +3 structural N/A rows from interval-text-without-its-label (MySQL, SQL Server and MongoDB have no INTERVAL type to reach the Interval arm).
-    na_ceiling: 561  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 first-CDC-run anchor release (#852): one MongoDB row with no reachable trigger, recounted by python -m dev.seeded --self-test (561 manifest N/A rows)
+    # 2026-11-05: +2 structural N/A rows from stop-class-number (PostgreSQL decides every error by its SQLSTATE, MongoDB reads whole documents and refuses no column).
+    na_ceiling: 563  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 first-CDC-run anchor release (#852): one MongoDB row with no reachable trigger, recounted by python -m dev.seeded --self-test (563 manifest N/A rows)
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

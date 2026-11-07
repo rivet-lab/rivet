@@ -448,21 +448,23 @@ pub(crate) fn source_object_of_capture_instance(
                 .await
         })
         .map_err(|e| {
-            crate::error::coded(
+            crate::error::coded_driver(
                 crate::error::codes::SOURCE_QUERY_FAILED,
-                format!(
+                &format!(
                     "sqlserver cdc: reading cdc.change_tables for capture instance \
-                 '{capture_instance}' (the login needs SELECT on the cdc schema): {e}"
+                 '{capture_instance}' (the login needs SELECT on the cdc schema)"
                 ),
+                e,
             )
         })?;
     let row = rt.block_on(async { rows.into_row().await }).map_err(|e| {
-        crate::error::coded(
+        crate::error::coded_driver(
             crate::error::codes::SOURCE_QUERY_FAILED,
-            format!(
+            &format!(
                 "sqlserver cdc: reading the cdc.change_tables row for capture \
-                 instance '{capture_instance}': {e}"
+                 instance '{capture_instance}'"
             ),
+            e,
         )
     })?;
     // A FOURTH outcome the first cut folded back into "no such instance", making

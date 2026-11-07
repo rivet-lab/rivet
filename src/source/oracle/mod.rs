@@ -31,18 +31,31 @@ pub(crate) trait Ora<T> {
 
 impl<T> Ora<T> for std::result::Result<T, oracledb::Error> {
     fn ora(self) -> Result<T> {
-        self.map_err(|e| driver_failure(format!("{e:?}")))
+        self.map_err(|e| driver_failure(format!("{e:?}"), server_verdict(&e)))
+    }
+}
+
+/// The verdict of the server's own number in `e`, `None` when it is not a database error or the number is not typed.
+fn server_verdict(e: &oracledb::Error) -> Option<crate::error::retry::RetryClass> {
+    match e.kind() {
+        oracledb::ErrorKind::DbError(db) => crate::error::retry::oracle_number_class(db.code()),
+        _ => None,
     }
 }
 
 /// An actionable hint for failures whose cause rivet has measured.
 /// The driver's error as rivet's: the server's words kept, a known failure's hint appended, coded by phase.
-fn driver_failure(msg: String) -> anyhow::Error {
+fn driver_failure(msg: String, verdict: Option<crate::error::retry::RetryClass>) -> anyhow::Error {
     let code = driver_failure_code(&msg);
-    match known_failure_hint(&msg) {
-        Some(hint) => crate::error::coded(code, format!("oracle: {msg}\n  hint: {hint}")),
-        None => crate::error::coded(code, format!("oracle: {msg}")),
-    }
+    let text = match known_failure_hint(&msg) {
+        Some(hint) => format!("oracle: {msg}\n  hint: {hint}"),
+        None => format!("oracle: {msg}"),
+    };
+    let stop = crate::error::CodedError::new(code, text);
+    anyhow::Error::new(match verdict {
+        Some(class) => stop.over(class),
+        None => stop,
+    })
 }
 
 /// Connect-time failures (listener, credentials, a connection closed during setup) against statement-time ones.
@@ -1203,6 +1216,49 @@ mod error_code_tests {
     use super::*;
     use crate::config::{TlsConfig, TlsMode};
 
+    /// A statement failure whose server number is typed permanent exits 1 whatever transient word the identifier it quotes holds.
+    #[test]
+    fn a_typed_permanent_oracle_number_exits_1_whatever_the_name_it_quotes_holds() {
+        use crate::error::retry::oracle_number_class;
+        for (number, message) in [
+            (904, "ORA-00904: \"DEADLOCK_FLAG\": invalid identifier"),
+            (904, "ORA-00904: \"login_timeout\": invalid identifier"),
+            (
+                942,
+                "ORA-00942: table or view \"LOGIN_TIMEOUTS\" does not exist",
+            ),
+            (1031, "ORA-01031: insufficient privileges on dns_cache"),
+            (933, "ORA-00933: SQL command not properly ended near dns"),
+            (936, "ORA-00936: missing expression near timeout"),
+            (900, "ORA-00900: invalid SQL statement dns"),
+        ] {
+            let err = driver_failure(message.into(), oracle_number_class(number));
+            crate::error::assert_coded(&err, "RIVET_SOURCE_QUERY_FAILED", 1);
+        }
+    }
+
+    /// A failure whose number is transient, or not typed, is decided exactly as before.
+    #[test]
+    fn an_oracle_failure_that_is_not_a_typed_permanent_number_is_decided_as_before() {
+        use crate::error::retry::oracle_number_class;
+        for (number, message, exit) in [
+            (12541, "ORA-12541: TNS:no listener", 2),
+            (3113, "ORA-03113: end-of-file on communication channel", 2),
+            (18, "ORA-00018: maximum number of sessions exceeded", 2),
+            (12170, "ORA-12170: TNS:Connect timeout occurred", 2),
+            (1555, "ORA-01555: snapshot too old", 1),
+            (1555, "ORA-01555: snapshot too old, login timeout", 2),
+            (
+                60,
+                "ORA-00060: deadlock detected while waiting for resource",
+                2,
+            ),
+        ] {
+            let err = driver_failure(message.into(), oracle_number_class(number));
+            assert_eq!(crate::error::classify_exit(&err), exit, "{message}");
+        }
+    }
+
     /// A malformed URL (usage), the driver's failures by phase (environment), an alias-less
     /// re-read column (usage) and an unsupported `tls.ca_file` (usage) carry their codes.
     #[test]
@@ -1210,12 +1266,12 @@ mod error_code_tests {
         let err = parse_oracle_url("oracle://h:1521/svc").unwrap_err();
         crate::error::assert_coded(&err, "RIVET_CONFIG_SOURCE_URL_INVALID", 1);
         // "no listener" is a transient failure to the retry classifier: environment, exit 2.
-        let err = driver_failure("ORA-12541: TNS:no listener".into());
+        let err = driver_failure("ORA-12541: TNS:no listener".into(), None);
         crate::error::assert_coded(&err, "RIVET_SOURCE_CONNECT_FAILED", 2);
-        let err = driver_failure("ORA-00942: table or view does not exist".into());
+        let err = driver_failure("ORA-00942: table or view does not exist".into(), None);
         crate::error::assert_coded(&err, "RIVET_SOURCE_QUERY_FAILED", 1);
         // A connection closed during setup is transient to the retry classifier: exit 2.
-        let err = driver_failure("unexpected end of file".into());
+        let err = driver_failure("unexpected end of file".into(), None);
         crate::error::assert_coded(&err, "RIVET_SOURCE_CONNECT_FAILED", 2);
         assert!(err.to_string().contains("hint:"), "{err}");
         let err = alias_required("ROWID");

@@ -1262,32 +1262,17 @@ pub(crate) fn pg_retention_warnings_on(client: &mut postgres::Client, slot: &str
     out
 }
 
-/// Add an engine's setup hint ONLY to errors rivet did not raise itself.
-///
-/// Every `open` is wrapped in a `wal_level` / binlog-grants / Agent-setup hint,
-/// because a connection that fails for a permissions reason gives an opaque driver
-/// message and the hint is the whole answer. But rivet's OWN verdicts are already
-/// the whole answer, and the wrap puts the wrong cause FIRST — measured on the PG
-/// anti-gap guard, which reports permanent DATA LOSS:
-///
-///   Error: if this is a permissions/setup error: PostgreSQL CDC needs wal_level=
-///   logical and a role with the REPLICATION attribute — see … : pg cdc: slot
-///   'x' is missing but a resume checkpoint exists — the changes since then are no
-///   longer in the log. Re-snapshot …
-///
-/// The operator reads a wal_level troubleshooting line while the sentence that
-/// matters — re-snapshot, the data is gone — sits past a colon at the end. Two
-/// call sites were already hoisted OUT of their wrap one at a time for exactly
-/// this (`precheck_configured_tables` on both MySQL and PG, each with a comment
-/// saying the hint "sends the operator to fix permissions they never had a problem
-/// with"). Hoisting works only for a check that can run BEFORE `open`; this covers
-/// the ones raised inside it.
-///
-/// The discriminator is the prefix rivet puts on its own CDC messages
-/// (`mysql cdc:`, `pg cdc:`, …), which is also what the refusals and guards in each
-/// adapter are built from.
+/// Add an engine's setup hint only to errors rivet did not raise itself: chosen by code, then by type, then by an engine `cdc` segment of the message.
 fn with_setup_hint(e: anyhow::Error, hint: &'static str) -> anyhow::Error {
     let rendered = format!("{e:#}");
+    if let Some(coded) = e.downcast_ref::<crate::error::CodedError>()
+        && !matches!(
+            coded.kind(),
+            crate::error::ErrorKind::Environment(crate::error::Retry::ByCause)
+        )
+    {
+        return e;
+    }
     if e.downcast_ref::<crate::source::TlsHandshakeFailed>()
         .is_some()
         || e.downcast_ref::<crate::source::UnreachableTarget>()
@@ -1298,16 +1283,12 @@ fn with_setup_hint(e: anyhow::Error, hint: &'static str) -> anyhow::Error {
     if crate::source::is_tls_handshake_failure(&rendered) {
         return crate::source::TlsHandshakeFailed::wrap(e, None);
     }
-    if [
-        "mysql cdc:",
-        "pg cdc:",
-        "mssql cdc:",
-        "mongodb cdc:",
-        "cdc:",
-    ]
-    .iter()
-    .any(|p| rendered.contains(p))
-    {
+    if rendered.split(": ").any(|segment| {
+        segment == "cdc"
+            || segment
+                .strip_suffix(" cdc")
+                .is_some_and(|engine| !engine.is_empty() && !engine.contains(' '))
+    }) {
         return e;
     }
     e.context(hint)
@@ -2458,6 +2439,51 @@ mod setup_hint {
             "an engine-agnostic sink refusal is rivet's verdict as much as an \
              engine-prefixed one"
         );
+    }
+
+    /// The hint is chosen by the error's code and by an engine `cdc` segment of the message, never by a `cdc:` that a driver message happens to echo inside a word.
+    #[test]
+    fn the_setup_hint_is_chosen_by_code_then_by_the_prefix_not_by_a_substring() {
+        let hint = super::PG_CDC_HINT;
+        let hinted = |e: anyhow::Error| {
+            format!("{:#}", super::with_setup_hint(e, hint))
+                .starts_with("if this is a permissions/setup error")
+        };
+        assert!(
+            !hinted(crate::error::coded(
+                crate::error::codes::SOURCE_CDC_LOG_GAP,
+                "the stop says nothing of cdc"
+            )),
+            "a coded refusal is rivet's verdict whatever its words"
+        );
+        assert!(
+            hinted(anyhow::anyhow!(
+                "db error: relation \"dns_cdc: zones\" does not exist"
+            )),
+            "a driver message that echoes `cdc:` mid-word is still an opaque driver error"
+        );
+        for opaque in [
+            "db error: relation the orders cdc: does not exist",
+            "db error:  cdc: stray",
+        ] {
+            assert!(
+                hinted(anyhow::anyhow!(opaque)),
+                "a segment ending ` cdc` after a spaced or empty engine is not rivet's prefix: {opaque}"
+            );
+        }
+        for rivet_own in [
+            "oracle cdc: the redo log changed",
+            "sqlserver cdc: capture job stopped",
+            "cdc: rivet.t: a row image carries 1 value(s)",
+            "opening the stream: pg cdc: slot 'x' is missing",
+        ] {
+            assert!(!hinted(anyhow::anyhow!(rivet_own)), "{rivet_own}");
+        }
+        let wrapper = crate::error::coded(
+            crate::error::codes::SOURCE_QUERY_FAILED,
+            "permission denied for table t",
+        );
+        assert!(hinted(wrapper), "a driver-failure wrapper keeps the hint");
     }
 
     /// A redo log that kept changing under LogMiner reaches the operator as that, never as a grants problem.
