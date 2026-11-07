@@ -82,12 +82,19 @@ def oracle_lines(log: Path, keep: int = 6) -> list[str]:
     return list(tail)
 
 
+def switch_refusal(wt: Path, logs: Path, head: str, sha: str, switch: bool) -> str:
+    """Why a tree standing at `head` may not be moved to origin/main ("" = it may): no --switch, a head off main, or a gate log at head that never finished."""
+    if not switch:
+        return f"{wt} stands at {head}, origin/main is {sha}; pass --switch to move it"
+    if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", "HEAD", "origin/main"], capture_output=True).returncode != 0:
+        return f"{wt} stands at {head}, which is not an ancestor of origin/main {sha}; it is never moved"
+    unfinished = [log for log in sorted((logs / head).glob("*.log")) if sentinel_rc(log) is None]
+    return f"{wt} stands at {head} with an unfinished gate log {unfinished[0]}; it is not moved" if unfinished else ""
+
+
 def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: Callable[[], dict], quiet_load: float,
              wait_min: float = 0.0, poll_s: float = 60.0, switch: bool = False) -> int:
-    """Wait up to `wait_min` for a quiet machine, refuse on a dirty tree; else run `cmd` into <logs>/<sha>/ at origin/main.
-
-    The tree is moved to origin/main only when it already stands there or `switch` is set.
-    """
+    """Wait up to `wait_min` for a quiet machine, then run `cmd` into <logs>/<sha>/ at origin/main (see switch_refusal for when the tree may move)."""
     if wt.resolve() != devbox_load.GATE_WORKTREE.resolve() and cmd == GATE_CMD:
         return verdict(False, f"refused: {wt} is not the gate worktree {devbox_load.GATE_WORKTREE}")
     why = devbox_load.wait_gate_quiet(snap, quiet_load, time.monotonic() + (0 if dry_run else wait_min * 60), poll_s)
@@ -99,8 +106,9 @@ def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: Callable
         git(wt, "fetch", "-q", "origin", "main")
     sha = git(wt, "rev-parse", "--short=8", "origin/main")
     head = git(wt, "rev-parse", "--short=8", "HEAD")
-    if head != sha and not switch:
-        return verdict(False, f"refused: {wt} stands at {head}, origin/main is {sha}; pass --switch to move it")
+    why = switch_refusal(wt, logs, head, sha, switch) if head != sha else ""
+    if why:
+        return verdict(False, f"refused: {why}")
     logdir = logs / sha
     log = logdir / "weekly-full.log"
     if dry_run:
@@ -279,13 +287,15 @@ def run_mutants(a: argparse.Namespace) -> int:
     for pkg, lines, total in picked:
         left = package_timeout(a.budget_min, (time.monotonic() - started) / 60, a.timeout_min)
         why = "job budget spent" if not left else devbox_load.wait_quiet(hold, time.monotonic() + min(a.hold_max_min, left) * 60, a.hold_poll)
+        if not why:
+            left = package_timeout(a.budget_min, (time.monotonic() - started) / 60, a.timeout_min)
+            why = "" if left else "job budget spent"
         if why:
             rows.append(f"| {pkg} | {lines} | {total} | NOT RUN | - | - | {why} |")
             unfinished.append(pkg)
             write_report(out_root, day, sha, rows)
             continue
-        left = package_timeout(a.budget_min, (time.monotonic() - started) / 60, a.timeout_min)
-        res = run_package(a.worktree, pkg, out_root, a.jobs, max(left, 1))
+        res = run_package(a.worktree, pkg, out_root, a.jobs, left)
         (out_root / f"survivors-{pkg.replace('/', '_')}.txt").write_text("\n".join(res["missed"]) + "\n")
         issue = "-"
         if res["missed"] or res["timeout"]:
@@ -367,6 +377,7 @@ def check_examples(examples: Path) -> None:
         assert t["tag"] == "weekly" and t["every"] == "week" and t["cmd"][:3] == ["python3", "-m", "dev.pytools.weekly_jobs"], t
         assert t["cmd"][3] in SUBCOMMANDS and "after" not in t, f"queue order carries the sequence; `after` waits on a renamed weekly id: {t}"
     by_id = {t["id"]: t for t in queue}
+    assert "--switch" in by_id["weekly-gate"]["cmd"], "the weekly gate must move its tree to origin/main or it grades a stale sha"
     assert by_id["weekly-gate"]["timeout_min"] > GATE_WAIT_MIN and by_id["weekly-hot-mutants"]["timeout_min"] > BUDGET_MIN
     args = plist["ProgramArguments"]
     assert args[args.index("--tag") + 1] == "weekly" and "--queue" in args and "--until" in args, args
@@ -483,6 +494,11 @@ def gate_selftest(t: Path, snap: dict) -> None:
     subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c2"], check=True)
     rc, out = go(ok)
     assert rc != 0 and "--switch" in out and git(wt, "rev-parse", "--short=8", "HEAD") == sha, f"a tree standing elsewhere is not moved without --switch: {out}"
+    (logs / sha).mkdir(parents=True, exist_ok=True)
+    (logs / sha / "weekly-full.log").write_text("started, never finished\n")
+    rc, out = go(ok, switch=True)
+    assert rc != 0 and "unfinished gate log" in out and git(wt, "rev-parse", "--short=8", "HEAD") == sha, f"a tree whose gate log never finished is not moved: {out}"
+    (logs / sha / "weekly-full.log").write_text("x\nexit 0 2026-11-07T20:00:00Z\n")
     rc, out = go(ok, switch=True)
     assert rc == 0 and git(wt, "rev-parse", "--short=8", "HEAD") != sha and "VERDICT: done" in out, out
     loads = iter([9.0, 9.0, 1.0])
@@ -491,6 +507,12 @@ def gate_selftest(t: Path, snap: dict) -> None:
     assert rc == 0 and len(seen) == 3, f"a loaded machine is waited on, not refused at once: {seen} {out}"
     rc, out = go(ok, {**snap, "load1": 9.0}, wait_min=0)
     assert rc != 0 and "not quiet" in out
+    git(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "candidate")
+    off = git(wt, "rev-parse", "--short=8", "HEAD")
+    subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c3"], check=True)
+    rc, out = go(ok, switch=True)
+    assert rc != 0 and "not an ancestor" in out and git(wt, "rev-parse", "--short=8", "HEAD") == off, f"a head off main is never moved: {out}"
+    git(wt, "checkout", "-q", "--detach", "origin/main")
     try:
         prepare_worktree(devbox_load.GATE_WORKTREE, origin)
     except RuntimeError as e:
@@ -523,11 +545,46 @@ def tools_selftest(t: Path, snap: dict) -> None:
     subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "scripts"], check=True)
     mut.worktree = t / "mutants-wt"
+    mut.timeout_min = 240
     real_snapshot, devbox_load.snapshot = devbox_load.snapshot, lambda *_: snap
     try:
         _mutants_runs(t, snap, mut)
     finally:
         devbox_load.snapshot = real_snapshot
+
+
+def budget(real, mut: argparse.Namespace, t: Path, lefts: list[int], expect: int | None, packages: int = 1) -> None:
+    """run_mutants with package_timeout answering `lefts` (then stopping the job): the package gets exactly `expect` minutes, or is NOT RUN with no cargo started (None)."""
+    seen, answers = [], iter(lefts)
+
+    def spy(*args):
+        """run_package that records the minutes it was given."""
+        seen.append(args[4])
+        return real(*args)
+
+    def left(*_):
+        """package_timeout that answers from `lefts` and raises StopIteration when they run out."""
+        return next(answers)
+
+    out = t / f"budget-{len(list(t.glob('budget-*')))}"
+    g = globals()
+    saved = g["run_package"], g["package_timeout"]
+    g["run_package"], g["package_timeout"] = spy, left
+    try:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_mutants(argparse.Namespace(**{**vars(mut), "report_dir": out, "packages": ",".join(["src/source"] * packages)}))
+        except (KeyboardInterrupt, StopIteration):
+            pass
+    finally:
+        g["run_package"], g["package_timeout"] = saved
+    reports = list(out.glob("*/report.md"))
+    assert reports, "a stopped job leaves the rows it had written"
+    report = reports[0].read_text()
+    if expect is None:
+        assert not seen and "NOT RUN" in report and "job budget spent" in report, (seen, report)
+    else:
+        assert seen == [expect], f"a package gets what is left of the budget, not its own limit: {seen}"
 
 
 def _mutants_runs(t: Path, snap: dict, mut: argparse.Namespace) -> None:
@@ -539,7 +596,7 @@ def _mutants_runs(t: Path, snap: dict, mut: argparse.Namespace) -> None:
             assert run_mutants(starved) != 0
         report = next((t / "starved").glob("*/report.md")).read_text()
         assert "NOT RUN" in report and "job budget spent" in report and "NOT COMPLETE: src/source" in buf.getvalue(), (report, buf.getvalue())
-        real, calls = run_package, []
+        real, real_timeout, calls = run_package, package_timeout, []
 
         def die_on_second(*args):
             """run_package that raises on its second call, as a SIGTERM would."""
@@ -559,6 +616,9 @@ def _mutants_runs(t: Path, snap: dict, mut: argparse.Namespace) -> None:
         finally:
             globals()["run_package"] = real
         assert "| COMPLETE |" in next((t / "midway").glob("*/report.md")).read_text(), "a job stopped between packages still leaves the finished rows"
+        budget(real, mut, t, [100, 100], expect=100)
+        budget(real, mut, t, [5, 0], expect=None)
+        budget(real, mut, t, [0, 7], expect=None, packages=2)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = run_mutants(mut)
