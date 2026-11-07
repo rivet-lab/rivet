@@ -523,6 +523,15 @@ def tools_selftest(t: Path, snap: dict) -> None:
     subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "scripts"], check=True)
     mut.worktree = t / "mutants-wt"
+    real_snapshot, devbox_load.snapshot = devbox_load.snapshot, lambda *_: snap
+    try:
+        _mutants_runs(t, snap, mut)
+    finally:
+        devbox_load.snapshot = real_snapshot
+
+
+def _mutants_runs(t: Path, snap: dict, mut: argparse.Namespace) -> None:
+    """The budget, midway-report and complete runs of run_mutants against a quiet snapshot."""
     with mock_env({**os.environ, "PATH": f"{t / 'bin'}{os.pathsep}{os.environ['PATH']}"}):
         starved = argparse.Namespace(**{**vars(mut), "budget_min": 0.0, "report_dir": t / "starved"})
         buf = io.StringIO()
