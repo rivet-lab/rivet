@@ -25,15 +25,15 @@ fn require_config(config_path: &str) -> Result<Config> {
 }
 
 /// Who owns a stored export name: a declared export, or the `partition_by` export whose child (`<parent>__<value>`) it is.
-enum Owner<'a> {
-    Declared(&'a crate::config::ExportConfig),
-    PartitionChild(&'a crate::config::ExportConfig),
+enum Owner {
+    Declared(crate::config::ExportConfig),
+    PartitionChild(crate::config::ExportConfig),
 }
 
 /// The owner of `name`: an exact declared name first, else the longest `partition_by` parent it is a child of.
-fn owner_of<'a>(config: &'a Config, name: &str) -> Option<Owner<'a>> {
-    if let Some(e) = config.exports.iter().find(|e| e.name == name) {
-        return Some(Owner::Declared(e));
+fn owner_of(config: &Config, name: &str) -> Option<Owner> {
+    if let Ok(found) = crate::config::declared_exports(config, Some(name)) {
+        return found.into_iter().next().map(Owner::Declared);
     }
     config
         .exports
@@ -46,6 +46,7 @@ fn owner_of<'a>(config: &'a Config, name: &str) -> Option<Owner<'a>> {
                     .is_some_and(|value| !value.is_empty())
         })
         .max_by_key(|e| e.name.len())
+        .cloned()
         .map(Owner::PartitionChild)
 }
 
@@ -289,7 +290,7 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
     let stored = state.stored_export_names(&source)?;
     let mut family = vec![export_name.to_string()];
     match owner {
-        Owner::Declared(e) if e.partition_by.is_some() => family.extend(
+        Owner::Declared(_) => family.extend(
             stored
                 .iter()
                 .filter(|n| n.as_str() != export_name && belongs_to(&config, n, export_name))
@@ -325,15 +326,21 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
         .map(|n| super::chunked::claim_export_progress(&state, n, &source, "reset its state"))
         .collect::<Result<Vec<_>>>()?;
     state.reset_all(&family, &source)?;
-    println!("State reset for export '{}'", export_name);
+    println!("{}", reset_report(&family));
+    Ok(())
+}
+
+/// What `state reset` prints: the export it reset (first in `family`) and, when it holds any, the partition children cleared with it.
+fn reset_report(family: &[String]) -> String {
+    let mut report = format!("State reset for export '{}'", family[0]);
     if family.len() > 1 {
-        println!(
-            "  and its {} partition(s): {}",
+        report.push_str(&format!(
+            "\n  and its {} partition(s): {}",
             family.len() - 1,
             family[1..].join(", ")
-        );
+        ));
     }
-    Ok(())
+    report
 }
 
 /// The context of the journal event `rivet state accept` records, and the status of its journal.
@@ -1696,6 +1703,22 @@ exports:
             );
         }
         assert_eq!(held_names(&state), ["a__2026-01-01", "p"]);
+    }
+
+    #[test]
+    fn reset_report_names_the_children_only_when_there_are_some() {
+        let one = vec!["a".to_string()];
+        assert_eq!(reset_report(&one), "State reset for export 'a'");
+        let two = vec!["a".to_string(), "a__1".to_string()];
+        assert_eq!(
+            reset_report(&two),
+            "State reset for export 'a'\n  and its 1 partition(s): a__1"
+        );
+        let three = vec!["a".to_string(), "a__1".to_string(), "a__2".to_string()];
+        assert_eq!(
+            reset_report(&three),
+            "State reset for export 'a'\n  and its 2 partition(s): a__1, a__2"
+        );
     }
 
     #[test]

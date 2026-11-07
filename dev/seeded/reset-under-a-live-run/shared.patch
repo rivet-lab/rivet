@@ -1,16 +1,19 @@
 diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+index 9e1d6fb..95462e9 100644
 --- a/src/pipeline/cli.rs
 +++ b/src/pipeline/cli.rs
-@@ -261,8 +261,6 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
-         )
-     })?;
-     let state = StateStore::open(config_path)?;
--    let _held =
--        super::chunked::claim_export_progress(&state, export_name, &source, "reset its state")?;
-     state.reset(export_name, &source)?;
+@@ -321,10 +321,6 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
+         }
+         _ => {}
+     }
+-    let _held = family
+-        .iter()
+-        .map(|n| super::chunked::claim_export_progress(&state, n, &source, "reset its state"))
+-        .collect::<Result<Vec<_>>>()?;
+     state.reset_all(&family, &source)?;
      println!("State reset for export '{}'", export_name);
-     Ok(())
-@@ -520,12 +518,6 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
+     if family.len() > 1 {
+@@ -598,12 +594,6 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
      }
      let source = reset_chunks_source(&config, &format!("export '{export_name}'"))?;
      let state = StateStore::open(config_path)?;
@@ -23,7 +26,7 @@ diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
      let n = state.reset_chunk_checkpoint(export_name, &source)?;
      // Abandoning the resume also clears the committed/verified boundary, so
      // `rivet state progression` does not report a stale chunk boundary after
-@@ -598,14 +590,6 @@ pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
+@@ -676,14 +666,6 @@ pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
      );
  
      for name in targets {
