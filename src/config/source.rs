@@ -224,8 +224,7 @@ pub struct TlsConfig {
     /// Enforcement level. See [`TlsMode`].
     #[serde(default)]
     pub mode: TlsMode,
-    /// PEM-encoded CA certificate to trust for server verification. Required
-    /// for [`TlsMode::VerifyCa`] and [`TlsMode::VerifyFull`] against a private CA.
+    /// PEM CA certificate for server verification: the only trust anchor on Postgres and MongoDB, trusted beside the system store on MySQL and SQL Server.
     pub ca_file: Option<String>,
     /// Accept certificates not chained to a trusted CA. Dangerous — disables
     /// server authentication — and only honored when explicitly `true`.

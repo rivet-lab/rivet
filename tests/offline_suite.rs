@@ -44,6 +44,8 @@ mod one_sanitizer_guard;
 mod renderer_locality_guard;
 #[path = "offline/skip_is_not_a_pass_guard.rs"]
 mod skip_is_not_a_pass_guard;
+#[path = "offline/tls_ca_file_sole_anchor.rs"]
+mod tls_ca_file_sole_anchor;
 #[path = "offline/validate_cdc_union.rs"]
 mod validate_cdc_union;
 
