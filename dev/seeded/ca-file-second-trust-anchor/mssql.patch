@@ -1,0 +1,34 @@
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -204,7 +204,6 @@
+ [patch.crates-io]
+ mysql_common = { git = "https://github.com/rivet-lab/rust_mysql_common", rev = "a660b506c230efe91a31d0421e11c7f373533df9" }
+ mysql = { git = "https://github.com/rivet-lab/rust-mysql-simple", rev = "fa791fe955a645cf111257aa7eca07ceadea6efe" }
+-tiberius = { git = "https://github.com/rivet-lab/tiberius", rev = "f84c3c7eb7fceaa2a8f88beaa3afa73213310088" }
+ opentls = { git = "https://github.com/rivet-lab/opentls", rev = "b7c9d874d51a37f5d0fc8757db3a59dcf374375a" }
+ 
+ [[bench]]
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4671,7 +4671,8 @@
+ [[package]]
+ name = "tiberius"
+ version = "0.13.0"
+-source = "git+https://github.com/rivet-lab/tiberius?rev=f84c3c7eb7fceaa2a8f88beaa3afa73213310088#f84c3c7eb7fceaa2a8f88beaa3afa73213310088"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e07324791de2bdaed058af4aa433a0b5ec5c0beac407a9797419c19805df2415"
+ dependencies = [
+  "async-trait",
+  "asynchronous-codec",
+@@ -4701,7 +4702,8 @@
+ [[package]]
+ name = "tiberius-macros"
+ version = "0.1.0"
+-source = "git+https://github.com/rivet-lab/tiberius?rev=f84c3c7eb7fceaa2a8f88beaa3afa73213310088#f84c3c7eb7fceaa2a8f88beaa3afa73213310088"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "907fed5ea55695d902cc3359fffa4a35021dfa9b95ab4eb9c8376d42ffb9eec8"
+ dependencies = [
+  "proc-macro2",
+  "quote",

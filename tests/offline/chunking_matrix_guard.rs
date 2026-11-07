@@ -191,6 +191,8 @@ const MATRICES: &[(&str, usize)] = &[
     // Lowered 5 -> 4 (2026-09-29): Oracle CDC vanished-anchor proven live.
     // Lowered 4 -> 3 (2026-09-29): Oracle CDC refuses a captured-table TRUNCATE.
     // Lowered 3 -> 0 (2026-10-08): Oracle view-under-CDC, sparse-guard and unusable-key cells.
+    // Raised 0 -> 2 (2026-11-06): the MySQL and SQL Server cells of ca_file_is_the_only_trust_anchor, open defect #789, closed by a driver patch.
+    // Lowered 2 -> 0 (2026-11-06): both cells now run, the MySQL and SQL Server drivers are patched to a sole anchor.
     ("docs/fail-loud-matrix.yaml", 0),
     // Load-mode write contracts — keyed on the 3 LoadMode variants (full /
     // incremental / cdc), not source engines. Codifies the 4 data bugs found in
