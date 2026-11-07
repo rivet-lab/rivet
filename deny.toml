@@ -102,4 +102,10 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # 2026-11-04: the mysql_common fork pins a one-line fix for a negative TIME(1)/(2) binlog fraction (upstream blackbeam/rust_mysql_common#200); drop this entry and the [patch] with the upstream release.
-allow-git = ["https://github.com/rivet-lab/rust_mysql_common"]
+# 2026-11-06: the mysql, tiberius and opentls forks make tls.ca_file the only trust anchor (#789); drop each entry and its [patch] with the upstream release that does the same.
+allow-git = [
+    "https://github.com/rivet-lab/rust_mysql_common",
+    "https://github.com/rivet-lab/rust-mysql-simple",
+    "https://github.com/rivet-lab/tiberius",
+    "https://github.com/rivet-lab/opentls",
+]

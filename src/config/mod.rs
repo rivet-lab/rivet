@@ -405,8 +405,7 @@ impl Config {
     /// (`accept_invalid_certs` / `accept_invalid_hostnames`). `mode: verify-full`
     /// promises chain + hostname verification, but the knob silently downgrades
     /// it to "trust anything" — a MITM exposure that contradicts the stated
-    /// intent (see `src/source/tls.rs::build_native_tls`, whose comment claims
-    /// this is warned about at config-time but is not).
+    /// intent.
     ///
     /// Like [`Self::check_csv_compression`], this is a raw-YAML scan rather than
     /// a `validate` check on purpose: `TlsMode` is `#[serde(default)]` and the
@@ -2811,18 +2810,6 @@ mod sec_config_validation {
             "rejection must name the offending 'path' / traversal; got: {msg}"
         );
     }
-
-    // ── V13: dangerous TLS cert-knob combination ─────────────────────────────
-    //
-    // `tls: { mode: verify-full, accept_invalid_certs: true }` silently
-    // *downgrades* the strongest mode to "accept any cert" — `verify-full`
-    // promises chain + hostname verification, but the danger knob disables
-    // chain verification (see `src/source/tls.rs::build_native_tls`). The
-    // comment at `src/source/tls.rs:55-56` claims "Each one emits a warning at
-    // config-time (see `Config::validate`)" — but `Config::validate` emits no
-    // such warning today. The secure behavior is a LOUD error (or surfaced
-    // warning) at config-load. No `Err`/warning is produced today, so this is
-    // RED.
 
     #[test]
     fn sec_accept_invalid_certs_warns() {

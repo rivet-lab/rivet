@@ -52,7 +52,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | Field | Type | Required | Description |
 |-------|------|:--------:|-------------|
 | `mode` | `disable` \| `require` \| `verify-ca` \| `verify-full` |  | Enforcement level. See [`TlsMode`]. |
-| `ca_file` | `string` |  | PEM CA certificate for server verification: the only trust anchor on Postgres and MongoDB, trusted beside the system store on MySQL and SQL Server. |
+| `ca_file` | `string` |  | PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set. |
 | `accept_invalid_certs` | `boolean` |  | Accept certificates not chained to a trusted CA. Dangerous — disables server authentication — and only honored when explicitly `true`. |
 | `accept_invalid_hostnames` | `boolean` |  | Accept certificates whose subjectAltName does not match the connection hostname. Dangerous — disables hostname verification. |
 
