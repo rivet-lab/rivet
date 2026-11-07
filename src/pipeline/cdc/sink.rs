@@ -38,7 +38,8 @@ use crate::pipeline::manifest_writer::{write_manifest, write_manifest_without_su
 use crate::source::cdc::identity::table_matches;
 use crate::source::cdc::value::{self, RivetValue};
 use crate::source::cdc::{
-    CdcEngine, ChangeEvent, ChangeStream, Position, ResidentBytes, TxnSeq, partition_guard,
+    CdcEngine, ChangeEvent, ChangeStream, Position, ResidentBytes, TxnSeq,
+    named_image_arity_mismatch, partition_guard,
 };
 use crate::types::{TypeMapping, build_arrow_field};
 
@@ -773,7 +774,9 @@ pub(crate) fn run_to_files(
         // whole stops the run by code instead of ending clean over values it never read.
         let tables: Vec<String> = sinks.iter().map(|s| s.out.table.clone()).collect();
         if let crate::source::cdc::RowImage::Partial { why } = stream.row_image(&tables) {
-            return Err(super::partial_image_refusal(run.engine, &why));
+            return Err(crate::source::cdc::open_partial_image_refusal(
+                run.engine, &why,
+            ));
         }
         if !hit_max
             && !unacked_commit
@@ -1017,22 +1020,6 @@ pub(crate) fn pass_must_roll(unacked_commit: bool, buffered_rows: usize) -> bool
 /// also happens to be empty.
 pub(crate) fn drain_is_complete(hit_max: bool, yielded_this_pass: usize) -> bool {
     hit_max || yielded_this_pass == 0
-}
-
-/// A NAMED image whose value count disagrees with its name count — a PARTIAL
-/// image. `Some((values, names))` when they disagree, and the caller formats.
-///
-/// Round 13's guard, which lived as an `if` inside `flush` and was proven only by a
-/// live test (`SET GLOBAL binlog_row_image=MINIMAL`, one UPDATE). Offline, its `!=`
-/// → `==` mutant survived: refusing every image whose arity AGREES is the whole
-/// stream, so a green suite said nothing about the case that matters.
-///
-/// A key-only DELETE is not a counter-example: PostgreSQL names only the key
-/// columns it also supplies, so its lengths agree.
-pub(crate) fn named_image_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usize)> {
-    let names = ev.image_names.as_deref()?;
-    let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
-    (n != names.len()).then_some((n, names.len()))
 }
 
 /// The O(1) name-lookup memo `image_cell` takes: this column's index in the

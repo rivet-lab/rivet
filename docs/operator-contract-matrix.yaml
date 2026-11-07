@@ -392,6 +392,14 @@ scenarios:
     mongo:    { test: cdc_to_stdout_emits_each_change_once_mongo }
     oracle:   { test: cdc_to_stdout_emits_each_change_once_oracle }
 
+  - id: cdc_stdout_refuses_a_partial_image
+    what: "`rivet cdc` without `--output` refuses a change whose row image carries fewer values than its column names (MySQL binlog_row_image MINIMAL/NOBLOB, an MSSQL capture instance with fewer columns than the table) by RIVET_SOURCE_CDC_PREREQUISITE, prints no line for it and leaves the checkpoint where it was"
+    postgres: { na: "a PostgreSQL image is whole or key-only on deletes, never partial: the stdout loop prints key-only deletes as before (the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images)" }
+    mysql:    { test: cdc_to_stdout_refuses_a_partial_image_mysql }
+    mssql:    { test: cdc_to_stdout_refuses_a_partial_image_mssql }
+    mongo:    { na: "a MongoDB change carries a document, not positional values under column names, so no arity can disagree" }
+    oracle:   { na: "every Oracle event carries image_names from ALL_TAB_COLS and the open refuses a table without ALL COLUMNS supplemental logging, oracle_cdc_table_without_all_column_logging_is_refused (live_cdc_oracledb.rs)" }
+
   - id: init_config_runs_full
     what: "the config `rivet init --mode full` writes runs as written"
     postgres: { test: the_config_init_writes_runs_full_postgres }

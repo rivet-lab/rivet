@@ -3936,6 +3936,148 @@ fn cdc_to_stdout_emits_each_change_once_mysql() {
     ));
 }
 
+/// The `after` image of `id` in the source, as the JSON array a whole NDJSON image must equal.
+fn mysql_source_row(table: &str, id: i64) -> serde_json::Value {
+    use mysql::prelude::Queryable as _;
+    let row: (i64, String, String, String) = cdc_conn()
+        .query_first(format!("SELECT id, a, b, c FROM {table} WHERE id = {id}"))
+        .unwrap()
+        .expect("the source row");
+    serde_json::json!([row.0, row.1, row.2, row.3])
+}
+
+/// The `after` arrays of the NDJSON change lines in `lines`.
+fn ndjson_after_images(lines: &[String]) -> Vec<serde_json::Value> {
+    lines
+        .iter()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["after"].clone())
+        .collect()
+}
+
+/// `rivet cdc` to stdout over a MySQL change written under a partial `binlog_row_image` is refused `RIVET_SOURCE_CDC_PREREQUISITE` before it prints a line, the checkpoint byte-identical, every run; whole images before it match the source; the re-baseline the refusal names delivers the next change.
+fn cdc_stdout_refuses_a_partial_image_mysql(image: &str, id: i64) {
+    use mysql::prelude::Queryable as _;
+    let mut s = CdcScenario::mysql_with(
+        "oc_ndjson_part",
+        "id INT PRIMARY KEY, a VARCHAR(20), b TEXT, c VARCHAR(20)",
+        |r, _| r,
+    );
+    let table = s.table.clone();
+    assert_eq!(
+        s.rig.cli_cdc_ndjson(true).len(),
+        0,
+        "fixture: the anchor run"
+    );
+    s.sql(&format!(
+        "INSERT INTO {table} VALUES (1, 'a1', 'b1', 'c1'), (2, 'a2', 'b2', 'c2')"
+    ));
+    let whole = s.rig.cli_cdc_ndjson(true);
+    assert_eq!(
+        ndjson_after_images(&whole),
+        [mysql_source_row(&table, 1), mysql_source_row(&table, 2)],
+        "the whole images before the partial one are the source rows"
+    );
+    let ckpt = s.rig.checkpoint();
+    let held = std::fs::read(&ckpt).expect("the anchor wrote a checkpoint");
+    let mut writer = mysql::Conn::new(
+        mysql::Opts::from_url(&MYSQL_CDC_URL.replace("rivet:rivet@", "root:rivet@")).unwrap(),
+    )
+    .expect("connect as root");
+    writer
+        .query_drop(format!("SET SESSION binlog_row_image = '{image}'"))
+        .unwrap();
+    writer
+        .query_drop(format!("UPDATE {table} SET c = 'C{id}x' WHERE id = {id}"))
+        .unwrap();
+    for _ in 0..2 {
+        let out = s.rig.cli_cdc_raw(true, &[]);
+        assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_PREREQUISITE", 1));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.lines().any(|l| l.trim_start().starts_with('{')),
+            "{image}: a refused image prints no change line:\n{stdout}"
+        );
+        let said = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            said.contains("a PARTIAL image")
+                && said.contains("binlog_row_image = FULL")
+                && said.contains("Re-baseline the stream in one run: delete the checkpoint file"),
+            "{image}: the refusal names the cause and the re-baseline:\n{said}"
+        );
+        assert_eq!(
+            std::fs::read(&ckpt).expect("the checkpoint stays"),
+            held,
+            "{image}: the refused run left the position alone"
+        );
+    }
+    writer
+        .query_drop("SET SESSION binlog_row_image = 'FULL'")
+        .unwrap();
+    writer
+        .query_drop(format!("UPDATE {table} SET c = 'c{id}' WHERE id = {id}"))
+        .unwrap();
+    std::fs::remove_file(&ckpt).expect("the remedy deletes the checkpoint");
+    assert_eq!(
+        s.rig.cli_cdc_ndjson(true).len(),
+        0,
+        "{image}: the re-baseline anchors past the partial change"
+    );
+    s.sql(&format!("UPDATE {table} SET c = 'C{id}y' WHERE id = {id}"));
+    assert_eq!(
+        ndjson_after_images(&s.rig.cli_cdc_ndjson(true)),
+        [mysql_source_row(&table, id)],
+        "{image}: after the re-baseline the next change is delivered whole"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn cdc_to_stdout_refuses_a_partial_image_mysql() {
+    cdc_stdout_refuses_a_partial_image_mysql("MINIMAL", 1);
+    cdc_stdout_refuses_a_partial_image_mysql("NOBLOB", 2);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn cdc_to_stdout_refuses_a_partial_image_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = unique_name("oc_ndjson_part");
+    let ci = format!("dbo_{table}");
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table} (id INT PRIMARY KEY, keep INT, dropped INT)"
+    ));
+    let _guard = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    mssql_cdc_exec(
+        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
+         EXEC sys.sp_cdc_enable_db;",
+    );
+    mssql_cdc_exec(&format!(
+        "EXEC sys.sp_cdc_enable_table @source_schema=N'dbo', @source_name=N'{table}', \
+         @role_name=NULL, @capture_instance=N'{ci}', @captured_column_list=N'id,keep';"
+    ));
+    wait_for_a_max_lsn();
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (1, 10, 100), (2, 20, 200)"
+    ));
+    wait_for_capture(&ci, 2);
+    let out = Rig::mssql_cdc(&table, &ci).cli_cdc_raw(false, &[]);
+    assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_PREREQUISITE", 1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.lines().any(|l| l.trim_start().starts_with('{')),
+        "a capture instance that omits a column prints no change line:\n{stdout}"
+    );
+    let said = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        said.contains("2 of 3 columns")
+            && said.contains("Re-enable the table with the full column list"),
+        "the refusal names the instance's arity and the remedy:\n{said}"
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose mssql (CDC)"]
 fn cdc_to_stdout_emits_each_change_once_mssql() {
