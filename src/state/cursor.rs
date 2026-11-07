@@ -1024,13 +1024,16 @@ impl StateStore {
         self.reset_all(&[export_name.to_string()], source)
     }
 
-    /// The export names `source` holds progress under, in byte order: those with a cursor on `source` (under any spelling of it, or written before sources were recorded) and the boundaries no cursor of another source owns.
+    /// The export names `source` holds progress under, in byte order: those with a cursor on `source` (under any spelling of it, or written before sources were recorded) and the boundaries no cursor owns and no chunk run of another source recorded.
     pub fn stored_export_names(&self, source: &str) -> Result<Vec<String>> {
         let cursors = self.query("SELECT export_name, prefix FROM export_state", &[], |r| {
             (r.text(0), r.text(1))
         })?;
         let boundaries = self.query("SELECT export_name FROM export_progression", &[], |r| {
             r.text(0)
+        })?;
+        let chunk_runs = self.query("SELECT export_name, source FROM chunk_run", &[], |r| {
+            (r.text(0), r.opt_text(1))
         })?;
         let mut cursor_of: std::collections::BTreeMap<String, bool> = Default::default();
         for (name, prefix) in cursors {
@@ -1039,17 +1042,40 @@ impl StateStore {
                 || crate::config::canonical_source_key(&prefix) == source;
             *cursor_of.entry(name).or_default() |= here;
         }
+        let mut chunked_here: std::collections::BTreeMap<String, bool> = Default::default();
+        for (name, stored) in chunk_runs {
+            *chunked_here.entry(name).or_default() |=
+                super::checkpoint::chunk_run_is_of(source, stored.as_deref());
+        }
         let mut names: std::collections::BTreeSet<String> = cursor_of
             .iter()
             .filter(|(_, here)| **here)
             .map(|(name, _)| name.clone())
             .collect();
-        names.extend(
-            boundaries
-                .into_iter()
-                .filter(|n| !cursor_of.contains_key(n)),
-        );
+        names.extend(boundaries.into_iter().filter(|n| {
+            !cursor_of.contains_key(n) && chunked_here.get(n).copied().unwrap_or(true)
+        }));
         Ok(names.into_iter().collect())
+    }
+
+    /// Whether the state holds anything under `export_name`: a cursor, a boundary, a chunk run, a run, a file or a journal.
+    pub fn holds_export(&self, export_name: &str) -> Result<bool> {
+        let sql = [
+            "export_state",
+            "export_progression",
+            "chunk_run",
+            "export_metrics",
+            "run_status",
+            "run_journal",
+            "file_log",
+        ]
+        .map(|t| format!("SELECT 1 FROM {t} WHERE export_name = ?1"))
+        .join(" UNION ALL ");
+        Ok(self
+            .query_opt(&format!("{sql} LIMIT 1"), &[export_name.into()], |r| {
+                r.i64(0)
+            })?
+            .is_some())
     }
 
     /// Return every export of `names` to a "never ran" state in one transaction, a statement per kind for each `RESET_BATCH` of them.
@@ -1533,6 +1559,69 @@ mod tests {
         let latest = |k: &ProgressKey| s.claim(k.clone()).unwrap().latest_chunk_run().unwrap();
         assert_eq!(latest(&a).as_deref(), Some("run_a"));
         assert_eq!(latest(&b).as_deref(), Some("run_b"));
+    }
+
+    #[test]
+    fn a_boundary_with_no_cursor_belongs_to_the_source_of_its_chunk_runs() {
+        let s = store();
+        for (name, run_source) in [
+            ("here", Some("pg/a")),
+            ("there", Some("pg/b")),
+            ("both", None),
+        ] {
+            s.record_committed_chunked(name, 3, "run").unwrap();
+            if let Some(source) = run_source {
+                s.open_chunk_run(
+                    &ProgressKey::chunked(name, source),
+                    &format!("run_{name}"),
+                    "h",
+                    3,
+                    &[(1, 10)],
+                )
+                .unwrap();
+            }
+        }
+        s.record_committed_chunked("never_chunked", 3, "run")
+            .unwrap();
+        s.create_chunk_run("run_l", "unsourced", "h", 3).unwrap();
+        s.record_committed_chunked("unsourced", 3, "run").unwrap();
+        s.open_chunk_run(
+            &ProgressKey::chunked("both", "pg/a"),
+            "run_2",
+            "h",
+            3,
+            &[(1, 10)],
+        )
+        .unwrap();
+        s.open_chunk_run(
+            &ProgressKey::chunked("both", "pg/b"),
+            "run_3",
+            "h",
+            3,
+            &[(1, 10)],
+        )
+        .unwrap();
+        assert_eq!(
+            s.stored_export_names("pg/a").unwrap(),
+            ["both", "here", "never_chunked", "unsourced"]
+        );
+        assert_eq!(
+            s.stored_export_names("pg/b").unwrap(),
+            ["both", "never_chunked", "there", "unsourced"]
+        );
+    }
+
+    #[test]
+    fn the_state_holds_an_export_that_has_any_record_and_no_other() {
+        let s = store();
+        assert!(!s.holds_export("orders").unwrap());
+        s.record_committed_chunked("orders", 1, "run").unwrap();
+        assert!(s.holds_export("orders").unwrap());
+        assert!(!s.holds_export("order").unwrap());
+        assert!(!s.holds_export("orders__2026-01-01").unwrap());
+        s.create_chunk_run("run_l", "orders__2026-01-01", "h", 3)
+            .unwrap();
+        assert!(s.holds_export("orders__2026-01-01").unwrap());
     }
 
     #[test]

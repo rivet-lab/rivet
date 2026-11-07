@@ -461,3 +461,27 @@ scenarios:
     mssql:    { test: partition_reset_child_lease_pg_state_mssql }
     oracle:   { test: partition_reset_child_lease_pg_state_oracle }
     mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_labels
+    what: "PR12 — a reset of the parent takes the stored names whose suffix is a label of the export's granularity and leaves an undeclared `<parent>__archive`, a month label under a day export and `<parent>__x__<date>` as they were; the next run delivers every row"
+    postgres: { test: partition_reset_labels_postgres }
+    mysql:    { test: partition_reset_labels_mysql }
+    mssql:    { test: partition_reset_labels_mssql }
+    oracle:   { test: partition_reset_labels_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_inspect
+    what: "PR13 — `state files|chunks|progression`, `journal` and `metrics` with `--export <parent>__typo` or a label the state does not hold are refused with RIVET_CLI_EXPORT_UNKNOWN (exit 1), and `state progression --export <held partition>` shows that partition"
+    postgres: { test: partition_reset_inspect_postgres }
+    mysql:    { test: partition_reset_inspect_mysql }
+    mssql:    { test: partition_reset_inspect_mssql }
+    oracle:   { test: partition_reset_inspect_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_chunked
+    what: "PR14 — a chunked export with `partition_by`: a reset of the parent clears the boundary of a partition whose chunk runs are of this source and keeps the boundary of a partition whose chunk runs are all of another source; the next run delivers every row"
+    postgres: { test: partition_reset_chunked_postgres }
+    mysql:    { test: partition_reset_chunked_mysql }
+    mssql:    { test: partition_reset_chunked_mssql }
+    oracle:   { test: partition_reset_chunked_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }

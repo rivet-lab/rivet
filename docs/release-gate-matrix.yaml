@@ -441,7 +441,8 @@ infra:
     # 2026-11-06: +3 N/A rows from connection-cut-mid-row-not-retried (mssql lifts tiberius errors into text, mongo classifies a typed driver error, oracle lifts oracledb errors into text: none reaches the removed arm).
     # 2026-11-07: +1 N/A row from state-reset-skips-partition-children x mongo (partition_by is refused for a MongoDB source at config load, so no export keeps per-partition progress).
     # 2026-11-07: +2 N/A rows from PR 881 review: state-reset-holds-every-lease-at-once x postgres-state (a Postgres state lease is a row, no open file) and state-reset-misreads-stored-partitions x mongo (no partition_by on MongoDB).
-    na_ceiling: 569  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 first-CDC-run anchor release (#852): one MongoDB row with no reachable trigger, recounted by python -m dev.seeded --self-test
+    # 2026-11-07: +6 N/A rows from the second review of PR 881: five MongoDB rows (no partition_by on MongoDB) for the F1 F3 F4 F5 F6 classes and state-reset-half-done-says-nothing-was-done x postgres-state (the race between two batches has no hook-free seam on a row lease).
+    na_ceiling: 575  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 first-CDC-run anchor release (#852): one MongoDB row with no reachable trigger, recounted by python -m dev.seeded --self-test
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

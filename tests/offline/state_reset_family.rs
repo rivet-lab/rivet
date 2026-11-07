@@ -25,7 +25,8 @@ fn source_of(cfg: &Path) -> String {
 }
 
 fn child(i: usize) -> String {
-    format!("ev__{i:05}")
+    let day = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap() + chrono::Days::new(i as u64);
+    format!("ev__{}", day.format("%Y-%m-%d"))
 }
 
 /// The state beside `cfg` holding `ev` and `children` partitions under `prefix`, each with a cursor and a boundary.
@@ -40,7 +41,7 @@ fn seeded(cfg: &Path, prefix: &str, children: usize) -> rusqlite::Connection {
         )
         .unwrap();
         db.execute(
-            "INSERT INTO export_progression (export_name, last_committed_strategy, last_committed_cursor) VALUES (?1, 'incremental', '7')",
+            "INSERT INTO export_progression (export_name, last_committed_strategy, last_committed_cursor, last_committed_run_id, last_committed_at) VALUES (?1, 'incremental', '7', 'r', '2026-01-01T00:00:00Z')",
             rusqlite::params![name],
         )
         .unwrap();
@@ -115,7 +116,7 @@ fn state_reset_family_a_small_family_is_cleared_under_the_same_cap() {
     assert_eq!(held(&db, "export_progression"), 0, "{said}");
 }
 
-/// A live run's lease on the partition `ev__00007`, held by this process through its own state handle.
+/// A live run's lease on the partition `child(7)`, held by this process through its own state handle.
 fn child_lease(cfg: &Path) -> (StateStore, String) {
     let state = StateStore::open(&cfg.display().to_string()).unwrap();
     let key = rivet::pipeline::run_lease_key(&child(7), &source_of(cfg));
@@ -137,7 +138,7 @@ fn state_reset_family_a_live_run_of_a_child_refuses_the_reset_and_touches_nothin
     let said = said(&out);
     assert_eq!(out.status.code(), Some(2), "{said}");
     assert!(said.contains("RIVET_STATE_RUN_IN_PROGRESS"), "{said}");
-    assert!(said.contains("export 'ev__00007'"), "{said}");
+    assert!(said.contains(&format!("export '{}'", child(7))), "{said}");
     assert_eq!(held(&db, "export_state"), 13, "nothing was reset: {said}");
     assert_eq!(held(&db, "export_progression"), 13, "{said}");
 }
@@ -158,7 +159,7 @@ fn state_reset_family_a_wait_that_runs_out_on_a_child_is_refused_by_code_and_tou
     assert_eq!(out.status.code(), Some(2), "{said}");
     assert!(said.contains("RIVET_STATE_LOCK_TIMEOUT"), "{said}");
     assert!(
-        said.contains("the run lease of export 'ev__00007'"),
+        said.contains(&format!("the run lease of export '{}'", child(7))),
         "{said}"
     );
     assert!(said.contains("nothing was done"), "{said}");
@@ -191,4 +192,67 @@ fn state_reset_family_a_wait_on_a_child_ends_with_the_run_and_the_reset_clears_t
     assert!(out.status.success(), "{said}");
     assert_eq!(held(&db, "export_state"), 0, "{said}");
     assert_eq!(held(&db, "export_progression"), 0, "{said}");
+}
+
+#[test]
+fn state_reset_family_a_reset_takes_the_partitions_of_its_labels_and_never_another_exports_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let db = seeded(&cfg, &source_of(&cfg), 3);
+    for name in ["ev__archive", "ev__2026-01", "ev__x__2026-01-01"] {
+        db.execute(
+            "INSERT INTO export_state (export_name, prefix, last_cursor_value) VALUES (?1, ?2, '7')",
+            rusqlite::params![name, source_of(&cfg)],
+        )
+        .unwrap();
+    }
+    let out = rivet(&cfg, &["state", "reset", "--export", "ev"], None);
+    let said = said(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("and its 3 partition(s)"), "{said}");
+    let left: Vec<String> = db
+        .prepare("SELECT export_name FROM export_state ORDER BY 1")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        left,
+        ["ev__2026-01", "ev__archive", "ev__x__2026-01-01"],
+        "{said}"
+    );
+}
+
+#[test]
+fn state_reset_family_an_inspect_command_refuses_a_name_no_partition_could_carry_and_shows_a_held_one()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let _db = seeded(&cfg, &source_of(&cfg), 3);
+    for cmd in [
+        &["state", "files"][..],
+        &["state", "chunks"],
+        &["state", "progression"],
+        &["journal"],
+        &["metrics"],
+    ] {
+        for name in ["ev__typo", "ev__1999-01-01"] {
+            let mut args = cmd.to_vec();
+            args.extend(["--export", name]);
+            let out = rivet(&cfg, &args, None);
+            let text = said(&out);
+            assert_eq!(out.status.code(), Some(1), "{cmd:?} {name}: {text}");
+            assert!(
+                text.contains("RIVET_CLI_EXPORT_UNKNOWN"),
+                "{cmd:?} {name}: {text}"
+            );
+        }
+    }
+    let held = child(1);
+    let out = rivet(&cfg, &["state", "progression", "--export", &held], None);
+    let said = said(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(&held), "{said}");
+    assert!(!said.contains("No progression boundaries"), "{said}");
 }

@@ -1,0 +1,14 @@
+diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+--- a/src/pipeline/cli.rs
++++ b/src/pipeline/cli.rs
+@@ -43,9 +43,7 @@
+                 && name
+                     .strip_prefix(e.name.as_str())
+                     .and_then(|rest| rest.strip_prefix("__"))
+-                    .is_some_and(|label| {
+-                        crate::plan::partition::is_child_label(label, e.partition_granularity)
+-                    })
++                    .is_some_and(|label| !label.is_empty())
+         })
+         .cloned()
+         .map(Owner::PartitionChild)
