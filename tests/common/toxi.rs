@@ -275,12 +275,12 @@ pub fn assert_midrow_cut_retried_and_delivered_exactly_once(
         out_run.status.success(),
         "a connection cut mid-row must be retried and the run must exit 0; stderr:\n{stderr}"
     );
-    let state = super::StateDb::next_to_config(&rig.config_path());
-    let metrics = state.metrics_row(&state.latest_run_id(export));
+    let recorded = super::recorded_run_outcome(&rig.config_path(), export)
+        .expect("the run's export_metrics row");
     assert!(
-        metrics.retries.unwrap_or(0) >= 1,
-        "export_metrics.retries must record the retry; got {:?}; stderr:\n{stderr}",
-        metrics.retries
+        recorded.retries >= 1,
+        "export_metrics.retries must record the retry; got {}; stderr:\n{stderr}",
+        recorded.retries
     );
     super::duckdb_declared_assert_complete(
         out_container,
