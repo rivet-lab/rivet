@@ -4,7 +4,7 @@
 //! prefix (`live+gate-only: ...`) means no CI job holds its topology and the release gate is
 //! its only runner; every other live_suite test runs in the nightly (`live-full`, or
 //! `mongo-versions` for a test whose path names mongo) and, minus the named E2E-only cuts,
-//! in the PR E2E job. The CI filters are substring lists kept by hand in two workflow files;
+//! in the nightly `e2e` job. The CI filters are substring lists kept by hand in nightly-live.yml;
 //! these tests grade them against the markers, in both directions: a gate-only test that a
 //! CI filter still selects (the `*_failover_to_the_standby` red run), and a filter term that
 //! drops a test CI could run (`--skip mongo` took 14 live_suite tests from every CI job,
@@ -12,7 +12,6 @@
 
 use std::path::{Path, PathBuf};
 
-const CI: &str = ".github/workflows/ci.yml";
 const NIGHTLY: &str = ".github/workflows/nightly-live.yml";
 
 /// Tests the E2E job skips although the nightly runs them, each with its reason.
@@ -172,7 +171,7 @@ fn hit(path: &str, terms: &[String]) -> bool {
     terms.iter().any(|t| path.contains(t.as_str()))
 }
 
-/// The three CI runners' selection rules, read from the two workflow files.
+/// The three CI runners' selection rules, read from the nightly workflow.
 struct Runners {
     e2e_skips: Vec<String>,
     nightly_excludes: Vec<String>,
@@ -182,7 +181,11 @@ struct Runners {
 
 impl Runners {
     fn load() -> Self {
-        let e2e_skips = libtest_skips(&step_run(CI, "e2e", "Run live cargo integration tests"));
+        let e2e_skips = libtest_skips(&step_run(
+            NIGHTLY,
+            "e2e",
+            "Run live cargo integration tests",
+        ));
         let (nightly_inc, nightly_excludes) =
             nextest_terms(&step_run(NIGHTLY, "live-full", "Run FULL live suite"));
         assert!(
@@ -233,7 +236,7 @@ fn a_gate_only_live_test_is_skipped_by_every_ci_runner() {
         .filter(|t| t.gate_only())
         .filter_map(|t| {
             let by: Vec<&str> = [
-                (r.e2e(t), "ci.yml e2e"),
+                (r.e2e(t), "nightly e2e"),
                 (r.nightly(t), "nightly live-full"),
                 (r.mongo(t), "nightly mongo-versions"),
             ]
@@ -306,7 +309,7 @@ fn a_stack_without_mongo_skips_every_mongo_test() {
     let r = Runners::load();
     let tests = live_tests_checked();
     for (workflow, job, sel) in [
-        (CI, "e2e", &r.e2e_skips),
+        (NIGHTLY, "e2e", &r.e2e_skips),
         (NIGHTLY, "live-full", &r.nightly_excludes),
     ] {
         if job_starts_mongo(workflow, job) {
