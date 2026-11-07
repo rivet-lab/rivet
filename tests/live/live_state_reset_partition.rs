@@ -708,12 +708,19 @@ fn reset_after_a_granularity_change_takes_every_partition(engine: SqlEngine, sta
     assert_eq!(day_lines, day_children, "{said}");
     let said = reset(&rig, &export);
     assert!(said.contains("partition(s)"), "{said}");
-    assert_eq!(family_rows(&rig, "export_state"), 0, "{said}");
-    assert_eq!(family_rows(&rig, "export_progression"), 0, "{said}");
+    let left = (
+        family_rows(&rig, "export_state"),
+        family_rows(&rig, "export_progression"),
+    );
     emptied(dest.path());
     let rig = at_granularity(engine, rig, "day");
     rig.run_ok();
-    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
+    assert_eq!(
+        delivered(dest.path()),
+        (vec![1, 2, 3, 4, 5, 6], 6),
+        "{said}"
+    );
+    assert_eq!(left, (0, 0), "{said}");
 }
 
 /// A reset of the export takes the partitions whose suffix is a label of its granularity and never an undeclared name that merely starts with `<export>__`.
