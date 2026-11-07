@@ -1034,7 +1034,7 @@ seeds:
           - keyset_incremental_repointed_at_another_table_oracle
           - parallel_keyset_incremental_repointed_at_another_table_oracle
       mongo:
-        cells: [resume_repointed_at_another_collection_mongo]
+        na: "2026-11-05: the stored population of a MongoDB export names the collection incarnation (UUID), so a resume repointed at another collection is refused by the incarnation part even with the rows comparison broken (resume_repointed_at_another_collection_mongo stays green under this seed); that part is graded by mongo-progress-not-bound-to-incarnation, and the rows comparison alone is graded on the SQL engines and in the lib cell"
       lib:
         cells:
           - "lib:a_stored_cursor_is_refused_for_another_table_every_time_until_a_reset"
@@ -2620,6 +2620,86 @@ seeds:
         cells: [check_refuses_a_collection_that_does_not_exist_as_run_does_mongo]
       oracle:
         na: "a missing SQL table fails the query, read by the engine; the absent-collection guard is MongoDB's"
+  - name: mongo-empty-read-after-drop
+    class: "a read of a source that was dropped, or dropped and created again, after the existence check returns no rows and no error (or the new collection's rows), and the run ends exit 0 with a marker over what it had"
+    history: "found 2026-11-03 by gate cell collection_dropped_under_it going red under load (a MongoDB `find` on a collection dropped after `listCollections` returns 0 documents); RED on main 904b8f21 3/3; reworked 2026-11-04: the collection is confirmed by its listing and UUID after every read, not only an empty one (RED on main f0f5207c, 7 of 7 cells); this seed removes the check after the read"
+    scope: source
+    patch: mongo-empty-read-after-drop/shared.patch
+    engines:
+      postgres:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
+      mysql:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
+      mssql:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
+      mongo:
+        cells: [a_collection_dropped_before_a_keyset_page_is_refused_by_code_mongo, a_collection_dropped_before_a_full_scan_is_refused_by_code_mongo, a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo, a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo, a_collection_created_again_under_a_full_scan_is_refused_by_code_mongo, a_collection_created_again_under_an_id_range_read_is_refused_by_code_mongo]
+      oracle:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
+  - name: mongo-collection-uuid-not-compared
+    class: "a collection dropped and created again under a run is listed under a new identity, and the check compares only presence, so the run reads the new collection's documents as the old one's and ends exit 0"
+    history: "2026-11-04 - the first fix of mongo-empty-read-after-drop re-read the listing only on an empty read and kept the UUID only for that read; reworked so every read is confirmed against the UUID the run pinned; this seed passes no pinned UUID to the comparison"
+    scope: source
+    patch: mongo-collection-uuid-not-compared/shared.patch
+    engines:
+      postgres:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mysql:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mssql:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mongo:
+        cells: [a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo, a_collection_created_again_under_a_full_scan_is_refused_by_code_mongo, a_collection_created_again_under_an_id_range_read_is_refused_by_code_mongo]
+      oracle:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+  - name: mongo-parallel-worker-pins-its-own-uuid
+    class: "a parallel worker pins the collection it finds when it starts instead of the one its run planned the ranges on, so a collection created again between the plan and a worker's first read is read as the planned one"
+    history: "2026-11-04 - a worker opened its own source and pinned the UUID at its first listing, after the run's range sample; the run now hands its pin to every worker; this seed drops the hand-over"
+    scope: source
+    patch: mongo-parallel-worker-pins-its-own-uuid/shared.patch
+    engines:
+      postgres:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mysql:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mssql:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mongo:
+        cells: [a_collection_created_again_before_the_workers_connect_is_refused_by_code_mongo]
+      oracle:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+  - name: mongo-listing-failure-fails-open
+    class: "a failed listCollections of a MongoDB collection is read as no listing, so the identity check is skipped and the run reads a collection it could not confirm"
+    history: "2026-11-05 - the check treated any listing error as the role not being allowed to list; only the Unauthorized code (13) lifts the check, any other failure stops the run; this seed lifts the check on every error"
+    scope: source
+    patch: mongo-listing-failure-fails-open/shared.patch
+    engines:
+      postgres:
+        na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
+      mysql:
+        na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
+      mssql:
+        na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
+      mongo:
+        cells: [lib:a_listing_that_fails_for_any_reason_but_the_privilege_stops_the_run]
+      oracle:
+        na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
+  - name: mongo-progress-not-bound-to-incarnation
+    class: "the resume anchor or incremental cursor of a MongoDB export is not bound to the collection incarnation it was written against, so after the collection is dropped and created again with other ids the next run reads 0 rows and ends exit 0 with a marker over the old data"
+    history: "2026-11-05 - found by verify-808: a refused run left the keyset anchor, and the next run over the collection created again with other ids exited 0 with 0 rows; the incarnation (UUID) is now part of the stored population and a different one is a different stream; this seed binds nothing"
+    scope: source
+    patch: mongo-progress-not-bound-to-incarnation/shared.patch
+    engines:
+      postgres:
+        na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
+      mysql:
+        na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
+      mssql:
+        na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
+      mongo:
+        cells: [a_collection_created_again_with_other_ids_after_a_refused_resume_is_read_whole_mongo]
+      oracle:
+        na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
   - name: dropped-source-table-uncoded
     class: "a verdict every engine types (the relation the export reads does not exist) is recognised by no path, so each path ends with the raw driver error or a generic query-failed code instead of the one refusal"
     history: "2026-10-16 - found by hand on the pilot client's shape (MySQL -> GCS -> BigQuery, cron): an export whose source table was dropped failed as `MySqlError { ERROR 1146 (42S02): Table 'rivet.drop_probe_b' doesn't exist }` with no RIVET_* code (PostgreSQL too), RIVET_SOURCE_QUERY_FAILED on SQL Server and Oracle, through 0.31.0; fixed by one `names_a_missing_relation` / `code_a_missing_relation` on every path that reads the table"
@@ -2748,6 +2828,23 @@ seeds:
         cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
       oracle:
         cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
+
+  - name: query-password-key-by-suffix-family
+    class: "a credential scrubber that keeps a second, narrower rule for the same key: the URL query path masked `password` only as a bare key or after `_`/`-`, while the keyword path masks every key ending in password/passwd/pwd, so `?sslpassword=…`, `&SSLPassword=…`, `&db.password=…` and `&MYSQL_PWD=…` reached logs, summaries and the journal in clear"
+    history: "issue #781, hand-reproduced on main 2026-11-06: redact_secrets on a URL with `sslpassword=TOPSECRET` left TOPSECRET; closed by routing the query path through is_password_keyword"
+    scope: source
+    patch: query-password-key-by-suffix-family/shared.patch
+    engines:
+      postgres:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mysql:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mssql:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mongo:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      oracle:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
 
   - name: mongo-standalone-uncoded
     class: "a server error that names a missing deployment prerequisite is passed up as the driver's raw dump instead of the coded prerequisite refusal"

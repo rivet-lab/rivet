@@ -126,6 +126,8 @@ fn outcome_markers() -> BTreeSet<String> {
         "StateDb::",
         "recorded_load_spec(",
         "recorded_cursor_bounds(",
+        "recorded_run_outcome(",
+        "assert_recorded_failure(",
         "recorded_export_runs(",
         "StateStore::",
         "metrics_row(",

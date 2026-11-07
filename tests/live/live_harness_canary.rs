@@ -30,11 +30,8 @@ fn postgres_primary_is_reachable() {
 #[test]
 #[ignore = "live: requires docker compose toxiproxy"]
 fn postgres_via_toxiproxy_is_reachable_after_proxy_registration() {
-    // Toxiproxy starts with an empty runtime config — registering the
-    // upstream route is part of the harness, not the image.  `ensure_toxi_proxy`
-    // is idempotent so repeated test runs do not conflict.
+    let _g = toxiproxy_guard();
     ensure_toxi_proxy("postgres", 15432, "postgres:5432");
-    // Important: also clear any leftover toxics from a previous flaky test.
     toxi_reset_toxics("postgres");
 
     let mut c = postgres::Client::connect(POSTGRES_TOXI_URL, NoTls).expect("pg via toxi");
@@ -46,6 +43,7 @@ fn postgres_via_toxiproxy_is_reachable_after_proxy_registration() {
 #[test]
 #[ignore = "live: requires docker compose toxiproxy"]
 fn mysql_via_toxiproxy_is_reachable_after_proxy_registration() {
+    let _g = toxiproxy_guard();
     ensure_toxi_proxy("mysql", 13306, "mysql:3306");
     toxi_reset_toxics("mysql");
 

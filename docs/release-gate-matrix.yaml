@@ -375,8 +375,12 @@ infra:
     status: test
     note: "verify_network_faults drives export_survives_transient_latency_added_via_toxiproxy +
       export_fails_cleanly_when_toxiproxy_is_disabled_before_run +
-      gremlin_cdc_binlog_cut_mid_drain_fails_loud_then_recovers through the release binary;
-      probes toxiproxy :8474 itself and SKIPs loudly when down"
+      export_recovers_after_mid_stream_connection_reset_with_retries +
+      chunked_export_recovers_after_mid_stream_connection_reset +
+      mongo_export_recovers_after_mid_stream_connection_cut_with_retries +
+      gremlin_cdc_binlog_cut_mid_drain_fails_loud_then_recovers through the release binary
+      (a Postgres reset is cut mid-stream by the pause seam and a Mongo scan by a byte-budget cut,
+      retries are read from the state); MySQL mid-stream retry is not proven here; probes toxiproxy :8474 itself and SKIPs loudly when down"
   - id: state_upgrade
     status: test
     note: "pg_upgrade_from_v18_lands_keyset_range_as_bigint_and_keeps_data (src/state/migrations.rs) — stages a POPULATED v18 Postgres state db, migrates in place to HEAD, asserts keyset_range is BIGINT + the pre-upgrade cursor survives; run by the state_migrations preflight. RED-proven against the int4 v19."
@@ -419,13 +423,16 @@ infra:
     # 2026-11-04: +1 structural N/A row from keyset-key-init-mirror (MongoDB init scaffolds no keyset key).
     # 2026-11-04: +4 structural N/A rows from mysql-binlog-negative-time-fraction (PostgreSQL, SQL Server, MongoDB and Oracle have no MySQL binlog TIME decoder).
     # 2026-11-05: +3 structural N/A rows from destination-credential-read-by-one-leg (local, azure, stdout name no credential this seed reaches).
+    # 2026-11-04: +12 structural N/A rows from mongo-empty-read-after-drop, mongo-collection-uuid-not-compared and mongo-parallel-worker-pins-its-own-uuid (a SQL page query of a dropped table fails with the missing-relation error, never an empty page).
+    # 2026-11-05: +8 structural N/A rows from mongo-listing-failure-fails-open and mongo-progress-not-bound-to-incarnation (a SQL engine has no collection listing; SQL tables recreated under a run are a separate, reported defect).
     # 2026-11-05: +4 structural N/A rows from oracle-timestamp-ns-undeclared-truncated (PostgreSQL, MySQL, SQL Server and MongoDB map no column with a refusal).
     # 2026-11-05: +4 structural N/A rows from pg-temporal-uuid-bytea-array-refused (MySQL, SQL Server, Oracle and MongoDB have no PostgreSQL array element builder).
     # 2026-11-05: +4 structural N/A rows from number-text-without-its-label (PostgreSQL, MySQL, SQL Server and MongoDB reach no Oracle NUMBER mapping).
     # 2026-11-05: +4 structural N/A rows from keyset-key-alias-type-by-name (postgres, mysql, oracle and mongo have no catalog name match on a user type to seed).
     # 2026-11-05: +4 structural N/A rows from keyset-key-oracle-exact-number-refused (postgres, mysql, mssql and mongo reach no Oracle NUMBER exemption in the keyset key check).
     # 2026-11-06: +4 structural N/A rows from keyset-key-oracle-inexact-number-admitted (postgres, mysql, mssql and mongo reach no Oracle NUMBER scale fact in the keyset key check).
-    na_ceiling: 531  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-06 keyset seeds: ten rows for engines without the path; 2026-11-06 first-CDC-run anchor release: one MongoDB row with no reachable trigger
+    # 2026-11-05: +1 N/A row, progress-inherited-by-another-stream x mongo: the collection incarnation in the stored population refuses the repoint before the rows comparison the seed breaks.
+    na_ceiling: 552  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-06 keyset seeds: ten rows for engines without the path; 2026-11-06 first-CDC-run anchor release: one MongoDB row with no reachable trigger (see #852)
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
