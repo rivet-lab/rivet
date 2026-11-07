@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- The weekly devbox queue (dev/pytools/night_queue.py with the weekly tag, tasks in dev/launchd/weekly-queue.json.example) on Saturday
-     at 20:00. Copy the queue to ~/night/weekly-queue.json and this file to ~/Library/LaunchAgents/, fix the paths, then:
-     launchctl load ~/Library/LaunchAgents/ai.rivet.weekly.plist -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>ai.rivet.weekly</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/Users/YOU/.cargo/bin:/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/Users/YOU/rivet</string>
   <key>ProgramArguments</key>
   <array>

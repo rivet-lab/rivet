@@ -1,13 +1,10 @@
 """Weekly devbox jobs, run by the night queue (`night_queue.py --tag weekly`, queue example in dev/launchd/).
 
-    python3 -m dev.pytools.weekly_jobs gate [--dry-run]       `make release-oracle-full` in the gate worktree, only on a quiet machine
+    python3 -m dev.pytools.weekly_jobs gate [--dry-run] [--switch]    `make release-oracle-full` in the gate worktree, on a quiet machine
     python3 -m dev.pytools.weekly_jobs mutants [--plan] [--dry-run-issues] [--packages src/a,src/b.rs]
     python3 -m dev.pytools.weekly_jobs --self-test
 
-`gate` refuses while another gate runs, the disk is under the gate floor or the load is not quiet, and writes
-~/wt/gate-logs/<sha>/weekly-full.log ending in `exit <rc> <utc>`. `mutants` runs scripts/mutants.py over the 5 src packages
-with the most changed lines in `git log --since=30.days` (whole package each), writes report.md and the survivors, and files
-one issue per package with survivors (`--dry-run-issues` prints the issue instead). Both end with `VERDICT: done|blocked`.
+Both end with `VERDICT: done|blocked`; `gate` logs to ~/wt/gate-logs/<sha>/weekly-full.log ending in `exit <rc> <utc>`.
 """
 
 from __future__ import annotations
@@ -21,6 +18,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -38,6 +36,8 @@ GATE_CMD = ["make", "release-oracle-full"]
 MUTANTS_WORKTREE = Path.home() / "wt" / "weekly-mutants"
 REPORT_ROOT = devbox_load.NIGHT / "reports" / "hot-mutants"
 HOT_COUNT, HOT_DAYS = 5, 30
+GATE_WAIT_MIN, BUDGET_MIN = 180.0, 600.0
+GATE_TOOLS, MUTANTS_TOOLS = ("git", "make", "uv", "gh"), ("git", "cargo", "gh")
 SUBCOMMANDS = ("gate", "mutants")
 CLOSING = re.compile(r"(fix|fixe[sd]|close[sd]?|resolve[sd]?):? +#[0-9]+", re.I)
 EXAMPLES = ROOT / "dev" / "launchd"
@@ -50,6 +50,12 @@ def git(wt: Path, *args: str, check: bool = True) -> str:
     if check and p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} in {wt}: {p.stderr.strip()}")
     return p.stdout.strip()
+
+
+def missing_tools(names: tuple[str, ...]) -> str:
+    """A refusal naming the tools not on PATH ("" = all found), so a bare launchd PATH is said out loud."""
+    gone = [n for n in names if shutil.which(n) is None]
+    return f"not on PATH: {', '.join(gone)} (PATH={os.environ.get('PATH', '')})" if gone else ""
 
 
 def verdict(done: bool, why: str) -> int:
@@ -76,11 +82,15 @@ def oracle_lines(log: Path, keep: int = 6) -> list[str]:
     return list(tail)
 
 
-def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: dict, quiet_load: float) -> int:
-    """Refuse on a busy machine or a dirty tree; else check out origin/main in `wt` and run `cmd` into <logs>/<sha>/."""
+def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: Callable[[], dict], quiet_load: float,
+             wait_min: float = 0.0, poll_s: float = 60.0, switch: bool = False) -> int:
+    """Wait up to `wait_min` for a quiet machine, refuse on a dirty tree; else run `cmd` into <logs>/<sha>/ at origin/main.
+
+    The tree is moved to origin/main only when it already stands there or `switch` is set.
+    """
     if wt.resolve() != devbox_load.GATE_WORKTREE.resolve() and cmd == GATE_CMD:
         return verdict(False, f"refused: {wt} is not the gate worktree {devbox_load.GATE_WORKTREE}")
-    why = devbox_load.gate_start_refusal(snap, quiet_load)
+    why = devbox_load.wait_gate_quiet(snap, quiet_load, time.monotonic() + (0 if dry_run else wait_min * 60), poll_s)
     if why:
         return verdict(False, f"refused: {why}")
     if git(wt, "status", "--porcelain"):
@@ -88,6 +98,9 @@ def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: dict, qu
     if not dry_run:
         git(wt, "fetch", "-q", "origin", "main")
     sha = git(wt, "rev-parse", "--short=8", "origin/main")
+    head = git(wt, "rev-parse", "--short=8", "HEAD")
+    if head != sha and not switch:
+        return verdict(False, f"refused: {wt} stands at {head}, origin/main is {sha}; pass --switch to move it")
     logdir = logs / sha
     log = logdir / "weekly-full.log"
     if dry_run:
@@ -101,6 +114,14 @@ def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: dict, qu
         f.write(f"\nexit {rc} {dt.datetime.now(dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ}\n")
     lines = "\n".join(oracle_lines(log)) or "no RIVET-ORACLE verdict line in the log"
     return verdict(rc == 0, f"{sha}: `{' '.join(cmd)}` exit {rc}, log {log}\n{lines}")
+
+
+def gate_job(a: argparse.Namespace, snap: Callable[[], dict] = devbox_load.snapshot) -> int:
+    """The `gate` subcommand: refuse on a bare PATH, else run_gate."""
+    gone = missing_tools(GATE_TOOLS)
+    if gone:
+        return verdict(False, f"refused: {gone}")
+    return run_gate(a.worktree, a.logs, GATE_CMD, a.dry_run, snap, a.quiet_load, a.wait_min, a.poll, a.switch)
 
 
 def package_of(path: str) -> str | None:
@@ -185,8 +206,11 @@ def file_issue(res: dict, sha: str, day: str, dry_run: bool, wt: Path) -> str:
     if dry_run:
         print(f"--- dry-run issue: {title}\n{body}")
         return "dry-run"
-    found = subprocess.run(["gh", "issue", "list", "--state", "open", "--search", f'"{title}" in:title', "--json", "number,title"],
-                           cwd=wt, capture_output=True, text=True)
+    try:
+        found = subprocess.run(["gh", "issue", "list", "--state", "open", "--search", f'"{title}" in:title', "--json", "number,title"],
+                               cwd=wt, capture_output=True, text=True)
+    except OSError as e:
+        return f"gh unavailable: {e}"
     if found.returncode != 0:
         return f"gh issue list failed: {found.stderr.strip()[-200:]}"
     open_nums = [i["number"] for i in json.loads(found.stdout or "[]") if i["title"] == title]
@@ -217,8 +241,24 @@ def prepare_worktree(wt: Path, repo: Path) -> str:
     return git(wt, "rev-parse", "HEAD")
 
 
+def package_timeout(budget_min: float, elapsed_min: float, per_package_min: int) -> int:
+    """Minutes the next package may run: its own limit capped by what is left of the job budget (0 = none left)."""
+    return max(0, min(per_package_min, int(budget_min - elapsed_min)))
+
+
+def write_report(out_root: Path, day: str, sha: str, rows: list[str]) -> Path:
+    """Rewrite report.md from the rows so far, so a job stopped midway still leaves its report."""
+    head = f"# Hot-package mutants {day} at {sha[:8]}\n\n| package | changed lines | mutants | run | missed | timed out | issue |\n|---|---|---|---|---|---|---|\n"
+    (out_root / "report.md").write_text(head + "\n".join(rows) + "\n")
+    return out_root / "report.md"
+
+
 def run_mutants(a: argparse.Namespace) -> int:
-    """Pick the hot packages, mutate each whole, write the report and file the issues."""
+    """Pick the hot packages, mutate each whole within the budget, write the report as it grows and file the issues."""
+    started = time.monotonic()
+    gone = missing_tools(MUTANTS_TOOLS)
+    if gone:
+        return verdict(False, f"refused: {gone}")
     try:
         sha = prepare_worktree(a.worktree, a.repo)
         counts = churn(git(a.worktree, "log", f"--since={HOT_DAYS}.days", "--no-renames", "--numstat", "--pretty=format:", "--", "src"))
@@ -226,7 +266,7 @@ def run_mutants(a: argparse.Namespace) -> int:
             picked = [(p, counts.get(p, 0), mutant_count(a.worktree, p)) for p in a.packages.split(",")]
         else:
             picked = hot_packages(counts, HOT_COUNT, lambda p: mutant_count(a.worktree, p))
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         return verdict(False, f"refused: {e}")
     day = dt.date.today().isoformat()
     out_root = a.report_dir / day
@@ -237,12 +277,15 @@ def run_mutants(a: argparse.Namespace) -> int:
     hold = devbox_load.default_hold(a.max_load)
     rows, survivors, unfinished = [], 0, []
     for pkg, lines, total in picked:
-        why = devbox_load.wait_quiet(hold, time.monotonic() + a.hold_max_min * 60, a.hold_poll)
+        left = package_timeout(a.budget_min, (time.monotonic() - started) / 60, a.timeout_min)
+        why = "job budget spent" if not left else devbox_load.wait_quiet(hold, time.monotonic() + min(a.hold_max_min, left) * 60, a.hold_poll)
         if why:
-            rows.append(f"| {pkg} | {lines} | {total} | NOT RUN | - | - | held: {why} |")
+            rows.append(f"| {pkg} | {lines} | {total} | NOT RUN | - | - | {why} |")
             unfinished.append(pkg)
+            write_report(out_root, day, sha, rows)
             continue
-        res = run_package(a.worktree, pkg, out_root, a.jobs, a.timeout_min)
+        left = package_timeout(a.budget_min, (time.monotonic() - started) / 60, a.timeout_min)
+        res = run_package(a.worktree, pkg, out_root, a.jobs, max(left, 1))
         (out_root / f"survivors-{pkg.replace('/', '_')}.txt").write_text("\n".join(res["missed"]) + "\n")
         issue = "-"
         if res["missed"] or res["timeout"]:
@@ -251,10 +294,10 @@ def run_mutants(a: argparse.Namespace) -> int:
         if not res["complete"]:
             unfinished.append(pkg)
         rows.append(report_row(res, lines, total, issue))
-    head = f"# Hot-package mutants {day} at {sha[:8]}\n\n| package | changed lines | mutants | run | missed | timed out | issue |\n|---|---|---|---|---|---|---|\n"
-    (out_root / "report.md").write_text(head + "\n".join(rows) + "\n")
+        write_report(out_root, day, sha, rows)
+    report = write_report(out_root, day, sha, rows)
     done = not unfinished
-    return verdict(done, f"{len(picked)} packages, {survivors} survivors, report {out_root / 'report.md'}"
+    return verdict(done, f"{len(picked)} packages, {survivors} survivors, report {report}"
                    + ("" if done else f"; NOT COMPLETE: {', '.join(unfinished)}"))
 
 
@@ -307,6 +350,8 @@ def self_test() -> int:
         finally:
             foreign.rmdir()
         gate_selftest(t, snap)
+        tools_selftest(t, snap)
+    assert package_timeout(600, 590, 240) == 10 and package_timeout(600, 0, 240) == 240 and package_timeout(600, 700, 240) == 0
     check_examples(EXAMPLES)
     print("weekly_jobs self-test: ok")
     return 0
@@ -320,9 +365,13 @@ def check_examples(examples: Path) -> None:
     assert len(set(ids)) == len(ids) and {"weekly-gate", "weekly-hot-mutants"} <= set(ids)
     for t in queue:
         assert t["tag"] == "weekly" and t["every"] == "week" and t["cmd"][:3] == ["python3", "-m", "dev.pytools.weekly_jobs"], t
-        assert t["cmd"][3] in SUBCOMMANDS and set(t.get("after", [])) <= set(ids), t
+        assert t["cmd"][3] in SUBCOMMANDS and "after" not in t, f"queue order carries the sequence; `after` waits on a renamed weekly id: {t}"
+    by_id = {t["id"]: t for t in queue}
+    assert by_id["weekly-gate"]["timeout_min"] > GATE_WAIT_MIN and by_id["weekly-hot-mutants"]["timeout_min"] > BUDGET_MIN
     args = plist["ProgramArguments"]
     assert args[args.index("--tag") + 1] == "weekly" and "--queue" in args and "--until" in args, args
+    path = plist["EnvironmentVariables"]["PATH"].split(":")
+    assert any(p.endswith(".cargo/bin") for p in path) and any("/opt/homebrew/bin" == p for p in path), "launchd's default PATH has no cargo, gh or uv"
     days = {t["weekday"] for t in queue}
     assert len(days) == 1 and plist["StartCalendarInterval"]["Weekday"] == (days.pop() + 1) % 7, "launchd counts Sunday=0, the queue Monday=0"
 
@@ -400,11 +449,11 @@ def gate_selftest(t: Path, snap: dict) -> None:
     red = [sys.executable, "-c", "import sys; print('RIVET-ORACLE-NO-GO'); sys.exit(1)"]
     gate_wt = lambda: mock_gate_worktree(wt)
 
-    def go(cmd, snap=snap, dry=False) -> tuple[int, str]:
-        """run_gate with stdout captured."""
+    def go(cmd, snap=snap, dry=False, **kw) -> tuple[int, str]:
+        """run_gate with stdout captured; `snap` is a dict or a callable giving one."""
         buf = io.StringIO()
         with gate_wt(), contextlib.redirect_stdout(buf):
-            return run_gate(wt, logs, cmd, dry, snap, 4.0), buf.getvalue()
+            return run_gate(wt, logs, cmd, dry, snap if callable(snap) else (lambda: snap), 4.0, **kw), buf.getvalue()
 
     sha = git(wt, "rev-parse", "--short=8", "origin/main")
     for bad, word in (({"gates": [7]}, "another release gate"), ({"load1": 9.0}, "not quiet"), ({"free_gib": 10.0}, "start floor"), ({"pause": True}, "PAUSE")):
@@ -429,8 +478,19 @@ def gate_selftest(t: Path, snap: dict) -> None:
     other = Path(t) / "elsewhere"
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        assert run_gate(other, logs, GATE_CMD, False, snap, 4.0) != 0
+        assert run_gate(other, logs, GATE_CMD, False, lambda: snap, 4.0) != 0
     assert "not the gate worktree" in buf.getvalue()
+    subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c2"], check=True)
+    rc, out = go(ok)
+    assert rc != 0 and "--switch" in out and git(wt, "rev-parse", "--short=8", "HEAD") == sha, f"a tree standing elsewhere is not moved without --switch: {out}"
+    rc, out = go(ok, switch=True)
+    assert rc == 0 and git(wt, "rev-parse", "--short=8", "HEAD") != sha and "VERDICT: done" in out, out
+    loads = iter([9.0, 9.0, 1.0])
+    seen = []
+    rc, out = go(ok, lambda: (seen.append(1), {**snap, "load1": next(loads)})[1], wait_min=1, poll_s=0)
+    assert rc == 0 and len(seen) == 3, f"a loaded machine is waited on, not refused at once: {seen} {out}"
+    rc, out = go(ok, {**snap, "load1": 9.0}, wait_min=0)
+    assert rc != 0 and "not quiet" in out
     try:
         prepare_worktree(devbox_load.GATE_WORKTREE, origin)
     except RuntimeError as e:
@@ -439,6 +499,61 @@ def gate_selftest(t: Path, snap: dict) -> None:
         raise AssertionError("the mutants job accepted the gate worktree")
     for pkg in SUBCOMMANDS:
         assert pkg in __doc__
+
+
+def tools_selftest(t: Path, snap: dict) -> None:
+    """A bare PATH is refused by both jobs with a VERDICT; the mutants job writes its report as it goes and stops at its budget."""
+    bare = t / "bare"
+    bare.mkdir()
+    git_exe = shutil.which("git")
+    assert git_exe
+    (bare / "git").symlink_to(git_exe)
+    gate_args = argparse.Namespace(worktree=t / "gate", logs=t / "gate-logs", dry_run=True, quiet_load=4.0, wait_min=0.0, poll=0.0, switch=False)
+    mut = argparse.Namespace(worktree=t / "gate", repo=t / "gate", packages="src/source", plan=False, dry_run_issues=True, report_dir=t / "reports",
+                             jobs=1, timeout_min=1, budget_min=BUDGET_MIN, max_load=None, hold_poll=0.0, hold_max_min=0.0)
+    with mock_env({**os.environ, "PATH": str(bare)}):
+        for job in (lambda: gate_job(gate_args, lambda: snap), lambda: run_mutants(mut)):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = job()
+            assert rc != 0 and "VERDICT: blocked" in buf.getvalue() and "not on PATH" in buf.getvalue(), buf.getvalue()
+    origin = t / "origin"
+    (origin / "scripts").mkdir(exist_ok=True)
+    (origin / "scripts" / "mutants.py").write_text((ROOT / "scripts" / "mutants.py").read_text())
+    subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "scripts"], check=True)
+    mut.worktree = t / "mutants-wt"
+    with mock_env({**os.environ, "PATH": f"{t / 'bin'}{os.pathsep}{os.environ['PATH']}"}):
+        starved = argparse.Namespace(**{**vars(mut), "budget_min": 0.0, "report_dir": t / "starved"})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert run_mutants(starved) != 0
+        report = next((t / "starved").glob("*/report.md")).read_text()
+        assert "NOT RUN" in report and "job budget spent" in report and "NOT COMPLETE: src/source" in buf.getvalue(), (report, buf.getvalue())
+        real, calls = run_package, []
+
+        def die_on_second(*args):
+            """run_package that raises on its second call, as a SIGTERM would."""
+            calls.append(1)
+            if len(calls) > 1:
+                raise KeyboardInterrupt
+            return real(*args)
+
+        globals()["run_package"] = die_on_second
+        try:
+            twice = argparse.Namespace(**{**vars(mut), "packages": "src/source,src/source", "report_dir": t / "midway"})
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run_mutants(twice)
+            except KeyboardInterrupt:
+                pass
+        finally:
+            globals()["run_package"] = real
+        assert "| COMPLETE |" in next((t / "midway").glob("*/report.md")).read_text(), "a job stopped between packages still leaves the finished rows"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = run_mutants(mut)
+        assert rc == 0 and "| COMPLETE |" in next((t / "reports").glob("*/report.md")).read_text(), buf.getvalue()
 
 
 @contextlib.contextmanager
@@ -463,6 +578,9 @@ def main(argv: list[str]) -> int:
     g.add_argument("--worktree", type=Path, default=devbox_load.GATE_WORKTREE)
     g.add_argument("--logs", type=Path, default=devbox_load.GATE_LOGS)
     g.add_argument("--quiet-load", type=float, default=4.0)
+    g.add_argument("--wait-min", type=float, default=GATE_WAIT_MIN, help="longest wait for a quiet machine before refusing")
+    g.add_argument("--poll", type=float, default=60.0)
+    g.add_argument("--switch", action="store_true", help="move the gate worktree to origin/main when it stands elsewhere")
     m = sub.add_parser("mutants")
     m.add_argument("--plan", action="store_true", help="print the picked packages and stop")
     m.add_argument("--dry-run-issues", action="store_true", help="print the issues instead of filing them")
@@ -472,12 +590,13 @@ def main(argv: list[str]) -> int:
     m.add_argument("--report-dir", type=Path, default=REPORT_ROOT)
     m.add_argument("-j", "--jobs", type=int, default=4)
     m.add_argument("--timeout-min", type=int, default=240, help="per package")
+    m.add_argument("--budget-min", type=float, default=BUDGET_MIN, help="whole job; packages left over are reported NOT RUN")
     m.add_argument("--max-load", type=float)
     m.add_argument("--hold-poll", type=float, default=60.0)
     m.add_argument("--hold-max-min", type=float, default=120.0)
     a = ap.parse_args(argv)
     if a.job == "gate":
-        return run_gate(a.worktree, a.logs, GATE_CMD, a.dry_run, devbox_load.snapshot(), a.quiet_load)
+        return gate_job(a)
     return run_mutants(a)
 
 

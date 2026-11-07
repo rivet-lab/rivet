@@ -3,8 +3,6 @@
     python3 -m dev.pytools.devbox_load [--max-load N] [--min-free-gib G] [--path P]    exit 0 quiet, 3 busy
     python3 -m dev.pytools.devbox_load --self-test
 
-The night queue holds new jobs on `Hold.reason`, the weekly jobs refuse on it, and the worktree sweep
-keeps `GATE_WORKTREE`. `~/night/PAUSE` holds everything until removed. Nothing here signals a process or writes to a worktree.
 """
 
 from __future__ import annotations
@@ -27,6 +25,7 @@ from dev.release_oracle.stand_disk import START_FLOOR_GIB, WATCH_FLOOR_GIB, host
 
 NIGHT = Path.home() / "night"
 GATE_WORKTREE = Path.home() / "wt" / "gate"
+STAND_WORKTREE = Path.home() / "wt" / "stand"
 GATE_LOGS = Path.home() / "wt" / "gate-logs"
 GATE_MODULE = "dev.release_oracle"
 GATE_TARGETS = ("release-oracle-full", "release-oracle-island")
@@ -37,12 +36,22 @@ def is_gate(argv: list[str]) -> bool:
     """Whether this command line is the release gate: its main module or the make target that starts it, never a self-test."""
     if not argv or "--self-test" in argv:
         return False
-    prog = Path(argv[0]).name
+    prog = Path(argv[0]).name.lower()
     if prog == "make":
         return any(t in argv for t in GATE_TARGETS)
     if prog.startswith(("python", "uv")):
         return any(a == "-m" and b == GATE_MODULE for a, b in zip(argv, argv[1:]))
     return False
+
+
+def protection(path: str | Path, gate: Path | None = None, stand: Path | None = None) -> str:
+    """Why a worktree path is never swept ("" = free): the gate worktree or the stand worktree, or anything under either."""
+    real = os.path.realpath(path)
+    for why, root in (("the gate worktree", gate or GATE_WORKTREE), ("the stand worktree", stand or STAND_WORKTREE)):
+        top = os.path.realpath(root)
+        if real == top or real.startswith(top + os.sep):
+            return why
+    return ""
 
 
 def gate_pids(rows: Iterable[tuple[int, str]]) -> list[int]:
@@ -120,6 +129,16 @@ def gate_start_refusal(snap: dict, quiet_load: float = 4.0) -> str:
     return ""
 
 
+def wait_gate_quiet(snap: Callable[[], dict], quiet_load: float, deadline: float, poll_s: float = 60.0,
+                    sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> str:
+    """Block until `gate_start_refusal` clears; return "" then, or the last refusal once `deadline` (monotonic) passes."""
+    while True:
+        why = gate_start_refusal(snap(), quiet_load)
+        if not why or clock() >= deadline:
+            return why
+        sleep(poll_s)
+
+
 def self_test() -> int:
     """The classifier, the hysteresis, the wait loop and a real process seen through the real ps."""
     gate = "/x/.venv/bin/python -m dev.release_oracle --with-seeded-recall"
@@ -128,7 +147,12 @@ def self_test() -> int:
     for not_gate in ("python -m dev.release_oracle --self-test", "python -m dev.release_oracle.state_lib", "zsh -lc python -m dev.release_oracle",
                      "grep dev.release_oracle", "python other.py dev.release_oracle", "ssh devbox python -m dev.release_oracle", "make sweep-test-db", "python -m dev.release_oracle_x", ""):
         assert not is_gate(not_gate.split()), not_gate
+    framework = "/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -m dev.release_oracle"
+    assert is_gate(framework.split()), "macOS framework python shows as Python.app/Contents/MacOS/Python"
     assert gate_pids([(1, gate), (2, "grep dev.release_oracle"), (3, "make release-oracle-full")]) == [1, 3]
+    assert protection("/h/wt/gate/target/seeded/w1/tree", Path("/h/wt/gate"), Path("/h/wt/stand")) == "the gate worktree"
+    assert protection("/h/wt/stand", Path("/h/wt/gate"), Path("/h/wt/stand")) == "the stand worktree"
+    assert protection("/h/wt/gate2", Path("/h/wt/gate"), Path("/h/wt/stand")) == "" and protection("/h/wt/other", Path("/h/wt/gate"), Path("/h/wt/stand")) == ""
 
     quiet = {"load1": 1.0, "free_gib": 500.0, "gates": [], "pause": False}
     default = default_hold(8.0)
@@ -155,13 +179,22 @@ def self_test() -> int:
     why = wait_quiet(Hold(10, 7), 12, 5, lambda: {**quiet, "gates": [1]}, lambda s: now.__setitem__(0, now[0] + s), lambda: now[0])
     assert "release gate running" in why, "a hold past its deadline returns the reason, not an empty go-ahead"
 
-    me = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", GATE_MODULE])
+    probe = f"--probe-{os.getpid()}-{time.monotonic_ns()}"
+    me = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", probe])
     try:
-        assert me.pid in gate_pids(ps_rows()), "the real ps sees a process whose command line carries -m dev.release_oracle"
+        seen = [cmd for pid, cmd in ps_rows() if pid == me.pid]
+        assert seen and probe in seen[0], "the real ps lists a spawned process with its arguments"
+        assert is_gate((seen[0] + " -m " + GATE_MODULE).split()) and not is_gate(seen[0].split()), "the listed command line is classified by its arguments"
     finally:
         me.terminate()
         me.wait()
-    assert me.pid not in gate_pids(ps_rows())
+    assert me.pid not in [pid for pid, _ in ps_rows()]
+    quiet_now = {"load1": 1.0, "free_gib": 500.0, "gates": [], "pause": False}
+    tick = [0.0]
+    loads = iter([9.0, 9.0, 1.0])
+    assert wait_gate_quiet(lambda: quiet_now | {"load1": next(loads)}, 4.0, 100, 5, lambda s: tick.__setitem__(0, tick[0] + s), lambda: tick[0]) == "" and tick[0] == 10
+    tick[0] = 0.0
+    assert "not quiet" in wait_gate_quiet(lambda: quiet_now | {"load1": 9.0}, 4.0, 12, 5, lambda s: tick.__setitem__(0, tick[0] + s), lambda: tick[0])
     snap = snapshot()
     assert isinstance(snap["load1"], float) and isinstance(snap["gates"], list) and isinstance(snap["pause"], bool) and shutil.disk_usage(Path.home()).free > 0
     print("devbox_load self-test: ok")

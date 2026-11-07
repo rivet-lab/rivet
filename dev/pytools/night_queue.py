@@ -43,6 +43,7 @@ HOME = Path.home()
 NIGHT = devbox_load.NIGHT
 QUEUE = NIGHT / "queue.json"
 NIGHT_BUDGET_M = float(os.environ.get("NIGHT_BUDGET_M", "1500"))
+WATCH_POLL_S = 5.0
 TOKEN_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
 UNATTENDED = (
     "You run unattended at night from a task queue: nobody will answer a question, so never ask one. "
@@ -122,9 +123,9 @@ def run_task(task: dict, run_dir: Path) -> dict:
         while proc.poll() is None:
             if time.monotonic() - started > timeout:
                 stop_reason.append(f"timeout {timeout / 60:.0f} min")
-                proc.send_signal(signal.SIGTERM)
+                stop_group(proc)
                 return
-            time.sleep(5)
+            time.sleep(WATCH_POLL_S)
 
     threading.Thread(target=watchdog, daemon=True).start()
     plain, tail = bool(task.get("cmd")), collections.deque(maxlen=60)
@@ -145,7 +146,7 @@ def run_task(task: dict, run_dir: Path) -> dict:
                 status["tokens"] += sum((msg.get("usage") or {}).get(k) or 0 for k in TOKEN_KEYS)
                 if status["tokens"] > budget and not stop_reason:
                     stop_reason.append(f"budget {budget / 1e6:.1f}M passed")
-                    proc.send_signal(signal.SIGTERM)
+                    stop_group(proc)
         elif ev.get("type") == "result":
             status["result"] = ev.get("result") or ""
             status["session_id"] = ev.get("session_id")
@@ -213,6 +214,22 @@ def instance(task: dict, today: dt.date) -> dict | None:
     return {**task, "id": f"{task['id']}-{year}w{week:02d}", **brief}
 
 
+def instance_ids(tasks: list[dict], today: dt.date) -> dict[str, str]:
+    """Each task's declared id mapped to the id it runs under today, so `after` names a task the way the queue file does."""
+    return {raw["id"]: (instance(raw, today) or raw)["id"] for raw in tasks if isinstance(raw, dict) and raw.get("id")}
+
+
+def stop_group(proc: subprocess.Popen) -> None:
+    """SIGTERM the task's own session group so its children stop with it; a pid that leads no group of its own gets the plain signal."""
+    try:
+        if os.getpgid(proc.pid) == proc.pid:
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.send_signal(signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+
 def hold_deadline(cutoff: dt.datetime | None, hold_max_min: float) -> float:
     """The monotonic time past which a held task is skipped: the queue's cutoff, or `hold_max_min` from now."""
     wait = (cutoff - dt.datetime.now()).total_seconds() if cutoff else hold_max_min * 60
@@ -258,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     hold = devbox_load.default_hold(args.max_load, args.min_free_gib)
     deadline = hold_deadline(cutoff, args.hold_max_min)
     results, skipped, spent = [], [], 0.0
+    ids = instance_ids(tasks, today)
     try:
         for raw in tasks:
             if raw.get("tag", "night") != args.tag:
@@ -268,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
             tid = task["id"]
             if find_status(tid).get("state") == "done":
                 continue
-            blocked = [a for a in task.get("after", []) if find_status(a).get("state") != "done"]
+            blocked = [a for a in task.get("after", []) if find_status(ids.get(a, a)).get("state") != "done"]
             if blocked:
                 skipped.append(f"{tid} (waits for {', '.join(blocked)})")
                 continue
@@ -360,6 +378,32 @@ def self_test() -> int:
         code, out, _ = run([cmd_task("a", mk, tag="weekly"), cmd_task("b", tag="night")], ["--tag", "weekly"], quiet)
         assert mk.exists() and "start b" not in out, out
         mk.unlink()
+
+        weekly_pair = [cmd_task("g", every="week", weekday=5), cmd_task("m", every="week", weekday=5, after=["g"])]
+        code, out, runs = run(weekly_pair, [], quiet)
+        assert "start m-2026w45" in out and runs["m-2026w45"]["state"] == "done", f"`after` names the declared id of a weekly task: {out}"
+        code, out, runs = run([cmd_task("x", every="week", weekday=5, after=["nowhere"])], [], quiet)
+        assert "waits for nowhere" in out and not runs, out
+
+        with tempfile.TemporaryDirectory() as g:
+            pidfile = Path(g) / "child.pid"
+            body = ("import subprocess, sys, time; c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(40)']);"
+                    f"open({str(pidfile)!r}, 'w').write(str(c.pid)); time.sleep(40)")
+            t0 = time.monotonic()
+            with mock.patch.object(me, "WATCH_POLL_S", 0.1):
+                code, out, runs = run([{"id": "slow", "cmd": [sys.executable, "-c", body], "cwd": str(Path.cwd()), "timeout_min": 0.05}], [], quiet)
+            assert runs["slow"]["state"] == "stopped" and "timeout" in runs["slow"]["stop_reason"], runs
+            child = int(pidfile.read_text())
+            assert time.monotonic() - t0 < 20, "the stop returned only when the child let go of the task's pipe"
+            for _ in range(50):
+                try:
+                    os.kill(child, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(child, signal.SIGKILL)
+                raise AssertionError("the timeout stopped the task's wrapper but left its child running")
 
         days = iter([sat, dt.date(2026, 11, 8), dt.date(2026, 11, 8), dt.date(2026, 11, 8)])
         weekly = lambda tid: cmd_task(tid, every="week", weekday=5)

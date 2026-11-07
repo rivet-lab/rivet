@@ -14,9 +14,6 @@ session, each time producing an empty survivor list that read as a perfect score
 So the completion condition is the LOG's own summary line, never a process check,
 and the script REFUSES to print a verdict without it — an empty `missed.txt` from a
 run that never started is indistinguishable from a clean file otherwise.
-
-cargo-mutants builds in a temp tree: it is pointed at `<out>/tmp`, which is removed with the run, so
-another agent's live mutant tree under the shared temp directory is never touched.
 """
 
 import argparse

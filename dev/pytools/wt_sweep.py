@@ -52,7 +52,7 @@ def mounted_paths():
     docker = shutil.which("docker") or next((d for d in ("/opt/homebrew/bin/docker", "/usr/local/bin/docker") if os.path.exists(d)), None)
     if not docker:
         return []
-    _, ids = run([docker, "ps", "-q"])
+    _, ids = run([docker, "ps", "-aq"])
     if not ids:
         return []
     fmt = '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}{{println (index .Config.Labels "com.docker.compose.project.working_dir")}}'
@@ -79,13 +79,14 @@ def queued_paths(night=None):
     return paths
 
 
-def kept(wt, queued, cwds, gate=None):
+def kept(wt, queued, cwds, gate=None, stand=None):
     """Why a worktree stays whatever its git state says ("" = it may go)."""
     path = wt["worktree"]
     if wt.get("locked"):
         return "locked"
-    if os.path.realpath(path) == os.path.realpath(gate or devbox_load.GATE_WORKTREE):
-        return "the gate worktree"
+    protected = devbox_load.protection(path, gate, stand)
+    if protected:
+        return protected
     if os.path.realpath(path) in queued:
         return "night queue task runs here"
     if in_use(path, cwds):
@@ -139,6 +140,11 @@ def target_idle_days(target):
     return (time.time() - newest) / 86400
 
 
+def target_cleanable(path, cwds, gate=None, stand=None):
+    """Whether the idle-target pass may look at path/target: it exists, no process works inside, and the worktree is not protected."""
+    return (Path(path) / "target").is_dir() and not in_use(path, cwds) and not devbox_load.protection(path, gate, stand)
+
+
 def size_gb(path):
     """Disk usage of path in GB."""
     _, out = run(["du", "-sk", str(path)])
@@ -146,7 +152,7 @@ def size_gb(path):
 
 
 def self_test():
-    """The keep rules: the gate worktree, queued cwds from every queue file, a process inside, a lock."""
+    """The keep rules: the gate and stand worktrees, queued cwds from every queue file, a process inside, a lock."""
     with tempfile.TemporaryDirectory() as t:
         night, gate, other = Path(t) / "night", Path(t) / "wt" / "gate", Path(t) / "wt" / "other"
         night.mkdir()
@@ -162,10 +168,38 @@ def self_test():
         assert kept(free, queued, [], gate) == ""
         assert kept({"worktree": str(gate)}, queued, [], gate) == "the gate worktree"
         assert kept({"worktree": str(gate)}, set(), [str(gate)], gate) == "the gate worktree"
+        nested = {"worktree": str(gate / "target" / "seeded" / "w1" / "tree")}
+        assert kept(nested, set(), [], gate) == "the gate worktree", "seeded worktrees under the gate tree stay"
+        stand = Path(t) / "wt" / "stand"
+        assert kept({"worktree": str(stand)}, set(), [], gate, stand) == "the stand worktree"
+        assert kept({"worktree": str(Path(t) / "wt" / "gate2")}, set(), [], gate, stand) == "", "a sibling that only shares the prefix is free"
         assert kept({"worktree": str(other)}, queued, [], gate) == "night queue task runs here"
         assert kept({"worktree": str(Path(t) / "wt" / "weekly")}, queued, [], gate) == "night queue task runs here"
         assert kept(free, queued, [str(free["worktree"]) + "/target"], gate) == "process inside"
         assert kept({**free, "locked": True}, queued, [], gate) == "locked"
+    with tempfile.TemporaryDirectory() as t:
+        gate, plain = Path(t) / "gate", Path(t) / "plain"
+        for d in (gate, plain):
+            (d / "target").mkdir(parents=True)
+        assert target_cleanable(plain, [], gate, Path(t) / "stand") and not target_cleanable(gate, [], gate, Path(t) / "stand"), "the gate tree's target is never cleaned"
+        assert not target_cleanable(plain, [str(plain)], gate, Path(t) / "stand") and not target_cleanable(Path(t) / "none", [], gate, Path(t) / "stand")
+        bindir = Path(t) / "bin"
+        bindir.mkdir()
+        fake = bindir / "docker"
+        fake.write_text(f"#!{sys.executable}\n" + """import sys
+a = sys.argv[1:]
+if a[:1] == ["ps"]:
+    print("abc" if "-a" in a[1] else "")
+else:
+    print("/wt/stopped")
+""")
+        fake.chmod(0o755)
+        saved = os.environ["PATH"]
+        os.environ["PATH"] = f"{bindir}{os.pathsep}{saved}"
+        try:
+            assert mounted_paths() == ["/wt/stopped"], "stopped containers still pin the worktrees they mount"
+        finally:
+            os.environ["PATH"] = saved
     print("wt_sweep self-test: ok")
     return 0
 
@@ -228,7 +262,7 @@ def main():
 
     for path in survivors:
         target = Path(path) / "target"
-        if not target.is_dir() or in_use(path, cwds):
+        if not target_cleanable(path, cwds):
             continue
         idle = target_idle_days(target)
         if idle < a.target_idle_days:
