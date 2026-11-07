@@ -82,31 +82,35 @@ def oracle_lines(log: Path, keep: int = 6) -> list[str]:
     return list(tail)
 
 
-def switch_refusal(wt: Path, logs: Path, head: str, sha: str, switch: bool) -> str:
-    """Why a tree standing at `head` may not be moved to origin/main ("" = it may): no --switch, a head off main, or a gate log at head that never finished."""
+def switch_refusal(wt: Path, head: str, sha: str, switch: bool) -> str:
+    """Why a tree standing at `head` may not be moved to origin/main ("" = it may): no --switch, or a head that is not an ancestor of main."""
     if not switch:
-        return f"{wt} stands at {head}, origin/main is {sha}; pass --switch to move it"
+        return f"{wt} stands at {head}, origin/main is {sha}; pass --switch to move it, or check origin/main out in it by hand"
     if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", "HEAD", "origin/main"], capture_output=True).returncode != 0:
-        return f"{wt} stands at {head}, which is not an ancestor of origin/main {sha}; it is never moved"
-    unfinished = [log for log in sorted((logs / head).glob("*.log")) if sentinel_rc(log) is None]
-    return f"{wt} stands at {head} with an unfinished gate log {unfinished[0]}; it is not moved" if unfinished else ""
+        return f"{wt} stands at {head}, which is not an ancestor of origin/main {sha}; it is never moved, park the candidate in another worktree or check origin/main out by hand"
+    return ""
+
+
+def busy(why: str) -> int:
+    """A refusal for a machine that is not quiet or runs another gate, with the way out."""
+    return verdict(False, f"refused: {why}; wait for it to clear (raise --wait-min) or run the gate again by hand")
 
 
 def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: Callable[[], dict], quiet_load: float,
              wait_min: float = 0.0, poll_s: float = 60.0, switch: bool = False) -> int:
-    """Wait up to `wait_min` for a quiet machine, then run `cmd` into <logs>/<sha>/ at origin/main (see switch_refusal for when the tree may move)."""
+    """Wait up to `wait_min` for a quiet machine, then run `cmd` into <logs>/<sha>/ at origin/main; --switch moves a clean tree that is an ancestor of it."""
     if wt.resolve() != devbox_load.GATE_WORKTREE.resolve() and cmd == GATE_CMD:
-        return verdict(False, f"refused: {wt} is not the gate worktree {devbox_load.GATE_WORKTREE}")
+        return verdict(False, f"refused: {wt} is not the gate worktree {devbox_load.GATE_WORKTREE}; run it with --worktree {devbox_load.GATE_WORKTREE}")
     why = devbox_load.wait_gate_quiet(snap, quiet_load, time.monotonic() + (0 if dry_run else wait_min * 60), poll_s)
     if why:
-        return verdict(False, f"refused: {why}")
+        return busy(why)
     if git(wt, "status", "--porcelain"):
-        return verdict(False, f"refused: {wt} has uncommitted changes")
+        return verdict(False, f"refused: {wt} has uncommitted changes; commit or discard them, the weekly gate never touches a dirty tree")
     if not dry_run:
         git(wt, "fetch", "-q", "origin", "main")
     sha = git(wt, "rev-parse", "--short=8", "origin/main")
     head = git(wt, "rev-parse", "--short=8", "HEAD")
-    why = switch_refusal(wt, logs, head, sha, switch) if head != sha else ""
+    why = switch_refusal(wt, head, sha, switch) if head != sha else ""
     if why:
         return verdict(False, f"refused: {why}")
     logdir = logs / sha
@@ -115,13 +119,17 @@ def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: Callable
         return verdict(True, f"dry-run: would run `{' '.join(cmd)}` in {wt} at {sha} into {log}")
     if sentinel_rc(log) == 0:
         return verdict(True, f"already graded green at {sha}: {log}")
+    why = devbox_load.wait_gate_quiet(snap, quiet_load, 0.0, poll_s)
+    if why:
+        return busy(why)
     git(wt, "checkout", "-q", "--detach", "origin/main")
+    moved = f"moved {wt} from {head} to {sha}; recreate the rivet-duckdb container (uv.lock pins may have changed), as after a manual checkout\n" if head != sha else ""
     logdir.mkdir(parents=True, exist_ok=True)
     with log.open("w") as f:
         rc = subprocess.run(cmd, cwd=wt, env={**os.environ, "COMPOSE_PROJECT_NAME": "rivet"}, stdout=f, stderr=subprocess.STDOUT).returncode
         f.write(f"\nexit {rc} {dt.datetime.now(dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ}\n")
     lines = "\n".join(oracle_lines(log)) or "no RIVET-ORACLE verdict line in the log"
-    return verdict(rc == 0, f"{sha}: `{' '.join(cmd)}` exit {rc}, log {log}\n{lines}")
+    return verdict(rc == 0, f"{moved}{sha}: `{' '.join(cmd)}` exit {rc}, log {log}\n{lines}")
 
 
 def gate_job(a: argparse.Namespace, snap: Callable[[], dict] = devbox_load.snapshot) -> int:
@@ -494,22 +502,27 @@ def gate_selftest(t: Path, snap: dict) -> None:
     subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c2"], check=True)
     rc, out = go(ok)
     assert rc != 0 and "--switch" in out and git(wt, "rev-parse", "--short=8", "HEAD") == sha, f"a tree standing elsewhere is not moved without --switch: {out}"
-    (logs / sha).mkdir(parents=True, exist_ok=True)
-    (logs / sha / "weekly-full.log").write_text("started, never finished\n")
+    (logs / sha / "sub").mkdir(parents=True, exist_ok=True)
+    for name, text in (("weekly-full.log", "started, never finished\n"), ("gate.log", "gate exit 1 2026-11-07T20:00:00Z\n"), ("master.log", "all done full_rc=1\n"), ("x.out", "?\n"), ("sub/y.log", "?\n")):
+        (logs / sha / name).write_text(text)
     rc, out = go(ok, switch=True)
-    assert rc != 0 and "unfinished gate log" in out and git(wt, "rev-parse", "--short=8", "HEAD") == sha, f"a tree whose gate log never finished is not moved: {out}"
-    (logs / sha / "weekly-full.log").write_text("x\nexit 0 2026-11-07T20:00:00Z\n")
-    rc, out = go(ok, switch=True)
-    assert rc == 0 and git(wt, "rev-parse", "--short=8", "HEAD") != sha and "VERDICT: done" in out, out
+    assert rc == 0 and git(wt, "rev-parse", "--short=8", "HEAD") != sha and "VERDICT: done" in out and "rivet-duckdb" in out, f"a log in any format does not block the switch: {out}"
     loads = iter([9.0, 9.0, 1.0])
     seen = []
     rc, out = go(ok, lambda: (seen.append(1), {**snap, "load1": next(loads)})[1], wait_min=1, poll_s=0)
     assert rc == 0 and len(seen) == 3, f"a loaded machine is waited on, not refused at once: {seen} {out}"
     rc, out = go(ok, {**snap, "load1": 9.0}, wait_min=0)
     assert rc != 0 and "not quiet" in out
+    head = git(wt, "rev-parse", "--short=8", "HEAD")
+    subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c3"], check=True)
+    calls = iter(range(99))
+    rc, out = go(ok, lambda: {**snap, "gates": [7] if next(calls) else []}, switch=True)
+    assert rc != 0 and "another release gate" in out and "wait for it" in out and git(wt, "rev-parse", "--short=8", "HEAD") == head, f"a gate that starts after the first check stops the move: {out}"
+    rc, out = go(ok, switch=True)
+    assert rc == 0 and git(wt, "rev-parse", "--short=8", "HEAD") != head, out
     git(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "candidate")
     off = git(wt, "rev-parse", "--short=8", "HEAD")
-    subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c3"], check=True)
+    subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c4"], check=True)
     rc, out = go(ok, switch=True)
     assert rc != 0 and "not an ancestor" in out and git(wt, "rev-parse", "--short=8", "HEAD") == off, f"a head off main is never moved: {out}"
     git(wt, "checkout", "-q", "--detach", "origin/main")
@@ -596,7 +609,7 @@ def _mutants_runs(t: Path, snap: dict, mut: argparse.Namespace) -> None:
             assert run_mutants(starved) != 0
         report = next((t / "starved").glob("*/report.md")).read_text()
         assert "NOT RUN" in report and "job budget spent" in report and "NOT COMPLETE: src/source" in buf.getvalue(), (report, buf.getvalue())
-        real, real_timeout, calls = run_package, package_timeout, []
+        real, calls = run_package, []
 
         def die_on_second(*args):
             """run_package that raises on its second call, as a SIGTERM would."""
