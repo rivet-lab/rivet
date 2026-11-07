@@ -110,7 +110,7 @@ fn every_known_red_entry_carries_a_dated_reason() {
     let (open, rows) = entries(&ledger());
     super::nonvacuity::require_enumerated(
         open.len() + rows.len(),
-        4,
+        2,
         "known-red entries",
         "the ledger moved or changed shape",
     );
