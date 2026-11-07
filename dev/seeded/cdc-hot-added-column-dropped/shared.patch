@@ -12,12 +12,12 @@ index ec5a360f..e33d42e1 100644
                      if !lacking.is_empty() {
                          let table = sinks[at].out.table.clone();
                          let fresh = match reschema.as_mut() {
-@@ -712,7 +711,7 @@ pub(crate) fn run_to_files(
+@@ -773,7 +772,7 @@ pub(crate) fn run_to_files(
          // column added while the run was open: asked again here, a table it no longer covers
          // whole stops the run by code instead of ending clean over values it never read.
          let tables: Vec<String> = sinks.iter().map(|s| s.out.table.clone()).collect();
 -        if let crate::source::cdc::RowImage::Partial { why } = stream.row_image(&tables) {
 +        if let (true, crate::source::cdc::RowImage::Partial { why }) = (false, stream.row_image(&tables)) {
-             return Err(super::partial_image_refusal(run.engine, &why));
-         }
-         if !hit_max
+             return Err(crate::source::cdc::open_partial_image_refusal(
+                 run.engine, &why,
+             ));
