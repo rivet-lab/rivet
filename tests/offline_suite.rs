@@ -179,6 +179,8 @@ mod sprawl_ratchets;
 mod stand_registry_guard;
 #[path = "offline/state_compat.rs"]
 mod state_compat;
+#[path = "offline/state_reset_family.rs"]
+mod state_reset_family;
 #[path = "offline/test_checks_guard.rs"]
 mod test_checks_guard;
 #[path = "offline/time_window.rs"]

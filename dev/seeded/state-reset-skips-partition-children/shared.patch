@@ -1,0 +1,12 @@
+diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+index bc3c298f..e5c6612d 100644
+--- a/src/pipeline/cli.rs
++++ b/src/pipeline/cli.rs
+@@ -293,6 +293,7 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
+             stored
+                 .iter()
+                 .filter(|n| n.as_str() != export_name && belongs_to(&config, n, export_name))
++                .filter(|_| false)
+                 .cloned(),
+         ),
+         Owner::PartitionChild(parent) if !stored.iter().any(|n| n == export_name) => {

@@ -1,0 +1,41 @@
+diff --git a/src/state/cursor.rs b/src/state/cursor.rs
+index a8b33b6e..22490637 100644
+--- a/src/state/cursor.rs
++++ b/src/state/cursor.rs
+@@ -1026,30 +1026,12 @@ impl StateStore {
+ 
+     /// The export names `source` holds progress under, in byte order: those with a cursor on `source` (under any spelling of it, or written before sources were recorded) and the boundaries no cursor of another source owns.
+     pub fn stored_export_names(&self, source: &str) -> Result<Vec<String>> {
+-        let cursors = self.query("SELECT export_name, prefix FROM export_state", &[], |r| {
+-            (r.text(0), r.text(1))
+-        })?;
+-        let boundaries = self.query("SELECT export_name FROM export_progression", &[], |r| {
+-            r.text(0)
+-        })?;
+-        let mut cursor_of: std::collections::BTreeMap<String, bool> = Default::default();
+-        for (name, prefix) in cursors {
+-            let here = prefix.is_empty()
+-                || prefix == source
+-                || crate::config::canonical_source_key(&prefix) == source;
+-            *cursor_of.entry(name).or_default() |= here;
+-        }
+-        let mut names: std::collections::BTreeSet<String> = cursor_of
+-            .iter()
+-            .filter(|(_, here)| **here)
+-            .map(|(name, _)| name.clone())
+-            .collect();
+-        names.extend(
+-            boundaries
+-                .into_iter()
+-                .filter(|n| !cursor_of.contains_key(n)),
+-        );
+-        Ok(names.into_iter().collect())
++        self.query(
++            "SELECT export_name FROM export_state WHERE prefix IN (?1, '') \
++             UNION SELECT export_name FROM export_progression ORDER BY export_name",
++            &[source.into()],
++            |r| r.text(0),
++        )
+     }
+ 
+     /// Return every export of `names` to a "never ran" state in one transaction, a statement per kind for each `RESET_BATCH` of them.
