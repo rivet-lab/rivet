@@ -2270,7 +2270,7 @@ fn table_changed_under_it(engine: SqlEngine, ddl: Ddl) {
     recovers(&rig, &[]);
 }
 
-/// The collection of a live MongoDB export dropped once it has committed a part, then seeded again with the documents it held: the run delivers or fails loudly (a run that ends with exit 0 is graded against the collection put back), and a run then delivers the source.
+/// The collection of a live MongoDB export dropped once it has committed a part, then seeded again with the documents it held: the run delivers or fails loudly (a run that ends with exit 0 is graded against the collection put back), and the collection put back is another stream, refused until `rivet state reset`, after which a run delivers the source.
 fn collection_dropped_under_it() {
     let (rig, m, _guard) = mongo_live("sab_ddl");
     let met = rig.beside_a_live_run_over_a_source_taken(
@@ -2282,7 +2282,7 @@ fn collection_dropped_under_it() {
     let (run, ()) = met.answered_while_alive();
     rig.delivered_or_failed_loudly("the run whose collection was dropped under it", &run);
     m.seed_int_id("t", MONGO_LIVE);
-    recovers(&rig, &[]);
+    refused_as_another_stream_then_reset_recovers(&rig);
 }
 
 /// Documents of the collection a held read finds dropped.
