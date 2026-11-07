@@ -46,6 +46,21 @@ fn check_refuses_a_text_value_declared_uuid_mysql() {
 }
 
 #[test]
+#[ignore = "live: postgres"]
+fn a_nanosecond_timestamp_override_is_refused_by_the_wire_check_postgres() {
+    require_alive(LiveService::Postgres);
+    let name = unique_name("ovw_ns_pg");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::pg_batch(&name)
+        .query("SELECT TIMESTAMP '2300-01-01 00:00:00' AS ts")
+        .mode("full")
+        .export_line("columns:")
+        .export_line("  ts: \"timestamp_ns\"")
+        .dest_path(out.path().to_path_buf());
+    check_and_run_refuse_alike(rig, &name);
+}
+
+#[test]
 #[ignore = "live: mssql"]
 fn check_refuses_an_int_column_declared_string_mssql() {
     require_alive(LiveService::Mssql);

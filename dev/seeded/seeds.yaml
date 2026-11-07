@@ -5018,6 +5018,23 @@ seeds:
           - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
           - "lib:two_named_identities_are_refused_by_code"
 
+  - name: mssql-ns-override-out-of-range-null
+    class: "a SQL Server or Oracle value outside 1677-09-21..2262-04-11 under a `timestamp_ns` / `timestamp_tz_ns` override is written as NULL with exit 0 instead of being refused by code"
+    history: "umbrella #852, found 2026-11-06: the SQL Server nanosecond builder wrote NULL when timestamp_nanos_opt() was None; the Oracle builder refused uncoded with exit 1; both now route through types::timestamp_nanos_or_refuse"
+    scope: source
+    engines:
+      mssql:
+        patch: mssql-ns-override-out-of-range-null/mssql.patch
+        cells: [a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null]
+      oracle:
+        patch: mssql-ns-override-out-of-range-null/oracle.patch
+        cells: [a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code]
+      postgres:
+        na: "PostgreSQL refuses a nanosecond override with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (live check_override_wire cells a_nanosecond_timestamp_override_is_refused_by_the_wire_check_postgres), so no value reaches a nanosecond builder"
+      mysql:
+        na: "MySQL has no nanosecond builder: a timestamp_ns override stops the run with RIVET_INTERNAL_TYPE_BUILDER before any value is read, so no value reaches a nanosecond builder"
+      mongo:
+        na: "a document source has no declared column wire type and no builder takes a nanosecond override"
   - name: oracle-timestamp-ns-undeclared-truncated
     class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
     history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"

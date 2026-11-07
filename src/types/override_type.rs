@@ -55,13 +55,6 @@ pub fn parse_type_str(s: &str) -> Result<RivetType> {
             unit: TimeUnit::Microsecond,
             timezone: None,
         }),
-        // Nanosecond opt-in: preserves a source's sub-microsecond fractional
-        // seconds (e.g. SQL Server `datetime2(7)`'s 100 ns tick) that the default
-        // microsecond mapping truncates. Arrow nanosecond timestamps are i64 ns,
-        // so the representable range is 1677-09-21 .. 2262-04-11 — values outside
-        // it export as NULL. Default to `timestamp` (microsecond, full range)
-        // unless you specifically need the extra precision and your data is in
-        // range. See docs/type-mapping.md.
         "timestamp_ns" => Ok(RivetType::Timestamp {
             unit: TimeUnit::Nanosecond,
             timezone: None,

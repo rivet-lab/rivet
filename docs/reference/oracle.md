@@ -84,7 +84,7 @@ A `columns:` override reads the Oracle column into the declared type:
 | `bool` | `BOOLEAN` |
 | `date` | `DATE`, `TIMESTAMP` holding midnight; a value with a time of day fails the run with the column named |
 | `timestamp`, `timestamp_tz` | `DATE`, `TIMESTAMP` (zoned ones through their UTC instant) |
-| `timestamp_ns`, `timestamp_tz_ns` | the same, keeping all nine fractional digits; a value outside 1677-09-21..2262-04-11 fails the run |
+| `timestamp_ns`, `timestamp_tz_ns` | the same, keeping all nine fractional digits; a value outside 1677-09-21..2262-04-11 is refused with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) |
 | `binary` | `RAW`, `LONG RAW`, `BLOB` |
 | `uuid` | a 16-byte `RAW`/`BLOB`; any other length fails the run |
 | `text` | any exported column: numbers as exact text, `DATE`/`TIMESTAMP` as `SYYYY-MM-DDTHH24:MI:SS.FF6` (`FF9` when a value has sub-microsecond digits), binary floats as shortest round-trip text, `BOOLEAN` as `true`/`false`, `RAW`/`BLOB` as upper-case hex (`RAWTOHEX`) |
