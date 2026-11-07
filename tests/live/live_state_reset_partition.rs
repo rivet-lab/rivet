@@ -249,64 +249,127 @@ fn reset_of_a_plain_incremental_export_starts_it_over(engine: SqlEngine) {
     assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
 }
 
-macro_rules! per_engine {
-    ($body:ident, $pg:ident, $mysql:ident, $mssql:ident, $oracle:ident) => {
-        #[test]
-        #[ignore = "live: requires docker compose postgres"]
-        fn $pg() {
-            $body(SqlEngine::Pg);
-        }
-        #[test]
-        #[ignore = "live: requires docker compose mysql"]
-        fn $mysql() {
-            $body(SqlEngine::Mysql);
-        }
-        #[test]
-        #[ignore = "live: requires docker compose mssql"]
-        fn $mssql() {
-            $body(SqlEngine::Mssql);
-        }
-        #[cfg(feature = "oracle")]
-        #[test]
-        #[ignore = "live: requires docker compose oracle"]
-        fn $oracle() {
-            $body(SqlEngine::Oracle);
-        }
-    };
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_parent_postgres() {
+    reset_of_the_parent_starts_every_child_over(SqlEngine::Pg);
 }
 
-per_engine!(
-    reset_of_the_parent_starts_every_child_over,
-    partition_reset_parent_postgres,
-    partition_reset_parent_mysql,
-    partition_reset_parent_mssql,
-    partition_reset_parent_oracle
-);
-per_engine!(
-    reset_of_one_child_starts_only_that_child_over,
-    partition_reset_child_postgres,
-    partition_reset_child_mysql,
-    partition_reset_child_mssql,
-    partition_reset_child_oracle
-);
-per_engine!(
-    reset_of_an_unknown_child_is_refused,
-    partition_reset_unknown_child_postgres,
-    partition_reset_unknown_child_mysql,
-    partition_reset_unknown_child_mssql,
-    partition_reset_unknown_child_oracle
-);
-per_engine!(
-    reset_of_a_full_partitioned_export_changes_nothing,
-    partition_reset_full_postgres,
-    partition_reset_full_mysql,
-    partition_reset_full_mssql,
-    partition_reset_full_oracle
-);
-per_engine!(
-    reset_of_a_plain_incremental_export_starts_it_over,
-    partition_reset_plain_postgres,
-    partition_reset_plain_mysql,
-    partition_reset_plain_mssql,
-    partition_reset_plain_oracle
-);
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_parent_mysql() {
+    reset_of_the_parent_starts_every_child_over(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_parent_mssql() {
+    reset_of_the_parent_starts_every_child_over(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_parent_oracle() {
+    reset_of_the_parent_starts_every_child_over(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_child_postgres() {
+    reset_of_one_child_starts_only_that_child_over(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_child_mysql() {
+    reset_of_one_child_starts_only_that_child_over(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_child_mssql() {
+    reset_of_one_child_starts_only_that_child_over(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_child_oracle() {
+    reset_of_one_child_starts_only_that_child_over(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_unknown_child_postgres() {
+    reset_of_an_unknown_child_is_refused(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_unknown_child_mysql() {
+    reset_of_an_unknown_child_is_refused(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_unknown_child_mssql() {
+    reset_of_an_unknown_child_is_refused(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_unknown_child_oracle() {
+    reset_of_an_unknown_child_is_refused(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_full_postgres() {
+    reset_of_a_full_partitioned_export_changes_nothing(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_full_mysql() {
+    reset_of_a_full_partitioned_export_changes_nothing(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_full_mssql() {
+    reset_of_a_full_partitioned_export_changes_nothing(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_full_oracle() {
+    reset_of_a_full_partitioned_export_changes_nothing(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_plain_postgres() {
+    reset_of_a_plain_incremental_export_starts_it_over(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_plain_mysql() {
+    reset_of_a_plain_incremental_export_starts_it_over(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_plain_mssql() {
+    reset_of_a_plain_incremental_export_starts_it_over(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_plain_oracle() {
+    reset_of_a_plain_incremental_export_starts_it_over(SqlEngine::Oracle);
+}
