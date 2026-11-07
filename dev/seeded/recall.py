@@ -315,16 +315,19 @@ class Cargo:
         self.skipped: dict[str, str] = {}
 
     def binaries(self, cells) -> list[str]:
-        """The nextest binary flags these cells need: `--lib` for `lib:` cells, else the top-level tests/<name>.rs defining the cell, else live_suite."""
+        """The nextest binary flags these cells need: `--lib` for `lib:` cells, else the top-level tests/<name>.rs defining the cell, else offline_suite for a cell under tests/offline, else live_suite."""
         if not cells:
             return ["--lib"]
         tops = sorted((self.tree / "tests").glob("*.rs"))
+        offline = "\n".join(f.read_text() for f in sorted((self.tree / "tests" / "offline").glob("*.rs")))
         picked: list[tuple[str, ...]] = []
         for c in cells:
             if c.startswith(LIB):
                 one: tuple[str, ...] = ("--lib",)
             else:
                 owner = [f.stem for f in tops if re.search(rf"\bfn {re.escape(c)}\(", f.read_text())]
+                if not owner and re.search(rf"\bfn {re.escape(c)}\(", offline):
+                    owner = ["offline_suite"]
                 one = ("--test", owner[0] if owner else "live_suite")
             if one not in picked:
                 picked.append(one)
