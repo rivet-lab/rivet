@@ -344,6 +344,7 @@ impl StateStore {
         let now = chrono::Utc::now().to_rfc3339();
         match &self.conn {
             StateConn::Sqlite(conn) => {
+                let _turn = self.write_turn();
                 let tx =
                     rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
                 let res = Self::claim_next_chunk_in_sqlite_tx(&tx, &now, run_id)?;
@@ -1053,6 +1054,107 @@ mod tests {
         writer.join().unwrap();
         assert!(slow.is_empty(), "starved: {slow:?}");
         assert_eq!(s.count_chunk_tasks_total("run_a").unwrap(), 3);
+    }
+
+    fn sqlite_path_of(s: &StateStore) -> std::path::PathBuf {
+        match &s.state_ref {
+            super::super::StateRef::Sqlite(p) => p.clone(),
+            super::super::StateRef::Postgres(_) => unreachable!("a SQLite store"),
+        }
+    }
+
+    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never reached: {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A second writer that ran out of patience behind a held lock keeps a place beside the first overdue one (main: it leaves the queue for SQLite's busy wait).
+    #[test]
+    fn a_replan_that_runs_out_of_patience_behind_an_overdue_writer_gets_its_turn() {
+        use std::sync::mpsc::channel;
+        let (dir, s) = store_on_disk();
+        s.create_chunk_run("run_a", "orders", "deadbeef", 2)
+            .unwrap();
+        s.create_chunk_run("run_b", "other", "deadbeef", 2).unwrap();
+        s.insert_chunk_tasks("run_b", &[(1, 5)]).unwrap();
+        let db = sqlite_path_of(&s);
+        let cfg = dir.path().join("rivet.yaml");
+        let (held_tx, held_rx) = channel();
+        let (release_tx, release_rx) = channel::<()>();
+        let holder = {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || {
+                let x = StateStore::open(cfg.to_str().unwrap()).expect("holder store");
+                x.transaction(|| {
+                    held_tx.send(()).unwrap();
+                    let _ = release_rx.recv();
+                    Ok(())
+                })
+                .expect("the holder");
+            })
+        };
+        held_rx.recv().unwrap();
+        let cfg_replan = cfg.clone();
+        let sibling = std::thread::spawn(move || {
+            let w = StateStore::open(cfg.to_str().unwrap()).expect("sibling store");
+            w.transaction(|| w.fail_chunk_task("run_b", 0, "x", true))
+                .expect("the sibling");
+        });
+        wait_until("the sibling holds the first overdue place", || {
+            super::super::write_turn::counts(&db).1 >= 1
+        });
+        let replan = std::thread::scope(|sc| {
+            let r = sc.spawn(|| {
+                let x = StateStore::open(cfg_replan.to_str().unwrap()).expect("replan store");
+                x.replan_chunk_tasks("run_a", false, &[(10, 10)])
+            });
+            let reached = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    if super::super::write_turn::counts(&db).1 >= 2 {
+                        break true;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            release_tx.send(()).unwrap();
+            (reached, r.join().unwrap())
+        });
+        sibling.join().unwrap();
+        holder.join().unwrap();
+        assert!(replan.0, "the second overdue writer got no place");
+        assert!(replan.1.is_ok(), "{:?}", replan.1);
+        assert_eq!(s.count_chunk_tasks_total("run_a").unwrap(), 1);
+    }
+
+    /// A chunk claim takes its turn in the in-process write queue like any other write (main: it goes straight to SQLite's busy wait).
+    #[test]
+    fn a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn() {
+        let (_dir, s) = store_on_disk();
+        s.create_chunk_run("run_a", "orders", "deadbeef", 2)
+            .unwrap();
+        s.insert_chunk_tasks("run_a", &[(1, 5), (6, 10)]).unwrap();
+        let db = sqlite_path_of(&s);
+        for i in 0..2i64 {
+            let before = super::super::write_turn::counts(&db).0;
+            let r = s.claim_next_chunk_task("run_a");
+            assert!(matches!(&r, Ok(Some((idx, _, _))) if *idx == i), "{r:?}");
+            assert_eq!(
+                super::super::write_turn::counts(&db).0,
+                before + 1,
+                "claim {i} asked for no turn"
+            );
+        }
+        assert_eq!(s.claim_next_chunk_task("run_a").unwrap(), None);
     }
 
     #[test]

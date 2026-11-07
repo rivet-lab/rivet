@@ -4,7 +4,7 @@
   the Google credential it already uses for BigQuery and GCS (`GOOGLE_APPLICATION_CREDENTIALS` or
   gcloud ADC), once per process, so the database password is never stored on the machine. The
   credential needs `roles/secretmanager.secretAccessor` on the secret. A secret that cannot be read
-  stops the run with the new `RIVET_CONFIG_GCP_SECRET_UNREADABLE` (exit 1), naming the secret and the
+  stops the run with the new `RIVET_CONFIG_GCP_SECRET_UNREADABLE` (exit 1, or exit 2 when its cause is transient), naming the secret and the
   role to grant; a sealed plan keeps the secret name, never its value. The name may be a `${VAR}`
   filled by `--param` or the environment, so a scheduler passes the name and never the value.
 - **A config refusal raised while connecting to the source was relabelled a connectivity or auth

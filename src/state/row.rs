@@ -252,7 +252,7 @@ impl StateStore {
 
     /// This process's turn at the SQLite file's write lock (see [`super::write_turn`]); none on
     /// PostgreSQL, inside an open transaction (which holds it), or for an in-memory store.
-    fn write_turn(&self) -> Option<super::write_turn::Turn> {
+    pub(super) fn write_turn(&self) -> Option<super::write_turn::Turn> {
         let super::StateRef::Sqlite(db) = &self.state_ref else {
             return None;
         };

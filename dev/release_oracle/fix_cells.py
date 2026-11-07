@@ -84,6 +84,26 @@ FIX_SCOPE: dict[str, tuple[str, str]] = {
         r"a_sharded_",
         "2026-11-01: #738 rewrote the port env of 47 mongo cells; only the four a_sharded_ cells need the shard stand and fail on 0.32.2",
     ),
+    "fcc9f1d8": (
+        r"^(?!partition_reset_(full|plain|unknown_child)_)",
+        "2026-11-07: #881 new file; the full, plain and unknown_child cells are controls 0.32.2 passes (full keeps no cursor, a plain export has no children, a ghost child was refused there too); the parent, child, family, respelled, cross_source and child_lease cells fail there",
+    ),
+    "32df35d8": (
+        r"^(?!a_missing_column_named_plainly_|a_missing_column_exits_by_its_code_whatever_its_name_holds_postgres$)",
+        "2026-11-07: #827 plain-name cells are controls and PostgreSQL already exits 1 for a missing column whatever its name holds on 0.32.2; the mysql, mssql and oracle whatever_its_name_holds cells fail there",
+    ),
+    "34ab117d": (
+        r"^(?!a_binary_double_a_float_|a_domain_over_text_keyset_key_|an_alias_type_over_datetime2_6_|init_scaffolds_no_keyset_key_for_a_(binary16|bytea)_|keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle$|parallel_keyset_incremental_on_an_mssql_datetime_key_)",
+        "2026-11-07: #814 admitted-key and stays-refused cells are controls 0.32.2 passes (domain over text, datetime2(6) alias and datetime, oracle integer and text keys, init without a keyset key for binary16 and bytea, the refusals Oracle made before); the refused-key, bare-NUMBER and datetime2(7) cells fail there",
+    ),
+    "2c52067f": (
+        r"^(?!an_incremental_cursor_on_a_nanosecond_timestamp_is_refused_before_it_re_exports$|an_init_generated_config_runs_on_a_key_the_oracle_planner_cannot_seek$)",
+        "2026-11-07: #854 these two now declare the TIMESTAMP(9) column and 0.32.2 delivers or refuses them the same; the oracle_batch_timestamp9 and oracle_cdc_timestamp9 undeclared-refusal cells fail there",
+    ),
+    "a0cc571f": (
+        r"^(?!in_range_values_under_the_override_keep_every_digit_and_null_stays_null$)",
+        "2026-11-07: #875 in-range values and NULL were delivered right on 0.32.2; the past-range cells fail there",
+    ),
 }
 
 
@@ -258,6 +278,7 @@ def _self_test() -> None:
     assert stale_scope(seen, scope) == [] and stale_scope(seen[:1], scope) == ["ab12"] and stale_scope(seen[1:], scope) == ["ab12"]
     assert stale_scope([("ff00", "fix: y", "port_env")], scope) == ["ab12"]
     assert all(pat and why.strip() for pat, why in FIX_SCOPE.values()), "a FIX_SCOPE entry has no pattern or reason"
+    assert all(re.compile(pat) for pat, _ in FIX_SCOPE.values()), "a FIX_SCOPE pattern does not compile"
     here = {n for f in (ROOT / "tests" / "live").glob("*.rs") for n in tests_in(f.read_text())}
     assert len(here) > 1000, f"the test pattern reads {len(here)} live cells: it stopped matching"
     assert all(why.strip() for why in GREEN_ON_PREV.values()), "a GREEN_ON_PREV entry has no reason"

@@ -509,6 +509,28 @@ seeds:
           - "lib:turns_are_served_in_the_order_they_were_asked_and_a_late_one_gives_up"
       postgres-state:
         na: "the turn queue is SQLite's; PostgreSQL row locks queue writers on the server"
+  - name: sqlite-second-overdue-writer-has-no-place
+    class: "a second SQLite state writer that ran out of the turn queue's patience while another overdue writer held the one kept place gets none, so it waits unqueued in SQLite's busy wait while a sibling of the same process commits back to back and is refused `database is locked` after the busy timeout"
+    history: "0.33 gate, 2026-11-07: a_replan_beside_another_writer_of_the_state_waits_for_it failed 1 in 5 quiet runs (`1 of 1000 replans failed beside 989 writes: 256: database is locked`, the failing run 49 s against 5.9 s); forced with a sibling placed behind a holder and a replan arriving behind its place: red on main 8ea632b4 (refused after 10.7 s)"
+    scope: state
+    engines:
+      sqlite-state:
+        patch: sqlite-second-overdue-writer-has-no-place/sqlite-state.patch
+        cells:
+          - "lib:a_replan_that_runs_out_of_patience_behind_an_overdue_writer_gets_its_turn"
+          - "lib:turns_are_served_in_the_order_they_were_asked_and_a_late_one_gives_up"
+      postgres-state:
+        na: "the turn queue is SQLite's; PostgreSQL row locks queue writers on the server"
+  - name: sqlite-chunk-claim-takes-no-turn
+    class: "the chunk claim on the SQLite state file opens its IMMEDIATE transaction without taking its turn in the in-process write queue, so a sibling store committing back to back wins every gap and the claim is refused `database is locked` after the busy timeout"
+    history: "0.33 gate, 2026-11-07: found while closing the replan flake of the same queue; forced with a sibling holding the write lock 4 ms at a time: the claim is refused after 10.7 s on main 8ea632b4"
+    scope: state
+    engines:
+      sqlite-state:
+        patch: sqlite-chunk-claim-takes-no-turn/sqlite-state.patch
+        cells: ["lib:a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn"]
+      postgres-state:
+        na: "the chunk claim on PostgreSQL is `FOR UPDATE SKIP LOCKED`: the server skips a locked row and never queues the claim"
 
   - name: load-block-missing-uncoded
     class: "`rivet load` / `rivet compact` on a config without a `load:` block exit 1 with no RIVET_* code, so a scheduler cannot tell the config mistake from another failure"
