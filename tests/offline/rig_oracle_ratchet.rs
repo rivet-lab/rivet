@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 // 51 -> 52 (2026-10-29, #719 follow-up): the same helper; a refused run leaves its parts, rows and checkpoint for the re-run by design.
 // 52 -> 53 (2026-11-02): a BigQuery first load whose lease is lost mid-write (a_first_load_whose_lease_is_taken_during_the_write_*): the unowned table and its failed load_run row stay for the refusal the cell then asserts.
 // 53 -> 52 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); one leftover declaration left.
+// 52 -> 56 (2026-11-06): the first-CDC-run-refused-after-its-anchor cells on PostgreSQL, MySQL, SQL Server and Oracle (a_first_cdc_run_refused_after_its_anchor_releases_it_*): the observed schema of the refused baseline leg stays; the slot, the checkpoint and the captured-tables record are asserted gone.
 // ratchet-pin: failed-run-leftover-declarations (review 2027-02-01) count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).

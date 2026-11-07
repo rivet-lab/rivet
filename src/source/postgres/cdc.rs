@@ -138,6 +138,58 @@ pub(crate) fn slot_created_warning(slot: &str) -> String {
     )
 }
 
+/// Whether the replication slot `slot` exists on the server at `url`.
+pub(crate) fn slot_exists(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<bool> {
+    let mut client = super::connect_client(url, tls)?;
+    Ok(client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+            &[&slot],
+        )?
+        .get(0))
+}
+
+/// Drop the replication slot `slot`, waiting for the server to release a slot the closed stream still holds.
+pub(crate) fn drop_slot(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<()> {
+    let mut client = super::connect_client(url, tls)?;
+    retry_drop(
+        || {
+            client
+                .execute(
+                    "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
+                    &[&slot],
+                )
+                .map(|_| ())
+        },
+        |e| log::debug!("pg cdc: slot '{slot}' not dropped yet: {e}"),
+        || std::thread::sleep(std::time::Duration::from_millis(200)),
+    )
+    .map_err(Into::into)
+}
+
+/// How many times a failed slot drop is retried before its error is returned.
+const DROP_SLOT_RETRIES: u32 = 25;
+
+/// Runs `attempt`, retrying a failure up to [`DROP_SLOT_RETRIES`] times with `pause` between tries; the last failure is returned.
+fn retry_drop<E>(
+    mut attempt: impl FnMut() -> std::result::Result<(), E>,
+    mut note: impl FnMut(&E),
+    mut pause: impl FnMut(),
+) -> std::result::Result<(), E> {
+    let mut tries = 0;
+    loop {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(e) if tries < DROP_SLOT_RETRIES => {
+                note(&e);
+                tries += 1;
+                pause();
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// The refusal for a missing slot, naming exactly the prior-run evidence the caller checked.
 pub(crate) fn pg_slot_missing_refusal(slot: &str, prior: PriorRun) -> String {
     const CKPT: &str = "the checkpoint file holds a position from a prior run";
@@ -2487,6 +2539,51 @@ fn parse_pg_timestamp(val: &str) -> Option<RivetValue> {
 
 #[cfg(test)]
 mod tests {
+    /// A failed slot drop is retried, pausing once per retry, until it succeeds.
+    #[test]
+    fn a_slot_drop_that_fails_then_succeeds_is_retried_until_it_does() {
+        let (mut calls, mut pauses, mut noted) = (0u32, 0u32, 0u32);
+        let out = retry_drop(
+            || {
+                calls += 1;
+                if calls <= 3 { Err("held") } else { Ok(()) }
+            },
+            |_| noted += 1,
+            || pauses += 1,
+        );
+        assert_eq!(out, Ok(()));
+        assert_eq!((calls, pauses, noted), (4, 3, 3));
+    }
+
+    /// A slot drop that never succeeds is tried once plus every retry, then its last error is returned.
+    #[test]
+    fn a_slot_drop_that_never_succeeds_gives_up_after_its_retries_with_the_last_error() {
+        let (mut calls, mut pauses) = (0u32, 0u32);
+        let out = retry_drop(
+            || {
+                calls += 1;
+                Err(calls)
+            },
+            |_| {},
+            || {
+                pauses += 1;
+                assert!(pauses <= DROP_SLOT_RETRIES + 5, "the retry loop never ends");
+            },
+        );
+        assert_eq!(out, Err(DROP_SLOT_RETRIES + 1));
+        assert_eq!((calls, pauses), (DROP_SLOT_RETRIES + 1, DROP_SLOT_RETRIES));
+    }
+
+    /// A slot drop that succeeds at once neither pauses nor notes.
+    #[test]
+    fn a_slot_drop_that_succeeds_at_once_does_not_pause() {
+        let (mut pauses, mut noted) = (0u32, 0u32);
+        let out: std::result::Result<(), &str> =
+            retry_drop(|| Ok(()), |_| noted += 1, || pauses += 1);
+        assert_eq!(out, Ok(()));
+        assert_eq!((pauses, noted), (0, 0));
+    }
+
     /// A bare name routes only the schema the search_path resolved it to; a qualified name its own;
     /// a bare name resolved nowhere routes as before.
     #[test]

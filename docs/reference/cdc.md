@@ -102,7 +102,7 @@ snapshot read, a change landing mid-snapshot appears in **both** the snapshot
 and the stream — an overlap the PK + `__op` dedupe absorbs, never a gap.
 Subsequent runs skip the snapshot because the state DB records it as done (`cdc_snapshot` — the authoritative signal; the `snapshot/_SUCCESS` marker remains a legacy co-signal, so re-snapshotting requires clearing BOTH) and go straight to draining;
 a run that crashes mid-snapshot re-snapshots on retry (the anchor stays put, so
-nothing is lost). Once any snapshot completed, a MISSING server-side anchor
+nothing is lost). A first run that ends in an error before anything was delivered (no baseline done, no part written) releases the anchor it created: it drops the PostgreSQL slot, deletes the checkpoint file and forgets the captured-tables record, so the next run starts the stream clean; a slot or checkpoint that existed before the run is never touched. If the release itself fails the run keeps its exit code and prints `RIVET_SOURCE_CDC_ANCHOR_NOT_RELEASED` with the object and the command that removes it. Once any snapshot completed, a MISSING server-side anchor
 (a dropped PostgreSQL slot) is a loud error, never a silent re-anchor — see
 "A vanished slot" below. Load order downstream: the snapshot prefix as the base table,
 then MERGE the CDC parts. MySQL / SQL Server require `cdc.checkpoint:` with

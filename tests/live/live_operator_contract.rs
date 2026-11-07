@@ -2496,6 +2496,205 @@ fn a_refused_changes_only_cdc_run_on_a_missing_table_leaves_no_slot_postgres() {
     pg_cdc_missing_table_leaves_no_slot(false);
 }
 
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn a_first_cdc_run_refused_after_its_anchor_releases_it_postgres() {
+    pg_cdc_first_run_refused_after_the_anchor_releases_it();
+}
+
+/// RESULTS 16: a first PostgreSQL CDC run refused after its baseline began leaves no replication slot and no recorded capture, and the corrected config then delivers the source.
+fn pg_cdc_first_run_refused_after_the_anchor_releases_it() {
+    let slot = unique_name("oc_relslot");
+    let _guard = Slot::new(slot.clone());
+    let table = unique_name("oc_rel");
+    let _table = PgTable::adopt_on(POSTGRES_CDC_URL, table.clone());
+    let mut pg =
+        postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("connect postgres-cdc");
+    pg.batch_execute(&format!(
+        "CREATE TABLE {table} (id BIGINT PRIMARY KEY, ts TIMESTAMP); \
+         INSERT INTO {table} SELECT g, TIMESTAMP '2024-01-01' + g * INTERVAL '1 second' FROM generate_series(1, 5) g"
+    ))
+    .expect("create and seed the table");
+    let mut rig = Rig::pg_cdc(&table, &slot)
+        .cdc("initial: snapshot")
+        .export_line("columns: {ts: timestamp_ns}")
+        .a_failed_run_may_leave(
+            &[Leftover::ObservedSchema],
+            "the baseline leg stores the schema its first batch resolved before the converter refuses the override",
+        );
+    rig.refuses_twice_then(
+        &["run"],
+        &[],
+        Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
+        vec![Remedy::new(
+            "columns",
+            Then::DeliversTheSource,
+            |r| {
+                let slots: i64 = pg
+                    .query_one(
+                        "SELECT COUNT(*) FROM pg_replication_slots WHERE slot_name = $1",
+                        &[&slot],
+                    )
+                    .expect("pg_replication_slots")
+                    .get(0);
+                assert_eq!(
+                    slots, 0,
+                    "a first CDC run refused after its anchor left its replication slot"
+                );
+                let rows = r.state_count(
+                    "SELECT COUNT(*) FROM export_state WHERE export_name = '{export}' AND stream IS NOT NULL",
+                );
+                assert_eq!(
+                    rows, 0,
+                    "a first CDC run refused after its anchor left its captured_tables record"
+                );
+                r.rebuilt(|r| r.restage("cdc", &[]));
+            },
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_first_cdc_run_refused_after_its_anchor_releases_it_mysql() {
+    use mysql::prelude::Queryable as _;
+    let table = unique_name("oc_rel");
+    let _table = MysqlCdcTable(table.clone());
+    mysql::Conn::new(MYSQL_CDC_URL)
+        .expect("connect mysql-cdc")
+        .query_drop(format!(
+            "CREATE TABLE {table} (id BIGINT PRIMARY KEY, ts DATETIME(6)); \
+             INSERT INTO {table} VALUES (1, '2024-01-01 00:00:01'), (2, '2024-01-01 00:00:02'), (3, '2024-01-01 00:00:03'), (4, '2024-01-01 00:00:04'), (5, '2024-01-01 00:00:05')"
+        ))
+        .expect("create and seed the table");
+    let mut rig = Rig::mysql_cdc(&table)
+        .cdc("initial: snapshot")
+        .export_line("columns: {ts: timestamp_ns}")
+        .a_failed_run_may_leave(
+            &[Leftover::ObservedSchema],
+            "the baseline leg stores the schema its first batch resolved before the converter refuses the override",
+        );
+    rig.refuses_twice_then(
+        &["run"],
+        &[],
+        Refused::by_code("RIVET_INTERNAL_TYPE_BUILDER", 6),
+        vec![Remedy::new(
+            "columns",
+            Then::DeliversTheSource,
+            |r| {
+                assert!(
+                    !r.checkpoint().exists(),
+                    "a first CDC run refused after its anchor left its checkpoint"
+                );
+                let rows = r.state_count(
+                    "SELECT COUNT(*) FROM export_state WHERE export_name = '{export}' AND stream IS NOT NULL",
+                );
+                assert_eq!(
+                    rows, 0,
+                    "a first CDC run refused after its anchor left its captured_tables record"
+                );
+                r.rebuilt(|r| r.restage("cdc", &[]));
+            },
+        )],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_first_cdc_run_refused_after_its_anchor_releases_it_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = unique_name("oc_rel");
+    let ci = format!("dbo_{table}");
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table} (id BIGINT PRIMARY KEY, v INT); \
+         INSERT INTO dbo.{table} VALUES (1, 11), (2, 12), (3, 13), (4, 14), (5, 15)"
+    ));
+    let _table = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    enable_cdc(&table, &ci);
+    let mut rig = Rig::mssql_cdc(&table, &ci)
+        .cdc("initial: snapshot")
+        .export_line("columns: {v: string}")
+        .a_failed_run_may_leave(
+            &[Leftover::ObservedSchema],
+            "the baseline leg stores the schema its first batch resolved before the converter refuses the override",
+        );
+    rig.refuses_twice_then(
+        &["run"],
+        &[],
+        Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
+        vec![Remedy::new(
+            "columns",
+            Then::DeliversTheSource,
+            |r| {
+                assert!(
+                    !r.checkpoint().exists(),
+                    "a first CDC run refused after its anchor left its checkpoint"
+                );
+                let rows = r.state_count(
+                    "SELECT COUNT(*) FROM export_state WHERE export_name = '{export}' AND stream IS NOT NULL",
+                );
+                assert_eq!(
+                    rows, 0,
+                    "a first CDC run refused after its anchor left its captured_tables record"
+                );
+                r.rebuilt(|r| r.restage("cdc", &[]));
+            },
+        )],
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn a_first_cdc_run_refused_after_its_anchor_releases_it_oracle() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let t = OracleTable::create("oc_rel", "id NUMBER(18) PRIMARY KEY, dt DATE");
+    ora_exec(&format!(
+        "ALTER TABLE {} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS",
+        t.name()
+    ));
+    ora_exec(&format!("GRANT SELECT ON {} TO c##rivetcdc", t.name()));
+    for id in 1..=5 {
+        ora_exec(&format!(
+            "INSERT INTO {} VALUES ({id}, TO_DATE('2024-03-15 13:14:0{id}', 'YYYY-MM-DD HH24:MI:SS'))",
+            t.name()
+        ));
+    }
+    let mut rig = Rig::oracle_cdc(t.name())
+        .cdc("initial: snapshot")
+        .export_line("columns: {DT: date}")
+        .a_failed_run_may_leave(
+            &[Leftover::ObservedSchema],
+            "the baseline leg stores the schema its first batch resolved before the converter refuses the override",
+        );
+    rig.refuses_twice_then(
+        &["run"],
+        &[],
+        Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
+        vec![Remedy::new(
+            "timestamp",
+            Then::DeliversTheSource,
+            |r| {
+                assert!(
+                    !r.checkpoint().exists(),
+                    "a first CDC run refused after its anchor left its checkpoint"
+                );
+                let rows = r.state_count(
+                    "SELECT COUNT(*) FROM export_state WHERE export_name = '{export}' AND stream IS NOT NULL",
+                );
+                assert_eq!(
+                    rows, 0,
+                    "a first CDC run refused after its anchor left its captured_tables record"
+                );
+                r.rebuilt(|r| r.restage("cdc", &[]));
+            },
+        )],
+    );
+}
+
 /// The MySQL twin of RESULTS 15: a first CDC run refused for a table that does not exist leaves no checkpoint, and creating the table then runs.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
