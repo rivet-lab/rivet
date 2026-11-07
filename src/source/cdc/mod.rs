@@ -75,6 +75,25 @@ pub(crate) fn partial_image_refusal(
     )
 }
 
+/// The refusal of a stream whose image does not carry every column of a captured table, at open and at the end of a drain.
+pub(crate) fn open_partial_image_refusal(engine: CdcEngine, why: &str) -> anyhow::Error {
+    crate::error::coded(
+        crate::error::codes::SOURCE_CDC_PREREQUISITE,
+        format!(
+            "{} cdc: {why}. Capturing under this setting would report success over events that \
+             cannot represent the row.",
+            engine.label()
+        ),
+    )
+}
+
+/// `Some((values, names))` when a named image carries a different number of values than names, a PARTIAL image.
+pub(crate) fn named_image_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usize)> {
+    let names = ev.image_names.as_deref()?;
+    let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
+    (n != names.len()).then_some((n, names.len()))
+}
+
 /// Default row cap — 5M rows, far above any real OLTP transaction.
 pub(crate) const DEFAULT_MAX_TX_ROWS: usize = 5_000_000;
 /// Default byte cap — 2 GiB, likewise.
@@ -669,6 +688,9 @@ pub(crate) fn run(
     if max_events == Some(0) {
         return Ok(());
     }
+    if let RowImage::Partial { why } = stream.row_image(&tables) {
+        return Err(open_partial_image_refusal(stream.engine(), &why));
+    }
     let mut last_commit: Option<Position> = None;
     let drained = emit_ndjson(stream, &checkpoint, &tables, max_events, &mut last_commit);
     // Every line up to `last_commit` is on stdout: release it at the source (PostgreSQL advances the slot).
@@ -716,6 +738,9 @@ fn emit_ndjson(
         // corruption). An uncaptured table's poison was already dropped above.
         ev.raise_poison()?;
         ev.raise_before_poison()?;
+        if let Some((n, names)) = named_image_arity_mismatch(&ev) {
+            return Err(partial_image_refusal(&ev.schema, &ev.table, n, names));
+        }
         println!("{}", ndjson_line(&ev));
         emitted += 1;
         // Checkpoint AFTER emitting the captured event — never before. A crash in
@@ -3239,6 +3264,115 @@ mod tests {
         );
         super::run(&mut s, None, vec!["orders".into()], None).expect_err("the poison");
         assert_eq!(s.1, ["0/1"]);
+    }
+
+    /// A stream of events with a fixed open-time image verdict.
+    struct Imaged(
+        std::collections::VecDeque<super::ChangeEvent>,
+        super::RowImage,
+    );
+    impl super::ChangeStream for Imaged {
+        fn engine(&self) -> super::CdcEngine {
+            super::CdcEngine::Mysql
+        }
+        fn row_image(&mut self, _tables: &[String]) -> super::RowImage {
+            self.1.clone()
+        }
+        fn next_change(&mut self) -> Option<Result<super::ChangeEvent>> {
+            self.0.pop_front().map(Ok)
+        }
+    }
+
+    /// One update on `table` naming four columns and carrying `n` values in its after image.
+    fn named_update(table: &str, lsn: &str, n: usize) -> super::ChangeEvent {
+        super::ChangeEvent {
+            after: Some((0..n as i64).map(RivetValue::Int).collect()),
+            image_names: Some(std::sync::Arc::from(
+                ["id", "a", "b", "c"].map(String::from).to_vec(),
+            )),
+            ..event_at(table, lsn, true)
+        }
+    }
+
+    /// The stdout driver refuses a partial image by code, acks nothing, and leaves the checkpoint file unwritten.
+    #[test]
+    fn the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ck = dir.path().join("ck.json");
+        let mut s = Imaged(
+            vec![named_update("orders", "0/1", 1)].into(),
+            super::RowImage::Whole,
+        );
+        let err = super::run(&mut s, Some(ck.clone()), vec!["orders".into()], None)
+            .expect_err("a partial image must stop the run");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("a row image carries 1 value(s) under 4 column name(s)")
+                && text.contains("a PARTIAL image")
+                && text.contains(super::checkpoint_identity::RECOVER),
+            "got: {text}"
+        );
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_CDC_PREREQUISITE)
+        );
+        assert!(
+            !ck.exists(),
+            "the checkpoint must not move past a refused event"
+        );
+    }
+
+    /// Whole images, partial images of an unlisted table and key-only deletes print as before.
+    #[test]
+    fn the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images() {
+        let drained = |events: Vec<super::ChangeEvent>, image: super::RowImage| {
+            let mut s = Imaged(events.into(), image);
+            let out = super::run(&mut s, None, vec!["orders".into()], None);
+            assert!(out.is_ok(), "got: {out:?}");
+            s.0.len()
+        };
+        assert_eq!(
+            drained(
+                vec![named_update("orders", "0/1", 4)],
+                super::RowImage::Whole
+            ),
+            0
+        );
+        assert_eq!(
+            drained(
+                vec![named_update("other", "0/1", 1)],
+                super::RowImage::Whole
+            ),
+            0
+        );
+        assert_eq!(
+            drained(
+                vec![named_update("orders", "0/1", 4)],
+                super::RowImage::KeyOnlyDeletes { why: "k".into() }
+            ),
+            0
+        );
+    }
+
+    /// A partial open-time verdict stops the run before any event is read.
+    #[test]
+    fn the_ndjson_driver_refuses_a_partial_open_time_image_before_reading() {
+        let mut s = Imaged(
+            vec![named_update("orders", "0/1", 4)].into(),
+            super::RowImage::Partial {
+                why: "binlog_row_image = MINIMAL".into(),
+            },
+        );
+        let err = super::run(&mut s, None, vec!["orders".into()], None).expect_err("partial");
+        assert!(
+            format!("{err:#}").contains("binlog_row_image = MINIMAL"),
+            "got: {err:#}"
+        );
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_CDC_PREREQUISITE)
+        );
+        assert_eq!(s.0.len(), 1, "no event was consumed");
     }
 
     /// A declared key column is found by exact or case-folded name; the first missing one is named.
