@@ -1159,6 +1159,7 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         writer.join().unwrap();
         assert!(slow.is_empty(), "starved: {slow:?}");
+        assert_eq!(s.claim_next_chunk_task("run_a").unwrap(), None);
     }
 
     #[test]
