@@ -1,14 +1,4 @@
-//! Transport-security setup shared by Postgres, MySQL, and preflight paths.
-//!
-//! Both drivers eventually need a `native_tls::TlsConnector`, then wrap it in a
-//! driver-specific adapter (`postgres_native_tls::MakeTlsConnector` for
-//! `postgres::Client::connect`, and `mysql::SslOpts` for `mysql::Pool`).
-//!
-//! The single entry point [`build_native_tls`] translates the user-facing
-//! [`TlsConfig`] (mode + optional CA file + danger-knobs) into a configured
-//! `native_tls::TlsConnector`. Error messages deliberately avoid leaking the
-//! configured CA path into the anyhow chain that ends up in
-//! `summary.error_message` / Slack — we surface only the failure reason.
+//! Postgres transport security: [`TlsConfig`] into a `native_tls::TlsConnector`.
 
 use crate::config::{TlsConfig, TlsMode};
 use crate::error::Result;
@@ -28,17 +18,13 @@ pub(crate) fn build_native_tls(cfg: &TlsConfig) -> Result<native_tls::TlsConnect
 
     match cfg.mode {
         TlsMode::Require => {
-            // Protect against passive sniffing; skip chain + hostname checks.
             builder.danger_accept_invalid_certs(true);
             builder.danger_accept_invalid_hostnames(true);
         }
         TlsMode::VerifyCa => {
-            // Trust chain is verified; hostname is not.
             builder.danger_accept_invalid_hostnames(true);
         }
-        TlsMode::VerifyFull => {
-            // Full verification (chain + hostname). This is the secure default.
-        }
+        TlsMode::VerifyFull => {}
         TlsMode::Disable => unreachable!(),
     }
 
@@ -55,19 +41,10 @@ pub(crate) fn build_native_tls(cfg: &TlsConfig) -> Result<native_tls::TlsConnect
                 format!("tls: ca_file is not valid PEM: {}", e),
             )
         })?;
+        builder.disable_built_in_roots(true);
         builder.add_root_certificate(cert);
     }
 
-    // Honor the explicit danger knobs on top of the mode-derived defaults.
-    // Config-load enforcement lives upstream: `Config::check_tls_mode_downgrade`
-    // (run from `Config::from_yaml`) REJECTS an *explicitly chosen* enforced
-    // `mode:` paired with a danger knob (e.g. `mode: verify-full` +
-    // `accept_invalid_certs: true`) with an Err, since the knob silently
-    // downgrades the stated mode to trust-anything. A danger knob therefore
-    // reaches here only in the permitted case: an enforced mode with no explicit
-    // `mode:` key (the dev-container default-mode path against a loopback
-    // self-signed cert), where the contradiction the config check guards against
-    // is absent.
     if cfg.accept_invalid_certs {
         builder.danger_accept_invalid_certs(true);
     }
