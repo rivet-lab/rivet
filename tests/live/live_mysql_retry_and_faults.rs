@@ -223,3 +223,59 @@ fn mysql_permanent_sql_error_fails_fast_without_exhausting_retries() {
         "a permanent error is not retried: {failed:?}"
     );
 }
+
+const CUT_ROWS: i64 = 100;
+const CUT_PAD_BYTES: usize = 60_000;
+const CUT_AFTER_BYTES: u64 = 5 * CUT_PAD_BYTES as u64 + (CUT_PAD_BYTES / 2) as u64;
+
+/// A table of `rows` rows, each holding `pad_bytes` of text, so one result row is one large packet.
+fn seed_mysql_padded_table(rows: i64, pad_bytes: usize) -> MysqlTable {
+    use mysql::prelude::Queryable;
+
+    let name = unique_name("rivet_qa_cut");
+    let mut c = mysql_connect();
+    c.query_drop(format!(
+        "CREATE TABLE {name} (id BIGINT PRIMARY KEY, pad LONGTEXT NOT NULL) ENGINE=InnoDB"
+    ))
+    .expect("create padded mysql table");
+    let table = MysqlTable::adopt(name.clone());
+    c.query_drop(format!(
+        "INSERT INTO {name} (id, pad) \
+         WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < {rows}) \
+         SELECT n, REPEAT('x', {pad_bytes}) FROM s"
+    ))
+    .expect("seed padded mysql rows");
+    table
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql + toxiproxy + duckdb"]
+fn mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once() {
+    let _g = toxiproxy_guard();
+    require_alive(LiveService::Mysql);
+    require_alive(LiveService::DuckDb);
+    require_alive(LiveService::Toxiproxy);
+    reset_mysql_proxy();
+
+    let table = seed_mysql_padded_table(CUT_ROWS, CUT_PAD_BYTES);
+    let export_name = unique_name("my_cut_midrow");
+    let (out_host, out_container) = duckdb_shared_workdir("my_cut_midrow_oracle");
+    let rig = Rig::mysql_batch(&export_name)
+        .source_url(MYSQL_TOXI_URL)
+        .query(&format!("SELECT id, pad FROM {}", table.name()))
+        .mode("full")
+        .export_line("tuning:")
+        .export_line("  max_retries: 3")
+        .export_line("  retry_backoff_ms: 3000")
+        .dest_path(out_host.clone());
+
+    assert_midrow_cut_retried_and_delivered_exactly_once(
+        &rig,
+        &export_name,
+        "mysql",
+        CUT_AFTER_BYTES,
+        CUT_ROWS,
+        CUT_PAD_BYTES,
+        &out_container,
+    );
+}

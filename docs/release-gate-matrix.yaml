@@ -378,7 +378,9 @@ infra:
       export_recovers_after_mid_stream_connection_reset_with_retries +
       chunked_export_recovers_after_mid_stream_connection_reset +
       mongo_export_recovers_after_mid_stream_connection_cut_with_retries +
-      gremlin_cdc_binlog_cut_mid_drain_fails_loud_then_recovers through the release binary
+      gremlin_cdc_binlog_cut_mid_drain_fails_loud_then_recovers +
+      the postgres_ and mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once
+      pair through the release binary
       (a Postgres reset is cut mid-stream by the pause seam and a Mongo scan by a byte-budget cut,
       retries are read from the state); MySQL mid-stream retry is not proven here; probes toxiproxy :8474 itself and SKIPs loudly when down"
   - id: state_upgrade
@@ -436,7 +438,8 @@ infra:
     # 2026-11-05: +1 N/A row, progress-inherited-by-another-stream x mongo: the collection incarnation in the stored population refuses the repoint before the rows comparison the seed breaks.
     # 2026-11-06: +3 structural N/A rows from interval-text-without-its-label (MySQL, SQL Server and MongoDB have no INTERVAL type to reach the Interval arm).
     # 2026-11-05: +2 structural N/A rows from stop-class-number (PostgreSQL decides every error by its SQLSTATE, MongoDB reads whole documents and refuses no column).
-    na_ceiling: 563  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 first-CDC-run anchor release (#852): one MongoDB row with no reachable trigger, recounted by python -m dev.seeded --self-test (563 manifest N/A rows)
+    # 2026-11-06: +3 N/A rows from connection-cut-mid-row-not-retried (mssql lifts tiberius errors into text, mongo classifies a typed driver error, oracle lifts oracledb errors into text: none reaches the removed arm).
+    na_ceiling: 566  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 first-CDC-run anchor release (#852): one MongoDB row with no reachable trigger, recounted by python -m dev.seeded --self-test
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

@@ -118,6 +118,13 @@ fn classify_io_kind(kind: std::io::ErrorKind) -> Option<RetryClass> {
     }
 }
 
+/// A driver error that wraps the socket's `io::Error`: the kind decides, and a kind the table leaves open is a lost connection.
+fn classify_wire_io(err: &(dyn std::error::Error + 'static)) -> Option<RetryClass> {
+    err.source()
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .map(|io| classify_io_kind(io.kind()).unwrap_or(TRANSIENT_RECONNECT))
+}
+
 pub fn classify_error(err: &anyhow::Error) -> RetryClass {
     if let Some(kept) = crate::error::kept_verdict(err) {
         return kept;
@@ -156,6 +163,9 @@ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
         // Connection-level (non-DB) postgres errors → reconnect
         if pg.is_closed() {
             return TRANSIENT_RECONNECT;
+        }
+        if let Some(class) = classify_wire_io(pg) {
+            return class;
         }
     }
 
@@ -529,6 +539,7 @@ fn classify_mysql_error(err: &mysql::Error) -> Option<RetryClass> {
             _ => None,
         },
         mysql::Error::IoError(_) => Some(TRANSIENT_RECONNECT),
+        mysql::Error::CodecError(codec) => classify_wire_io(codec),
         _ => None,
     }
 }
@@ -1419,5 +1430,34 @@ mod tests {
             classify_error(&anyhow::anyhow!("i/o timeout")).is_transient(),
             "text still decides for a non-store error"
         );
+    }
+
+    /// A connection lost while a packet is half read is retried; every other codec error keeps its class.
+    #[test]
+    fn mysql_codec_errors_keep_their_class_except_a_connection_lost_mid_packet() {
+        use mysql_common::proto::codec::error::PacketCodecError;
+        use std::io::{Error as E, ErrorKind as K};
+        let full = |e: mysql::Error| classify_error(&anyhow::Error::new(e));
+        let codec = mysql::Error::CodecError;
+        let cut = E::other("bytes remaining on stream");
+        assert_eq!(full(codec(PacketCodecError::Io(cut))), TRANSIENT_RECONNECT);
+        assert_eq!(
+            full(codec(PacketCodecError::Io(E::from(K::ConnectionReset)))),
+            TRANSIENT_RECONNECT
+        );
+        for kept in [
+            codec(PacketCodecError::Io(E::from(K::InvalidData))),
+            codec(PacketCodecError::PacketTooLarge),
+            codec(PacketCodecError::PacketsOutOfSync),
+            codec(PacketCodecError::BadCompressedPacketHeader),
+        ] {
+            assert_eq!(full(kept), PERMANENT);
+        }
+        for io in [K::ConnectionReset, K::InvalidData] {
+            assert_eq!(
+                full(mysql::Error::IoError(E::from(io))),
+                TRANSIENT_RECONNECT
+            );
+        }
     }
 }
