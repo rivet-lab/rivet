@@ -32,12 +32,11 @@ seams:
       - "userinfo_span ("
     exceptions: []
   - id: object-store-retry
-    owner: src/destination/cloud.rs::new_with_retries
+    owner: src/destination/cloud.rs::retry_layer
     reads: "the retry policy every object-store operator is wrapped in"
     bypass:
       - "RetryLayer :: new ("
-    exceptions:
-      - {at: src/destination/gcs.rs::wrap, dated: 2026-10-31, reason: "second RetryLayer with max_times 3, duplication only", closes: "route through new_with_retries after the gate"}
+    exceptions: []
   - id: cdc-captured-tables
     owner: src/config/cdc.rs::cdc_captured_tables
     reads: "the tables one mode cdc export captures, folding table and tables"

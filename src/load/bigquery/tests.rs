@@ -1945,3 +1945,60 @@ fn a_named_key_bigquery_cannot_mint_is_refused_not_replaced() {
     );
     assert_eq!(api_authorizations(&stand), Vec::<String>::new());
 }
+
+/// A stand whose token endpoint answers `token_status(nth)` to the nth request for a token (a token on 200, and from the 50th ask on) and any other path as a failing BigQuery.
+fn token_status_stand(token_status: impl Fn(usize) -> u16 + Send + 'static) -> Stand {
+    Stand::start(move |seen, nth| match seen.path.strip_suffix("/token") {
+        Some(who) => match if nth >= 50 { 200 } else { token_status(nth) } {
+            200 => json(
+                200,
+                &format!(
+                    r#"{{"access_token":"tok-{}","expires_in":3600,"token_type":"Bearer"}}"#,
+                    who.trim_start_matches('/')
+                ),
+            ),
+            status => json(status, r#"{"error":"invalid_grant"}"#),
+        },
+        None => json(400, r#"{"error":{"message":"stand"}}"#),
+    })
+}
+
+/// `row_count_as` the destination's named key `who`, against `stand`; each test names its own principal so no token source is shared.
+fn row_count_as_named_key(stand: &Stand, who: &str) -> Result<u64> {
+    let dir = tempfile::tempdir().unwrap();
+    let (named, ambient) = (key_file(&dir, stand, who), key_file(&dir, stand, "ambient"));
+    row_count_as(stand, Some(named), &ambient, "")
+}
+
+/// A 5xx from the token endpoint is ridden out: the load signs with the token the next answer mints.
+#[test]
+fn a_bigquery_load_rides_out_a_5xx_from_the_token_endpoint() {
+    let stand = token_status_stand(|nth| if nth == 0 { 500 } else { 200 });
+    let _ = row_count_as_named_key(&stand, "rides-out-5xx");
+    assert_eq!(
+        api_authorizations(&stand)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["Bearer tok-rides-out-5xx".to_string()].into(),
+    );
+}
+
+/// A token endpoint that keeps answering 5xx ends the load unavailable (exit 2), never as bad credentials, before any BigQuery request.
+#[test]
+fn a_bigquery_load_stops_unavailable_when_the_token_endpoint_keeps_failing() {
+    let stand = token_status_stand(|_| 503);
+    let err = row_count_as_named_key(&stand, "keeps-failing")
+        .expect_err("the token endpoint never recovers");
+    crate::error::assert_coded(&err, "RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE", 2);
+    assert!(format!("{err:#}").contains("503"), "{err:#}");
+    assert_eq!(api_authorizations(&stand), Vec::<String>::new());
+}
+
+/// A token endpoint that refuses the grant is still bad credentials (exit 1), asked once.
+#[test]
+fn a_bigquery_load_whose_grant_is_refused_stays_invalid_credentials() {
+    let stand = token_status_stand(|_| 401);
+    let err = row_count_as_named_key(&stand, "grant-refused").expect_err("the grant is refused");
+    crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+    assert_eq!(stand.asked("/grant-refused/token"), 1);
+}
