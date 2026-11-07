@@ -11,6 +11,21 @@ use arrow::datatypes::{DataType, TimeUnit};
 
 use crate::common::*;
 
+/// The `rivet.text_form` label on a column of the first part under `dir`.
+fn parquet_text_form(dir: &Path, col: &str) -> Option<String> {
+    let p = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "parquet"))
+        .expect("a parquet part");
+    let bytes = bytes::Bytes::from(std::fs::read(p).unwrap());
+    let builder =
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    let field = builder.schema().field_with_name(col).unwrap().clone();
+    field.metadata().get("rivet.text_form").cloned()
+}
+
 /// One Parquet column, every file in `dir`, keyed by the `ID` column, rendered canonically.
 fn parquet_cells(dir: &Path, col: &str) -> BTreeMap<i64, Option<String>> {
     let mut out = BTreeMap::new();
@@ -702,6 +717,13 @@ fn edge_oracle_types_export_losslessly() {
     assert_eq!(ids[&1].as_deref(), Some("P1DT2H3M4.000005S"));
     assert_eq!(ids[&2].as_deref(), Some("PT0S"));
     assert_eq!(ids[&3], None);
+    for col in ["IYM", "IDS"] {
+        assert_eq!(
+            parquet_text_form(out.path(), col).as_deref(),
+            Some("iso8601_duration"),
+            "{col} carries its text-form label"
+        );
+    }
     // DuckDB renders the calendar date (with its own BC marker); Oracle renders the same.
     let want_d: BTreeSet<String> = ora_text_rows(&format!(
         "SELECT TO_CHAR(d, 'YYYY-MM-DD') || CASE WHEN d < DATE '0001-01-01' THEN ' (BC)' END FROM {}",
@@ -2165,6 +2187,71 @@ fn nanosecond_boundary_table() -> OracleTable {
     t
 }
 
+/// A `timestamp_ns` override on a value past Arrow's nanosecond range is refused by code before any part is written; each remedy the text names delivers the source and a wrong one is walked.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create("ora_tsr", "id NUMBER(10) PRIMARY KEY, t9 TIMESTAMP(9)");
+    for row in [
+        "1, TIMESTAMP '2024-02-29 13:14:15.123456'",
+        "2, TIMESTAMP '2300-01-01 00:00:00.000001'",
+        "3, NULL",
+    ] {
+        ora_exec(&format!("INSERT INTO {} VALUES ({row})", t.name()));
+    }
+    let out = tempfile::tempdir().unwrap();
+    let table = t.name().to_string();
+    let mut rig = Rig::oracle_batch(t.name())
+        .export_line("columns: {T9: timestamp_ns}")
+        .dest_path(out.path().to_path_buf());
+    assert_refused(
+        &rig.run(),
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    assert!(
+        files_with_extension(out.path(), "parquet").is_empty(),
+        "nothing is written before the refusal"
+    );
+    let same = Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+    let said = rig.refuses_twice_and_walks_out(
+        &["run"],
+        &[],
+        same,
+        vec![
+            Remedy::wrong(
+                "empties the destination and runs again",
+                Then::Refuses(same),
+                |r| {
+                    for f in std::fs::read_dir(r.out_dir())
+                        .expect("the destination")
+                        .flatten()
+                    {
+                        let _ = std::fs::remove_file(f.path());
+                    }
+                },
+            ),
+            Remedy::new(
+                "Declare the column `timestamp`",
+                Then::DeliversTheSource,
+                |r| r.rebuilt(|rig| rig.restage("full", &["columns: {T9: timestamp}"])),
+            ),
+            Remedy::new(
+                "CAST it in the export's `query:`",
+                Then::DeliversTheSource,
+                move |r| {
+                    r.rebuilt(|rig| {
+                        rig.restage("full", &[]).query(&format!(
+                            "SELECT id, CAST(t9 AS TIMESTAMP(6)) AS t9 FROM {table} ORDER BY id"
+                        ))
+                    })
+                },
+            ),
+        ],
+    );
+    assert!(said.contains("column `T9` holds "), "{said}");
+}
+
 /// An undeclared TIMESTAMP(7..9), zoned or not, is refused naming each such column and not TIMESTAMP(6); declaring it as `timestamp_ns` delivers every digit.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
@@ -2251,7 +2338,7 @@ fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
             .clone()
     };
     assert_eq!(fidelity("IV9"), "lossy");
-    assert_eq!(fidelity("IV6"), "compatible");
+    assert_eq!(fidelity("IV6"), "logical_string");
 }
 
 /// The `columns:` override types beyond the autodetected ones, one column each.

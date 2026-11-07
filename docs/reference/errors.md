@@ -212,6 +212,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_DEST_CREDENTIALS_INVALID` | environment | 2 if transient, else 1 | issue the destination a fresh, complete credential: a new SAS, or name a service-account key file as `credentials_file` (leave `credentials_file` out to use gcloud ADC) |
 | `RIVET_DEST_PREFIX_MODE_MISMATCH` | refusal | 5 | give the export its own destination prefix; a batch and a CDC export must not share one |
 | `RIVET_DEST_IO_RUNTIME_UNAVAILABLE` | environment | 2 if transient, else 1 | raise the process's thread and open-file limits, or lower the export parallelism, then run again |
+| `RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE` | transient | 2 | re-run the same command later; Google's token endpoint failed with a transient error (HTTP 408, 429 or 5xx, or no answer) that rivet's retries did not outlast, and the credential itself was not refused |
 | `RIVET_INIT_CDC_NAME_TAKEN` | refusal | 5 | write the config under another `-o` name: the stem names its checkpoint and destination |
 | `RIVET_INIT_CONFIG_EXISTS` | refusal | 5 | move the existing config aside, or write elsewhere with `-o <new-path>` |
 | `RIVET_INIT_TABLE_NOT_FOUND` | usage | 1 | correct `--table` (and `--schema`), or grant the user SELECT on the table |

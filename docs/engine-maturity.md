@@ -29,7 +29,7 @@ code does not count.
     database's character types compared byte for byte with `UTL_I18N.STRING_TO_RAW`);
   - M2 (a `date` override on a value with a time of day, a `uuid` override on a RAW
     that is not 16 bytes and a `timestamp_ns` value past Arrow's range fail the run
-    with the column named);
+    by code with the column named: `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5);
   - M3 (every batch runner hook — single, incremental, chunked range with and
     without the checkpoint, sequential and parallel, keyset sequential and parallel —
     faulted on Oracle, then recovered, with every declared row compared with the

@@ -307,20 +307,9 @@ pub(super) fn timestamp_micros(t: &OracleTimestamp) -> Result<i64> {
     Ok(timestamp_datetime(t)?.and_utc().timestamp_micros())
 }
 
-/// Nanoseconds since the Unix epoch, or an error naming `name` outside Arrow's 1677..2262 range.
+/// Nanoseconds since the Unix epoch, or the coded refusal naming `name` outside Arrow's 1677..2262 range.
 fn timestamp_nanos(t: &OracleTimestamp, name: &str) -> Result<i64> {
-    timestamp_datetime(t)?
-        .and_utc()
-        .timestamp_nanos_opt()
-        .ok_or_else(|| {
-            crate::error::coded(
-                crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
-                format!(
-                    "oracle: column {name} = {t} is outside the nanosecond timestamp range \
-                 (1677-09-21..2262-04-11); declare it `timestamp` (microseconds) instead"
-                ),
-            )
-        })
+    crate::types::timestamp_nanos_or_refuse(timestamp_datetime(t)?, "oracle", name)
 }
 
 /// Days since the Unix epoch, or an error naming `name` when the value has a time of day.
@@ -934,8 +923,9 @@ mod tests {
         let t = OracleTimestamp::new_timestamp(1970, 1, 1, 0, 0, 1, 123_456_789);
         assert_eq!(timestamp_nanos(&t, "T").unwrap(), 1_123_456_789);
         let far = OracleTimestamp::new_date(9999, 12, 31);
-        let err = timestamp_nanos(&far, "T").unwrap_err().to_string();
-        assert!(err.contains("column T = "), "{err}");
+        let err = timestamp_nanos(&far, "T").unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        assert!(format!("{err:#}").contains("column `T` holds "), "{err:#}");
     }
 
     #[test]

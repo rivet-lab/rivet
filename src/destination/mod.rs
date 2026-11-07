@@ -6,6 +6,8 @@
 
 pub mod azure;
 mod cloud;
+#[cfg(test)]
+pub(crate) use cloud::retry_layer;
 pub use cloud::{add_transient_retries, transient_retries_summary, transient_retries_total};
 pub mod gcs;
 pub mod local;
