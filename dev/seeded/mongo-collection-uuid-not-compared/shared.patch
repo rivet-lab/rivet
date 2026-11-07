@@ -1,0 +1,11 @@
+--- a/src/source/mongo/mod.rs
++++ b/src/source/mongo/mod.rs
+@@ -303,7 +303,7 @@ impl MongoSource {
+             self.session.db(),
+             collection,
+             listed.as_deref(),
+-            self.started_as.get(collection).map(Vec::as_slice),
++            None,
+         )?;
+         if let Some(uuid) = listed.as_deref().and_then(<[_]>::first) {
+             self.started_as

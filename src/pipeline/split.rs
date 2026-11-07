@@ -594,6 +594,7 @@ pub(crate) struct Realized {
 /// Drop the in-progress checkpoints (keyset anchor + chunk run) of every unit that runs over a new window.
 fn forget_stale_unit_checkpoints(
     state: &StateStore,
+    source: &str,
     units: &[ExportConfig],
     fresh_windows: bool,
 ) -> Result<()> {
@@ -602,7 +603,7 @@ fn forget_stale_unit_checkpoints(
         .filter(|u| fresh_windows || !u.chunk_checkpoint)
     {
         state.clear_resume_run_id_every_scope(&unit.name)?;
-        state.reset_chunk_checkpoint(&unit.name)?;
+        state.reset_chunk_checkpoint(&unit.name, source)?;
     }
     Ok(())
 }
@@ -685,13 +686,13 @@ pub(crate) fn realize(
                 u.len(),
                 state,
             );
-            forget_stale_unit_checkpoints(state, &u, false)?;
+            forget_stale_unit_checkpoints(state, &config.source.state_key(), &u, false)?;
             Some(u)
         }
         None => {
             let fresh = probe_and_synthesize(config, &base, config_dir, n)?;
             if let Some(units) = &fresh {
-                forget_stale_unit_checkpoints(state, units, true)?;
+                forget_stale_unit_checkpoints(state, &config.source.state_key(), units, true)?;
             }
             fresh
         }
@@ -934,7 +935,7 @@ mod tests {
             .create_chunk_run("r1", &units[1].name, "h", 3)
             .unwrap();
 
-        forget_stale_unit_checkpoints(&state, &units, false).unwrap();
+        forget_stale_unit_checkpoints(&state, "pg/a", &units, false).unwrap();
         assert!(
             state
                 .find_in_progress_chunk_run(&units[0].name)
@@ -948,12 +949,46 @@ mod tests {
                 .is_none()
         );
 
-        forget_stale_unit_checkpoints(&state, &units, true).unwrap();
+        forget_stale_unit_checkpoints(&state, "pg/a", &units, true).unwrap();
         assert!(
             state
                 .find_in_progress_chunk_run(&units[0].name)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A unit's crashed chunk run goes with its own source's and with one that recorded no source; another source's stays.
+    #[test]
+    fn a_unit_over_a_new_window_forgets_only_the_chunk_runs_of_its_own_source() {
+        let state = StateStore::open_in_memory().unwrap();
+        let mut giant = sample_export("orders");
+        giant.mode = ExportMode::Chunked;
+        giant.chunk_by_key = Some("id".into());
+        let units = synthesize(&giant, "id", &["10".into(), "20".into()]);
+        let open = |run: &str, unit: &ExportConfig, source: &str| {
+            let key = crate::state::ProgressKey::chunked(&unit.name, source);
+            state.open_chunk_run(&key, run, "h", 3, &[(1, 10)]).unwrap();
+        };
+        open("r_own", &units[0], "pg/a");
+        open("r_other", &units[1], "pg/b");
+        state
+            .create_chunk_run("r_legacy", &units[2].name, "h", 3)
+            .unwrap();
+
+        forget_stale_unit_checkpoints(&state, "pg/a", &units, true).unwrap();
+
+        let in_progress = |unit: &ExportConfig| {
+            state
+                .find_in_progress_chunk_run(&unit.name)
+                .unwrap()
+                .is_some()
+        };
+        assert!(!in_progress(&units[0]), "its own source's run goes");
+        assert!(in_progress(&units[1]), "another source's run stays");
+        assert!(
+            !in_progress(&units[2]),
+            "a run that recorded no source goes"
         );
     }
 

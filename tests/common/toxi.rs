@@ -144,6 +144,53 @@ pub fn toxi_add_limit_data(proxy: &str, bytes: u64, stream: &str) -> String {
     toxic_name
 }
 
+/// Reset every connection through `proxy` (TCP RST) on its next `stream` data, until the toxic is removed.
+pub fn toxi_add_reset_peer(proxy: &str, stream: &str) -> String {
+    let toxic_name = unique_name("rivet_reset");
+    let payload = format!(
+        r#"{{"name":"{toxic_name}","type":"reset_peer","stream":"{stream}","toxicity":1.0,"attributes":{{"timeout":0}}}}"#
+    );
+    let (code, body) = toxi_admin("POST", &format!("/proxies/{proxy}/toxics"), Some(&payload));
+    assert!(
+        code == 200,
+        "add reset_peer to {proxy}: status {code}, body:\n{body}"
+    );
+    toxic_name
+}
+
+/// Remove one toxic by the name its `toxi_add_*` returned.
+pub fn toxi_remove_toxic(proxy: &str, toxic: &str) {
+    let (code, body) = toxi_admin("DELETE", &format!("/proxies/{proxy}/toxics/{toxic}"), None);
+    assert!(
+        code == 204,
+        "remove toxic {toxic} from {proxy}: status {code}, body:\n{body}"
+    );
+}
+
+/// Once the paused run raises `marker`, reset every connection through `proxy` until `lifted()` holds, then remove the toxic; false when the run never paused.
+pub fn reset_peer_until(
+    proxy: &str,
+    marker: &std::path::Path,
+    mut lifted: impl FnMut() -> bool,
+) -> bool {
+    let limit = std::time::Duration::from_secs(90);
+    let nap = std::time::Duration::from_millis(25);
+    let t0 = std::time::Instant::now();
+    while !marker.exists() {
+        if t0.elapsed() > limit {
+            return false;
+        }
+        std::thread::sleep(nap);
+    }
+    let toxic = toxi_add_reset_peer(proxy, "downstream");
+    let t1 = std::time::Instant::now();
+    while !lifted() && t1.elapsed() < limit {
+        std::thread::sleep(nap);
+    }
+    toxi_remove_toxic(proxy, &toxic);
+    true
+}
+
 /// Disable the proxy — every open connection is closed and new ones refused
 /// until re-enabled.  Simulates a hard "database went away" event.
 pub fn toxi_disable(proxy: &str) {
@@ -159,39 +206,21 @@ pub fn toxi_enable(proxy: &str) {
     assert!(code == 200, "enable {proxy}: status {code}, body:\n{body}");
 }
 
-/// RAII cross-process lock guard for the Toxiproxy admin API.
-///
-/// Closing the file descriptor (happens automatically on `Drop`) releases the
-/// kernel-held `flock(2)` lock.  Works across cargo's parallel integration
-/// test binaries — an in-process `Mutex` would not, since each test binary
-/// is a separate OS process with its own static state.
+/// RAII cross-process lock on the Toxiproxy admin API, released by an explicit unlock.
 pub struct ToxiproxyGuard {
-    _file: std::fs::File,
+    file: std::fs::File,
 }
 
-/// Acquire the global Toxiproxy serialisation lock.
-///
-/// The admin API is a shared resource across the entire test suite.  Cargo
-/// executes integration test binaries in parallel by default, so a plain
-/// in-process mutex would not serialise `toxi_disable` / `toxi_enable` /
-/// toxic-lifecycle calls across binaries.  We use an advisory `flock(2)`
-/// exclusive lock on a well-known file in the temp dir; the kernel releases
-/// it automatically when the file descriptor is closed — even if the test
-/// panics mid-run.
-///
-/// Call this at the top of any test that mutates Toxiproxy state:
-///
-/// ```ignore
-/// #[test]
-/// fn my_toxi_test() {
-///     let _g = toxiproxy_guard();
-///     toxi_add_latency(...);
-/// }
-/// ```
-///
-/// Unix-only — live tests are Linux/macOS in CI.  A Windows CI runner would
-/// need a different backend (e.g. `LockFileEx`), but the live-test matrix
-/// does not target Windows.
+impl Drop for ToxiproxyGuard {
+    /// Unlock the flock itself: a child forked while it was held keeps a copy of the descriptor.
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `file` owns the fd; `flock` does not transfer ownership.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Take the suite-wide `flock(2)` on a well-known temp file, blocking until it is free (Unix only).
 pub fn toxiproxy_guard() -> ToxiproxyGuard {
     use std::os::unix::io::AsRawFd;
     let path = std::env::temp_dir().join("rivet_qa_toxiproxy.lock");
@@ -202,7 +231,6 @@ pub fn toxiproxy_guard() -> ToxiproxyGuard {
         .open(&path)
         .unwrap_or_else(|e| panic!("open toxiproxy lock {}: {e}", path.display()));
     // SAFETY: `file` owns the fd; `flock` does not transfer ownership.
-    // LOCK_EX blocks this thread until the lock is acquired.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     if rc != 0 {
         panic!(
@@ -211,7 +239,7 @@ pub fn toxiproxy_guard() -> ToxiproxyGuard {
             std::io::Error::last_os_error()
         );
     }
-    ToxiproxyGuard { _file: file }
+    ToxiproxyGuard { file }
 }
 
 /// Run `rig` with a byte-budget cut armed on `proxy`, lift the cut once the first retry starts, and grade exactly-once delivery.

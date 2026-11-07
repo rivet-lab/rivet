@@ -53,15 +53,12 @@ fn clean_postgres_via_toxi_works_as_a_baseline_and_exports_successfully() {
 #[test]
 #[ignore = "live: requires docker compose postgres + toxiproxy"]
 fn export_survives_transient_latency_added_via_toxiproxy() {
-    // Inject a short latency and re-run. The statement_timeout default is
-    // generous; the export must still complete.  This pins the contract
-    // that a slow-but-not-failed network is not misclassified as an error.
     let _g = toxiproxy_guard();
     require_alive(LiveService::Postgres);
     require_alive(LiveService::Toxiproxy);
     reset_postgres_proxy();
 
-    let toxic = toxi_add_latency("postgres", 50); // 50ms per packet
+    let toxic = toxi_add_latency("postgres", 50);
 
     let table = seed_pg_numeric_table(5);
     let export_name = unique_name("qa41_latency");
@@ -76,9 +73,9 @@ fn export_survives_transient_latency_added_via_toxiproxy() {
         .export_line("tuning:")
         .export_line("  max_retries: 2")
         .dest_path(out.path().to_path_buf());
+    let t0 = std::time::Instant::now();
     let out_run = rig.run_args(&["--export", &export_name]);
-
-    // Clean up before asserting so we don't leak toxics on failure.
+    let took = t0.elapsed();
     let _ = toxic;
     toxi_reset_toxics("postgres");
 
@@ -87,14 +84,18 @@ fn export_survives_transient_latency_added_via_toxiproxy() {
         "export must complete under 50ms latency; stderr:\n{}",
         String::from_utf8_lossy(&out_run.stderr),
     );
+    assert!(
+        took >= Duration::from_millis(3 * 50),
+        "the 50 ms toxic must have slowed at least three sequential round trips; took {took:?}"
+    );
+    let ran =
+        recorded_run_outcome(&rig.config_path(), &export_name).expect("the run's metrics row");
+    assert_eq!(ran.retries, 0, "latency must not cost a retry: {ran:?}");
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres + toxiproxy"]
 fn export_fails_cleanly_when_toxiproxy_is_disabled_before_run() {
-    // Disabling the proxy simulates a total outage.  The pipeline must exit
-    // non-zero and stderr must point the operator at a network-level cause
-    // (connection refused / reset / timeout).  No panic, no zero-exit.
     let _g = toxiproxy_guard();
     require_alive(LiveService::Postgres);
     require_alive(LiveService::Toxiproxy);
@@ -120,30 +121,21 @@ fn export_fails_cleanly_when_toxiproxy_is_disabled_before_run() {
         !out_run.status.success(),
         "export through a disabled proxy must exit non-zero"
     );
-    let stderr = String::from_utf8_lossy(&out_run.stderr);
-    let low = stderr.to_lowercase();
-    assert!(
-        low.contains("connection")
-            || low.contains("refused")
-            || low.contains("reset")
-            || low.contains("timeout")
-            || low.contains("failed"),
-        "stderr must include a network-level diagnostic; got:\n{stderr}"
+    let failed = assert_recorded_failure(&rig.config_path(), &export_name, &["connectivity error"]);
+    assert_eq!(
+        failed.retries, 0,
+        "max_retries 0 is not retried: {failed:?}"
+    );
+    assert_eq!(
+        failed.error_class.as_deref(),
+        Some("connection"),
+        "{failed:?}"
     );
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres + toxiproxy"]
-fn export_recovers_after_mid_stream_proxy_disable_then_enable_with_retries() {
-    // Start export, immediately disable the proxy for a short window, then
-    // re-enable.  With max_retries >= 2 the retry loop must reconnect and
-    // the export must finish with the full row count.
-    //
-    // The "mid-stream" nature of the fault is simulated by scheduling the
-    // disable-then-enable cycle in a background thread that races the
-    // export itself.  This is weaker than a true "fault after batch N"
-    // hook (which is QA backlog Task 1.1 / Phase G), but it does exercise
-    // the reconnect path.
+fn export_recovers_after_mid_stream_connection_reset_with_retries() {
     let _g = toxiproxy_guard();
     require_alive(LiveService::Postgres);
     require_alive(LiveService::DuckDb);
@@ -152,8 +144,6 @@ fn export_recovers_after_mid_stream_proxy_disable_then_enable_with_retries() {
 
     let table = seed_pg_numeric_table(50);
     let export_name = unique_name("qa42_midstream");
-    // Output lands in the shared bind mount so the DuckDB container can read
-    // it — the oracle below must not share rivet's own parquet codec.
     let (out_host, out_container) = duckdb_shared_workdir("qa42_midstream_oracle");
     let rig = Rig::pg_batch(&export_name)
         .source_url(POSTGRES_TOXI_URL)
@@ -164,44 +154,47 @@ fn export_recovers_after_mid_stream_proxy_disable_then_enable_with_retries() {
         .mode("full")
         .export_line("tuning:")
         .export_line("  max_retries: 3")
-        .export_line("  retry_backoff_ms: 200")
+        .export_line("  retry_backoff_ms: 1500")
         .dest_path(out_host.clone());
 
-    // Disable/enable cycle runs in the background.
-    let bg = std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(50));
-        toxi_disable("postgres");
-        std::thread::sleep(Duration::from_millis(500));
-        toxi_enable("postgres");
+    let marker = std::env::temp_dir().join(format!("rivet-{export_name}.paused"));
+    let _ = std::fs::remove_file(&marker);
+    let marker_env = marker.to_string_lossy().into_owned();
+    let mut run = rig.spawn_args_env(
+        &["--export", &export_name],
+        &[
+            ("RIVET_TEST_PAUSE_AT", "pg_after_snapshot_open:2000"),
+            ("RIVET_TEST_PAUSE_MARKER", &marker_env),
+        ],
+    );
+    let reset = reset_peer_until("postgres", &marker, || {
+        run.stderr_so_far().contains("retry 2/") || matches!(run.try_wait(), Ok(Some(_)))
     });
-
-    let out_run = rig.run_args(&["--export", &export_name]);
-    let _ = bg.join();
+    let out_run = run.wait_with_output().expect("reap the run");
+    let _ = std::fs::remove_file(&marker);
 
     assert!(
+        reset,
+        "the run never paused after its snapshot: nothing was cut"
+    );
+    assert!(
         out_run.status.success(),
-        "export must recover after transient proxy outage; stderr:\n{}",
+        "export must recover after a mid-stream reset and a refused reconnect; stderr:\n{}",
         String::from_utf8_lossy(&out_run.stderr),
     );
-    // The comment here used to promise "a single file was produced and contains
-    // 50 rows" while asserting only the FILE COUNT — so an in-place retry that
-    // dropped rows at the reconnect boundary, which is precisely the hazard this
-    // test exists for, passed as long as one file appeared. Assert the rows.
-    // FILE count stays on read_dir: counting directory entries never goes
-    // through rivet's codec, so a container round-trip would buy nothing.
+    let ran =
+        recorded_run_outcome(&rig.config_path(), &export_name).expect("the run's metrics row");
+    assert!(
+        ran.status == "success" && ran.retries >= 2,
+        "the run must have retried the cut and the refused reconnect; recorded: {ran:?}"
+    );
     let files = files_with_extension(&out_host, "parquet");
     assert_eq!(files.len(), 1, "one part expected; got {files:?}");
-
-    // ROWS go through DuckDB. `total_parquet_rows` decodes with the SAME parquet
-    // crate rivet encodes with, so a fault in that shared path cancels out and
-    // the assertion passes over corrupt output. DuckDB does not share it.
-    // Distinct is asserted alongside the total because a retry can satisfy one
-    // and break the other: fewer rows is loss, fewer distinct is duplication.
     duckdb_assert_complete(
         &out_container,
         "id",
         50,
-        "a retry across a mid-stream connection death",
+        "a retry across a mid-stream reset",
     );
 }
 
@@ -244,12 +237,14 @@ fn permanent_sql_error_fails_fast_without_exhausting_retries() {
         elapsed < Duration::from_secs(15),
         "permanent error must short-circuit retry loop; elapsed={elapsed:?}"
     );
-    // And the stderr must name the underlying cause.
-    let stderr = String::from_utf8_lossy(&out_run.stderr);
-    let low = stderr.to_lowercase();
-    assert!(
-        low.contains("syntax") || low.contains("error"),
-        "stderr must include the driver's error text; got:\n{stderr}"
+    let failed = assert_recorded_failure(
+        &rig.config_path(),
+        &export_name,
+        &["syntax error at or near"],
+    );
+    assert_eq!(
+        failed.retries, 0,
+        "a permanent error is not retried: {failed:?}"
     );
 }
 

@@ -220,7 +220,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `boolean` | `bool` | `Boolean` | true/false | | type_roundtrip |
 | `numeric(10,2)` | `decimal(10,2)` | `DECIMAL(10,2)` | exact decimal text | second precision tier | type_roundtrip |
 | `char` / `bpchar` | `string` | `Utf8` | escaped UTF-8 | padded char | type_roundtrip |
-| `interval` | `interval` | `Utf8` (ISO 8601) | duration text | not Parquet Interval type | type_roundtrip |
+| `interval` | `interval` | `Utf8` labelled `rivet.text_form = iso8601_duration` | ISO 8601 duration text, six fraction digits when the value has a fraction | not Parquet Interval type; a reader tells the duration text from a plain string by the field label | type_roundtrip, type capability ledger |
 | `enum` | `enum` | `Utf8` + logical=enum | label text | custom PG enum | type_roundtrip |
 | `text[]` | `list<string>` | `List<Utf8>` | — | 1-D arrays | type_roundtrip |
 | `integer[]` | `list<int32>` | `List<Int32>` | — | 1-D arrays | type_roundtrip |
@@ -343,7 +343,7 @@ CDC (change streams) emits the same two-column shape prefixed with the
    (verified live 2026-06-07: DuckDB reads it natively as `TIMESTAMP_NS`,
    `…12:00:00.1234567` intact; the default µs path truncates to `.123456`).
    **Caveats (all verified live 2026-06-07):**
-   - A value outside 1677–2262 exports as **NULL** (Arrow ns range).
+   - A value outside 1677-09-21 .. 2262-04-11 (Arrow's nanosecond range) is **refused**: the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, before any part is written. Declare the column `timestamp` / `timestamp_tz` (microseconds, full range) or remove the override. Before 0.33.0 such a value was written as NULL with exit 0.
    - **DuckDB** — native `TIMESTAMP_NS`, fully lossless.
    - **Snowflake** — autoloads as `NUMBER(38,0)` (raw nanos); `TO_TIMESTAMP_NTZ(col, 9)`
      recovers a **lossless** `TIMESTAMP_NTZ` (it holds 9 digits — the 7th survives).

@@ -581,7 +581,7 @@ exclude_re = [
     # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
     # 2026-10-31 #728: pre-existing arm, killed only by live cell a_prepared_xa_branch_is_never_published_by_another_transactions_commit (proven RED 2026-10-31).
-    "^src/source/mysql/cdc\\.rs:1572:13: delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill$",
+    "^src/source/mysql/cdc\\.rs:1574:13: delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill$",
 
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
     # `in_quotes && next == '"'` guard on the escaped-quote arm cannot change what

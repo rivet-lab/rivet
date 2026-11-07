@@ -373,14 +373,25 @@ impl Refused {
     }
 }
 
+/// What decides the exit of an [`ErrorKind::Environment`] code: the code, or the typed verdict of the cause it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    /// A fact the code names (a missing object, an unset secret): exit 1 whatever the message holds.
+    Never,
+    /// The code's own remedy is to run again: exit 2 whatever the message holds.
+    Always,
+    /// The cause the stop wraps: exit 2 when its typed verdict is transient, else 1.
+    ByCause,
+}
+
 /// What KIND of failure a coded error is — the dimension an operator (and the release gate)
 /// branches on: fix the input, fix the environment, decide, stop and investigate, report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// Invalid config or command line: the same input fails the same way.
     Usage,
-    /// The world outside rivet: network, credentials, permissions, a missing object.
-    Environment,
+    /// The world outside rivet: network, credentials, permissions, a missing object. Its [`Retry`] says what decides the exit.
+    Environment(Retry),
     /// rivet stopped on purpose so as not to lose, duplicate or overwrite data.
     Refusal,
     /// A live rivet process holds the lease or lock this command needs: the same command succeeds once it ends.
@@ -398,7 +409,7 @@ impl ErrorKind {
     pub fn name(self) -> &'static str {
         match self {
             ErrorKind::Usage => "usage",
-            ErrorKind::Environment => "environment",
+            ErrorKind::Environment(_) => "environment",
             ErrorKind::Refusal => "refusal",
             ErrorKind::Busy => "busy",
             ErrorKind::Transient => "transient",
@@ -432,6 +443,7 @@ pub struct Code {
 pub struct CodedError {
     code: Code,
     message: String,
+    cause: Option<retry::RetryClass>,
 }
 
 impl CodedError {
@@ -440,7 +452,19 @@ impl CodedError {
         Self {
             code,
             message: message.into(),
+            cause: None,
         }
+    }
+
+    /// This stop over a cause whose typed verdict is `cause`.
+    pub fn over(mut self, cause: retry::RetryClass) -> Self {
+        self.cause = Some(cause);
+        self
+    }
+
+    /// The verdict of the cause this stop wraps, when the site that raised it kept one.
+    pub(crate) fn cause(&self) -> Option<retry::RetryClass> {
+        self.cause
     }
 
     /// The stable `RIVET_*` code id.
@@ -472,9 +496,24 @@ pub fn coded_io(code: Code, message: impl Into<String>, source: std::io::Error) 
     anyhow::Error::new(source).context(CodedError::new(code, message))
 }
 
-/// `message` built around `inner`, carrying `inner`'s code when it has one, else `fallback`.
+/// [`coded`] over `cause`, whose typed verdict the stop keeps for its exit.
+pub fn coded_over(code: Code, message: impl Into<String>, cause: &anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(CodedError::new(code, message).over(retry::classify_error(cause)))
+}
+
+/// [`coded_over`] a driver error `cause`, the message `what: cause`.
+pub fn coded_driver<E: std::error::Error + Send + Sync + 'static>(
+    code: Code,
+    what: &str,
+    cause: E,
+) -> anyhow::Error {
+    let message = format!("{what}: {cause}");
+    coded_over(code, message, &anyhow::Error::new(cause))
+}
+
+/// `message` built around `inner`, carrying `inner`'s code when it has one, else `fallback`; the exit follows `inner`'s verdict.
 pub fn recoded(inner: &anyhow::Error, fallback: Code, message: impl Into<String>) -> anyhow::Error {
-    coded(code_of(inner).unwrap_or(fallback), message)
+    coded_over(code_of(inner).unwrap_or(fallback), message, inner)
 }
 
 /// The stable `RIVET_*` error code for a failure, if one was tagged via
@@ -482,7 +521,7 @@ pub fn recoded(inner: &anyhow::Error, fallback: Code, message: impl Into<String>
 /// JSON `code` field and a `[CODE]` prefix on the text error line.
 pub fn error_code(err: &anyhow::Error) -> Option<&'static str> {
     let err = stop_cause(err);
-    if let Some(c) = err.downcast_ref::<CodedError>() {
+    if let Some(c) = coded_error(err) {
         return Some(c.code());
     }
     // The existing source-side statement-timeout marker also gets a stable code,
@@ -496,7 +535,13 @@ pub fn error_code(err: &anyhow::Error) -> Option<&'static str> {
 
 /// The registered [`Code`] a failure carries through [`CodedError`], if any.
 pub(crate) fn code_of(err: &anyhow::Error) -> Option<Code> {
-    stop_cause(err).downcast_ref::<CodedError>().map(|c| c.code)
+    coded_error(stop_cause(err)).map(|c| c.code)
+}
+
+/// The [`CodedError`] in the anyhow context layers, else the first one nested in a std `source()` link (an `opendal::Error` carrying the loader's refusal).
+fn coded_error(err: &anyhow::Error) -> Option<&CodedError> {
+    err.downcast_ref::<CodedError>()
+        .or_else(|| err.chain().find_map(|e| e.downcast_ref::<CodedError>()))
 }
 
 /// Map an error to its process exit code per the [`ExitClass`] taxonomy.
@@ -544,7 +589,16 @@ fn stop_cause(err: &anyhow::Error) -> &anyhow::Error {
     err.downcast_ref::<Refused>().map_or(err, Refused::cause)
 }
 
-/// The class a typed stop marker in the chain fixes regardless of wording; `None` leaves it to the transient check.
+/// The verdict a wrapper code kept of its cause, `None` for any other stop.
+pub(crate) fn kept_verdict(err: &anyhow::Error) -> Option<retry::RetryClass> {
+    let coded = err.downcast_ref::<CodedError>()?;
+    match coded.kind() {
+        ErrorKind::Environment(Retry::ByCause) => coded.cause(),
+        _ => None,
+    }
+}
+
+/// The class a typed stop marker in the chain fixes regardless of wording; `None` leaves a wrapper that kept no cause to the transient check.
 pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
     if err.downcast_ref::<SchemaDriftError>().is_some() {
         return Some(ExitClass::SchemaDrift);
@@ -554,15 +608,21 @@ pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
     {
         return Some(ExitClass::DataIntegrity);
     }
-    // An environment failure still goes through the transient check (a dropped
-    // connection retries, a denied permission does not).
-    match err.downcast_ref::<CodedError>()?.kind() {
+    let coded = coded_error(err)?;
+    match coded.kind() {
         ErrorKind::Refusal => Some(ExitClass::Refusal),
         ErrorKind::Busy | ErrorKind::Transient => Some(ExitClass::Retryable),
         ErrorKind::Internal => Some(ExitClass::Internal),
         ErrorKind::Integrity => Some(ExitClass::DataIntegrity),
-        ErrorKind::Usage => Some(ExitClass::Generic),
-        ErrorKind::Environment => None,
+        ErrorKind::Usage | ErrorKind::Environment(Retry::Never) => Some(ExitClass::Generic),
+        ErrorKind::Environment(Retry::Always) => Some(ExitClass::Retryable),
+        ErrorKind::Environment(Retry::ByCause) => coded.cause().map(|c| {
+            if c.is_transient() {
+                ExitClass::Retryable
+            } else {
+                ExitClass::Generic
+            }
+        }),
     }
 }
 
@@ -597,7 +657,7 @@ pub(crate) fn worst_typed_failure_idx(failures: &[anyhow::Error]) -> Option<usiz
 /// `RIVET_CONFIG_` or `RIVET_SOURCE_` prefix; the `codes_*` guard tests assert
 /// distinctness + the prefix, mirroring the verify-layer `RIVET_VERIFY_*` guard.
 pub mod codes {
-    use super::{Code, ErrorKind};
+    use super::{Code, ErrorKind, Retry};
 
     const fn usage(id: &'static str, action: &'static str) -> Code {
         Code {
@@ -606,10 +666,10 @@ pub mod codes {
             action,
         }
     }
-    const fn environment(id: &'static str, action: &'static str) -> Code {
+    const fn environment(id: &'static str, retry: Retry, action: &'static str) -> Code {
         Code {
             id,
-            kind: ErrorKind::Environment,
+            kind: ErrorKind::Environment(retry),
             action,
         }
     }
@@ -689,6 +749,7 @@ pub mod codes {
     /// The config file is missing or cannot be read.
     pub const CONFIG_FILE_UNREADABLE: Code = environment(
         "RIVET_CONFIG_FILE_UNREADABLE",
+        Retry::Never,
         "check the config path and its read permission, or run `rivet init` to generate one",
     );
     /// The YAML does not parse, or names an unknown or misplaced key.
@@ -704,11 +765,13 @@ pub mod codes {
     /// An environment variable, `--param` or file a config key points at is not there.
     pub const CONFIG_SECRET_UNSET: Code = environment(
         "RIVET_CONFIG_SECRET_UNSET",
+        Retry::Never,
         "export the environment variable (or pass the `--param`) the message names, or make the named file readable",
     );
     /// A Secret Manager secret a source setting names could not be read.
     pub const CONFIG_GCP_SECRET_UNREADABLE: Code = environment(
         "RIVET_CONFIG_GCP_SECRET_UNREADABLE",
+        Retry::ByCause,
         "grant the credential rivet runs as `roles/secretmanager.secretAccessor` on the secret the message names, and check its project, name and version",
     );
     /// An export does not name exactly one well-formed `query` / `query_file` / `table` / `tables`.
@@ -780,6 +843,7 @@ pub mod codes {
     /// `source::StatementDurationTimeout` marker (recognised in [`super::error_code`]).
     pub const SOURCE_STATEMENT_TIMEOUT: Code = environment(
         "RIVET_SOURCE_STATEMENT_TIMEOUT",
+        Retry::Never,
         "raise `tuning.statement_timeout_s`, or narrow the chunk",
     );
 
@@ -822,6 +886,7 @@ pub mod codes {
     /// `rivet check` logged an ERROR line, so it does not call the config ready.
     pub const CLI_CHECK_REPORTED_ERRORS: Code = environment(
         "RIVET_CLI_CHECK_REPORTED_ERRORS",
+        Retry::Never,
         "fix what the ERROR lines above name (the source, the state, the destination), then run `rivet check` again",
     );
     /// `RIVET_STATE_URL` names a remote host and does not say whether to encrypt the connection.
@@ -847,11 +912,13 @@ pub mod codes {
     /// The state store cannot be written: read-only when it is opened, or it did not take a run's first write.
     pub const STATE_NOT_WRITABLE: Code = environment(
         "RIVET_STATE_NOT_WRITABLE",
+        Retry::ByCause,
         "make the state database writable (the SQLite file and its directory, a read-only filesystem, a read-only role) and run again; the export did not start",
     );
     /// A run delivered its rows and manifest, and its incremental cursor write failed.
     pub const STATE_CURSOR_NOT_STORED: Code = environment(
         "RIVET_STATE_CURSOR_NOT_STORED",
+        Retry::ByCause,
         "repair the state database before the next run; the rows are delivered, and the next run delivers them again from the previous cursor",
     );
     pub const STATE_SCHEMA_NEWER: Code = refusal(
@@ -861,6 +928,7 @@ pub mod codes {
     /// The pre-migration copy of the state (the SQLite `.bak` beside the file, the PostgreSQL `rivet_state_backup_v<N>` schema) could not be written; the schema was not migrated.
     pub const STATE_BACKUP_FAILED: Code = environment(
         "RIVET_STATE_BACKUP_FAILED",
+        Retry::ByCause,
         "free disk space or make the state writable for the copy (SQLite: the directory beside the state file; PostgreSQL: CREATE on the database) and run again; the state was not migrated, and the previous rivet release still opens it",
     );
     /// A parallel incremental keyset run met an unfinished sequential run's anchor, whose cursor ran past its unmanifested pages.
@@ -984,6 +1052,7 @@ pub mod codes {
     );
     pub const SOURCE_CDC_PREREQUISITE: Code = environment(
         "RIVET_SOURCE_CDC_PREREQUISITE",
+        Retry::ByCause,
         "apply the setup statement the message names, then re-run (docs/reference/cdc.md)",
     );
     /// A source value the column's Arrow type has no faithful reading for (PG `infinity`, `24:00:00`).
@@ -999,6 +1068,7 @@ pub mod codes {
     /// A read returned fewer columns than its type probe described a moment earlier: the table changed between the two.
     pub const SOURCE_COLUMNS_CHANGED_UNDER_READ: Code = environment(
         "RIVET_SOURCE_COLUMNS_CHANGED_UNDER_READ",
+        Retry::Always,
         "run the export again: the next run probes and reads the table as it is now",
     );
     /// A `columns:` override declares a type the source's wire value cannot be read as.
@@ -1009,6 +1079,7 @@ pub mod codes {
     /// A PostgreSQL-state lease was not granted: the connection that renews this process's leases could not be opened.
     pub const STATE_LEASE_KEEPER_UNAVAILABLE: Code = environment(
         "RIVET_STATE_LEASE_KEEPER_UNAVAILABLE",
+        Retry::ByCause,
         "free a connection on the state database (rivet holds one per worker plus one for the lease keeper), raise the open-file limit, or lower `--pool`, then run again; nothing ran under the lease",
     );
     /// A PostgreSQL-state lease stopped being this process's while the work it guards was under way.
@@ -1019,21 +1090,25 @@ pub mod codes {
     /// `rivet plan` could not read the source it plans over (no connection, a refused login, a missing table or collection).
     pub const PLAN_SOURCE_UNREADABLE: Code = environment(
         "RIVET_PLAN_SOURCE_UNREADABLE",
+        Retry::ByCause,
         "fix what the message names (the connection, the credentials, or the table the export reads), then run `rivet plan` again",
     );
     /// A preflight met a MongoDB collection the database does not list.
     pub const SOURCE_COLLECTION_NOT_FOUND: Code = environment(
         "RIVET_SOURCE_COLLECTION_NOT_FOUND",
+        Retry::Never,
         "correct the export's `table:` (a dotted collection name is written whole), or create the collection",
     );
     /// The relation an export reads does not exist, by the engine's own verdict (dropped, or misspelt in `table:` / `query:`).
     pub const SOURCE_TABLE_NOT_FOUND: Code = environment(
         "RIVET_SOURCE_TABLE_NOT_FOUND",
+        Retry::Never,
         "correct the export's `table:` (or the relation its `query:` reads), or remove the export from `exports:` if the table was dropped on purpose",
     );
     /// The bucket or container a cloud destination names does not exist.
     pub const DEST_CONTAINER_NOT_FOUND: Code = environment(
         "RIVET_DEST_CONTAINER_NOT_FOUND",
+        Retry::Never,
         "create the bucket or container, or correct `destination.bucket`",
     );
     /// A relative local `destination.path` names a directory beside the config since 0.32, while the one under the working directory (where a release before 0.32 wrote it) still holds the export's files.
@@ -1205,31 +1280,37 @@ pub mod codes {
     /// The state ledger that decides ownership or what is loaded could not be read.
     pub const LOAD_LEDGER_UNREADABLE: Code = environment(
         "RIVET_LOAD_LEDGER_UNREADABLE",
+        Retry::ByCause,
         "restore the state backend (lower `--pool` if workers could not reconnect), then re-run",
     );
     /// A run finished between typing the load and listing its runs.
     pub const LOAD_RUN_LANDED_DURING_LOAD: Code = environment(
         "RIVET_LOAD_RUN_LANDED_DURING_LOAD",
+        Retry::Always,
         "run `rivet load` again: it types from the newest run",
     );
     /// The warehouse credentials could not be obtained or were not accepted.
     pub const LOAD_WAREHOUSE_AUTH_FAILED: Code = environment(
         "RIVET_LOAD_WAREHOUSE_AUTH_FAILED",
+        Retry::ByCause,
         "renew the warehouse credentials (`gcloud auth application-default login`, a service-account key, or the target's connection settings)",
     );
     /// The warehouse refused the load's identity a permission.
     pub const LOAD_WAREHOUSE_ACCESS_DENIED: Code = environment(
         "RIVET_LOAD_WAREHOUSE_ACCESS_DENIED",
+        Retry::Never,
         "grant the load's identity the warehouse permission the message names",
     );
     /// The warehouse has no object (dataset, table, job) the request names.
     pub const LOAD_WAREHOUSE_OBJECT_NOT_FOUND: Code = environment(
         "RIVET_LOAD_WAREHOUSE_OBJECT_NOT_FOUND",
+        Retry::Never,
         "create the dataset or database the load writes into, or correct the names of the `load:` target",
     );
     /// The warehouse rejected a statement or job.
     pub const LOAD_WAREHOUSE_REJECTED: Code = environment(
         "RIVET_LOAD_WAREHOUSE_REJECTED",
+        Retry::ByCause,
         "read the warehouse's reason in the message and fix what it names, then re-run",
     );
     /// The warehouse kept answering with a transient failure, or a job failed with a reason it documents as retryable.
@@ -1255,6 +1336,7 @@ pub mod codes {
     /// `run --validate` could not read the destination back.
     pub const VALIDATE_UNVERIFIED: Code = environment(
         "RIVET_VALIDATE_UNVERIFIED",
+        Retry::ByCause,
         "restore read access to the destination and run `rivet validate`; if the export completed, its parts are already written",
     );
     pub const INTERNAL_VALUE_CONVERTER: Code = internal(
@@ -1308,22 +1390,26 @@ pub mod codes {
     /// A plan, report or run artifact file the command writes beside the config could not be written.
     pub const CLI_OUTPUT_UNWRITABLE: Code = environment(
         "RIVET_CLI_OUTPUT_UNWRITABLE",
+        Retry::ByCause,
         "check the output path and its directory's write permission",
     );
     /// A file passed to the command could not be read.
     pub const CLI_INPUT_UNREADABLE: Code = environment(
         "RIVET_CLI_INPUT_UNREADABLE",
+        Retry::ByCause,
         "check the path passed to the command and its read permission",
     );
     /// The OS could not say which binary runs, so no child process could be spawned.
     pub const CLI_EXECUTABLE_UNRESOLVED: Code = environment(
         "RIVET_CLI_EXECUTABLE_UNRESOLVED",
+        Retry::Never,
         "run rivet from a binary the OS can resolve: not deleted, unmounted or replaced while it runs",
     );
     /// rivet's own test hook raised the fault `RIVET_TEST_ERROR_AT` names.
     pub const CLI_TEST_FAULT_INJECTED: Code = environment(
         "RIVET_CLI_TEST_FAULT_INJECTED",
-        "unset `RIVET_TEST_ERROR_AT`; the fault is rivet's own test hook, not the source",
+        Retry::ByCause,
+        "unset `RIVET_TEST_ERROR_AT` and `RIVET_TEST_TRANSIENT_ONCE`; the fault is rivet's own test hook, not the source",
     );
     /// Every export in the config is a CDC stream or a backfill recipe, which `rivet plan` does not plan.
     pub const PLAN_NOTHING_TO_PLAN: Code = usage(
@@ -1413,21 +1499,25 @@ pub mod codes {
     /// The run's parts are durable, and the manifest naming them could not be written.
     pub const DEST_MANIFEST_NOT_WRITTEN: Code = environment(
         "RIVET_DEST_MANIFEST_NOT_WRITTEN",
+        Retry::ByCause,
         "restore write access to the destination prefix and run again; until a run completes, no manifest names the parts already there",
     );
     /// A control artifact the destination listed a moment earlier is gone.
     pub const DEST_OBJECT_NOT_FOUND: Code = environment(
         "RIVET_DEST_OBJECT_NOT_FOUND",
+        Retry::Always,
         "run again: the object vanished between rivet's two reads of it; if it repeats, check what else writes to the prefix",
     );
     /// A part's local checksum differs from the one the store reported after upload.
     pub const DEST_UPLOAD_CORRUPTED: Code = environment(
         "RIVET_DEST_UPLOAD_CORRUPTED",
+        Retry::Always,
         "run again: the part is uploaded afresh; if it repeats, check the network path and any proxy in front of the destination",
     );
     /// A split resume could not list the destination prefix it reconstructs its partition from.
     pub const DEST_PREFIX_UNLISTABLE: Code = environment(
         "RIVET_DEST_PREFIX_UNLISTABLE",
+        Retry::ByCause,
         "restore list access to the destination prefix and retry the resume",
     );
     /// A part a checkpoint committed is gone from the destination, so a manifest naming it would declare absent rows.
@@ -1448,11 +1538,13 @@ pub mod codes {
     /// One or more units (chunks, keyset ranges, child exports) of the run failed and none carries its own code or class; the message lists each cause.
     pub const RUN_UNITS_FAILED: Code = environment(
         "RIVET_RUN_UNITS_FAILED",
+        Retry::ByCause,
         "fix the first cause the message names and run again; a checkpointed run resumes from where it stopped",
     );
     /// `run --reconcile` could not obtain the source count to compare.
     pub const RUN_RECONCILE_UNVERIFIED: Code = environment(
         "RIVET_RUN_RECONCILE_UNVERIFIED",
+        Retry::ByCause,
         "run again to obtain the reconcile assurance, or drop `--reconcile`; the export completed",
     );
     /// A run invariant did not hold.
@@ -1509,26 +1601,31 @@ pub mod codes {
     /// The async runtime a driver runs on could not be built: the process is out of descriptors or threads.
     pub const SOURCE_RUNTIME_UNAVAILABLE: Code = environment(
         "RIVET_SOURCE_RUNTIME_UNAVAILABLE",
+        Retry::ByCause,
         "the process could not start the async runtime its driver needs (out of file descriptors or threads): raise the open-files limit (`ulimit -n`) or lower parallelism, then rerun",
     );
     /// The connection to the source could not be opened: no route, a refused login, a failed handshake.
     pub const SOURCE_CONNECT_FAILED: Code = environment(
         "RIVET_SOURCE_CONNECT_FAILED",
+        Retry::ByCause,
         "check the host, port, credentials and TLS settings in the source URL; the driver's own words follow the colon",
     );
     /// A statement the source refused or a session that broke under it; the server's words are kept.
     pub const SOURCE_QUERY_FAILED: Code = environment(
         "RIVET_SOURCE_QUERY_FAILED",
+        Retry::ByCause,
         "fix what the server's words name (the statement, the login's rights on the object, or the session), then run again",
     );
     /// The spill directory's filesystem refused `flock`, which the spill sweep relies on.
     pub const SOURCE_CDC_SPILL_UNLOCKABLE: Code = environment(
         "RIVET_SOURCE_CDC_SPILL_UNLOCKABLE",
+        Retry::ByCause,
         "point RIVET_CDC_SPILL_DIR at a local, flock-capable filesystem, or raise the rollover memory cap so the transaction stays in memory",
     );
     /// A spill log could not be flushed to disk.
     pub const SOURCE_CDC_SPILL_UNWRITABLE: Code = environment(
         "RIVET_SOURCE_CDC_SPILL_UNWRITABLE",
+        Retry::ByCause,
         "free space on the spill directory's filesystem (RIVET_CDC_SPILL_DIR, else beside the checkpoint) and check its write permission, then re-run",
     );
     /// A source reader invariant did not hold: a driver answer, a log message or a position in a shape rivet never produces.
@@ -1560,6 +1657,7 @@ pub mod codes {
     /// `rivet doctor` met a transient fault on a probe, so the verdict is not a verdict on the config.
     pub const CLI_PREFLIGHT_UNVERIFIED: Code = environment(
         "RIVET_CLI_PREFLIGHT_UNVERIFIED",
+        Retry::ByCause,
         "run `rivet doctor` again once the source or destination the output names answers",
     );
     /// A `target:` (or `--target`) naming no warehouse rivet types for.
@@ -1605,6 +1703,7 @@ pub mod codes {
     /// A destination credential that is malformed, expired or refused by the provider's token endpoint.
     pub const DEST_CREDENTIALS_INVALID: Code = environment(
         "RIVET_DEST_CREDENTIALS_INVALID",
+        Retry::ByCause,
         "issue the destination a fresh, complete credential: a new SAS, or name a service-account key file as `credentials_file` (leave `credentials_file` out to use gcloud ADC)",
     );
     /// The destination prefix holds a manifest of another export mode (batch beside CDC).
@@ -1615,7 +1714,13 @@ pub mod codes {
     /// The object-store I/O runtime could not start: the OS refused a thread or a file descriptor.
     pub const DEST_IO_RUNTIME_UNAVAILABLE: Code = environment(
         "RIVET_DEST_IO_RUNTIME_UNAVAILABLE",
+        Retry::ByCause,
         "raise the process's thread and open-file limits, or lower the export parallelism, then run again",
+    );
+    /// Google's token endpoint answered a grant with a transient failure (HTTP 408, 429 or 5xx) or could not be reached, through every retry.
+    pub const DEST_TOKEN_ENDPOINT_UNAVAILABLE: Code = transient(
+        "RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE",
+        "re-run the same command later; Google's token endpoint failed with a transient error (HTTP 408, 429 or 5xx, or no answer) that rivet's retries did not outlast, and the credential itself was not refused",
     );
     /// `rivet init -o` would write a CDC checkpoint that exists, or a checkpoint or destination another config names.
     pub const INIT_CDC_NAME_TAKEN: Code = refusal(
@@ -1675,11 +1780,13 @@ pub mod codes {
     /// The state database did not take a statement: a connection, a migration step or a claim failed.
     pub const STATE_BACKEND_FAILED: Code = environment(
         "RIVET_STATE_BACKEND_FAILED",
+        Retry::ByCause,
         "check the state database (the SQLite file, or the `RIVET_STATE_URL` server and the role's rights), then run again",
     );
     /// The SQLite state file is not a database.
     pub const STATE_FILE_CORRUPT: Code = environment(
         "RIVET_STATE_FILE_CORRUPT",
+        Retry::Never,
         "move the state file aside (rivet rebuilds it; cursors and skip-ledgers start fresh), or restore it from a backup",
     );
     /// `rivet state copy` found no state in the SQLite file it reads.
@@ -1705,6 +1812,7 @@ pub mod codes {
     /// Another rivet process holds the state migration lock.
     pub const STATE_MIGRATION_LOCKED: Code = environment(
         "RIVET_STATE_MIGRATION_LOCKED",
+        Retry::Always,
         "wait for the other rivet process migrating this state database to finish, then run again",
     );
     /// A destination or file-writer invariant did not hold.
@@ -1916,6 +2024,7 @@ pub mod codes {
         DEST_CREDENTIALS_INVALID,
         DEST_PREFIX_MODE_MISMATCH,
         DEST_IO_RUNTIME_UNAVAILABLE,
+        DEST_TOKEN_ENDPOINT_UNAVAILABLE,
         INIT_CDC_NAME_TAKEN,
         INIT_CONFIG_EXISTS,
         INIT_TABLE_NOT_FOUND,
@@ -1958,11 +2067,13 @@ macro_rules! config_bail {
     };
 }
 
-/// The exit code a code of `kind` produces (an environment failure: 2 when transient, else 1).
+/// The exit code a code of `kind` produces (an environment code: by its declared [`Retry`]).
 fn kind_exit(kind: ErrorKind) -> &'static str {
     match kind {
         ErrorKind::Usage => "1",
-        ErrorKind::Environment => "2 if transient, else 1",
+        ErrorKind::Environment(Retry::Never) => "1",
+        ErrorKind::Environment(Retry::Always) => "2",
+        ErrorKind::Environment(Retry::ByCause) => "2 if its cause is transient, else 1",
         ErrorKind::Refusal => "5",
         ErrorKind::Busy | ErrorKind::Transient => "2",
         ErrorKind::Integrity => "3",
@@ -1976,7 +2087,10 @@ pub fn codes_markdown() -> String {
         "# Error codes\n\n<!-- Generated by `rivet schema errors` from the code registry in \
          src/error.rs. Do not edit. -->\n\nEvery failure rivet names carries a stable \
          `RIVET_<FAMILY>_<NAME>` code: in `--json-errors` output as `code`, and as a `[CODE]` \
-         prefix on the text error line. The KIND decides the exit code.\n\n\
+         prefix on the text error line. The KIND decides the exit code. An environment code is \
+         exit 1 (a fact), exit 2 (its remedy is to run again), or exit 2 only when the typed \
+         verdict of the failure it wraps is transient (a driver error number, an io kind or a \
+         SQLSTATE); a wrapper raised without a typed cause reads the words of its message.\n\n\
          | exit | meaning |\n|---|---|\n\
          | 1 | usage — fix the config or the command; retrying fails the same way |\n\
          | 2 | a transient failure, or busy (another live rivet process holds the lease or lock \
@@ -2078,7 +2192,7 @@ mod tests {
         let md = codes_markdown();
         for row in [
             "| `RIVET_CONFIG_NO_EXPORTS` | usage | 1 | declare at least one export under `exports:` |",
-            "| `RIVET_SOURCE_STATEMENT_TIMEOUT` | environment | 2 if transient, else 1 | raise `tuning.statement_timeout_s`, or narrow the chunk |",
+            "| `RIVET_SOURCE_STATEMENT_TIMEOUT` | environment | 1 | raise `tuning.statement_timeout_s`, or narrow the chunk |",
             "| `RIVET_STATE_SCHEMA_NEWER` | refusal | 5 | upgrade rivet, or point this binary at a state DB it created |",
             "| `RIVET_LOAD_COUNT_MISMATCH` | integrity | 3 | compare the warehouse table with the run's manifest before re-running; the source is kept |",
             "| `RIVET_INTERNAL_SPILL` | internal | 6 | the CDC spill log is inconsistent — a bug or a damaged spill directory; report it and re-run |",
@@ -2250,10 +2364,118 @@ mod tests {
         assert_eq!(with(ErrorKind::Integrity), 3);
         assert_eq!(with(ErrorKind::Usage), 1);
         assert_eq!(
-            with(ErrorKind::Environment),
+            with(ErrorKind::Environment(Retry::Never)),
             1,
-            "a non-transient environment failure"
+            "a fact, whatever its text says"
         );
+        assert_eq!(
+            with(ErrorKind::Environment(Retry::Always)),
+            2,
+            "a run-again remedy, whatever its text says"
+        );
+        assert_eq!(
+            with(ErrorKind::Environment(Retry::ByCause)),
+            1,
+            "a wrapper that kept no cause and whose text names none"
+        );
+    }
+
+    const WORDS_OF_A_FAILURE: [&str; 7] = [
+        "plain text",
+        "login timeout",
+        "time out",
+        "dns zone",
+        "connection reset",
+        "temporarily unavailable",
+        "deadline exceeded",
+    ];
+
+    /// An Environment code that names a fact or a run-again remedy exits by its declaration, whatever words its message holds.
+    #[test]
+    fn a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds() {
+        let mut walked = 0;
+        for code in codes::ALL {
+            let want = match code.kind {
+                ErrorKind::Environment(Retry::Never) => 1,
+                ErrorKind::Environment(Retry::Always) => 2,
+                _ => continue,
+            };
+            walked += 1;
+            for text in WORDS_OF_A_FAILURE {
+                let err = anyhow::Error::new(CodedError::new(*code, text));
+                assert_eq!(classify_exit(&err), want, "{} over {text:?}", code.id);
+            }
+        }
+        assert!(walked >= 16, "{walked}");
+    }
+
+    /// A wrapper code exits by the typed verdict of its cause, whatever words its message holds.
+    #[test]
+    fn a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message() {
+        use super::retry::{PERMANENT, TRANSIENT_RECONNECT};
+        for code in codes::ALL
+            .iter()
+            .filter(|c| c.kind == ErrorKind::Environment(Retry::ByCause))
+        {
+            for text in WORDS_OF_A_FAILURE {
+                let denied = anyhow::Error::new(CodedError::new(*code, text).over(PERMANENT));
+                assert_eq!(classify_exit(&denied), 1, "{} permanent {text:?}", code.id);
+                let blip =
+                    anyhow::Error::new(CodedError::new(*code, text).over(TRANSIENT_RECONNECT));
+                assert_eq!(classify_exit(&blip), 2, "{} transient {text:?}", code.id);
+            }
+        }
+    }
+
+    /// A code whose remedy is to run again is never declared a fact: it exits retryable or by its cause.
+    #[test]
+    fn a_run_again_remedy_is_never_declared_a_fact() {
+        for code in codes::ALL {
+            let again = code.action.starts_with("run again")
+                || code.action.starts_with("run `rivet load` again");
+            assert!(
+                !(again && code.kind == ErrorKind::Environment(Retry::Never)),
+                "{} tells the operator to run again and declares Retry::Never",
+                code.id
+            );
+        }
+    }
+
+    /// `recoded` keeps the typed verdict of the error it wraps: a driver error that is transient by its number stays exit 2, a permanent one exit 1.
+    #[test]
+    fn recoded_keeps_the_typed_verdict_of_the_error_it_wraps() {
+        let server = |code: u16| {
+            anyhow::Error::new(mysql::Error::MySqlError(mysql::error::MySqlError {
+                state: "HY000".to_string(),
+                message: "x".to_string(),
+                code,
+            }))
+        };
+        for (number, exit) in [(1053, 2), (1040, 2), (1045, 1), (1146, 1)] {
+            let inner = server(number);
+            let out = recoded(
+                &inner,
+                codes::SOURCE_QUERY_FAILED,
+                "export 'o': the read stopped",
+            );
+            assert_eq!(classify_exit(&out), exit, "mysql {number}: {out:#}");
+            assert_eq!(error_code(&out), Some("RIVET_SOURCE_QUERY_FAILED"));
+        }
+    }
+
+    /// The verdict a wrapper kept decides before any word of its own message, through a context layer and a second wrapper.
+    #[test]
+    fn a_kept_verdict_decides_through_context_layers_and_rewrapping() {
+        let inner = anyhow::Error::new(mysql::Error::MySqlError(mysql::error::MySqlError {
+            state: "HY000".to_string(),
+            message: "Server shutdown in progress".to_string(),
+            code: 1053,
+        }));
+        let once = recoded(&inner, codes::SOURCE_QUERY_FAILED, "permission denied");
+        assert_eq!(classify_exit(&once), 2, "{once:#}");
+        let twice = recoded(&once, codes::PLAN_SOURCE_UNREADABLE, "permission denied");
+        assert_eq!(classify_exit(&twice), 2, "{twice:#}");
+        assert_eq!(classify_exit(&twice.context("export 'o'")), 2);
     }
 
     /// A stop held by another live rivet process exits retryable (2) with its code, bare and through a load's pre-write seam; no refusal's remedy is to wait.
@@ -2442,7 +2664,10 @@ mod representative_failure_tests {
 
 #[cfg(test)]
 mod stop_marker_tests {
-    use super::{JobWaitTimeout, ManifestInconsistency, Refused};
+    use super::{
+        CodedError, JobWaitTimeout, ManifestInconsistency, Refused, assert_coded, classify_exit,
+        coded, codes, error_code,
+    };
 
     #[test]
     fn a_job_wait_timeout_names_the_job_and_how_long_it_waited() {
@@ -2515,5 +2740,61 @@ mod stop_marker_tests {
             format!("open: {plain:#}"),
         );
         assert_coded(&out, "RIVET_STATE_NOT_WRITABLE", 1);
+    }
+
+    fn opendal_carrying(source: Option<anyhow::Error>, temporary: bool) -> anyhow::Error {
+        let mut e = opendal::Error::new(opendal::ErrorKind::Unexpected, "write");
+        if let Some(source) = source {
+            e = e.set_source(source);
+        }
+        if temporary {
+            e = e.set_temporary();
+        }
+        anyhow::Error::from(e)
+    }
+
+    #[test]
+    fn a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class() {
+        let invalid = coded(codes::DEST_CREDENTIALS_INVALID, "refused");
+        assert_coded(
+            &opendal_carrying(Some(invalid), true),
+            "RIVET_DEST_CREDENTIALS_INVALID",
+            1,
+        );
+        let down = coded(codes::DEST_TOKEN_ENDPOINT_UNAVAILABLE, "down");
+        assert_coded(
+            &opendal_carrying(Some(down), false),
+            "RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE",
+            2,
+        );
+        let outage = opendal_carrying(
+            Some(coded(codes::DEST_TOKEN_ENDPOINT_UNAVAILABLE, "d")),
+            true,
+        );
+        assert!(!super::retry::classify_error(&outage).is_transient());
+        let wrapped = opendal_carrying(Some(coded(codes::DEST_CREDENTIALS_INVALID, "x")), true)
+            .context("writing the part");
+        assert_coded(&wrapped, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+    }
+
+    #[test]
+    fn an_opendal_error_without_a_nested_code_stays_as_it_was() {
+        let temporary = opendal_carrying(Some(anyhow::anyhow!("a reset")), true);
+        assert_eq!(
+            (error_code(&temporary), classify_exit(&temporary)),
+            (None, 2)
+        );
+        let persistent = opendal_carrying(None, false);
+        assert_eq!(
+            (error_code(&persistent), classify_exit(&persistent)),
+            (None, 1)
+        );
+    }
+
+    #[test]
+    fn the_outer_code_wins_over_a_nested_one() {
+        let outer = opendal_carrying(Some(coded(codes::DEST_CREDENTIALS_INVALID, "in")), true)
+            .context(CodedError::new(codes::STATE_NOT_WRITABLE, "out"));
+        assert_eq!(error_code(&outer), Some("RIVET_STATE_NOT_WRITABLE"));
     }
 }

@@ -177,7 +177,7 @@ scenarios:
 
   - id: type_interval
     what: "PostgreSQL interval — canonical ISO-8601 text through CDC, identical to batch"
-    postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["INTERVAL"] }
+    postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mysql:    { na: "MySQL has no INTERVAL column type" }
     mssql:    { na: "SQL Server has no INTERVAL type" }
     mongo:    { na: "no interval type" }

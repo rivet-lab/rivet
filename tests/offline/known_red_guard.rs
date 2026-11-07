@@ -35,7 +35,8 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 25 -> 24 (2026-11-05): the HFF-2 cell is green on fix/destination-credential-every-leg and its entry is deleted.
 // 24 -> 22 (2026-11-05): the two Oracle TIMESTAMP(9) sentinel gate rows are deleted; an undeclared TIMESTAMP(7..9) is refused by code (c5-oracle-ts9).
 // 22 -> 20 (2026-11-05): the two CDC-RUN-START cells are plain cells again (fix/cdc-run-start-marker).
-// 20 -> 6 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
+// 20 -> 16 (2026-11-05): the VP-8 cells on MSSQL, Oracle and Mongo and the MSSQL lock-timeout cell MT-F-F are plain cells again (fix/stop-class-by-code).
+// 16 -> 2 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
 const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
@@ -109,7 +110,7 @@ fn every_known_red_entry_carries_a_dated_reason() {
     let (open, rows) = entries(&ledger());
     super::nonvacuity::require_enumerated(
         open.len() + rows.len(),
-        4,
+        2,
         "known-red entries",
         "the ledger moved or changed shape",
     );

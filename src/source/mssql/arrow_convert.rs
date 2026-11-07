@@ -629,20 +629,12 @@ fn build_array(
             });
         }
         DataType::Timestamp(TimeUnit::Nanosecond, tz) => {
-            // Opt-in via a `timestamp_ns` / `timestamp_tz_ns` column override —
-            // preserves `datetime2(7)`'s 100 ns tick that the default microsecond
-            // mapping truncates. Arrow nanosecond timestamps are i64 ns, so the
-            // representable range is 1677-09-21 .. 2262-04-11; a value outside
-            // that cannot be encoded and is exported as NULL (the documented
-            // range caveat of the override — the default `timestamp` keeps full
-            // range at microsecond precision).
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
             for (r, row) in rows.iter().enumerate() {
                 match row.try_get::<NaiveDateTime, _>(idx) {
-                    Ok(Some(dt)) => match dt.and_utc().timestamp_nanos_opt() {
-                        Some(ns) => b.append_value(ns),
-                        None => b.append_null(),
-                    },
+                    Ok(Some(dt)) => b.append_value(crate::types::timestamp_nanos_or_refuse(
+                        dt, "mssql", column,
+                    )?),
                     Ok(None) => b.append_null(),
                     Err(e) => crate::rivet_bail!(
                         crate::error::codes::INTERNAL_TYPE_BUILDER,

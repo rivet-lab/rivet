@@ -1,15 +1,13 @@
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -200,9 +200,6 @@
- futures-util = "0.3"
+@@ -202,7 +202,6 @@ futures-util = "0.3"
  mysql_common = { version = "0.37", default-features = false, features = ["binlog"] }
  
--[patch.crates-io]
+ [patch.crates-io]
 -mysql_common = { git = "https://github.com/rivet-lab/rust_mysql_common", rev = "a660b506c230efe91a31d0421e11c7f373533df9" }
--
- [[bench]]
- name = "hot_paths"
- harness = false
+ mysql = { git = "https://github.com/rivet-lab/rust-mysql-simple", rev = "fa791fe955a645cf111257aa7eca07ceadea6efe" }
+ tiberius = { git = "https://github.com/rivet-lab/tiberius", rev = "f84c3c7eb7fceaa2a8f88beaa3afa73213310088" }
+ opentls = { git = "https://github.com/rivet-lab/opentls", rev = "b7c9d874d51a37f5d0fc8757db3a59dcf374375a" }
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -2755,7 +2755,8 @@

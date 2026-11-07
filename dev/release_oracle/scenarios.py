@@ -1604,12 +1604,11 @@ def _drive_live_tests(
 
 
 def verify_network_faults(led: Ledger) -> None:
-    """Release-gate leg for the `network_faults` infra row: retry/reconnect under
-    REAL injected faults (toxiproxy latency / downed proxy / mid-stream cut),
-    end-to-end through the release binary. The three tests are the live suite's
-    RED-proven fault set: batch retry-through-latency, loud-fail on a dead
-    proxy, and the CDC binlog cut that must fail loud then recover without a
-    gap. SKIP (never silent) when toxiproxy's admin port is down."""
+    """Release-gate leg for the `network_faults` infra row: a slow link is tolerated, a
+    dead proxy is refused by the recorded cause, a Postgres connection reset mid-stream is
+    retried to an exact result, a MongoDB scan cut before its first part is retried to an
+    exact result, and the CDC binlog cut fails loud then recovers without a gap, end-to-end
+    through the release binary. MySQL mid-stream retry is not in this row. SKIP (never silent) when toxiproxy's admin port is down."""
     if not have("cargo"):
         _skipped(led, "infra", "network", "faults", "-", "network-faults: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
@@ -1623,7 +1622,7 @@ def verify_network_faults(led: Ledger) -> None:
         return
     _drive_live_tests(
         led, "infra", "network", "faults",
-        "Network faults (toxiproxy: latency retry, dead proxy, mid-row cut, CDC mid-stream cut)",
+        "Network faults (toxiproxy: latency, dead proxy, mid-stream reset retry, mid-row cut retry, CDC mid-stream cut)",
         # Every engine sibling by its own whole name: the filter matches whole names since
         # 2026-09-26, so the MySQL and Mongo variants the old suffix match pulled in are listed.
         [
@@ -1632,6 +1631,9 @@ def verify_network_faults(led: Ledger) -> None:
             "mongo_export_survives_transient_latency_added_via_toxiproxy",
             "export_fails_cleanly_when_toxiproxy_is_disabled_before_run",
             "mysql_export_fails_cleanly_when_toxiproxy_is_disabled_before_run",
+            "export_recovers_after_mid_stream_connection_reset_with_retries",
+            "chunked_export_recovers_after_mid_stream_connection_reset",
+            "mongo_export_recovers_after_mid_stream_connection_cut_with_retries",
             "gremlin_cdc_binlog_cut_mid_drain_fails_loud_then_recovers",
             "postgres_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once",
             "mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once",

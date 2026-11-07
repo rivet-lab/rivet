@@ -48,7 +48,7 @@ The most-used options, grouped by section, with the *why* and examples.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `mode` | `disable` \| `require` \| `verify-ca` \| `verify-full` | `verify-full` | Enforcement level (mirrors libpq `sslmode` semantics) |
-| `ca_file` | string | — | PEM-encoded CA certificate for private trust stores; required for `verify-ca`/`verify-full` against custom CAs |
+| `ca_file` | string | — | PEM CA certificate for private trust stores. It is the only trust anchor on Postgres, MySQL, SQL Server and MongoDB (libpq `sslrootcert` semantics: a certificate the system store trusts but this CA did not sign is refused) |
 | `accept_invalid_certs` | boolean | `false` | Dangerous — disables certificate verification. Only honored when explicitly `true`. |
 | `accept_invalid_hostnames` | boolean | `false` | Dangerous — disables hostname (SAN/CN) verification. Only honored when explicitly `true`. |
 

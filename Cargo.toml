@@ -184,6 +184,7 @@ regex = "1"
 csv = "1"
 serde_json = "1"
 serde_yaml_ng = "0.10"
+openssl = "0.10"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 # OPT-3: property-based type round-trip (tests/type_roundtrip/property.rs).
@@ -202,6 +203,9 @@ mysql_common = { version = "0.37", default-features = false, features = ["binlog
 
 [patch.crates-io]
 mysql_common = { git = "https://github.com/rivet-lab/rust_mysql_common", rev = "a660b506c230efe91a31d0421e11c7f373533df9" }
+mysql = { git = "https://github.com/rivet-lab/rust-mysql-simple", rev = "fa791fe955a645cf111257aa7eca07ceadea6efe" }
+tiberius = { git = "https://github.com/rivet-lab/tiberius", rev = "f84c3c7eb7fceaa2a8f88beaa3afa73213310088" }
+opentls = { git = "https://github.com/rivet-lab/opentls", rev = "b7c9d874d51a37f5d0fc8757db3a59dcf374375a" }
 
 [[bench]]
 name = "hot_paths"

@@ -397,6 +397,9 @@ pub trait Source: Send {
     /// Execute `request.query` and stream batches into `sink`.
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()>;
 
+    /// Read `collection` only as the incarnation a stored cursor was written against; a source without incarnations ignores it.
+    fn pin_incarnation(&mut self, _collection: &str, _incarnation: &str) {}
+
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>>;
 
     /// The chunk planner's catalog probe of `qualified_table`, on this connection.
@@ -976,7 +979,7 @@ mod error_code_tests {
         let err = value_within_ceiling("c", 2, Some(1)).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_TOO_LARGE", 1);
         let err = verify_wire_columns(&["a"], &["b"]).unwrap_err();
-        crate::error::assert_coded(&err, "RIVET_SOURCE_COLUMNS_CHANGED_UNDER_READ", 1);
+        crate::error::assert_coded(&err, "RIVET_SOURCE_COLUMNS_CHANGED_UNDER_READ", 2);
     }
 }
 

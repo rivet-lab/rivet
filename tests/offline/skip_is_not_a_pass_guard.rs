@@ -145,7 +145,7 @@ fn every_toxiproxy_fault_injector_asserts_its_own_injection_landed() {
         let body = &rest[i..end];
         rest = &rest[end..];
         // An injector CHANGES the link; reset/teardown restores it.
-        if name.contains("reset") {
+        if name == "toxi_reset_toxics" {
             continue;
         }
         injectors += 1;

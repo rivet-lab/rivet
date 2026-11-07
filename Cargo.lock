@@ -2730,8 +2730,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "mysql"
 version = "28.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca3de8a73b7c70f76dbcdd4b6abc9b53bbb6c4f7bd6c79d8e8a7ea2157c02487"
+source = "git+https://github.com/rivet-lab/rust-mysql-simple?rev=fa791fe955a645cf111257aa7eca07ceadea6efe#fa791fe955a645cf111257aa7eca07ceadea6efe"
 dependencies = [
  "arc-swap",
  "bufstream",
@@ -3013,8 +3012,7 @@ dependencies = [
 [[package]]
 name = "opentls"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f561874f8d6ecfb674fc08863414040c93cc90c0b6963fe679895fab8b65560"
+source = "git+https://github.com/rivet-lab/opentls?rev=b7c9d874d51a37f5d0fc8757db3a59dcf374375a#b7c9d874d51a37f5d0fc8757db3a59dcf374375a"
 dependencies = [
  "futures-util",
  "log",
@@ -3907,6 +3905,7 @@ dependencies = [
  "mysql_common",
  "native-tls",
  "opendal",
+ "openssl",
  "oracledb",
  "parquet",
  "percent-encoding",
@@ -4672,8 +4671,7 @@ dependencies = [
 [[package]]
 name = "tiberius"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e07324791de2bdaed058af4aa433a0b5ec5c0beac407a9797419c19805df2415"
+source = "git+https://github.com/rivet-lab/tiberius?rev=f84c3c7eb7fceaa2a8f88beaa3afa73213310088#f84c3c7eb7fceaa2a8f88beaa3afa73213310088"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -4703,8 +4701,7 @@ dependencies = [
 [[package]]
 name = "tiberius-macros"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "907fed5ea55695d902cc3359fffa4a35021dfa9b95ab4eb9c8376d42ffb9eec8"
+source = "git+https://github.com/rivet-lab/tiberius?rev=f84c3c7eb7fceaa2a8f88beaa3afa73213310088#f84c3c7eb7fceaa2a8f88beaa3afa73213310088"
 dependencies = [
  "proc-macro2",
  "quote",

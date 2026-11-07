@@ -72,6 +72,16 @@ pub fn add_transient_retries(n: u64) {
     TRANSIENT_RETRIES.fetch_add(n, Ordering::Relaxed);
 }
 
+/// The production retry layer every object-store operator carries; `max_times == 0` makes a single attempt.
+pub(crate) fn retry_layer(max_times: usize) -> RetryLayer<RivetRetryNotify> {
+    RetryLayer::new()
+        .with_max_times(max_times)
+        .with_min_delay(Duration::from_millis(200))
+        .with_max_delay(Duration::from_secs(10))
+        .with_jitter()
+        .with_notify(RivetRetryNotify)
+}
+
 /// Rivet's [`opendal::layers::RetryInterceptor`]: keep the truth, drop the
 /// spam. The FIRST transient retry in the process logs at WARN with the
 /// error kind (so an operator sees what the destination is doing), every
@@ -316,24 +326,7 @@ impl<B: CloudBackend> CloudDestination<B> {
         let runtime = io_runtime()?;
         let _guard = runtime.enter();
 
-        // OpenDAL's `RetryLayer` retries individual HTTP calls on hyper /
-        // reqwest transient failures (`dispatch task is gone`, server-side
-        // 5xx, 429, partial-upload disconnects, …) without re-running the
-        // whole chunk through the source. The chunk worker's outer retry
-        // loop is still the safety net for harder failures (auth, region,
-        // SQL retries) — this just stops a single TCP blip from poisoning a
-        // streaming upload that otherwise costs another full SQL fetch +
-        // parquet encode. One policy, applied identically to every backend.
-        // `max_times == 0` disables retries entirely (single attempt) — the
-        // fail-fast path the doctor probe wants.
-        let async_op = B::build_operator(config)?.layer(
-            RetryLayer::new()
-                .with_max_times(max_times)
-                .with_min_delay(Duration::from_millis(200))
-                .with_max_delay(Duration::from_secs(10))
-                .with_jitter()
-                .with_notify(RivetRetryNotify),
-        );
+        let async_op = B::build_operator(config)?.layer(retry_layer(max_times));
         let op = blocking::Operator::new(async_op)?;
 
         // Normalize the prefix to a trailing `/` (object-store convention). Every

@@ -78,19 +78,7 @@ impl GcsStore {
         // drops them while other workers reuse the global HTTP pool's connections.
         let runtime = super::cloud::io_runtime()?;
         let _guard = runtime.enter();
-        // Retry transient HTTP failures (5xx / 429 / hyper-reqwest blips) on the
-        // LOAD/read path too — the export path (CloudDestination) applies this
-        // identical RetryLayer, but this store built the operator without it, so
-        // a transient blip during a load list/read failed hard (bug hunt
-        // 2026-08-09). One policy on both paths; harmless on the local Fs backend.
-        let async_op = async_op.layer(
-            opendal::layers::RetryLayer::new()
-                .with_max_times(3)
-                .with_min_delay(std::time::Duration::from_millis(200))
-                .with_max_delay(std::time::Duration::from_secs(10))
-                .with_jitter()
-                .with_notify(super::cloud::RivetRetryNotify),
-        );
+        let async_op = async_op.layer(super::cloud::retry_layer(3));
         let op = opendal::blocking::Operator::new(async_op.clone())?;
         Ok(Self {
             _runtime: runtime,
