@@ -807,6 +807,77 @@ fn pg_state_a_range_run_whose_checkpoint_rows_vanish_fails_loudly() {
     a_run_whose_checkpoint_rows_vanish_fails_loudly(SqlEngine::Pg, State::postgres("reset_vanish"));
 }
 
+/// `reset-chunks` removes the checkpoint of a run recorded under a respelling of this config's source (default port left out) together with its resume anchor.
+fn a_reset_removes_a_respelled_runs_checkpoint_and_its_anchor(engine: SqlEngine, state: State) {
+    let s = Scenario::new(engine, RANGE, state);
+    let export = s.rig.export_name().to_string();
+    let mut owner = s.spawn_mid_run();
+    owner.kill().expect("SIGKILL the run");
+    assert!(
+        !owner.wait().unwrap().success(),
+        "fixture: the run was killed"
+    );
+
+    let port = engine.url().rsplit_once(':').expect("a port").1;
+    let port = port.split('/').next().unwrap();
+    let anchors = format!(
+        "SELECT COUNT(*) FROM export_state WHERE export_name = '{export}' AND resume_run_id IS NOT NULL"
+    );
+    assert_eq!(
+        s.chunk_runs(),
+        1,
+        "fixture: the killed run left its chunk run"
+    );
+    assert_eq!(
+        s.count(&anchors),
+        1,
+        "fixture: the killed run left its resume anchor"
+    );
+    s.state.exec(
+        &s.rig.config_path(),
+        &format!(
+            "UPDATE chunk_run SET source = replace(source, ':{port}', '') WHERE export_name = '{export}'; \
+             UPDATE export_state SET prefix = replace(prefix, ':{port}', '') WHERE export_name = '{export}' AND resume_run_id IS NOT NULL"
+        ),
+    );
+    let respelled = format!(
+        "SELECT COUNT(*) FROM chunk_run WHERE export_name = '{export}' AND source NOT LIKE '%:{port}%'"
+    );
+    assert_eq!(
+        s.count(&respelled),
+        1,
+        "fixture: the run is recorded under a respelled source"
+    );
+
+    let (code, _, said) = s.state_cmd(&["reset-chunks", "--export", &export]);
+    assert_eq!(code, Some(0), "reset-chunks of a respelled source:\n{said}");
+    assert_eq!(
+        s.chunk_runs(),
+        0,
+        "the respelled run's chunk run stays:\n{said}"
+    );
+    assert_eq!(
+        s.count(&anchors),
+        0,
+        "the respelled run's resume anchor stays after its chunk run is gone:\n{said}"
+    );
+}
+
+#[test]
+#[ignore = "live: requires postgres"]
+fn pg_a_reset_removes_a_respelled_runs_checkpoint_and_its_anchor() {
+    a_reset_removes_a_respelled_runs_checkpoint_and_its_anchor(SqlEngine::Pg, State::Sqlite);
+}
+
+#[test]
+#[ignore = "live: requires postgres + postgres-state"]
+fn pg_state_a_reset_removes_a_respelled_runs_checkpoint_and_its_anchor() {
+    a_reset_removes_a_respelled_runs_checkpoint_and_its_anchor(
+        SqlEngine::Pg,
+        State::postgres("reset_respelled"),
+    );
+}
+
 #[test]
 #[ignore = "live: requires postgres + postgres-state"]
 fn pg_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint() {
