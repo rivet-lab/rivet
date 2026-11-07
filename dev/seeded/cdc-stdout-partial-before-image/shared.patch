@@ -1,0 +1,12 @@
+diff --git a/src/source/cdc/mod.rs b/src/source/cdc/mod.rs
+--- a/src/source/cdc/mod.rs
++++ b/src/source/cdc/mod.rs
+@@ -746,7 +746,7 @@
+         ev.raise_poison()?;
+         ev.raise_before_poison()?;
+         if let Some((n, names)) =
+-            named_image_arity_mismatch(&ev).or_else(|| named_before_arity_mismatch(&ev))
++            named_image_arity_mismatch(&ev)
+         {
+             return Err(partial_image_refusal(&ev.schema, &ev.table, n, names));
+         }

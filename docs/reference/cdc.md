@@ -808,12 +808,17 @@ When a drain to stdout ends it acknowledges the last commit it printed, so on
 PostgreSQL the slot advances and the next drain starts after that commit. A drain
 that stops before its end acknowledges nothing and the next one prints the same
 lines again: a consumer of the pipe must tolerate a repeated line.
-A change whose row image is partial (MySQL `binlog_row_image` = `MINIMAL` or `NOBLOB`, a
-session override included; an SQL Server capture instance with fewer columns than the
-table) is never printed as positional values: the drain stops with
-`RIVET_SOURCE_CDC_PREREQUISITE` (exit 1) before that line, the checkpoint stays where it
-was, and the refusal prints the re-baseline steps, exactly as `--output` and `mode: cdc`
-do. A global `MINIMAL` or `NOBLOB` is refused when the drain opens.
+A change whose row image is partial, in its `after` or in its `before` (MySQL
+`binlog_row_image` = `MINIMAL` or `NOBLOB`, a session override included; an SQL Server
+capture instance with fewer columns than its table, with or without `--table`), is never
+printed as positional values: the drain stops with `RIVET_SOURCE_CDC_PREREQUISITE`
+(exit 1) before that line and the checkpoint stays where it was. On MySQL the refusal of
+a change already in the binlog prints the re-baseline steps (`Re-baseline the stream in
+one run: delete the checkpoint file`, exactly as `--output` and `mode: cdc` do). The
+refusal at open prints the setting to change instead: for a global `MINIMAL` or `NOBLOB`,
+to set `binlog_row_image = FULL` and re-run; for an SQL Server capture instance that omits
+a column, to re-enable the table with the full column list (`Re-enable the table with the
+full column list`) and re-run.
 `before` holds the old image's cells in the order the engine logged them. On
 PostgreSQL every UPDATE that carries an old image also gets `before_columns`, which
 names those cells. That is the replica identity's columns, or under

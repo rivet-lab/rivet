@@ -436,7 +436,8 @@ infra:
     # 2026-11-05: +1 N/A row, progress-inherited-by-another-stream x mongo: the collection incarnation in the stored population refuses the repoint before the rows comparison the seed breaks.
     # 2026-11-06: +3 structural N/A rows from interval-text-without-its-label (MySQL, SQL Server and MongoDB have no INTERVAL type to reach the Interval arm).
     # 2026-11-05: +2 structural N/A rows from stop-class-number (PostgreSQL decides every error by its SQLSTATE, MongoDB reads whole documents and refuses no column).
-    na_ceiling: 562  # ratchet-pin: seeded-na (review 2027-02-01)
+    # 2026-11-07: +7 structural N/A rows from cdc-stdout-partial-image (postgres, mongo, oracle) and cdc-stdout-partial-before-image (postgres, mssql, mongo, oracle): the partial image the stdout loop prints is a MySQL binlog and SQL Server capture-instance shape only.
+    na_ceiling: 569  # ratchet-pin: seeded-na (review 2027-02-01)
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
