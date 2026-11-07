@@ -705,7 +705,7 @@ fn reset_after_a_granularity_change_takes_every_partition(engine: SqlEngine, sta
             })
         })
         .count() as i64;
-    assert_eq!(day_lines, day_children, "{said}");
+    let listed = said;
     let said = reset(&rig, &export);
     assert!(said.contains("partition(s)"), "{said}");
     let left = (
@@ -721,6 +721,7 @@ fn reset_after_a_granularity_change_takes_every_partition(engine: SqlEngine, sta
         "{said}"
     );
     assert_eq!(left, (0, 0), "{said}");
+    assert_eq!(day_lines, day_children, "{listed}");
 }
 
 /// A reset of the export takes the partitions whose suffix is a label of its granularity and never an undeclared name that merely starts with `<export>__`.
