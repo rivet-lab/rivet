@@ -527,6 +527,22 @@ impl Rig {
         crate::common::runner::output_of(&mut cmd).1
     }
 
+    /// [`Rig::cli_cdc_raw`] without the `--table` pair: the stream is scoped by its capture instance, slot or server id alone.
+    pub fn cli_cdc_raw_all_tables(
+        &self,
+        checkpointed: bool,
+        extra: &[&str],
+    ) -> std::process::Output {
+        let mut argv = with_source_form(self.cdc_cli_argv(checkpointed), None, extra);
+        let at = argv
+            .iter()
+            .position(|a| a == "--table")
+            .expect("the --table pair");
+        argv.drain(at..at + 2);
+        let mut cmd = self.invoke_command(&argv, &[]);
+        crate::common::runner::output_of(&mut cmd).1
+    }
+
     /// The source URL this rig's `rivet cdc` argv carries inline.
     pub fn cdc_source_url(&self) -> &str {
         &self.source_url

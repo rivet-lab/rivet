@@ -46,13 +46,13 @@ CI steps keep working. The grouped symlinks are the navigation layer.
 
 | Tier | Matrices | Trigger |
 |------|----------|---------|
-| **PR** | cli, cfg, path | every push / PR |
+| **PR** | cli, cfg, path | nightly `e2e` job |
 | **Nightly** | + query, soak | cron (planned) |
 | **Release** | + cross_version | before tag |
 | **Manual** | legacy full matrix, cloud smoke | operator |
 
 ```bash
-# PR gate (same as CI matrices-pr job)
+# PR tier (the nightly e2e job's step)
 python3 -m dev.pytools.matrices --tier=pr
 
 # Single matrix

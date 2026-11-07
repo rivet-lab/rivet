@@ -87,11 +87,17 @@ pub(crate) fn open_partial_image_refusal(engine: CdcEngine, why: &str) -> anyhow
     )
 }
 
-/// `Some((values, names))` when a named image carries a different number of values than names, a PARTIAL image.
+/// `Some((values, names))` when the image an event prints or writes, or its before image, carries a different number of values than the names it travels under, a PARTIAL image.
 pub(crate) fn named_image_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usize)> {
-    let names = ev.image_names.as_deref()?;
-    let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
-    (n != names.len()).then_some((n, names.len()))
+    let image = ev.image_names.as_deref().and_then(|names| {
+        let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
+        (n != names.len()).then_some((n, names.len()))
+    });
+    image.or_else(|| {
+        let names = ev.before_names.as_deref().or(ev.image_names.as_deref())?;
+        let n = ev.before.as_ref()?.len();
+        (n != names.len()).then_some((n, names.len()))
+    })
 }
 
 /// Default row cap — 5M rows, far above any real OLTP transaction.
@@ -3318,6 +3324,52 @@ mod tests {
             )),
             ..event_at(table, lsn, true)
         }
+    }
+
+    /// An update on `orders` with a whole four-value after image and a before image of `n` values named by `names` (the event's own four names when `None`).
+    fn update_with_before(n: usize, names: Option<&[&str]>) -> super::ChangeEvent {
+        super::ChangeEvent {
+            before: Some((0..n as i64).map(RivetValue::Int).collect()),
+            before_names: names
+                .map(|v| std::sync::Arc::from(v.iter().map(|s| s.to_string()).collect::<Vec<_>>())),
+            ..named_update("orders", "0/1", 4)
+        }
+    }
+
+    /// A before image short of its names is refused by code with no line and no checkpoint; a key-only one named by `before_names` and a whole one print.
+    #[test]
+    fn the_ndjson_driver_refuses_a_partial_before_image_and_prints_a_named_or_whole_one() {
+        let drive = |ev: super::ChangeEvent| {
+            let dir = tempfile::tempdir().unwrap();
+            let ck = dir.path().join("ck.json");
+            let mut s = Imaged(vec![ev].into(), super::RowImage::Whole);
+            let out = super::run(&mut s, Some(ck.clone()), vec!["orders".into()], None);
+            (out, ck.exists(), s.0.len())
+        };
+        let (out, ckpt, left) = drive(update_with_before(1, None));
+        let err = out.expect_err("a before image of 1 value under 4 names is partial");
+        assert!(
+            format!("{err:#}").contains("a row image carries 1 value(s) under 4 column name(s)"),
+            "got: {err:#}"
+        );
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_CDC_PREREQUISITE)
+        );
+        assert!(!ckpt, "the checkpoint must not move past a refused event");
+        assert_eq!(left, 0, "the event was consumed and refused");
+        let (out, ckpt, _) = drive(update_with_before(1, Some(&["id"])));
+        assert!(
+            out.is_ok() && ckpt,
+            "a key-only before image named by before_names prints: {out:?}"
+        );
+        let (out, ckpt, _) = drive(update_with_before(4, None));
+        assert!(out.is_ok() && ckpt, "a whole before image prints: {out:?}");
+        let (out, _, _) = drive(update_with_before(3, Some(&["id"])));
+        assert!(
+            out.is_err(),
+            "a before image wider than its own names is refused"
+        );
     }
 
     /// The stdout driver refuses a partial image by code, acks nothing, and leaves the checkpoint file unwritten.

@@ -1,116 +1,130 @@
-//! The semantic gates are STEPS of the `Tests` job, the service-backed suites steps of the E2E
-//! `pre` leg and the censuses steps of the `E2E matrix` verdict job, not jobs of their own. A step is easy to drop or to point at the
+//! The semantic gates are STEPS of the `Tests` job of ci.yml; the service-backed suites are steps of the E2E `pre` leg
+//! and the censuses steps of the `E2E matrix` verdict job of nightly-live.yml. A step is easy to drop or to point at the
 //! wrong filter in an edit that reads as tidying; this pins each one by its command.
 
 use std::path::Path;
 
 const ALWAYS: &str = "${{ !cancelled() }}";
-/// A census step of `E2E matrix`: after an earlier failure too, and only over legs that ran.
-/// The verdict census of `E2E matrix`: its ceilings are whole-matrix totals, so only a full run is graded.
-const ALWAYS_WHEN_FULL: &str = "${{ !cancelled() && needs.e2e-scope.outputs.scope == 'full' }}";
-const ALWAYS_WHEN_RUN: &str = "${{ !cancelled() && needs.e2e-scope.outputs.scope != 'skip' }}";
 /// The E2E job is a matrix; these run on its `pre` leg only, so once per check.
 const PRE_LEG: &str = "${{ !cancelled() && matrix.leg == 'pre' }}";
 
-/// (job id, step name, one line its `run:` must hold EXACTLY — a substring would accept `recovery_typo`, its `if:`)
-const GATES: &[(&str, &str, &str, &str)] = &[
+/// (workflow, job id, step name, one line its `run:` must hold EXACTLY — a substring would accept `recovery_typo`, its `if:`)
+const GATES: &[(&str, &str, &str, &str, &str)] = &[
     (
+        "ci.yml",
         "test",
         "Invariant tests (semantic gate)",
         "cargo test --test invariants --test journal_invariants",
         ALWAYS,
     ),
     (
+        "ci.yml",
         "test",
         "Recovery tests (semantic gate)",
         "cargo test --test recovery",
         ALWAYS,
     ),
     (
+        "ci.yml",
         "test",
         "Compatibility matrix tests (semantic gate)",
         "cargo test --lib -- plan::validate::tests",
         ALWAYS,
     ),
     (
+        "ci.yml",
         "test",
         "Type mapping contracts (semantic gate)",
         "cargo test --test type_roundtrip contract_",
         ALWAYS,
     ),
     (
+        "ci.yml",
         "test",
         "Stability tests — format & row-group goldens (semantic gate)",
         "cargo test --test format_golden",
         ALWAYS,
     ),
     (
+        "ci.yml",
         "test",
         "Stability tests — sink unit tests (semantic gate)",
         "cargo test --lib -- pipeline::sink::tests",
         ALWAYS,
     ),
     (
+        "ci.yml",
         "test",
         "Generated docs are in sync (docs-as-code)",
         "python3 -m dev.pytools.docgen --check",
         ALWAYS,
     ),
     (
+        "nightly-live.yml",
         "e2e",
         "Type-golden tests (semantic gate)",
         "cargo test --test live_type_golden -- --ignored",
         PRE_LEG,
     ),
     (
+        "nightly-live.yml",
         "e2e",
         "Type round-trip validators — DuckDB · ClickHouse · pyarrow (semantic gate)",
         "cargo test --test type_roundtrip -- --include-ignored --skip bigquery",
         PRE_LEG,
     ),
     (
+        "nightly-live.yml",
         "e2e",
         "Differential correctness at scale (DuckDB vs source)",
         "cargo test --test live_differential -- --ignored",
         PRE_LEG,
     ),
     (
+        "nightly-live.yml",
         "e2e",
         "PR regression matrices (cli + cfg + path)",
         "python3 -m dev.pytools.matrices --tier=pr --skip-compose | tee dev/matrices/run.log",
         PRE_LEG,
     ),
     (
+        "nightly-live.yml",
         "e2e-matrix",
         "Self-skip census",
         "python3 -m dev.release_oracle.skip_census target/rivet-skips.log --lacking \"$LACKING\"",
-        ALWAYS_WHEN_RUN,
+        ALWAYS,
     ),
     (
+        "nightly-live.yml",
         "e2e-matrix",
         "Rig oracle verdict census",
         "python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci",
-        ALWAYS_WHEN_FULL,
+        ALWAYS,
     ),
 ];
 
-fn steps_of(ci: &serde_yaml_ng::Value, job: &str) -> Vec<serde_yaml_ng::Value> {
-    ci["jobs"][job]["steps"]
+fn workflow(file: &str) -> serde_yaml_ng::Value {
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".github/workflows")
+            .join(file),
+    )
+    .unwrap_or_else(|e| panic!("read {file}: {e}"));
+    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("parse {file}: {e}"))
+}
+
+fn steps_of(wf: &serde_yaml_ng::Value, job: &str) -> Vec<serde_yaml_ng::Value> {
+    wf["jobs"][job]["steps"]
         .as_sequence()
-        .unwrap_or_else(|| panic!("ci.yml has no job `{job}` with steps"))
+        .unwrap_or_else(|| panic!("no job `{job}` with steps"))
         .clone()
 }
 
 /// Every former gate job still runs, under its own name, with its own filter.
 #[test]
 fn every_semantic_gate_is_a_step_with_its_command() {
-    let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
-    )
-    .expect("read ci.yml");
-    let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).expect("parse ci.yml");
-    for (job, name, cmd, cond) in GATES {
-        let steps = steps_of(&ci, job);
+    for (file, job, name, cmd, cond) in GATES {
+        let steps = steps_of(&workflow(file), job);
         let step = steps
             .iter()
             .find(|s| s["name"].as_str() == Some(*name))
@@ -154,11 +168,7 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
     ] {
         assert_eq!(partitions_of(bad), None, "{bad:?}");
     }
-    let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
-    )
-    .expect("read ci.yml");
-    let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).expect("parse ci.yml");
+    let ci = workflow("nightly-live.yml");
     let legs: Vec<String> = ci["jobs"]["e2e"]["strategy"]["matrix"]["leg"]
         .as_sequence()
         .expect("the e2e job has a `leg` matrix")
@@ -181,24 +191,18 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
     );
     let run = sweep["run"].as_str().unwrap_or_default();
     for flag in [
-        // Without a measured list (e2e_legs.py) a leg falls back to this partition.
-        "--partition \"count:$LEG\"",
+        "--partition \"count:${{ matrix.leg }}\"",
         "--run-ignored only ",
         "--profile pr ",
     ] {
         assert!(run.contains(flag), "the live sweep lost `{flag}`: {run}");
     }
     let verdict = &ci["jobs"]["e2e-matrix"];
-    assert_eq!(
-        verdict["name"].as_str(),
-        Some("E2E matrix"),
-        "branch protection requires this name"
-    );
     let needs: Vec<&str> = verdict["needs"]
         .as_sequence()
         .map(|n| n.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    assert_eq!(needs, ["e2e-scope", "e2e"]);
+    assert_eq!(needs, ["e2e"]);
     assert_eq!(verdict["if"].as_str(), Some("${{ always() }}"));
     let first = &steps_of(&ci, "e2e-matrix")[0];
     assert!(
@@ -210,11 +214,33 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
                 .any(|l| l.trim() == r#"[ "${{ needs.e2e.result }}" = success ]"#),
         "the verdict job must fail unless every leg succeeded"
     );
-    // A skipped PR is green only when the scope job succeeded AND said skip.
-    let run = first["run"].as_str().unwrap_or_default();
-    assert!(
-        run.contains(r#"[ "${{ needs.e2e-scope.result }}" = success ] && [ "$SCOPE" = skip ]"#),
-        "a skip must come from a scope job that succeeded: {run}"
+}
+
+/// A nightly job the verdict job does not wait for can go red and leave the run green.
+#[test]
+fn the_nightly_verdict_waits_for_every_other_nightly_job() {
+    let nightly = workflow("nightly-live.yml");
+    let jobs = nightly["jobs"].as_mapping().expect("nightly jobs");
+    let mut want: Vec<&str> = jobs
+        .keys()
+        .filter_map(|k| k.as_str())
+        .filter(|k| *k != "nightly-verdict")
+        .collect();
+    let mut got: Vec<&str> = nightly["jobs"]["nightly-verdict"]["needs"]
+        .as_sequence()
+        .expect("nightly-verdict needs the other jobs")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    want.sort();
+    got.sort();
+    assert_eq!(
+        got, want,
+        "nightly-verdict must need exactly every other nightly job"
+    );
+    assert_eq!(
+        nightly["jobs"]["nightly-verdict"]["if"].as_str(),
+        Some("${{ always() }}")
     );
 }
 

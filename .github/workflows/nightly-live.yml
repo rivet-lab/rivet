@@ -1,26 +1,9 @@
 name: Nightly Live
 
-# Heavy live tests that would slow down per-PR CI but must be exercised
-# regularly so regressions in checkpoint/recovery/load-aware behaviour are
-# caught before they ship.
-#
-# This workflow:
-#   1. Brings up the full docker-compose stack including pgBouncer.
-#   2. Seeds the `content_items` fixture (~2M rows, several minutes).
-#   3. Runs `live_content_load` AND every other `#[ignore]` live test
-#      against the seeded DB.
-#
-# Triggers: nightly cron (03:30 UTC) + manual dispatch.
-
 on:
   schedule:
-    # 03:30 UTC = roughly 06:30 CET / 23:30 ET — outside business hours so
-    # a failure email arrives by morning and the dev box is unlikely to be
-    # busy if the matrix is later expanded.
     - cron: "30 3 * * *"
   workflow_dispatch:
-    # Manual button in the Actions UI: useful for verifying a fix on the
-    # full live matrix without waiting for the next nightly window.
 
 permissions:
   contents: read
@@ -77,7 +60,7 @@ jobs:
         # rivet-duckdb` / `ClickHouse reachable on 127.0.0.1:8123` (pyarrow_*
         # cases also go through the shared rivet-duckdb exec helper).
         run: |
-          # Same .live-tmp prolog as ci.yml's jobs: pre-create runner-owned
+          # Same .live-tmp prolog as the e2e job: pre-create runner-owned
           # (the daemon would root-own a missing bind-mount source), then
           # re-open after ClickHouse chowns /work to uid 101 on boot. Without
           # it every test that writes a shared workdir EACCESes — the first
@@ -107,7 +90,7 @@ jobs:
           for i in $(seq 1 60); do (exec 3<>/dev/tcp/127.0.0.1/6097) 2>/dev/null && break || sleep 1; done
           echo "Waiting for Azurite..."
           # Blob emulator on :10000 — cloud_multipart_azure_* needs it. It was missing
-          # from `up` here (ci.yml has it) and panicked the whole nightly suite nightly.
+          # from `up` here (the e2e job has it) and panicked the whole nightly suite nightly.
           for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/10000) 2>/dev/null && break || sleep 1; done
           echo "Waiting for ClickHouse..."
           # HTTP :8123/ping — the type_roundtrip clickhouse_load tests connect here.
@@ -129,11 +112,11 @@ jobs:
           docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
           echo "Waiting for SQL Server (governor instance)..."
           # The dedicated governor instance (`mssql-governor`, :1435) was added to
-          # ci.yml's E2E stack on 2026-08-17 and MISSED here — the runner-bypass
+          # the e2e job's stack on 2026-08-17 and MISSED here — the runner-bypass
           # class, in workflow YAML: two hand-maintained service lists, and the
           # nightly's fell behind on the first change. Both governor canaries then
           # failed the 08-19 nightly with "requires MssqlGovernor reachable on
-          # :1435". Same wait + same database seed as ci.yml; its two canaries
+          # :1435". Same wait + same database seed as the e2e job; its two canaries
           # seed their own tables.
           for i in $(seq 1 40); do docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
           docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
@@ -196,28 +179,7 @@ jobs:
         run: python3 -m pip install --break-system-packages xxhash
 
       - name: Run FULL live suite
-        # Everything #[ignore]d that a CI stack can hold. The exclusion list is the
-        # same as ci.yml e2e's `--skip` list minus `content_export` (the per-PR job
-        # cuts that fixture for time; this run takes it), and
-        # tests/offline/live_skip_policy_guard.rs fails when the two drift or when a
-        # term here drops a test no `live+gate-only:` marker excuses.
-        #
-        # `full_content_export_max_pressure` (1M rows, 3–5 min even seeded) is
-        # gate-only. `validates`, `edge_cases` and `via_duckdb` name the type_roundtrip
-        # and live_differential binaries, which ci.yml's e2e job runs as its own
-        # steps on every PR; `warehouse_cell` needs BigQuery/Snowflake credentials no
-        # workflow has. `--skip mongo` (substring), NOT `--skip live_mongo --skip
-        # live_cdc_mongo` (module prefixes): the prefix form missed the
-        # engine-agnostic `chunking_stand::stand_*_mongo` tests, which were then
-        # SELECTED on this mongo-less stack and panicked at require_alive. Every test
-        # whose path names mongo is owned by the `mongo-versions` job below, which
-        # selects by the same substring.
-        # The remaining terms are the `live+gate-only` topologies this stack cannot
-        # hold (SQL Server AG, PG 16 standby pair, the LATIN1 Oracle PDB), the
-        # audit's BigQuery cells, and the read-blocked quarantine; the release gate
-        # runs every one of them and fails when their stand is down.
         env:
-          # Same as ci.yml's E2E job: the Postgres-state tests only; RIVET_STATE_URL / RIVET_GATE_STATE_URL stay unset.
           RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
         run: |
           # nextest, not plain `cargo test`: tests/live_suite.rs's own header
@@ -324,7 +286,7 @@ jobs:
 
       - name: Run Mongo live tests
         # Every live_suite test whose path names mongo, by the same `mongo` substring
-        # ci.yml e2e and live-full SKIP on — the live_mongo* / live_cdc_mongo modules,
+        # the e2e and live-full jobs SKIP on — the live_mongo* / live_cdc_mongo modules,
         # the chunking_stand `stand_*_mongo` cells and the mongo cases of the
         # engine-agnostic modules (full cycle, compact, init, shape drift, soak).
         # An explicit name list here once left 14 of them with no CI runner at all.
@@ -422,7 +384,7 @@ jobs:
             FILTER="live_cdc::pg_cdc_"
           fi
           # `from_a_standby` and `failover_to_the_standby` need the PG 16 primary/standby pair
-          # (dev/pytools/cdc_stand), which this lane does not start; ci.yml e2e skips both for
+          # (dev/pytools/cdc_stand), which this lane does not start; the e2e job skips both for
           # the same reason (the failover cell was red here every night from 2026-10-13).
           cargo nextest run --run-ignored ignored-only --no-fail-fast \
             -E "binary(live_suite) and test($FILTER) and not (test(gcs) or test(toxiproxy) or test(from_a_standby) or test(failover_to_the_standby))"
@@ -560,3 +522,330 @@ jobs:
       - name: Stop the stand
         if: always()
         run: python3 dev/pytools/statement_truth.py mysql down
+
+  # E2E: one nextest archive, four legs on a full stack, one census job.
+  e2e-build:
+    name: E2E build (nextest archive)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: e2e-debug
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-nextest
+      - name: Build rivet and every test binary (debug), once
+        run: |
+          cargo nextest archive --archive-file "$RUNNER_TEMP/e2e-nextest.tar.zst"
+          ls -l "$RUNNER_TEMP/e2e-nextest.tar.zst"
+          df -h /
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-nextest-archive
+          path: ${{ runner.temp }}/e2e-nextest.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  e2e:
+    name: E2E (${{ matrix.leg }})
+    needs: e2e-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [pre, 1/3, 2/3, 3/3]
+    env:
+      RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
+      RIVET_SKIP_LOG: ${{ github.workspace }}/target/rivet-skips.log
+      RIVET_ORACLE_LOG: ${{ github.workspace }}/target/rivet-oracle.log
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/free-disk
+
+      - name: Start services (in the background)
+        run: |
+          mkdir -p tests/.live-tmp
+          ( docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle mysql-stmt-84-lctn1 > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: ${{ matrix.leg == 'pre' }}
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: ${{ matrix.leg == 'pre' }}
+        with:
+          shared-key: e2e-debug
+          save-if: false
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-nextest,uv
+
+      - name: Independent row-hash oracle deps
+        run: python3 -m pip install --break-system-packages xxhash
+
+      - name: Build rivet and the small suites' binaries (debug)
+        if: ${{ matrix.leg == 'pre' }}
+        run: |
+          cargo build
+          cargo test --no-run
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ matrix.leg != 'pre' }}
+        with:
+          name: e2e-nextest-archive
+          path: ${{ runner.temp }}
+      - name: Services are up
+        timeout-minutes: 25
+        run: |
+          for i in $(seq 1 600); do [ -f "$RUNNER_TEMP/compose.rc" ] && break; sleep 2; done
+          if [ ! -f "$RUNNER_TEMP/compose.rc" ]; then
+            echo "::error::docker compose up did not finish within 20 minutes"
+            cat "$RUNNER_TEMP/compose.log"; docker compose ps -a; exit 1
+          fi
+          cat "$RUNNER_TEMP/compose.log"
+          [ "$(cat "$RUNNER_TEMP/compose.rc")" = 0 ]
+          sudo chmod -R 0777 tests/.live-tmp
+          df -h /
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for Postgres..."
+          for i in $(seq 1 30); do docker compose exec -T postgres pg_isready -U rivet && break || sleep 2; done
+          echo "Waiting for the Postgres state server, then its per-run database (RIVET_TEST_STATE_URL)..."
+          for i in $(seq 1 30); do docker compose exec -T postgres-state pg_isready -U rivet && break || sleep 2; done
+          docker compose exec -T postgres-state psql -U rivet -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE rivet_state_ci"
+          echo "Waiting for MySQL..."
+          for i in $(seq 1 30); do docker compose exec -T mysql mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
+          echo "Waiting for pgBouncer..."
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6432) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for pgBouncer in front of the state server..."
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6433) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for ProxySQL..."
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6033) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for ProxySQL in front of the +03:00 MySQL (mysql-tz, D5)..."
+          for i in $(seq 1 60); do (exec 3<>/dev/tcp/127.0.0.1/6097) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for Azurite..."
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/10000) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for SQL Server..."
+          for i in $(seq 1 40); do docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
+          for i in $(seq 1 40); do docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
+          echo "Waiting for CDC services (cdc profile)..."
+          for i in $(seq 1 30); do docker compose exec -T postgres-cdc pg_isready -U rivet && break || sleep 2; done
+          for i in $(seq 1 30); do docker compose exec -T mysql-cdc mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
+          for i in $(seq 1 40); do docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
+          echo "Waiting for replica pair (replica profile)..."
+          for i in $(seq 1 30); do docker compose exec -T mysql-primary mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
+          for i in $(seq 1 60); do docker compose exec -T mysql-stmt-84-lctn1 mysql -h 127.0.0.1 -uroot -e "select 1" >/dev/null 2>&1 && break || sleep 2; done
+          for i in $(seq 1 30); do docker compose exec -T mysql-replica mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
+          for i in $(seq 1 90); do docker compose exec -T oracle healthcheck.sh >/dev/null 2>&1 && break || sleep 2; done
+
+      - name: Seed databases
+        run: |
+          PGPASSWORD=rivet psql -h 127.0.0.1 -U rivet -d rivet -f dev/e2e/seed_pg.sql
+          mysql -h 127.0.0.1 -u rivet -privet rivet < dev/e2e/seed_mysql.sql
+
+      - name: Seed Oracle database
+        run: docker compose exec -T oracle sqlplus -s rivet/rivet@localhost/FREEPDB1 < seeds/common/oracle.sql > /dev/null
+
+      - name: Seed MSSQL database
+        run: |
+          docker compose cp dev/mssql/init.sql mssql:/tmp/init.sql
+          docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P 'Rivet_Passw0rd!' -C -i /tmp/init.sql
+
+      - name: Seed MSSQL-governor database
+        run: |
+          docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P 'Rivet_Passw0rd!' -C \
+            -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
+
+      - name: Seed MSSQL-CDC database
+        run: |
+          docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P 'Rivet_Passw0rd!' -C \
+            -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
+
+      - name: Type-golden tests (semantic gate)
+        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        run: cargo test --test live_type_golden -- --ignored
+
+      - name: Type round-trip validators — DuckDB · ClickHouse · pyarrow (semantic gate)
+        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        run: cargo test --test type_roundtrip -- --include-ignored --skip bigquery
+
+      - name: Differential correctness at scale (DuckDB vs source)
+        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        run: cargo test --test live_differential -- --ignored
+
+      - name: Create matrix navigation links
+        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        env:
+          RIVET_BIN: ${{ github.workspace }}/target/debug/rivet
+        run: python3 -m dev.pytools.matrix_common setup-links
+
+      - name: PR regression matrices (cli + cfg + path)
+        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        env:
+          RIVET_BIN: ${{ github.workspace }}/target/debug/rivet
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 -m dev.pytools.matrices --tier=pr --skip-compose | tee dev/matrices/run.log
+
+      - name: Upload matrix logs on failure
+        if: ${{ failure() && matrix.leg == 'pre' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: matrices-pr-logs
+          path: |
+            dev/cli_matrix/logs/
+            dev/cfg_matrix/logs/
+            dev/path_matrix/logs/
+          retention-days: 14
+
+      - name: Run E2E test suite
+        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        env:
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+          RIVET: ./target/debug/rivet
+        run: python3 -m dev.pytools.e2e
+
+      - name: State lib tests on the Postgres state backend
+        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        run: python3 -m dev.release_oracle.state_lib
+
+      - name: Ignored doc-tests
+        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        run: cargo test --doc -- --ignored
+
+      - name: Run live cargo integration tests
+        if: ${{ !cancelled() && matrix.leg != 'pre' }}
+        run: |
+          cargo nextest run --archive-file "$RUNNER_TEMP/e2e-nextest.tar.zst" \
+          --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
+          --profile pr --run-ignored only --partition "count:${{ matrix.leg }}" \
+          -- --skip content_export --skip validates --skip edge_cases \
+          --skip via_duckdb --skip mongo --skip warehouse_cell \
+          --skip readable_secondary --skip mssql_checkpoint_follows_a_failover \
+          --skip mssql_checkpoint_from_another_database --skip from_a_standby \
+          --skip failover_to_the_standby --skip bounded_on_a_standby --skip on_a_standby \
+          --skip doctor_is_not_green_where_the_cdc_run_refuses_a_replica \
+          --skip loads_into_bigquery_or_refuses_by_column \
+          --skip cleanup_source_never_deletes_parts --skip compact_after_a_source_alter \
+          --skip a_non_unicode_database_round_trips \
+          --skip range_chunk_shared_name_another_source_oracle \
+          --skip a_read_blocked_longer_than_thirty_seconds_still_completes \
+          --skip open_defect_
+
+      - name: Kernel OOM kills (on failure)
+        if: ${{ failure() }}
+        run: sudo dmesg -T | grep -iE 'out of memory|oom-kill|killed process' || echo "no OOM kill in the kernel log"
+
+      - name: Disk snapshot
+        if: ${{ !cancelled() }}
+        run: df -h /
+
+      - name: This leg's skip and verdict logs
+        if: ${{ !cancelled() }}
+        run: mkdir -p target && touch "$RIVET_SKIP_LOG" "$RIVET_ORACLE_LOG"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: e2e-logs-${{ strategy.job-index }}
+          path: |
+            target/rivet-skips.log
+            target/rivet-oracle.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  e2e-matrix:
+    name: E2E matrix
+    needs: [e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Every leg passed
+        run: |
+          echo "e2e legs: ${{ needs.e2e.result }}"
+          [ "${{ needs.e2e.result }}" = success ]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ !cancelled() }}
+        with:
+          pattern: e2e-logs-*
+          path: e2e-logs
+      - name: One log of the whole matrix
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p target
+          cat e2e-logs/*/rivet-skips.log > target/rivet-skips.log
+          cat e2e-logs/*/rivet-oracle.log > target/rivet-oracle.log
+          wc -l e2e-logs/*/*.log target/rivet-skips.log target/rivet-oracle.log
+
+      - name: Self-skip census
+        if: ${{ !cancelled() }}
+        env:
+          LACKING: |
+            BIGQUERY_TEST_PROJECT
+            SNOWFLAKE_TEST_CONNECTION
+            RIVET_SF_CONNECTION
+            RIVET_SNOWFLAKE_ACCOUNT
+            RIVET_TEST_EXCLUSIVE
+            pg18-batch (:5518)
+            RIVET_PREV_RELEASE_BIN
+            RIVET_MIGRATION_CARRIER_BIN
+            RIVET_LEASE_CARRIER_BIN
+            macOS `hdiutil`
+            RIVET_GATE_STATE_URL
+        run: |
+          python3 -m dev.release_oracle.skip_census target/rivet-skips.log --lacking "$LACKING"
+
+      - name: Rig oracle verdict census
+        if: ${{ !cancelled() }}
+        run: python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci
+
+  nightly-verdict:
+    name: Nightly verdict
+    needs: [live-full, mongo-versions, cdc-version-scout, release-compat-artifacts, soak-cdc, mysql-statement-truth, e2e-build, e2e, e2e-matrix]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Name the red jobs and the merges since the last green nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          red=$(python3 -c 'import json,os; print(" ".join(k for k, v in json.loads(os.environ["NEEDS"]).items() if v["result"] != "success"))')
+          if [ -z "$red" ]; then echo "nightly green"; exit 0; fi
+          green=$(gh run list --workflow nightly-live.yml --branch "$GITHUB_REF_NAME" --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
+          { echo "### Nightly red: $red"; python3 .github/scripts/nightly_range.py --green "$green" --head "$GITHUB_SHA"; } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Nightly red::$red"
+          exit 1

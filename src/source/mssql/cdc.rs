@@ -39,86 +39,19 @@ use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Positio
 use crate::source::require_tls_or_loopback;
 use crate::types::hex_bytes;
 
-/// Does the capture instance carry every column of its source table?
-///
-/// `sp_cdc_enable_table @captured_column_list` lets an operator capture a SUBSET,
-/// and rivet had NO check for it — `grep -c captured_column_list src/` returned 0
-/// while MySQL was being taught to refuse a partial binlog image and PostgreSQL to
-/// warn about key-only deletes. SQL Server was the one engine where a partial
-/// image is CONFIGURABLE and unchecked.
-///
-/// `cdc.captured_columns` is the catalog answer, joined to `sys.columns` for what
-/// the table actually has. Catalogs, not names.
-///
-/// Best-effort: a reader without rights on the `cdc` schema answers `Whole` rather
-/// than blocking a capture that is otherwise fine.
-fn row_image_sql(tables: &[String], capture_instance: Option<&str>) -> Option<String> {
-    if tables.is_empty() {
-        return None;
-    }
-    let bare: Vec<String> = tables
-        .iter()
-        .map(|t| t.rsplit('.').next().unwrap_or(t).to_string())
-        .collect();
-    let list = bare
-        .iter()
-        .map(|t| format!("'{}'", t.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(",");
-    // Scope by the CAPTURE INSTANCE rivet will actually read, not by table name.
-    //
-    // Two defects lived in the name-only form, both found by an adversarial pass
-    // over this branch and both invisible in the single-instance case that every
-    // manual check uses:
-    //
-    // 1. `cdc.change_tables` holds ONE ROW PER CAPTURE INSTANCE, and the join to
-    //    `cdc.captured_columns` is on the CHANGE table (`ct.object_id`) while the
-    //    GROUP BY is on the SOURCE table. With two instances — which is exactly
-    //    the documented schema-change workflow (create a second, cut over, drop
-    //    the old) — their captured columns are SUMMED against a denominator
-    //    counted once, so any pair reaching the source column count masks the
-    //    partial one. Reading the partial instance then writes NULL for every
-    //    omitted column with `status: success`: the harm this gate exists to
-    //    refuse. Per-instance grouping alone would NOT do — mid-cutover the old
-    //    instance is legitimately short, so grading every instance turns the
-    //    drift-recovery path into a false refusal. The instance rivet READS is
-    //    the only one whose answer means anything.
-    //
-    // 2. `WHERE t.name IN (…)` had no schema predicate (the schema is stripped by
-    //    `rsplit('.')` above), so `archive.orders` — a different table that merely
-    //    shares a name — could make a healthy `dbo.orders` capture hard-fail with
-    //    a message naming a table the operator did not configure.
-    //
-    // The instance predicate closes both: it names one change table, which names
-    // one source object_id, in one schema. `open` already validates the instance
-    // to `[A-Za-z0-9_]` (see below), so it is safe to inline.
-    let sql = match capture_instance {
-        Some(ci) => format!(
-            "SELECT t.name + ':' + CAST(COUNT(cc.column_name) AS varchar(12)) + '/' + \
-                    CAST((SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id) \
-                         AS varchar(12)) \
-             FROM cdc.change_tables ct \
-             JOIN sys.tables t ON t.object_id = ct.source_object_id \
-             JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id \
-             WHERE ct.capture_instance = '{ci}' \
-             GROUP BY t.name, t.object_id",
-            ci = ci.replace('\'', "''"),
-        ),
-        // No instance configured (not reachable for a real MSSQL CDC export —
-        // `open` requires one — but the seam allows it): fall back to the name
-        // match, still scoped to ONE instance per group so the sum cannot mask.
-        None => format!(
-            "SELECT t.name + ':' + CAST(COUNT(cc.column_name) AS varchar(12)) + '/' + \
-                    CAST((SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id) \
-                         AS varchar(12)) \
-             FROM cdc.change_tables ct \
-             JOIN sys.tables t ON t.object_id = ct.source_object_id \
-             JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id \
-             WHERE t.name IN ({list}) \
-             GROUP BY t.name, t.object_id, ct.capture_instance"
-        ),
-    };
-    Some(sql)
+/// The query for the captured vs source column count of the capture instance rivet reads, as `name:got/all`.
+fn row_image_sql(capture_instance: &str) -> String {
+    format!(
+        "SELECT t.name + ':' + CAST(COUNT(cc.column_name) AS varchar(12)) + '/' + \
+                CAST((SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id) \
+                     AS varchar(12)) \
+         FROM cdc.change_tables ct \
+         JOIN sys.tables t ON t.object_id = ct.source_object_id \
+         JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id \
+         WHERE ct.capture_instance = '{ci}' \
+         GROUP BY t.name, t.object_id",
+        ci = capture_instance.replace('\'', "''"),
+    )
 }
 
 /// Pure verdict half of [`row_image`] (#161, the compression_refusal split):
@@ -964,11 +897,9 @@ impl MssqlChangeStream {
 }
 
 impl ChangeStream for MssqlChangeStream {
-    fn row_image(&mut self, tables: &[String]) -> crate::source::cdc::RowImage {
+    fn row_image(&mut self, _tables: &[String]) -> crate::source::cdc::RowImage {
         use crate::source::cdc::RowImage;
-        let Some(sql) = row_image_sql(tables, Some(&self.capture_instance)) else {
-            return RowImage::Whole;
-        };
+        let sql = row_image_sql(&self.capture_instance);
         let Self { rt, client, .. } = self;
         let rows = rt.block_on(async { client.simple_query(sql).await?.into_first_result().await });
         // Best-effort: an unreadable catalog is `Whole`.
@@ -1753,6 +1684,20 @@ mod tests {
         );
     }
 
+    /// The catalog query is scoped by the capture instance alone, quote-escaped, whatever tables are listed.
+    #[test]
+    fn the_row_image_query_names_the_capture_instance_and_escapes_it() {
+        let sql = row_image_sql("dbo_orders");
+        assert!(
+            sql.contains("WHERE ct.capture_instance = 'dbo_orders' GROUP BY t.name, t.object_id"),
+            "{sql}"
+        );
+        assert!(
+            row_image_sql("a'b").contains("ct.capture_instance = 'a''b'"),
+            "a quote in the instance name is doubled"
+        );
+    }
+
     /// #161: both directions of the got/all capture-column verdict.
     #[test]
     fn row_image_verdict_both_directions() {
@@ -1767,6 +1712,10 @@ mod tests {
         match row_image_verdict(&["orders_ci:3/5".into(), "items_ci:4/4".into()]) {
             RowImage::Partial { why } => {
                 assert!(why.contains("orders_ci (3 of 5 columns)"), "{why}");
+                assert!(
+                    why.contains("Re-enable the table with the full column list"),
+                    "{why}"
+                );
                 assert!(
                     !why.contains("items_ci"),
                     "complete instance must not be named: {why}"

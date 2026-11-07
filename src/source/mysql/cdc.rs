@@ -4896,7 +4896,10 @@ mod tests {
         // refuse: MINIMAL / NOBLOB write partial rows.
         for bad in ["MINIMAL", "noblob"] {
             match MysqlChangeStream::row_image_verdict(Some(bad)) {
-                RowImage::Partial { why } => assert!(why.contains(bad), "{why}"),
+                RowImage::Partial { why } => assert!(
+                    why.contains(bad) && why.contains("Set `binlog_row_image = FULL`"),
+                    "{why}"
+                ),
                 other => panic!("{bad} must refuse, got {other:?}"),
             }
         }
