@@ -116,7 +116,7 @@ pub(super) fn take(db: &Path, patience: Duration) -> Option<Turn> {
 
 #[cfg(test)]
 mod tests {
-    use super::take;
+    use super::{take, turns_of};
     use std::time::Duration;
 
     #[test]
@@ -155,10 +155,20 @@ mod tests {
             order.lock().unwrap().is_empty(),
             "no waiter is served while the second overdue one has not written"
         );
+        let handed = std::time::Instant::now();
         drop(later);
         for w in waiters {
             w.join().unwrap();
         }
+        assert!(
+            handed.elapsed() < Duration::from_millis(1500),
+            "a dropped place hands the lock on at once, not at the waiters' patience"
+        );
+        let q = turns_of(&db);
+        let q = q.queue.lock().unwrap();
+        assert!(!q.taken, "every turn was handed back");
+        assert_eq!(q.overdue, 0);
+        assert!(q.waiting.is_empty());
         assert_eq!(
             *order.lock().unwrap(),
             vec![0, 1, 2],
