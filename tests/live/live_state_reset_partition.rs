@@ -204,6 +204,16 @@ fn reset_of_an_unknown_child_is_refused(engine: SqlEngine) {
     let dest = tempfile::tempdir().unwrap();
     let rig = partitioned(engine, &table, "incremental", dest.path());
     rig.run_ok();
+    if rig.state_count("SELECT COUNT(*) FROM export_state WHERE export_name = '{export}'") == 0 {
+        let ours = source_key(&rig);
+        rig.edit_state(
+            &format!(
+                "INSERT INTO export_state (export_name, prefix, last_cursor_value) \
+                 VALUES ('{{export}}', '{ours}', '7')"
+            ),
+            1,
+        );
+    }
     let before = state_names(&rig, &table);
     let ghost = format!("{}__1999-01-01", rig.export_name());
     let out = rig.cli(&["state", "reset", "--export", &ghost]);
