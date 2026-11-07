@@ -385,7 +385,7 @@ scenarios:
     oracle:   { test: cdc_to_stdout_emits_each_change_once_oracle }
 
   - id: cdc_stdout_refuses_a_partial_image
-    what: "`rivet cdc` without `--output` refuses a change whose row image carries fewer values than its column names in its after or its before image (MySQL binlog_row_image MINIMAL/NOBLOB, an MSSQL capture instance with fewer columns than the table, with or without --table) by RIVET_SOURCE_CDC_PREREQUISITE, prints no line for it and leaves the checkpoint where it was"
+    what: "`rivet cdc` without `--output` refuses a change whose row image carries fewer values than its column names in its after or its before image (MySQL binlog_row_image MINIMAL/NOBLOB, an MSSQL capture instance with fewer columns than the table, with or without --table) by RIVET_SOURCE_CDC_PREREQUISITE, prints no line for it and leaves the checkpoint short of it, so a repeat is refused the same way"
     postgres: { na: "a PostgreSQL image is whole or key-only on deletes, never partial: the stdout loop prints key-only deletes as before (the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images)" }
     mysql:    { test: cdc_to_stdout_refuses_a_partial_image_mysql }
     mssql:    { test: cdc_to_stdout_refuses_a_partial_image_mssql }
