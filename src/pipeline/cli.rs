@@ -257,6 +257,9 @@ fn boundary_value(b: &crate::state::Boundary) -> String {
     }
 }
 
+/// How many partitions `state reset` holds the run lease of at once: each holds two open files on an SQLite state.
+const RESET_LEASES: usize = 16;
+
 /// `rivet state reset`: return a declared export, with every partition child it holds, or one stored partition child to a "never ran" state.
 pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
     let config = crate::config::Config::load(config_path)?;
@@ -321,11 +324,16 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
         }
         _ => {}
     }
-    let _held = family
-        .iter()
-        .map(|n| super::chunked::claim_export_progress(&state, n, &source, "reset its state"))
-        .collect::<Result<Vec<_>>>()?;
-    state.reset_all(&family, &source)?;
+    let claim =
+        |n: &String| super::chunked::claim_export_progress(&state, n, &source, "reset its state");
+    let (export, children) = family.split_first().expect("the family names the export");
+    let _export_lease = claim(export)?;
+    children.iter().try_for_each(|n| claim(n).map(drop))?;
+    for batch in children.chunks(RESET_LEASES) {
+        let _held = batch.iter().map(claim).collect::<Result<Vec<_>>>()?;
+        state.reset_all(batch, &source)?;
+    }
+    state.reset(export, &source)?;
     println!("{}", reset_report(&family));
     Ok(())
 }
@@ -1726,6 +1734,84 @@ exports:
         let (_dir, config_path, state) = partition_setup(&["a__x", "a__x__2026-01-01", "p"]);
         reset_state(&config_path, "a__x").unwrap();
         assert_eq!(held_names(&state), ["a__x__2026-01-01", "p"]);
+    }
+
+    /// The cursor of `name` on `source`, and a boundary when `boundary`.
+    fn put_child(state: &StateStore, name: &str, source: &str, boundary: bool) {
+        let key = crate::state::ProgressKey {
+            export_name: name.into(),
+            source: source.into(),
+            stream: String::new(),
+            schema: String::new(),
+            population: String::new(),
+            column: Some("id".into()),
+            landing: Default::default(),
+            mode: "incremental",
+            continues_high_water: true,
+            resumable: true,
+        };
+        state.update_with_column(&key, "7").unwrap();
+        if boundary {
+            state
+                .record_committed_incremental(name, "7", "run")
+                .unwrap();
+        }
+    }
+
+    /// Every `(export, source)` cursor row of the state in `dir`.
+    fn cursor_rows(dir: &tempfile::TempDir) -> Vec<(String, String)> {
+        let db = rusqlite::Connection::open(dir.path().join(".rivet_state.db")).unwrap();
+        let mut q = db
+            .prepare("SELECT export_name, prefix FROM export_state ORDER BY 1, 2")
+            .unwrap();
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn reset_of_a_partitioned_export_takes_a_child_stored_under_a_respelled_source() {
+        let (dir, config_path, state) = partition_setup(&[]);
+        let source = Config::load(&config_path).unwrap().source.state_key();
+        let respelled = source.replacen(":5432", "", 1);
+        assert_ne!(respelled, source, "fixture: a spelling without the port");
+        assert_eq!(crate::config::canonical_source_key(&respelled), source);
+        put_child(&state, "a", &source, true);
+        put_child(&state, "a__2026-01-01", &respelled, false);
+        reset_state(&config_path, "a").unwrap();
+        assert_eq!(cursor_rows(&dir), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn reset_of_a_partitioned_export_leaves_the_partitions_of_another_source() {
+        let (dir, config_path, state) = partition_setup(&[]);
+        let source = Config::load(&config_path).unwrap().source.state_key();
+        let other = "postgres://other.host:5432/db";
+        put_child(&state, "a", &source, true);
+        put_child(&state, "a__2026-01-01", &source, true);
+        put_child(&state, "a__2026-02-01", other, true);
+        assert_eq!(
+            state.stored_export_names(&source).unwrap(),
+            ["a", "a__2026-01-01"],
+            "the partitions this source holds"
+        );
+        reset_state(&config_path, "a").unwrap();
+        assert_eq!(
+            cursor_rows(&dir),
+            [("a__2026-02-01".to_string(), other.to_string())]
+        );
+        let kept: Vec<String> = state
+            .list_progression()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.export_name)
+            .collect();
+        assert_eq!(
+            kept,
+            ["a__2026-02-01"],
+            "the other source keeps its boundary"
+        );
     }
 
     #[test]

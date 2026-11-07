@@ -413,3 +413,51 @@ scenarios:
     mssql:    { test: partition_reset_plain_mssql }
     oracle:   { test: partition_reset_plain_oracle }
     mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_family
+    what: "PR6 — `state reset -e <parent>` of a family larger than the files one process may hold open (300 stored partitions, 256-file cap, SQLite state) clears every partition and the next run delivers every row"
+    postgres: { test: partition_reset_family_postgres }
+    mysql:    { test: partition_reset_family_mysql }
+    mssql:    { test: partition_reset_family_mssql }
+    oracle:   { test: partition_reset_family_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_family_pg_state
+    what: "PR7 — the same family on a Postgres state: every partition goes and the next run delivers every row"
+    postgres: { test: partition_reset_family_pg_state_postgres }
+    mysql:    { test: partition_reset_family_pg_state_mysql }
+    mssql:    { test: partition_reset_family_pg_state_mssql }
+    oracle:   { test: partition_reset_family_pg_state_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_respelled
+    what: "PR8 — partitions stored under the source spelled without its default port, with no boundary row, go with a reset of the parent and the next run delivers every row"
+    postgres: { test: partition_reset_respelled_postgres }
+    mysql:    { test: partition_reset_respelled_mysql }
+    mssql:    { test: partition_reset_respelled_mssql }
+    oracle:   { test: partition_reset_respelled_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_cross_source
+    what: "PR9 — a reset of the parent leaves the same-named export's partition of another source: its cursor row and boundary row stay"
+    postgres: { test: partition_reset_cross_source_postgres }
+    mysql:    { test: partition_reset_cross_source_mysql }
+    mssql:    { test: partition_reset_cross_source_mssql }
+    oracle:   { test: partition_reset_cross_source_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_child_lease
+    what: "PR10 — a live run holding one partition's lease stops `state reset -e <parent>`: `--lock-wait 0` with RIVET_STATE_RUN_IN_PROGRESS, `--lock-wait 2` with RIVET_STATE_LOCK_TIMEOUT and \"nothing was done\", state untouched in both; a wait that outlasts the run clears every partition"
+    postgres: { test: partition_reset_child_lease_postgres }
+    mysql:    { test: partition_reset_child_lease_mysql }
+    mssql:    { test: partition_reset_child_lease_mssql }
+    oracle:   { test: partition_reset_child_lease_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }
+
+  - id: partition_reset_child_lease_pg_state
+    what: "PR11 — the same live run on a Postgres state"
+    postgres: { test: partition_reset_child_lease_pg_state_postgres }
+    mysql:    { test: partition_reset_child_lease_pg_state_mysql }
+    mssql:    { test: partition_reset_child_lease_pg_state_mssql }
+    oracle:   { test: partition_reset_child_lease_pg_state_oracle }
+    mongo:    { na: "a Mongo export accepts only mode: full or cdc and no `partition_by`, so it keeps no partition children" }

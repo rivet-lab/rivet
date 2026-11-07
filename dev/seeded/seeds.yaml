@@ -1089,10 +1089,14 @@ seeds:
           - pg_a_reset_is_refused_while_a_range_run_is_alive_and_works_after_it
           - pg_a_reset_is_refused_while_a_keyset_run_is_alive_and_works_after_it
           - pg_a_killed_range_run_does_not_block_the_reset
+          - state_reset_family_a_live_run_of_a_child_refuses_the_reset_and_touches_nothing
+          - state_reset_family_a_wait_that_runs_out_on_a_child_is_refused_by_code_and_touches_nothing
+          - state_reset_family_a_wait_on_a_child_ends_with_the_run_and_the_reset_clears_the_family
       postgres-state:
         cells:
           - pg_state_a_reset_is_refused_while_a_range_run_is_alive_and_works_after_it
           - pg_state_a_killed_range_run_does_not_block_the_reset
+          - partition_reset_child_lease_pg_state_postgres
       lib:
         cells:
           - "lib:every_reset_is_refused_while_the_exports_run_lease_is_held"
@@ -1137,6 +1141,35 @@ seeds:
         cells: [partition_reset_parent_mssql]
       oracle:
         cells: [partition_reset_parent_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+
+  - name: state-reset-holds-every-lease-at-once
+    class: "`state reset -e <parent>` takes the run lease of every partition child before it clears any, so a family larger than the open-file limit of the process on an SQLite state (two files per lease) fails with `Too many open files` and clears nothing"
+    history: "verifier review of PR 881, 2026-11-07: 204 children under `ulimit -n 256` ended exit 1 `Too many open files (os error 24)`"
+    scope: state
+    patch: state-reset-holds-every-lease-at-once/shared.patch
+    engines:
+      sqlite-state:
+        cells:
+          - state_reset_family_a_reset_larger_than_the_open_file_limit_clears_every_member
+          - partition_reset_family_postgres
+      postgres-state:
+        na: "a Postgres state holds a run lease as a row kept by one connection, so holding every member's lease at once opens no file"
+  - name: state-reset-misreads-stored-partitions
+    class: "`state reset -e <parent>` lists the partitions to clear by a bare match of the stored source key and every boundary row, so a partition stored under another spelling of the source with no boundary is skipped and a partition that exists only for another source is cleared with its boundary"
+    history: "verifier review of PR 881, 2026-11-07: children under the port-less spelling were left with their cursors, and a reset from source A deleted the boundary of `ev__2026-02-01` that only source B holds"
+    scope: source
+    patch: state-reset-misreads-stored-partitions/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_respelled_postgres, partition_reset_cross_source_postgres, "lib:reset_of_a_partitioned_export_takes_a_child_stored_under_a_respelled_source", "lib:reset_of_a_partitioned_export_leaves_the_partitions_of_another_source"]
+      mysql:
+        cells: [partition_reset_respelled_mysql, partition_reset_cross_source_mysql]
+      mssql:
+        cells: [partition_reset_respelled_mssql, partition_reset_cross_source_mssql]
+      oracle:
+        cells: [partition_reset_respelled_oracle, partition_reset_cross_source_oracle]
       mongo:
         na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
 

@@ -762,6 +762,8 @@ The reset clears the progress the export holds on the source this config names (
 
 An export with `partition_by` keeps its progress per partition, under the names `<export>__<value>` (`events__2026-01-01`, `events__null`). Resetting the declared name clears the progress of every partition the state holds, together with the export's own, in one transaction, and prints the partitions it cleared. Resetting one partition by the name a refusal prints (`--export events__2026-01-01`) clears that partition only; a partition the state does not hold is refused with `RIVET_CLI_EXPORT_UNKNOWN`, naming the partitions it does hold. An export that is declared under the name of a would-be partition (`events__x` beside `events`) keeps its own progress when `events` is reset.
 
+The reset takes the run lease of the export and of each partition it clears. While a run holds one, the reset waits `--lock-wait` seconds (600 by default) and then stops with `RIVET_STATE_LOCK_TIMEOUT` naming that export and `nothing was done`; with `--lock-wait 0` it stops at once with `RIVET_STATE_RUN_IN_PROGRESS`. Repeat the command once the run has ended. A partition stored under another spelling of the source (its default port dropped) is cleared with the rest; a partition that exists only for another source is not listed and not cleared.
+
 While a checkpointed run of that export (`chunk_checkpoint: true`) is alive in another rivet process, the reset is refused with `RIVET_STATE_RUN_IN_PROGRESS` (exit 2, retryable) and removes nothing: wait for the run, or stop its process, and repeat the command. A run that was killed does not hold the reset back.
 
 ### `rivet state accept`

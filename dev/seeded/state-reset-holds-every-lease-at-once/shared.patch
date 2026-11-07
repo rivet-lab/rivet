@@ -1,0 +1,21 @@
+diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+index 30c19c56..897aed69 100644
+--- a/src/pipeline/cli.rs
++++ b/src/pipeline/cli.rs
+@@ -326,14 +326,8 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
+     }
+     let claim =
+         |n: &String| super::chunked::claim_export_progress(&state, n, &source, "reset its state");
+-    let (export, children) = family.split_first().expect("the family names the export");
+-    let _export_lease = claim(export)?;
+-    children.iter().try_for_each(|n| claim(n).map(drop))?;
+-    for batch in children.chunks(RESET_LEASES) {
+-        let _held = batch.iter().map(claim).collect::<Result<Vec<_>>>()?;
+-        state.reset_all(batch, &source)?;
+-    }
+-    state.reset(export, &source)?;
++    let _held = family.iter().map(claim).collect::<Result<Vec<_>>>()?;
++    state.reset_all(&family, &source)?;
+     println!("{}", reset_report(&family));
+     Ok(())
+ }

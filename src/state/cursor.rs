@@ -2,6 +2,18 @@ use crate::error::Result;
 use crate::types::CursorState;
 
 use super::StateStore;
+use super::row::StateParam;
+
+/// How many exports one `reset_all` statement names.
+const RESET_BATCH: usize = 100;
+
+/// `?from, ?from+1, ...` for `count` bound values.
+fn placeholders(from: usize, count: usize) -> String {
+    (from..from + count)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Incremental cursor store — reads and writes `export_state`.
 ///
@@ -424,20 +436,32 @@ impl StateStore {
 
     /// Move progress stored under another spelling of `scope` (its default port left out, its password unmasked) onto `scope`: the newest such cursor row unless `scope` holds one, and its checkpoint rows; the cursor rows left are deleted.
     pub(super) fn adopt_respelled_source(&self, export_name: &str, scope: &str) -> Result<()> {
+        self.adopt_respelled_sources(&[export_name.to_string()], scope)
+    }
+
+    /// [`Self::adopt_respelled_source`] for every export of `names`, read in one query.
+    fn adopt_respelled_sources(&self, names: &[String], scope: &str) -> Result<()> {
+        let marks = placeholders(2, names.len());
+        let mut params: Vec<StateParam> = vec![scope.into()];
+        params.extend(names.iter().map(|n| StateParam::from(n.as_str())));
         let stored = self.query(
-            "SELECT prefix, last_run_at FROM export_state \
-             WHERE export_name = ?1 AND prefix NOT IN ('', ?2) \
-             UNION SELECT source, NULL FROM chunk_run WHERE export_name = ?1 AND source <> ?2 \
-             UNION SELECT source, NULL FROM keyset_range WHERE export_name = ?1 AND source <> ?2 \
-             ORDER BY 2 DESC NULLS LAST",
-            &[export_name.into(), scope.into()],
-            |r| r.text(0),
+            &format!(
+                "SELECT export_name, prefix, last_run_at FROM export_state \
+                 WHERE export_name IN ({marks}) AND prefix NOT IN ('', ?1) \
+                 UNION SELECT export_name, source, NULL FROM chunk_run \
+                 WHERE export_name IN ({marks}) AND source <> ?1 \
+                 UNION SELECT export_name, source, NULL FROM keyset_range \
+                 WHERE export_name IN ({marks}) AND source <> ?1 \
+                 ORDER BY 3 DESC NULLS LAST"
+            ),
+            &params,
+            |r| (r.text(0), r.text(1)),
         )?;
-        for respelled in stored
+        for (name, respelled) in stored
             .iter()
-            .filter(|p| crate::config::canonical_source_key(p) == scope)
+            .filter(|(_, p)| crate::config::canonical_source_key(p) == scope)
         {
-            self.rekey_source(export_name, respelled, scope)?;
+            self.rekey_source(name, respelled, scope)?;
         }
         Ok(())
     }
@@ -997,28 +1021,62 @@ impl StateStore {
     ///
     /// Only the row of `source` (and the row written before sources were recorded) goes: an export of the same name reading another source keeps its cursor.
     pub fn reset(&self, export_name: &str, source: &str) -> Result<()> {
-        self.adopt_respelled_source(export_name, source)?;
-        self.execute(
-            "DELETE FROM export_state WHERE export_name = ?1 AND prefix IN (?2, '')",
-            &[export_name.into(), source.into()],
-        )?;
-        self.delete_progression(export_name)?;
-        Ok(())
+        self.reset_all(&[export_name.to_string()], source)
     }
 
-    /// The export names `source` holds progress under: cursors (and the ones written before sources were recorded) and boundaries.
+    /// The export names `source` holds progress under, in byte order: those with a cursor on `source` (under any spelling of it, or written before sources were recorded) and the boundaries no cursor of another source owns.
     pub fn stored_export_names(&self, source: &str) -> Result<Vec<String>> {
-        self.query(
-            "SELECT export_name FROM export_state WHERE prefix IN (?1, '') \
-             UNION SELECT export_name FROM export_progression ORDER BY export_name",
-            &[source.into()],
-            |r| r.text(0),
-        )
+        let cursors = self.query("SELECT export_name, prefix FROM export_state", &[], |r| {
+            (r.text(0), r.text(1))
+        })?;
+        let boundaries = self.query("SELECT export_name FROM export_progression", &[], |r| {
+            r.text(0)
+        })?;
+        let mut cursor_of: std::collections::BTreeMap<String, bool> = Default::default();
+        for (name, prefix) in cursors {
+            let here = prefix.is_empty()
+                || prefix == source
+                || crate::config::canonical_source_key(&prefix) == source;
+            *cursor_of.entry(name).or_default() |= here;
+        }
+        let mut names: std::collections::BTreeSet<String> = cursor_of
+            .iter()
+            .filter(|(_, here)| **here)
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.extend(
+            boundaries
+                .into_iter()
+                .filter(|n| !cursor_of.contains_key(n)),
+        );
+        Ok(names.into_iter().collect())
     }
 
-    /// Return every export of `names` to a "never ran" state in one transaction.
+    /// Return every export of `names` to a "never ran" state in one transaction, a statement per kind for each `RESET_BATCH` of them.
     pub fn reset_all(&self, names: &[String], source: &str) -> Result<()> {
-        self.transaction(|| names.iter().try_for_each(|n| self.reset(n, source)))
+        self.transaction(|| {
+            for batch in names.chunks(RESET_BATCH) {
+                self.adopt_respelled_sources(batch, source)?;
+                let marks = placeholders(2, batch.len());
+                let mut params: Vec<StateParam> = vec![source.into()];
+                params.extend(batch.iter().map(|n| StateParam::from(n.as_str())));
+                self.execute(
+                    &format!(
+                        "DELETE FROM export_state WHERE export_name IN ({marks}) \
+                         AND prefix IN (?1, '')"
+                    ),
+                    &params,
+                )?;
+                self.execute(
+                    &format!(
+                        "DELETE FROM export_progression WHERE export_name IN ({})",
+                        placeholders(1, batch.len())
+                    ),
+                    &params[1..],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Re-bind the stored progress of `key` to the stream, schema and rows it reads now, on the operator's word: the cursor value, its column and any anchor stay. Refused for a cursor written for another column; changes a row only where a run of `key` is refused for its stream.

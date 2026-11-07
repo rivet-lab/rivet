@@ -437,7 +437,8 @@ infra:
     # 2026-11-06: +3 structural N/A rows from interval-text-without-its-label (MySQL, SQL Server and MongoDB have no INTERVAL type to reach the Interval arm).
     # 2026-11-05: +2 structural N/A rows from stop-class-number (PostgreSQL decides every error by its SQLSTATE, MongoDB reads whole documents and refuses no column).
     # 2026-11-07: +1 N/A row from state-reset-skips-partition-children x mongo (partition_by is refused for a MongoDB source at config load, so no export keeps per-partition progress).
-    na_ceiling: 563  # ratchet-pin: seeded-na (review 2027-02-01)
+    # 2026-11-07: +2 N/A rows from PR 881 review: state-reset-holds-every-lease-at-once x postgres-state (a Postgres state lease is a row, no open file) and state-reset-misreads-stored-partitions x mongo (no partition_by on MongoDB).
+    na_ceiling: 565  # ratchet-pin: seeded-na (review 2027-02-01)
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
