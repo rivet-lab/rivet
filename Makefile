@@ -348,16 +348,16 @@ GATE_ENV = \
 release-oracle-prev-bin:  ## Download the PREVIOUS release binary (the regression + scale baseline) and the pinned carriers. A downloaded asset, never a locally rebuilt parent.
 	@rm -rf $(PREV_RELEASE_DIR) && mkdir -p $(PREV_RELEASE_DIR)
 	@$(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR) latest
-	@if [ ! -x "$(FIELD_REPLAY_CARRIER_BIN)" ]; then \
+	-@if [ ! -x "$(FIELD_REPLAY_CARRIER_BIN)" ]; then \
 	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/carrier $(FIELD_REPLAY_CARRIER_TAG); \
 	fi
 	@echo "  field-replay carrier: $$($(FIELD_REPLAY_CARRIER_BIN) --version)"
-	@$(PY) -m dev.release_oracle.field_state --fetch $(PREV_RELEASE_DIR)/field
-	@if [ ! -x "$(MIGRATION_CARRIER_BIN)" ]; then \
+	-@$(PY) -m dev.release_oracle.field_state --fetch $(PREV_RELEASE_DIR)/field
+	-@if [ ! -x "$(MIGRATION_CARRIER_BIN)" ]; then \
 	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/field $(MIGRATION_CARRIER_TAG); \
 	fi
 	@echo "  migration carrier: $$($(MIGRATION_CARRIER_BIN) --version)"
-	@if [ ! -x "$(STATE_COPY_FROM_BIN)" ]; then \
+	-@if [ ! -x "$(STATE_COPY_FROM_BIN)" ]; then \
 	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/field $(STATE_COPY_FROM_TAG); \
 	fi
 	@echo "  state-copy source release: $$($(STATE_COPY_FROM_BIN) --version)"

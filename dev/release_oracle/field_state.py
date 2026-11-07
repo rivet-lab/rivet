@@ -190,9 +190,9 @@ def absent_note(cache: Path, version: str) -> Path:
 
 
 def latest_tag() -> str:
-    """The tag of the repo's latest published release, from the public API."""
-    with urllib.request.urlopen(f"https://api.github.com/repos/{REPO}/releases/latest", timeout=120) as r:
-        return json.load(r)["tag_name"]
+    """The tag of the repo's latest published release, where its public `releases/latest` page redirects (the API answers 403 past 60 calls an hour per address)."""
+    with urllib.request.urlopen(f"https://github.com/{REPO}/releases/latest", timeout=120) as r:
+        return r.geturl().rstrip("/").rsplit("/", 1)[-1]
 
 
 def fetch_release(v: str, cache: Path) -> int:
@@ -254,7 +254,7 @@ def fetch_tags(cache: Path, tags: list[str]) -> int:
     for tag in tags:
         try:
             v = (latest_tag() if tag == "latest" else tag).removeprefix("v")
-        except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
+        except (urllib.error.URLError, OSError) as e:
             print(f"  {tag}: the latest release could not be resolved: {e}")
             rc = 1
             continue
@@ -1299,8 +1299,11 @@ def _fetch_self_test() -> None:
         return buf.getvalue()
 
     class Served:
-        def __init__(self, data: bytes) -> None:
-            self.data = data
+        def __init__(self, data: bytes, url: str = "") -> None:
+            self.data, self.url = data, url
+
+        def geturl(self) -> str:
+            return self.url
 
         def __enter__(self) -> "Served":
             return self
@@ -1314,7 +1317,7 @@ def _fetch_self_test() -> None:
     def host(assets: dict[str, bytes], listed: dict[str, bytes]) -> Callable[..., Served]:
         def get(url: str, timeout: int = 0) -> Served:
             if url.endswith("/releases/latest"):
-                return Served(b'{"tag_name": "v9.9.9"}')
+                return Served(b"", f"https://github.com/{REPO}/releases/tag/v9.9.9")
             if "/v9.9.9/" not in url:
                 raise urllib.error.HTTPError(url, 404, "not found", None, None)  # type: ignore[arg-type]
             if url.endswith("SHA256SUMS.txt"):
