@@ -5175,6 +5175,17 @@ seeds:
         na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint for a reset to remove"
 
 
+  - name: reset-chunks-respelled-source-kept
+    class: "`state reset-chunks` does not re-key a run recorded under another spelling of the config's source onto the canonical one before removing, so the chunk run goes while its chunked resume anchor stays and a later full claim is refused RIVET_STATE_INTERRUPTED_RUN_OWNER_MISMATCH"
+    history: "verifier finding F1 of #862, 2026-11-07: reset-chunks deleted a respelled run but left its export_state anchor"
+    scope: state
+    patch: reset-chunks-respelled-source-kept/shared.patch
+    engines:
+      postgres-state:
+        cells: [pg_state_a_reset_removes_a_respelled_runs_checkpoint_and_its_anchor, "lib:reset_chunks_still_removes_a_run_that_recorded_no_source_and_a_respelled_one"]
+      sqlite-state:
+        cells: [pg_a_reset_removes_a_respelled_runs_checkpoint_and_its_anchor, "lib:reset_chunks_still_removes_a_run_that_recorded_no_source_and_a_respelled_one"]
+
   - name: interval-text-without-its-label
     class: "an INTERVAL column (PostgreSQL, Oracle) is written as ISO 8601 duration text in a Utf8 column without the rivet.text_form = iso8601_duration label (PostgreSQL in batch and in CDC alike, Oracle in batch), so a reader cannot tell the canonical duration from a free string"
     history: "type-known-defects INTERVAL of docs/type-capability-matrix.yaml (ADR-0038 CP2/CP5, issue #851 class C); RED on main 2026-11-05 (the ledger row without its marker fails postgres_batch_and_cdc_deliver_every_ledger_row_alike: the ledger delivers text form iso8601_duration, the part labels it nothing)"
