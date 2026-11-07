@@ -5306,3 +5306,24 @@ seeds:
         na: "an Oracle source refuses tls.ca_file by code (src/source/oracle/mod.rs), so no trust anchor is built"
       mongo:
         na: "tls_to_mongo hands ca_file to the driver as its whole root store; mongo_system_store_is_not_a_second_anchor holds it, and no rivet line adds the system roots to seed"
+
+  - name: connection-cut-mid-row-not-retried
+    class: "a source connection cut while a row is being read exits 1 with no retry: the driver reports the peer closing inside a packet as a codec error (MySQL) or a connection error whose source is an io error (PostgreSQL), and the retry classifier read neither as a lost connection"
+    history: "2026-11-06 - toxiproxy cut at +3 s and +6 s into a 2M-row MySQL export: exit 1, CodecError bytes remaining on stream, retries 0, rows 0; a cut at +1 s between queries retried; RED on main for MySQL and PostgreSQL with a 60 KB-row table"
+    scope: source
+    patch: connection-cut-mid-row-not-retried/shared.patch
+    engines:
+      postgres:
+        cells:
+          - postgres_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once
+          - "lib:mysql_codec_errors_keep_their_class_except_a_connection_lost_mid_packet"
+      mysql:
+        cells:
+          - mysql_export_retries_a_connection_cut_in_the_middle_of_a_row_and_delivers_exactly_once
+          - "lib:mysql_codec_errors_keep_their_class_except_a_connection_lost_mid_packet"
+      mssql:
+        na: "the SQL Server source lifts a tiberius streaming error into text before the classifier sees it; the same cut is not reproduced live (docs/resilience-matrix.yaml source_connection_cut_mid_row_retried carries the gap)"
+      mongo:
+        na: "a MongoDB cut is classified from the typed driver error (classify_mongo_error), a different arm from the one this seed removes"
+      oracle:
+        na: "the Oracle source lifts oracledb errors into text read by is_oracle_lost_session, a different arm from the one this seed removes"
