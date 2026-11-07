@@ -32,13 +32,15 @@ A red row names its kind: re-baseline, restart, duplicate, loss, refuses its own
 longer loads, config read differently, contract, empty table.
 
     python -m dev.release_oracle.field_state --fetch <cache dir>
+    python -m dev.release_oracle.field_state --fetch-release <cache dir> <tag | latest> ...
+    python -m dev.release_oracle.field_state --triple
     RIVET_PREV_RELEASE_BIN=<previous rivet> python -m dev.release_oracle.field_state [name part ...]
     python -m dev.release_oracle.field_state --self-test
 """
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 import json
 import os
 import re
@@ -180,48 +182,71 @@ def absent_note(cache: Path, version: str) -> Path:
     return cache / f"rivet-v{version}-{triple()}.absent"
 
 
-def fetch(cache: Path) -> int:
-    """Download every release's asset from the floor on for this machine into `cache`, checked against the release's SHA256SUMS."""
+def latest_tag() -> str:
+    """The tag of the repo's latest published release, from the public API."""
+    with urllib.request.urlopen(f"https://api.github.com/repos/{REPO}/releases/latest", timeout=120) as r:
+        return json.load(r)["tag_name"]
+
+
+def fetch_release(v: str, cache: Path) -> int:
+    """Download release `v`'s asset for this machine into `cache`, checked against the release's SHA256SUMS, and unpack it; 1 when it could not be had whole."""
     import hashlib
     import tarfile
 
+    name = f"rivet-v{v}-{triple()}.tar.gz"
+    base = f"https://github.com/{REPO}/releases/download/v{v}"
+    try:
+        with urllib.request.urlopen(f"{base}/SHA256SUMS.txt", timeout=120) as r:
+            sums = r.read().decode()
+        want = next((ln.split()[0] for ln in sums.splitlines() if ln.split()[1:] and ln.split()[-1].lstrip("*") == name), None)
+        if want is None:
+            absent_note(cache, v).write_text(f"release v{v} publishes no {name}\n")
+            print(f"  v{v}: NO ASSET for this machine ({name} is not in the release's SHA256SUMS.txt)")
+            return 0
+        with urllib.request.urlopen(f"{base}/{name}", timeout=600) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            absent_note(cache, v).write_text(f"tag v{v} has no published release (HTTP 404)\n")
+            print(f"  v{v}: NO RELEASE published for this tag")
+            return 0
+        print(f"  v{v}: {name} could not be downloaded: {e}")
+        return 1
+    except (urllib.error.URLError, OSError) as e:
+        print(f"  v{v}: {name} could not be downloaded: {e}")
+        return 1
+    if hashlib.sha256(data).hexdigest() != want:
+        print(f"  v{v}: {name} does not match the release's SHA256SUMS.txt")
+        return 1
+    (cache / name).write_bytes(data)
+    with tarfile.open(cache / name) as t:
+        t.extractall(cache, filter="data")
+    said = run([str(binary_in(cache, v)), "--version"]).stdout.strip()
+    print(f"  {said} -> {binary_in(cache, v)}")
+    return 0 if f" {v} " in f"{said} " else 1
+
+
+def fetch(cache: Path) -> int:
+    """Download every release's asset from the floor on for this machine into `cache`."""
     cache.mkdir(parents=True, exist_ok=True)
     rc = 0
     for v in field_versions(release_tags()):
-        name = f"rivet-v{v}-{triple()}.tar.gz"
-        base = f"https://github.com/{REPO}/releases/download/v{v}"
+        rc = fetch_release(v, cache) or rc
+    return rc
+
+
+def fetch_tags(cache: Path, tags: list[str]) -> int:
+    """Download each named release (`latest` = the newest) into `cache`; one with no asset for this machine fails."""
+    cache.mkdir(parents=True, exist_ok=True)
+    rc = 0
+    for tag in tags:
         try:
-            with urllib.request.urlopen(f"{base}/SHA256SUMS.txt", timeout=120) as r:
-                sums = r.read().decode()
-            want = next((ln.split()[0] for ln in sums.splitlines() if ln.split()[1:] and ln.split()[-1].lstrip("*") == name), None)
-            if want is None:
-                absent_note(cache, v).write_text(f"release v{v} publishes no {name}\n")
-                print(f"  v{v}: NO ASSET for this machine ({name} is not in the release's SHA256SUMS.txt)")
-                continue
-            with urllib.request.urlopen(f"{base}/{name}", timeout=600) as r:
-                data = r.read()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                absent_note(cache, v).write_text(f"tag v{v} has no published release (HTTP 404)\n")
-                print(f"  v{v}: NO RELEASE published for this tag")
-                continue
-            print(f"  v{v}: {name} could not be downloaded: {e}")
+            v = (latest_tag() if tag == "latest" else tag).removeprefix("v")
+        except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
+            print(f"  {tag}: the latest release could not be resolved: {e}")
             rc = 1
             continue
-        except (urllib.error.URLError, OSError) as e:
-            print(f"  v{v}: {name} could not be downloaded: {e}")
-            rc = 1
-            continue
-        if hashlib.sha256(data).hexdigest() != want:
-            print(f"  v{v}: {name} does not match the release's SHA256SUMS.txt")
-            rc = 1
-            continue
-        (cache / name).write_bytes(data)
-        with tarfile.open(cache / name) as t:
-            t.extractall(cache, filter="data")
-        said = run([str(binary_in(cache, v)), "--version"]).stdout.strip()
-        print(f"  {said} -> {binary_in(cache, v)}")
-        rc = rc or (0 if f" {v} " in f"{said} " else 1)
+        rc = fetch_release(v, cache) or (0 if binary_in(cache, v).is_file() else 1) or rc
     return rc
 
 
@@ -1246,6 +1271,56 @@ def verify_upgrade_from_field_state(led: Ledger, only: list[str] | None = None) 
     led.ok(f"upgrade from a field state: {len(todo)} cells in {time.monotonic() - t0:.0f}s")
 
 
+def _fetch_self_test() -> None:
+    """`fetch_tags` against a stubbed release host: a whole asset lands, a tampered or absent one fails, `latest` resolves."""
+    import hashlib
+    import io
+    import tarfile
+
+    body = b"#!/bin/sh\necho rivet 9.9.9\n"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        member = tarfile.TarInfo(f"rivet-v9.9.9-{triple()}/rivet")
+        member.size, member.mode = len(body), 0o755
+        t.addfile(member, io.BytesIO(body))
+    asset = buf.getvalue()
+    name = f"rivet-v9.9.9-{triple()}.tar.gz"
+
+    class Served:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+        def __enter__(self) -> "Served":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return self.data
+
+    def host(sum_of: bytes) -> Callable[..., Served]:
+        def get(url: str, timeout: int = 0) -> Served:
+            if url.endswith("/releases/latest"):
+                return Served(b'{"tag_name": "v9.9.9"}')
+            if "/v9.9.9/" not in url:
+                raise urllib.error.HTTPError(url, 404, "not found", None, None)  # type: ignore[arg-type]
+            return Served(f"{hashlib.sha256(sum_of).hexdigest()}  {name}\n".encode() if url.endswith("SHA256SUMS.txt") else asset)
+        return get
+
+    real = urllib.request.urlopen
+    try:
+        with tempfile.TemporaryDirectory() as d, redirect_stdout(io.StringIO()):
+            urllib.request.urlopen = host(asset)
+            whole = Path(d, "whole")
+            assert fetch_tags(whole, ["latest", "v9.9.9"]) == 0 and os.access(binary_in(whole, "9.9.9"), os.X_OK)
+            assert fetch_tags(Path(d, "gone"), ["v8.8.8"]) == 1, "a tag with no release must fail a pinned fetch"
+            urllib.request.urlopen = host(asset + b"x")
+            assert fetch_tags(Path(d, "tampered"), ["v9.9.9"]) == 1 and not binary_in(Path(d, "tampered"), "9.9.9").exists()
+    finally:
+        urllib.request.urlopen = real
+
+
 def _self_test() -> None:
     """The graders on fixtures: each finding kind is the one row that fails, and the config edits are strict."""
     src = [(i, i) for i in range(1, 11)]
@@ -1358,6 +1433,7 @@ def _self_test() -> None:
     assert binary_in(Path("c"), "1.2.3").parts[-2].startswith("rivet-v1.2.3-") and field_cache(Path("c/rivet-v9/rivet")) == Path("c/field")
     names = [n for _, n, _ in cells([("0.1.0", Path("a")), ("0.2.0", Path("b"))], Path(tempfile.gettempdir()), [""])]
     assert len(names) == len([n for n in names if n.startswith("field[")]) > 0
+    _fetch_self_test()
     print("self-test ok: a re-baseline, a restart, a duplicate, a loss and a config that no longer loads each fail their row")
 
 
@@ -1367,6 +1443,11 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if sys.argv[1:2] == ["--fetch"]:
         raise SystemExit(fetch(Path(sys.argv[2])))
+    if sys.argv[1:2] == ["--fetch-release"]:
+        raise SystemExit(fetch_tags(Path(sys.argv[2]), sys.argv[3:]))
+    if sys.argv[1:] == ["--triple"]:
+        print(triple())
+        raise SystemExit(0)
     _led = Ledger()
     verify_upgrade_from_field_state(_led, sys.argv[1:] or None)
     raise SystemExit(_led.report())

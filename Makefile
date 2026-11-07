@@ -293,28 +293,29 @@ RIVET_CONC_SRC_CONTAINER  ?= rivet-postgres-1
 # single full run while the download step reported success. A baseline the
 # gate needs must live where the gate's own hygiene cannot eat it.
 PREV_RELEASE_DIR          ?= .gate-baseline
+TRIPLE                    = $(or $(TRIPLE_MEMO),$(eval TRIPLE_MEMO := $(shell $(PY) -m dev.release_oracle.field_state --triple))$(TRIPLE_MEMO))
 # The field-symptom replay's baseline is NOT the latest release: criterion 1
 # needs the release that CARRIES the governor regression (0.24.4 — see
 # verify_field_symptom_replay's shelf-life doc). Pinned here explicitly so the
 # stage stops going permanently red now that the fix has shipped in 0.24.5+.
 FIELD_REPLAY_CARRIER_TAG  ?= v0.24.4
-FIELD_REPLAY_CARRIER_BIN  ?= $(PREV_RELEASE_DIR)/carrier/rivet-$(FIELD_REPLAY_CARRIER_TAG)-$(shell uname -m | sed 's/arm64/aarch64/')-apple-darwin/rivet
+FIELD_REPLAY_CARRIER_BIN  ?= $(PREV_RELEASE_DIR)/carrier/rivet-$(FIELD_REPLAY_CARRIER_TAG)-$(TRIPLE)/rivet
 # The MIGRATION carrier: a release from before the last state-schema migration, PINNED like the
 # field-replay carrier, so every cell whose premise is an older release (the way-back legs, the
 # relative-path move, the lease met at the schema, the doc's rollback) grades a real migration even
 # when the previous release writes this tree's schema. Missing is a FAIL in each of them.
 MIGRATION_CARRIER_TAG     ?= v0.31.0
-MIGRATION_CARRIER_BIN     ?= $(PREV_RELEASE_DIR)/field/rivet-$(MIGRATION_CARRIER_TAG)-$(shell uname -m | sed 's/arm64/aarch64/')-apple-darwin/rivet
+MIGRATION_CARRIER_BIN     ?= $(PREV_RELEASE_DIR)/field/rivet-$(MIGRATION_CARRIER_TAG)-$(TRIPLE)/rivet
 # The LEASE carrier: a release that holds the run and load leases this tree's migration waits for
 # (0.32.0+), writes an older state schema (v37), and still advances a Postgres slot past its checkpoint
 # (#649, fixed in 0.32.2). PINNED like the carriers above, and found in the field cache `field_state
 # --fetch` fills below; the cells that run it beside this tree fail the census when it is missing.
 LEASE_CARRIER_TAG         ?= v0.32.1
-LEASE_CARRIER_BIN         ?= $(PREV_RELEASE_DIR)/field/rivet-$(LEASE_CARRIER_TAG)-$(shell uname -m | sed 's/arm64/aarch64/')-apple-darwin/rivet
+LEASE_CARRIER_BIN         ?= $(PREV_RELEASE_DIR)/field/rivet-$(LEASE_CARRIER_TAG)-$(TRIPLE)/rivet
 # The release whose state `rivet state copy` must carry to PostgreSQL: 0.30.0 (state v31), the one a
 # client moves from. PINNED like the carriers above.
 STATE_COPY_FROM_TAG       ?= v0.30.0
-STATE_COPY_FROM_BIN       ?= $(PREV_RELEASE_DIR)/field/rivet-$(STATE_COPY_FROM_TAG)-$(shell uname -m | sed 's/arm64/aarch64/')-apple-darwin/rivet
+STATE_COPY_FROM_BIN       ?= $(PREV_RELEASE_DIR)/field/rivet-$(STATE_COPY_FROM_TAG)-$(TRIPLE)/rivet
 
 GATE_ENV = \
   PYTHONUNBUFFERED=1 \
@@ -344,39 +345,20 @@ GATE_ENV = \
   BQ_ORACLE_DATASET='$(BQ_ORACLE_DATASET)' \
   BQ_ORACLE_BUCKET='$(BQ_ORACLE_BUCKET)'
 
-release-oracle-prev-bin:  ## Download the PREVIOUS release binary (the regression + scale baseline). A downloaded asset, never a locally rebuilt parent.
-	@rm -rf $(PREV_RELEASE_DIR) && mkdir -p $(PREV_RELEASE_DIR)  # exactly one baseline: `ls | tail` below must not pick a lexicographically-wrong version from an accumulating dir (bug hunt 2026-08-08)
-	@tag=$$(gh release list --limit 1 --json tagName -q '.[0].tagName'); \
-	 arch=$$(uname -m); os=$$(uname -s | tr 'A-Z' 'a-z'); \
-	 [ "$$arch" = "arm64" ] && arch=aarch64; \
-	 case "$$os" in darwin) triple="$$arch-apple-darwin";; *) triple="$$arch-unknown-linux-gnu";; esac; \
-	 echo "  downloading $$tag ($$triple) — the artifact users actually run"; \
-	 gh release download "$$tag" --pattern "rivet-$$tag-$$triple.tar.gz" --dir $(PREV_RELEASE_DIR) --clobber; \
-	 tar -xzf "$(PREV_RELEASE_DIR)/rivet-$$tag-$$triple.tar.gz" -C $(PREV_RELEASE_DIR); \
-	 chmod +x "$(PREV_RELEASE_DIR)/rivet-$$tag-$$triple/rivet"; \
-	 echo "  $$($(PREV_RELEASE_DIR)/rivet-$$tag-$$triple/rivet --version) → $(PREV_RELEASE_DIR)/rivet-$$tag-$$triple/rivet"
-	@# The field-replay CARRIER (0.24.4) — a separate, PINNED download: the
-	@# stage needs the release that still reproduces the symptom, and the
-	@# latest asset above stopped carrying it the day the fix shipped.
+release-oracle-prev-bin:  ## Download the PREVIOUS release binary (the regression + scale baseline) and the pinned carriers. A downloaded asset, never a locally rebuilt parent.
+	@rm -rf $(PREV_RELEASE_DIR) && mkdir -p $(PREV_RELEASE_DIR)
+	@$(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR) latest
 	@if [ ! -x "$(FIELD_REPLAY_CARRIER_BIN)" ]; then \
-	 mkdir -p $(PREV_RELEASE_DIR)/carrier; \
-	 gh release download $(FIELD_REPLAY_CARRIER_TAG) --pattern "*aarch64-apple-darwin*" -D $(PREV_RELEASE_DIR)/carrier --clobber; \
-	 tar xzf $(PREV_RELEASE_DIR)/carrier/rivet-$(FIELD_REPLAY_CARRIER_TAG)-aarch64-apple-darwin.tar.gz -C $(PREV_RELEASE_DIR)/carrier; \
-	 echo "  field-replay carrier: $$($(FIELD_REPLAY_CARRIER_BIN) --version)"; \
+	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/carrier $(FIELD_REPLAY_CARRIER_TAG); \
 	fi
-	@# The releases a client still runs (dev/release_oracle/field_state.py FIELD_VERSIONS), beside the baseline.
+	@echo "  field-replay carrier: $$($(FIELD_REPLAY_CARRIER_BIN) --version)"
 	@$(PY) -m dev.release_oracle.field_state --fetch $(PREV_RELEASE_DIR)/field
-	@# The MIGRATION carrier, PINNED: fetched by tag even once the compatibility floor passes it.
 	@if [ ! -x "$(MIGRATION_CARRIER_BIN)" ]; then \
-	 mkdir -p $(PREV_RELEASE_DIR)/field; \
-	 gh release download $(MIGRATION_CARRIER_TAG) --pattern "*aarch64-apple-darwin*" -D $(PREV_RELEASE_DIR)/field --clobber; \
-	 tar xzf $(PREV_RELEASE_DIR)/field/rivet-$(MIGRATION_CARRIER_TAG)-aarch64-apple-darwin.tar.gz -C $(PREV_RELEASE_DIR)/field; \
+	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/field $(MIGRATION_CARRIER_TAG); \
 	fi
 	@echo "  migration carrier: $$($(MIGRATION_CARRIER_BIN) --version)"
 	@if [ ! -x "$(STATE_COPY_FROM_BIN)" ]; then \
-	 mkdir -p $(PREV_RELEASE_DIR)/field; \
-	 gh release download $(STATE_COPY_FROM_TAG) --pattern "*aarch64-apple-darwin*" -D $(PREV_RELEASE_DIR)/field --clobber; \
-	 tar xzf $(PREV_RELEASE_DIR)/field/rivet-$(STATE_COPY_FROM_TAG)-aarch64-apple-darwin.tar.gz -C $(PREV_RELEASE_DIR)/field; \
+	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/field $(STATE_COPY_FROM_TAG); \
 	fi
 	@echo "  state-copy source release: $$($(STATE_COPY_FROM_BIN) --version)"
 

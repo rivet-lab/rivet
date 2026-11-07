@@ -73,3 +73,47 @@ fn the_baseline_download_fetches_the_field_releases_beside_the_previous_one() {
         "field_state.field_cache must read the directory the Makefile fetches into"
     );
 }
+
+#[test]
+fn no_baseline_or_carrier_path_or_download_names_a_triple() {
+    let makefile = repo_file("Makefile");
+    for literal in [
+        "apple-darwin",
+        "unknown-linux",
+        "aarch64",
+        "x86_64",
+        "arm64",
+        "uname",
+        "gh release",
+    ] {
+        assert!(
+            !makefile.contains(literal),
+            "the Makefile spells `{literal}`: a baseline or carrier path or download pattern fixed to one \
+             machine leaves the island unrunnable on the other; the triple comes from \
+             `field_state --triple` through $(TRIPLE), the download from `field_state --fetch-release`"
+        );
+    }
+    let carriers: Vec<&str> = makefile
+        .lines()
+        .filter(|l| l.contains("_BIN") && l.contains("?= $(PREV_RELEASE_DIR)/"))
+        .collect();
+    assert!(
+        carriers.len() >= 4,
+        "the four pinned carrier paths are no longer found: {carriers:?}"
+    );
+    for line in carriers {
+        assert!(
+            line.ends_with("-$(TRIPLE)/rivet"),
+            "a carrier path must end in -$(TRIPLE)/rivet, the directory `field_state.binary_in` unpacks into: {line}"
+        );
+    }
+    let recipe = makefile
+        .split("\nrelease-oracle-prev-bin:")
+        .nth(1)
+        .and_then(|rest| rest.split("\nrelease-oracle-full:").next())
+        .expect("the Makefile has a release-oracle-prev-bin recipe before release-oracle-full");
+    assert!(
+        recipe.contains("field_state --fetch-release $(PREV_RELEASE_DIR) latest"),
+        "the baseline must come from `field_state --fetch-release ... latest`"
+    );
+}
