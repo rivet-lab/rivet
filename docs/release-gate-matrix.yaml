@@ -431,12 +431,12 @@ infra:
     # 2026-11-05: +4 structural N/A rows from keyset-key-alias-type-by-name (postgres, mysql, oracle and mongo have no catalog name match on a user type to seed).
     # 2026-11-05: +4 structural N/A rows from keyset-key-oracle-exact-number-refused (postgres, mysql, mssql and mongo reach no Oracle NUMBER exemption in the keyset key check).
     # 2026-11-06: +4 structural N/A rows from keyset-key-oracle-inexact-number-admitted (postgres, mysql, mssql and mongo reach no Oracle NUMBER scale fact in the keyset key check).
+    # 2026-11-06: +1 structural N/A row from reset-chunks-by-export-name (a MongoDB export has no range-chunk checkpoint for a reset to remove).
     # 2026-11-06: +2 N/A rows from ca-file-second-trust-anchor (oracle refuses ca_file; mongo's driver takes ca_file as its whole root store); mysql and mssql carry patches that restore the registry driver.
     # 2026-11-05: +1 N/A row, progress-inherited-by-another-stream x mongo: the collection incarnation in the stored population refuses the repoint before the rows comparison the seed breaks.
     # 2026-11-06: +3 structural N/A rows from interval-text-without-its-label (MySQL, SQL Server and MongoDB have no INTERVAL type to reach the Interval arm).
     # 2026-11-05: +2 structural N/A rows from stop-class-number (PostgreSQL decides every error by its SQLSTATE, MongoDB reads whole documents and refuses no column).
-    na_ceiling: 561  # ratchet-pin: seeded-na (review 2027-02-01)
-    # 2026-11-05: +2 structural N/A rows from stop-class-number (PostgreSQL decides every error by its SQLSTATE, MongoDB reads whole documents and refuses no column).
+    na_ceiling: 562  # ratchet-pin: seeded-na (review 2027-02-01)
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

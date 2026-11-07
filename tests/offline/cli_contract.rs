@@ -777,3 +777,30 @@ fn metrics_json_prints_the_aggregate_rows_and_never_the_human_sentinel() {
     assert_eq!(row["validated"], true);
     assert!(row["error_message"].is_null());
 }
+
+// ─── state reset-chunks --stuck-checkpoints: the empty answer names its source ─
+
+/// The empty answer of `reset-chunks --stuck-checkpoints` says whose checkpoints it looked for.
+#[test]
+fn reset_chunks_stuck_with_nothing_stuck_names_the_source_it_looked_under() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("r.yaml");
+    std::fs::write(
+        &cfg,
+        "source:\n  type: postgres\n  url: postgres://x/x\nexports:\n  - name: orders\n    query: SELECT 1\n    mode: full\n    format: parquet\n    destination:\n      type: local\n      path: ./out\n",
+    )
+    .unwrap();
+    let cfg = cfg.to_str().unwrap();
+
+    let (code, out, err) = run(&["state", "reset-chunks", "-c", cfg, "--stuck-checkpoints"]);
+    assert_eq!(code, 0, "{err}");
+    let state_db = dir.path().join(".rivet_state.db");
+    assert_eq!(
+        out,
+        format!(
+            "No exports have an in-progress chunk checkpoint run for this config's source.\n\
+             (Nothing with chunk_run.status = 'in_progress' under `postgres://x:5432/x` in {}.)\n",
+            state_db.display()
+        )
+    );
+}

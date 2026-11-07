@@ -5140,6 +5140,24 @@ seeds:
         patch: number-text-without-its-label/oracle.patch
         cells: [oracle_batch_and_cdc_deliver_every_ledger_row_alike, "lib:a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not"]
 
+  - name: reset-chunks-by-export-name
+    class: "`state reset-chunks` (and `--stuck-checkpoints`) takes the run lease on the config's source, empty when the source does not resolve, and deletes every chunk checkpoint of the export name whatever source wrote it: from a config on another source or with `url_env` unset it removes a live run's checkpoint past the lease, and that run ends exit 5 RIVET_STATE_CHUNK_CHECKPOINT_GONE"
+    history: "confirmed 2026-11-06 (two PostgreSQL databases, one state, a live checkpointed run of B, `reset-chunks` from A, then from B with its url_env unset); RED on main 2026-11-06 (the rig oracle: the chunk_run and chunk_task counts of the live run drop to 0)"
+    scope: source
+    patch: reset-chunks-by-export-name/shared.patch
+    engines:
+      postgres:
+        cells: [pg_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint, pg_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint, "lib:reset_chunks_removes_only_the_checkpoint_of_its_own_source", "lib:stuck_checkpoints_removes_only_the_checkpoint_of_its_own_source", "lib:reset_chunks_refuses_a_source_that_does_not_resolve_and_removes_nothing"]
+      mysql:
+        cells: [mysql_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint, mysql_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint, "lib:reset_chunks_removes_only_the_checkpoint_of_its_own_source", "lib:stuck_checkpoints_removes_only_the_checkpoint_of_its_own_source", "lib:reset_chunks_refuses_a_source_that_does_not_resolve_and_removes_nothing"]
+      mssql:
+        cells: [mssql_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint, mssql_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint, "lib:reset_chunks_removes_only_the_checkpoint_of_its_own_source", "lib:stuck_checkpoints_removes_only_the_checkpoint_of_its_own_source", "lib:reset_chunks_refuses_a_source_that_does_not_resolve_and_removes_nothing"]
+      oracle:
+        cells: [oracle_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint, oracle_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint, "lib:reset_chunks_removes_only_the_checkpoint_of_its_own_source", "lib:stuck_checkpoints_removes_only_the_checkpoint_of_its_own_source", "lib:reset_chunks_refuses_a_source_that_does_not_resolve_and_removes_nothing"]
+      mongo:
+        na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint for a reset to remove"
+
+
   - name: interval-text-without-its-label
     class: "an INTERVAL column (PostgreSQL, Oracle) is written as ISO 8601 duration text in a Utf8 column without the rivet.text_form = iso8601_duration label (PostgreSQL in batch and in CDC alike, Oracle in batch), so a reader cannot tell the canonical duration from a free string"
     history: "type-known-defects INTERVAL of docs/type-capability-matrix.yaml (ADR-0038 CP2/CP5, issue #851 class C); RED on main 2026-11-05 (the ledger row without its marker fails postgres_batch_and_cdc_deliver_every_ledger_row_alike: the ledger delivers text form iso8601_duration, the part labels it nothing)"
