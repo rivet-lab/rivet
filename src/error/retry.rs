@@ -51,8 +51,8 @@ impl RetryClass {
 
 // Shorthand internal constructors — the older code passed naked tuples and
 // these keep the matchers below short without losing type safety.
-const PERMANENT: RetryClass = RetryClass::Permanent;
-const TRANSIENT_RECONNECT: RetryClass = RetryClass::Transient {
+pub(crate) const PERMANENT: RetryClass = RetryClass::Permanent;
+pub(crate) const TRANSIENT_RECONNECT: RetryClass = RetryClass::Transient {
     needs_reconnect: true,
     extra_delay_ms: 0,
 };
@@ -119,6 +119,9 @@ fn classify_io_kind(kind: std::io::ErrorKind) -> Option<RetryClass> {
 }
 
 pub fn classify_error(err: &anyhow::Error) -> RetryClass {
+    if let Some(kept) = crate::error::kept_verdict(err) {
+        return kept;
+    }
     // A typed stop (drift, integrity, a non-environment code) is permanent, whatever its text says.
     if crate::error::stop_class(err).is_some() {
         return PERMANENT;
@@ -164,6 +167,15 @@ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
         return result;
     }
 
+    // --- SQL Server: the server's own number, before any word of its text ---
+    if let Some(class) = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<tiberius::error::Error>())
+        .and_then(classify_mssql_error)
+    {
+        return class;
+    }
+
     // --- MongoDB: network / server-selection / retryable-read command codes ---
     if let Some(result) = err
         .downcast_ref::<mongodb::error::Error>()
@@ -193,7 +205,6 @@ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
     // --- Fallback: string-based classification ---
     let msg = format!("{:#}", err).to_lowercase();
 
-    // Oracle: the source lifts `oracledb::Error` (Debug-only) into a string, so no downcast.
     if is_oracle_lost_session(&msg) {
         return TRANSIENT_RECONNECT;
     }
@@ -305,6 +316,29 @@ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
 
     // Not transient
     PERMANENT
+}
+
+/// The class of a SQL Server error number: 1205 (deadlock victim) and 1222 (lock request time out) clear on their own, the numbers that name a missing or forbidden object or column are final; any other number is left to the text.
+fn mssql_number_class(code: u32) -> Option<RetryClass> {
+    match code {
+        1205 | 1222 => Some(TRANSIENT_SAME_CONN),
+        102 | 156 | 207 | 208 | 229 | 230 => Some(PERMANENT),
+        _ => None,
+    }
+}
+
+/// The class of a SQL Server driver error by the server's own number.
+fn classify_mssql_error(err: &tiberius::error::Error) -> Option<RetryClass> {
+    match err {
+        tiberius::error::Error::Server(token) => mssql_number_class(token.code()),
+        _ => None,
+    }
+}
+
+/// The class of an Oracle server number the driver reports: the numbers that name an invalid statement, identifier, object or privilege are final; any other is left to the text.
+#[cfg(feature = "oracle")]
+pub(crate) fn oracle_number_class(code: usize) -> Option<RetryClass> {
+    matches!(code, 900 | 904 | 933 | 936 | 942 | 1031).then_some(PERMANENT)
 }
 
 /// The opendal error one link of an error chain is, or the one an `io::Error` from opendal's std writer wraps.
@@ -491,9 +525,7 @@ fn classify_mysql_error(err: &mysql::Error) -> Option<RetryClass> {
             3024 => Some(PERMANENT),
             // ER_CON_COUNT_ERROR (too many connections) / ER_SERVER_SHUTDOWN
             1040 | 1053 => Some(transient(true, 15_000)),
-            // ER_ACCESS_DENIED_ERROR, ER_DBACCESS_DENIED_ERROR
-            // ER_BAD_DB_ERROR, ER_NO_SUCH_TABLE, ER_PARSE_ERROR
-            1045 | 1044 | 1049 | 1146 | 1064 => Some(PERMANENT),
+            1045 | 1044 | 1049 | 1146 | 1064 | 1051 | 1052 | 1054 | 1142 | 1143 => Some(PERMANENT),
             _ => None,
         },
         mysql::Error::IoError(_) => Some(TRANSIENT_RECONNECT),
@@ -1056,19 +1088,25 @@ mod tests {
     }
 
     #[test]
-    fn a_coded_refusal_is_permanent_but_a_coded_environment_error_still_reads_its_text() {
-        let refused: anyhow::Error = crate::error::CodedError::new(
+    fn a_coded_stop_is_decided_by_its_code_and_only_a_wrapper_without_a_kept_cause_reads_its_text()
+    {
+        let permanent = |code, text: &str| {
+            !classify_error(&crate::error::CodedError::new(code, text).into()).is_transient()
+        };
+        assert!(permanent(
             crate::error::codes::STATE_CURSOR_OWNER_MISMATCH,
-            "connection reset while the cursor is owned elsewhere",
-        )
-        .into();
-        assert!(!classify_error(&refused).is_transient());
-        let env: anyhow::Error = crate::error::CodedError::new(
+            "connection reset while the cursor is owned elsewhere"
+        ));
+        assert!(permanent(
             crate::error::codes::SOURCE_STATEMENT_TIMEOUT,
+            "connection reset by peer"
+        ));
+        let wrapper: anyhow::Error = crate::error::CodedError::new(
+            crate::error::codes::STATE_NOT_WRITABLE,
             "connection reset by peer",
         )
         .into();
-        assert!(classify_error(&env).is_transient());
+        assert!(classify_error(&wrapper).is_transient());
     }
 
     /// Each credential needle classifies PERMANENT on its own, even beside a transient one.
@@ -1145,10 +1183,104 @@ mod tests {
         for code in [1040, 1053] {
             assert_eq!(class(code), Some(transient(true, 15_000)), "{code}");
         }
-        for code in [1045, 1044, 1049, 1146, 1064, 3024] {
+        for code in [
+            1045, 1044, 1049, 1146, 1064, 3024, 1051, 1052, 1054, 1142, 1143,
+        ] {
             assert_eq!(class(code), Some(PERMANENT), "{code}");
         }
         assert_eq!(class(9999), None);
+    }
+
+    /// Each SQL Server number maps to its class by number, and an untyped one is left to the text.
+    #[test]
+    fn each_mssql_number_maps_to_its_class() {
+        for code in [1205, 1222] {
+            assert_eq!(
+                mssql_number_class(code),
+                Some(TRANSIENT_SAME_CONN),
+                "{code}"
+            );
+        }
+        for code in [102, 156, 207, 208, 229, 230] {
+            assert_eq!(mssql_number_class(code), Some(PERMANENT), "{code}");
+        }
+        for code in [0, 1, 206, 231, 1204, 1223, 4060, 18456] {
+            assert_eq!(mssql_number_class(code), None, "{code}");
+        }
+    }
+
+    /// Each Oracle number maps to its class by number, and an untyped one is left to the text.
+    #[cfg(feature = "oracle")]
+    #[test]
+    fn each_oracle_number_maps_to_its_class() {
+        for code in [900, 904, 933, 936, 942, 1031] {
+            assert_eq!(oracle_number_class(code), Some(PERMANENT), "{code}");
+        }
+        for code in [0, 1, 903, 943, 1017, 1555, 3113, 12541, 60] {
+            assert_eq!(oracle_number_class(code), None, "{code}");
+        }
+    }
+
+    /// A permanent MySQL number exits 1 whatever transient word the object it quotes holds.
+    #[test]
+    fn a_permanent_mysql_number_exits_1_whatever_the_name_it_quotes_holds() {
+        for (code, message) in [
+            (1054, "Unknown column 'login_timeout' in 'field list'"),
+            (1054, "Unknown column 'dns_cache' in 'field list'"),
+            (1051, "Unknown table 'login_timeouts'"),
+            (1052, "Column 'deadlock_flag' in field list is ambiguous"),
+            (
+                1142,
+                "SELECT command denied to user 'dns_user'@'h' for table 'login_timeouts'",
+            ),
+            (
+                1143,
+                "SELECT command denied to user 'u'@'h' for column 'deadlock_flag' in table 't'",
+            ),
+        ] {
+            let inner = anyhow::Error::new(mysql::Error::MySqlError(mysql::error::MySqlError {
+                state: "42S22".to_string(),
+                message: message.to_string(),
+                code,
+            }));
+            let out = crate::error::recoded(
+                &inner,
+                crate::error::codes::SOURCE_QUERY_FAILED,
+                "export 'o': the read stopped",
+            );
+            assert_eq!(
+                crate::error::classify_exit(&out),
+                1,
+                "mysql {code}: {out:#}"
+            );
+        }
+    }
+
+    /// A MySQL number rivet does not type is decided exactly as before.
+    #[test]
+    fn a_mysql_number_that_is_not_typed_is_decided_as_before() {
+        for (code, message, exit) in [
+            (1062, "Duplicate entry 'a' for key 'k'", 1),
+            (1062, "Duplicate entry 'dns_cache' for key 'k'", 2),
+            (1213, "Deadlock found when trying to get lock", 2),
+            (1053, "Server shutdown in progress", 2),
+        ] {
+            let inner = anyhow::Error::new(mysql::Error::MySqlError(mysql::error::MySqlError {
+                state: "HY000".to_string(),
+                message: message.to_string(),
+                code,
+            }));
+            let out = crate::error::recoded(
+                &inner,
+                crate::error::codes::SOURCE_QUERY_FAILED,
+                "export 'o': the read stopped",
+            );
+            assert_eq!(
+                crate::error::classify_exit(&out),
+                exit,
+                "mysql {code}: {message}"
+            );
+        }
     }
 
     /// Each string needle of the network, duration and lock-wait groups classifies on its own.

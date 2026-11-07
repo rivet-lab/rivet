@@ -808,6 +808,12 @@ When a drain to stdout ends it acknowledges the last commit it printed, so on
 PostgreSQL the slot advances and the next drain starts after that commit. A drain
 that stops before its end acknowledges nothing and the next one prints the same
 lines again: a consumer of the pipe must tolerate a repeated line.
+A change whose row image is partial (MySQL `binlog_row_image` = `MINIMAL` or `NOBLOB`, a
+session override included; an SQL Server capture instance with fewer columns than the
+table) is never printed as positional values: the drain stops with
+`RIVET_SOURCE_CDC_PREREQUISITE` (exit 1) before that line, the checkpoint stays where it
+was, and the refusal prints the re-baseline steps, exactly as `--output` and `mode: cdc`
+do. A global `MINIMAL` or `NOBLOB` is refused when the drain opens.
 `before` holds the old image's cells in the order the engine logged them. On
 PostgreSQL every UPDATE that carries an old image also gets `before_columns`, which
 names those cells. That is the replica identity's columns, or under

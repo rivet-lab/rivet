@@ -75,6 +75,25 @@ pub(crate) fn partial_image_refusal(
     )
 }
 
+/// The refusal of a stream whose image does not carry every column of a captured table, at open and at the end of a drain.
+pub(crate) fn open_partial_image_refusal(engine: CdcEngine, why: &str) -> anyhow::Error {
+    crate::error::coded(
+        crate::error::codes::SOURCE_CDC_PREREQUISITE,
+        format!(
+            "{} cdc: {why}. Capturing under this setting would report success over events that \
+             cannot represent the row.",
+            engine.label()
+        ),
+    )
+}
+
+/// `Some((values, names))` when a named image carries a different number of values than names, a PARTIAL image.
+pub(crate) fn named_image_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usize)> {
+    let names = ev.image_names.as_deref()?;
+    let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
+    (n != names.len()).then_some((n, names.len()))
+}
+
 /// Default row cap — 5M rows, far above any real OLTP transaction.
 pub(crate) const DEFAULT_MAX_TX_ROWS: usize = 5_000_000;
 /// Default byte cap — 2 GiB, likewise.
@@ -669,6 +688,9 @@ pub(crate) fn run(
     if max_events == Some(0) {
         return Ok(());
     }
+    if let RowImage::Partial { why } = stream.row_image(&tables) {
+        return Err(open_partial_image_refusal(stream.engine(), &why));
+    }
     let mut last_commit: Option<Position> = None;
     let drained = emit_ndjson(stream, &checkpoint, &tables, max_events, &mut last_commit);
     // Every line up to `last_commit` is on stdout: release it at the source (PostgreSQL advances the slot).
@@ -716,6 +738,9 @@ fn emit_ndjson(
         // corruption). An uncaptured table's poison was already dropped above.
         ev.raise_poison()?;
         ev.raise_before_poison()?;
+        if let Some((n, names)) = named_image_arity_mismatch(&ev) {
+            return Err(partial_image_refusal(&ev.schema, &ev.table, n, names));
+        }
         println!("{}", ndjson_line(&ev));
         emitted += 1;
         // Checkpoint AFTER emitting the captured event — never before. A crash in
@@ -1262,32 +1287,17 @@ pub(crate) fn pg_retention_warnings_on(client: &mut postgres::Client, slot: &str
     out
 }
 
-/// Add an engine's setup hint ONLY to errors rivet did not raise itself.
-///
-/// Every `open` is wrapped in a `wal_level` / binlog-grants / Agent-setup hint,
-/// because a connection that fails for a permissions reason gives an opaque driver
-/// message and the hint is the whole answer. But rivet's OWN verdicts are already
-/// the whole answer, and the wrap puts the wrong cause FIRST — measured on the PG
-/// anti-gap guard, which reports permanent DATA LOSS:
-///
-///   Error: if this is a permissions/setup error: PostgreSQL CDC needs wal_level=
-///   logical and a role with the REPLICATION attribute — see … : pg cdc: slot
-///   'x' is missing but a resume checkpoint exists — the changes since then are no
-///   longer in the log. Re-snapshot …
-///
-/// The operator reads a wal_level troubleshooting line while the sentence that
-/// matters — re-snapshot, the data is gone — sits past a colon at the end. Two
-/// call sites were already hoisted OUT of their wrap one at a time for exactly
-/// this (`precheck_configured_tables` on both MySQL and PG, each with a comment
-/// saying the hint "sends the operator to fix permissions they never had a problem
-/// with"). Hoisting works only for a check that can run BEFORE `open`; this covers
-/// the ones raised inside it.
-///
-/// The discriminator is the prefix rivet puts on its own CDC messages
-/// (`mysql cdc:`, `pg cdc:`, …), which is also what the refusals and guards in each
-/// adapter are built from.
+/// Add an engine's setup hint only to errors rivet did not raise itself: chosen by code, then by type, then by an engine `cdc` segment of the message.
 fn with_setup_hint(e: anyhow::Error, hint: &'static str) -> anyhow::Error {
     let rendered = format!("{e:#}");
+    if let Some(coded) = e.downcast_ref::<crate::error::CodedError>()
+        && !matches!(
+            coded.kind(),
+            crate::error::ErrorKind::Environment(crate::error::Retry::ByCause)
+        )
+    {
+        return e;
+    }
     if e.downcast_ref::<crate::source::TlsHandshakeFailed>()
         .is_some()
         || e.downcast_ref::<crate::source::UnreachableTarget>()
@@ -1298,16 +1308,12 @@ fn with_setup_hint(e: anyhow::Error, hint: &'static str) -> anyhow::Error {
     if crate::source::is_tls_handshake_failure(&rendered) {
         return crate::source::TlsHandshakeFailed::wrap(e, None);
     }
-    if [
-        "mysql cdc:",
-        "pg cdc:",
-        "mssql cdc:",
-        "mongodb cdc:",
-        "cdc:",
-    ]
-    .iter()
-    .any(|p| rendered.contains(p))
-    {
+    if rendered.split(": ").any(|segment| {
+        segment == "cdc"
+            || segment
+                .strip_suffix(" cdc")
+                .is_some_and(|engine| !engine.is_empty() && !engine.contains(' '))
+    }) {
         return e;
     }
     e.context(hint)
@@ -2460,6 +2466,51 @@ mod setup_hint {
         );
     }
 
+    /// The hint is chosen by the error's code and by an engine `cdc` segment of the message, never by a `cdc:` that a driver message happens to echo inside a word.
+    #[test]
+    fn the_setup_hint_is_chosen_by_code_then_by_the_prefix_not_by_a_substring() {
+        let hint = super::PG_CDC_HINT;
+        let hinted = |e: anyhow::Error| {
+            format!("{:#}", super::with_setup_hint(e, hint))
+                .starts_with("if this is a permissions/setup error")
+        };
+        assert!(
+            !hinted(crate::error::coded(
+                crate::error::codes::SOURCE_CDC_LOG_GAP,
+                "the stop says nothing of cdc"
+            )),
+            "a coded refusal is rivet's verdict whatever its words"
+        );
+        assert!(
+            hinted(anyhow::anyhow!(
+                "db error: relation \"dns_cdc: zones\" does not exist"
+            )),
+            "a driver message that echoes `cdc:` mid-word is still an opaque driver error"
+        );
+        for opaque in [
+            "db error: relation the orders cdc: does not exist",
+            "db error:  cdc: stray",
+        ] {
+            assert!(
+                hinted(anyhow::anyhow!(opaque)),
+                "a segment ending ` cdc` after a spaced or empty engine is not rivet's prefix: {opaque}"
+            );
+        }
+        for rivet_own in [
+            "oracle cdc: the redo log changed",
+            "sqlserver cdc: capture job stopped",
+            "cdc: rivet.t: a row image carries 1 value(s)",
+            "opening the stream: pg cdc: slot 'x' is missing",
+        ] {
+            assert!(!hinted(anyhow::anyhow!(rivet_own)), "{rivet_own}");
+        }
+        let wrapper = crate::error::coded(
+            crate::error::codes::SOURCE_QUERY_FAILED,
+            "permission denied for table t",
+        );
+        assert!(hinted(wrapper), "a driver-failure wrapper keeps the hint");
+    }
+
     /// A redo log that kept changing under LogMiner reaches the operator as that, never as a grants problem.
     #[cfg(feature = "oracle")]
     #[test]
@@ -3239,6 +3290,115 @@ mod tests {
         );
         super::run(&mut s, None, vec!["orders".into()], None).expect_err("the poison");
         assert_eq!(s.1, ["0/1"]);
+    }
+
+    /// A stream of events with a fixed open-time image verdict.
+    struct Imaged(
+        std::collections::VecDeque<super::ChangeEvent>,
+        super::RowImage,
+    );
+    impl super::ChangeStream for Imaged {
+        fn engine(&self) -> super::CdcEngine {
+            super::CdcEngine::Mysql
+        }
+        fn row_image(&mut self, _tables: &[String]) -> super::RowImage {
+            self.1.clone()
+        }
+        fn next_change(&mut self) -> Option<Result<super::ChangeEvent>> {
+            self.0.pop_front().map(Ok)
+        }
+    }
+
+    /// One update on `table` naming four columns and carrying `n` values in its after image.
+    fn named_update(table: &str, lsn: &str, n: usize) -> super::ChangeEvent {
+        super::ChangeEvent {
+            after: Some((0..n as i64).map(RivetValue::Int).collect()),
+            image_names: Some(std::sync::Arc::from(
+                ["id", "a", "b", "c"].map(String::from).to_vec(),
+            )),
+            ..event_at(table, lsn, true)
+        }
+    }
+
+    /// The stdout driver refuses a partial image by code, acks nothing, and leaves the checkpoint file unwritten.
+    #[test]
+    fn the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ck = dir.path().join("ck.json");
+        let mut s = Imaged(
+            vec![named_update("orders", "0/1", 1)].into(),
+            super::RowImage::Whole,
+        );
+        let err = super::run(&mut s, Some(ck.clone()), vec!["orders".into()], None)
+            .expect_err("a partial image must stop the run");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("a row image carries 1 value(s) under 4 column name(s)")
+                && text.contains("a PARTIAL image")
+                && text.contains(super::checkpoint_identity::RECOVER),
+            "got: {text}"
+        );
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_CDC_PREREQUISITE)
+        );
+        assert!(
+            !ck.exists(),
+            "the checkpoint must not move past a refused event"
+        );
+    }
+
+    /// Whole images, partial images of an unlisted table and key-only deletes print as before.
+    #[test]
+    fn the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images() {
+        let drained = |events: Vec<super::ChangeEvent>, image: super::RowImage| {
+            let mut s = Imaged(events.into(), image);
+            let out = super::run(&mut s, None, vec!["orders".into()], None);
+            assert!(out.is_ok(), "got: {out:?}");
+            s.0.len()
+        };
+        assert_eq!(
+            drained(
+                vec![named_update("orders", "0/1", 4)],
+                super::RowImage::Whole
+            ),
+            0
+        );
+        assert_eq!(
+            drained(
+                vec![named_update("other", "0/1", 1)],
+                super::RowImage::Whole
+            ),
+            0
+        );
+        assert_eq!(
+            drained(
+                vec![named_update("orders", "0/1", 4)],
+                super::RowImage::KeyOnlyDeletes { why: "k".into() }
+            ),
+            0
+        );
+    }
+
+    /// A partial open-time verdict stops the run before any event is read.
+    #[test]
+    fn the_ndjson_driver_refuses_a_partial_open_time_image_before_reading() {
+        let mut s = Imaged(
+            vec![named_update("orders", "0/1", 4)].into(),
+            super::RowImage::Partial {
+                why: "binlog_row_image = MINIMAL".into(),
+            },
+        );
+        let err = super::run(&mut s, None, vec!["orders".into()], None).expect_err("partial");
+        assert!(
+            format!("{err:#}").contains("binlog_row_image = MINIMAL"),
+            "got: {err:#}"
+        );
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_CDC_PREREQUISITE)
+        );
+        assert_eq!(s.0.len(), 1, "no event was consumed");
     }
 
     /// A declared key column is found by exact or case-folded name; the first missing one is named.

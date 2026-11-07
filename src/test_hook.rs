@@ -51,7 +51,16 @@
 //!     .output();
 //! ```
 
+use crate::error::retry::{PERMANENT, RetryClass, TRANSIENT_RECONNECT};
 use std::sync::OnceLock;
+
+/// The test hook's coded fault over the typed verdict `cause`.
+fn injected(message: String, cause: RetryClass) -> anyhow::Error {
+    anyhow::Error::new(
+        crate::error::CodedError::new(crate::error::codes::CLI_TEST_FAULT_INJECTED, message)
+            .over(cause),
+    )
+}
 
 fn configured_point() -> Option<&'static str> {
     static CELL: OnceLock<Option<String>> = OnceLock::new();
@@ -131,10 +140,10 @@ pub(crate) fn maybe_fail_at(point: &str) -> crate::error::Result<()> {
     if let Ok(p) = std::env::var("RIVET_TEST_ERROR_AT")
         && p == point
     {
-        crate::rivet_bail!(
-            crate::error::codes::CLI_TEST_FAULT_INJECTED,
-            "rivet test-hook: injected error at '{point}' (RIVET_TEST_ERROR_AT)"
-        );
+        return Err(injected(
+            format!("rivet test-hook: injected error at '{point}' (RIVET_TEST_ERROR_AT)"),
+            PERMANENT,
+        ));
     }
     Ok(())
 }
@@ -146,11 +155,13 @@ pub(crate) fn maybe_transient_once(point: &str) -> crate::error::Result<()> {
     if std::env::var("RIVET_TEST_TRANSIENT_ONCE").is_ok_and(|p| p == point)
         && !FIRED.swap(true, std::sync::atomic::Ordering::SeqCst)
     {
-        crate::rivet_bail!(
-            crate::error::codes::CLI_TEST_FAULT_INJECTED,
-            "Unexpected (temporary) rivet test-hook: injected transient error at '{point}' \
-             (RIVET_TEST_TRANSIENT_ONCE)"
-        );
+        return Err(injected(
+            format!(
+                "Unexpected (temporary) rivet test-hook: injected transient error at '{point}' \
+                 (RIVET_TEST_TRANSIENT_ONCE)"
+            ),
+            TRANSIENT_RECONNECT,
+        ));
     }
     Ok(())
 }
@@ -174,10 +185,10 @@ pub(crate) fn fault_at_index(
     configured: Option<&str>,
 ) -> anyhow::Result<()> {
     if configured == Some(format!("{point}:{index}").as_str()) {
-        crate::rivet_bail!(
-            crate::error::codes::CLI_TEST_FAULT_INJECTED,
-            "rivet test-hook: injected error at '{point}:{index}' (RIVET_TEST_ERROR_AT)"
-        );
+        return Err(injected(
+            format!("rivet test-hook: injected error at '{point}:{index}' (RIVET_TEST_ERROR_AT)"),
+            PERMANENT,
+        ));
     }
     Ok(())
 }
@@ -257,5 +268,15 @@ mod tests {
         let err = fault_at_index("chunk_export", 1, Some("chunk_export:1")).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_CLI_TEST_FAULT_INJECTED", 1);
         assert!(format!("{err}").contains("'chunk_export:1'"));
+    }
+
+    #[test]
+    fn an_injected_fault_exits_by_the_verdict_it_carries() {
+        let transient = injected("x".into(), TRANSIENT_RECONNECT);
+        crate::error::assert_coded(&transient, "RIVET_CLI_TEST_FAULT_INJECTED", 2);
+        assert!(crate::error::retry::classify_error(&transient).is_transient());
+        let permanent = injected("Unexpected (temporary) x".into(), PERMANENT);
+        crate::error::assert_coded(&permanent, "RIVET_CLI_TEST_FAULT_INJECTED", 1);
+        assert!(!crate::error::retry::classify_error(&permanent).is_transient());
     }
 }

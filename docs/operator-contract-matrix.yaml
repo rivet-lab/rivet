@@ -384,6 +384,14 @@ scenarios:
     mongo:    { test: cdc_to_stdout_emits_each_change_once_mongo }
     oracle:   { test: cdc_to_stdout_emits_each_change_once_oracle }
 
+  - id: cdc_stdout_refuses_a_partial_image
+    what: "`rivet cdc` without `--output` refuses a change whose row image carries fewer values than its column names (MySQL binlog_row_image MINIMAL/NOBLOB, an MSSQL capture instance with fewer columns than the table) by RIVET_SOURCE_CDC_PREREQUISITE, prints no line for it and leaves the checkpoint where it was"
+    postgres: { na: "a PostgreSQL image is whole or key-only on deletes, never partial: the stdout loop prints key-only deletes as before (the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images)" }
+    mysql:    { test: cdc_to_stdout_refuses_a_partial_image_mysql }
+    mssql:    { test: cdc_to_stdout_refuses_a_partial_image_mssql }
+    mongo:    { na: "a MongoDB change carries a document, not positional values under column names, so no arity can disagree" }
+    oracle:   { na: "every Oracle event carries image_names from ALL_TAB_COLS and the open refuses a table without ALL COLUMNS supplemental logging, oracle_cdc_table_without_all_column_logging_is_refused (live_cdc_oracledb.rs)" }
+
   - id: init_config_runs_full
     what: "the config `rivet init --mode full` writes runs as written"
     postgres: { test: the_config_init_writes_runs_full_postgres }
@@ -492,14 +500,22 @@ scenarios:
     what: "2026-11-04 finding VP-8 (seam stop-class): a source table or collection the source does not hold is refused by its code (RIVET_SOURCE_TABLE_NOT_FOUND, RIVET_SOURCE_COLLECTION_NOT_FOUND) with exit 1 whatever words its name holds; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exited 2 on SQL Server, Oracle and MongoDB because the exit was read from the message text that holds the name, and 1 on PostgreSQL and MySQL; the plain-named neighbours (users, orders_archive) exit 1 everywhere"
     postgres: { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_postgres }
     mysql:    { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_mysql }
-    mssql:    { test: open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql }
-    mongo:    { test: open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo }
-    oracle:   { test: open_defect_a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle }
+    mssql:    { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_mssql }
+    mongo:    { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_mongo }
+    oracle:   { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_oracle }
+
+  - id: missing_column_exits_by_its_code
+    what: "2026-11-05 finding D1 of the stop-class verification (VP-8 class): a column the table does not hold fails the read with exit 1 whatever words its name holds (SQL Server and Oracle carry RIVET_SOURCE_QUERY_FAILED; PostgreSQL and MySQL raise the driver error uncoded today, so their cells assert the exit alone); the driver numbers that name a missing or forbidden object or column (SQL Server 207/208/229/230, MySQL 1054/1142/1143, ORA-00904/00942/01031) are typed permanent, where a column named login_timeout, dns_cache or deadlock_flag exited 2 on SQL Server, MySQL and Oracle because the exit was read from the words of the message that holds the name; the plain-named neighbours (amount, region_code) exit 1 everywhere"
+    postgres: { test: a_missing_column_exits_by_its_code_whatever_its_name_holds_postgres }
+    mysql:    { test: a_missing_column_exits_by_its_code_whatever_its_name_holds_mysql }
+    mssql:    { test: a_missing_column_exits_by_its_code_whatever_its_name_holds_mssql }
+    mongo:    { na: "a MongoDB export reads whole documents; a field the documents do not hold is a null, not a refused read" }
+    oracle:   { test: a_missing_column_exits_by_its_code_whatever_its_name_holds_oracle }
 
   - id: mssql_lock_timeout_exits_retryable
     what: "2026-11-04 finding MT-F-F (seam stop-class): a SQL Server read that waited past `tuning: lock_timeout_s` on a row lock another session holds ends with error 1222 and exits 2 (retryable), as the same wait on MySQL (1205) does; it exited 1 because the stringified SOURCE_QUERY_FAILED text did not name the lock"
     postgres: { na: "PostgreSQL has no lock_timeout_s tuning knob in rivet; its lock_not_available (55P03) is a typed verdict the retry classifier reads, covered offline" }
     mysql:    { na: "MySQL error 1205 is a typed verdict the retry classifier already reads (src/error/retry.rs), covered offline" }
-    mssql:    { test: open_defect_an_mssql_read_blocked_past_its_lock_timeout_exits_retryable }
+    mssql:    { test: an_mssql_read_blocked_past_its_lock_timeout_exits_retryable }
     mongo:    { na: "MongoDB has no row lock a read waits on" }
     oracle:   { na: "an Oracle read does not wait on a row lock (multiversion reads)" }

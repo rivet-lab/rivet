@@ -118,7 +118,10 @@ pub(crate) fn run_capture(
             engine.label()
         ),
         RowImage::Partial { why } => {
-            return (Vec::new(), Err(partial_image_refusal(engine, &why)));
+            return (
+                Vec::new(),
+                Err(crate::source::cdc::open_partial_image_refusal(engine, &why)),
+            );
         }
     }
     let retention = stream.retention_warnings();
@@ -233,20 +236,4 @@ pub(crate) fn run_capture(
         reschema: Some(reschema),
     };
     sink::run_to_files(stream.as_mut(), sink_cfg)
-}
-
-/// The refusal of a stream whose image does not carry every column of a captured table: one text
-/// and one code, at open and at the end of a drain that saw the table outgrow its image.
-pub(crate) fn partial_image_refusal(
-    engine: crate::source::cdc::CdcEngine,
-    why: &str,
-) -> anyhow::Error {
-    crate::error::coded(
-        crate::error::codes::SOURCE_CDC_PREREQUISITE,
-        format!(
-            "{} cdc: {why}. Capturing under this setting would report success over events that \
-             cannot represent the row.",
-            engine.label()
-        ),
-    )
 }
