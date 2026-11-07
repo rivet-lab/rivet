@@ -440,7 +440,9 @@ infra:
     # 2026-11-05: +2 structural N/A rows from stop-class-number (PostgreSQL decides every error by its SQLSTATE, MongoDB reads whole documents and refuses no column).
     # 2026-11-07: +7 structural N/A rows from cdc-stdout-partial-image (postgres, mongo, oracle) and cdc-stdout-partial-before-image (postgres, mssql, mongo, oracle): the partial image the stdout loop prints is a MySQL binlog and SQL Server capture-instance shape only.
     # 2026-11-06: +3 N/A rows from connection-cut-mid-row-not-retried (mssql lifts tiberius errors into text, mongo classifies a typed driver error, oracle lifts oracledb errors into text: none reaches the removed arm).
-    na_ceiling: 573  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 raised 566 -> 573 by #882: the 7 structural N/A rows of cdc-stdout-partial-image (postgres, mongo, oracle) and cdc-stdout-partial-before-image (postgres, mssql, mongo, oracle), each with its reason in dev/seeded/seeds.yaml
+    # 2026-11-07: +1 N/A row from state-reset-skips-partition-children x mongo (partition_by is refused for a MongoDB source at config load, so no export keeps per-partition progress).
+    # 2026-11-07: +2 N/A rows from PR 881 review: state-reset-holds-every-lease-at-once x postgres-state (a Postgres state lease is a row, no open file) and state-reset-misreads-stored-partitions x mongo (no partition_by on MongoDB).
+    na_ceiling: 576  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 raised 569 -> 576 by #882: the 7 structural N/A rows of cdc-stdout-partial-image and cdc-stdout-partial-before-image, each with its reason in dev/seeded/seeds.yaml; the 569 base is #881 with its own rows
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.

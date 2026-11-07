@@ -24,14 +24,43 @@ fn require_config(config_path: &str) -> Result<Config> {
     Config::load(config_path)
 }
 
-/// Bail if `export_name` is not declared in `config`, listing the known names.
-///
-/// Inspect commands (`metrics`, `journal`) that filter by a single export must
-/// not let a typo'd `--export` look like "this export simply has not run yet" —
-/// both used to print the same empty-state line. With the config now loaded, an
-/// unknown name is a clear error that points at the declared exports.
+/// Who owns a stored export name: a declared export, or the `partition_by` export whose child (`<parent>__<value>`) it is.
+enum Owner {
+    Declared(crate::config::ExportConfig),
+    PartitionChild(crate::config::ExportConfig),
+}
+
+/// The owner of `name`: an exact declared name first, else the longest `partition_by` parent it is a child of.
+fn owner_of(config: &Config, name: &str) -> Option<Owner> {
+    if let Ok(found) = crate::config::declared_exports(config, Some(name)) {
+        return found.into_iter().next().map(Owner::Declared);
+    }
+    config
+        .exports
+        .iter()
+        .filter(|e| {
+            e.partition_by.is_some()
+                && name
+                    .strip_prefix(e.name.as_str())
+                    .and_then(|rest| rest.strip_prefix("__"))
+                    .is_some_and(|value| !value.is_empty())
+        })
+        .max_by_key(|e| e.name.len())
+        .cloned()
+        .map(Owner::PartitionChild)
+}
+
+/// Whether the stored `name` belongs to the declared export `export`: it is that export, or one of its partition children.
+fn belongs_to(config: &Config, name: &str, export: &str) -> bool {
+    match owner_of(config, name) {
+        Some(Owner::Declared(e) | Owner::PartitionChild(e)) => e.name == export,
+        None => false,
+    }
+}
+
+/// Bail if `export_name` is neither declared in `config` nor a partition child of a declared export, listing the known names.
 fn require_known_export(config: &Config, config_path: &str, export_name: &str) -> Result<()> {
-    if config.exports.iter().any(|e| e.name == export_name) {
+    if owner_of(config, export_name).is_some() {
         return Ok(());
     }
     let known: Vec<&str> = config.exports.iter().map(|e| e.name.as_str()).collect();
@@ -71,15 +100,13 @@ fn scoped_union<T>(
     Ok(all)
 }
 
-/// Keep only rows whose export is DECLARED in `config` — the scope guard for the
+/// Keep only rows whose export is declared in `config` or is a partition child of a declared export — the scope guard for the
 /// UNLIMITED list queries (cursors, progression) that carry no `limit` to unify.
 /// Same shared-DB leak as [`scoped_union`], filtered post-fetch since there is no
 /// window to preserve.
 fn retain_declared<T>(rows: Vec<T>, config: &Config, name_of: impl Fn(&T) -> &str) -> Vec<T> {
-    let declared: std::collections::HashSet<&str> =
-        config.exports.iter().map(|e| e.name.as_str()).collect();
     rows.into_iter()
-        .filter(|r| declared.contains(name_of(r)))
+        .filter(|r| owner_of(config, name_of(r)).is_some())
         .collect()
 }
 
@@ -178,7 +205,11 @@ pub fn show_progression(config_path: &str, export_name: Option<&str>) -> Result<
     }
     let state = StateStore::open(config_path)?;
     let entries = match export_name {
-        Some(name) => vec![state.get_progression(name)?],
+        Some(name) => state
+            .list_progression()?
+            .into_iter()
+            .filter(|p| belongs_to(&config, &p.export_name, name))
+            .collect(),
         // Scope to this config's exports (shared-DB leak, same as metrics/state).
         None => retain_declared(state.list_progression()?, &config, |p| &p.export_name),
     };
@@ -226,15 +257,13 @@ fn boundary_value(b: &crate::state::Boundary) -> String {
     }
 }
 
+/// How many partitions `state reset` holds the run lease of at once: each holds two open files on an SQLite state.
+const RESET_LEASES: usize = 16;
+
+/// `rivet state reset`: return a declared export, with every partition child it holds, or one stored partition child to a "never ran" state.
 pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
-    // Validate the export name against the config BEFORE touching state, so a
-    // typo (`--export pa_audi` instead of `pa_audit`) produces a hint with the
-    // declared names instead of silently DELETE-ing zero rows and printing
-    // "State reset for export 'pa_audi'" as if it worked.  Without this guard
-    // a stray `--export <unknown>` looked like success but did nothing — a
-    // genuine ops footgun under "I reset it, why did the cursor not move".
     let config = crate::config::Config::load(config_path)?;
-    if !config.exports.iter().any(|e| e.name == export_name) {
+    let Some(owner) = owner_of(&config, export_name) else {
         let known: Vec<String> = config.exports.iter().map(|e| e.name.clone()).collect();
         crate::rivet_bail!(
             crate::error::codes::CLI_EXPORT_UNKNOWN,
@@ -248,7 +277,7 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
             },
             config_path,
         );
-    }
+    };
     let source = config.source.try_state_key().map_err(|e| {
         crate::error::recoded(
             &e,
@@ -261,11 +290,65 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
         )
     })?;
     let state = StateStore::open(config_path)?;
-    let _held =
-        super::chunked::claim_export_progress(&state, export_name, &source, "reset its state")?;
-    state.reset(export_name, &source)?;
-    println!("State reset for export '{}'", export_name);
+    let stored = state.stored_export_names(&source)?;
+    let mut family = vec![export_name.to_string()];
+    match owner {
+        Owner::Declared(_) => family.extend(
+            stored
+                .iter()
+                .filter(|n| n.as_str() != export_name && belongs_to(&config, n, export_name))
+                .cloned(),
+        ),
+        Owner::PartitionChild(parent) if !stored.iter().any(|n| n == export_name) => {
+            let children: Vec<&String> = stored
+                .iter()
+                .filter(|n| belongs_to(&config, n, &parent.name))
+                .collect();
+            crate::rivet_bail!(
+                crate::error::codes::CLI_EXPORT_UNKNOWN,
+                "export '{}' is a partition of '{}' but holds no progress on this source.\n  Partitions held: {}\n  Hint: `rivet state reset -c {} --export {}` starts every partition over.",
+                export_name,
+                parent.name,
+                if children.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    children
+                        .iter()
+                        .map(|n| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                config_path,
+                parent.name,
+            );
+        }
+        _ => {}
+    }
+    let claim =
+        |n: &String| super::chunked::claim_export_progress(&state, n, &source, "reset its state");
+    let (export, children) = family.split_first().expect("the family names the export");
+    let _export_lease = claim(export)?;
+    children.iter().try_for_each(|n| claim(n).map(drop))?;
+    for batch in children.chunks(RESET_LEASES) {
+        let _held = batch.iter().map(claim).collect::<Result<Vec<_>>>()?;
+        state.reset_all(batch, &source)?;
+    }
+    state.reset(export, &source)?;
+    println!("{}", reset_report(&family));
     Ok(())
+}
+
+/// What `state reset` prints: the export it reset (first in `family`) and, when it holds any, the partition children cleared with it.
+fn reset_report(family: &[String]) -> String {
+    let mut report = format!("State reset for export '{}'", family[0]);
+    if family.len() > 1 {
+        report.push_str(&format!(
+            "\n  and its {} partition(s): {}",
+            family.len() - 1,
+            family[1..].join(", ")
+        ));
+    }
+    report
 }
 
 /// The context of the journal event `rivet state accept` records, and the status of its journal.
@@ -287,6 +370,19 @@ pub fn accept_state(
 ) -> Result<()> {
     let config = Config::load_with_params(config_path, params)?;
     require_known_export(&config, config_path, export_name)?;
+    let partitioned = match owner_of(&config, export_name) {
+        Some(Owner::PartitionChild(e)) => Some(e),
+        Some(Owner::Declared(e)) if e.partition_by.is_some() => Some(e),
+        _ => None,
+    };
+    if let Some(parent) = partitioned.filter(|e| e.mode != crate::config::ExportMode::Full) {
+        crate::rivet_bail!(
+            crate::error::codes::STATE_ACCEPT_PARTITIONED,
+            "export '{export_name}': `state accept` keeps the progress of one export, and the progress of '{}' is held per partition, so nothing was changed.\n  Hint: `rivet state reset -c {config_path} --export {}` starts every partition over with a full pass.",
+            parent.name,
+            parent.name,
+        );
+    }
     let run_set = crate::pipeline::run_set::RunSet::select(&config, Some(export_name))?;
     let export = &run_set.declared()[0];
     if export.mode == crate::config::ExportMode::Cdc {
@@ -486,16 +582,11 @@ fn export_is_declared(config: &Config, name: &str) -> bool {
         .rsplit_once('#')
         .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         .map(|(giant, _)| giant);
-    config.exports.iter().any(|e| {
-        e.name == name
-            || e.name == leg_parent
-            || unit_giant == Some(e.name.as_str())
-            || (e.partition_by.is_some()
-                && name
-                    .strip_prefix(e.name.as_str())
-                    .and_then(|rest| rest.strip_prefix("__"))
-                    .is_some_and(|value| !value.is_empty()))
-    })
+    config
+        .exports
+        .iter()
+        .any(|e| e.name == name || e.name == leg_parent || unit_giant == Some(e.name.as_str()))
+        || matches!(owner_of(config, name), Some(Owner::PartitionChild(_)))
 }
 
 pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()> {
@@ -1485,6 +1576,285 @@ exports:
             msg.contains("rivet state show"),
             "must point at a follow-up command: {msg}"
         );
+    }
+
+    /// A config declaring `a` and `ab` (partitioned, incremental), `a__x` and `p` (plain incremental) and `full_by_day` (partitioned, full).
+    fn write_partition_config(config_path: &str) {
+        let export = |name: &str, extra: &str, mode: &str| {
+            let path = if extra.is_empty() {
+                "./out"
+            } else {
+                "./out/{partition}"
+            };
+            format!(
+                "  - name: {name}\n    query: \"SELECT 1\"\n    mode: {mode}\n    cursor_column: id\n    format: parquet\n{extra}    destination:\n      type: local\n      path: {path}\n"
+            )
+        };
+        let by = "    partition_by: d\n";
+        let yaml = format!(
+            "source:\n  type: postgres\n  url: postgresql://localhost/testdb\nexports:\n{}{}{}{}{}",
+            export("a", by, "incremental"),
+            export("a__x", "", "incremental"),
+            export("ab", by, "incremental"),
+            export("p", "", "incremental"),
+            export("full_by_day", by, "full").replace("    cursor_column: id\n", ""),
+        );
+        std::fs::write(config_path, yaml).unwrap();
+    }
+
+    fn partition_setup(held: &[&str]) -> (tempfile::TempDir, String, StateStore) {
+        let (dir, config_path) = setup_dir();
+        write_partition_config(&config_path);
+        let state = open_state(&dir);
+        for name in held {
+            state.update_legacy(name, "7").unwrap();
+            state
+                .record_committed_incremental(name, "7", "run")
+                .unwrap();
+        }
+        (dir, config_path, state)
+    }
+
+    fn held_names(state: &StateStore) -> Vec<String> {
+        state.stored_export_names("").unwrap()
+    }
+
+    #[test]
+    fn owner_of_names_the_declared_export_or_its_longest_partition_parent() {
+        let (_dir, config_path) = setup_dir();
+        write_partition_config(&config_path);
+        let config = Config::load(&config_path).unwrap();
+        let owner = |name: &str| match owner_of(&config, name) {
+            Some(Owner::Declared(e)) => format!("declared {}", e.name),
+            Some(Owner::PartitionChild(e)) => format!("child of {}", e.name),
+            None => "none".to_string(),
+        };
+        for (name, want) in [
+            ("a", "declared a"),
+            ("a__x", "declared a__x"),
+            ("ab", "declared ab"),
+            ("a__2026-01-01", "child of a"),
+            ("a__null", "child of a"),
+            ("a__x__2026-01-01", "child of a"),
+            ("ab__2026-01-01", "child of ab"),
+            ("a__", "none"),
+            ("a_x", "none"),
+            ("abc__2026-01-01", "none"),
+            ("p__2026-01-01", "none"),
+            ("full_by_day__2026-01-01", "child of full_by_day"),
+            ("ghost", "none"),
+        ] {
+            assert_eq!(owner(name), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn reset_of_a_partitioned_export_clears_every_child_and_nothing_else() {
+        let held = [
+            "a",
+            "a__2026-01-01",
+            "a__2026-01-02",
+            "a__x",
+            "ab__2026-01-01",
+            "p",
+        ];
+        let (_dir, config_path, state) = partition_setup(&held);
+        reset_state(&config_path, "a").unwrap();
+        assert_eq!(held_names(&state), ["a__x", "ab__2026-01-01", "p"]);
+        let progression = state.list_progression().unwrap();
+        let names: Vec<&str> = progression.iter().map(|p| p.export_name.as_str()).collect();
+        assert_eq!(names, ["a__x", "ab__2026-01-01", "p"]);
+    }
+
+    #[test]
+    fn reset_of_a_partition_child_clears_that_child_only() {
+        let held = ["a__2026-01-01", "a__2026-01-02", "ab__2026-01-01"];
+        let (_dir, config_path, state) = partition_setup(&held);
+        reset_state(&config_path, "a__2026-01-02").unwrap();
+        assert_eq!(held_names(&state), ["a__2026-01-01", "ab__2026-01-01"]);
+        assert_eq!(state.list_progression().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reset_of_a_child_the_state_does_not_hold_is_refused_naming_the_partitions_held() {
+        let (_dir, config_path, state) = partition_setup(&["a__2026-01-01", "p"]);
+        let err = reset_state(&config_path, "a__1999-01-01").unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_CLI_EXPORT_UNKNOWN")
+        );
+        let said = format!("{err:#}");
+        assert!(
+            said.contains(
+                "export 'a__1999-01-01' is a partition of 'a' but holds no progress on this source."
+            ),
+            "{said}"
+        );
+        assert!(said.contains("Partitions held: a__2026-01-01"), "{said}");
+        assert!(
+            said.contains(&format!(
+                "`rivet state reset -c {config_path} --export a` starts every partition over."
+            )),
+            "{said}"
+        );
+        assert_eq!(held_names(&state), ["a__2026-01-01", "p"]);
+    }
+
+    #[test]
+    fn reset_of_a_name_that_is_no_partition_child_is_still_unknown() {
+        let (_dir, config_path, state) = partition_setup(&["a__2026-01-01", "p"]);
+        for name in ["a_2026-01-01", "a__", "p__2026-01-01", "abc__2026-01-01"] {
+            let err = reset_state(&config_path, name).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(&format!("export '{name}' not found")),
+                "{name}"
+            );
+        }
+        assert_eq!(held_names(&state), ["a__2026-01-01", "p"]);
+    }
+
+    #[test]
+    fn reset_report_names_the_children_only_when_there_are_some() {
+        let one = vec!["a".to_string()];
+        assert_eq!(reset_report(&one), "State reset for export 'a'");
+        let two = vec!["a".to_string(), "a__1".to_string()];
+        assert_eq!(
+            reset_report(&two),
+            "State reset for export 'a'\n  and its 1 partition(s): a__1"
+        );
+        let three = vec!["a".to_string(), "a__1".to_string(), "a__2".to_string()];
+        assert_eq!(
+            reset_report(&three),
+            "State reset for export 'a'\n  and its 2 partition(s): a__1, a__2"
+        );
+    }
+
+    #[test]
+    fn reset_of_a_plain_export_clears_it_and_no_other() {
+        let (_dir, config_path, state) = partition_setup(&["a__x", "a__x__2026-01-01", "p"]);
+        reset_state(&config_path, "a__x").unwrap();
+        assert_eq!(held_names(&state), ["a__x__2026-01-01", "p"]);
+    }
+
+    /// The cursor of `name` on `source`, and a boundary when `boundary`.
+    fn put_child(state: &StateStore, name: &str, source: &str, boundary: bool) {
+        let key = crate::state::ProgressKey {
+            export_name: name.into(),
+            source: source.into(),
+            stream: String::new(),
+            schema: String::new(),
+            population: String::new(),
+            column: Some("id".into()),
+            landing: Default::default(),
+            mode: "incremental",
+            continues_high_water: true,
+            resumable: true,
+        };
+        state.update_with_column(&key, "7").unwrap();
+        if boundary {
+            state
+                .record_committed_incremental(name, "7", "run")
+                .unwrap();
+        }
+    }
+
+    /// Every `(export, source)` cursor row of the state in `dir`.
+    fn cursor_rows(dir: &tempfile::TempDir) -> Vec<(String, String)> {
+        let db = rusqlite::Connection::open(dir.path().join(".rivet_state.db")).unwrap();
+        let mut q = db
+            .prepare("SELECT export_name, prefix FROM export_state ORDER BY 1, 2")
+            .unwrap();
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn reset_of_a_partitioned_export_takes_a_child_stored_under_a_respelled_source() {
+        let (dir, config_path, state) = partition_setup(&[]);
+        let source = Config::load(&config_path).unwrap().source.state_key();
+        let respelled = source.replacen(":5432", "", 1);
+        assert_ne!(respelled, source, "fixture: a spelling without the port");
+        assert_eq!(crate::config::canonical_source_key(&respelled), source);
+        put_child(&state, "a", &source, true);
+        put_child(&state, "a__2026-01-01", &respelled, false);
+        reset_state(&config_path, "a").unwrap();
+        assert_eq!(cursor_rows(&dir), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn reset_of_a_partitioned_export_leaves_the_partitions_of_another_source() {
+        let (dir, config_path, state) = partition_setup(&[]);
+        let source = Config::load(&config_path).unwrap().source.state_key();
+        let other = "postgres://other.host:5432/db";
+        put_child(&state, "a", &source, true);
+        put_child(&state, "a__2026-01-01", &source, true);
+        put_child(&state, "a__2026-02-01", other, true);
+        assert_eq!(
+            state.stored_export_names(&source).unwrap(),
+            ["a", "a__2026-01-01"],
+            "the partitions this source holds"
+        );
+        reset_state(&config_path, "a").unwrap();
+        assert_eq!(
+            cursor_rows(&dir),
+            [("a__2026-02-01".to_string(), other.to_string())]
+        );
+        let kept: Vec<String> = state
+            .list_progression()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.export_name)
+            .collect();
+        assert_eq!(
+            kept,
+            ["a__2026-02-01"],
+            "the other source keeps its boundary"
+        );
+    }
+
+    #[test]
+    fn state_show_and_progression_list_the_partition_children() {
+        let (_dir, config_path, _state) =
+            partition_setup(&["a__2026-01-01", "ab__2026-01-02", "ghost", "p"]);
+        let config = Config::load(&config_path).unwrap();
+        let state = StateStore::open(&config_path).unwrap();
+        let shown: Vec<String> =
+            retain_declared(state.list_all().unwrap(), &config, |s| &s.export_name)
+                .into_iter()
+                .map(|s| s.export_name)
+                .collect();
+        assert_eq!(shown, ["a__2026-01-01", "ab__2026-01-02", "p"]);
+        assert!(show_progression(&config_path, Some("a__2026-01-01")).is_ok());
+        assert!(show_progression(&config_path, Some("a")).is_ok());
+        assert!(show_progression(&config_path, Some("a_2026-01-01")).is_err());
+        assert!(belongs_to(&config, "a__2026-01-01", "a"));
+        assert!(!belongs_to(&config, "ab__2026-01-01", "a"));
+        assert!(!belongs_to(&config, "a__x", "a"));
+    }
+
+    #[test]
+    fn accept_of_a_partitioned_export_or_its_child_is_refused_by_code() {
+        let (_dir, config_path, state) = partition_setup(&["a__2026-01-01"]);
+        for name in ["a", "a__2026-01-01"] {
+            let err = accept_state(&config_path, name, None).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_STATE_ACCEPT_PARTITIONED"),
+                "{name}"
+            );
+            let said = format!("{err:#}");
+            assert!(
+                said.contains("the progress of 'a' is held per partition, so nothing was changed."),
+                "{said}"
+            );
+            assert!(
+                said.contains(&format!("`rivet state reset -c {config_path} --export a` starts every partition over with a full pass.")),
+                "{said}"
+            );
+        }
+        assert_eq!(held_names(&state), ["a__2026-01-01"]);
     }
 
     // ── accept_state ─────────────────────────────────────────────────────────
