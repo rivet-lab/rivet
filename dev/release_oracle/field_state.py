@@ -32,16 +32,19 @@ A red row names its kind: re-baseline, restart, duplicate, loss, refuses its own
 longer loads, config read differently, contract, empty table.
 
     python -m dev.release_oracle.field_state --fetch <cache dir>
+    python -m dev.release_oracle.field_state --fetch-release <cache dir> <tag | latest> ...
+    python -m dev.release_oracle.field_state --triple
     RIVET_PREV_RELEASE_BIN=<previous rivet> python -m dev.release_oracle.field_state [name part ...]
     python -m dev.release_oracle.field_state --self-test
 """
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -146,6 +149,12 @@ def triple() -> str:
     return f"{arch}-apple-darwin" if sys.platform == "darwin" else f"{arch}-unknown-linux-gnu"
 
 
+def asset_names(v: str) -> list[str]:
+    """The assets of release `v` this machine can use, best first: on Linux the glibc 2.28 build runs where the default one does not."""
+    plain = f"rivet-v{v}-{triple()}.tar.gz"
+    return [plain.replace(".tar.gz", "-glibc2.28.tar.gz"), plain] if "linux" in triple() else [plain]
+
+
 def binary_in(cache: Path, version: str) -> Path:
     """Where `fetch` leaves the binary of `version`."""
     return cache / f"rivet-v{version}-{triple()}" / "rivet"
@@ -180,48 +189,76 @@ def absent_note(cache: Path, version: str) -> Path:
     return cache / f"rivet-v{version}-{triple()}.absent"
 
 
-def fetch(cache: Path) -> int:
-    """Download every release's asset from the floor on for this machine into `cache`, checked against the release's SHA256SUMS."""
+def latest_tag() -> str:
+    """The tag of the repo's latest published release, where its public `releases/latest` page redirects (the API answers 403 past 60 calls an hour per address)."""
+    with urllib.request.urlopen(f"https://github.com/{REPO}/releases/latest", timeout=120) as r:
+        return r.geturl().rstrip("/").rsplit("/", 1)[-1]
+
+
+def fetch_release(v: str, cache: Path) -> int:
+    """Download release `v`'s asset for this machine into `cache`, checked against the release's SHA256SUMS, and unpack it; 1 when it could not be had whole."""
     import hashlib
     import tarfile
 
+    name = f"rivet-v{v}-{triple()}.tar.gz"
+    base = f"https://github.com/{REPO}/releases/download/v{v}"
+    try:
+        with urllib.request.urlopen(f"{base}/SHA256SUMS.txt", timeout=120) as r:
+            sums = r.read().decode()
+        listed = {ln.split()[-1].lstrip("*"): ln.split()[0] for ln in sums.splitlines() if ln.split()[1:]}
+        name = next((n for n in asset_names(v) if n in listed), name)
+        want = listed.get(name)
+        if want is None:
+            absent_note(cache, v).write_text(f"release v{v} publishes no {name}\n")
+            print(f"  v{v}: NO ASSET for this machine ({name} is not in the release's SHA256SUMS.txt)")
+            return 0
+        with urllib.request.urlopen(f"{base}/{name}", timeout=600) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            absent_note(cache, v).write_text(f"tag v{v} has no published release (HTTP 404)\n")
+            print(f"  v{v}: NO RELEASE published for this tag")
+            return 0
+        print(f"  v{v}: {name} could not be downloaded: {e}")
+        return 1
+    except (urllib.error.URLError, OSError) as e:
+        print(f"  v{v}: {name} could not be downloaded: {e}")
+        return 1
+    if hashlib.sha256(data).hexdigest() != want:
+        print(f"  v{v}: {name} does not match the release's SHA256SUMS.txt")
+        return 1
+    (cache / name).write_bytes(data)
+    with tarfile.open(cache / name) as t:
+        t.extractall(cache, filter="data")
+    if name != f"rivet-v{v}-{triple()}.tar.gz":
+        shutil.rmtree(binary_in(cache, v).parent, ignore_errors=True)
+        (cache / name.removesuffix(".tar.gz")).rename(binary_in(cache, v).parent)
+    said = run([str(binary_in(cache, v)), "--version"]).stdout.strip()
+    print(f"  {said} -> {binary_in(cache, v)}")
+    return 0 if f" {v} " in f"{said} " else 1
+
+
+def fetch(cache: Path) -> int:
+    """Download every release's asset from the floor on for this machine into `cache`."""
     cache.mkdir(parents=True, exist_ok=True)
     rc = 0
     for v in field_versions(release_tags()):
-        name = f"rivet-v{v}-{triple()}.tar.gz"
-        base = f"https://github.com/{REPO}/releases/download/v{v}"
+        rc = fetch_release(v, cache) or rc
+    return rc
+
+
+def fetch_tags(cache: Path, tags: list[str]) -> int:
+    """Download each named release (`latest` = the newest) into `cache`; one with no asset for this machine fails."""
+    cache.mkdir(parents=True, exist_ok=True)
+    rc = 0
+    for tag in tags:
         try:
-            with urllib.request.urlopen(f"{base}/SHA256SUMS.txt", timeout=120) as r:
-                sums = r.read().decode()
-            want = next((ln.split()[0] for ln in sums.splitlines() if ln.split()[1:] and ln.split()[-1].lstrip("*") == name), None)
-            if want is None:
-                absent_note(cache, v).write_text(f"release v{v} publishes no {name}\n")
-                print(f"  v{v}: NO ASSET for this machine ({name} is not in the release's SHA256SUMS.txt)")
-                continue
-            with urllib.request.urlopen(f"{base}/{name}", timeout=600) as r:
-                data = r.read()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                absent_note(cache, v).write_text(f"tag v{v} has no published release (HTTP 404)\n")
-                print(f"  v{v}: NO RELEASE published for this tag")
-                continue
-            print(f"  v{v}: {name} could not be downloaded: {e}")
-            rc = 1
-            continue
+            v = (latest_tag() if tag == "latest" else tag).removeprefix("v")
         except (urllib.error.URLError, OSError) as e:
-            print(f"  v{v}: {name} could not be downloaded: {e}")
+            print(f"  {tag}: the latest release could not be resolved: {e}")
             rc = 1
             continue
-        if hashlib.sha256(data).hexdigest() != want:
-            print(f"  v{v}: {name} does not match the release's SHA256SUMS.txt")
-            rc = 1
-            continue
-        (cache / name).write_bytes(data)
-        with tarfile.open(cache / name) as t:
-            t.extractall(cache, filter="data")
-        said = run([str(binary_in(cache, v)), "--version"]).stdout.strip()
-        print(f"  {said} -> {binary_in(cache, v)}")
-        rc = rc or (0 if f" {v} " in f"{said} " else 1)
+        rc = fetch_release(v, cache) or (0 if binary_in(cache, v).is_file() else 1) or rc
     return rc
 
 
@@ -1246,6 +1283,71 @@ def verify_upgrade_from_field_state(led: Ledger, only: list[str] | None = None) 
     led.ok(f"upgrade from a field state: {len(todo)} cells in {time.monotonic() - t0:.0f}s")
 
 
+def _fetch_self_test() -> None:
+    """`fetch_tags` against a stubbed release host: a whole asset lands, a tampered or absent one fails, `latest` resolves, Linux prefers the glibc 2.28 build."""
+    import hashlib
+    import io
+    import tarfile
+
+    def asset_of(name: str, says: str) -> bytes:
+        body = f"#!/bin/sh\necho rivet 9.9.9 {says}\n".encode()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            member = tarfile.TarInfo(f"{name.removesuffix('.tar.gz')}/rivet")
+            member.size, member.mode = len(body), 0o755
+            t.addfile(member, io.BytesIO(body))
+        return buf.getvalue()
+
+    class Served:
+        def __init__(self, data: bytes, url: str = "") -> None:
+            self.data, self.url = data, url
+
+        def geturl(self) -> str:
+            return self.url
+
+        def __enter__(self) -> "Served":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return self.data
+
+    def host(assets: dict[str, bytes], listed: dict[str, bytes]) -> Callable[..., Served]:
+        def get(url: str, timeout: int = 0) -> Served:
+            if url.endswith("/releases/latest"):
+                return Served(b"", f"https://github.com/{REPO}/releases/tag/v9.9.9")
+            if "/v9.9.9/" not in url:
+                raise urllib.error.HTTPError(url, 404, "not found", None, None)  # type: ignore[arg-type]
+            if url.endswith("SHA256SUMS.txt"):
+                return Served("".join(f"{hashlib.sha256(d).hexdigest()}  {n}\n" for n, d in listed.items()).encode())
+            return Served(assets[url.rsplit("/", 1)[1]])
+        return get
+
+    real, real_platform = urllib.request.urlopen, sys.platform
+    try:
+        with tempfile.TemporaryDirectory() as d, redirect_stdout(io.StringIO()) as out:
+            for platform in (real_platform, "linux"):
+                sys.platform = platform
+                plain = f"rivet-v9.9.9-{triple()}.tar.gz"
+                old = plain.replace(".tar.gz", "-glibc2.28.tar.gz") if "linux" in triple() else plain
+                assets = {n: asset_of(n, "glibc228" if n == old and n != plain else "plain") for n in (old, plain)}
+                urllib.request.urlopen = host(assets, assets)
+                whole = Path(d, f"whole-{platform}")
+                assert fetch_tags(whole, ["latest", "v9.9.9"]) == 0 and os.access(binary_in(whole, "9.9.9"), os.X_OK), out.getvalue()
+                said = run([str(binary_in(whole, "9.9.9")), "--version"]).stdout.strip()
+                assert said.endswith("glibc228" if old != plain else "plain"), said
+                assert fetch_tags(Path(d, f"gone-{platform}"), ["v8.8.8"]) == 1, "a tag with no release must fail a pinned fetch"
+                urllib.request.urlopen = host(assets, {n: assets[n] + b"x" for n in assets})
+                assert fetch_tags(Path(d, f"bad-{platform}"), ["v9.9.9"]) == 1 and not binary_in(Path(d, f"bad-{platform}"), "9.9.9").exists()
+            urllib.request.urlopen = host({plain: assets[plain]}, {plain: assets[plain]})
+            plain_only = Path(d, "plain-only")
+            assert fetch_tags(plain_only, ["v9.9.9"]) == 0 and binary_in(plain_only, "9.9.9").is_file()
+    finally:
+        urllib.request.urlopen, sys.platform = real, real_platform
+
+
 def _self_test() -> None:
     """The graders on fixtures: each finding kind is the one row that fails, and the config edits are strict."""
     src = [(i, i) for i in range(1, 11)]
@@ -1358,6 +1460,7 @@ def _self_test() -> None:
     assert binary_in(Path("c"), "1.2.3").parts[-2].startswith("rivet-v1.2.3-") and field_cache(Path("c/rivet-v9/rivet")) == Path("c/field")
     names = [n for _, n, _ in cells([("0.1.0", Path("a")), ("0.2.0", Path("b"))], Path(tempfile.gettempdir()), [""])]
     assert len(names) == len([n for n in names if n.startswith("field[")]) > 0
+    _fetch_self_test()
     print("self-test ok: a re-baseline, a restart, a duplicate, a loss and a config that no longer loads each fail their row")
 
 
@@ -1367,6 +1470,11 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if sys.argv[1:2] == ["--fetch"]:
         raise SystemExit(fetch(Path(sys.argv[2])))
+    if sys.argv[1:2] == ["--fetch-release"]:
+        raise SystemExit(fetch_tags(Path(sys.argv[2]), sys.argv[3:]))
+    if sys.argv[1:] == ["--triple"]:
+        print(triple())
+        raise SystemExit(0)
     _led = Ledger()
     verify_upgrade_from_field_state(_led, sys.argv[1:] or None)
     raise SystemExit(_led.report())
