@@ -8,7 +8,6 @@ died unexpectedly`, sqlplus rc=137) because every other engine's version legs we
 
 from __future__ import annotations
 
-import subprocess
 import sys
 import threading
 import time
@@ -18,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from .stand_disk import HELPER_IMAGE
+from .stand_disk import vm_run
 
 __all__ = ["HEAVY", "MSSQL_LIMIT_MB", "MSSQL_MEM_LIMIT", "admitted", "unbounded_mssql"]
 
@@ -46,12 +45,8 @@ def parse_meminfo(text: str) -> float | None:
 
 def vm_available_gib() -> float | None:
     """Memory the docker VM can still hand out, read inside a throwaway container; None when unreadable."""
-    try:
-        p = subprocess.run(["docker", "run", "--rm", "--pull", "never", HELPER_IMAGE, "cat", "/proc/meminfo"],
-                           capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return parse_meminfo(p.stdout) if p.returncode == 0 else None
+    out = vm_run("cat", "/proc/meminfo")
+    return None if out is None else parse_meminfo(out)
 
 
 def wait_for_headroom(read: Callable[[], float | None] = vm_available_gib, floor: float = FLOOR_GIB,

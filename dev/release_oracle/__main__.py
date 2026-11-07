@@ -931,6 +931,8 @@ def _self_test() -> int:
     stand_memory.self_test()
     stand_profiles.self_test()
     import inspect
+    assert "stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island)" in inspect.getsource(main), \
+        "the start floor follows the run's mode"
     assert "stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))" in inspect.getsource(main), \
         "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
     assert inspect.getsource(main).count("stand_images.record_to_target()") == 2 and "stand_images.record_to_target()" in inspect.getsource(bring_up), \
@@ -2186,7 +2188,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     config = gate_config(ns)
     from . import stand_disk
-    refused = stand_disk.start_refusal(stand_disk.free_gib())
+    refused = stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island)
     if refused:
         print(refused, file=sys.stderr)
         return 3
