@@ -979,7 +979,7 @@ mod error_code_tests {
         let err = value_within_ceiling("c", 2, Some(1)).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_TOO_LARGE", 1);
         let err = verify_wire_columns(&["a"], &["b"]).unwrap_err();
-        crate::error::assert_coded(&err, "RIVET_SOURCE_COLUMNS_CHANGED_UNDER_READ", 1);
+        crate::error::assert_coded(&err, "RIVET_SOURCE_COLUMNS_CHANGED_UNDER_READ", 2);
     }
 }
 

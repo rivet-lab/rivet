@@ -1769,7 +1769,7 @@ mod tests {
         );
         crate::error::assert_coded(&err, "RIVET_DEST_CONTROL_ARTIFACT_INVALID", 5);
         let err = read_capped(&dest, "absent.bin", 8).expect_err("an absent object errors");
-        crate::error::assert_coded(&err, "RIVET_DEST_OBJECT_NOT_FOUND", 1);
+        crate::error::assert_coded(&err, "RIVET_DEST_OBJECT_NOT_FOUND", 2);
     }
 
     #[test]

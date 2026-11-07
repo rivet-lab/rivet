@@ -1,12 +1,13 @@
 diff --git a/src/preflight/cdc_health.rs b/src/preflight/cdc_health.rs
+index 5127d5fa..fe96e65c 100644
 --- a/src/preflight/cdc_health.rs
 +++ b/src/preflight/cdc_health.rs
-@@ -117,7 +117,7 @@
-     };
-     match result {
-         Err(e) => checks.push(probe_failed(&e)),
+@@ -132,7 +132,7 @@ pub(super) fn collect(
+             checks.push(probe_failed(&e));
+             probe = Some(probe_verdict(&e));
+         }
 -        Ok(()) => checks.extend(run_refusals(config, &cdc, &url)),
 +        Ok(()) => checks.extend(run_refusals(config, &cdc[..0], &url)),
      }
-     checks
+     (checks, probe)
  }
