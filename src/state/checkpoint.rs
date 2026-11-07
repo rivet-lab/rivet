@@ -344,6 +344,7 @@ impl StateStore {
         let now = chrono::Utc::now().to_rfc3339();
         match &self.conn {
             StateConn::Sqlite(conn) => {
+                let _turn = self.write_turn();
                 let tx =
                     rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
                 let res = Self::claim_next_chunk_in_sqlite_tx(&tx, &now, run_id)?;
@@ -1053,6 +1054,112 @@ mod tests {
         writer.join().unwrap();
         assert!(slow.is_empty(), "starved: {slow:?}");
         assert_eq!(s.count_chunk_tasks_total("run_a").unwrap(), 3);
+    }
+
+    /// A second writer that ran out of patience while the first one's place is held keeps a place too: it still writes within a turn of the sibling's (main: `database is locked` after SQLite's busy timeout, every time).
+    #[test]
+    fn a_replan_that_runs_out_of_patience_behind_an_overdue_writer_gets_its_turn() {
+        use std::sync::mpsc::channel;
+        let (dir, s) = store_on_disk();
+        s.create_chunk_run("run_a", "orders", "deadbeef", 2)
+            .unwrap();
+        s.create_chunk_run("run_b", "other", "deadbeef", 2).unwrap();
+        s.insert_chunk_tasks("run_b", &[(1, 5)]).unwrap();
+        let cfg = dir.path().join("rivet.yaml");
+        let p = super::super::write_turn::PATIENCE;
+        let (held_tx, held_rx) = channel();
+        let (placed_tx, placed_rx) = channel();
+        let holder = {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || {
+                let x = StateStore::open(cfg.to_str().unwrap()).expect("holder store");
+                x.transaction(|| {
+                    held_tx.send(()).unwrap();
+                    std::thread::sleep(p * 4);
+                    Ok(())
+                })
+                .expect("the holder");
+            })
+        };
+        held_rx.recv().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sibling = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let w = StateStore::open(cfg.to_str().unwrap()).expect("sibling store");
+                w.transaction(|| {
+                    placed_tx.send(()).unwrap();
+                    std::thread::sleep(p * 6);
+                    Ok(())
+                })
+                .expect("the sibling");
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    w.transaction(|| {
+                        w.fail_chunk_task("run_b", 0, "x", true)?;
+                        std::thread::sleep(std::time::Duration::from_millis(4));
+                        Ok(())
+                    })
+                    .expect("the sibling");
+                }
+            })
+        };
+        placed_rx.recv().unwrap();
+        let t0 = std::time::Instant::now();
+        let r = s.replan_chunk_tasks("run_a", false, &[(10, 10)]);
+        let waited = t0.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        sibling.join().unwrap();
+        holder.join().unwrap();
+        assert!(
+            r.is_ok() && waited < std::time::Duration::from_secs(3),
+            "starved: {r:?} after {waited:?}"
+        );
+        assert_eq!(s.count_chunk_tasks_total("run_a").unwrap(), 1);
+    }
+
+    /// A chunk claim beside a sibling that takes the write lock again at once gets its turn like any other write (main: `database is locked` after SQLite's busy timeout, every time).
+    #[test]
+    fn a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn() {
+        let (dir, s) = store_on_disk();
+        s.create_chunk_run("run_a", "orders", "deadbeef", 2)
+            .unwrap();
+        s.create_chunk_run("run_b", "other", "deadbeef", 2).unwrap();
+        s.insert_chunk_tasks("run_a", &[(1, 5), (6, 10), (11, 15)])
+            .unwrap();
+        s.insert_chunk_tasks("run_b", &[(1, 5)]).unwrap();
+        let cfg = dir.path().join("rivet.yaml");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let other = StateStore::open(cfg.to_str().unwrap()).expect("second store");
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    other
+                        .transaction(|| {
+                            other.fail_chunk_task("run_b", 0, "x", true)?;
+                            std::thread::sleep(std::time::Duration::from_millis(4));
+                            Ok(())
+                        })
+                        .expect("the sibling");
+                }
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut slow = Vec::new();
+        for i in 0..3i64 {
+            let t0 = std::time::Instant::now();
+            let r = s.claim_next_chunk_task("run_a");
+            if !matches!(&r, Ok(Some((idx, _, _))) if *idx == i)
+                || t0.elapsed() > std::time::Duration::from_secs(2)
+            {
+                slow.push(format!("{i}: {r:?} after {:?}", t0.elapsed()));
+                break;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(slow.is_empty(), "starved: {slow:?}");
+        assert_eq!(s.claim_next_chunk_task("run_a").unwrap(), None);
     }
 
     #[test]
