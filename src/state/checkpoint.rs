@@ -17,6 +17,11 @@ pub struct ChunkTaskInfo {
     pub file_name: Option<String>,
 }
 
+/// Whether a chunk run stored under `stored` (`None`: it recorded no source) belongs to the stream reading `source`, however its source was spelled when it was stored.
+fn chunk_run_is_of(source: &str, stored: Option<&str>) -> bool {
+    stored.is_none_or(|s| s == source || crate::config::canonical_source_key(s) == source)
+}
+
 /// Chunk checkpoint store — reads and writes `chunk_run` and `chunk_task`.
 ///
 /// Governs Invariant I5 (Chunk Task Acyclicity): transitions are strictly
@@ -27,14 +32,23 @@ pub struct ChunkTaskInfo {
 /// Some methods accept an explicit `state_ref` and open a fresh connection.
 /// This is required for parallel workers that cannot share one `Connection`.
 impl StateStore {
-    /// Distinct `export_name` values that currently have at least one
-    /// `chunk_run` row with `status = 'in_progress'` (interrupted run — resume or reset).
-    pub fn list_export_names_with_in_progress_chunk_runs(&self) -> Result<Vec<String>> {
-        self.query(
-            "SELECT DISTINCT export_name FROM chunk_run WHERE status = 'in_progress' ORDER BY export_name ASC",
-            &[],
-            |r| r.text(0),
-        )
+    /// Distinct `export_name` values with an `in_progress` chunk run of `source` (interrupted run — resume or reset); one that recorded no source counts.
+    pub fn list_export_names_with_in_progress_chunk_runs(
+        &self,
+        source: &str,
+    ) -> Result<Vec<String>> {
+        let mut names: Vec<String> = self
+            .query(
+                "SELECT export_name, source FROM chunk_run WHERE status = 'in_progress' ORDER BY export_name ASC",
+                &[],
+                |r| (r.text(0), r.opt_text(1)),
+            )?
+            .into_iter()
+            .filter(|(_, stored)| chunk_run_is_of(source, stored.as_deref()))
+            .map(|(name, _)| name)
+            .collect();
+        names.dedup();
+        Ok(names)
     }
 
     /// Whether this export has a resumable checkpoint — an in-progress chunk run
@@ -519,8 +533,8 @@ impl StateStore {
     /// again.  Without this reset, `claim_next_chunk_task` would skip the
     /// completed row and the destination would stay broken across resumes.
     ///
-    /// Distinct from `reset_chunk_checkpoint(export_name)` (which wipes
-    /// every run+task for an export — the operator-facing "abandon resume"
+    /// Distinct from `reset_chunk_checkpoint(export_name, source)` (which wipes
+    /// every run+task of an export under one source — the operator-facing "abandon resume"
     /// nuke) and from `reset_stale_running_chunk_tasks` (which only
     /// rescues tasks left in 'running' after a crash).  This one is
     /// surgical: a single (run_id, chunk_index) goes from completed
@@ -552,28 +566,38 @@ impl StateStore {
         )
     }
 
-    /// Remove all chunk runs and tasks for an export (abandon resume).
-    pub fn reset_chunk_checkpoint(&self, export_name: &str) -> Result<usize> {
-        let run_ids = self.query(
-            "SELECT run_id FROM chunk_run WHERE export_name = ?1",
-            &[export_name.into()],
-            |r| r.text(0),
-        )?;
-        for rid in &run_ids {
-            let _ = self.execute(
-                "DELETE FROM chunk_task WHERE run_id = ?1",
-                &[rid.as_str().into()],
-            );
-        }
-        self.execute(
-            "UPDATE export_state SET resume_run_id = NULL, resume_owner = NULL \
-             WHERE export_name = ?1 AND resume_owner = 'chunked'",
-            &[export_name.into()],
-        )?;
-        self.execute(
-            "DELETE FROM chunk_run WHERE export_name = ?1",
-            &[export_name.into()],
-        )
+    /// Remove the chunk runs and tasks of `export_name` that belong to `source` (one that recorded no source belongs to every source) and the chunked resume anchor of `source`, a respelling of it re-keyed onto it first (abandon resume); another source's stay.
+    pub fn reset_chunk_checkpoint(&self, export_name: &str, source: &str) -> Result<usize> {
+        self.adopt_respelled_source(export_name, source)?;
+        let run_ids: Vec<String> = self
+            .query(
+                "SELECT run_id, source FROM chunk_run WHERE export_name = ?1",
+                &[export_name.into()],
+                |r| (r.text(0), r.opt_text(1)),
+            )?
+            .into_iter()
+            .filter(|(_, stored)| chunk_run_is_of(source, stored.as_deref()))
+            .map(|(run_id, _)| run_id)
+            .collect();
+        self.transaction(|| {
+            let mut removed = 0;
+            for rid in &run_ids {
+                self.execute(
+                    "DELETE FROM chunk_task WHERE run_id = ?1",
+                    &[rid.as_str().into()],
+                )?;
+                removed += self.execute(
+                    "DELETE FROM chunk_run WHERE run_id = ?1",
+                    &[rid.as_str().into()],
+                )?;
+            }
+            self.execute(
+                "UPDATE export_state SET resume_run_id = NULL, resume_owner = NULL \
+                 WHERE export_name = ?1 AND prefix IN (?2, '') AND resume_owner = 'chunked'",
+                &[export_name.into(), source.into()],
+            )?;
+            Ok(removed)
+        })
     }
 
     /// Latest chunk_run row for an export (any status), for `rivet state chunks`.
@@ -636,7 +660,7 @@ mod tests {
         assert!(s.find_in_progress_chunk_run("orders").unwrap().is_none());
 
         s.create_chunk_run("run_2", "orders", "h", 1).unwrap();
-        assert_eq!(s.reset_chunk_checkpoint("orders").unwrap(), 2);
+        assert_eq!(s.reset_chunk_checkpoint("orders", "pg/a").unwrap(), 2);
         let err = s
             .finalize_chunk_run_completed("run_2")
             .expect_err("the row was removed under the run");
@@ -1081,7 +1105,7 @@ mod tests {
         let (_dir, s) = store_on_disk();
         s.create_chunk_run("r1", "e", "h", 1).unwrap();
         s.insert_chunk_tasks("r1", &[(0, 1)]).unwrap();
-        assert_eq!(s.reset_chunk_checkpoint("e").unwrap(), 1);
+        assert_eq!(s.reset_chunk_checkpoint("e", "pg/a").unwrap(), 1);
         assert!(s.find_in_progress_chunk_run("e").unwrap().is_none());
     }
 
@@ -1089,7 +1113,7 @@ mod tests {
     fn list_in_progress_exports_orders_and_deduplicates() {
         let (_dir, s) = store_on_disk();
         assert!(
-            s.list_export_names_with_in_progress_chunk_runs()
+            s.list_export_names_with_in_progress_chunk_runs("pg/a")
                 .unwrap()
                 .is_empty()
         );
@@ -1098,7 +1122,8 @@ mod tests {
         s.create_chunk_run("r_a", "alpha", "h1", 1).unwrap();
         s.create_chunk_run("r_b", "beta", "h2", 1).unwrap();
         assert_eq!(
-            s.list_export_names_with_in_progress_chunk_runs().unwrap(),
+            s.list_export_names_with_in_progress_chunk_runs("pg/a")
+                .unwrap(),
             vec!["alpha".to_string(), "beta".to_string()]
         );
     }

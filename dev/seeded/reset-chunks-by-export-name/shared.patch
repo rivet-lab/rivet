@@ -1,0 +1,33 @@
+diff --git a/src/state/checkpoint.rs b/src/state/checkpoint.rs
+--- a/src/state/checkpoint.rs
++++ b/src/state/checkpoint.rs
+@@ -19,7 +19,8 @@
+ 
+ /// Whether a chunk run stored under `stored` (`None`: it recorded no source) belongs to the stream reading `source`, however its source was spelled when it was stored.
+ fn chunk_run_is_of(source: &str, stored: Option<&str>) -> bool {
+-    stored.is_none_or(|s| s == source || crate::config::canonical_source_key(s) == source)
++    let _ = (source, stored);
++    true
+ }
+ 
+ /// Chunk checkpoint store — reads and writes `chunk_run` and `chunk_task`.
+diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+--- a/src/pipeline/cli.rs
++++ b/src/pipeline/cli.rs
+@@ -539,14 +539,8 @@
+ }
+ 
+ /// The source `state reset-chunks` removes checkpoints of, or the refusal when `config`'s source does not resolve.
+-fn reset_chunks_source(config: &Config, scope: &str) -> Result<String> {
+-    config.source.try_state_key().map_err(|e| {
+-        crate::error::recoded(
+-            &e,
+-            crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
+-            format!("{scope}: `state reset-chunks` removes the chunk checkpoints this config's source holds and no other source's, and the source did not resolve — nothing was removed.\n  {e:#}"),
+-        )
+-    })
++fn reset_chunks_source(config: &Config, _scope: &str) -> Result<String> {
++    Ok(config.source.state_key())
+ }
+ 
+ /// Clear chunk checkpoints for every export **named in `config_path`'s YAML** that currently has an

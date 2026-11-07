@@ -256,7 +256,7 @@ fn pg_chunk_checkpoint_claim_complete() {
     s.finalize_chunk_run_completed(&run_id).unwrap();
 
     // Cleanup
-    s.reset_chunk_checkpoint("pg_orders").unwrap();
+    s.reset_chunk_checkpoint("pg_orders", "src").unwrap();
 }
 
 // ── v13/v14 load layer: the ledger + snapshot-completion on the Postgres arm ──
@@ -575,7 +575,7 @@ fn pg_a_chunk_run_whose_task_insert_fails_is_not_left_open() {
     s.open_chunk_run(&key, "run-1", "h", 3, &[(1, 10), (11, 20)])
         .unwrap_err();
     assert!(
-        s.list_export_names_with_in_progress_chunk_runs()
+        s.list_export_names_with_in_progress_chunk_runs("src")
             .unwrap()
             .is_empty(),
         "the chunk_run row must roll back with its failed task insert"
