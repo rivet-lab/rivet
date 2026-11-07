@@ -393,12 +393,20 @@ scenarios:
     oracle:   { test: cdc_to_stdout_emits_each_change_once_oracle }
 
   - id: cdc_stdout_refuses_a_partial_image
-    what: "`rivet cdc` without `--output` refuses a change whose row image carries fewer values than its column names (MySQL binlog_row_image MINIMAL/NOBLOB, an MSSQL capture instance with fewer columns than the table) by RIVET_SOURCE_CDC_PREREQUISITE, prints no line for it and leaves the checkpoint where it was"
+    what: "`rivet cdc` without `--output` refuses a change whose row image carries fewer values than its column names in its after or its before image (MySQL binlog_row_image MINIMAL/NOBLOB, an MSSQL capture instance with fewer columns than the table, with or without --table) by RIVET_SOURCE_CDC_PREREQUISITE, prints no line for it and leaves the checkpoint short of it, so a repeat is refused the same way"
     postgres: { na: "a PostgreSQL image is whole or key-only on deletes, never partial: the stdout loop prints key-only deletes as before (the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images)" }
     mysql:    { test: cdc_to_stdout_refuses_a_partial_image_mysql }
     mssql:    { test: cdc_to_stdout_refuses_a_partial_image_mssql }
-    mongo:    { na: "a MongoDB change carries a document, not positional values under column names, so no arity can disagree" }
+    mongo:    { na: "every MongoDB image is the fixed pair [_id, document] under the two IMAGE_NAMES (mongo/cdc.rs), so its values and its names cannot differ in length" }
     oracle:   { na: "every Oracle event carries image_names from ALL_TAB_COLS and the open refuses a table without ALL COLUMNS supplemental logging, oracle_cdc_table_without_all_column_logging_is_refused (live_cdc_oracledb.rs)" }
+
+  - id: cdc_files_refuse_a_partial_before_image
+    what: "`rivet cdc --output` and `rivet run` with `mode: cdc` refuse an update whose before image carries fewer values than its column names under a whole after image (MySQL binlog_row_image NOBLOB with only a TEXT column changed, MINIMAL with every column set, a MINIMAL primary-key update) by RIVET_SOURCE_CDC_PREREQUISITE, write none of its values and leave the checkpoint short of it, so a repeat is refused the same way; the re-baseline the refusal names delivers the next change whole"
+    postgres: { na: "a PostgreSQL before image is named by before_names (the replica identity's columns) or is as wide as its relation, so a key-only pre-image is whole under its own names (flush_refuses_a_partial_before_image_and_writes_a_named_or_whole_one)" }
+    mysql:    { test: cdc_to_files_refuses_a_partial_before_image_mysql }
+    mssql:    { na: "a SQL Server update is delivered as its after image only: the before image (operation 3) is skipped, so no short before image reaches the file sink (map_op_maps_the_three_ops_and_skips_the_before_image)" }
+    mongo:    { na: "every MongoDB image is the fixed pair [_id, document] under the two IMAGE_NAMES (mongo/cdc.rs), so its values and its names cannot differ in length" }
+    oracle:   { na: "every Oracle before image is the whole row under image_names (ALL COLUMNS supplemental logging is required at open, oracle_cdc_table_without_all_column_logging_is_refused)" }
 
   - id: init_config_runs_full
     what: "the config `rivet init --mode full` writes runs as written"

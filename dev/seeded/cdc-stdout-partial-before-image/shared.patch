@@ -1,0 +1,16 @@
+diff --git a/src/source/cdc/mod.rs b/src/source/cdc/mod.rs
+--- a/src/source/cdc/mod.rs
++++ b/src/source/cdc/mod.rs
+@@ -93,11 +93,7 @@ pub(crate) fn named_image_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usi
+         let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
+         (n != names.len()).then_some((n, names.len()))
+     });
+-    image.or_else(|| {
+-        let names = ev.before_names.as_deref().or(ev.image_names.as_deref())?;
+-        let n = ev.before.as_ref()?.len();
+-        (n != names.len()).then_some((n, names.len()))
+-    })
++    image
+ }
+ 
+ /// Default row cap — 5M rows, far above any real OLTP transaction.
