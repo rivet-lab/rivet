@@ -413,6 +413,12 @@ fn mysql_right_ca_is_accepted() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn mysql_system_store_is_not_a_second_anchor() {
+    system_store_is_not_a_second_anchor(Engine::Mysql);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn mysql_system_store_still_decides_without_a_ca_file() {
     system_store_still_decides_without_a_ca_file(Engine::Mysql);
 }
@@ -425,6 +431,12 @@ fn mssql_wrong_ca_is_refused() {
 #[test]
 fn mssql_right_ca_is_accepted() {
     right_ca_is_accepted(Engine::Mssql);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mssql_system_store_is_not_a_second_anchor() {
+    system_store_is_not_a_second_anchor(Engine::Mssql);
 }
 
 #[cfg(target_os = "linux")]
