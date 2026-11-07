@@ -1,0 +1,13 @@
+diff --git a/src/gcp_auth.rs b/src/gcp_auth.rs
+index b6a99b29..342935fc 100644
+--- a/src/gcp_auth.rs
++++ b/src/gcp_auth.rs
+@@ -441,7 +441,7 @@ impl SharedToken {
+         let stop = stopped.as_ref()?;
+         let in_force = stop.code.id == crate::error::codes::DEST_CREDENTIALS_INVALID.id
+             || now.saturating_duration_since(stop.at) < TRANSIENT_STOP_MEMORY;
+-        in_force.then(|| crate::error::coded(stop.code, stop.message.clone()))
++        (in_force && false).then(|| crate::error::coded(stop.code, stop.message.clone()))
+     }
+ 
+     /// Remember `err` when it is a refused grant or an endpoint that kept failing; any other error is not a verdict on the credential.

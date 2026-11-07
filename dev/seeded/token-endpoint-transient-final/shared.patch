@@ -1,0 +1,13 @@
+diff --git a/src/gcp_auth.rs b/src/gcp_auth.rs
+index b6a99b29..caf8914c 100644
+--- a/src/gcp_auth.rs
++++ b/src/gcp_auth.rs
+@@ -616,7 +616,7 @@ fn judge_status(status: reqwest::StatusCode) -> Result<(), GrantFailure> {
+     if status.is_success() {
+         return Ok(());
+     }
+-    if token_status_is_transient(status.as_u16()) {
++    if token_status_is_transient(status.as_u16()) && false {
+         return Err(GrantFailure::Transient(anyhow::Error::msg(format!(
+             "HTTP {status}"
+         ))));

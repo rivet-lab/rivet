@@ -3756,6 +3756,82 @@ seeds:
       clickhouse:
         na: "the seed edits src/load/bq_rest.rs, which only a BigQuery load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
+  - name: token-endpoint-transient-final
+    class: "an HTTP 5xx, 429 or 408 from Google's OAuth token endpoint is coded RIVET_DEST_CREDENTIALS_INVALID, exit 1, with no retry, so a scheduler fails the task for good on a blip of the endpoint"
+    history: "2026-11-06 - observed live on 0.32.2: a BigQuery load stopped 'ADC token request failed (HTTP 500 Internal Server Error)', exit 1; the next load with the same credential succeeded"
+    scope: target
+    patch: token-endpoint-transient-final/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_bigquery_load_rides_out_a_5xx_from_the_token_endpoint"
+      snowflake:
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_transient_token_reply_through_opendal_mints_and_the_write_lands"
+      clickhouse:
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_transient_token_reply_through_opendal_mints_and_the_write_lands"
+
+  - name: token-loader-stop-lost-in-opendal
+    class: "a refusal the GCS token loader raises (RIVET_DEST_CREDENTIALS_INVALID, RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE) is wrapped by opendal and read back with no code: the run stops with no code and exit 1 or 2 by opendal's flag, not by the code"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: a 401 from the token endpoint through real opendal Gcs read back code=None; code_of looked only at the anyhow layers, never at the std source chain"
+    scope: target
+    patch: token-loader-stop-lost-in-opendal/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+      snowflake:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+      clickhouse:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+
+  - name: token-grant-asked-again-by-opendal-retries
+    class: "a grant the token endpoint refused (401) or an endpoint that kept failing is asked again by every backon and RetryLayer retry of the same write: 24 to 144 asks and minutes of backoff for one answer"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: 401 through Gcs plus the RetryLayer asked the token endpoint 24 times in 67 s"
+    scope: target
+    patch: token-grant-asked-again-by-opendal-retries/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+      snowflake:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+      clickhouse:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+
+  - name: opendal-temporary-flag-overrides-nested-refusal
+    class: "an opendal error flagged temporary that carries a refused grant is retried as a blip: the exit is 2 for a refusal that no retry can fix"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: a 401 through Gcs without the RetryLayer exited 2 because opendal marks every loader error temporary"
+    scope: target
+    patch: opendal-temporary-flag-overrides-nested-refusal/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+      snowflake:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+      clickhouse:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+
   - name: transient-warehouse-code-exits-by-text
     class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
     history: "2026-10-28 - found while fixing #707: the code existed for the REST layer's transient replies but its exit followed the text, which names no transient word, so a scheduler never retried it"
@@ -4942,6 +5018,23 @@ seeds:
           - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
           - "lib:two_named_identities_are_refused_by_code"
 
+  - name: mssql-ns-override-out-of-range-null
+    class: "a SQL Server or Oracle value outside 1677-09-21..2262-04-11 under a `timestamp_ns` / `timestamp_tz_ns` override is written as NULL with exit 0 instead of being refused by code"
+    history: "umbrella #852, found 2026-11-06: the SQL Server nanosecond builder wrote NULL when timestamp_nanos_opt() was None; the Oracle builder refused uncoded with exit 1; both now route through types::timestamp_nanos_or_refuse"
+    scope: source
+    engines:
+      mssql:
+        patch: mssql-ns-override-out-of-range-null/mssql.patch
+        cells: [a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null]
+      oracle:
+        patch: mssql-ns-override-out-of-range-null/oracle.patch
+        cells: [a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code]
+      postgres:
+        na: "PostgreSQL refuses a nanosecond override with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (live check_override_wire cells a_nanosecond_timestamp_override_is_refused_by_the_wire_check_postgres), so no value reaches a nanosecond builder"
+      mysql:
+        na: "MySQL has no nanosecond builder: a timestamp_ns override stops the run with RIVET_INTERNAL_TYPE_BUILDER before any value is read, so no value reaches a nanosecond builder"
+      mongo:
+        na: "a document source has no declared column wire type and no builder takes a nanosecond override"
   - name: oracle-timestamp-ns-undeclared-truncated
     class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
     history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"

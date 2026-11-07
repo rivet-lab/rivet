@@ -2187,6 +2187,71 @@ fn nanosecond_boundary_table() -> OracleTable {
     t
 }
 
+/// A `timestamp_ns` override on a value past Arrow's nanosecond range is refused by code before any part is written; each remedy the text names delivers the source and a wrong one is walked.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create("ora_tsr", "id NUMBER(10) PRIMARY KEY, t9 TIMESTAMP(9)");
+    for row in [
+        "1, TIMESTAMP '2024-02-29 13:14:15.123456'",
+        "2, TIMESTAMP '2300-01-01 00:00:00.000001'",
+        "3, NULL",
+    ] {
+        ora_exec(&format!("INSERT INTO {} VALUES ({row})", t.name()));
+    }
+    let out = tempfile::tempdir().unwrap();
+    let table = t.name().to_string();
+    let mut rig = Rig::oracle_batch(t.name())
+        .export_line("columns: {T9: timestamp_ns}")
+        .dest_path(out.path().to_path_buf());
+    assert_refused(
+        &rig.run(),
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    assert!(
+        files_with_extension(out.path(), "parquet").is_empty(),
+        "nothing is written before the refusal"
+    );
+    let same = Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+    let said = rig.refuses_twice_and_walks_out(
+        &["run"],
+        &[],
+        same,
+        vec![
+            Remedy::wrong(
+                "empties the destination and runs again",
+                Then::Refuses(same),
+                |r| {
+                    for f in std::fs::read_dir(r.out_dir())
+                        .expect("the destination")
+                        .flatten()
+                    {
+                        let _ = std::fs::remove_file(f.path());
+                    }
+                },
+            ),
+            Remedy::new(
+                "Declare the column `timestamp`",
+                Then::DeliversTheSource,
+                |r| r.rebuilt(|rig| rig.restage("full", &["columns: {T9: timestamp}"])),
+            ),
+            Remedy::new(
+                "CAST it in the export's `query:`",
+                Then::DeliversTheSource,
+                move |r| {
+                    r.rebuilt(|rig| {
+                        rig.restage("full", &[]).query(&format!(
+                            "SELECT id, CAST(t9 AS TIMESTAMP(6)) AS t9 FROM {table} ORDER BY id"
+                        ))
+                    })
+                },
+            ),
+        ],
+    );
+    assert!(said.contains("column `T9` holds "), "{said}");
+}
+
 /// An undeclared TIMESTAMP(7..9), zoned or not, is refused naming each such column and not TIMESTAMP(6); declaring it as `timestamp_ns` delivers every digit.
 #[test]
 #[ignore = "live: requires docker compose oracle"]

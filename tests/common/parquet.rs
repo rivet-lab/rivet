@@ -494,6 +494,28 @@ pub fn dir_parquet_i64(dir: &Path, col: &str) -> Vec<i64> {
     out
 }
 
+/// `(id, nanoseconds since epoch or None)` of every row of a nanosecond timestamp column, ordered by id.
+pub fn dir_parquet_id_and_nanos(dir: &Path, col: &str) -> Vec<(i64, Option<i64>)> {
+    use arrow::array::{Array, AsArray};
+    let mut out = Vec::new();
+    for path in files_with_extension(dir, "parquet") {
+        for batch in reader(&path) {
+            let batch = batch.unwrap();
+            let id = column_ci(&batch, "id").expect("column id present");
+            let id =
+                arrow::compute::cast(id, &arrow::datatypes::DataType::Int64).expect("id as Int64");
+            let id = id.as_primitive::<arrow::datatypes::Int64Type>();
+            let v = column_ci(&batch, col).unwrap_or_else(|| panic!("column {col} present"));
+            let v = v
+                .as_primitive_opt::<arrow::datatypes::TimestampNanosecondType>()
+                .unwrap_or_else(|| panic!("{col} decodes as Timestamp(Nanosecond)"));
+            (0..v.len()).for_each(|i| out.push((id.value(i), (!v.is_null(i)).then(|| v.value(i)))));
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Distinct string values of `col` across every `.parquet` under `dir`.
 pub fn dir_parquet_distinct_strings(dir: &Path, col: &str) -> BTreeSet<String> {
     use arrow::array::{Array, AsArray};
