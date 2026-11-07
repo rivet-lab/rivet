@@ -2285,7 +2285,7 @@ def _run_pool_module(
 
 # NOTE: pooler safety (session-pin survival through pgbouncer/proxysql) is
 # deliberately NOT a gate stage. It is a pure re-run of tests/live/
-# live_pool_safety.rs, which CI already runs on every push (ci.yml brings up
+# live_pool_safety.rs, which CI already runs nightly (nightly-live.yml brings up
 # `--profile pool` for it). Re-running a CI-owned correctness suite here adds no
 # coverage AND is a noise source: it reddens on a missing pool backend
 # (`require_alive(Mysql)` panics when the compose `mysql` :3306 is down), drowning

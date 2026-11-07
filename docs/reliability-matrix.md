@@ -10,11 +10,11 @@ The matrix is derived from the workflows in [.github/workflows/](https://github.
 
 | Tier | What runs | Trigger | Wall time budget |
 |---|---|---|---|
-| **PR CI** | unit + integration + named semantic gates + e2e (incl. PG / MySQL / SQL Server CDC) + type-golden against live PG / MySQL / SQL Server | every push and PR to `main` | ~10 min |
-| **Nightly** | full live suite incl. content_load against ~60k-row fixture; pgBouncer profile; MongoDB version matrix (4.4 → 8.0, batch + CDC) | 03:30 UTC cron + manual dispatch | up to 60 min |
+| **PR CI** | unit + integration + named semantic gates | every push and PR to `main` | ~10 min |
+| **Nightly** | e2e (incl. PG / MySQL / SQL Server CDC, type-golden, type round-trip validators, differential, cli / cfg / path matrices) against live PG / MySQL / SQL Server; full live suite incl. content_load against ~60k-row fixture; pgBouncer profile; MongoDB version matrix (4.4 → 8.0, batch + CDC) | 03:30 UTC cron + manual dispatch | up to 90 min |
 | **Manual** | 1M-row stress, full legacy DB matrix (PG 12–15, MySQL 5.7), wide-table memory benchmarks | operator-invoked from `dev/` scripts | varies |
 
-PR CI defines branch protection — the named gates (`fmt`, `clippy`, `test` — whose invariant / recovery / compatibility / type-contract / stability / generated-docs steps each fail under their own name — and `e2e`, whose type-golden / type-validator / differential / PR-matrix steps do the same on one set of containers) block merges on regression.
+PR CI defines branch protection — the named gates (`fmt`, `clippy`, `test` — whose invariant / recovery / compatibility / type-contract / stability / generated-docs steps each fail under their own name) block merges on regression. The nightly `e2e` job is not a merge gate: a red nightly names the merges since the last green one.
 
 ---
 
@@ -143,16 +143,15 @@ runs the right set per gate.
 
 | Matrix | Layer | What it pins | Tier | Trigger |
 |---|---|---|---|---|
-| [`cli`](https://github.com/rivet-lab/rivet/tree/main/dev/cli_matrix) | Surface | CLI exit codes (88) + 36 stderr/stdout substring assertions per scenario | **PR (mandatory)** | every push |
-| [`cfg`](https://github.com/rivet-lab/rivet/tree/main/dev/cfg_matrix) | Surface | 83 YAML × 3 probes (doctor/check/plan) + 17 message substrings | **PR (mandatory)** | every push |
-| [`path`](https://github.com/rivet-lab/rivet/tree/main/dev/path_matrix) | Execution | 7 scenarios × on-disk layout snapshot + `summary.json` row/file accounting | **PR (mandatory)** | every push |
+| [`cli`](https://github.com/rivet-lab/rivet/tree/main/dev/cli_matrix) | Surface | CLI exit codes (88) + 36 stderr/stdout substring assertions per scenario | **PR tier** | nightly `e2e` job |
+| [`cfg`](https://github.com/rivet-lab/rivet/tree/main/dev/cfg_matrix) | Surface | 83 YAML × 3 probes (doctor/check/plan) + 17 message substrings | **PR tier** | nightly `e2e` job |
+| [`path`](https://github.com/rivet-lab/rivet/tree/main/dev/path_matrix) | Execution | 7 scenarios × on-disk layout snapshot + `summary.json` row/file accounting | **PR tier** | nightly `e2e` job |
 | [`query`](https://github.com/rivet-lab/rivet/tree/main/dev/query_matrix) | Execution | 5 representative queries × PG `EXPLAIN (COSTS OFF)` plan shape | **Nightly** | 03:30 UTC cron |
 | [`soak`](https://github.com/rivet-lab/rivet/tree/main/dev/soak_matrix) | Resources | 3 modes × 10k-row PG × per-scenario `duration_ms`/`peak_rss_mb` thresholds | **Nightly** | 03:30 UTC cron |
 | [`cross_version`](https://github.com/rivet-lab/rivet/tree/main/dev/cross_version_matrix) | Compatibility | doctor/check/plan rc agreement across PG 12–16 + MySQL 5.7/8.0 | **Release** | before tag |
 | [`legacy`](https://github.com/rivet-lab/rivet/tree/main/dev/legacy) | Compatibility | Full e2e (83 assertions) per DB version | **Manual** | operator-invoked |
 
-Branch-protection guarantees: the **PR** row must stay green to merge — the
-runs as a step of the `e2e` job in [.github/workflows/ci.yml](https://github.com/rivet-lab/rivet/blob/main/.github/workflows/ci.yml).
+The **PR tier** matrices run as a step of the nightly `e2e` job in [.github/workflows/nightly-live.yml](https://github.com/rivet-lab/rivet/blob/main/.github/workflows/nightly-live.yml).
 **Nightly** matrices run from [.github/workflows/nightly-live.yml](https://github.com/rivet-lab/rivet/blob/main/.github/workflows/nightly-live.yml);
 a red nightly emails the on-call. **Release** matrices run as part of the
 release checklist; the artifact is the matrix log in
