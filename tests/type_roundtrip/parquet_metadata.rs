@@ -130,7 +130,12 @@ fn parquet_metadata_pins_postgres_matrix_field_provenance() {
         ("attrs", "jsonb", "logical_string", Some("json")),
         ("attrs_json", "json", "logical_string", Some("json")),
         ("c_bool", "bool", "exact", None),
-        ("interval_col", "interval", "compatible", Some("interval")),
+        (
+            "interval_col",
+            "interval",
+            "logical_string",
+            Some("interval"),
+        ),
         // The enum column has the table-specific PG type name — assert just
         // the fidelity / logical bits here.
         ("large_text", "text", "exact", None),

@@ -9,7 +9,9 @@ mod canon;
 mod clickhouse;
 mod duckdb;
 mod env;
+mod forward;
 mod mongo;
+mod mongo_hold;
 mod mssql;
 mod mysql;
 #[cfg(feature = "oracle")]
@@ -34,7 +36,9 @@ pub use canon::*;
 pub use clickhouse::*;
 pub use duckdb::*;
 pub use env::*;
+pub use forward::*;
 pub use mongo::*;
+pub use mongo_hold::*;
 pub use mssql::*;
 pub use mysql::*;
 #[cfg(feature = "oracle")]

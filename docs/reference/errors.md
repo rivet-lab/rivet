@@ -211,10 +211,13 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_DEST_CREDENTIALS_INVALID` | environment | 2 if its cause is transient, else 1 | issue the destination a fresh, complete credential: a new SAS, or name a service-account key file as `credentials_file` (leave `credentials_file` out to use gcloud ADC) |
 | `RIVET_DEST_PREFIX_MODE_MISMATCH` | refusal | 5 | give the export its own destination prefix; a batch and a CDC export must not share one |
 | `RIVET_DEST_IO_RUNTIME_UNAVAILABLE` | environment | 2 if its cause is transient, else 1 | raise the process's thread and open-file limits, or lower the export parallelism, then run again |
+| `RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE` | transient | 2 | re-run the same command later; Google's token endpoint failed with a transient error (HTTP 408, 429 or 5xx, or no answer) that rivet's retries did not outlast, and the credential itself was not refused |
 | `RIVET_INIT_CDC_NAME_TAKEN` | refusal | 5 | write the config under another `-o` name: the stem names its checkpoint and destination |
 | `RIVET_INIT_CONFIG_EXISTS` | refusal | 5 | move the existing config aside, or write elsewhere with `-o <new-path>` |
 | `RIVET_INIT_TABLE_NOT_FOUND` | usage | 1 | correct `--table` (and `--schema`), or grant the user SELECT on the table |
+| `RIVET_INIT_TABLE_UNREADABLE` | usage | 1 | grant SELECT on the table or leave it out of init (a schema scan only warns, unless no table in it could be read) |
 | `RIVET_INIT_NO_TABLES` | usage | 1 | point `--schema` at a schema the user can read, and loosen `--include` / `--exclude` |
+| `RIVET_INIT_NOTHING_EXPORTABLE` | refusal | 5 | fix what each skip reason names (an Oracle CDC skip clears with a batch `--mode`), or init the schema with `--include` naming a table it can export |
 | `RIVET_LOAD_SPLIT_GENERATIONS_MIXED` | refusal | 5 | load from a fresh destination prefix, or clear the stale split generation, and run again |
 | `RIVET_LOAD_SPEC_MISSING` | refusal | 5 | run `rivet run` for the export the message names so its column types are recorded, then load again |
 | `RIVET_MCP_REQUEST_INVALID` | usage | 1 | send a method and tool name `tools/list` advertises, with `params` |

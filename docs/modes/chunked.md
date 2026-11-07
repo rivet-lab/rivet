@@ -300,14 +300,40 @@ than the snapshot it replaces. Rivet **refuses** a `chunk_by_key` that is not a
 single-column, NOT NULL, `UNIQUE`/`PRIMARY` key rather than emit such a query:
 
 ```
-chunk_by_key 'payload' is not a usable keyset key on app.events — it must be a
+export 'events': chunk_by_key 'payload' is not a usable keyset key on app.events — it must be a
 single-column, NOT NULL, UNIQUE or PRIMARY key WHOSE TYPE the keyset cursor can
-read (integer / float / string / timestamp / date / uuid). A `decimal`/`numeric`
-key is excluded: the cursor cannot advance past it (it would fail mid-run after
-a partial write). Without a usable key, `ORDER BY payload LIMIT n` would also
-full-scan + filesort. Add a unique index of a supported type, pick another key,
-use a range `chunk_column:` (integer), or `mode: full`.
+read (integer / float / string / timestamp / date / uuid). Column 'payload' is
+binary, which the cursor cannot render. Without a usable key, `ORDER BY payload
+LIMIT n` would also full-scan + filesort. Key the keyset on an integer, text,
+uuid, date or timestamp column, range-chunk an integer `chunk_column:`, or use
+`mode: full`.
 ```
+
+On SQL Server the remedy line adds "(a timestamp finer than a microsecond needs
+the `timestamp_ns` / `timestamp_tz_ns` column override)"; on Oracle it adds "(a
+TIMESTAMP finer than a microsecond, a NUMBER with a scale and a FLOAT stay refused
+whatever `columns:` delivers them as: key on a TIMESTAMP(6), a whole-number
+NUMBER or a text column)".
+
+One seam decides which delivered types can key a keyset, for every engine and
+for the explicit key, the key MySQL picks by itself and a composite key alike.
+The cause is named after the column. Refused: `decimal`/`numeric` on PostgreSQL,
+MySQL and SQL Server, binary, boolean (`TINYINT(1)`, `BIT(1)`), a time of day,
+an interval, an array, JSON (a PostgreSQL `jsonb` key a seek: the server orders
+and compares it by its own btree order on both sides of the cursor), a MySQL
+`ENUM`/`SET` (it sorts by member position, not by the label the cursor binds), a
+column delivered as text (the one exception is an Oracle `NUMBER`, delivered as
+exact `decimal_plain` text), and a SQL Server `datetime2`/`datetimeoffset` finer
+than a microsecond unless the `timestamp_ns` / `timestamp_tz_ns` override
+delivers it in nanoseconds. On Oracle the catalog decides, not the delivered
+type: a bare `NUMBER` and an integer `NUMBER(p)` key a seek; a `NUMBER` with a
+scale (`NUMBER(12,2)`, `NUMBER(5,-2)`, `NUMBER(*,2)`, `NUMBER(38,39)`), a `FLOAT`
+and a `TIMESTAMP(7)` to `TIMESTAMP(9)` are refused as a single key whatever
+`columns:` delivers them as (`timestamp_ns` included: the Oracle reader refuses a
+sub-microsecond cursor on any export), and a composite key refuses the
+`TIMESTAMP(7..9)` the same way and keeps a `FLOAT`. The refusal comes at plan
+time, so a table that fits in one chunk is refused too instead of running as a
+snapshot.
 
 With `parallel:` the planner also reads the key's boundaries (and, with
 `keyset_incremental: true`, its current maximum) through a scalar probe. On
@@ -377,7 +403,7 @@ with `N`.
 
 **Limitations (current):**
 
-- **Single-column keys only** — composite unique keys are not yet supported.
+- **Composite keys must be the primary key** — a `chunk_by_key` list is accepted only when it is exactly the primary key's columns in key order; a composite unique key that is not the primary key is refused with `RIVET_PLAN_CHUNK_KEY_UNUSABLE`.
 - **Decimal (`numeric`) keys and `partition_by` are rejected for ALL keyset
   exports, sequential included**: a decimal key is refused at plan time because
   the keyset cursor cannot read/advance past it, and `partition_by` is

@@ -1,0 +1,12 @@
+diff --git a/src/source/keyset_key.rs b/src/source/keyset_key.rs
+index 8442ceb5..08b7188e 100644
+--- a/src/source/keyset_key.rs
++++ b/src/source/keyset_key.rs
+@@ -41,6 +41,7 @@ pub(crate) fn keyset_key_refusal(
+         }
+     }
+     let exact_number_text = source == SourceType::Oracle
++        && false
+         && matches!(mapping.delivery, Delivery::Text(TextForm::DecimalPlain));
+     if !exact_number_text && !matches!(mapping.delivery, Delivery::Native) {
+         return Some("is delivered as text, which does not sort as the stored value");

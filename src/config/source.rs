@@ -224,8 +224,7 @@ pub struct TlsConfig {
     /// Enforcement level. See [`TlsMode`].
     #[serde(default)]
     pub mode: TlsMode,
-    /// PEM-encoded CA certificate to trust for server verification. Required
-    /// for [`TlsMode::VerifyCa`] and [`TlsMode::VerifyFull`] against a private CA.
+    /// PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set.
     pub ca_file: Option<String>,
     /// Accept certificates not chained to a trusted CA. Dangerous — disables
     /// server authentication — and only honored when explicitly `true`.

@@ -307,20 +307,9 @@ pub(super) fn timestamp_micros(t: &OracleTimestamp) -> Result<i64> {
     Ok(timestamp_datetime(t)?.and_utc().timestamp_micros())
 }
 
-/// Nanoseconds since the Unix epoch, or an error naming `name` outside Arrow's 1677..2262 range.
+/// Nanoseconds since the Unix epoch, or the coded refusal naming `name` outside Arrow's 1677..2262 range.
 fn timestamp_nanos(t: &OracleTimestamp, name: &str) -> Result<i64> {
-    timestamp_datetime(t)?
-        .and_utc()
-        .timestamp_nanos_opt()
-        .ok_or_else(|| {
-            crate::error::coded(
-                crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
-                format!(
-                    "oracle: column {name} = {t} is outside the nanosecond timestamp range \
-                 (1677-09-21..2262-04-11); declare it `timestamp` (microseconds) instead"
-                ),
-            )
-        })
+    crate::types::timestamp_nanos_or_refuse(timestamp_datetime(t)?, "oracle", name)
 }
 
 /// Days since the Unix epoch, or an error naming `name` when the value has a time of day.
@@ -578,6 +567,137 @@ pub(super) fn rows_to_batch(
 mod tests {
     use super::*;
 
+    /// The seam over what an Oracle catalog type is delivered as: integer NUMBERs, text, DATE and zone-less timestamps to the microsecond key a seek.
+    #[test]
+    fn an_oracle_catalog_type_keys_a_seek_by_what_it_is_delivered_as() {
+        use crate::config::SourceType;
+        use crate::source::keyset_key::{KeyShape, Wider, keyset_key_refusal};
+        use crate::types::SourceColumn;
+        let refusal = |kind, native: &str, p, s, wider| {
+            let rivet = autodetect(kind, native, p, s, native);
+            let mapping =
+                TypeMapping::from_source(&SourceColumn::simple("K", native, false), rivet);
+            let mapping = deliver_number_text(mapping, kind, p, s);
+            keyset_key_refusal(SourceType::Oracle, &mapping, wider, KeyShape::Single)
+        };
+        for (kind, native, p, s) in [
+            (OraKind::Number, "number", 10, 0),
+            (OraKind::Number, "number", 38, 0),
+            (OraKind::Number, "number", 0, 0),
+            (OraKind::Number, "number", 0, -127),
+            (OraKind::Text, "varchar", 0, 0),
+            (OraKind::Text, "nchar", 0, 0),
+            (OraKind::Date, "date", 0, 0),
+            (OraKind::Timestamp, "timestamp", 6, 0),
+            (OraKind::Timestamp, "timestamp", 6, 6),
+        ] {
+            assert_eq!(refusal(kind, native, p, s, None), None, "{native} {p} {s}");
+        }
+        for (kind, native, p, s, wider) in [
+            (OraKind::Number, "number", 12, 2, None),
+            (OraKind::Number, "number", 10, 3, None),
+            (OraKind::Number, "number", 7, -2, Some(Wider::InexactNumber)),
+            (
+                OraKind::Number,
+                "number",
+                38,
+                -5,
+                Some(Wider::InexactNumber),
+            ),
+            (
+                OraKind::Number,
+                "number",
+                38,
+                39,
+                Some(Wider::InexactNumber),
+            ),
+            (OraKind::Number, "number", 0, 2, Some(Wider::InexactNumber)),
+            (
+                OraKind::Number,
+                "number",
+                126,
+                -127,
+                Some(Wider::InexactNumber),
+            ),
+            (OraKind::BinaryFloat, "binary_float", 0, 0, None),
+            (OraKind::BinaryDouble, "binary_double", 0, 0, None),
+            (
+                OraKind::Timestamp,
+                "timestamp",
+                9,
+                9,
+                Some(Wider::FinerTimestamp),
+            ),
+            (OraKind::TimestampTz, "timestamp_tz", 6, 6, None),
+            (OraKind::TimestampLtz, "timestamp_ltz", 6, 6, None),
+            (OraKind::Raw, "raw", 0, 0, None),
+            (OraKind::Boolean, "boolean", 0, 0, None),
+            (OraKind::IntervalDs, "interval_ds", 0, 0, None),
+        ] {
+            assert!(
+                refusal(kind, native, p, s, wider).is_some(),
+                "{native} {p} {s} cannot key a seek"
+            );
+        }
+    }
+
+    /// Every NUMBER and FLOAT catalog shape keys a seek exactly when the catalog filter the seam replaced admitted it.
+    #[test]
+    fn an_oracle_number_keys_a_seek_exactly_when_the_catalog_filter_it_replaced_admitted_it() {
+        use crate::config::SourceType;
+        use crate::source::keyset_key::{KeyShape, Wider, keyset_key_refusal};
+        use crate::source::oracle::is_inexact_number_type;
+        use crate::types::SourceColumn;
+        let before = |data_type: &str, precision: Option<u32>, scale: Option<i32>| match data_type {
+            "NUMBER" => scale == Some(0) || (precision.is_none() && scale.is_none()),
+            _ => false,
+        };
+        let mut shapes: Vec<(&str, Option<u32>, Option<i32>)> = vec![("FLOAT", Some(126), None)];
+        for p in [
+            None,
+            Some(1),
+            Some(5),
+            Some(9),
+            Some(10),
+            Some(18),
+            Some(19),
+            Some(38),
+        ] {
+            for s in [
+                None,
+                Some(0),
+                Some(2),
+                Some(-2),
+                Some(-5),
+                Some(38),
+                Some(39),
+                Some(127),
+            ] {
+                if p.is_some() && s.is_none() {
+                    continue;
+                }
+                shapes.push(("NUMBER", p, s));
+            }
+        }
+        for (data_type, p, s) in shapes {
+            let (prec, scale) = match (data_type, p, s) {
+                ("FLOAT", ..) => (126u8, -127i8),
+                (_, None, None) => (0, -127),
+                (_, p, s) => (p.unwrap_or(0) as u8, s.unwrap_or(0) as i8),
+            };
+            let rivet = autodetect(OraKind::Number, "number", prec, scale, "number");
+            let mapping =
+                TypeMapping::from_source(&SourceColumn::simple("K", "number", false), rivet);
+            let mapping = deliver_number_text(mapping, OraKind::Number, prec, scale);
+            let wider = is_inexact_number_type(data_type, p, s).then_some(Wider::InexactNumber);
+            assert_eq!(
+                keyset_key_refusal(SourceType::Oracle, &mapping, wider, KeyShape::Single).is_none(),
+                before(data_type, p, s),
+                "{data_type} {p:?} {s:?}"
+            );
+        }
+    }
+
     fn mapping(native: &str) -> TypeMapping {
         use crate::types::SourceColumn;
         TypeMapping::from_source(
@@ -803,8 +923,9 @@ mod tests {
         let t = OracleTimestamp::new_timestamp(1970, 1, 1, 0, 0, 1, 123_456_789);
         assert_eq!(timestamp_nanos(&t, "T").unwrap(), 1_123_456_789);
         let far = OracleTimestamp::new_date(9999, 12, 31);
-        let err = timestamp_nanos(&far, "T").unwrap_err().to_string();
-        assert!(err.contains("column T = "), "{err}");
+        let err = timestamp_nanos(&far, "T").unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        assert!(format!("{err:#}").contains("column `T` holds "), "{err:#}");
     }
 
     #[test]

@@ -316,7 +316,8 @@ pub fn accept_state(
         &source,
         "accept its edited query",
     )?;
-    let kept = match state.accept(&plan.progress_key())? {
+    let bound = super::incarnation::bound_to_collection(&plan)?;
+    let kept = match state.accept(&bound.as_ref().unwrap_or(&plan).progress_key())? {
         crate::state::Accepted::NoProgress => {
             println!(
                 "Export '{export_name}' holds no stored progress on this source that a run would continue from; nothing to accept."

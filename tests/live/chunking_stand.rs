@@ -812,9 +812,15 @@ fn run_keyset_decimal_key_bails(eng: Eng) {
         !out.status.success(),
         "a DECIMAL keyset key must BAIL, not run; stderr:\n{stderr}"
     );
+    let cause = match eng {
+        Eng::Or => {
+            "Column 'DKEY' is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly"
+        }
+        _ => "is a decimal, which the cursor cannot advance past exactly",
+    };
     assert!(
-        stderr.contains("not a usable keyset key") && stderr.to_lowercase().contains("decimal"),
-        "the bail must name the TYPE reason (decimal), not just 'unique'; stderr:\n{stderr}"
+        stderr.contains("not a usable keyset key") && stderr.contains(cause),
+        "the bail must name the TYPE reason ({cause}), not just 'unique'; stderr:\n{stderr}"
     );
     assert_eq!(
         count_parquet_rows(&rig.out_dir()),

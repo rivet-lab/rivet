@@ -153,6 +153,14 @@ mod tests {
         }
     }
 
+    /// A primary-key column the keyset seam refuses.
+    fn refused_pk(name: &str, ty: &str) -> ColumnInfo {
+        ColumnInfo {
+            not_keyset: true,
+            ..c(name, ty, true)
+        }
+    }
+
     /// A non-PK column that leads an index.
     fn ix(name: &str, ty: &str) -> ColumnInfo {
         ColumnInfo {
@@ -296,7 +304,7 @@ mod tests {
                 tbl(
                     200_000,
                     narrow(200_000),
-                    vec![c("id", "decimal", true), ix("seq", "int")],
+                    vec![refused_pk("id", "decimal"), ix("seq", "int")],
                 ),
                 "chunked(seq, size=100000, parallel=1, checkpoint)",
             ),
@@ -374,7 +382,7 @@ mod tests {
             tbl(
                 150_000,
                 narrow(150_000),
-                vec![c("id", "decimal", true), c("name", "text", false)],
+                vec![refused_pk("id", "decimal"), c("name", "text", false)],
             ),
             tbl(
                 50_000,

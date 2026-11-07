@@ -1034,7 +1034,7 @@ seeds:
           - keyset_incremental_repointed_at_another_table_oracle
           - parallel_keyset_incremental_repointed_at_another_table_oracle
       mongo:
-        cells: [resume_repointed_at_another_collection_mongo]
+        na: "2026-11-05: the stored population of a MongoDB export names the collection incarnation (UUID), so a resume repointed at another collection is refused by the incarnation part even with the rows comparison broken (resume_repointed_at_another_collection_mongo stays green under this seed); that part is graded by mongo-progress-not-bound-to-incarnation, and the rows comparison alone is graded on the SQL engines and in the lib cell"
       lib:
         cells:
           - "lib:a_stored_cursor_is_refused_for_another_table_every_time_until_a_reset"
@@ -2603,6 +2603,86 @@ seeds:
         cells: [check_refuses_a_collection_that_does_not_exist_as_run_does_mongo]
       oracle:
         na: "a missing SQL table fails the query, read by the engine; the absent-collection guard is MongoDB's"
+  - name: mongo-empty-read-after-drop
+    class: "a read of a source that was dropped, or dropped and created again, after the existence check returns no rows and no error (or the new collection's rows), and the run ends exit 0 with a marker over what it had"
+    history: "found 2026-11-03 by gate cell collection_dropped_under_it going red under load (a MongoDB `find` on a collection dropped after `listCollections` returns 0 documents); RED on main 904b8f21 3/3; reworked 2026-11-04: the collection is confirmed by its listing and UUID after every read, not only an empty one (RED on main f0f5207c, 7 of 7 cells); this seed removes the check after the read"
+    scope: source
+    patch: mongo-empty-read-after-drop/shared.patch
+    engines:
+      postgres:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
+      mysql:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
+      mssql:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
+      mongo:
+        cells: [a_collection_dropped_before_a_keyset_page_is_refused_by_code_mongo, a_collection_dropped_before_a_full_scan_is_refused_by_code_mongo, a_collection_dropped_before_an_id_range_read_is_refused_by_code_mongo, a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo, a_collection_created_again_under_a_full_scan_is_refused_by_code_mongo, a_collection_created_again_under_an_id_range_read_is_refused_by_code_mongo]
+      oracle:
+        na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
+  - name: mongo-collection-uuid-not-compared
+    class: "a collection dropped and created again under a run is listed under a new identity, and the check compares only presence, so the run reads the new collection's documents as the old one's and ends exit 0"
+    history: "2026-11-04 - the first fix of mongo-empty-read-after-drop re-read the listing only on an empty read and kept the UUID only for that read; reworked so every read is confirmed against the UUID the run pinned; this seed passes no pinned UUID to the comparison"
+    scope: source
+    patch: mongo-collection-uuid-not-compared/shared.patch
+    engines:
+      postgres:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mysql:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mssql:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mongo:
+        cells: [a_collection_created_again_under_a_later_keyset_page_is_refused_by_code_mongo, a_collection_created_again_under_a_full_scan_is_refused_by_code_mongo, a_collection_created_again_under_an_id_range_read_is_refused_by_code_mongo]
+      oracle:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+  - name: mongo-parallel-worker-pins-its-own-uuid
+    class: "a parallel worker pins the collection it finds when it starts instead of the one its run planned the ranges on, so a collection created again between the plan and a worker's first read is read as the planned one"
+    history: "2026-11-04 - a worker opened its own source and pinned the UUID at its first listing, after the run's range sample; the run now hands its pin to every worker; this seed drops the hand-over"
+    scope: source
+    patch: mongo-parallel-worker-pins-its-own-uuid/shared.patch
+    engines:
+      postgres:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mysql:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mssql:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+      mongo:
+        cells: [a_collection_created_again_before_the_workers_connect_is_refused_by_code_mongo]
+      oracle:
+        na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
+  - name: mongo-listing-failure-fails-open
+    class: "a failed listCollections of a MongoDB collection is read as no listing, so the identity check is skipped and the run reads a collection it could not confirm"
+    history: "2026-11-05 - the check treated any listing error as the role not being allowed to list; only the Unauthorized code (13) lifts the check, any other failure stops the run; this seed lifts the check on every error"
+    scope: source
+    patch: mongo-listing-failure-fails-open/shared.patch
+    engines:
+      postgres:
+        na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
+      mysql:
+        na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
+      mssql:
+        na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
+      mongo:
+        cells: [lib:a_listing_that_fails_for_any_reason_but_the_privilege_stops_the_run]
+      oracle:
+        na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
+  - name: mongo-progress-not-bound-to-incarnation
+    class: "the resume anchor or incremental cursor of a MongoDB export is not bound to the collection incarnation it was written against, so after the collection is dropped and created again with other ids the next run reads 0 rows and ends exit 0 with a marker over the old data"
+    history: "2026-11-05 - found by verify-808: a refused run left the keyset anchor, and the next run over the collection created again with other ids exited 0 with 0 rows; the incarnation (UUID) is now part of the stored population and a different one is a different stream; this seed binds nothing"
+    scope: source
+    patch: mongo-progress-not-bound-to-incarnation/shared.patch
+    engines:
+      postgres:
+        na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
+      mysql:
+        na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
+      mssql:
+        na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
+      mongo:
+        cells: [a_collection_created_again_with_other_ids_after_a_refused_resume_is_read_whole_mongo]
+      oracle:
+        na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
   - name: dropped-source-table-uncoded
     class: "a verdict every engine types (the relation the export reads does not exist) is recognised by no path, so each path ends with the raw driver error or a generic query-failed code instead of the one refusal"
     history: "2026-10-16 - found by hand on the pilot client's shape (MySQL -> GCS -> BigQuery, cron): an export whose source table was dropped failed as `MySqlError { ERROR 1146 (42S02): Table 'rivet.drop_probe_b' doesn't exist }` with no RIVET_* code (PostgreSQL too), RIVET_SOURCE_QUERY_FAILED on SQL Server and Oracle, through 0.31.0; fixed by one `names_a_missing_relation` / `code_a_missing_relation` on every path that reads the table"
@@ -2731,6 +2811,23 @@ seeds:
         cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
       oracle:
         cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
+
+  - name: query-password-key-by-suffix-family
+    class: "a credential scrubber that keeps a second, narrower rule for the same key: the URL query path masked `password` only as a bare key or after `_`/`-`, while the keyword path masks every key ending in password/passwd/pwd, so `?sslpassword=…`, `&SSLPassword=…`, `&db.password=…` and `&MYSQL_PWD=…` reached logs, summaries and the journal in clear"
+    history: "issue #781, hand-reproduced on main 2026-11-06: redact_secrets on a URL with `sslpassword=TOPSECRET` left TOPSECRET; closed by routing the query path through is_password_keyword"
+    scope: source
+    patch: query-password-key-by-suffix-family/shared.patch
+    engines:
+      postgres:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mysql:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mssql:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      mongo:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
+      oracle:
+        cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
 
   - name: mongo-standalone-uncoded
     class: "a server error that names a missing deployment prerequisite is passed up as the driver's raw dump instead of the coded prerequisite refusal"
@@ -3658,6 +3755,82 @@ seeds:
         na: "the seed edits src/load/bq_rest.rs, which only a BigQuery load runs; Snowflake loads through its own loader (src/load/snowflake.rs)"
       clickhouse:
         na: "the seed edits src/load/bq_rest.rs, which only a BigQuery load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
+
+  - name: token-endpoint-transient-final
+    class: "an HTTP 5xx, 429 or 408 from Google's OAuth token endpoint is coded RIVET_DEST_CREDENTIALS_INVALID, exit 1, with no retry, so a scheduler fails the task for good on a blip of the endpoint"
+    history: "2026-11-06 - observed live on 0.32.2: a BigQuery load stopped 'ADC token request failed (HTTP 500 Internal Server Error)', exit 1; the next load with the same credential succeeded"
+    scope: target
+    patch: token-endpoint-transient-final/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_bigquery_load_rides_out_a_5xx_from_the_token_endpoint"
+      snowflake:
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_transient_token_reply_through_opendal_mints_and_the_write_lands"
+      clickhouse:
+        cells:
+          - "lib:a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints"
+          - "lib:a_transient_token_reply_through_opendal_mints_and_the_write_lands"
+
+  - name: token-loader-stop-lost-in-opendal
+    class: "a refusal the GCS token loader raises (RIVET_DEST_CREDENTIALS_INVALID, RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE) is wrapped by opendal and read back with no code: the run stops with no code and exit 1 or 2 by opendal's flag, not by the code"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: a 401 from the token endpoint through real opendal Gcs read back code=None; code_of looked only at the anyhow layers, never at the std source chain"
+    scope: target
+    patch: token-loader-stop-lost-in-opendal/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+      snowflake:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+      clickhouse:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+
+  - name: token-grant-asked-again-by-opendal-retries
+    class: "a grant the token endpoint refused (401) or an endpoint that kept failing is asked again by every backon and RetryLayer retry of the same write: 24 to 144 asks and minutes of backoff for one answer"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: 401 through Gcs plus the RetryLayer asked the token endpoint 24 times in 67 s"
+    scope: target
+    patch: token-grant-asked-again-by-opendal-retries/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+      snowflake:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+      clickhouse:
+        cells:
+          - "lib:a_remembered_stop_is_replayed_for_the_life_of_a_refusal_and_a_window_of_an_outage"
+          - "lib:a_refused_grant_through_opendal_and_the_load_retry_layer_stops_invalid_and_asks_once"
+          - "lib:an_endpoint_that_never_recovers_through_opendal_and_the_load_retry_layer_stops_unavailable"
+
+  - name: opendal-temporary-flag-overrides-nested-refusal
+    class: "an opendal error flagged temporary that carries a refused grant is retried as a blip: the exit is 2 for a refusal that no retry can fix"
+    history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: a 401 through Gcs without the RetryLayer exited 2 because opendal marks every loader error temporary"
+    scope: target
+    patch: opendal-temporary-flag-overrides-nested-refusal/shared.patch
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+      snowflake:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
+      clickhouse:
+        cells:
+          - "lib:a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class"
 
   - name: transient-warehouse-code-exits-by-text
     class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
@@ -4804,6 +4977,55 @@ seeds:
       mongo:
         na: "a MongoDB export reads whole documents; a field the documents do not hold is a null, not a refused read, so no driver number names a missing column"
 
+  - name: keyset-key-type-unchecked
+    class: "the planner accepts a keyset key by a type list kept apart from what the cursor reader can advance: a MySQL BINARY(16), TIME or TINYINT(1) unique key is auto-picked and stops the run with exit 5 after page 0 (exit 0 as a snapshot on one chunk), a PostgreSQL bytea or time and a SQL Server varbinary or time chunk_by_key are accepted, and an MSSQL datetime2(7) chunk_by_key reads microseconds from 100 ns ticks and delivers duplicates with exit 0"
+    history: "2026-11-03 - found by the seam packaging (ER-1, ER-3, ER-6, RHS-3): the MSSQL datetime2(7) key re-read the row at the end of every page; fixed by src/source/keyset_key.rs::keyset_key_refusal; owner decision Q11: a one-chunk table is refused too"
+    scope: source
+    patch: keyset-key-type-unchecked/shared.patch
+    engines:
+      postgres:
+        cells: [keyset_key_is_refused_postgres_bytea_unique_key, keyset_key_is_refused_postgres_time_unique_key, keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key, "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size"]
+      mysql:
+        cells: [keyset_key_is_refused_mysql_binary16_primary_key, keyset_key_is_refused_mysql_time_unique_key, keyset_key_is_refused_mysql_tinyint1_unique_key, keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key, "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size"]
+      mssql:
+        cells: [keyset_key_is_refused_mssql_varbinary_unique_key, keyset_key_is_refused_mssql_time_unique_key, keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds, keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond, keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds, keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key, "lib:a_sub_microsecond_mssql_key_is_refused_until_it_is_delivered_in_nanoseconds", "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders"]
+      oracle:
+        cells: ["lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size", "lib:an_oracle_catalog_type_keys_a_seek_by_what_it_is_delivered_as"]
+      mongo:
+        na: "Mongo always pages by _id; there is no user chunk_by_key knob and no keyset key to type"
+
+  - name: keyset-key-init-mirror
+    class: "rivet init decides which key it scaffolds as a keyset key by a type list of its own instead of the seam the planner calls, so init scaffolds a key the planner refuses (a run that stops at plan) or withholds one the planner admits"
+    history: "2026-11-04 - found verifying the keyset-key-type seam PR: init kept is_keysettable_type and per-engine catalog flags that mirrored the planner by hand; init now probes the delivered types and marks not_keyset through keyset_key::column_refusal"
+    scope: source
+    patch: keyset-key-init-mirror/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
+      mysql:
+        cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
+      mssql:
+        cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
+      oracle:
+        cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
+      mongo:
+        na: "Mongo always pages by _id; init scaffolds no keyset key for it"
+  - name: keyset-key-alias-type-by-name
+    class: "the sub-microsecond fact about a SQL Server keyset key is read by the column's user type name, so a key declared through an alias type over datetime2(7) is not found finer than a microsecond and the cursor delivers duplicate rows with exit 0"
+    history: "2026-11-05 - found verifying the keyset-key-type seam PR (D1): CREATE TYPE ts7 FROM datetime2(7) has sys.types.name ts7, so the name match in finer_than_microsecond_sql missed it; the probe now reads TYPE_NAME(c.system_type_id)"
+    scope: source
+    patch: keyset-key-alias-type-by-name/shared.patch
+    engines:
+      postgres:
+        na: "a PostgreSQL domain reports its base type on the wire, which is what the seam reads; there is no catalog name match to seed"
+      mysql:
+        na: "MySQL has no user-defined column types"
+      mssql:
+        cells: [keyset_key_is_refused_mssql_alias_type_over_datetime2_7, keyset_key_is_refused_on_a_one_chunk_table_mssql_alias_type_over_datetime2_7, init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql, "lib:the_sub_microsecond_probe_reads_the_system_type_under_an_alias"]
+      oracle:
+        na: "Oracle has no scalar alias types for a column"
+      mongo:
+        na: "Mongo always pages by _id; there is no user chunk_by_key knob and no keyset key to type"
   - name: destination-credential-read-by-one-leg
     class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
     history: "2026-11-03 seam packaging HFF-1 and HFF-2: with `credentials_file:` naming a service-account key every BigQuery request of `rivet load` carried the ambient ADC token; an S3 `aws_profile` beside `access_key_env` and `secret_key_env` signed with the profile alone and `rivet check` exited 0"
@@ -4830,6 +5052,23 @@ seeds:
           - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
           - "lib:two_named_identities_are_refused_by_code"
 
+  - name: mssql-ns-override-out-of-range-null
+    class: "a SQL Server or Oracle value outside 1677-09-21..2262-04-11 under a `timestamp_ns` / `timestamp_tz_ns` override is written as NULL with exit 0 instead of being refused by code"
+    history: "umbrella #852, found 2026-11-06: the SQL Server nanosecond builder wrote NULL when timestamp_nanos_opt() was None; the Oracle builder refused uncoded with exit 1; both now route through types::timestamp_nanos_or_refuse"
+    scope: source
+    engines:
+      mssql:
+        patch: mssql-ns-override-out-of-range-null/mssql.patch
+        cells: [a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null]
+      oracle:
+        patch: mssql-ns-override-out-of-range-null/oracle.patch
+        cells: [a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code]
+      postgres:
+        na: "PostgreSQL refuses a nanosecond override with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (live check_override_wire cells a_nanosecond_timestamp_override_is_refused_by_the_wire_check_postgres), so no value reaches a nanosecond builder"
+      mysql:
+        na: "MySQL has no nanosecond builder: a timestamp_ns override stops the run with RIVET_INTERNAL_TYPE_BUILDER before any value is read, so no value reaches a nanosecond builder"
+      mongo:
+        na: "a document source has no declared column wire type and no builder takes a nanosecond override"
   - name: oracle-timestamp-ns-undeclared-truncated
     class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
     history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"
@@ -4900,3 +5139,124 @@ seeds:
       oracle:
         patch: number-text-without-its-label/oracle.patch
         cells: [oracle_batch_and_cdc_deliver_every_ledger_row_alike, "lib:a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not"]
+
+  - name: interval-text-without-its-label
+    class: "an INTERVAL column (PostgreSQL, Oracle) is written as ISO 8601 duration text in a Utf8 column without the rivet.text_form = iso8601_duration label (PostgreSQL in batch and in CDC alike, Oracle in batch), so a reader cannot tell the canonical duration from a free string"
+    history: "type-known-defects INTERVAL of docs/type-capability-matrix.yaml (ADR-0038 CP2/CP5, issue #851 class C); RED on main 2026-11-05 (the ledger row without its marker fails postgres_batch_and_cdc_deliver_every_ledger_row_alike: the ledger delivers text form iso8601_duration, the part labels it nothing)"
+    scope: source
+    patch: interval-text-without-its-label/shared.patch
+    engines:
+      postgres:
+        cells: [postgres_batch_and_cdc_deliver_every_ledger_row_alike, "lib:an_interval_is_delivered_as_labelled_iso8601_text_and_nothing_next_to_it_is"]
+      mysql:
+        na: "MySQL has no INTERVAL column type, so no column reaches the Interval arm the seed edits"
+      mssql:
+        na: "SQL Server has no INTERVAL type, so no column reaches the Interval arm the seed edits"
+      mongo:
+        na: "a MongoDB value has no interval type, so no field reaches the Interval arm the seed edits"
+      oracle:
+        cells: [edge_oracle_types_export_losslessly, "lib:an_interval_is_delivered_as_labelled_iso8601_text_and_nothing_next_to_it_is"]
+  - name: keyset-key-oracle-exact-number-refused
+    class: "the keyset key check refuses every column delivered as text, so an Oracle NUMBER held as exact decimal text (a bare NUMBER, which main pages by correctly) stops with RIVET_PLAN_CHUNK_KEY_UNUSABLE on a table that read every row once before the check"
+    history: "RED on the PR head 2026-11-05: live_oracle keyset_over_a_bare_number_pk_reads_every_row_once and parallel_keyset_reads_every_row_once refused after the merge of #845, which delivers a bare NUMBER as decimal_plain text"
+    scope: source
+    engines:
+      postgres:
+        na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; a PostgreSQL numeric is refused as a decimal key with or without it"
+      mysql:
+        na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; a MySQL DECIMAL is refused as a decimal key with or without it"
+      mssql:
+        na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; a SQL Server decimal is refused as a decimal key with or without it"
+      mongo:
+        na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; MongoDB pages by _id and has no chunk_by_key"
+      oracle:
+        patch: keyset-key-oracle-exact-number-refused/oracle.patch
+        cells: [a_bare_number_keyset_key_delivers_the_seeded_ids_once_oracle, keyset_over_a_bare_number_pk_reads_every_row_once, "lib:a_number_held_as_exact_text_keys_a_seek_on_oracle_alone"]
+
+  - name: keyset-key-oracle-inexact-number-admitted
+    class: "the Oracle keyset key check admits a NUMBER held as exact text or as a whole decimal without asking the catalog for its scale, so a FLOAT or a NUMBER with a scale (NUMBER(*,2), NUMBER(5,-2), NUMBER(38,-5), NUMBER(38,39)), which main refuses, is keyed by a cursor that was never proven to advance past it"
+    history: "2026-11-06 - found verifying the keyset-key-type seam PR: the delivered type of a bare NUMBER, a FLOAT and a NUMBER past 38 digits is the same exact text, so the seam admitted keys main refused; the Oracle catalog probe now reports the declared FLOAT and scaled NUMBER columns"
+    scope: source
+    engines:
+      postgres:
+        na: "the seed drops the Oracle catalog fact about a NUMBER's scale; a PostgreSQL numeric is refused as a decimal key with or without it"
+      mysql:
+        na: "the seed drops the Oracle catalog fact about a NUMBER's scale; a MySQL DECIMAL is refused as a decimal key with or without it"
+      mssql:
+        na: "the seed drops the Oracle catalog fact about a NUMBER's scale; a SQL Server decimal is refused as a decimal key with or without it"
+      mongo:
+        na: "the seed drops the Oracle catalog fact about a NUMBER's scale; MongoDB pages by _id and has no chunk_by_key"
+      oracle:
+        patch: keyset-key-oracle-inexact-number-admitted/oracle.patch
+        cells: [a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle, "lib:an_oracle_number_keys_a_seek_exactly_when_the_catalog_filter_it_replaced_admitted_it", "lib:a_catalog_number_with_a_scale_or_a_float_is_inexact_and_nothing_else"]
+
+  - name: keyset-key-oracle-override-lifts-the-catalog-fact
+    class: "the Oracle keyset key check consults the catalog fact (a TIMESTAMP finer than a microsecond, a NUMBER with a scale, a FLOAT) only for the type the driver delivers, so a columns: override that delivers the column as timestamp_ns, int64 or string lifts a refusal main kept: a TIMESTAMP(9) key under timestamp_ns passes check and is refused by the reader with exit 5, a NUMBER(12,2) key under int64 passes check and fails the run with an uncoded error"
+    history: "2026-11-06 - found re-verifying the keyset-key-type seam PR (findings 1 and 5): the seam trusted the delivered mapping, which an override changes; the typed catalog fact now binds before the mapping is read"
+    scope: source
+    engines:
+      postgres:
+        na: "the seed edits an Oracle-only early return; no PostgreSQL catalog fact outranks the delivered type"
+      mysql:
+        na: "the seed edits an Oracle-only early return; no MySQL catalog fact outranks the delivered type"
+      mssql:
+        na: "the seed edits an Oracle-only early return; a SQL Server key delivered in nanoseconds under the override is admitted by design (a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql)"
+      mongo:
+        na: "the seed edits an Oracle-only early return; MongoDB pages by _id and has no chunk_by_key"
+      oracle:
+        patch: keyset-key-oracle-override-lifts-the-catalog-fact/oracle.patch
+        cells: [a_timestamp_9_keyset_key_under_the_timestamp_ns_override_stays_refused_oracle, a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_columns_override_oracle, "lib:an_oracle_key_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as", "lib:an_oracle_column_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as"]
+
+  - name: keyset-key-refuses-what-main-paged-correctly
+    class: "the keyset key check refuses a key main paged to every row once: a PostgreSQL jsonb key (single or composite) or an Oracle composite key whose second column is a FLOAT, a config that ran correctly before the upgrade stops with RIVET_PLAN_CHUNK_KEY_UNUSABLE"
+    history: "2026-11-06 - found re-verifying the keyset-key-type seam PR (findings 3 and 4): probed on main 40 of 40 ids on 8 jsonb value shapes and on a composite FLOAT, the seam refused both; they stay admitted"
+    scope: source
+    engines:
+      postgres:
+        patch: keyset-key-refuses-what-main-paged-correctly/postgres.patch
+        cells: [a_jsonb_keyset_key_delivers_the_seeded_ids_once_postgres, "lib:json_keys_a_seek_on_postgres_alone", "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders"]
+      mysql:
+        na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; a MySQL JSON key is refused on main and on this branch"
+      mssql:
+        na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; SQL Server has neither type"
+      mongo:
+        na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; MongoDB pages by _id and has no chunk_by_key"
+      oracle:
+        patch: keyset-key-refuses-what-main-paged-correctly/oracle.patch
+        cells: [a_float_and_a_scaled_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle, "lib:a_composite_oracle_key_refuses_a_finer_timestamp_and_keeps_an_inexact_number", "lib:an_inexact_oracle_number_is_refused_as_a_single_key_alone"]
+
+  - name: keyset-key-composite-ignores-the-catalog-fact
+    class: "the composite keyset key check does not read the catalog fact the single-key check reads, so a composite key whose second column is a TIMESTAMP(7..9) (Oracle) or a datetime2(7) (SQL Server) passes check and pages on microseconds: duplicate rows with exit 0 (53 rows for 40 distinct ids on Oracle)"
+    history: "2026-11-06 - found re-verifying the keyset-key-type seam PR: main delivered 53 rows for 40 ids on an Oracle composite TIMESTAMP(9) key; the composite check now passes the catalog fact into the same function"
+    scope: source
+    patch: keyset-key-composite-ignores-the-catalog-fact/shared.patch
+    engines:
+      postgres:
+        na: "no PostgreSQL catalog fact says a column holds more than it delivers; the composite check has nothing to omit"
+      mysql:
+        na: "no MySQL catalog fact says a column holds more than it delivers; the composite check has nothing to omit"
+      mssql:
+        cells: [a_datetime2_7_composite_keyset_key_is_refused_mssql]
+      oracle:
+        cells: [a_timestamp_9_composite_keyset_key_is_refused_oracle, "lib:a_composite_oracle_key_refuses_a_finer_timestamp_and_keeps_an_inexact_number"]
+      mongo:
+        na: "MongoDB pages by _id and has no chunk_by_key"
+
+  - name: ca-file-second-trust-anchor
+    class: "`tls.ca_file` is trusted beside the system store instead of alone, so a server certificate any system-trusted CA signed is accepted under `verify-ca` or `verify-full` although the config names one CA"
+    history: "issue #789; RED on main 2026-11-06 on Linux (a certificate from a CA installed through SSL_CERT_FILE was accepted with ca_file naming another CA, PostgreSQL, MySQL and SQL Server); the cell reads the system store through SSL_CERT_FILE, so it runs on Linux stands only; the mysql and mssql seeds restore the registry driver in place of the rivet-lab fork"
+    scope: source
+    patch: ca-file-second-trust-anchor/postgres.patch
+    engines:
+      postgres:
+        cells: [postgres_system_store_is_not_a_second_anchor]
+      mysql:
+        patch: ca-file-second-trust-anchor/mysql.patch
+        cells: [mysql_system_store_is_not_a_second_anchor]
+      mssql:
+        patch: ca-file-second-trust-anchor/mssql.patch
+        cells: [mssql_system_store_is_not_a_second_anchor]
+      oracle:
+        na: "an Oracle source refuses tls.ca_file by code (src/source/oracle/mod.rs), so no trust anchor is built"
+      mongo:
+        na: "tls_to_mongo hands ca_file to the driver as its whole root store; mongo_system_store_is_not_a_second_anchor holds it, and no rivet line adds the system roots to seed"

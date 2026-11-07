@@ -521,7 +521,7 @@ pub fn recoded(inner: &anyhow::Error, fallback: Code, message: impl Into<String>
 /// JSON `code` field and a `[CODE]` prefix on the text error line.
 pub fn error_code(err: &anyhow::Error) -> Option<&'static str> {
     let err = stop_cause(err);
-    if let Some(c) = err.downcast_ref::<CodedError>() {
+    if let Some(c) = coded_error(err) {
         return Some(c.code());
     }
     // The existing source-side statement-timeout marker also gets a stable code,
@@ -535,7 +535,13 @@ pub fn error_code(err: &anyhow::Error) -> Option<&'static str> {
 
 /// The registered [`Code`] a failure carries through [`CodedError`], if any.
 pub(crate) fn code_of(err: &anyhow::Error) -> Option<Code> {
-    stop_cause(err).downcast_ref::<CodedError>().map(|c| c.code)
+    coded_error(stop_cause(err)).map(|c| c.code)
+}
+
+/// The [`CodedError`] in the anyhow context layers, else the first one nested in a std `source()` link (an `opendal::Error` carrying the loader's refusal).
+fn coded_error(err: &anyhow::Error) -> Option<&CodedError> {
+    err.downcast_ref::<CodedError>()
+        .or_else(|| err.chain().find_map(|e| e.downcast_ref::<CodedError>()))
 }
 
 /// Map an error to its process exit code per the [`ExitClass`] taxonomy.
@@ -602,7 +608,7 @@ pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
     {
         return Some(ExitClass::DataIntegrity);
     }
-    let coded = err.downcast_ref::<CodedError>()?;
+    let coded = coded_error(err)?;
     match coded.kind() {
         ErrorKind::Refusal => Some(ExitClass::Refusal),
         ErrorKind::Busy | ErrorKind::Transient => Some(ExitClass::Retryable),
@@ -1711,6 +1717,11 @@ pub mod codes {
         Retry::ByCause,
         "raise the process's thread and open-file limits, or lower the export parallelism, then run again",
     );
+    /// Google's token endpoint answered a grant with a transient failure (HTTP 408, 429 or 5xx) or could not be reached, through every retry.
+    pub const DEST_TOKEN_ENDPOINT_UNAVAILABLE: Code = transient(
+        "RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE",
+        "re-run the same command later; Google's token endpoint failed with a transient error (HTTP 408, 429 or 5xx, or no answer) that rivet's retries did not outlast, and the credential itself was not refused",
+    );
     /// `rivet init -o` would write a CDC checkpoint that exists, or a checkpoint or destination another config names.
     pub const INIT_CDC_NAME_TAKEN: Code = refusal(
         "RIVET_INIT_CDC_NAME_TAKEN",
@@ -1726,10 +1737,20 @@ pub mod codes {
         "RIVET_INIT_TABLE_NOT_FOUND",
         "correct `--table` (and `--schema`), or grant the user SELECT on the table",
     );
+    /// `rivet init` could not read the column types of a table: a schema scan warns and scaffolds it without a keyset key; a named `--table`, or a scan in which no table could be read, stops.
+    pub const INIT_TABLE_UNREADABLE: Code = usage(
+        "RIVET_INIT_TABLE_UNREADABLE",
+        "grant SELECT on the table or leave it out of init (a schema scan only warns, unless no table in it could be read)",
+    );
     /// `rivet init` found no table or view to scaffold.
     pub const INIT_NO_TABLES: Code = usage(
         "RIVET_INIT_NO_TABLES",
         "point `--schema` at a schema the user can read, and loosen `--include` / `--exclude`",
+    );
+    /// `rivet init` left out every table it found, so the scaffold would hold no export.
+    pub const INIT_NOTHING_EXPORTABLE: Code = refusal(
+        "RIVET_INIT_NOTHING_EXPORTABLE",
+        "fix what each skip reason names (an Oracle CDC skip clears with a batch `--mode`), or init the schema with `--include` naming a table it can export",
     );
     /// A Full load over a `--pool --split` prefix whose parts span more than one split generation.
     pub const LOAD_SPLIT_GENERATIONS_MIXED: Code = refusal(
@@ -2003,10 +2024,13 @@ pub mod codes {
         DEST_CREDENTIALS_INVALID,
         DEST_PREFIX_MODE_MISMATCH,
         DEST_IO_RUNTIME_UNAVAILABLE,
+        DEST_TOKEN_ENDPOINT_UNAVAILABLE,
         INIT_CDC_NAME_TAKEN,
         INIT_CONFIG_EXISTS,
         INIT_TABLE_NOT_FOUND,
+        INIT_TABLE_UNREADABLE,
         INIT_NO_TABLES,
+        INIT_NOTHING_EXPORTABLE,
         LOAD_SPLIT_GENERATIONS_MIXED,
         LOAD_SPEC_MISSING,
         MCP_REQUEST_INVALID,
@@ -2640,7 +2664,10 @@ mod representative_failure_tests {
 
 #[cfg(test)]
 mod stop_marker_tests {
-    use super::{JobWaitTimeout, ManifestInconsistency, Refused};
+    use super::{
+        CodedError, JobWaitTimeout, ManifestInconsistency, Refused, assert_coded, classify_exit,
+        coded, codes, error_code,
+    };
 
     #[test]
     fn a_job_wait_timeout_names_the_job_and_how_long_it_waited() {
@@ -2713,5 +2740,61 @@ mod stop_marker_tests {
             format!("open: {plain:#}"),
         );
         assert_coded(&out, "RIVET_STATE_NOT_WRITABLE", 1);
+    }
+
+    fn opendal_carrying(source: Option<anyhow::Error>, temporary: bool) -> anyhow::Error {
+        let mut e = opendal::Error::new(opendal::ErrorKind::Unexpected, "write");
+        if let Some(source) = source {
+            e = e.set_source(source);
+        }
+        if temporary {
+            e = e.set_temporary();
+        }
+        anyhow::Error::from(e)
+    }
+
+    #[test]
+    fn a_coded_refusal_nested_in_an_opendal_error_stops_by_its_code_and_class() {
+        let invalid = coded(codes::DEST_CREDENTIALS_INVALID, "refused");
+        assert_coded(
+            &opendal_carrying(Some(invalid), true),
+            "RIVET_DEST_CREDENTIALS_INVALID",
+            1,
+        );
+        let down = coded(codes::DEST_TOKEN_ENDPOINT_UNAVAILABLE, "down");
+        assert_coded(
+            &opendal_carrying(Some(down), false),
+            "RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE",
+            2,
+        );
+        let outage = opendal_carrying(
+            Some(coded(codes::DEST_TOKEN_ENDPOINT_UNAVAILABLE, "d")),
+            true,
+        );
+        assert!(!super::retry::classify_error(&outage).is_transient());
+        let wrapped = opendal_carrying(Some(coded(codes::DEST_CREDENTIALS_INVALID, "x")), true)
+            .context("writing the part");
+        assert_coded(&wrapped, "RIVET_DEST_CREDENTIALS_INVALID", 1);
+    }
+
+    #[test]
+    fn an_opendal_error_without_a_nested_code_stays_as_it_was() {
+        let temporary = opendal_carrying(Some(anyhow::anyhow!("a reset")), true);
+        assert_eq!(
+            (error_code(&temporary), classify_exit(&temporary)),
+            (None, 2)
+        );
+        let persistent = opendal_carrying(None, false);
+        assert_eq!(
+            (error_code(&persistent), classify_exit(&persistent)),
+            (None, 1)
+        );
+    }
+
+    #[test]
+    fn the_outer_code_wins_over_a_nested_one() {
+        let outer = opendal_carrying(Some(coded(codes::DEST_CREDENTIALS_INVALID, "in")), true)
+            .context(CodedError::new(codes::STATE_NOT_WRITABLE, "out"));
+        assert_eq!(error_code(&outer), Some("RIVET_STATE_NOT_WRITABLE"));
     }
 }

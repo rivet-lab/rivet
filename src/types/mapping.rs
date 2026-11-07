@@ -92,7 +92,8 @@ impl TypeMapping {
     pub fn from_source(source: &SourceColumn, rivet_type: RivetType) -> Self {
         let fidelity = derive_fidelity(&rivet_type);
         let arrow_type = rivet_type_to_arrow(&rivet_type);
-        Self {
+        let interval = matches!(rivet_type, RivetType::Interval);
+        let mapping = Self {
             column_name: source.name.clone(),
             source_native_type: source.native_type.clone(),
             rivet_type,
@@ -102,6 +103,11 @@ impl TypeMapping {
             warnings: Vec::new(),
             delivery: Delivery::Native,
             refusal: None,
+        };
+        if interval {
+            mapping.with_text(TextForm::Iso8601Duration)
+        } else {
+            mapping
         }
     }
 
@@ -625,6 +631,43 @@ mod tests {
         let field = build_arrow_field(&m).expect("field");
         assert!(!field.metadata().contains_key("rivet.text_form"));
         assert!(!serde_json::to_string(&m).unwrap().contains("delivery"));
+    }
+
+    #[test]
+    fn an_interval_is_delivered_as_labelled_iso8601_text_and_nothing_next_to_it_is() {
+        let m = TypeMapping::from_source(&col("d", "interval"), RivetType::Interval);
+        assert_eq!(m.delivery, Delivery::Text(TextForm::Iso8601Duration));
+        assert_eq!(m.arrow_type, Some(DataType::Utf8));
+        assert_eq!(m.fidelity, TypeFidelity::LogicalString);
+        let field = build_arrow_field(&m).expect("field");
+        assert_eq!(field.data_type(), &DataType::Utf8);
+        assert_eq!(
+            field.metadata().get("rivet.text_form").map(String::as_str),
+            Some("iso8601_duration")
+        );
+        assert_eq!(
+            field
+                .metadata()
+                .get("rivet.logical_type")
+                .map(String::as_str),
+            Some("interval")
+        );
+        let list = RivetType::List {
+            inner: Box::new(RivetType::Interval),
+        };
+        for t in [
+            RivetType::String,
+            RivetType::Text,
+            RivetType::Json,
+            RivetType::Enum,
+            RivetType::Uuid,
+            list,
+        ] {
+            let n = TypeMapping::from_source(&col("c", "x"), t.clone());
+            assert_eq!(n.delivery, Delivery::Native, "{t:?}");
+            let f = build_arrow_field(&n).expect("field");
+            assert!(!f.metadata().contains_key("rivet.text_form"), "{t:?}");
+        }
     }
 
     #[test]

@@ -44,6 +44,8 @@ mod one_sanitizer_guard;
 mod renderer_locality_guard;
 #[path = "offline/skip_is_not_a_pass_guard.rs"]
 mod skip_is_not_a_pass_guard;
+#[path = "offline/tls_ca_file_sole_anchor.rs"]
+mod tls_ca_file_sole_anchor;
 #[path = "offline/validate_cdc_union.rs"]
 mod validate_cdc_union;
 
@@ -135,6 +137,8 @@ mod scheduler_contract;
 
 #[path = "offline/cli_flag_coverage_guard.rs"]
 mod cli_flag_coverage_guard;
+#[path = "offline/compose_image_pins_guard.rs"]
+mod compose_image_pins_guard;
 #[path = "offline/error_code_ratchet.rs"]
 mod error_code_ratchet;
 #[path = "offline/known_red_guard.rs"]

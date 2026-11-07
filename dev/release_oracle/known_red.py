@@ -35,15 +35,6 @@ def _open(cell: str, symptom: str, reason: str) -> KnownRed:
     """The entry of one `open_defect_*` live cell: its test path and the first line of its panic."""
     return KnownRed(f"{cell} — {symptom}", reason, _EXPIRES)
 
-_KEYSET_KEY_CURSOR = (
-    "ER-3/ER-6 (seam keyset-key-type, 2026-11-03): the probes admit every unique NOT NULL key but decimal, while the cursor reader (extract_last_cursor_value) has no Binary, Boolean or Time64 arm and a MySQL ENUM orders by member index but seeks by string; the run writes page 0 and stops with exit 5 RIVET_SOURCE_PROBE_UNREADABLE (or skips rows); closes with fix/seam-keyset-key-type, which refuses the key at plan with RIVET_PLAN_CHUNK_KEY_UNUSABLE"
-)
-_KEYSET_KEY_SUB_US = (
-    "ER-1 (seam keyset-key-type, 2026-11-03): an MSSQL datetime2(7)/datetimeoffset(7) chunk_by_key is admitted although the default batch holds microseconds, so the seek re-reads the row at the end of every page (exit 0 with duplicates) or cannot advance (exit 5); closes with fix/seam-keyset-key-type, which refuses the key at plan unless a timestamp_ns override is set"
-)
-_KEYSET_KEY_ONE_CHUNK = (
-    "RHS-3 (seam keyset-key-type, owner decision Q11 2026-11-03): a table that fits one chunk, under mode: chunked with a key the cursor cannot advance, runs with exit 0 (an auto-picked MySQL key downgrades to a snapshot, an explicit chunk_by_key reads one short page) while the same config on a large table fails or duplicates; closes with fix/seam-keyset-key-type, which refuses it with exit 1 RIVET_PLAN_CHUNK_KEY_UNUSABLE"
-)
 
 
 KNOWN_RED: tuple[KnownRed, ...] = (
@@ -53,48 +44,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("upgrade[oracle/cdc-load/tz=Asia/Tokyo]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_binary16_primary_key",
-          "keyset key MySQL BINARY(16) primary key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_CURSOR),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_time_unique_key",
-          "keyset key MySQL TIME unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_CURSOR),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_tinyint1_unique_key",
-          "keyset key MySQL TINYINT(1) unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_CURSOR),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mysql_enum_unique_key",
-          "keyset key MySQL ENUM unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_CURSOR),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_postgres_bytea_unique_key",
-          "keyset key PostgreSQL bytea unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_CURSOR),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_postgres_time_unique_key",
-          "keyset key PostgreSQL time unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_CURSOR),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_varbinary_unique_key",
-          "keyset key SQL Server varbinary unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_CURSOR),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_time_unique_key",
-          "keyset key SQL Server time unique key over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_CURSOR),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_datetime2_7_distinct_microseconds",
-          "keyset key SQL Server datetime2(7) key, a tick past each microsecond over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_SUB_US),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_datetime2_7_inside_one_microsecond",
-          "keyset key SQL Server datetime2(7) key, nine ticks inside one microsecond over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_SUB_US),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_mssql_datetimeoffset_7_distinct_microseconds",
-          "keyset key SQL Server datetimeoffset(7) key, a tick past each microsecond over several pages: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_SUB_US),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_on_a_one_chunk_table_mysql_binary16_primary_key",
-          "keyset key MySQL BINARY(16) primary key on a table that fits one chunk: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_ONE_CHUNK),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key",
-          "keyset key PostgreSQL bytea unique key on a table that fits one chunk: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_ONE_CHUNK),
-    _open("live_keyset_key_type::open_defect_keyset_key_is_refused_on_a_one_chunk_table_mssql_datetime2_7_key",
-          "keyset key SQL Server datetime2(7) key, a tick past each microsecond on a table that fits one chunk: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command",
-          _KEYSET_KEY_ONE_CHUNK),
 )
 
 

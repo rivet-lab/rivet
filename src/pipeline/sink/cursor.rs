@@ -627,4 +627,49 @@ mod tests {
         .unwrap();
         assert_eq!(extract_last_cursor_value(&batch, "bin", &schema), None);
     }
+
+    use crate::source::keyset_key::samples::{mapping_of, rivet_type_samples};
+
+    /// Every type the keyset seam admits has a cursor arm; the renderable types it still refuses are named.
+    #[test]
+    fn a_key_the_seam_admits_is_a_key_the_cursor_renders() {
+        use crate::config::SourceType;
+        use crate::source::keyset_key::{KeyShape, keyset_key_refusal};
+        use crate::types::RivetType;
+        let renderable_but_refused = |source: SourceType, t: &RivetType| match t {
+            RivetType::Json => source != SourceType::Postgres,
+            RivetType::Interval => true,
+            RivetType::Decimal { scale, .. } => source != SourceType::Oracle || *scale != 0,
+            RivetType::Float32 | RivetType::Float64 => source == SourceType::Oracle,
+            RivetType::Timestamp {
+                timezone: Some(_), ..
+            } => source == SourceType::Oracle,
+            RivetType::Enum => source == SourceType::Mysql,
+            _ => false,
+        };
+        for source in [
+            SourceType::Postgres,
+            SourceType::Mysql,
+            SourceType::Mssql,
+            SourceType::Oracle,
+        ] {
+            for t in rivet_type_samples() {
+                let m = mapping_of(t.clone());
+                let rendered = m.arrow_type.as_ref().and_then(|dt| {
+                    let array = arrow::array::new_null_array(dt, 1);
+                    render_cursor_value(&array, 0)
+                });
+                match keyset_key_refusal(source, &m, None, KeyShape::Single) {
+                    None => assert!(
+                        rendered.is_some(),
+                        "{source:?} admits {t:?} as a keyset key but the cursor cannot render it"
+                    ),
+                    Some(cause) => assert!(
+                        rendered.is_none() || renderable_but_refused(source, &t),
+                        "{source:?} refuses {t:?} ({cause}) though the cursor renders it and no reason is recorded"
+                    ),
+                }
+            }
+        }
+    }
 }

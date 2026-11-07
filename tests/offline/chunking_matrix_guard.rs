@@ -191,6 +191,8 @@ const MATRICES: &[(&str, usize)] = &[
     // Lowered 5 -> 4 (2026-09-29): Oracle CDC vanished-anchor proven live.
     // Lowered 4 -> 3 (2026-09-29): Oracle CDC refuses a captured-table TRUNCATE.
     // Lowered 3 -> 0 (2026-10-08): Oracle view-under-CDC, sparse-guard and unusable-key cells.
+    // Raised 0 -> 2 (2026-11-06): the MySQL and SQL Server cells of ca_file_is_the_only_trust_anchor, open defect #789, closed by a driver patch.
+    // Lowered 2 -> 0 (2026-11-06): both cells now run, the MySQL and SQL Server drivers are patched to a sole anchor.
     ("docs/fail-loud-matrix.yaml", 0),
     // Load-mode write contracts — keyed on the 3 LoadMode variants (full /
     // incremental / cdc), not source engines. Codifies the 4 data bugs found in
@@ -374,7 +376,14 @@ const MATRICES: &[(&str, usize)] = &[
     // 104 -> 103 (2026-10-15): the Oracle cell of corrupt_cursor_moved_forward is written with the fix.
     // 103 -> 104 (2026-10-21): RIVET_INIT_CDC_NAME_TAKEN gets its `refusal_*` row; `rivet init` has no
     // rig to walk it through, so a plain CLI cell walks it and the row stays a gap.
-    ("docs/sabotage-matrix.yaml", 104),
+    // 104 -> 105 (2026-11-06): RIVET_INIT_NOTHING_EXPORTABLE gets its `refusal_*` row; init has no rig,
+    // so a plain CLI cell walks it on Oracle and the row stays a gap.
+    // 105 -> 106 (2026-11-06): the Mongo cell of refusal_init_nothing_exportable is a gap: a gate-refused
+    // collection reaches the refusal; init has no rig, so a plain CLI cell walks it.
+    // 106 -> 109 (2026-11-06): a CDC init of only gate-refused names is refused on every engine, so the
+    // postgres, mysql and mssql cells of refusal_init_nothing_exportable are gaps (offline test only, no plain CLI cell).
+    // 109 -> 108 (2026-11-06): the SQL Server cell of refusal_source_value_unrepresentable is written with the nanosecond-override fix.
+    ("docs/sabotage-matrix.yaml", 108),
     // Pool-split — `apply --pool --split` per (strategy × source engine). Split is a
     // scheduler layer above the runners (each unit runs through chunked/keyset), so its
     // per-engine behaviour (boundary probe, crash-recovery, finding-2 exact-partition

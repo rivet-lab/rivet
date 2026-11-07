@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 // 30 -> 31 (2026-11-04, TF-1): the negative TIME(1)/(2) fraction cell drives a stream run that panics in a debug binary and leaves a running row; graded by MySQL's CAST text and the batch refusal; the fix PR removes the opt-out.
 // 31 -> 32 (2026-11-04): the datetime2(7) keyset cell under timestamp_ns delivers 700 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
 // 32 -> 31 (2026-11-04): the TF-1 cell closed with fix/mysql-binlog-time-fraction and its opt-out is gone.
+// 31 -> 32 (2026-11-06, #852): the SQL Server in-range nanosecond cell delivers 100 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
@@ -37,6 +38,7 @@ use std::path::{Path, PathBuf};
 // 47 -> 51 (2026-10-29, #719): four column-grants cells whose failed run leaves its parts, rows and checkpoint for the re-run by design.
 // 51 -> 52 (2026-10-29, #719 follow-up): the same helper; a refused run leaves its parts, rows and checkpoint for the re-run by design.
 // 52 -> 53 (2026-11-02): a BigQuery first load whose lease is lost mid-write (a_first_load_whose_lease_is_taken_during_the_write_*): the unowned table and its failed load_run row stay for the refusal the cell then asserts.
+// 53 -> 52 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); one leftover declaration left.
 // ratchet-pin: failed-run-leftover-declarations (review 2027-02-01) count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).
@@ -51,7 +53,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 628 -> 626 (2026-10-31): the unused duckdb_s3_parquet_rows helper left tests/common/duckdb.rs; no call site moved.
 // 624 -> 626 (2026-11-03): #792 composite keyset cells read distinct (id, kind) tuples; row_census keys one column. Closes when row_census takes a key list.
 // 626 -> 628 (2026-11-03): #792 parallel composite keyset cells, same tuple read. Closes with the line above.
-const DUCKDB_HELPER_CEILING: usize = 628; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
+// 628 -> 623 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); five helper calls left.
+const DUCKDB_HELPER_CEILING: usize = 623; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];
