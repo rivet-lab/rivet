@@ -58,6 +58,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_SOURCE_CDC_UNDECODABLE` | refusal | 5 | re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
 | `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` | refusal | 5 | leave the column out of the capture (SQL Server: @captured_column_list), then re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
 | `RIVET_SOURCE_CDC_PREREQUISITE` | environment | 2 if its cause is transient, else 1 | apply the setup statement the message names, then re-run (docs/reference/cdc.md) |
+| `RIVET_SOURCE_CDC_ANCHOR_NOT_RELEASED` | environment | 2 if its cause is transient, else 1 | remove the slot, checkpoint file or `export_state` row the warning names, or leave it for the next run of the export to reuse |
 | `RIVET_SOURCE_VALUE_UNREPRESENTABLE` | refusal | 5 | map the value to a representable one in the export's `query:`, or exclude the column |
 | `RIVET_SOURCE_PROBE_UNREADABLE` | refusal | 5 | chunk, page or partition the export on a column of a type the message lists, remove `parallel:` from a keyset export, or use `mode: full` |
 | `RIVET_SOURCE_COLUMNS_CHANGED_UNDER_READ` | environment | 2 | run the export again: the next run probes and reads the table as it is now |

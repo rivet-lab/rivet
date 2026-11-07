@@ -1953,6 +1953,23 @@ seeds:
       mongo:
         na: "the MongoDB anchor is the resume token of the change stream the open has already been given, so there is nothing to write before the server accepted the watch"
 
+  - name: cdc-first-run-refusal-keeps-anchor
+    class: a first CDC run that ends in an error keeps the anchor it created (a replication slot, a checkpoint file, the captured-tables record) instead of releasing it
+    history: "umbrella #852 (2026-11-06): PostgreSQL run 1 exit 1 RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH left the slot, MySQL run 1 exit 6 RIVET_INTERNAL_TYPE_BUILDER left the checkpoint, both before any baseline leg delivered; on main and on v0.32.2"
+    scope: source
+    patch: cdc-first-run-refusal-keeps-anchor/shared.patch
+    engines:
+      postgres:
+        cells: [a_first_cdc_run_refused_after_its_anchor_releases_it_postgres, "lib:a_stop_on_a_first_run_releases_what_the_run_created_and_a_success_keeps_it"]
+      mysql:
+        cells: [a_first_cdc_run_refused_after_its_anchor_releases_it_mysql, "lib:a_stop_on_a_first_run_releases_what_the_run_created_and_a_success_keeps_it"]
+      mssql:
+        cells: [a_first_cdc_run_refused_after_its_anchor_releases_it_mssql, "lib:a_stop_on_a_first_run_releases_what_the_run_created_and_a_success_keeps_it"]
+      oracle:
+        cells: [a_first_cdc_run_refused_after_its_anchor_releases_it_oracle, "lib:a_stop_on_a_first_run_releases_what_the_run_created_and_a_success_keeps_it"]
+      mongo:
+        na: "no first-run refusal after the anchor is reachable on MongoDB: the baseline leg reads each document into one column and a `columns:` override names no column of it, so the file-anchor release is graded by the MySQL, SQL Server and Oracle cells (2026-11-06)"
+
   - name: cdc-lost-file-anchor-reanchors
     class: a file-anchored CDC stream whose checkpoint file is gone anchors at the current position with a warning and exit 0, skipping every change committed since the lost position
     history: "2026-10-30 client report: MySQL binlog CDC with a Postgres state DB under Airflow, the checkpoint file lost when a task landed on another worker; `initial: none` re-anchored and the rows between the old and the new position were never delivered (rig oracle: source 2, delivered 1); on main and on v0.32.2"

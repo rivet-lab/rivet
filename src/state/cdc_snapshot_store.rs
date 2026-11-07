@@ -78,6 +78,41 @@ impl StateStore {
         })
     }
 
+    /// Whether the state DB holds any delivery of the CDC export `export_name`: a finished baseline or a durable part.
+    pub fn cdc_delivery_recorded(&self, export_name: &str) -> Result<bool> {
+        Ok(self
+            .query_opt(
+                "SELECT (SELECT COUNT(*) FROM cdc_snapshot WHERE export_name = ?1) \
+                      + (SELECT COUNT(*) FROM file_log WHERE export_name = ?1)",
+                &[export_name.into()],
+                |r| r.i64(0),
+            )?
+            .unwrap_or(0)
+            > 0)
+    }
+
+    /// Forget the tables recorded for `key` into `destination`, leaving any other progress on the row, and a row a batch run wrote.
+    pub fn forget_captured_tables(&self, key: &ProgressKey, destination: &str) -> Result<()> {
+        self.execute(
+            "UPDATE export_state SET stream = NULL, destination = NULL \
+             WHERE export_name = ?1 AND prefix = ?2 AND destination = ?3 AND stream = ?4",
+            &[
+                key.export_name.as_str().into(),
+                key.source.as_str().into(),
+                destination.into(),
+                key.stream.as_str().into(),
+            ],
+        )?;
+        self.execute(
+            "DELETE FROM export_state WHERE export_name = ?1 AND prefix = ?2 \
+             AND stream IS NULL AND destination IS NULL AND last_cursor_value IS NULL \
+             AND last_run_at IS NULL AND resume_run_id IS NULL AND cursor_column IS NULL \
+             AND resume_owner IS NULL AND source_schema IS NULL AND population IS NULL",
+            &[key.export_name.as_str().into(), key.source.as_str().into()],
+        )?;
+        Ok(())
+    }
+
     /// Record the tables of `key` as what its CDC stream captures into `destination` from this run on.
     pub fn record_captured_tables(&self, key: &ProgressKey, destination: &str) -> Result<()> {
         self.execute(
@@ -180,6 +215,77 @@ mod tests {
         s.execute("UPDATE export_state SET stream = 'public.a'", &[])
             .unwrap();
         assert_eq!(s.captured_tables(&key, "b/out").unwrap(), None);
+    }
+
+    /// Forgetting a stream's tables removes a bare row, keeps the progress another run wrote on the row, and leaves a batch run's relation alone.
+    #[test]
+    fn forgetting_the_captured_tables_removes_only_what_the_record_wrote() {
+        let s = StateStore::open_in_memory().unwrap();
+        let key = ProgressKey::cdc("e", "pg://h/db", &names(&["a"]));
+        let rows = |s: &StateStore| {
+            s.query_opt("SELECT COUNT(*) FROM export_state", &[], |r| r.i64(0))
+                .unwrap()
+                .unwrap()
+        };
+        s.record_captured_tables(&key, "b/out").unwrap();
+        s.forget_captured_tables(&key, "b/out").unwrap();
+        assert_eq!(
+            (rows(&s), s.captured_tables(&key, "b/out").unwrap()),
+            (0, None)
+        );
+
+        s.record_captured_tables(&key, "b/out").unwrap();
+        s.execute("UPDATE export_state SET last_cursor_value = '7'", &[])
+            .unwrap();
+        s.forget_captured_tables(&key, "b/out").unwrap();
+        assert_eq!(
+            (rows(&s), s.captured_tables(&key, "b/out").unwrap()),
+            (1, None)
+        );
+
+        let batch = StateStore::open_in_memory().unwrap();
+        batch.record_captured_tables(&key, "b/out").unwrap();
+        batch
+            .execute("UPDATE export_state SET stream = 'public.a'", &[])
+            .unwrap();
+        batch.forget_captured_tables(&key, "b/out").unwrap();
+        assert_eq!(rows(&batch), 1);
+
+        let other = StateStore::open_in_memory().unwrap();
+        other.record_captured_tables(&key, "b/out").unwrap();
+        other.forget_captured_tables(&key, "b/elsewhere").unwrap();
+        assert_eq!(
+            other.captured_tables(&key, "b/out").unwrap(),
+            Some(names(&["a"]))
+        );
+    }
+
+    /// A finished baseline or a durable part of the export is a delivery; a captured set alone is not.
+    #[test]
+    fn a_baseline_or_a_durable_part_is_a_recorded_delivery() {
+        let s = StateStore::open_in_memory().unwrap();
+        assert!(!s.cdc_delivery_recorded("e").unwrap());
+        s.record_captured_tables(&ProgressKey::cdc("e", "pg://h/db", &names(&["a"])), "b/out")
+            .unwrap();
+        assert!(!s.cdc_delivery_recorded("e").unwrap());
+        s.mark_snapshot_done("e", "a", "b/out/snapshot", "r1")
+            .unwrap();
+        assert!(s.cdc_delivery_recorded("e").unwrap());
+        assert!(!s.cdc_delivery_recorded("other").unwrap());
+        let t = StateStore::open_in_memory().unwrap();
+        t.record_file(crate::state::FilePart {
+            run_id: "r1",
+            export_name: "e",
+            file_name: "cdc-0",
+            rows: 1,
+            bytes: 1,
+            format: "parquet",
+            compression: None,
+            cursor_high: None,
+        })
+        .unwrap();
+        assert!(t.cdc_delivery_recorded("e").unwrap());
+        assert!(!t.cdc_delivery_recorded("other").unwrap());
     }
 
     #[test]

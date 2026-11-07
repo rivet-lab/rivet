@@ -324,7 +324,8 @@ const MATRICES: &[(&str, usize)] = &[
     // "retained changes gone past the checkpoint" rows; the stand cannot lose an archived redo log
     // or oplog for one cell without a SYSDBA handle or a dedicated replica set.
     // Lowered 4 -> 2 (2026-10-08): the MongoDB oplog-gone cells on a throwaway replica set; the Oracle pair was attempted and stays.
-    ("docs/operator-contract-matrix.yaml", 2),
+    // Raised 2 -> 3 (2026-11-06): the MongoDB first-CDC-run refusal after its anchor has no reachable trigger; closes when one exists.
+    ("docs/operator-contract-matrix.yaml", 3),
     // Sabotage: every `refusal` code of the registry walked out of (refuse, again, each named remedy,
     // one wrong remedy) and damage to what a run reads about itself. Born at 78 (2026-10-08): 62 are
     // refusal codes other cells assert but nobody walks (the CDC, load and legacy-state codes), 9 are
