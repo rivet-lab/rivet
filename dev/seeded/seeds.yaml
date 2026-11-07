@@ -3994,6 +3994,23 @@ seeds:
       mongo:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on MongoDB at config load (columns_from_grants_is_refused_by_every_command_mongo)"
 
+  - name: cdc-stdout-partial-image
+    class: "`rivet cdc` without `--output` prints a change whose row image is partial (MySQL `binlog_row_image` MINIMAL or NOBLOB, an MSSQL capture instance with fewer columns than the table) as positional values with no column names, exits 0 and advances the checkpoint"
+    history: "found 2026-11-07 hunting the stdout loop of `rivet cdc`; `rivet run` mode cdc and `rivet cdc --output` already refused these by code; RED from this patch: the update prints `after:[\"C1x\"]` for a four-column table and exits 0"
+    scope: source
+    patch: cdc-stdout-partial-image/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
+      mysql:
+        cells: [cdc_to_stdout_refuses_a_partial_image_mysql, "lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
+      mssql:
+        cells: [cdc_to_stdout_refuses_a_partial_image_mssql, "lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
+      oracle:
+        cells: ["lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
+      mongo:
+        cells: ["lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
+
   - name: qualified-table-matches-a-literal-dotted-name
     class: "a qualified `table: schema.table` also captures a table literally named `schema.table` in another schema or database: its rows are delivered into the export"
     history: "found reviewing PR #719 (2026-10-28), pre-existing in the routing authority; RED from this patch: the export holds `FOREIGN-ROW` from another database"
