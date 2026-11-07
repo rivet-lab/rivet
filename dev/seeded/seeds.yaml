@@ -1175,7 +1175,7 @@ seeds:
 
   - name: state-reset-takes-undeclared-name-with-parent-prefix
     class: "`state reset -e <parent>` of a `partition_by` export takes every stored name that starts with `<parent>__`, so an export of another config whose name carries that prefix (`events__archive`) loses its cursor with the partitions"
-    history: "second-round review of PR 881, 2026-11-07 (F1): `events__archive`, an export of another config sharing the state, was deleted by a reset of `events`; a partition child is only `<parent>__<label>` at the parent's granularity"
+    history: "second-round review of PR 881, 2026-11-07 (F1): `events__archive`, an export of another config sharing the state, was deleted by a reset of `events`; a partition child is only `<parent>__<label>` with a day, month, year or null label"
     scope: source
     patch: state-reset-takes-undeclared-name-with-parent-prefix/shared.patch
     engines:
@@ -1189,6 +1189,22 @@ seeds:
         cells: [partition_reset_labels_oracle]
       mongo:
         na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+  - name: state-reset-takes-only-the-current-granularity
+    class: "a name `<parent>__<label>` is a partition of a `partition_by` export only when its label is of the export's current `partition_granularity`, so after the granularity is changed a reset of the export leaves the partitions stored under the old labels, and the next run at the old granularity resumes from their cursors and delivers a fraction of the rows"
+    history: "verifier of PR 884, 2026-11-07 (A): events at day granularity then month, `state reset --export events` left the three day cursors with rc 0; back at day the run delivered 1 of 7 rows with exit 0, main reset all 5 and delivered 7"
+    scope: source
+    patch: state-reset-takes-only-the-current-granularity/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_granularity_postgres, partition_reset_granularity_pg_state_postgres, state_reset_family_a_partition_stored_under_another_granularity_is_shown_and_reset_with_the_export, "lib:child_labels_are_the_labels_generate_ranges_yields_at_any_granularity_and_the_null_bucket"]
+      mysql:
+        cells: [partition_reset_granularity_mysql, partition_reset_granularity_pg_state_mysql]
+      mssql:
+        cells: [partition_reset_granularity_mssql, partition_reset_granularity_pg_state_mssql]
+      oracle:
+        cells: [partition_reset_granularity_oracle, partition_reset_granularity_pg_state_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
   - name: state-reset-half-done-says-nothing-was-done
     class: "a `state reset -e <parent>` that loses a partition's run lease after the probe and after it has cleared earlier batches refuses with the \"nothing was done\" text, so the operator believes every partition kept its cursor"
     history: "second-round review of PR 881, 2026-11-07 (F2): a run taking a partition lease between two batches of 16 left cleared partitions and a kept parent, under a refusal that said nothing was done"
@@ -1199,7 +1215,8 @@ seeds:
         cells:
           - "lib:a_run_taking_a_partition_lease_after_the_probe_leaves_a_reset_that_says_it_is_half_done"
       postgres-state:
-        na: "the race is injected between the probe and a later batch of a unit cell on a file lease; a Postgres state lease is a row held by a connection and has no deterministic seam to lose it between two batches without a product hook (2026-11-07, closes with a hook-free lease-steal cell)"
+        cells:
+          - "lib:a_run_taking_a_partition_lease_after_the_probe_leaves_a_reset_that_says_it_is_half_done_on_a_postgres_state"
   - name: state-inspect-of-a-partition-shows-nothing
     class: "`state progression|files|chunks|metrics|journal --export <parent>__<label>` filters by the declared name only, so a held partition prints \"No progression boundaries recorded yet.\" while the state holds its row"
     history: "second-round review of PR 881, 2026-11-07 (F3): `state progression --export events__2026-01-01` printed no boundaries for a stored partition"

@@ -30,7 +30,7 @@ enum Owner {
     PartitionChild(crate::config::ExportConfig),
 }
 
-/// The owner of `name`: an exact declared name first, else the `partition_by` export whose child label (`<parent>__<label>` at its granularity, or `__null`) it carries.
+/// The owner of `name`: an exact declared name first, else the `partition_by` export whose child label (`<parent>__<label>` of any granularity, or `__null`) it carries.
 fn owner_of(config: &Config, name: &str) -> Option<Owner> {
     if let Ok(found) = crate::config::declared_exports(config, Some(name)) {
         return found.into_iter().next().map(Owner::Declared);
@@ -43,9 +43,7 @@ fn owner_of(config: &Config, name: &str) -> Option<Owner> {
                 && name
                     .strip_prefix(e.name.as_str())
                     .and_then(|rest| rest.strip_prefix("__"))
-                    .is_some_and(|label| {
-                        crate::plan::partition::is_child_label(label, e.partition_granularity)
-                    })
+                    .is_some_and(crate::plan::partition::is_child_label)
         })
         .cloned()
         .map(Owner::PartitionChild)
@@ -1679,9 +1677,9 @@ exports:
             ("a__x__2026-01-01", "none"),
             ("ab__2026-01-01", "child of ab"),
             ("mo__2026-01", "child of mo"),
-            ("mo__2026-01-01", "none"),
-            ("a__2026-01", "none"),
-            ("a__2026", "none"),
+            ("mo__2026-01-01", "child of mo"),
+            ("a__2026-01", "child of a"),
+            ("a__2026", "child of a"),
             ("a__archive", "none"),
             ("a__typo", "none"),
             ("a__2026-1-1", "none"),
@@ -1797,22 +1795,35 @@ exports:
         assert_eq!(held_names(&state), ["a__x__2026-01-01", "p"]);
     }
 
-    #[test]
-    fn a_run_taking_a_partition_lease_after_the_probe_leaves_a_reset_that_says_it_is_half_done() {
+    /// A reset of `parent` and its partitions on `state` while `run` takes the last partition's lease after the probe says it is half done, keeps what the batch left, and is finished by the repeat.
+    fn assert_half_done_reset_is_said(
+        state: &StateStore,
+        run: &StateStore,
+        config_path: &str,
+        parent: &str,
+    ) {
+        let source = Config::load(config_path).unwrap().source.state_key();
         let children: Vec<String> = (1..=RESET_LEASES + 4)
-            .map(|day| format!("a__2026-01-{day:02}"))
+            .map(|day| format!("{parent}__2026-01-{day:02}"))
             .collect();
-        let held: Vec<&str> = std::iter::once("a")
-            .chain(children.iter().map(String::as_str))
+        let family: Vec<String> = std::iter::once(parent.to_string())
+            .chain(children.iter().cloned())
             .collect();
-        let (_dir, config_path, state) = partition_setup(&held);
-        let source = Config::load(&config_path).unwrap().source.state_key();
-        let family: Vec<String> = held.iter().map(|n| n.to_string()).collect();
-        let run = StateStore::open(&config_path).unwrap();
+        for name in &family {
+            state.update_legacy(name, "7").unwrap();
+            state
+                .record_committed_incremental(name, "7", "run")
+                .unwrap();
+        }
+        let held = || {
+            let mut names = state.stored_export_names("").unwrap();
+            names.retain(|n| n == parent || n.starts_with(&format!("{parent}__")));
+            names
+        };
         let last = children.last().unwrap();
         let mut live = None;
-        let err = reset_family(&state, &source, &family, &config_path, || {
-            live = crate::pipeline::chunked::try_run_lease(&run, last, &source).unwrap();
+        let err = reset_family(state, &source, &family, config_path, || {
+            live = crate::pipeline::chunked::try_run_lease(run, last, &source).unwrap();
             assert!(live.is_some(), "the run takes the lease after the probe");
         })
         .unwrap_err();
@@ -1823,20 +1834,45 @@ exports:
         let said = format!("{err:#}");
         assert!(
             said.contains(&format!(
-                "16 of {} partition(s) were already reset and 'a' kept its state, so the reset is half done; `rivet state reset -c {config_path} --export a` finishes it once the run ends",
+                "16 of {} partition(s) were already reset and '{parent}' kept its state, so the reset is half done; `rivet state reset -c {config_path} --export {parent}` finishes it once the run ends",
                 children.len()
             )),
             "{said}"
         );
         assert!(!said.contains("nothing was done"), "{said}");
-        assert_eq!(held_names(&state), {
-            let mut left = vec!["a".to_string()];
+        assert_eq!(held(), {
+            let mut left = vec![parent.to_string()];
             left.extend(children[RESET_LEASES..].iter().cloned());
+            left.sort();
             left
         });
         drop(live);
-        reset_state(&config_path, "a").unwrap();
-        assert_eq!(held_names(&state), Vec::<String>::new());
+        reset_family(state, &source, &family, config_path, || {}).unwrap();
+        assert_eq!(held(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_run_taking_a_partition_lease_after_the_probe_leaves_a_reset_that_says_it_is_half_done() {
+        let (dir, config_path) = setup_dir();
+        write_partition_config(&config_path);
+        let state = open_state(&dir);
+        let run = StateStore::open(&config_path).unwrap();
+        assert_half_done_reset_is_said(&state, &run, &config_path, "a");
+    }
+
+    #[test]
+    fn a_run_taking_a_partition_lease_after_the_probe_leaves_a_reset_that_says_it_is_half_done_on_a_postgres_state()
+     {
+        let (Some(state), Some(run)) = (
+            StateStore::postgres_for_test(),
+            StateStore::postgres_for_test(),
+        ) else {
+            return;
+        };
+        let (_dir, config_path) = setup_dir();
+        write_partition_config(&config_path);
+        let parent = format!("half_{}", std::process::id());
+        assert_half_done_reset_is_said(&state, &run, &config_path, &parent);
     }
 
     #[test]
@@ -1990,13 +2026,7 @@ exports:
         let (_dir, config_path, _state) = partition_setup(&["a__2026-01-01", "p"]);
         let config = Config::load(&config_path).unwrap();
         let open = |name: &str| open_for_export(&config, &config_path, Some(name)).map(|_| ());
-        for name in [
-            "a__typo",
-            "a__archive",
-            "a__2026-01",
-            "ghost",
-            "p__2026-01-01",
-        ] {
+        for name in ["a__typo", "a__archive", "ghost", "p__2026-01-01"] {
             let err = open(name).unwrap_err();
             crate::error::assert_coded(&err, "RIVET_CLI_EXPORT_UNKNOWN", 1);
             assert!(
@@ -2004,14 +2034,16 @@ exports:
                 "{name}"
             );
         }
-        let err = open("a__1999-01-01").unwrap_err();
-        crate::error::assert_coded(&err, "RIVET_CLI_EXPORT_UNKNOWN", 1);
-        assert!(
-            format!("{err:#}").contains(
-                "export 'a__1999-01-01' is a partition of 'a' but the state holds nothing for it."
-            ),
-            "{err:#}"
-        );
+        for unheld in ["a__1999-01-01", "a__2026-01", "a__2026"] {
+            let err = open(unheld).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_CLI_EXPORT_UNKNOWN", 1);
+            assert!(
+                format!("{err:#}").contains(&format!(
+                    "export '{unheld}' is a partition of 'a' but the state holds nothing for it."
+                )),
+                "{err:#}"
+            );
+        }
         for name in ["a__2026-01-01", "a", "p", "a__x"] {
             open(name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
         }

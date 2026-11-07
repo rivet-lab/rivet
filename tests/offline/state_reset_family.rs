@@ -199,7 +199,13 @@ fn state_reset_family_a_reset_takes_the_partitions_of_its_labels_and_never_anoth
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
     let db = seeded(&cfg, &source_of(&cfg), 3);
-    for name in ["ev__archive", "ev__2026-01", "ev__x__2026-01-01"] {
+    for name in [
+        "ev__archive",
+        "ev__2026-02-30",
+        "ev__x__2026-01-01",
+        "ev__2026-01",
+        "ev__2026",
+    ] {
         db.execute(
             "INSERT INTO export_state (export_name, prefix, last_cursor_value) VALUES (?1, ?2, '7')",
             rusqlite::params![name, source_of(&cfg)],
@@ -209,7 +215,8 @@ fn state_reset_family_a_reset_takes_the_partitions_of_its_labels_and_never_anoth
     let out = rivet(&cfg, &["state", "reset", "--export", "ev"], None);
     let said = said(&out);
     assert!(out.status.success(), "{said}");
-    assert!(said.contains("and its 3 partition(s)"), "{said}");
+    assert!(said.contains("and its 5 partition(s)"), "{said}");
+    assert!(said.contains("ev__2026-01"), "{said}");
     let left: Vec<String> = db
         .prepare("SELECT export_name FROM export_state ORDER BY 1")
         .unwrap()
@@ -219,7 +226,7 @@ fn state_reset_family_a_reset_takes_the_partitions_of_its_labels_and_never_anoth
         .collect();
     assert_eq!(
         left,
-        ["ev__2026-01", "ev__archive", "ev__x__2026-01-01"],
+        ["ev__2026-02-30", "ev__archive", "ev__x__2026-01-01"],
         "{said}"
     );
 }
@@ -247,6 +254,20 @@ fn state_reset_family_an_inspect_command_refuses_a_name_no_partition_could_carry
                 text.contains("RIVET_CLI_EXPORT_UNKNOWN"),
                 "{cmd:?} {name}: {text}"
             );
+            if name == "ev__typo" {
+                assert!(
+                    text.contains("is not defined in") && text.contains("Known exports: ev"),
+                    "{cmd:?} {name}: {text}"
+                );
+                assert!(!text.contains("Partitions held"), "{cmd:?} {name}: {text}");
+            } else {
+                assert!(
+                    text.contains("is a partition of 'ev' but the state holds nothing for it.")
+                        && text.contains("`rivet state show -c ")
+                        && !text.contains("Partitions held"),
+                    "{cmd:?} {name}: {text}"
+                );
+            }
         }
     }
     let held = child(1);
@@ -255,4 +276,81 @@ fn state_reset_family_an_inspect_command_refuses_a_name_no_partition_could_carry
     assert!(out.status.success(), "{said}");
     assert!(said.contains(&held), "{said}");
     assert!(!said.contains("No progression boundaries"), "{said}");
+}
+
+#[test]
+fn state_reset_family_reset_refuses_a_typo_naming_the_exports_and_an_unheld_label_naming_the_partitions()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let _db = seeded(&cfg, &source_of(&cfg), 2);
+    let out = rivet(&cfg, &["state", "reset", "--export", "ev__typo"], None);
+    let text = said(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains("RIVET_CLI_EXPORT_UNKNOWN")
+            && text.contains("export 'ev__typo' not found in config")
+            && text.contains("Known exports: ev")
+            && !text.contains("Partitions held"),
+        "{text}"
+    );
+    let out = rivet(
+        &cfg,
+        &["state", "reset", "--export", "ev__1999-01-01"],
+        None,
+    );
+    let text = said(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains("RIVET_CLI_EXPORT_UNKNOWN")
+            && text.contains("export 'ev__1999-01-01' is a partition of 'ev' but holds no progress on this source.")
+            && text.contains(&format!("Partitions held: {}, {}", child(0), child(1))),
+        "{text}"
+    );
+}
+
+#[test]
+fn state_reset_family_a_partition_stored_under_another_granularity_is_shown_and_reset_with_the_export()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let db = seeded(&cfg, &source_of(&cfg), 2);
+    for name in ["ev__2026-01", "ev__2026-02", "ev__2026"] {
+        db.execute(
+            "INSERT INTO export_state (export_name, prefix, last_cursor_value) VALUES (?1, ?2, '7')",
+            rusqlite::params![name, source_of(&cfg)],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO export_progression (export_name, last_committed_strategy, last_committed_cursor, last_committed_run_id, last_committed_at) VALUES (?1, 'incremental', '7', 'r', '2026-01-01T00:00:00Z')",
+            rusqlite::params![name],
+        )
+        .unwrap();
+    }
+    let show = rivet(&cfg, &["state", "show"], None);
+    let text = said(&show);
+    assert!(show.status.success(), "{text}");
+    for name in ["ev__2026-01", "ev__2026-02", "ev__2026 "] {
+        assert!(text.contains(name), "{name}: {text}");
+    }
+    let out = rivet(
+        &cfg,
+        &["state", "progression", "--export", "ev__2026-01"],
+        None,
+    );
+    let text = said(&out);
+    assert!(
+        out.status.success() && text.contains("ev__2026-01"),
+        "{text}"
+    );
+    assert!(!text.contains("No progression boundaries"), "{text}");
+    let out = rivet(&cfg, &["state", "reset", "--export", "ev__2026-02"], None);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(held(&db, "export_state"), 5);
+    let out = rivet(&cfg, &["state", "reset", "--export", "ev"], None);
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("and its 4 partition(s)"), "{text}");
+    assert_eq!(held(&db, "export_state"), 0, "{text}");
+    assert_eq!(held(&db, "export_progression"), 0, "{text}");
 }

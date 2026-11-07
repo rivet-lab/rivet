@@ -1,0 +1,16 @@
+diff --git a/src/plan/partition.rs b/src/plan/partition.rs
+--- a/src/plan/partition.rs
++++ b/src/plan/partition.rs
+@@ -37,11 +37,7 @@
+ /// Whether `value` is a name suffix `partition_by` gave a child at any granularity: a day, month or year label, or the NULL bucket.
+ pub(crate) fn is_child_label(value: &str) -> bool {
+     value == NULL_BUCKET_LABEL
+-        || [
+-            PartitionGranularity::Day,
+-            PartitionGranularity::Month,
+-            PartitionGranularity::Year,
+-        ]
++        || [PartitionGranularity::Day]
+         .into_iter()
+         .any(|g| is_label_at(value, g))
+ }

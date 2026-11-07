@@ -671,6 +671,51 @@ fn reset_beside_a_run_of_one_partition(engine: SqlEngine, state: Option<&str>) {
     assert_eq!(family_rows(&rig, "export_progression"), 0, "{said}");
 }
 
+fn at_granularity(engine: SqlEngine, rig: Rig, granularity: &str) -> Rig {
+    let cursor = format!("cursor_column: {}", engine.col("id"));
+    let by = format!("partition_by: {}", partition_column(engine));
+    let width = format!("partition_granularity: {granularity}");
+    engine.staged(rig, "incremental", &[&cursor, &by, &width])
+}
+
+/// After `partition_granularity` changed day to month and a run, a reset of the export clears the partitions of both granularities, the inspect commands show the old ones, and the next run into an empty destination delivers every row.
+fn reset_after_a_granularity_change_takes_every_partition(engine: SqlEngine, state: Option<&str>) {
+    engine.alive();
+    let (table, _guard) = three_days(engine);
+    let dest = tempfile::tempdir().unwrap();
+    let (rig, _state) = on_state(
+        partitioned(engine, &table, "incremental", dest.path()),
+        state,
+    );
+    rig.run_ok();
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
+    let export = rig.export_name().to_string();
+    let day_children = child_rows(&rig, "export_state");
+    assert!(day_children > 0);
+    let rig = at_granularity(engine, rig, "month");
+    rig.run_ok();
+    let shown = rig.cli(&["state", "progression", "--export", &export]);
+    let said = text_of(&shown);
+    assert!(shown.status.success(), "{said}");
+    let day_lines = said
+        .lines()
+        .filter(|l| {
+            l.split_whitespace().next().is_some_and(|n| {
+                n.starts_with(&format!("{export}__")) && n.len() == export.len() + 2 + 10
+            })
+        })
+        .count() as i64;
+    assert_eq!(day_lines, day_children, "{said}");
+    let said = reset(&rig, &export);
+    assert!(said.contains("partition(s)"), "{said}");
+    assert_eq!(family_rows(&rig, "export_state"), 0, "{said}");
+    assert_eq!(family_rows(&rig, "export_progression"), 0, "{said}");
+    emptied(dest.path());
+    let rig = at_granularity(engine, rig, "day");
+    rig.run_ok();
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
+}
+
 /// A reset of the export takes the partitions whose suffix is a label of its granularity and never an undeclared name that merely starts with `<export>__`.
 fn reset_takes_labels_and_never_another_exports_name(engine: SqlEngine) {
     engine.alive();
@@ -679,8 +724,9 @@ fn reset_takes_labels_and_never_another_exports_name(engine: SqlEngine) {
     let rig = partitioned(engine, &table, "incremental", dest.path());
     rig.run_ok();
     let source = source_key(&rig);
-    let kept = ["archive", "2026-01", "x__2026-01-01"];
-    for name in kept {
+    let kept = ["archive", "2026-02-30", "x__2026-01-01"];
+    let taken = ["2026-01", "2026"];
+    for name in kept.into_iter().chain(taken) {
         rig.edit_state(
             &format!(
                 "INSERT INTO export_state (export_name, prefix, last_cursor_value) \
@@ -697,6 +743,16 @@ fn reset_takes_labels_and_never_another_exports_name(engine: SqlEngine) {
         0,
         "{said}"
     );
+    for name in taken {
+        assert_eq!(
+            rig.state_count(&format!(
+                "SELECT COUNT(*) FROM export_state WHERE export_name = '{{export}}__{name}'"
+            )),
+            0,
+            "'{}__{name}' is a partition of another granularity and goes with the reset: {said}",
+            rig.export_name()
+        );
+    }
     for name in kept {
         assert_eq!(
             rig.state_count(&format!(
@@ -1023,4 +1079,54 @@ fn partition_reset_chunked_mssql() {
 #[ignore = "live: requires docker compose oracle"]
 fn partition_reset_chunked_oracle() {
     reset_of_a_chunked_partitioned_export_leaves_another_sources_partition(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_granularity_postgres() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Pg, None);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_granularity_mysql() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Mysql, None);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_granularity_mssql() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Mssql, None);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_granularity_oracle() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Oracle, None);
+}
+
+#[test]
+#[ignore = "live: requires postgres + postgres-state"]
+fn partition_reset_granularity_pg_state_postgres() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Pg, Some("gran_pg"));
+}
+
+#[test]
+#[ignore = "live: requires mysql + postgres-state"]
+fn partition_reset_granularity_pg_state_mysql() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Mysql, Some("gran_my"));
+}
+
+#[test]
+#[ignore = "live: requires mssql + postgres-state"]
+fn partition_reset_granularity_pg_state_mssql() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Mssql, Some("gran_ms"));
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires oracle + postgres-state"]
+fn partition_reset_granularity_pg_state_oracle() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Oracle, Some("gran_or"));
 }
