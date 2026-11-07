@@ -68,6 +68,14 @@ scenarios:
     mongo:    { test: redact_secrets_url_safety_matrix }
     oracle:   { test: redact_secrets_url_safety_matrix }
 
+  - id: redact_query_password_key_any_spelling
+    what: "a URL query pair whose key ends in password/passwd/pwd in any case (sslpassword, SSLPassword, db.password, x-passwd, MYSQL_PWD) is masked by the general redactor, by the one rule the keyword path uses."
+    postgres: { test: a_query_pair_whose_key_names_a_password_is_masked_in_any_case }
+    mysql:    { test: a_query_pair_whose_key_names_a_password_is_masked_in_any_case }
+    mssql:    { test: a_query_pair_whose_key_names_a_password_is_masked_in_any_case }
+    mongo:    { test: a_query_pair_whose_key_names_a_password_is_masked_in_any_case }
+    oracle:   { test: a_query_pair_whose_key_names_a_password_is_masked_in_any_case }
+
   # Keyword/value connection strings (2026-10-07). The redactors above know
   # `scheme://user:pass@` and `?key=` only; a libpq DSN (`host=… password=…`), an ADO
   # string (`…;Password=…;` / `PWD=`) and JDBC properties (`;password=`) reached every

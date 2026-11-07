@@ -92,7 +92,7 @@ default port 1433), driven by the async `tiberius` client. Supported today:
   instant re-read correctly by the DuckDB/ClickHouse oracles — positive and
   negative offsets and NULL all covered in the type matrix).
 - **TLS**: required on the login handshake (SQL Server always encrypts it).
-  Set `tls.ca_file:` for a private CA, or `tls.accept_invalid_certs: true` for a
+  Set `tls.ca_file:` for a private CA (trusted beside the system store), or `tls.accept_invalid_certs: true` for a
   self-signed dev cert.
 
 ### Why these versions
