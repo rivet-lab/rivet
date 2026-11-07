@@ -760,6 +760,8 @@ rivet state reset --config <PATH> --export <NAME>
 
 The reset clears the progress the export holds on the source this config names (its cursor and any interrupted keyset run), so the config's source URL must resolve. An export of the same name that reads another source through the same state database keeps its cursor.
 
+An export with `partition_by` keeps its progress per partition, under the names `<export>__<value>` (`events__2026-01-01`, `events__null`). Resetting the declared name clears the progress of every partition the state holds, together with the export's own, in one transaction, and prints the partitions it cleared. Resetting one partition by the name a refusal prints (`--export events__2026-01-01`) clears that partition only; a partition the state does not hold is refused with `RIVET_CLI_EXPORT_UNKNOWN`, naming the partitions it does hold. An export that is declared under the name of a would-be partition (`events__x` beside `events`) keeps its own progress when `events` is reset.
+
 While a checkpointed run of that export (`chunk_checkpoint: true`) is alive in another rivet process, the reset is refused with `RIVET_STATE_RUN_IN_PROGRESS` (exit 2, retryable) and removes nothing: wait for the run, or stop its process, and repeat the command. A run that was killed does not hold the reset back.
 
 ### `rivet state accept`
@@ -774,6 +776,7 @@ A run refuses stored progress that was written reading another table, another sc
 
 `state accept` also answers `RIVET_STATE_CURSOR_SOURCE_RESPELLED`: when the export holds no progress on the source the config names, and holds a cursor on another source that delivers to the same destination, it moves that cursor (with its checkpoint rows) onto the source the config names, and the next run continues from it. With several such sources it takes the one that ran last. The move is recorded as a `run_journal` row with status `accepted`. To start the export over instead, follow it with `rivet state reset`.
 
+- A `partition_by` export, or one of its partitions, is refused with `RIVET_STATE_ACCEPT_PARTITIONED` (exit 1) and nothing changes: its progress is held per partition, and `rivet state reset --export <export>` starts every partition over with a full pass. An export with `partition_by` and `mode: full` keeps no progress and is not refused.
 - It acts on the one export named, on the source this config names, once. A later edit is refused again until it is accepted too; there is no setting that accepts edits in advance.
 - It reads the config as `rivet run` does, so pass the same `--param` values.
 - A cursor written for another `cursor_column` or keyset key is not accepted: the command stops with `RIVET_STATE_CURSOR_OWNER_MISMATCH` (exit 5) and changes nothing.

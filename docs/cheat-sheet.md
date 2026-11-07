@@ -301,7 +301,7 @@ Inspect state:
 
 ```bash
 rivet state show         -c rivet.yaml               # incremental cursors
-rivet state reset        -c rivet.yaml -e {{NAME}}   # re-export from scratch
+rivet state reset        -c rivet.yaml -e {{NAME}}   # re-export from scratch (every partition of a partition_by export)
 rivet state chunks       -c rivet.yaml -e {{NAME}}   # chunk checkpoint status
 rivet state reset-chunks -c rivet.yaml --stuck-checkpoints
 rivet state progression  -c rivet.yaml               # committed / verified boundaries

@@ -1006,6 +1006,21 @@ impl StateStore {
         Ok(())
     }
 
+    /// The export names `source` holds progress under: cursors (and the ones written before sources were recorded) and boundaries.
+    pub fn stored_export_names(&self, source: &str) -> Result<Vec<String>> {
+        self.query(
+            "SELECT export_name FROM export_state WHERE prefix IN (?1, '') \
+             UNION SELECT export_name FROM export_progression ORDER BY export_name",
+            &[source.into()],
+            |r| r.text(0),
+        )
+    }
+
+    /// Return every export of `names` to a "never ran" state in one transaction.
+    pub fn reset_all(&self, names: &[String], source: &str) -> Result<()> {
+        self.transaction(|| names.iter().try_for_each(|n| self.reset(n, source)))
+    }
+
     /// Re-bind the stored progress of `key` to the stream, schema and rows it reads now, on the operator's word: the cursor value, its column and any anchor stay. Refused for a cursor written for another column; changes a row only where a run of `key` is refused for its stream.
     pub fn accept(&self, key: &ProgressKey) -> Result<Accepted> {
         let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());

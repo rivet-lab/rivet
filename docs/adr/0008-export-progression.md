@@ -103,3 +103,12 @@ JSON output for monitoring integrations is tracked as a follow-up; current consu
 `rivet state reset -e <export>` deletes the cursor and the `export_progression` row together,
 and `rivet state reset-chunks -e <export>` also deletes the progression row. No separate
 `reset-progression` command exists or is planned.
+
+## Amendment 2026-11-07: a reset of a `partition_by` export reaches its partitions
+
+An export with `partition_by` keeps its cursor and progression rows under the names of its partitions
+(`<export>__<value>`), not under its own. `rivet state reset -e <export>` therefore clears the export's own
+rows and every stored partition's rows (cursor and progression) in one transaction, and
+`rivet state reset -e <export>__<value>` clears that partition's rows only. One resolver decides which stored
+names belong to a declared export (`owner_of`, `src/pipeline/cli.rs`): the exact declared name first, else the
+longest `partition_by` parent the name extends with `__` and a non-empty value.

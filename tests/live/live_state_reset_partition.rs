@@ -20,8 +20,16 @@ fn three_days(engine: SqlEngine) -> (String, Box<dyn std::any::Any>) {
     (table, guard)
 }
 
+fn partition_column(engine: SqlEngine) -> &'static str {
+    match engine {
+        #[cfg(feature = "oracle")]
+        SqlEngine::Oracle => "SERVER_TIME",
+        _ => "server_time",
+    }
+}
+
 fn partitioned(engine: SqlEngine, table: &str, mode: &str, dest: &Path) -> Rig {
-    let column = engine.col("server_time");
+    let column = partition_column(engine);
     let cursor = format!("cursor_column: {}", engine.col("id"));
     let by = format!("partition_by: {column}");
     let lines: Vec<&str> = if mode == "incremental" {
@@ -53,6 +61,33 @@ fn delivered(dest: &Path) -> (Vec<i64>, usize) {
     (ids.into_iter().collect(), rows)
 }
 
+fn emptied(dest: &Path) {
+    for entry in std::fs::read_dir(dest).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    assert!(files_under(dest).is_empty(), "the destination is empty");
+}
+
+fn partition_emptied(dest: &Path, value: &str) {
+    let mut gone = 0;
+    for entry in std::fs::read_dir(dest).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(value))
+        {
+            std::fs::remove_dir_all(&path).unwrap();
+            gone += 1;
+        }
+    }
+    assert_eq!(gone, 1, "one partition directory ends with {value}");
+}
+
 fn state_names(rig: &Rig, table: &str) -> Vec<String> {
     let db = rusqlite::Connection::open(rig.config_path().with_file_name(".rivet_state.db"))
         .expect("the state database");
@@ -70,6 +105,7 @@ fn state_names(rig: &Rig, table: &str) -> Vec<String> {
     }
     names.retain(|n| n.starts_with(rig.export_name()) || n.starts_with(table));
     names.sort();
+    names.dedup();
     names
 }
 
@@ -115,23 +151,23 @@ fn reset_of_the_parent_starts_every_child_over(engine: SqlEngine) {
         said.contains(&format!("State reset for export '{}'", rig.export_name())),
         "{said}"
     );
-    assert_eq!(
-        state_names(&rig, &table),
-        Vec::<String>::new(),
-        "a reset leaves no state of the export or its children"
-    );
+    let left = state_names(&rig, &table);
 
-    let second = tempfile::tempdir().unwrap();
-    let rig = rig.dest_path(second.path().join("{partition}"));
+    emptied(first.path());
     rig.run_ok();
     assert_eq!(
-        delivered(second.path()),
+        delivered(first.path()),
         (vec![1, 2, 3, 4, 5, 6], 6),
         "the run after a reset delivers every source row to the empty destination"
     );
+    assert_eq!(
+        left,
+        Vec::<String>::new(),
+        "a reset leaves no state of the export or its children"
+    );
 }
 
-/// A reset of one child starts that partition over and leaves the others' cursors.
+/// A reset of one child starts that partition over: with its directory emptied the destination holds every row once, so the others' cursors stayed.
 fn reset_of_one_child_starts_only_that_child_over(engine: SqlEngine) {
     engine.alive();
     let (table, _guard) = three_days(engine);
@@ -150,10 +186,10 @@ fn reset_of_one_child_starts_only_that_child_over(engine: SqlEngine) {
     let expected: Vec<String> = names.iter().filter(|n| **n != child).cloned().collect();
     assert_eq!(left, expected, "only that child's rows go");
 
-    let next = tempfile::tempdir().unwrap();
-    let rig = rig.dest_path(next.path().join("{partition}"));
+    let value = child.rsplit_once("__").unwrap().1;
+    partition_emptied(dest.path(), value);
     rig.run_ok();
-    assert_eq!(delivered(next.path()), (vec![3, 4], 2));
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
 }
 
 /// A reset of a name that is neither declared nor a stored child of a declared export is refused by code.
@@ -186,10 +222,9 @@ fn reset_of_a_full_partitioned_export_changes_nothing(engine: SqlEngine) {
         "{said}"
     );
     assert_eq!(state_names(&rig, &table), before);
-    let next = tempfile::tempdir().unwrap();
-    let rig = rig.dest_path(next.path().join("{partition}"));
+    emptied(dest.path());
     rig.run_ok();
-    assert_eq!(delivered(next.path()), (vec![1, 2, 3, 4, 5, 6], 6));
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
 }
 
 /// A reset of a plain incremental export clears its cursor and the next run delivers every row.
@@ -209,10 +244,9 @@ fn reset_of_a_plain_incremental_export_starts_it_over(engine: SqlEngine) {
     );
     reset(&rig, rig.export_name());
     assert_eq!(state_names(&rig, &table), Vec::<String>::new());
-    let next = tempfile::tempdir().unwrap();
-    let rig = rig.dest_path(next.path().to_path_buf());
+    emptied(dest.path());
     rig.run_ok();
-    assert_eq!(delivered(next.path()), (vec![1, 2, 3, 4, 5, 6], 6));
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
 }
 
 macro_rules! per_engine {

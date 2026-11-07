@@ -1698,6 +1698,11 @@ pub mod codes {
         "RIVET_STATE_COPY_SOURCE_EMPTY",
         "name the config whose `.rivet_state.db` holds the state, or its `RIVET_STATE_URL=sqlite:<path>`",
     );
+    /// `rivet state accept` named an export with `partition_by` or one of its partition children: their progress is kept per partition, so only a reset applies.
+    pub const STATE_ACCEPT_PARTITIONED: Code = usage(
+        "RIVET_STATE_ACCEPT_PARTITIONED",
+        "`rivet state reset -c <config> --export <export>` starts every partition of the export over with a full pass; `state accept` keeps the progress of an export that is not partitioned",
+    );
     /// `rivet state copy` was given no PostgreSQL state to copy into.
     pub const STATE_COPY_TARGET_MISSING: Code = usage(
         "RIVET_STATE_COPY_TARGET_MISSING",
@@ -1942,6 +1947,7 @@ pub mod codes {
         STATE_BACKEND_FAILED,
         STATE_FILE_CORRUPT,
         STATE_COPY_SOURCE_EMPTY,
+        STATE_ACCEPT_PARTITIONED,
         STATE_COPY_TARGET_MISSING,
         STATE_COPY_TARGET_NOT_EMPTY,
         STATE_COPY_COUNT_MISMATCH,

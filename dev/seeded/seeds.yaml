@@ -1123,6 +1123,23 @@ seeds:
       lib:
         cells:
           - "lib:settling_a_chunk_run_whose_rows_are_gone_is_refused_and_a_whole_one_is_counted"
+  - name: state-reset-skips-partition-children
+    class: "`state reset -e <parent>` of a `partition_by` export clears the declared name only: the partition children `<parent>__<value>` keep their cursors, the command prints \"State reset\" and exits 0, and the next run writes 0 rows"
+    history: "found by a rivet-verifier probe on fe9eb559 (PostgreSQL, incremental + partition_by: reset printed, children cursors kept, next run `_SUCCESS` and no parquet); RED on main 2026-11-07 (the rig oracle: source 6 rows, delivered 0)"
+    scope: source
+    patch: state-reset-skips-partition-children/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_parent_postgres, "lib:reset_of_a_partitioned_export_clears_every_child_and_nothing_else"]
+      mysql:
+        cells: [partition_reset_parent_mysql]
+      mssql:
+        cells: [partition_reset_parent_mssql]
+      oracle:
+        cells: [partition_reset_parent_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+
   - name: apply-skips-partition-expansion
     class: an entry point builds its own export list instead of taking the run set, and runs a `partition_by` export unexpanded
     history: "`rivet apply <config>`, `--pool` and a sealed plan wrote the whole table under a directory literally named `{partition}`, exit 0 (v0.31.0)"
