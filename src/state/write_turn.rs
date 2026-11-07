@@ -114,6 +114,14 @@ pub(super) fn take(db: &Path, patience: Duration) -> Option<Turn> {
     }
 }
 
+/// Tickets issued so far and writers now holding an overdue place at `db` (tests only).
+#[cfg(test)]
+pub(super) fn counts(db: &Path) -> (u64, usize) {
+    let turns = turns_of(db);
+    let q = turns.queue.lock().unwrap_or_else(|p| p.into_inner());
+    (q.next, q.overdue)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{take, turns_of};

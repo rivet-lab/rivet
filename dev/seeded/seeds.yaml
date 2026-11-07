@@ -530,7 +530,7 @@ seeds:
         patch: sqlite-chunk-claim-takes-no-turn/sqlite-state.patch
         cells: ["lib:a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn"]
       postgres-state:
-        na: "the chunk claim on PostgreSQL is `FOR UPDATE SKIP LOCKED`, queued by the server"
+        na: "the chunk claim on PostgreSQL is `FOR UPDATE SKIP LOCKED`: the server skips a locked row and never queues the claim"
 
   - name: load-block-missing-uncoded
     class: "`rivet load` / `rivet compact` on a config without a `load:` block exit 1 with no RIVET_* code, so a scheduler cannot tell the config mistake from another failure"
