@@ -27,15 +27,7 @@ class KnownLeak:
         return all(f == ANY or v in f for f, v in pairs)
 
 
-KNOWN_LEAKS: tuple[KnownLeak, ...] = (
-    KnownLeak(
-        reason="2026-11-08: percent-encoded `pass%77ord` key of a PostgreSQL state URL printed by every state error; closed by #903 (redact_query_secrets decodes the key), remove this entry when #903 is on main",
-        expires="2026-11-22", engines=("postgres",), slots=("state",), spellings=("query-pct-key",)),
-    KnownLeak(
-        reason="2026-11-08: query-pair password of a reachable PostgreSQL state URL printed by the `doctor` State line and the `state copy` done note (redact_pg_url masks userinfo only, src/state/mod.rs:181); closed by #903, remove this entry when #903 is on main",
-        expires="2026-11-22", commands=("doctor", "state copy"), engines=("postgres",), slots=("state",),
-        spellings=("query-password", "query-pct-value")),
-)
+KNOWN_LEAKS: tuple[KnownLeak, ...] = ()
 
 
 def match(cell: dict[str, str], sink_kinds: set[str], today: _dt.date | None = None) -> tuple[list[KnownLeak], bool]:
