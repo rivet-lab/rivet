@@ -202,8 +202,8 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
         .as_sequence()
         .map(|n| n.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    assert_eq!(needs, ["e2e"]);
-    assert_eq!(verdict["if"].as_str(), Some("${{ always() }}"));
+    assert_eq!(needs, ["start", "e2e"]);
+    assert_eq!(verdict["if"].as_str(), Some(STARTED));
     let first = &steps_of(&ci, "e2e-matrix")[0];
     assert!(
         first["if"].is_null()
@@ -240,9 +240,11 @@ fn the_nightly_verdict_waits_for_every_other_nightly_job() {
     );
     assert_eq!(
         nightly["jobs"]["nightly-verdict"]["if"].as_str(),
-        Some("${{ always() }}")
+        Some(STARTED)
     );
 }
+
+const STARTED: &str = "${{ always() && needs.start.result == 'success' }}";
 
 const FREE_DISK: &str = "./.github/actions/free-disk";
 

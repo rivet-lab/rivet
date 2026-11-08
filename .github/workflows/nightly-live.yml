@@ -860,7 +860,7 @@ jobs:
 
   nightly-verdict:
     name: Nightly verdict
-    needs: [start, live-full, mongo-versions, cdc-version-scout, release-compat-artifacts, soak-cdc, mysql-statement-truth, e2e-build, e2e, e2e-matrix]
+    needs: [dedupe, start, live-full, mongo-versions, cdc-version-scout, release-compat-artifacts, soak-cdc, mysql-statement-truth, e2e-build, e2e, e2e-matrix]
     if: ${{ always() && needs.start.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
