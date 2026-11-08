@@ -81,12 +81,21 @@ one, a red one, one from a dirty tree and a missing record are each refused.
 | `NO-CONTROL` | no declared cell is green on the unpatched tree, so the row grades nothing | FAIL |
 | `ABORTED` | a control-green cell was stopped by nextest (TIMEOUT, ABORT, SIGKILL) instead of failing; only a failing assertion catches a seed, so a hang-class seed needs a watchdog test that fails | FAIL |
 | `STAND-DOWN` | the cells ran while the stand was down or unreadable (the gate's stand watchdog, or a cell that failed on the stand's own `live test requires ...` panic): neither a catch nor a miss | INFRA (the run is NOT GRADED) |
+| `OWED` | the row declares `platform:` and this host is another one: its cells exist only there. A DESIGN skip row on the per-run gate, a FAIL on the island that owes it | SKIP (DESIGN) |
 | `N/A` | the manifest says why the code path does not exist on this engine | N/A row, counted under `na_ceiling` |
 
 Every `N/A` row is written to the ledger with its reason. Their count is held under
 `na_ceiling` in `docs/release-gate-matrix.yaml` (row `seeded_recall`); a new `na:` that
 does not lower another one fails the self-test and the gate until its cell is written or
 the ceiling is raised with a dated reason. A reason is at least 30 characters.
+
+## Platform-only cells
+
+A seed whose cells compile for one platform only (`#[cfg(target_os = "linux")]`) declares `platform: linux`
+at the seed level or on an engine. On another host the row is `OWED`, not `NO-CONTROL`: it builds nothing
+and runs nothing there. The Linux island owes the grade: `make release-oracle-island` ends with
+`verify_seeded_platform_rows`, which runs exactly the rows that declare a platform
+(`python -m dev.seeded --platform-rows`) and fails any of them it cannot run on its own host.
 
 A `MISSED` row is a harness finding. Close it with a cell on that engine; do not
 delete the row.

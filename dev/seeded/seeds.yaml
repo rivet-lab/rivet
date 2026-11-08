@@ -5399,6 +5399,7 @@ seeds:
     class: "`tls.ca_file` is trusted beside the system store instead of alone, so a server certificate any system-trusted CA signed is accepted under `verify-ca` or `verify-full` although the config names one CA"
     history: "issue #789; RED on main 2026-11-06 on Linux (a certificate from a CA installed through SSL_CERT_FILE was accepted with ca_file naming another CA, PostgreSQL, MySQL and SQL Server); the cell reads the system store through SSL_CERT_FILE, so it runs on Linux stands only; the mysql and mssql seeds restore the registry driver in place of the rivet-lab fork"
     scope: source
+    platform: linux
     patch: ca-file-second-trust-anchor/postgres.patch
     engines:
       postgres:
