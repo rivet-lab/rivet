@@ -1851,6 +1851,29 @@ seeds:
         na: "the session-time-zone guard is MySQL's; MongoDB dates are UTC instants"
       oracle:
         na: "the session-time-zone guard is MySQL's; rivet sets no session zone on Oracle"
+  - name: mysql-override-unread-value-nulled
+    class: "a MySQL `columns:` override whose declared type has no arm for the value the server sent (an integer under float4/float8, a double under int8) writes NULL for every row instead of the value or a coded refusal, exit 0"
+    history: "hunt-3 F1, 2026-11-08: RED on main 2026-11-08 (the rig, delivered parquet read back: `INT` as float8 gave [None, None, None, None] against the inserted 1..4, MySQL only; PostgreSQL refused at check, Oracle delivered 7.0)"
+    scope: source
+    patch: mysql-override-unread-value-nulled/mysql.patch
+    engines:
+      mysql:
+        cells:
+          - an_int_column_declared_float_is_delivered_with_its_values_mysql
+          - an_integer_a_float_cannot_hold_exactly_is_refused_never_rounded_mysql
+          - a_value_the_declared_type_does_not_read_is_refused_never_nulled_mysql
+          - a_declared_override_delivers_the_source_or_refuses_by_code_mysql
+          - "lib:an_integer_is_a_float_only_when_the_float_holds_it_exactly"
+          - "lib:a_value_no_arm_reads_is_refused_and_a_source_null_stays_null"
+      postgres:
+        na: "the MySQL converter's arms are the seam; PostgreSQL refuses the same override at check (an_int_column_declared_float8_is_refused_by_check_and_run_postgres)"
+      mssql:
+        na: "the MySQL converter's arms are the seam; SQL Server stops on a value its builder does not read (a_declared_override_delivers_the_source_or_refuses_by_code_mssql)"
+      mongo:
+        na: "a MongoDB document rides one verbatim `document` column, so a numeric field has no declared type to mismatch (a_columns_override_on_a_numeric_field_never_nulls_it_mongo)"
+      oracle:
+        na: "the MySQL converter's arms are the seam; Oracle reads each column through a typed driver get that errors on a mismatch (a_declared_override_delivers_the_source_or_refuses_by_code_oracle)"
+
   - name: summary-skip-reason-dropped
     class: "the run summary's `per_export[]` entry of a `skip_empty` run says `skipped` without the reason the metrics row and the console card carry"
     history: "0.32.1 item 6, 2026-10-18: measured on main 935064e8: `--summary-output` entry `\"status\":\"skipped\"`, `skip_reason` absent (read as null) on the sequential and the process runner"
