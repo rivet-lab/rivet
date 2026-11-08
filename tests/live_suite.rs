@@ -307,6 +307,8 @@ mod live_wave_apply;
 mod preflight_missing_table;
 #[path = "live/preflight_target_fail_note.rs"]
 mod preflight_target_fail_note;
+#[path = "live/property_check_equals_run.rs"]
+mod property_check_equals_run;
 #[path = "live/quality_live.rs"]
 mod quality_live;
 #[path = "live/roast_metric_validated_ordering.rs"]
