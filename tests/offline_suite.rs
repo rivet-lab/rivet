@@ -185,6 +185,8 @@ mod state_reset_family;
 mod test_checks_guard;
 #[path = "offline/time_window.rs"]
 mod time_window;
+#[path = "offline/true_cause_refusal_matrix.rs"]
+mod true_cause_refusal_matrix;
 #[path = "offline/trust_artifacts_integration.rs"]
 mod trust_artifacts_integration;
 #[path = "offline/type_capability_matrix_guard.rs"]
