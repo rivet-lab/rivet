@@ -248,9 +248,9 @@ jobs:
         mongo_version: ["4.4", "5.0", "6.0", "7.0", "8.0"]
         include:
           - mongo_version: "4.4"
-            not_sharded: " and not test(a_sharded_mongo)"
+            not_sharded: " and not test(live_clickhouse_load::a_sharded_mongo)"
           - mongo_version: "5.0"
-            not_sharded: " and not test(a_sharded_mongo)"
+            not_sharded: " and not test(live_clickhouse_load::a_sharded_mongo)"
     env:
       MONGO_VERSION: ${{ matrix.mongo_version }}
       NOT_SHARDED: ${{ matrix.not_sharded }}
