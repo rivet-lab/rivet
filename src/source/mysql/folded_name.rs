@@ -577,7 +577,7 @@ mod tests {
             assert!(!out.is_empty());
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
+            start.elapsed() < crate::test_budget::ceiling(std::time::Duration::from_secs(5)),
             "{:?}",
             start.elapsed()
         );

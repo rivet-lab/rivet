@@ -107,6 +107,8 @@ pub(crate) mod url_text;
 // Test-only fault-injection hook used by `tests/live_crash_recovery.rs`.
 // Activated by the `RIVET_TEST_PANIC_AT` env var; no-op otherwise.  See
 // module docs for details.
+#[cfg(test)]
+pub(crate) mod test_budget;
 pub(crate) mod test_hook;
 // Preflight diagnostics. The `check` and `doctor` entry points are invoked
 // from `src/cli/dispatch.rs` (binary-only) and the internal

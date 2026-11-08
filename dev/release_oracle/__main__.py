@@ -1243,6 +1243,16 @@ def _self_test() -> int:
     _core.note_invariant_violations(["rivet", "run"], 'a row mentions RIVET_INTERNAL_ in its data')
     assert len(_core.INTERNAL_HITS) == 1, _core.INTERNAL_HITS
     _core.INTERNAL_HITS.clear()
+    real_sub = _core.subprocess.run
+    _core.subprocess.run = lambda a, **_k: _core.subprocess.CompletedProcess(a, 1, "", "Error: [RIVET_INTERNAL_TYPE_BUILDER] no value converter")
+    try:
+        _core.run(["cargo", "nextest"], env={"RIVET_BIN_OVERRIDE": "/previous/rivet"})
+        assert not _core.INTERNAL_HITS, "a leg driven by a binary other than the gated one is not graded"
+        _core.run(["cargo", "nextest"], env=_core.release_bin_env())
+        assert len(_core.INTERNAL_HITS) == 1, "a leg driven by the gated binary is graded"
+    finally:
+        _core.subprocess.run = real_sub
+        _core.INTERNAL_HITS.clear()
     # Known reds: an in-date entry downgrades its failure, an expired one does not, and an
     # entry nothing matched in a full run is reported as fixed.
     import datetime as _dt

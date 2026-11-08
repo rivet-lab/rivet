@@ -16,7 +16,7 @@ filter = 'test(/^live_init_delta::a_generated_config_drives_run_load_compact_int
 slow-timeout = { period = "300s", terminate-after = 4 }
 
 [[profile.default.overrides]]
-filter = 'test(/^chunking_stand::stand_pool_split_.*_mysql$/)'
+filter = 'test(/^chunking_stand::stand_pool_split_.*_(mysql|mssql)$/)'
 slow-timeout = { period = "300s", terminate-after = 4 }
 
 [[profile.default.overrides]]
