@@ -75,6 +75,19 @@ pub fn redact_secrets(s: &str) -> String {
     redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(s)))
 }
 
+/// `raw` with its keyword/value passwords, its whole userinfo (user included) and its query secrets masked, and whether any was found: the form a persisted plan holds.
+pub(crate) fn redact_artifact_url(raw: &str) -> (String, bool) {
+    let keyword = redact_keyword_passwords(raw);
+    let span = crate::url_text::credential_span(&keyword, crate::url_text::Mask::AnyUserinfo);
+    let userinfo = match span {
+        Some((start, at)) => format!("{}REDACTED{}", &keyword[..start], &keyword[at..]),
+        None => keyword.clone(),
+    };
+    let query = redact_query_secrets(&userinfo);
+    let changed = keyword != raw || span.is_some() || query != userinfo;
+    (query, changed)
+}
+
 /// The marker a masked keyword/value password is replaced with.
 const MASK: &str = "***";
 
@@ -196,7 +209,7 @@ fn unescaped_whitespace(text: &str) -> usize {
     text.len()
 }
 
-/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling.
+/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling; a percent-encoded key is read decoded.
 pub(crate) fn redact_query_secrets(s: &str) -> String {
     const FAMILIES: [&str; 7] = [
         "token",
@@ -222,12 +235,10 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
         out.push_str(&rest[..=q]);
         rest = &rest[q + 1..];
         let key_end = rest
-            .find(|c: char| !c.is_ascii() || !is_keyword_byte(c as u8))
+            .find(|c: char| !c.is_ascii() || !(is_keyword_byte(c as u8) || c == '%'))
             .unwrap_or(rest.len());
-        if key_end < rest.len()
-            && rest.as_bytes()[key_end] == b'='
-            && is_secret_key(&rest[..key_end])
-        {
+        let key = percent_encoding::percent_decode_str(&rest[..key_end]).decode_utf8_lossy();
+        if key_end < rest.len() && rest.as_bytes()[key_end] == b'=' && is_secret_key(&key) {
             out.push_str(&rest[..key_end]);
             out.push_str("=***");
             let after = &rest[key_end + 1..];
@@ -596,7 +607,7 @@ mod tests {
 
     // ── URL-safety matrix: the recurring credential-leak class, at the infra
     //    level (docs/url-safety-matrix.yaml). The class has regressed THREE times
-    //    (round-1 MSSQL round-trip, round-3 redact_pg_url, and the general redactor
+    //    (round-1 MSSQL round-trip, round-3 the state-URL redactor, and the general redactor
     //    here), each invisible to point tests. This data-driven test sweeps every
     //    scheme × hostile-userinfo shape through the general log redactor and
     //    asserts the secret NEVER survives. Adding a URL shape here is cheaper than
@@ -1299,6 +1310,31 @@ mod tests {
         }
     }
 
+    /// A query key spelled with percent escapes is read decoded: `pass%77ord` is `password`; a key that decodes to a non-secret stays.
+    #[test]
+    fn a_percent_encoded_query_key_that_names_a_password_is_masked() {
+        for (text, want) in [
+            (
+                "postgres://h/db?pass%77ord=S3cr3tPw&b=2",
+                "postgres://h/db?pass%77ord=***&b=2",
+            ),
+            (
+                "postgres://h/db?a=1&%70wd=S3cr3tPw",
+                "postgres://h/db?a=1&%70wd=***",
+            ),
+            (
+                "postgres://h/db?ssl%50assword=S3cr3tPw",
+                "postgres://h/db?ssl%50assword=***",
+            ),
+            (
+                "postgres://h/db?options=-csearch_path%3Dp&application_name=x%20y",
+                "postgres://h/db?options=-csearch_path%3Dp&application_name=x%20y",
+            ),
+        ] {
+            assert_eq!(redact_secrets(text), want, "{text:?}");
+        }
+    }
+
     /// One rule governs both paths: a key the keyword path masks is masked in a URL query, and a key it ignores stays.
     #[test]
     fn the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords() {
@@ -1389,8 +1425,7 @@ mod tests {
         // the scan breaks on the first `@` it sees, so the password
         // `p@ssw0rd` is split: only `p` is treated as the password and the
         // tail `ssw0rd` survives in the output. The userinfo terminator must be
-        // the LAST `@` before the path/query (rfind semantics, as already used
-        // by redact_pg_url in state/mod.rs).
+        // the LAST `@` before the path/query (rfind semantics).
         let s = "connect failed to postgresql://rivet:p@ssw0rd@db.example.com:5432/orders";
         let out = redact_url_passwords(s);
         // No fragment of the password may survive. `ssw0rd` is the tail that

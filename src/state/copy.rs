@@ -72,8 +72,8 @@ pub fn done_note(
         std::fs::canonicalize(source)
             .unwrap_or_else(|_| source.to_path_buf())
             .display(),
-        super::redact_pg_url(target),
-        super::redact_pg_url(target),
+        crate::redact::redact_secrets(target),
+        crate::redact::redact_secrets(target),
     );
     if !checkpoints.is_empty() {
         note.push_str(
@@ -205,7 +205,7 @@ fn refuse_a_target_with_rows(tx: &mut postgres::Transaction<'_>, url: &str) -> R
         "the PostgreSQL state {} already holds state rows (in {}): a copy into it would mix two \
          states, and the runs of one would continue from the other's progress. Nothing was \
          copied. Copy into a database (or schema) of its own",
-        super::redact_pg_url(url),
+        crate::redact::redact_secrets(url),
         held.join(", ")
     )
 }
@@ -424,6 +424,29 @@ mod tests {
     use super::*;
 
     const PG: &str = "postgresql://u@h/db";
+
+    /// The success note names the target and the way to run with it, and neither holds a query-pair password.
+    #[test]
+    fn the_done_note_holds_no_query_password_of_the_target() {
+        let report = CopyReport::default();
+        for target in [
+            "postgresql://u@h/db?password=Qp7ZkSecret",
+            "postgresql://u@h/db?sslmode=disable&PASSWORD=Qp7ZkSecret&application_name=x",
+            "postgresql://u:Un7Secret@h/db?sslpassword=Qp7ZkSecret",
+        ] {
+            let note = done_note(
+                std::path::Path::new("/c/.rivet_state.db"),
+                target,
+                &report,
+                &[],
+            );
+            assert!(
+                !note.contains("Qp7ZkSecret") && !note.contains("Un7Secret"),
+                "{target}: {note}"
+            );
+            assert!(note.contains("RIVET_STATE_URL="), "{note}");
+        }
+    }
 
     /// `--to` wins over `RIVET_STATE_URL`; the source is the `sqlite:` file when one is named, else the file beside the config.
     #[test]

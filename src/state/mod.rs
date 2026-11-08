@@ -97,7 +97,11 @@ pub(super) fn connect_pg(url: &str) -> Result<postgres::Client> {
     crate::connect::postgres::connect_client(url, tls.as_ref()).map_err(|e| {
         crate::error::coded(
             crate::error::codes::STATE_BACKEND_FAILED,
-            format!("state(pg): connect to '{}': {:#}", redact_pg_url(url), e),
+            format!(
+                "state(pg): connect to '{}': {:#}",
+                crate::redact::redact_secrets(url),
+                e
+            ),
         )
     })
 }
@@ -142,7 +146,7 @@ fn state_url_tls(url: &str) -> Result<Option<crate::config::TlsConfig>> {
              state's credentials and cursors would cross the network unencrypted. Add \
              `?sslmode=require` (or `verify-ca` / `verify-full`) with TLS enabled on the state \
              server, or `?sslmode=disable` to accept plaintext on a private network.",
-            redact_pg_url(url)
+            crate::redact::redact_secrets(url)
         );
     }
     Ok(None)
@@ -175,22 +179,6 @@ pub(super) fn pg_detail(e: &dyn std::error::Error) -> String {
         Some(cause) => format!("{e}: {cause}"),
         None => e.to_string(),
     }
-}
-
-/// `scheme://user:SECRET@host/db` as `scheme://user:***@host/db`, for log and error messages; the credential reading never leaks a password holding `/ ? # @ :`.
-fn redact_pg_url(url: &str) -> String {
-    let mut out = String::with_capacity(url.len());
-    for word in url.split_inclusive(|c: char| c.is_ascii_whitespace()) {
-        let span = crate::url_text::credential_span(word, crate::url_text::Mask::Password);
-        match span.and_then(|(start, at)| {
-            let user = word.get(start..at)?.split(':').next()?;
-            Some((word.get(..start)?, user, word.get(at..)?))
-        }) {
-            Some((scheme, user, host)) => out.extend([scheme, user, ":***", host]),
-            None => out.push_str(word),
-        }
-    }
-    out
 }
 
 // ─── SQLite connection helper ─────────────────────────────────────────────────
@@ -378,12 +366,12 @@ impl StateStore {
                     crate::error::codes::STATE_BACKEND_FAILED,
                     format!(
                         "state(pg): '{}' took the connection and not `SELECT 1`: {}",
-                        redact_pg_url(url),
+                        crate::redact::redact_secrets(url),
                         pg_detail(&e)
                     ),
                 )
             })?;
-            return Ok(format!("postgres {}", redact_pg_url(url)));
+            return Ok(format!("postgres {}", crate::redact::redact_secrets(url)));
         }
         let path = Self::state_db_path(config_path);
         refuse_a_state_left_behind(&config_dir_of(config_path).join(STATE_DB_NAME), &path)?;
@@ -846,179 +834,25 @@ mod tests {
         assert_eq!(pg_detail(&std::io::Error::other("plain")), "plain");
     }
 
-    #[test]
-    fn redact_pg_url_removes_password() {
-        assert_eq!(
-            redact_pg_url("postgresql://rivet:secret123@localhost:5433/rivet_state"),
-            "postgresql://rivet:***@localhost:5433/rivet_state"
-        );
-        assert_eq!(
-            redact_pg_url("postgres://admin:p@ssw0rd@db.prod.example.com/state"),
-            "postgres://admin:***@db.prod.example.com/state"
-        );
-    }
+    /// Every spelling of a query-pair password the general redactor masks, with the key's own case kept.
+    const QUERY_PASSWORD_URLS: [&str; 8] = [
+        "postgresql://rivet@127.0.0.1:5433/postgres?password=Qp7ZkSecret",
+        "postgresql://rivet@127.0.0.1:5433/postgres?sslmode=disable&password=Qp7ZkSecret&application_name=x",
+        "postgresql://rivet@127.0.0.1:5433/postgres?PASSWORD=Qp7ZkSecret",
+        "postgresql://rivet@127.0.0.1:5433/postgres?Password=Qp7ZkSecret&options=-csearch_path%3Dp",
+        "postgresql://rivet@127.0.0.1:5433/postgres?sslpassword=Qp7ZkSecret",
+        "postgresql://rivet@127.0.0.1:5433/postgres?passwd=Qp7ZkSecret",
+        "postgresql://rivet@127.0.0.1:5433/postgres?pwd=Qp7ZkSecret",
+        "postgresql://rivet:Un7Secret@127.0.0.1:5433/postgres?password=Qp7ZkSecret",
+    ];
 
     #[test]
-    fn redact_pg_url_no_password_unchanged() {
-        // URL without a password should come back as-is.
-        let url = "postgresql://rivet@localhost/state";
-        assert_eq!(redact_pg_url(url), url);
-    }
-
-    #[test]
-    fn redact_pg_url_stray_at_in_query_does_not_leak_password() {
-        // Round-2 audit #2: an unbounded rfind('@') landed on a '@' in the query and
-        // echoed `secret`. The SECURITY property is that the secret never survives.
-        // The round-4 default-deny redactor over-redacts this contrived query-'@'
-        // shape (masks to the last '@') rather than risk a leak — the secret is gone,
-        // which is what matters; a '@' in a connection-URL query is vanishingly rare.
-        let out = redact_pg_url("postgresql://u:secret@host:5432/db?opt=a@b");
-        assert!(
-            !out.contains("secret"),
-            "password must not survive redaction with a stray '@' in the query: {out}"
-        );
-        // A normal single-'@' URL keeps the host visible (no over-redaction).
-        assert_eq!(
-            redact_pg_url("postgresql://u:secret@host:5432/db"),
-            "postgresql://u:***@host:5432/db"
-        );
-    }
-
-    fn legacy_redact_pg_url(url: &str) -> String {
-        let Some(scheme_end) = url.find("://") else {
-            return url.to_string();
-        };
-        let after_scheme = &url[scheme_end + 3..];
-        let span_end = after_scheme
-            .find(char::is_whitespace)
-            .unwrap_or(after_scheme.len());
-        let span = &after_scheme[..span_end];
-        let Some(at_rel) = span.rfind('@') else {
-            return url.to_string();
-        };
-        let userinfo = &span[..at_rel];
-        let Some(colon) = userinfo.find(':') else {
-            return url.to_string();
-        };
-        let at_pos = scheme_end + 3 + at_rel;
-        format!(
-            "{}://{}:***@{}",
-            &url[..scheme_end],
-            &userinfo[..colon],
-            &url[at_pos + 1..]
-        )
-    }
-
-    #[test]
-    fn redact_pg_url_masks_what_the_legacy_masker_masked_and_never_leaks_more() {
-        let mut compared = 0;
-        for scheme in ["postgresql", "postgres", "mysql", "sqlserver", "clickhouse"] {
-            for url in crate::url_text::corpus::urls(scheme) {
-                for text in [
-                    url.clone(),
-                    format!("connecting to {url} then retry"),
-                    format!("{url} and {url}"),
-                ] {
-                    let (new, old) = (redact_pg_url(&text), legacy_redact_pg_url(&text));
-                    for secret in ["pw", "p%40w", "a:b"] {
-                        if old.contains(secret) {
-                            continue;
-                        }
-                        assert!(!new.contains(&format!(":{secret}@")), "{text}: {new}");
-                    }
-                    if !text.contains(' ') {
-                        assert_eq!(new, old, "{text}");
-                    }
-                    compared += 1;
-                }
-            }
-        }
-        assert!(compared > 7000, "{compared}");
-    }
-
-    #[test]
-    fn redact_pg_url_common_hostport_url_is_not_mangled() {
-        // Round-4 #4/#5 documents that whitespace terminates the scan; the flip side
-        // this test PINS is that we must NOT aggressively redact a whitespace-bounded
-        // `:`-bearing span — a common credential-free `scheme://host:port/db` URL has
-        // exactly that shape and must pass through untouched (no false-positive mangle).
-        let url = "postgresql://db.internal:5432/orders";
-        assert_eq!(
-            redact_pg_url(url),
-            url,
-            "a credential-free host:port URL is untouched"
-        );
-        assert_eq!(
-            redact_pg_url("connecting to postgresql://db:5432/x then retry"),
-            "connecting to postgresql://db:5432/x then retry"
-        );
-    }
-
-    #[test]
-    fn redact_pg_url_at_or_colon_in_password_does_not_leak() {
-        // Round-4: the two-pass redactor leaked when the password held a '@' BEFORE a
-        // raw '/','?','#' (pass 1 caught the internal '@', skipping the fail-safe), and
-        // split the user at the LAST ':' (rfind) so a ':'-bearing password leaked its
-        // prefix. The default-deny form (last '@' before whitespace, FIRST ':') closes
-        // both. RED before the redesign.
-        assert_eq!(
-            redact_pg_url("postgresql://rivet:Kp@9x/Lm2z@db.prod:5432/orders"),
-            "postgresql://rivet:***@db.prod:5432/orders",
-            "'@'-before-'/' password tail must not leak"
-        );
-        assert_eq!(
-            redact_pg_url("postgresql://rivet:a:b:c:secret@host:5432/state"),
-            "postgresql://rivet:***@host:5432/state",
-            "':'-bearing password prefix must not leak (FIRST-colon split)"
-        );
-        for u in [
-            "postgresql://rivet:Kp@9x/Lm2z@db/orders",
-            "postgresql://rivet:a:b:c:secret@host/state",
-            "postgresql://u:p@w?rd@host/db",
-            "postgresql://u:p@w#rd@host/db",
-        ] {
-            let out = redact_pg_url(u);
+    fn a_state_url_query_password_is_masked_in_every_spelling() {
+        for url in QUERY_PASSWORD_URLS {
+            let out = crate::redact::redact_secrets(url);
             assert!(
-                !out.contains("Lm2z")
-                    && !out.contains("a:b:c")
-                    && !out.contains("w?rd")
-                    && !out.contains("w#rd"),
-                "no password fragment may survive: {out}"
-            );
-        }
-    }
-
-    #[test]
-    fn redact_pg_url_password_with_raw_delimiters_does_not_leak() {
-        // Round-3 regression: the #2 authority-bound `find(['/','?','#'])` truncated
-        // BEFORE the real '@' when the password itself contained '/','?', or '#'
-        // (base64 secrets routinely contain '/'), so rfind('@') missed, the redactor
-        // fell through, and echoed the cleartext password. RED before the fail-safe
-        // pass. Each must mask the secret AND keep the user + host visible.
-        assert_eq!(
-            redact_pg_url("postgresql://u:pa/ss@host/db"),
-            "postgresql://u:***@host/db",
-            "'/' in password must be redacted, not leaked"
-        );
-        assert_eq!(
-            redact_pg_url("postgresql://u:pa?ss@host/db"),
-            "postgresql://u:***@host/db",
-            "'?' in password must be redacted"
-        );
-        assert_eq!(
-            redact_pg_url("postgresql://u:pa#ss@host/db"),
-            "postgresql://u:***@host/db",
-            "'#' in password must be redacted"
-        );
-        // Belt-and-suspenders: the secret string never survives, whatever the shape.
-        for u in [
-            "postgresql://rivet:Xy/9Zq@db:5432/state",
-            "postgres://admin:p/a?s#s@db.example.com/state",
-        ] {
-            assert!(
-                !redact_pg_url(u).contains("Xy/9Zq") && !redact_pg_url(u).contains("p/a?s#s"),
-                "no raw-delimiter password may survive: {}",
-                redact_pg_url(u)
+                !out.contains("Qp7ZkSecret") && !out.contains("Un7Secret"),
+                "{url} -> {out}"
             );
         }
     }

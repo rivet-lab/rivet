@@ -924,7 +924,7 @@ rivet run --config pilot.yaml
 
 ### Security
 
-- Passwords are **redacted** from all log and error messages: `postgresql://user:***@host/db`.
+- Passwords are **redacted** from all log and error messages, whether written as `user:password@`, as a `password=` query pair (any case, any percent-encoding of the key) or as a keyword/value pair: `postgresql://REDACTED@host/db`.
 - A state URL for a non-loopback host must say how to connect. `?sslmode=require` (or
   `verify-ca` / `verify-full`) negotiates TLS and needs TLS enabled on the state server;
   `?sslmode=disable` connects in plaintext, the operator's choice for a private network, with
