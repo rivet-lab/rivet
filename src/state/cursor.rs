@@ -1564,43 +1564,21 @@ mod tests {
     #[test]
     fn a_boundary_with_no_cursor_belongs_to_the_source_of_its_chunk_runs() {
         let s = store();
-        for (name, run_source) in [
-            ("here", Some("pg/a")),
-            ("there", Some("pg/b")),
-            ("both", None),
-        ] {
-            s.record_committed_chunked(name, 3, "run").unwrap();
-            if let Some(source) = run_source {
-                s.open_chunk_run(
-                    &ProgressKey::chunked(name, source),
-                    &format!("run_{name}"),
-                    "h",
-                    3,
-                    &[(1, 10)],
-                )
+        let open_unanchored = |name: &str, source: &str, run: &str| {
+            s.open_chunk_run(&ProgressKey::chunked(name, source), run, "h", 3, &[(1, 10)])
                 .unwrap();
-            }
-        }
-        s.record_committed_chunked("never_chunked", 3, "run")
-            .unwrap();
+            s.reset(name, source).unwrap();
+        };
+        open_unanchored("here", "pg/a", "run_here");
+        open_unanchored("there", "pg/b", "run_there");
+        open_unanchored("both", "pg/a", "run_2");
+        open_unanchored("both", "pg/b", "run_3");
         s.create_chunk_run("run_l", "unsourced", "h", 3).unwrap();
-        s.record_committed_chunked("unsourced", 3, "run").unwrap();
-        s.open_chunk_run(
-            &ProgressKey::chunked("both", "pg/a"),
-            "run_2",
-            "h",
-            3,
-            &[(1, 10)],
-        )
-        .unwrap();
-        s.open_chunk_run(
-            &ProgressKey::chunked("both", "pg/b"),
-            "run_3",
-            "h",
-            3,
-            &[(1, 10)],
-        )
-        .unwrap();
+        for name in ["here", "there", "both", "never_chunked", "unsourced"] {
+            s.record_committed_chunked(name, 3, "run").unwrap();
+        }
+        let anchors = s.query("SELECT 1 FROM export_state", &[], |r| r.i64(0));
+        assert!(anchors.unwrap().is_empty());
         assert_eq!(
             s.stored_export_names("pg/a").unwrap(),
             ["both", "here", "never_chunked", "unsourced"]

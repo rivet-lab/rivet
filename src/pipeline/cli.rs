@@ -2065,7 +2065,6 @@ exports:
         let other = "postgres://other.host:5432/db";
         state.record_committed_chunked("a", 1, "r").unwrap();
         for (name, from) in [("a__2026-01-01", source.as_str()), ("a__2026-01-02", other)] {
-            state.record_committed_chunked(name, 3, "r").unwrap();
             state
                 .open_chunk_run(
                     &crate::state::ProgressKey::chunked(name, from),
@@ -2075,6 +2074,8 @@ exports:
                     &[(1, 10)],
                 )
                 .unwrap();
+            state.reset(name, from).unwrap();
+            state.record_committed_chunked(name, 3, "r").unwrap();
         }
         reset_state(&config_path, "a").unwrap();
         let kept: Vec<String> = state
