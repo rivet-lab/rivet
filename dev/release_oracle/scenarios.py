@@ -278,7 +278,7 @@ def _first_red(out: str) -> str:
     panics = nextest_panics(out)
     for name, status in nextest_outcomes(out).items():
         if status not in ("PASS", "LEAK"):
-            return f"{status} {name}: {panics.get(name, '')}".rstrip(": ")
+            return f"{status} {name}" + (f": {panics[name]}" if panics.get(name) else "")
     return _first_match(out, r"panicked|^error")
 
 

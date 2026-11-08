@@ -24,7 +24,7 @@ import yaml
 
 from dev.pytools import evidence
 from dev.release_oracle import stand_health
-from dev.release_oracle.core import FULL_GATE, Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, nextest_panics, self_skipped
+from dev.release_oracle.core import Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, nextest_panics, self_skipped
 from dev.release_oracle.live_modules import EXCLUSIVE_ENV, exclusive_tests, live_modules_env
 from dev.seeded import run_record
 
@@ -94,7 +94,6 @@ class Verdict:
     row: Row
     status: str
     detail: str
-    design: bool = False
 
 
 def parse_manifest(doc: dict, patch_dir: Path = HERE) -> list[Row]:
@@ -150,6 +149,31 @@ def _fn_names(tree: Path) -> set[str]:
     return {m for p in tree.rglob("*.rs") for m in re.findall(r"\bfn (\w+)\(", p.read_text())}
 
 
+def os_gated(cell: str, root: Path = ROOT) -> bool:
+    """True when every `#[test]` fn of this name under tests/ carries a `#[cfg(target_os = ...)]`, so the cell builds on one OS only."""
+    if cell.startswith(LIB):
+        return False
+    found = []
+    for f in sorted((root / "tests").rglob("*.rs")):
+        lines = f.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if not re.match(rf"\s*(?:pub\s+)?(?:async\s+)?fn {re.escape(cell)}\b", line):
+                continue
+            attrs = []
+            while i > 0 and lines[i - 1].lstrip().startswith("#["):
+                i -= 1
+                attrs.append(lines[i].strip())
+            if "#[test]" in attrs:
+                found.append(any(re.fullmatch(r'#\[cfg\(target_os = "\w+"\)\]', a) for a in attrs))
+    return bool(found) and all(found)
+
+
+def split_os_gated(rows: list[Row], root: Path = ROOT) -> tuple[list[Row], list[Row]]:
+    """(rows the per-run gate grades, rows whose every cell builds on one OS only and the island run grades)."""
+    gated = [r for r in rows if r.cells and all(os_gated(c, root) for c in r.cells)]
+    return [r for r in rows if r not in gated], gated
+
+
 def patch_files(patch_text: str) -> list[str]:
     """The repo-relative files a unified diff changes."""
     return re.findall(r"^\+\+\+ b/(\S+)", patch_text, re.M)
@@ -184,26 +208,6 @@ def cell_outcomes(out: str, skipped: dict[str, str], cells: tuple[str, ...]) -> 
     return res
 
 
-COMPILED_OUT = "compiled out: "
-HOST_OS = {"darwin": "macos", "linux": "linux", "win32": "windows"}.get(sys.platform, sys.platform)
-
-
-def compiled_out(tree: Path, cell: str, host: str = HOST_OS) -> str | None:
-    """The `#[cfg(target_os = ...)]` that keeps this cell's fn out of a build for `host`, if any."""
-    bare = cell.removeprefix(LIB)
-    for f in sorted((tree / "tests").rglob("*.rs")):
-        lines = f.read_text().splitlines()
-        for i, line in enumerate(lines):
-            if re.match(rf"\s*(?:pub\s+)?(?:async\s+)?fn {re.escape(bare)}\b", line):
-                j = i
-                while j > 0 and lines[j - 1].lstrip().startswith("#["):
-                    j -= 1
-                    m = re.fullmatch(r'\s*#\[cfg\(target_os = "(\w+)"\)\]', lines[j])
-                    if m and m.group(1) != host:
-                        return f'#[cfg(target_os = "{m.group(1)}")] and this host is {host}'
-    return None
-
-
 def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
           skipped: dict[str, str] | None = None, stand: stand_health.StandVerdict = stand_health.ALIVE) -> Verdict:
     """CAUGHT iff a cell green on the unpatched tree is red on the patched one; `seeded=None` = the patched tree did not build; `skipped` = each control cell's own skip reason; `stand` = how the stand read while the cells ran (down or unreadable grades nothing)."""
@@ -222,8 +226,7 @@ def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
         return Verdict(row, STAND_DOWN, f"cell(s) {', '.join(hit)} failed on the stand's own panic, so no catch or miss is read")
     if not green and all(control.get(c) == "SKIP" for c in row.cells):
         why = "; ".join(f"{c}: {(skipped or {}).get(c, 'skipped')}" for c in row.cells)
-        design = all((skipped or {}).get(c, "").startswith(COMPILED_OUT) for c in row.cells)
-        return Verdict(row, NOT_GRADED_HERE, f"every declared cell skipped on this stand ({why})", design)
+        return Verdict(row, NOT_GRADED_HERE, f"every declared cell skipped on this stand ({why})")
     if not green:
         said = ", ".join(f"{c}={control.get(c, 'ABSENT')}" for c in row.cells)
         return Verdict(row, NO_CONTROL, f"no declared cell is green on the unpatched tree ({said})")
@@ -390,10 +393,6 @@ class Cargo:
         skipped = self_skipped(skip_log)
         out = cell_outcomes(p.stdout, skipped, tuple(cells))
         why = {k.split("::")[-1]: v for k, v in skipped.items()}
-        for c in cells:
-            gone = compiled_out(self.tree, c) if out.get(c) == "ABSENT" else None
-            if gone:
-                out[c], why[c.removeprefix(LIB)] = "SKIP", COMPILED_OUT + gone
         owed = [c for c in cells if self.again and out.get(c) == "SKIP" and self.again[0] in why.get(c.removeprefix(LIB), "")]
         if owed:
             # As the stage does: a self-skip naming the gate's state var runs again under it, and that leg is its verdict.
@@ -437,7 +436,7 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceili
         if v.status == CAUGHT:
             led.passed(v.row.engine, "seeded", v.row.seed, "-", msg)
         elif v.status == NOT_GRADED_HERE:
-            led.skipped(v.row.engine, "seeded", v.row.seed, "-", msg, cause=SkipCause.DESIGN if v.design else SkipCause.ENV)
+            led.skipped(v.row.engine, "seeded", v.row.seed, "-", msg, cause=SkipCause.ENV)
             here.append(f"{v.row.seed} × {v.row.engine}")
         elif v.status == NA:
             led.not_applicable(v.row.engine, "seeded", v.row.seed, "-", msg)
@@ -583,9 +582,17 @@ def grade_seeds(led: Ledger, live: list[Row], control: dict[str, str], control_s
     return verdicts
 
 
-def recall(led: Ledger, rows: list[Row], *, complete: bool = True) -> list[Verdict]:
-    """Grade every row: STALE check, one CONTROL run on the unpatched tree, then one build+run per patch; appends the run to the record."""
+def recall(led: Ledger, rows: list[Row], *, complete: bool = True, island: bool = False) -> list[Verdict]:
+    """Grade the per-run gate's rows (or, with `island`, the rows whose cells build on one OS only): STALE check, one CONTROL run on the unpatched tree, then one build+run per patch; appends the run to the record."""
     t0 = time.perf_counter()
+    portable, gated = split_os_gated(rows)
+    rows, complete = (gated, False) if island else (portable, complete)
+    if not rows:
+        print("  seeded recall: no OS-gated rows for the island run")
+        return []
+    if not island and gated:
+        print(f"  seeded recall: {len(gated)} row(s) build on one OS only and are graded by the island run: "
+              + ", ".join(f"{r.seed} × {r.engine}" for r in gated))
     led.phase("Seeded-defect recall — does the harness catch known bug classes re-introduced?")
     verdicts: dict[Row, Verdict] = {}
     for r, c in unknown_cells(rows):
@@ -872,21 +879,23 @@ def self_test() -> int:
         probe.tree = Path(td)
         assert probe.binaries(["offline_cell", "live_cell", "lib:u1"]) == ["--test", "top_level", "--test", "live_suite", "--lib"]
         assert probe.binaries(["live_cell", "other_live"]) == ["--test", "live_suite"]
+        (Path(td) / "tests" / "a_helper.rs").write_text('#[cfg(target_os = "linux")]\nfn any_cell() {}\n')
+        (Path(td) / "tests" / "b_gated.rs").write_text(
+            '#[cfg(target_os = "linux")]\n#[test]\nfn linux_cell() {}\n\n#[test]\nfn any_cell() {}\n\n#[test]\nfn plain_cell() {}\n')
+        assert os_gated("linux_cell", Path(td)) and not os_gated("plain_cell", Path(td)) and not os_gated("missing_cell", Path(td))
+        assert not os_gated("any_cell", Path(td)), "a gated non-test helper of the same name must not own a portable cell"
+        (Path(td) / "tests" / "c_helper.rs").write_text('#[cfg(target_os = "linux")]\nfn helper_only() {}\n')
+        assert not os_gated("helper_only", Path(td)), "a gated fn that is no test is no cell"
+        assert not os_gated("lib:linux_cell", Path(td))
+        mixed = [Row("s", "postgres", "p", ("linux_cell",)), Row("s", "mysql", "p", ("linux_cell", "plain_cell")),
+                 Row("s", "mssql", None, (), "n/a")]
+        assert split_os_gated(mixed, Path(td)) == (mixed[1:], mixed[:1]), split_os_gated(mixed, Path(td))
+        real = [r for r in parse_manifest(yaml.safe_load(MANIFEST.read_text())) if r.seed == "ca-file-second-trust-anchor" and r.cells]
+        assert len(real) == 3 and split_os_gated(real) == ([], real), "the TLS trust-store seed is graded by the island run"
+        from unittest import mock
+        with mock.patch.object(sys.modules[__name__], "prepare_tree", side_effect=AssertionError("built a tree")):
+            assert recall(Ledger(colour=False), real) == [], "the per-run gate builds nothing for rows the island owns"
         assert probe.binaries([]) == ["--lib"]
-        (Path(td) / "tests" / "gated.rs").write_text('#[cfg(target_os = "linux")]\n#[test]\nfn linux_cell() {}\n\n#[test]\nfn any_cell() {}\n')
-        assert compiled_out(Path(td), "linux_cell", "macos") and not compiled_out(Path(td), "linux_cell", "linux")
-        assert not compiled_out(Path(td), "any_cell", "macos") and not compiled_out(Path(td), "missing_cell", "macos")
-        other = "linux" if HOST_OS != "linux" else "macos"
-        (Path(td) / "tests" / "elsewhere.rs").write_text(f'#[cfg(target_os = "{other}")]\n#[test]\nfn elsewhere_cell() {{}}\n')
-        ran = Cargo.__new__(Cargo)
-        ran.tree, ran.env, ran.again = Path(td), {}, None
-        real_sh = globals()["sh"]
-        globals()["sh"] = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="")
-        try:
-            got, why = ran._run_group(["elsewhere_cell", "any_cell"], Path(td) / "run.log", {})
-        finally:
-            globals()["sh"] = real_sh
-        assert got == {"elsewhere_cell": "SKIP", "any_cell": "ABSENT"} and why["elsewhere_cell"].startswith(COMPILED_OUT), (got, why)
         (Path(td) / "src").mkdir()
         (Path(td) / "src" / "a.rs").write_text("fn lib_cell() {}\nfn generic_cell<T>() {}\n")
         named = Row("s", "postgres", "p", ("offline_cell", "renamed_cell", "lib:lib_cell", "lib:generic_cell", "lib:offline_cell"))
@@ -903,9 +912,6 @@ def self_test() -> int:
     v = grade(skip, {"t1": "SKIP", "t2": "SKIP"}, {}, {"t1": "no SNOWFLAKE_TEST_CONNECTION"})
     assert v.status == NOT_GRADED_HERE and "no SNOWFLAKE_TEST_CONNECTION" in v.detail, v
     assert grade(skip, {"t1": "SKIP", "t2": "FAIL"}, {}).status == NO_CONTROL, "a red control is not a stand skip"
-    gone = grade(skip, {"t1": "SKIP", "t2": "SKIP"}, {}, {"t1": COMPILED_OUT + "x", "t2": COMPILED_OUT + "x"})
-    assert gone.status == NOT_GRADED_HERE and gone.design and not v.design, (gone, v)
-    assert not grade(skip, {"t1": "SKIP", "t2": "SKIP"}, {}, {"t1": COMPILED_OUT + "x", "t2": "no creds"}).design
     assert grade(skip, {"t1": "SKIP", "t2": "PASS"}, {"t2": "SKIP"}).status == MISSED, \
         "a green control the seed made skip is no catch"
     dead = stand_health.down("the state DB stopped answering")
@@ -931,10 +937,6 @@ def self_test() -> int:
         led = Ledger(colour=False)
         assert record(led, rows) is (not red)
         assert sum(c.status.name == "SKIP" for c in led.cells) == n and led.red is red, (n, limit, led.cells)
-    for design, want in ((True, "RELEASE-READY"), (False, "NOT GRADED")):
-        led = Ledger(colour=False)
-        record(led, [Verdict(Row("s", "mysql", "p", ("t1",)), NOT_GRADED_HERE, "skipped", design)], ceiling=1)
-        assert led.verdict(FULL_GATE) == want, (design, led.verdict(FULL_GATE), "a cell compiled out on this host is a design skip; a missing stand is not")
     for status in (MISSED, STALE, BROKEN, NO_CONTROL, ABORTED):
         led = Ledger(colour=False)
         green = record(led, [Verdict(pg, CAUGHT, "t2"), Verdict(Row("s", "mysql", "p", ()), status, "x"),
@@ -1007,13 +1009,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="seeded-recall")
     ap.add_argument("--seeds", default="", help="comma-separated seed names (default: all)")
     ap.add_argument("--engines", default="", help="comma-separated engines (default: all)")
+    ap.add_argument("--island", action="store_true", help="grade the rows whose cells build on one OS only, instead of the others")
     ap.add_argument("--self-test", action="store_true", help="check the manifest and the grading logic; no build")
     ns = ap.parse_args(argv)
     if ns.self_test:
         return self_test()
     rows = select(parse_manifest(yaml.safe_load(MANIFEST.read_text())), ns.seeds, ns.engines)
     led = Ledger()
-    recall(led, rows, complete=not (ns.seeds or ns.engines))
+    recall(led, rows, complete=not (ns.seeds or ns.engines), island=ns.island)
     return 1 if led.red else 0
 
 

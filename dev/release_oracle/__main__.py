@@ -181,9 +181,9 @@ _ENV_FLAG_TABLE = {
 }
 
 
-def verify_seeded_recall(led: Ledger, enabled: bool) -> None:
-    """Seeded-defect recall (dev/seeded): every known bug class re-introduced must turn its catching cells red."""
-    if not enabled:
+def verify_seeded_recall(led: Ledger, enabled: bool, island: bool = False) -> None:
+    """Seeded-defect recall (dev/seeded): every known bug class re-introduced must turn its catching cells red; the island run grades the rows whose cells build on one OS only."""
+    if not enabled and not island:
         led.skipped("-", "harness", "seeded_recall", "-",
                     "seeded-defect recall: not run (--with-seeded-recall, on in release-oracle-full); "
                     "this run is a reduced gate and cannot support a tag", cause=SkipCause.REDUCED)
@@ -192,7 +192,24 @@ def verify_seeded_recall(led: Ledger, enabled: bool) -> None:
 
     from dev.seeded import recall as seeded
 
-    seeded.recall(led, seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text())))
+    seeded.recall(led, seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text())), island=island)
+
+
+def _seeded_island_self_test() -> None:
+    """The island run grades the OS-gated seeded rows without `--with-seeded-recall`; the per-run gate skips the whole leg unless asked, and runs the other rows."""
+    import inspect
+    from unittest import mock
+
+    from dev.seeded import recall as seeded
+
+    for enabled, island, calls in ((False, True, [True]), (True, False, [False]), (False, False, [])):
+        seen: list = []
+        led = Ledger(colour=False)
+        with mock.patch.object(seeded, "recall", lambda led, rows, island=False, **k: seen.append(island)):
+            verify_seeded_recall(led, enabled, island=island)
+        assert seen == calls, (enabled, island, seen)
+    assert "verify_seeded_recall(led, ns.with_seeded_recall, island=ns.island)" in inspect.getsource(main), \
+        "the island run must reach the OS-gated seeded rows"
 
 
 def gate_config(ns: argparse.Namespace) -> dict:
@@ -575,6 +592,10 @@ def _first_red_self_test() -> None:
     got = scenarios._first_red(out)
     assert got == "FAIL source::mysql::folded_name::tests::a_megabyte: 9.88s", got
     assert scenarios._first_red("       PASS [ 0.1s] (1/1) rivet-cli t::failed_alias\nerror: test run failed\n") == "error: test run failed"
+    colon = out.replace("    9.88s\n", "    expected a value:\n")
+    assert scenarios._first_red(colon) == "FAIL source::mysql::folded_name::tests::a_megabyte: expected a value:", scenarios._first_red(colon)
+    bare = "        FAIL [   9.882s] (4231/6029) rivet-cli t::quiet\n"
+    assert scenarios._first_red(bare) == "FAIL t::quiet", scenarios._first_red(bare)
 
 
 def _lanes_self_test() -> None:
@@ -948,6 +969,7 @@ def _self_test() -> int:
         "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
     assert inspect.getsource(main).count("stand_images.record_to_target()") == 2 and "stand_images.record_to_target()" in inspect.getsource(bring_up), \
         "the gate must record the stand's images at the start, after every bring-up and at the end"
+    _seeded_island_self_test()
     _stand_down_self_test()
     sunk = Ledger(colour=False)
     sunk._buf = []
@@ -2343,7 +2365,7 @@ def main(argv: list[str] | None = None) -> int:
             keep_failure_log(work / "rivet-oracle.log", kept.name)
         if not ns.island:
             skip_census.verify_oracle_verdict_census(led, kept)
-            verify_seeded_recall(led, ns.with_seeded_recall)
+        verify_seeded_recall(led, ns.with_seeded_recall, island=ns.island)
         verify_no_invariant_violations(led)
         # Only a FULL run can say a known red no longer fires, and only one writes a verdict line.
         full = not (ns.engines or ns.versions or ns.no_cloud or ns.latest_only)

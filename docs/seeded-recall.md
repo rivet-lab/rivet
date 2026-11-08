@@ -24,6 +24,12 @@ costs one build per patch:
 make release-oracle-full ARGS=--with-seeded-recall        # or RIVET_ORACLE_SEEDED_RECALL=1
 ```
 
+A row whose every declared cell is a `#[test]` under `#[cfg(target_os = ...)]` builds on one OS only
+(the `ca-file-second-trust-anchor` rows read the platform trust store through `SSL_CERT_FILE`, Linux
+only). The per-run gate does not owe those rows and names them; the island run (`--island`, on the
+Linux satellite) grades them after its measured stages, and a host where the cell is compiled out
+grades them `NO-CONTROL`. `make seeded-recall SEEDED_ARGS=--island` runs just that share.
+
 It needs the live stand: the same services the declared cells need (the CDC
 stand, ClickHouse + fake-gcs, Oracle, the Postgres state server for the
 migration seed).
