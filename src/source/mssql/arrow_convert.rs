@@ -269,6 +269,18 @@ pub(super) fn mssql_columns_to_schema(
         let mapping = TypeMapping::from_source(&source, rivet);
         match build_arrow_field(&mapping) {
             Some(field) => {
+                if let Some(dt) = mapping
+                    .arrow_type
+                    .as_ref()
+                    .filter(|_| overrides.contains_key(col.name()))
+                {
+                    crate::source::refuse_unbuildable_override(
+                        "mssql",
+                        col.name(),
+                        &mapping.rivet_type,
+                        build_array(dt, idx, &[], col.name(), None),
+                    )?;
+                }
                 fields.push(field);
                 decoders.push((col.name().to_string(), col.column_type()));
             }
@@ -452,11 +464,9 @@ fn build_array(
                     | Some(ColumnData::Guid(None))
                     | Some(ColumnData::Numeric(None))
                     | None => b.append_null(),
-                    Some(other) => crate::rivet_bail!(
-                        crate::error::codes::INTERNAL_TYPE_BUILDER,
-                        "mssql column {idx}: expected {} but row carried {other:?}",
-                        stringify!($builder)
-                    ),
+                    Some(other) => {
+                        return Err(override_mismatch(column, &target.to_string(), other));
+                    }
                 }
             }
             Arc::new(b.finish()) as ArrayRef
@@ -488,10 +498,9 @@ fn build_array(
                     | Some(ColumnData::Guid(None))
                     | Some(ColumnData::Numeric(None))
                     | None => b.append_null(),
-                    Some(other) => crate::rivet_bail!(
-                        crate::error::codes::INTERNAL_TYPE_BUILDER,
-                        "mssql column {idx}: expected Int16Builder but row carried {other:?}"
-                    ),
+                    Some(other) => {
+                        return Err(override_mismatch(column, &target.to_string(), other));
+                    }
                 }
             }
             Arc::new(b.finish())
@@ -585,24 +594,21 @@ fn build_array(
         }
         DataType::Date32 => {
             let mut b = Date32Builder::with_capacity(rows.len());
-            for (r, row) in rows.iter().enumerate() {
+            for row in rows {
                 match row.try_get::<NaiveDate, _>(idx) {
                     Ok(Some(d)) => b.append_value(
                         (d - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32
                             + UNIX_EPOCH_DAY,
                     ),
                     Ok(None) => b.append_null(),
-                    Err(e) => crate::rivet_bail!(
-                        crate::error::codes::INTERNAL_TYPE_BUILDER,
-                        "mssql date column {idx} row {r}: {e}"
-                    ),
+                    Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
                 }
             }
             Arc::new(b.finish())
         }
         DataType::Timestamp(TimeUnit::Microsecond, tz) => {
             let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
-            for (r, row) in rows.iter().enumerate() {
+            for row in rows {
                 // datetime/datetime2 are naive; datetimeoffset is tz-aware and is NOT
                 // a NaiveDateTime (reading it as one errors and fails the whole
                 // export). Fall back to its UTC instant via FixedOffset.
@@ -611,10 +617,7 @@ fn build_array(
                     Ok(v) => v.map(|dt| naive_micros(dt, legacy)),
                     Err(_) => match row.try_get::<chrono::DateTime<chrono::FixedOffset>, _>(idx) {
                         Ok(v) => v.map(|dt| dt.timestamp_micros()),
-                        Err(e) => crate::rivet_bail!(
-                            crate::error::codes::INTERNAL_TYPE_BUILDER,
-                            "mssql timestamp column {idx} row {r}: {e}"
-                        ),
+                        Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
                     },
                 };
                 match micros {
@@ -630,16 +633,13 @@ fn build_array(
         }
         DataType::Timestamp(TimeUnit::Nanosecond, tz) => {
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
-            for (r, row) in rows.iter().enumerate() {
+            for row in rows {
                 match row.try_get::<NaiveDateTime, _>(idx) {
                     Ok(Some(dt)) => b.append_value(crate::types::timestamp_nanos_or_refuse(
                         dt, "mssql", column,
                     )?),
                     Ok(None) => b.append_null(),
-                    Err(e) => crate::rivet_bail!(
-                        crate::error::codes::INTERNAL_TYPE_BUILDER,
-                        "mssql datetime column {idx} row {r}: {e}"
-                    ),
+                    Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
                 }
             }
             let arr = b.finish();
@@ -651,17 +651,14 @@ fn build_array(
         DataType::Time64(TimeUnit::Microsecond) => {
             use arrow::array::Time64MicrosecondBuilder;
             let mut b = Time64MicrosecondBuilder::with_capacity(rows.len());
-            for (r, row) in rows.iter().enumerate() {
+            for row in rows {
                 match row.try_get::<chrono::NaiveTime, _>(idx) {
                     Ok(Some(t)) => b.append_value(
                         t.num_seconds_from_midnight() as i64 * 1_000_000
                             + (t.nanosecond() as i64 / 1000),
                     ),
                     Ok(None) => b.append_null(),
-                    Err(e) => crate::rivet_bail!(
-                        crate::error::codes::INTERNAL_TYPE_BUILDER,
-                        "mssql time column {idx} row {r}: {e}"
-                    ),
+                    Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
                 }
             }
             Arc::new(b.finish())
@@ -674,16 +671,26 @@ fn build_array(
     Ok(arr)
 }
 
+/// The refusal for a cell the `target` builder cannot read, naming the wire type the server sent.
+fn cell_mismatch(column: &str, target: &DataType, cell: Option<&ColumnData<'_>>) -> anyhow::Error {
+    let sent = cell.map_or_else(|| "no value".to_string(), cell_type_name);
+    declared_mismatch(column, &target.to_string(), &sent)
+}
+
 /// A valued cell whose wire type a `columns:` override declared as something rivet does not convert.
 fn override_mismatch(column: &str, declared: &str, other: &ColumnData<'_>) -> anyhow::Error {
+    declared_mismatch(column, declared, &cell_type_name(other))
+}
+
+/// The coded refusal for column `column` declared `declared` that SQL Server sends as `sent`.
+fn declared_mismatch(column: &str, declared: &str, sent: &str) -> anyhow::Error {
     anyhow::Error::new(crate::error::CodedError::new(
         crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
         format!(
             "column `{column}` is declared {declared} by a `columns:` override but SQL Server \
-             sends it as {} — rivet does not convert it, and writing it as NULL would lose \
+             sends it as {sent} — rivet does not convert it, and writing it as NULL would lose \
              every value. Remove the override, or CAST the column to that type in the \
-             export's `query:`.",
-            cell_type_name(other)
+             export's `query:`."
         ),
     ))
 }
@@ -1503,5 +1510,94 @@ mod error_code_tests {
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
         let err = rescale_i128(i128::MAX, 0, 2).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+    }
+
+    /// Every `columns:` override type over every wire value variant ends Ok or as a coded usage refusal, never an internal stop.
+    #[test]
+    fn no_override_over_any_wire_value_ends_as_an_internal_stop() {
+        use tiberius::numeric::Numeric;
+        use tiberius::time::{Date, DateTime, DateTime2, DateTimeOffset, SmallDateTime, Time};
+        let dt2 = DateTime2::new(Date::new(693_595), Time::new(0, 0));
+        let cells: Vec<(ColumnType, ColumnData<'static>)> = vec![
+            (ColumnType::Bit, ColumnData::Bit(Some(true))),
+            (ColumnType::Int1, ColumnData::U8(Some(1))),
+            (ColumnType::Int2, ColumnData::I16(Some(1))),
+            (ColumnType::Int4, ColumnData::I32(Some(1))),
+            (ColumnType::Int8, ColumnData::I64(Some(1))),
+            (ColumnType::Float4, ColumnData::F32(Some(1.5))),
+            (ColumnType::Float8, ColumnData::F64(Some(1.5))),
+            (
+                ColumnType::Numericn,
+                ColumnData::Numeric(Some(Numeric::new_with_scale(125, 2))),
+            ),
+            (ColumnType::NVarchar, ColumnData::String(Some("x".into()))),
+            (
+                ColumnType::BigVarBin,
+                ColumnData::Binary(Some(vec![1u8, 2].into())),
+            ),
+            (
+                ColumnType::Guid,
+                ColumnData::Guid(Some(tiberius::Uuid::from_bytes([1; 16]))),
+            ),
+            (ColumnType::Daten, ColumnData::Date(Some(Date::new(1)))),
+            (ColumnType::Timen, ColumnData::Time(Some(Time::new(1, 0)))),
+            (ColumnType::Datetime2, ColumnData::DateTime2(Some(dt2))),
+            (
+                ColumnType::DatetimeOffsetn,
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(dt2, 0))),
+            ),
+            (
+                ColumnType::Datetime,
+                ColumnData::DateTime(Some(DateTime::new(0, 1))),
+            ),
+            (
+                ColumnType::Datetime4,
+                ColumnData::SmallDateTime(Some(SmallDateTime::new(1, 1))),
+            ),
+            (ColumnType::Int4, ColumnData::I32(None)),
+        ];
+        let overrides = [
+            "bool",
+            "int2",
+            "int4",
+            "int8",
+            "float4",
+            "float8",
+            "decimal(10,2)",
+            "decimal(50,2)",
+            "text",
+            "binary",
+            "date",
+            "json",
+            "uuid",
+            "timestamp",
+            "timestamp_ns",
+            "timestamp_tz",
+            "timestamp_tz_ns",
+        ];
+        for ov in overrides {
+            let rivet = crate::types::parse_type_str(ov).unwrap();
+            let mapping = TypeMapping::from_source(&SourceColumn::simple("c", "x", true), rivet);
+            let field = build_arrow_field(&mapping).expect("override has an Arrow field");
+            let probe = build_array(field.data_type(), 0, &[], "c", None);
+            if let Err(e) =
+                crate::source::refuse_unbuildable_override("mssql", "c", &mapping.rivet_type, probe)
+            {
+                crate::error::assert_coded(&e, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+                continue;
+            }
+            let schema = Arc::new(Schema::new(vec![field]));
+            for (ty, data) in &cells {
+                let rows = [Row::builder().column("c", *ty, data.clone()).build()];
+                if let Err(e) = mssql_rows_to_record_batch(&schema, &rows, None) {
+                    let code = crate::error::error_code(&e);
+                    assert_ne!(
+                        code,
+                        Some("RIVET_INTERNAL_TYPE_BUILDER"),
+                        "override {ov} over {data:?}: {e:#}"
+                    );
+                }
+            }
+        }
     }
 }

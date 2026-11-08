@@ -209,7 +209,21 @@ pub(super) fn oracle_schema(
     let mut errors = Vec::new();
     for mapping in oracle_type_mappings(metas, native, overrides) {
         match build_arrow_field(&mapping) {
-            Some(f) => fields.push(f),
+            Some(f) => {
+                if let Some(dt) = mapping
+                    .arrow_type
+                    .as_ref()
+                    .filter(|_| overrides.contains_key(&mapping.column_name))
+                {
+                    crate::source::refuse_unbuildable_override(
+                        "oracle",
+                        &mapping.column_name,
+                        &mapping.rivet_type,
+                        build_column(&[], 0, &mapping.column_name, dt, None, None),
+                    )?;
+                }
+                fields.push(f)
+            }
             None => {
                 let reason = match &mapping.rivet_type {
                     RivetType::Unsupported { reason, .. } => reason.clone(),
@@ -1083,6 +1097,53 @@ mod renderer_twins {
         ] {
             let canonical = iso_timestamp_nanos(timestamp_datetime(&t).unwrap(), false);
             assert_eq!(timestamp_text(&t), canonical, "{t}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod override_builder_tests {
+    use super::*;
+
+    /// Every override type either builds on zero rows or is refused by code at the schema stage, never an internal stop.
+    #[test]
+    fn no_override_type_ends_as_an_internal_stop_on_zero_rows() {
+        for ov in [
+            "bool",
+            "int2",
+            "int4",
+            "int8",
+            "float4",
+            "float8",
+            "decimal(10,2)",
+            "decimal(50,2)",
+            "text",
+            "binary",
+            "date",
+            "json",
+            "uuid",
+            "timestamp",
+            "timestamp_ns",
+            "timestamp_tz",
+            "timestamp_tz_ns",
+        ] {
+            let rivet = crate::types::parse_type_str(ov).unwrap();
+            let mapping = TypeMapping::from_source(&SourceColumn::simple("c", "x", true), rivet);
+            let dt = mapping
+                .arrow_type
+                .clone()
+                .expect("override has an Arrow type");
+            let probe = build_column(&[], 0, "c", &dt, None, None);
+            let verdict = crate::source::refuse_unbuildable_override(
+                "oracle",
+                "c",
+                &mapping.rivet_type,
+                probe,
+            );
+            assert_eq!(verdict.is_err(), ov == "decimal(50,2)", "{ov}");
+            if let Err(e) = verdict {
+                crate::error::assert_coded(&e, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            }
         }
     }
 }

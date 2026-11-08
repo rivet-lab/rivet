@@ -273,6 +273,14 @@ pub(super) fn mysql_schema_and_arrow_types(
 
         match (build_arrow_field(&mapping), mapping.arrow_type) {
             (Some(field), Some(dt)) => {
+                if column_overrides.contains_key(col.name_str().as_ref()) {
+                    crate::source::refuse_unbuildable_override(
+                        "mysql",
+                        col.name_str().as_ref(),
+                        &mapping.rivet_type,
+                        build_array(&dt, 0, &[], false, col.name_str().as_ref(), None),
+                    )?;
+                }
                 fields.push(field);
                 arrow_types.push(dt);
             }
@@ -2497,5 +2505,53 @@ mod error_code_tests {
     fn a_value_overflowing_its_declared_width_is_refused_by_code() {
         let err = super::narrow::<i32>(1 << 40, "INT").unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+    }
+}
+
+#[cfg(test)]
+mod override_builder_tests {
+    use super::*;
+
+    /// Every override type either builds on zero rows or is refused by code at the schema stage, never an internal stop.
+    #[test]
+    fn no_override_type_ends_as_an_internal_stop_on_zero_rows() {
+        for ov in [
+            "bool",
+            "int2",
+            "int4",
+            "int8",
+            "float4",
+            "float8",
+            "decimal(10,2)",
+            "decimal(50,2)",
+            "text",
+            "binary",
+            "date",
+            "json",
+            "uuid",
+            "timestamp",
+            "timestamp_ns",
+            "timestamp_tz",
+            "timestamp_tz_ns",
+        ] {
+            let rivet = crate::types::parse_type_str(ov).unwrap();
+            let mapping = TypeMapping::from_source(&SourceColumn::simple("c", "x", true), rivet);
+            let dt = mapping
+                .arrow_type
+                .clone()
+                .expect("override has an Arrow type");
+            let probe = build_array(&dt, 0, &[], false, "c", None);
+            let verdict = crate::source::refuse_unbuildable_override(
+                "mysql",
+                "c",
+                &mapping.rivet_type,
+                probe,
+            );
+            let refused = ov.ends_with("_ns");
+            assert_eq!(verdict.is_err(), refused, "{ov}");
+            if let Err(e) = verdict {
+                crate::error::assert_coded(&e, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            }
+        }
     }
 }

@@ -2577,7 +2577,7 @@ fn a_first_cdc_run_refused_after_its_anchor_releases_it_mysql() {
     rig.refuses_twice_then(
         &["run"],
         &[],
-        Refused::by_code("RIVET_INTERNAL_TYPE_BUILDER", 6),
+        Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
         vec![Remedy::new(
             "columns",
             Then::DeliversTheSource,

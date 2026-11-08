@@ -1,0 +1,18 @@
+diff --git a/src/source/mssql/arrow_convert.rs b/src/source/mssql/arrow_convert.rs
+--- a/src/source/mssql/arrow_convert.rs
++++ b/src/source/mssql/arrow_convert.rs
+@@ -464,9 +464,11 @@ fn build_array(
+                     | Some(ColumnData::Guid(None))
+                     | Some(ColumnData::Numeric(None))
+                     | None => b.append_null(),
+-                    Some(other) => {
+-                        return Err(override_mismatch(column, &target.to_string(), other));
+-                    }
++                    Some(other) => crate::rivet_bail!(
++                        crate::error::codes::INTERNAL_TYPE_BUILDER,
++                        "mssql column {idx}: expected {} but row carried {other:?}",
++                        stringify!($builder)
++                    ),
+                 }
+             }
+             Arc::new(b.finish()) as ArrayRef
