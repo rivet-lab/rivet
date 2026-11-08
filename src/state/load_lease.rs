@@ -458,6 +458,9 @@ pub fn lock_wait_s() -> u64 {
     LOCK_WAIT_S.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// What a lease timeout says of the command before it, when the command changed nothing.
+pub const NOTHING_DONE: &str = "nothing was done";
+
 /// How often a waiting take says again that it is waiting.
 pub(super) const WAIT_NOTE_EVERY: Duration = Duration::from_secs(60);
 
@@ -478,7 +481,17 @@ impl StateStore {
         key: &str,
         what: &dyn Fn() -> String,
     ) -> Result<Option<LoadLease<'_>>> {
-        self.take_lease_waiting_for(key, Duration::from_secs(lock_wait_s()), what)
+        self.take_lease_waiting_saying(key, NOTHING_DONE, what)
+    }
+
+    /// [`StateStore::take_lease_waiting`] whose timeout says `outcome` of what the command did before it, where the plain take says nothing was done.
+    pub fn take_lease_waiting_saying(
+        &self,
+        key: &str,
+        outcome: &str,
+        what: &dyn Fn() -> String,
+    ) -> Result<Option<LoadLease<'_>>> {
+        self.take_lease_waiting_for(key, Duration::from_secs(lock_wait_s()), outcome, what)
     }
 
     /// [`StateStore::take_lease_waiting`] for up to `wait`.
@@ -486,6 +499,7 @@ impl StateStore {
         &self,
         key: &str,
         wait: Duration,
+        outcome: &str,
         what: &dyn Fn() -> String,
     ) -> Result<Option<LoadLease<'_>>> {
         let started = Instant::now();
@@ -501,12 +515,13 @@ impl StateStore {
             if waited >= wait {
                 crate::rivet_bail!(
                     crate::error::codes::STATE_LOCK_TIMEOUT,
-                    "{}, held by {}, was still held after {} s (`--lock-wait {}`); nothing was \
-                     done. Retry once it ends, or give `--lock-wait` more seconds",
+                    "{}, held by {}, was still held after {} s (`--lock-wait {}`); {}. Retry \
+                     once it ends, or give `--lock-wait` more seconds",
                     what(),
                     self.lease_holder(key)?,
                     waited.as_secs(),
-                    wait.as_secs()
+                    wait.as_secs(),
+                    outcome
                 );
             }
             if note_due(noted, WAIT_NOTE_EVERY) {
@@ -1012,6 +1027,32 @@ mod lease_file_tests {
 mod lock_wait_tests {
     use super::*;
 
+    /// A timeout says what the command did before it: the plain take says nothing was done, a take
+    /// told otherwise says that and never the plain claim.
+    #[test]
+    fn a_timeout_says_what_the_command_did_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(dir.path().join("rivet.yaml").to_str().unwrap()).unwrap();
+        let _held = store.try_load_lease("t").unwrap().expect("the first take");
+        let said = |outcome: &str| {
+            format!(
+                "{:#}",
+                store
+                    .take_lease_waiting_for("t", Duration::from_millis(10), outcome, &|| "lease t"
+                        .into())
+                    .map(|_| ())
+                    .unwrap_err()
+            )
+        };
+        assert!(said(NOTHING_DONE).contains("; nothing was done. Retry once it ends"));
+        let half = said("3 of 5 were reset");
+        assert!(
+            half.contains("; 3 of 5 were reset. Retry once it ends"),
+            "{half}"
+        );
+        assert!(!half.contains("nothing was done"), "{half}");
+    }
+
     /// A waiting take of a held lease stops by code once `wait` ran out, not before and not a
     /// poll later; free, it takes the lease at once.
     #[test]
@@ -1021,7 +1062,9 @@ mod lock_wait_tests {
         let held = store.try_load_lease("t").unwrap().expect("the first take");
         let started = Instant::now();
         let err = store
-            .take_lease_waiting_for("t", Duration::from_millis(1200), &|| "lease t".into())
+            .take_lease_waiting_for("t", Duration::from_millis(1200), NOTHING_DONE, &|| {
+                "lease t".into()
+            })
             .map(|_| ())
             .unwrap_err();
         let took = started.elapsed();
@@ -1037,7 +1080,8 @@ mod lock_wait_tests {
         drop(held);
         assert!(
             store
-                .take_lease_waiting_for("t", Duration::from_secs(5), &|| "lease t".into())
+                .take_lease_waiting_for("t", Duration::from_secs(5), NOTHING_DONE, &|| "lease t"
+                    .into())
                 .unwrap()
                 .is_some()
         );

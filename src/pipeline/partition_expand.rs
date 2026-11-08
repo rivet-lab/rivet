@@ -155,7 +155,13 @@ fn build_partition_children(
     // would be lost without this. `__HIVE_DEFAULT_PARTITION__` keeps them
     // queryable by Hive/Spark/duckdb partition discovery.
     if has_nulls {
-        children.push(make_child(parent, col, HIVE_NULL_PARTITION, "null", None));
+        children.push(make_child(
+            parent,
+            col,
+            HIVE_NULL_PARTITION,
+            partition::NULL_BUCKET_LABEL,
+            None,
+        ));
     }
     children
 }

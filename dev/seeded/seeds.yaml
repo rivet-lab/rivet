@@ -1195,6 +1195,115 @@ seeds:
       mongo:
         na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
 
+  - name: state-reset-takes-undeclared-name-with-parent-prefix
+    class: "`state reset -e <parent>` of a `partition_by` export takes every stored name that starts with `<parent>__`, so an export of another config whose name carries that prefix (`events__archive`) loses its cursor with the partitions"
+    history: "second-round review of PR 881, 2026-11-07 (F1): `events__archive`, an export of another config sharing the state, was deleted by a reset of `events`; a partition child is only `<parent>__<label>` with a day, month, year or null label"
+    scope: source
+    patch: state-reset-takes-undeclared-name-with-parent-prefix/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_labels_postgres, state_reset_family_a_reset_takes_the_partitions_of_its_labels_and_never_another_exports_name, "lib:owner_of_names_the_declared_export_or_the_parent_whose_label_the_name_carries"]
+      mysql:
+        cells: [partition_reset_labels_mysql]
+      mssql:
+        cells: [partition_reset_labels_mssql]
+      oracle:
+        cells: [partition_reset_labels_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+  - name: state-reset-takes-only-the-current-granularity
+    class: "a name `<parent>__<label>` is a partition of a `partition_by` export only when its label is of the export's current `partition_granularity`, so after the granularity is changed a reset of the export leaves the partitions stored under the old labels, and the next run at the old granularity resumes from their cursors and delivers a fraction of the rows"
+    history: "verifier of PR 884, 2026-11-07 (A): events at day granularity then month, `state reset --export events` left the three day cursors with rc 0; back at day the run delivered 1 of 7 rows with exit 0, main reset all 5 and delivered 7"
+    scope: source
+    patch: state-reset-takes-only-the-current-granularity/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_granularity_postgres, partition_reset_granularity_pg_state_postgres, state_reset_family_a_partition_stored_under_another_granularity_is_shown_and_reset_with_the_export, "lib:child_labels_are_the_labels_generate_ranges_yields_at_any_granularity_and_the_null_bucket"]
+      mysql:
+        cells: [partition_reset_granularity_mysql, partition_reset_granularity_pg_state_mysql]
+      mssql:
+        cells: [partition_reset_granularity_mssql, partition_reset_granularity_pg_state_mssql]
+      oracle:
+        cells: [partition_reset_granularity_oracle, partition_reset_granularity_pg_state_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+  - name: state-reset-half-done-says-nothing-was-done
+    class: "a `state reset -e <parent>` that loses a partition's run lease after the probe and after it has cleared earlier batches refuses with the \"nothing was done\" text, so the operator believes every partition kept its cursor"
+    history: "second-round review of PR 881, 2026-11-07 (F2): a run taking a partition lease between two batches of 16 left cleared partitions and a kept parent, under a refusal that said nothing was done"
+    scope: state
+    patch: state-reset-half-done-says-nothing-was-done/shared.patch
+    engines:
+      sqlite-state:
+        cells:
+          - "lib:a_run_taking_a_partition_lease_after_the_probe_leaves_a_reset_that_says_it_is_half_done"
+      postgres-state:
+        cells:
+          - "lib:a_run_taking_a_partition_lease_after_the_probe_leaves_a_reset_that_says_it_is_half_done_on_a_postgres_state"
+  - name: state-inspect-of-a-partition-shows-nothing
+    class: "`state progression|files|chunks|metrics|journal --export <parent>__<label>` filters by the declared name only, so a held partition prints \"No progression boundaries recorded yet.\" while the state holds its row"
+    history: "second-round review of PR 881, 2026-11-07 (F3): `state progression --export events__2026-01-01` printed no boundaries for a stored partition"
+    scope: source
+    patch: state-inspect-of-a-partition-shows-nothing/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_inspect_postgres, state_reset_family_an_inspect_command_refuses_a_name_no_partition_could_carry_and_shows_a_held_one, "lib:progression_of_a_child_shows_that_child_and_of_the_parent_shows_the_family"]
+      mysql:
+        cells: [partition_reset_inspect_mysql]
+      mssql:
+        cells: [partition_reset_inspect_mssql]
+      oracle:
+        cells: [partition_reset_inspect_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+  - name: state-inspect-accepts-a-label-the-state-does-not-hold
+    class: "an export-scoped command accepts `<parent>__<anything>` whatever the state holds, so a typo (`events__typo`) exits 0 with an empty answer instead of the unknown-export refusal"
+    history: "second-round review of PR 881, 2026-11-07 (F4): the typo guard of `require_known_export` was lifted for every name carrying a declared export's prefix"
+    scope: source
+    patch: state-inspect-accepts-a-label-the-state-does-not-hold/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_inspect_postgres, state_reset_family_an_inspect_command_refuses_a_name_no_partition_could_carry_and_shows_a_held_one, "lib:an_export_scoped_command_refuses_a_name_that_is_no_declared_export_or_held_child"]
+      mysql:
+        cells: [partition_reset_inspect_mysql]
+      mssql:
+        cells: [partition_reset_inspect_mssql]
+      oracle:
+        cells: [partition_reset_inspect_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+  - name: state-reset-takes-a-partition-of-another-sources-chunk-runs
+    class: "`state reset -e <parent>` of a chunked `partition_by` export clears a partition that has only a progression row when its chunk runs belong to another source"
+    history: "second-round review of PR 881, 2026-11-07 (F5): a progression-only partition of another source (progression is keyed by name only) lost its boundary to a reset from this source"
+    scope: source
+    patch: state-reset-takes-a-partition-of-another-sources-chunk-runs/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_chunked_postgres, "lib:a_boundary_with_no_cursor_belongs_to_the_source_of_its_chunk_runs", "lib:reset_of_a_partitioned_export_leaves_a_progression_only_partition_of_another_source"]
+      mysql:
+        cells: [partition_reset_chunked_mysql]
+      mssql:
+        cells: [partition_reset_chunked_mssql]
+      oracle:
+        cells: [partition_reset_chunked_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+  - name: state-reset-lists-the-parent-as-a-partition
+    class: "the refusal of `state reset -e <parent>__<unknown label>` lists the parent among \"Partitions held\", naming the export being reset as one of its own partitions"
+    history: "second-round review of PR 881, 2026-11-07 (F6): `Partitions held: events, events__2026-01-01` for a reset of `events__2026-03-03`"
+    scope: source
+    patch: state-reset-lists-the-parent-as-a-partition/shared.patch
+    engines:
+      postgres:
+        cells: [partition_reset_unknown_child_postgres, "lib:reset_of_a_child_the_state_does_not_hold_is_refused_naming_the_partitions_held"]
+      mysql:
+        cells: [partition_reset_unknown_child_mysql]
+      mssql:
+        cells: [partition_reset_unknown_child_mssql]
+      oracle:
+        cells: [partition_reset_unknown_child_oracle]
+      mongo:
+        na: "partition_by is refused for a MongoDB source at config load (the bucket probes are SQL), so no export keeps per-partition progress"
+
   - name: apply-skips-partition-expansion
     class: an entry point builds its own export list instead of taking the run set, and runs a `partition_by` export unexpanded
     history: "`rivet apply <config>`, `--pool` and a sealed plan wrote the whole table under a directory literally named `{partition}`, exit 0 (v0.31.0)"
