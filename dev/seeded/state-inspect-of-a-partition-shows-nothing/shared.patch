@@ -1,0 +1,19 @@
+diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+--- a/src/pipeline/cli.rs
++++ b/src/pipeline/cli.rs
+@@ -53,11 +53,10 @@
+ 
+ /// Whether the stored `name` belongs to the declared export `export`: it is `export` itself, or one of its partition children.
+ fn belongs_to(config: &Config, name: &str, export: &str) -> bool {
+-    name == export
+-        || match owner_of(config, name) {
+-            Some(Owner::Declared(e) | Owner::PartitionChild(e)) => e.name == export,
+-            None => false,
+-        }
++    match owner_of(config, name) {
++        Some(Owner::Declared(e) | Owner::PartitionChild(e)) => e.name == export,
++        None => false,
++    }
+ }
+ 
+ /// Bail if `export_name` is neither declared in `config` nor a partition child of a declared export, listing the known names.
