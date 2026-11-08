@@ -195,6 +195,16 @@ def verify_seeded_recall(led: Ledger, enabled: bool) -> None:
     seeded.recall(led, seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text())))
 
 
+def verify_seeded_platform_rows(led: Ledger) -> None:
+    """The island's share of the seeded recall: the rows whose cells exist on one platform only, failing when this host is another one."""
+    import yaml
+
+    from dev.seeded import recall as seeded
+
+    rows = seeded.platform_rows(seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text())))
+    seeded.recall(led, rows, complete=False, owed_fails=True)
+
+
 def gate_config(ns: argparse.Namespace) -> dict:
     """What this run is graded under, computed once from argv and the shell: the bless modes, every tolerance override and the state backends."""
     from .core import GRADING_KNOBS
@@ -2333,6 +2343,8 @@ def main(argv: list[str] | None = None) -> int:
         if not ns.island:
             skip_census.verify_oracle_verdict_census(led, kept)
             verify_seeded_recall(led, ns.with_seeded_recall)
+        else:
+            verify_seeded_platform_rows(led)
         verify_no_invariant_violations(led)
         # Only a FULL run can say a known red no longer fires, and only one writes a verdict line.
         full = not (ns.engines or ns.versions or ns.no_cloud or ns.latest_only)
