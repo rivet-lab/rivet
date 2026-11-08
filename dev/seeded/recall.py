@@ -63,6 +63,9 @@ OPTIONAL = ("lib",)
 MIN_NA_REASON = 30
 CAUGHT, MISSED, STALE, BROKEN, NO_CONTROL, NA = "CAUGHT", "MISSED", "STALE", "BROKEN", "NO-CONTROL", "N/A"
 ABORTED = "ABORTED"
+#: A row whose cells exist only on another platform: owed to that platform's island, never a miss on this host.
+OWED = "OWED"
+PLATFORMS = ("linux", "macos")
 #: Every declared cell skipped on this stand for a reason it named: reported, never a catch, held under a ceiling.
 NOT_GRADED_HERE = "NOT-GRADED-HERE"
 #: A row whose cells ran while the stand was down or unreadable: neither a catch nor a miss, and the run is NOT GRADED.
@@ -85,6 +88,7 @@ class Row:
     patch: str | None = None
     cells: tuple[str, ...] = ()
     na: str | None = None
+    platform: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,11 @@ class Verdict:
     row: Row
     status: str
     detail: str
+
+
+def host_platform() -> str:
+    """The platform this run's cells compile for: `linux`, `macos` or the raw `sys.platform`."""
+    return "linux" if sys.platform.startswith("linux") else "macos" if sys.platform == "darwin" else sys.platform
 
 
 def parse_manifest(doc: dict, patch_dir: Path = HERE) -> list[Row]:
@@ -122,11 +131,14 @@ def parse_manifest(doc: dict, patch_dir: Path = HERE) -> list[Row]:
                 rows.append(Row(name, eng, na=str(e["na"]).strip()))
                 continue
             patch, cells = e.get("patch", s.get("patch")), e.get("cells")
+            platform = e.get("platform", s.get("platform"))
+            if platform is not None and platform not in PLATFORMS:
+                raise ValueError(f"seed {name}/{eng}: platform must be one of {list(PLATFORMS)}")
             if not patch or not isinstance(cells, list):
                 raise ValueError(f"seed {name}/{eng}: needs a patch and a `cells:` list, or `na:`")
             if not (patch_dir / patch).is_file():
                 raise ValueError(f"seed {name}/{eng}: patch {patch} does not exist under {patch_dir}")
-            rows.append(Row(name, eng, patch, tuple(str(c) for c in cells)))
+            rows.append(Row(name, eng, patch, tuple(str(c) for c in cells), platform=platform))
     if not rows:
         raise ValueError("the manifest declares no seeds")
     return rows
@@ -147,31 +159,6 @@ def unknown_cells(rows: list[Row], root: Path = ROOT) -> list[tuple[Row, str]]:
 def _fn_names(tree: Path) -> set[str]:
     """Every name a `fn <name>(` declares under one tree, read in one pass."""
     return {m for p in tree.rglob("*.rs") for m in re.findall(r"\bfn (\w+)\(", p.read_text())}
-
-
-def os_gated(cell: str, root: Path = ROOT) -> bool:
-    """True when every `#[test]` fn of this name under tests/ carries a `#[cfg(target_os = ...)]`, so the cell builds on one OS only."""
-    if cell.startswith(LIB):
-        return False
-    found = []
-    for f in sorted((root / "tests").rglob("*.rs")):
-        lines = f.read_text().splitlines()
-        for i, line in enumerate(lines):
-            if not re.match(rf"\s*(?:pub\s+)?(?:async\s+)?fn {re.escape(cell)}\b", line):
-                continue
-            attrs = []
-            while i > 0 and lines[i - 1].lstrip().startswith("#["):
-                i -= 1
-                attrs.append(lines[i].strip())
-            if "#[test]" in attrs:
-                found.append(any(re.fullmatch(r'#\[cfg\(target_os = "\w+"\)\]', a) for a in attrs))
-    return bool(found) and all(found)
-
-
-def split_os_gated(rows: list[Row], root: Path = ROOT) -> tuple[list[Row], list[Row]]:
-    """(rows the per-run gate grades, rows whose every cell builds on one OS only and the island run grades)."""
-    gated = [r for r in rows if r.cells and all(os_gated(c, root) for c in r.cells)]
-    return [r for r in rows if r not in gated], gated
 
 
 def patch_files(patch_text: str) -> list[str]:
@@ -213,6 +200,8 @@ def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
     """CAUGHT iff a cell green on the unpatched tree is red on the patched one; `seeded=None` = the patched tree did not build; `skipped` = each control cell's own skip reason; `stand` = how the stand read while the cells ran (down or unreadable grades nothing)."""
     if row.na:
         return Verdict(row, NA, row.na)
+    if row.platform and row.platform != host_platform():
+        return Verdict(row, OWED, f"its cells are {row.platform}-only and this host is {host_platform()}: owed to the {row.platform} island")
     if seeded is None:
         return Verdict(row, BROKEN, "the patched tree does not build — a red build is not a catch")
     if not row.cells:
@@ -428,9 +417,9 @@ def gate_ceiling(key: str, matrix: Path = GATE_MATRIX) -> int:
     return row[key]
 
 
-def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceiling: int | None = None) -> bool:
-    """One ledger row per verdict: CAUGHT passes, STAND-DOWN is an INFRA row (the run is NOT GRADED), N/A is a counted N/A row held under `na_ceiling`, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), anything else (MISSED, STALE, BROKEN, NO-CONTROL, ABORTED) fails the gate; True when no row failed."""
-    here, nas, green = [], 0, True
+def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceiling: int | None = None, owed_fails: bool = False) -> bool:
+    """One ledger row per verdict: CAUGHT passes, STAND-DOWN is an INFRA row (the run is NOT GRADED), N/A is a counted N/A row held under `na_ceiling`, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), OWED is a DESIGN SKIP row (a FAIL on the island that owes it, `owed_fails`), anything else (MISSED, STALE, BROKEN, NO-CONTROL, ABORTED) fails the gate; True when no row failed."""
+    here, owed, nas, green = [], [], 0, True
     for v in out:
         msg = f"seeded {v.row.seed} × {v.row.engine}: {v.status} — {v.detail}"
         if v.status == CAUGHT:
@@ -441,6 +430,9 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceili
         elif v.status == NA:
             led.not_applicable(v.row.engine, "seeded", v.row.seed, "-", msg)
             nas += 1
+        elif v.status == OWED and not owed_fails:
+            led.skipped(v.row.engine, "seeded", v.row.seed, "-", msg, cause=SkipCause.DESIGN)
+            owed.append(f"{v.row.seed} × {v.row.engine}")
         elif v.status == STAND_DOWN:
             led.ungraded(v.row.engine, "seeded", v.row.seed, "-", msg)
             green = False
@@ -456,6 +448,8 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceili
         green = False
     elif here:
         print(f"  {len(here)} row(s) NOT-GRADED-HERE (ceiling {limit}): " + ", ".join(here))
+    if owed:
+        print(f"  {len(owed)} row(s) OWED to another platform's island: " + ", ".join(owed))
     na_limit = gate_ceiling("na_ceiling") if na_ceiling is None else na_ceiling
     if nas > na_limit:
         led.failed("-", "seeded", "na_rows", "-",
@@ -582,17 +576,9 @@ def grade_seeds(led: Ledger, live: list[Row], control: dict[str, str], control_s
     return verdicts
 
 
-def recall(led: Ledger, rows: list[Row], *, complete: bool = True, island: bool = False) -> list[Verdict]:
-    """Grade the per-run gate's rows (or, with `island`, the rows whose cells build on one OS only): STALE check, one CONTROL run on the unpatched tree, then one build+run per patch; appends the run to the record."""
+def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: bool = False) -> list[Verdict]:
+    """Grade every row (a row of another platform is OWED, a FAIL under `owed_fails`): STALE check, one CONTROL run on the unpatched tree, then one build+run per patch; appends the run to the record."""
     t0 = time.perf_counter()
-    portable, gated = split_os_gated(rows)
-    rows, complete = (gated, False) if island else (portable, complete)
-    if not rows:
-        print("  seeded recall: no OS-gated rows for the island run")
-        return []
-    if not island and gated:
-        print(f"  seeded recall: {len(gated)} row(s) build on one OS only and are graded by the island run: "
-              + ", ".join(f"{r.seed} × {r.engine}" for r in gated))
     led.phase("Seeded-defect recall — does the harness catch known bug classes re-introduced?")
     verdicts: dict[Row, Verdict] = {}
     for r, c in unknown_cells(rows):
@@ -613,7 +599,7 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True, island: bool 
             p = sh(["git", "-C", str(tree), "apply", "--check", str(HERE / r.patch)])
             if p.returncode != 0:
                 verdicts[r] = Verdict(r, STALE, stale_message(r.seed, text, p.stdout))
-    live = [r for r in rows if r not in verdicts and not r.na]
+    live = [r for r in rows if r not in verdicts and not r.na and r.platform in (None, host_platform())]
     workers = [cargo] + [Cargo(prepare_tree(base / f"w{k}")[0], base / f"w{k}", state_url)
                          for k in range(1, min(POOL, len({r.patch for r in live})))]
     control_cells = sorted({c for r in live for c in r.cells})
@@ -636,7 +622,7 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True, island: bool 
     verdicts.update(grade_seeds(led, live, control, control_skips, workers, logs, control_stand=control_stand))
 
     out = [verdicts.get(r) or grade(r, control, {}, control_skips, control_stand) for r in rows]
-    green = record(led, out)
+    green = record(led, out, owed_fails=owed_fails)
     dirty = evidence.tree_dirty(ROOT)
     run_record.append_run(base / run_record.RUNS_FILE, sha=sha, complete=complete, green=green, dirty=dirty)
     print(render(out))
@@ -654,13 +640,18 @@ def render(verdicts: list[Verdict]) -> str:
     lines.append("-" * len(lines[-1]))
     for s in seeds:
         lines.append(s.ljust(w) + " | " + " | ".join(at.get((s, e), "").ljust(10) for e in engines))
-    graded = [v for v in verdicts if v.status != NA]
+    graded = [v for v in verdicts if v.status not in (NA, OWED)]
     caught = sum(v.status == CAUGHT for v in graded)
-    lines.append(f"\nrecall: {caught}/{len(graded)} graded rows CAUGHT (N/A rows excluded)")
+    lines.append(f"\nrecall: {caught}/{len(graded)} graded rows CAUGHT (N/A and OWED rows excluded)")
     for v in verdicts:
         if v.status != CAUGHT:
             lines.append(f"  {v.status:<10} {v.row.seed} × {v.row.engine}: {v.detail}")
     return "\n".join(lines)
+
+
+def platform_rows(rows: list[Row]) -> list[Row]:
+    """The rows that declare a platform: what the platform's island owes beside the per-run recall."""
+    return [r for r in rows if r.platform]
 
 
 def select(rows: list[Row], seeds: str, engines: str) -> list[Row]:
@@ -879,22 +870,6 @@ def self_test() -> int:
         probe.tree = Path(td)
         assert probe.binaries(["offline_cell", "live_cell", "lib:u1"]) == ["--test", "top_level", "--test", "live_suite", "--lib"]
         assert probe.binaries(["live_cell", "other_live"]) == ["--test", "live_suite"]
-        (Path(td) / "tests" / "a_helper.rs").write_text('#[cfg(target_os = "linux")]\nfn any_cell() {}\n')
-        (Path(td) / "tests" / "b_gated.rs").write_text(
-            '#[cfg(target_os = "linux")]\n#[test]\nfn linux_cell() {}\n\n#[test]\nfn any_cell() {}\n\n#[test]\nfn plain_cell() {}\n')
-        assert os_gated("linux_cell", Path(td)) and not os_gated("plain_cell", Path(td)) and not os_gated("missing_cell", Path(td))
-        assert not os_gated("any_cell", Path(td)), "a gated non-test helper of the same name must not own a portable cell"
-        (Path(td) / "tests" / "c_helper.rs").write_text('#[cfg(target_os = "linux")]\nfn helper_only() {}\n')
-        assert not os_gated("helper_only", Path(td)), "a gated fn that is no test is no cell"
-        assert not os_gated("lib:linux_cell", Path(td))
-        mixed = [Row("s", "postgres", "p", ("linux_cell",)), Row("s", "mysql", "p", ("linux_cell", "plain_cell")),
-                 Row("s", "mssql", None, (), "n/a")]
-        assert split_os_gated(mixed, Path(td)) == (mixed[1:], mixed[:1]), split_os_gated(mixed, Path(td))
-        real = [r for r in parse_manifest(yaml.safe_load(MANIFEST.read_text())) if r.seed == "ca-file-second-trust-anchor" and r.cells]
-        assert len(real) == 3 and split_os_gated(real) == ([], real), "the TLS trust-store seed is graded by the island run"
-        from unittest import mock
-        with mock.patch.object(sys.modules[__name__], "prepare_tree", side_effect=AssertionError("built a tree")):
-            assert recall(Ledger(colour=False), real) == [], "the per-run gate builds nothing for rows the island owns"
         assert probe.binaries([]) == ["--lib"]
         (Path(td) / "src").mkdir()
         (Path(td) / "src" / "a.rs").write_text("fn lib_cell() {}\nfn generic_cell<T>() {}\n")
@@ -955,6 +930,31 @@ def self_test() -> int:
         assert sum(c.status.name == "NA" for c in led.cells) == n, "every N/A row is a ledger row"
     led = Ledger(colour=False)
     assert not record(led, [Verdict(pg, ABORTED, "stopped")], ceiling=0) and led.red, "ABORTED fails the gate"
+    other = "macos" if host_platform() == "linux" else "linux"
+    away, here_row = Row("s", "postgres", "p", ("t1",), platform=other), Row("s", "mysql", "p", ("t1",), platform=host_platform())
+    assert grade(away, {}, {}).status == OWED, "a row of another platform is owed, not NO-CONTROL"
+    assert grade(here_row, {"t1": "PASS"}, {"t1": "FAIL"}).status == CAUGHT, "a row of this platform is graded"
+    owed_row = [Verdict(away, OWED, "x")]
+    led = Ledger(colour=False)
+    assert record(led, owed_row, ceiling=0) and not led.red and [(c.status.name, c.cause.name) for c in led.cells] == [("SKIP", "DESIGN")], \
+        "an owed row is a DESIGN skip, not red"
+    led = Ledger(colour=False)
+    assert not record(led, owed_row, ceiling=0, owed_fails=True) and led.red, "the island that owes a row fails when it cannot run it"
+    assert platform_rows([away, pg, here_row]) == [away, here_row]
+    assert {r.platform for r in real if r.seed == "ca-file-second-trust-anchor" and r.cells} == {"linux"}, \
+        "the ca_file cells exist under cfg(target_os = \"linux\") only, so the seed declares it"
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "p.patch").write_text("x")
+        doc = {"seeds": [{"name": "s", "scope": "state", "patch": "p.patch", "platform": "plan9",
+                          "engines": {"postgres-state": {"cells": ["t1"]}, "sqlite-state": {"cells": ["t1"]}}}]}
+        try:
+            parse_manifest(doc, Path(d))
+        except ValueError as e:
+            assert "platform must be one of" in str(e), str(e)
+        else:
+            raise AssertionError("an unknown platform was accepted")
+        doc["seeds"][0]["platform"] = "linux"
+        assert {r.platform for r in parse_manifest(doc, Path(d))} == {"linux"}
     saved = os.environ.get("RIVET_GATE_STATE_URL")
     os.environ["RIVET_GATE_STATE_URL"] = "postgresql://u:p@127.0.0.1:5433/rivet_state"
     os.environ["RIVET_SELFTEST_CARRIER_BIN"] = ".gate-baseline/field/rivet"
@@ -1009,14 +1009,16 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="seeded-recall")
     ap.add_argument("--seeds", default="", help="comma-separated seed names (default: all)")
     ap.add_argument("--engines", default="", help="comma-separated engines (default: all)")
-    ap.add_argument("--island", action="store_true", help="grade the rows whose cells build on one OS only, instead of the others")
+    ap.add_argument("--platform-rows", action="store_true", help="only the rows that declare a platform, failing a row of another platform (the island's run)")
     ap.add_argument("--self-test", action="store_true", help="check the manifest and the grading logic; no build")
     ns = ap.parse_args(argv)
     if ns.self_test:
         return self_test()
     rows = select(parse_manifest(yaml.safe_load(MANIFEST.read_text())), ns.seeds, ns.engines)
+    if ns.platform_rows:
+        rows = platform_rows(rows)
     led = Ledger()
-    recall(led, rows, complete=not (ns.seeds or ns.engines), island=ns.island)
+    recall(led, rows, complete=not (ns.seeds or ns.engines or ns.platform_rows), owed_fails=ns.platform_rows)
     return 1 if led.red else 0
 
 
