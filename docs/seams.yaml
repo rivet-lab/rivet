@@ -103,3 +103,12 @@ seams:
       - "config . sas_token_env"
       - "config . allow_anonymous"
     exceptions: []
+  - id: credential-masking
+    owner: src/redact.rs::redact_secrets
+    reads: "the text of a connection URL or error with its userinfo, keyword/value and query-pair passwords masked"
+    also_in: [src/url_text.rs]
+    bypass:
+      - "credential_span ("
+      - "\"REDACTED\""
+      - "\"***\""
+    exceptions: []
