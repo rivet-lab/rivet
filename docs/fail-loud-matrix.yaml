@@ -48,6 +48,14 @@ scenarios:
     mongo:    { na: "BSON double NaN is representable in Parquet; the NaN-as-_id keyset refusal is a separate row (unusable_keyset_key_loud)" }
     oracle:   { na: "Oracle NUMBER cannot hold NaN/Inf; BINARY_FLOAT/BINARY_DOUBLE NaN/Inf are representable in Parquet and exported as IEEE values (pinned by oracle_full_export_matches_the_databases_own_rendering_for_every_type)" }
 
+  - id: override_unread_value_never_nulled
+    what: "a `columns:` override whose declared type cannot read a source value (an integer under float8, a double under int8) → the value delivered exactly, or a coded refusal naming the column and the remedy, never a NULL column with exit 0"
+    postgres: { test: a_declared_override_delivers_the_source_or_refuses_by_code_postgres }
+    mysql:    { test: a_value_the_declared_type_does_not_read_is_refused_never_nulled_mysql }
+    mssql:    { test: a_declared_override_delivers_the_source_or_refuses_by_code_mssql }
+    mongo:    { test: a_columns_override_on_a_numeric_field_never_nulls_it_mongo }
+    oracle:   { test: a_declared_override_delivers_the_source_or_refuses_by_code_oracle }
+
   - id: sparse_range_plan_guard
     what: "a sparse range-chunk key that would blow up into thousands of near-empty windows → bail (PG/MSSQL, scan-free estimate proves ≥4×) or loud warn (MySQL, no trustworthy estimate)"
     postgres: { test: stand_sparse_guard_postgres }
