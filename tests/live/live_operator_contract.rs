@@ -2722,6 +2722,36 @@ fn a_refused_cdc_run_on_a_missing_table_leaves_no_checkpoint_mysql() {
     );
 }
 
+/// The Oracle twin of RESULTS 15: a first CDC run refused for a table without all-column logging leaves no checkpoint, and adding the logging then runs.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn a_refused_cdc_run_on_a_table_without_all_column_logging_leaves_no_checkpoint_oracle() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let t = OracleTable::create("oc_nolckpt", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
+    ora_exec(&format!("GRANT SELECT ON {} TO c##rivetcdc", t.name()));
+    let name = t.name().to_string();
+    let mut rig = Rig::oracle_cdc(t.name());
+    rig.refuses_twice_then(
+        &["run"],
+        &[],
+        Refused::by_code(CDC_PREREQUISITE, 1),
+        vec![Remedy::new(
+            "supplemental",
+            Then::DeliversTheSource,
+            move |r| {
+                assert!(
+                    !r.checkpoint().exists(),
+                    "a first CDC run refused for its prerequisite left its checkpoint"
+                );
+                ora_exec(&format!(
+                    "ALTER TABLE {name} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS"
+                ));
+            },
+        )],
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn doctor_is_not_green_where_the_cdc_run_refuses_wal_level_postgres() {
