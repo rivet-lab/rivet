@@ -326,6 +326,8 @@ def self_test() -> int:
     quiet = {"load1": 0.5, "free_gib": 900.0, "gates": [], "pause": False}
     sat = dt.date(2026, 11, 7)
     assert sat.weekday() == 5
+    year, week, _ = sat.isocalendar()
+    wk = f"{year}w{week:02d}"
 
     def run(tasks: list[dict], argv: list[str], snaps, today=sat) -> tuple[int, str, dict]:
         """main() over a temp night dir; `snaps` is a dict or a list consumed one per hold check."""
@@ -333,11 +335,12 @@ def self_test() -> int:
             night = Path(t)
             (night / "q.json").write_text(json.dumps(tasks))
             seq = iter(snaps) if isinstance(snaps, list) else None
-            clock = types.SimpleNamespace(**{**vars(dt), "date": type("D", (dt.date,), {"today": classmethod(lambda c: today())})}) if callable(today) else None
+            day = today if callable(today) else (lambda: today)
+            clock = types.SimpleNamespace(**{**vars(dt), "date": type("D", (dt.date,), {"today": classmethod(lambda c: day())})})
             out = io.StringIO()
             with mock.patch.object(me, "NIGHT", night), mock.patch.object(devbox_load, "NIGHT", night), \
                     mock.patch.object(devbox_load, "snapshot", lambda path=None: next(seq) if seq else snaps), \
-                    mock.patch.object(me, "dt", clock or dt), contextlib.redirect_stdout(out):
+                    mock.patch.object(me, "dt", clock), contextlib.redirect_stdout(out):
                 code = main(["--queue", str(night / "q.json"), "--hold-poll", "0", *argv])
             return code, out.getvalue(), {p.stem: json.loads(p.read_text()) for p in night.glob("runs/*/*.json")}
 
@@ -381,7 +384,7 @@ def self_test() -> int:
 
         weekly_pair = [cmd_task("g", every="week", weekday=5), cmd_task("m", every="week", weekday=5, after=["g"])]
         code, out, runs = run(weekly_pair, [], quiet)
-        assert "start m-2026w45" in out and runs["m-2026w45"]["state"] == "done", f"`after` names the declared id of a weekly task: {out}"
+        assert f"start m-{wk}" in out and runs[f"m-{wk}"]["state"] == "done", f"`after` names the declared id of a weekly task: {out}"
         code, out, runs = run([cmd_task("x", every="week", weekday=5, after=["nowhere"])], [], quiet)
         assert "waits for nowhere" in out and not runs, out
 
@@ -408,7 +411,7 @@ def self_test() -> int:
         days = iter([sat, dt.date(2026, 11, 8), dt.date(2026, 11, 8), dt.date(2026, 11, 8)])
         weekly = lambda tid: cmd_task(tid, every="week", weekday=5)
         code, out, _ = run([weekly("a"), weekly("b")], [], quiet, today=lambda: next(days))
-        assert "start a-2026w45" in out and "start b-2026w45" in out, f"a weekly task that follows one running past midnight still runs: {out}"
+        assert f"start a-{wk}" in out and f"start b-{wk}" in out, f"a weekly task that follows one running past midnight still runs: {out}"
     print("night_queue self-test: ok")
     return 0
 
