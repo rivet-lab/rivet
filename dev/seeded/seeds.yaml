@@ -2113,7 +2113,7 @@ seeds:
         cells: ["lib:an_unfinished_run_is_refused_for_another_format_than_its_parts_until_it_is_abandoned"]
 
   - name: cdc-anchor-written-before-the-refusal
-    class: a CDC open writes its durable anchor (a replication slot, a first-run checkpoint) before it asks the prerequisites it refuses by
+    class: a CDC open writes its durable anchor (a replication slot, a first-run checkpoint) before it asks the prerequisites it refuses by, and the first-run release (src/pipeline/cdc_release.rs) does not remove it
     history: "known_red sweep 15 and gate run 1 (2026-10-08): a PostgreSQL run refused for a missing table left an inactive slot pinning WAL; a MySQL first run refused for binlog compression left `cdc.ckpt added (112 bytes)`; on main and on v0.31.0"
     scope: source
     engines:
@@ -2128,7 +2128,7 @@ seeds:
           - a_refused_cdc_run_on_a_missing_table_leaves_no_checkpoint_mysql
       oracle:
         patch: cdc-anchor-written-before-the-refusal/oracle.patch
-        cells: [doctor_is_not_green_where_the_cdc_run_refuses_a_table_without_all_column_logging_oracle]
+        cells: [a_refused_cdc_run_on_a_table_without_all_column_logging_leaves_no_checkpoint_oracle]
       mssql:
         na: "the SQL Server open writes no anchor: the stream floors at fn_cdc_get_min_lsn and the checkpoint is the sink's, written at the first ack"
       mongo:
