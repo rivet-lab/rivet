@@ -25,6 +25,11 @@ gate_profiles:
   shard:       {services: [mongos],               url: *mongo_shard_url}
   tz:          {services: [clickhouse-tz],        url: "http://127.0.0.1:8125"}
   mysql-stmt:  {services: [mysql-stmt-84-lctn1],  url: "mysql://root@127.0.0.1:3333"}
+  mysql-reset: {services: [mysql-reset],          url: "mysql://root:rivet@127.0.0.1:3317", profile: cdc}
+  mysql-tz:    {services: [mysql-tz],             url: "mysql://rivet:rivet@127.0.0.1:3397/rivet", profile: tz}
+  proxysql-tz: {services: [proxysql-tz],          url: "mysql://rivet:rivet@127.0.0.1:6097/rivet", profile: tz}
+  pgbouncer:   {services: [pgbouncer],            url: "postgresql://rivet:rivet@127.0.0.1:6432/rivet", profile: pool}
+  proxysql:    {services: [proxysql],             url: "mysql://rivet:rivet@127.0.0.1:6033/rivet", profile: pool}
   clickhouse:  {services: [clickhouse],           url: "http://127.0.0.1:8123", profile: ""}
   governor:    {services: [mssql-governor],       url: "sqlserver://sa:Rivet_Passw0rd!@127.0.0.1:1435/rivet", seed_sql: "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet"}
   minio:       {services: [minio],                url: "http://127.0.0.1:9000", profile: ""}

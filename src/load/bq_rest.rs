@@ -1726,7 +1726,7 @@ mod tests {
              reported: gave up after {waited:?} of a {budget:?} budget"
         );
         assert!(
-            waited < Duration::from_secs(30),
+            waited < crate::test_budget::ceiling(Duration::from_secs(30)),
             "the budget must also BOUND the wait: {waited:?} for a {budget:?} budget"
         );
     }

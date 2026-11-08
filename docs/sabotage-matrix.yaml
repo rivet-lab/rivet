@@ -315,6 +315,14 @@ scenarios:
     mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint" }
     oracle:   { test: a_resume_over_a_removed_committed_part_delivers_or_refuses_oracle }
 
+  - id: corrupt_declared_chunk_unlogged
+    what: "a failed range-chunk run leaves a manifest declaring its committed chunks and the `file_log` row of one is gone before the resume: the resume reads that chunk again, delivers the source and leaves no superseded part in the prefix"
+    postgres: { test: a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_postgres }
+    mysql:    { test: a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_mysql }
+    mssql:    { test: a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_mssql }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint" }
+    oracle:   { test: a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_oracle }
+
   - id: corrupt_committed_part_replaced
     what: "a part an unfinished range-chunk run committed, replaced by its sibling's bytes before the resume: the resume delivers the source or refuses"
     postgres: { test: a_resume_over_a_replaced_committed_part_delivers_or_refuses_postgres }

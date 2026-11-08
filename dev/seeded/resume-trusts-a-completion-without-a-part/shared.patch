@@ -10,4 +10,4 @@ index 54863bb3..6a22965b 100644
 +    false && t.status == "completed"
  }
  
- /// Completed, undeclared chunks whose surviving attempt's `file_log` rows are absent or short of the chunk's rows.
+ /// Completed chunks whose surviving attempt's `file_log` rows are absent or short of the chunk's rows, declared by a manifest or not.

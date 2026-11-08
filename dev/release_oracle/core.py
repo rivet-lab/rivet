@@ -695,9 +695,11 @@ class Proc:
     returncode: int
     stdout: str
     stderr: str
+    gated: bool = True
 
     def __post_init__(self) -> None:
-        note_invariant_violations(self.argv, self.stdout + self.stderr)
+        if self.gated:
+            note_invariant_violations(self.argv, self.stdout + self.stderr)
 
     @property
     def ok(self) -> bool:
@@ -769,6 +771,7 @@ def run(
     """Run `argv` (a LIST — no shell, so no quoting or word-splitting bugs)."""
     # A busy lease is graded as the immediate refusal it was before `--lock-wait`; a stage that grades the wait sets it.
     full_env = {"RIVET_LOCK_WAIT": "0", **os.environ, **(env or {})}
+    gated = full_env.get("RIVET_BIN_OVERRIDE", str(rivet_bin())) == str(rivet_bin())
     try:
         p = subprocess.run(
             list(argv),
@@ -779,7 +782,7 @@ def run(
             env=full_env,
             cwd=str(cwd) if cwd else None,
         )
-        return Proc(argv, p.returncode, p.stdout, p.stderr)
+        return Proc(argv, p.returncode, p.stdout, p.stderr, gated)
     except subprocess.TimeoutExpired as e:
         # TimeoutExpired carries raw bytes even under `text=True`; decode both streams.
         def _text(v: "bytes | str | None") -> str:
@@ -787,9 +790,9 @@ def run(
                 return ""
             return v if isinstance(v, str) else v.decode(errors="replace")
 
-        return Proc(argv, 124, _text(e.stdout), _text(e.stderr) + f"\n[timeout after {timeout}s]")
+        return Proc(argv, 124, _text(e.stdout), _text(e.stderr) + f"\n[timeout after {timeout}s]", gated)
     except FileNotFoundError as e:
-        return Proc(argv, 127, "", str(e))
+        return Proc(argv, 127, "", str(e), gated)
 
 
 def docker(*args: str, **kw) -> Proc:

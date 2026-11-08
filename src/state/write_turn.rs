@@ -169,7 +169,7 @@ mod tests {
             w.join().unwrap();
         }
         assert!(
-            handed.elapsed() < Duration::from_millis(1500),
+            handed.elapsed() < crate::test_budget::ceiling(Duration::from_millis(1500)),
             "a dropped place hands the lock on at once, not at the waiters' patience"
         );
         let q = turns_of(&db);
