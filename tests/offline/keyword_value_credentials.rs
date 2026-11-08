@@ -1,5 +1,5 @@
 //! A password written in a keyword/value connection string (libpq DSN, ADO, `;`-separated
-//! JDBC properties) reaches no sink: stdout, stderr, `--json-errors`, the state DB,
+//! JDBC properties) or as a pair of a URL's query reaches no sink: stdout, stderr, `--json-errors`, the state DB,
 //! the run reports. Every command here fails before a server answers, so no stand is
 //! needed; the succeeding path, `plan.json` included (a plan is written only over a source
 //! that answered), is `tests/live/sec_keyword_value_credentials.rs`.
@@ -72,8 +72,12 @@ fn config(engine: &str, url: &str) -> String {
     )
 }
 
+/// The secret as its value is spelled when a URL percent-encodes one letter of it.
+const SECRET_ENCODED: &str = "Kv9Zq4%53ecretP40x";
+
 fn holds_secret(text: &str) -> bool {
-    text.to_lowercase().contains(&SECRET.to_lowercase())
+    let text = text.to_lowercase();
+    text.contains(&SECRET.to_lowercase()) || text.contains(&SECRET_ENCODED.to_lowercase())
 }
 
 /// Every row of every table of a SQLite state DB, as text, by table.
@@ -197,11 +201,11 @@ fn leaks_of(engine: &str, form: &str, url: &str) -> (Vec<String>, Vec<String>) {
     (leaked, populated)
 }
 
-#[test]
-fn a_keyword_value_password_reaches_no_sink_on_any_engine() {
+/// Every command of `leaks_of` on each engine and form: the sinks that held the secret, after checking each cell wrote the sinks it grades.
+fn leaks_on_every_engine(forms_of: impl Fn(&str) -> Vec<(&'static str, String)>) -> Vec<String> {
     let mut leaked = Vec::new();
     for engine in ["postgres", "mysql", "mssql", "mongo", "oracle"] {
-        for (form, url) in forms() {
+        for (form, url) in forms_of(engine) {
             let (cell_leaks, populated) = leaks_of(engine, form, &url);
             for sink in [
                 "run: stderr",
@@ -227,9 +231,60 @@ fn a_keyword_value_password_reaches_no_sink_on_any_engine() {
             leaked.extend(cell_leaks);
         }
     }
+    leaked
+}
+
+/// The URL of `engine` at a closed port, with no password in its userinfo.
+fn url_base(engine: &str) -> &'static str {
+    match engine {
+        "postgres" => "postgresql://u@127.0.0.1:1/d",
+        "mysql" => "mysql://u@127.0.0.1:1/d",
+        "mssql" => "sqlserver://u@127.0.0.1:1/d",
+        "mongo" => "mongodb://u@127.0.0.1:1/d",
+        _ => "oracle://u@127.0.0.1:1/svc",
+    }
+}
+
+/// The query-pair spellings of a password, by name: key case, a percent-encoded key or value, a pair after another.
+fn query_forms(engine: &str) -> Vec<(&'static str, String)> {
+    let base = url_base(engine);
+    vec![
+        ("query_password", format!("{base}?password={SECRET}")),
+        ("query_upper_case_key", format!("{base}?PASSWORD={SECRET}")),
+        ("query_capitalised_key", format!("{base}?Password={SECRET}")),
+        (
+            "query_percent_encoded_key",
+            format!("{base}?pass%77ord={SECRET}"),
+        ),
+        (
+            "query_percent_encoded_value",
+            format!("{base}?password={SECRET_ENCODED}"),
+        ),
+        ("query_sslpassword", format!("{base}?sslpassword={SECRET}")),
+        (
+            "query_after_another_pair",
+            format!("{base}?application_name=x&password={SECRET}&connect_timeout=1"),
+        ),
+    ]
+}
+
+#[test]
+fn a_keyword_value_password_reaches_no_sink_on_any_engine() {
+    let leaked = leaks_on_every_engine(|_| forms());
     assert!(
         leaked.is_empty(),
         "KEYWORD-VALUE PASSWORD LEAKED into {} sink(s):\n  {}",
+        leaked.len(),
+        leaked.join("\n  ")
+    );
+}
+
+#[test]
+fn a_query_pair_password_reaches_no_sink_on_any_engine() {
+    let leaked = leaks_on_every_engine(query_forms);
+    assert!(
+        leaked.is_empty(),
+        "QUERY-PAIR PASSWORD LEAKED into {} sink(s):\n  {}",
         leaked.len(),
         leaked.join("\n  ")
     );

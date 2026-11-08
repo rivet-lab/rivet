@@ -5544,3 +5544,36 @@ seeds:
         na: "a MongoDB cut is classified from the typed driver error (classify_mongo_error), a different arm from the one this seed removes"
       oracle:
         na: "the Oracle source lifts oracledb errors into text read by is_oracle_lost_session, a different arm from the one this seed removes"
+
+  - name: state-url-query-password-unmasked
+    class: "a PostgreSQL state URL is named with only its `user:password@` part masked, so a password written as a query pair (`?password=`, `?sslpassword=`, any case) is printed by `rivet doctor` and by `rivet state copy --to`"
+    history: "hunt-2 F3, 2026-11-08: RED on main 10bcf9bf (doctor `[OK]  State (postgres postgresql://u@h:5433/postgres?password=Qp7ZkStateSecretX9&options=...)`; the `state copy` done note held the same URL twice)"
+    scope: state
+    patch: state-url-query-password-unmasked/shared.patch
+    engines:
+      postgres-state:
+        cells:
+          - a_query_pair_password_in_the_state_url_reaches_no_output
+          - "lib:the_done_note_holds_no_query_password_of_the_target"
+      sqlite-state:
+        na: "a SQLite state is a file beside the config; it has no URL and no password"
+
+  - name: query-secret-percent-key-unmasked
+    class: "a URL query pair whose key is spelled with percent escapes (`?pass%77ord=`) is not read as the password it names, so the general redactor prints its value in every message and plan artifact that names the URL"
+    history: "hunt-2 F3 class sweep, 2026-11-08: RED on main 10bcf9bf (state URL `?pass%77ord=` printed by check, doctor, init and state copy; a source URL printed in `rivet plan` output)"
+    scope: source
+    patch: query-secret-percent-key-unmasked/shared.patch
+    engines:
+      postgres:
+        cells:
+          - a_query_pair_password_in_the_source_url_reaches_no_output
+          - a_query_pair_password_in_a_dead_state_url_reaches_no_output
+          - "lib:a_percent_encoded_query_key_that_names_a_password_is_masked"
+      mysql:
+        cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
+      mssql:
+        cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
+      mongo:
+        cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
+      oracle:
+        cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
