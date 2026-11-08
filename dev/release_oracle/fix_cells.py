@@ -104,6 +104,10 @@ FIX_SCOPE: dict[str, tuple[str, str]] = {
         r"^(?!in_range_values_under_the_override_keep_every_digit_and_null_stays_null$)",
         "2026-11-07: #875 in-range values and NULL were delivered right on 0.32.2; the past-range cells fail there",
     ),
+    "c20c6403": (
+        r"^(?!cdc_to_files_still_refuses_a_partial_after_image_mysql$)",
+        "2026-11-08: #882 the partial after image was refused by the file sink on 0.32.2 as well (the control of the new before-image check); the before-image and stdout cells fail there",
+    ),
 }
 
 

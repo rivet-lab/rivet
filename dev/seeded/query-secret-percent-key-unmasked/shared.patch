@@ -1,0 +1,12 @@
+diff --git a/src/redact.rs b/src/redact.rs
+--- a/src/redact.rs
++++ b/src/redact.rs
+@@ -237,7 +237,7 @@
+         let key_end = rest
+             .find(|c: char| !c.is_ascii() || !(is_keyword_byte(c as u8) || c == '%'))
+             .unwrap_or(rest.len());
+-        let key = percent_encoding::percent_decode_str(&rest[..key_end]).decode_utf8_lossy();
++        let key = std::borrow::Cow::Borrowed(&rest[..key_end]);
+         if key_end < rest.len() && rest.as_bytes()[key_end] == b'=' && is_secret_key(&key) {
+             out.push_str(&rest[..key_end]);
+             out.push_str("=***");
