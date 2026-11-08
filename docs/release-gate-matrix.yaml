@@ -449,6 +449,7 @@ infra:
       On in release-oracle-full (a run without it is a reduced gate). A row whose every declared cell
       skipped on the stand is NOT-GRADED-HERE (a SKIP row naming each skip reason) under
       not_graded_here_ceiling; every `na:` row is an N/A ledger row with its reason, held under na_ceiling;
+      a row that declares `platform:` on another host is OWED (a DESIGN skip) and graded by the island on that platform;
       a stopped cell (TIMEOUT, ABORT, SIGKILL) is ABORTED and fails, never a catch; a row with a green control and a seed that left nothing red stays MISSED.
       RESIDUAL: several classes have engines with no catching cell (see the manifest)"
   - id: cdc_standby
