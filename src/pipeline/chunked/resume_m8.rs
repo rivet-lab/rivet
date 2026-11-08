@@ -2352,6 +2352,52 @@ pub(crate) mod tests {
         );
     }
 
+    /// A resume with no manifest or a foreign one, whose summary already declares a part of a chunk the ledger does not hold, re-exports that chunk and moves the part to `_quarantine/<run_id>/`, as the own-manifest resume does.
+    #[test]
+    fn a_pruned_part_is_quarantined_by_the_no_manifest_and_foreign_manifest_resumes() {
+        for manifest_run in [None, Some("SOMEONE_ELSES_RUN")] {
+            let run_id = "m8run";
+            let unlogged = "orders_chunk0_00000000000000aa.parquet";
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(unlogged), b"12345").unwrap();
+            if let Some(other) = manifest_run {
+                std::fs::write(
+                    dir.path().join(MANIFEST_FILENAME),
+                    serde_json::to_vec_pretty(&m8_manifest(other, vec![])).unwrap(),
+                )
+                .unwrap();
+            }
+            let state_dir = tempfile::tempdir().unwrap();
+            let state =
+                crate::state::StateStore::open_at_path(&state_dir.path().join("state.db")).unwrap();
+            state.insert_chunk_tasks(run_id, &[(0, 9)]).unwrap();
+            state.claim_next_chunk_task(run_id).unwrap();
+            state
+                .complete_chunk_task(run_id, 0, 10, Some(unlogged))
+                .unwrap();
+            let plan = m8_plan(dir.path());
+            let mut summary = crate::pipeline::summary::RunSummary::stub_for_testing(
+                run_id,
+                String::from("orders"),
+            );
+            summary.manifest_parts.push(m8_part(unlogged, 10, 5));
+            summary.total_rows = 10;
+
+            let stats = apply_m8_resume_decisions(&state, run_id, &plan, &mut summary).unwrap();
+
+            assert!(summary.manifest_parts.is_empty(), "{manifest_run:?}");
+            assert_eq!(summary.total_rows, 0, "{manifest_run:?}");
+            assert_eq!(stats.reset_for_rewrite, 1, "{manifest_run:?}");
+            assert_eq!(stats.quarantined_moved, 1, "{manifest_run:?}");
+            assert!(prefix_files(dir.path()).is_empty(), "{manifest_run:?}");
+            assert_eq!(
+                prefix_files(&dir.path().join(QUARANTINE_PREFIX).join(run_id)),
+                [unlogged],
+                "{manifest_run:?}"
+            );
+        }
+    }
+
     /// A chunk that failed after writing parts, was re-claimed and completed in the SAME
     /// run leaves its failed attempt's parts in `manifest_parts`: the completing run must
     /// declare only the attempt that completed each chunk (rotation siblings and non-chunk
