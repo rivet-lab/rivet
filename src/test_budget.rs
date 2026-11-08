@@ -15,7 +15,7 @@ fn scaled(ceiling: Duration, instrumented: bool) -> Duration {
 
 /// An upper wall-clock bound for a test: as written, or widened under `cargo llvm-cov`.
 pub(crate) fn ceiling(ceiling: Duration) -> Duration {
-    scaled(ceiling, std::env::var_os("CARGO_LLVM_COV").is_some())
+    scaled(ceiling, cfg!(coverage))
 }
 
 #[cfg(test)]
