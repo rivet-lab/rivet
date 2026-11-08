@@ -2522,6 +2522,30 @@ seeds:
         cells:
           - "lib:a_part_of_another_size_and_a_completion_without_a_part_are_read_again"
 
+  - name: resume-trusts-a-declared-part-without-a-file-log-row
+    class: "a resume over this run's own manifest trusts a completed chunk the manifest declares although its file_log row is absent or short, so the finished run records fewer parts than it declares"
+    history: "2026-11-08 - gate d6581394: a_run_whose_state_volume_fills_up_delivers_or_fails_loudly (file_log records 9 of 10 declared parts); present since the manifest-present resume branch rehydrated file_log"
+    scope: source
+    patch: resume-trusts-a-declared-part-without-a-file-log-row/shared.patch
+    engines:
+      postgres:
+        cells:
+          - "a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_postgres"
+      mysql:
+        cells:
+          - "a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_mysql"
+      mssql:
+        cells:
+          - "a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_mssql"
+      mongo:
+        na: "a MongoDB export is `mode: full` or `cdc` only, so it has no range-chunk checkpoint"
+      oracle:
+        cells:
+          - "a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_oracle"
+      lib:
+        cells:
+          - "lib:a_declared_chunk_missing_from_file_log_is_re_exported_by_a_resume_over_its_manifest"
+
   - name: resume-trusts-a-part-of-another-size
     class: "a resume declares a committed part that is present at the destination at another size than the state logged, so a cut or replaced part is delivered as the chunk's rows"
     history: "2026-10-13 - an open defect of the sabotage matrix (class 4: a resume trusts what it continues), fixed on fix/resume-checks-what-it-continues; present through 0.31.0"

@@ -206,13 +206,28 @@ fn interrupted_with(
     tag: &str,
     extra: &[&str],
 ) -> (String, Rig, Box<dyn std::any::Any>) {
+    stopped_by(
+        engine,
+        tag,
+        extra,
+        ("RIVET_TEST_PANIC_AT", "after_chunk_complete:2"),
+    )
+}
+
+/// A range-chunked, checkpointed run of a fresh `N`-row table that `fault` stops after its third chunk.
+fn stopped_by(
+    engine: SqlEngine,
+    tag: &str,
+    extra: &[&str],
+    fault: (&str, &str),
+) -> (String, Rig, Box<dyn std::any::Any>) {
     let (table, guard) = seeded(engine, tag);
     let lines: Vec<&str> = RANGE_CHECKPOINT.iter().chain(extra).copied().collect();
     let rig = engine.staged(engine.rig(&table), "chunked", &lines);
-    let crash = rig.run_with_env("RIVET_TEST_PANIC_AT", "after_chunk_complete:2");
+    let stopped = rig.run_with_env(fault.0, fault.1);
     assert!(
-        !crash.status.success(),
-        "fixture: the run crashes after its third chunk"
+        !stopped.status.success(),
+        "fixture: the run stops after its third chunk"
     );
     (table, rig, guard)
 }
@@ -624,6 +639,27 @@ fn committed_part_removed(engine: SqlEngine) {
     resume_after(engine, |rig| {
         rig.damage(&committed_parts(rig)[0], Damage::Removed)
     });
+}
+
+/// A run stopped by an error after three chunks leaves a failed manifest declaring them; the `file_log` row of the second is gone before the resume, which reads that chunk again and delivers the source.
+fn declared_chunk_unlogged(engine: SqlEngine) {
+    let (_table, rig, _guard) = stopped_by(
+        engine,
+        "sab_unlogged",
+        &[],
+        ("RIVET_TEST_ERROR_AT", "chunk_export:3"),
+    );
+    assert!(
+        rig.out_dir().join("manifest.json").is_file(),
+        "fixture: the failed run left a manifest declaring its committed chunks"
+    );
+    rig.edit_state(
+        "DELETE FROM file_log WHERE export_name = '{export}' AND file_name LIKE '%chunk1_%'",
+        1,
+    );
+    assert_eq!(rig.delivers_or_refuses(RERUN, &[]), Survived::Delivered);
+    assert_eq!(declared_ids(&rig), (1..=N).collect::<Vec<_>>());
+    ok(rig.cli(&["validate"]));
 }
 
 /// A part the unfinished run committed, replaced by the bytes of its sibling (of another size) before the resume.
@@ -3545,6 +3581,31 @@ fn a_resume_over_a_removed_committed_part_delivers_or_refuses_mssql() {
 #[ignore = "live: requires docker compose oracle"]
 fn a_resume_over_a_removed_committed_part_delivers_or_refuses_oracle() {
     committed_part_removed(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_postgres() {
+    declared_chunk_unlogged(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_mysql() {
+    declared_chunk_unlogged(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_mssql() {
+    declared_chunk_unlogged(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_oracle() {
+    declared_chunk_unlogged(SqlEngine::Oracle);
 }
 
 #[test]

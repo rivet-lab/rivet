@@ -189,7 +189,7 @@ pub(crate) fn prune_superseded_attempts(
     summary.manifest_parts = kept;
     for p in &pruned {
         log::warn!(
-            "export '{}': part '{}' is debris of a chunk attempt a later attempt completed — \
+            "export '{}': part '{}' is not the part that completed its chunk (a later attempt did, or the chunk is read again) — \
              left out of the manifest",
             summary.export_name,
             p.path
@@ -207,19 +207,16 @@ fn completed_without_a_part(t: &crate::state::ChunkTaskInfo) -> bool {
     t.status == "completed" && t.file_name.is_none() && t.rows_written != Some(0)
 }
 
-/// Completed, undeclared chunks whose surviving attempt's `file_log` rows are absent or short of the chunk's rows.
+/// Completed chunks whose surviving attempt's `file_log` rows are absent or short of the chunk's rows, declared by a manifest or not.
 fn under_logged_chunks(
     tasks: &[crate::state::ChunkTaskInfo],
     files: &[crate::state::FileRecord],
-    declared: &[crate::manifest::ManifestPart],
 ) -> Vec<(i64, String)> {
     tasks
         .iter()
         .filter(|t| t.status == "completed")
         .filter_map(|t| t.file_name.as_deref().map(|f| (t, f)))
-        .filter(|(_, f)| {
-            super::chunk_index_of(f).is_some() && !declared.iter().any(|p| p.path == *f)
-        })
+        .filter(|(_, f)| super::chunk_index_of(f).is_some())
         .filter(|(t, f)| {
             let logged: Vec<i64> = files
                 .iter()
@@ -312,7 +309,7 @@ pub(crate) fn rehydrate_manifest_parts_probed(
     let tasks = state.list_chunk_tasks_for_run(run_id)?;
     let mut surviving = surviving_attempts(&tasks);
     let mut missing: Vec<MissingPart> = Vec::new();
-    for (idx, name) in under_logged_chunks(&tasks, &files, &summary.manifest_parts) {
+    for (idx, name) in under_logged_chunks(&tasks, &files) {
         surviving.remove(&idx.to_string());
         missing.push((u32::try_from(idx).ok(), name));
     }
@@ -810,6 +807,7 @@ fn rehydrate_and_reset(
     };
     let present = checked.as_ref().or(present);
     let (rehydrated, missing) = rehydrate_manifest_parts_probed(state, run_id, summary, present)?;
+    let reset = !missing.is_empty();
     for (idx, name) in missing {
         let Some(idx) = idx else {
             return Err(committed_part_gone(&name));
@@ -827,6 +825,9 @@ fn rehydrate_and_reset(
                  re-exported this run"
             );
         }
+    }
+    if reset {
+        prune_superseded_attempts(summary, &state.list_chunk_tasks_for_run(run_id)?);
     }
     Ok(rehydrated)
 }
@@ -2198,6 +2199,78 @@ pub(crate) mod tests {
                 (Some(2), short.to_string())
             ]
         );
+    }
+
+    /// A resume over this run's own manifest that declares a completed chunk whose `file_log` row was never written, or is short of the chunk's rows, re-exports that chunk and drops the adopted part; a declared chunk with its full rows logged, rotation siblings included, stays declared.
+    #[test]
+    fn a_declared_chunk_missing_from_file_log_is_re_exported_by_a_resume_over_its_manifest() {
+        let run_id = "m8run";
+        let (logged, unlogged, short) = (
+            "orders_chunk0_00000000000000aa.parquet",
+            "orders_chunk1_00000000000000bb.parquet",
+            "orders_chunk2_00000000000000cc.parquet",
+        );
+        let (rot0, rot1) = (
+            "orders_chunk3_00000000000000dd_p0.parquet",
+            "orders_chunk3_00000000000000dd_p1.parquet",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        for name in [logged, unlogged, short, rot0, rot1] {
+            std::fs::write(dir.path().join(name), b"12345").unwrap();
+        }
+        let manifest = m8_manifest(
+            run_id,
+            vec![
+                m8_part(logged, 10, 5),
+                m8_part(unlogged, 10, 5),
+                m8_part(short, 10, 5),
+                m8_part(rot0, 6, 5),
+                m8_part(rot1, 4, 5),
+            ],
+        );
+        std::fs::write(
+            dir.path().join(MANIFEST_FILENAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let state =
+            crate::state::StateStore::open_at_path(&state_dir.path().join("state.db")).unwrap();
+        state
+            .insert_chunk_tasks(run_id, &[(0, 9), (10, 19), (20, 29), (30, 39)])
+            .unwrap();
+        seed_logged_chunk(&state, run_id, 0, &[(logged, 10)]);
+        state.claim_next_chunk_task(run_id).unwrap();
+        state
+            .complete_chunk_task(run_id, 1, 10, Some(unlogged))
+            .unwrap();
+        seed_logged_chunk(&state, run_id, 2, &[(short, 6)]);
+        state
+            .complete_chunk_task(run_id, 2, 10, Some(short))
+            .unwrap();
+        seed_logged_chunk(&state, run_id, 3, &[(rot0, 6), (rot1, 4)]);
+        let plan = m8_plan(dir.path());
+        let mut summary =
+            crate::pipeline::summary::RunSummary::stub_for_testing(run_id, String::from("orders"));
+
+        let stats = apply_m8_resume_decisions(&state, run_id, &plan, &mut summary).unwrap();
+
+        let mut declared: Vec<&str> = summary
+            .manifest_parts
+            .iter()
+            .map(|p| p.path.as_str())
+            .collect();
+        declared.sort_unstable();
+        assert_eq!(declared, [logged, rot0, rot1]);
+        let status: Vec<String> = state
+            .list_chunk_tasks_for_run(run_id)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.status)
+            .collect();
+        assert_eq!(status, ["completed", "pending", "pending", "completed"]);
+        assert_eq!(stats.reset_for_rewrite, 2);
+        assert_eq!(summary.total_rows, 20);
     }
 
     /// A chunk that failed after writing parts, was re-claimed and completed in the SAME
