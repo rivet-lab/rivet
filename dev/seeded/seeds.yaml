@@ -1860,7 +1860,7 @@ seeds:
       mysql:
         cells:
           - an_int_column_declared_float_is_delivered_with_its_values_mysql
-          - an_integer_a_float_cannot_hold_exactly_is_refused_never_rounded_mysql
+          - an_integer_past_the_floats_integer_range_is_refused_never_rounded_mysql
           - a_value_the_declared_type_does_not_read_is_refused_never_nulled_mysql
           - a_declared_override_delivers_the_source_or_refuses_by_code_mysql
           - "lib:an_integer_is_a_float_only_when_the_float_holds_it_exactly"

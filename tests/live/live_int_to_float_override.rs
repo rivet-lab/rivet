@@ -8,6 +8,13 @@ const WIRE: &str = "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH";
 /// The source values of the `i` and `j` columns; the last row is NULL.
 const VALUES: [&str; 4] = ["7", "0", "-5", "NULL"];
 
+/// The rig oracle compares source types to delivered ones, which a declared override changes by design; every cell here reads the parquet back itself.
+fn readback_only(rig: Rig) -> Rig {
+    rig.no_oracle(
+        "the subject is the value a declared override delivers, graded against the inserted rows",
+    )
+}
+
 fn floats(of: &[&str]) -> Vec<Option<f64>> {
     of.iter()
         .map(|v| (*v != "NULL").then(|| v.parse::<i128>().unwrap() as f64))
@@ -42,9 +49,7 @@ fn mysql_table(ty: &str, values: &[&str]) -> (String, MysqlTable) {
 }
 
 fn mysql_rig(table: &str, columns: &str) -> Rig {
-    Rig::mysql_batch(table)
-        .no_oracle("the subject is the float value of an integer column under an override, graded against the inserted integers")
-        .export_line(&format!("columns: {{{columns}}}"))
+    readback_only(Rig::mysql_batch(table)).export_line(&format!("columns: {{{columns}}}"))
 }
 
 /// MySQL INT columns, the primary key among them, under float4/float8 are delivered as the inserted numbers, NULL only where the source is NULL.
@@ -68,7 +73,7 @@ fn an_int_column_declared_float_is_delivered_with_its_values_mysql() {
 /// One integer type under a float override: the largest value the float holds is delivered, the next one up is refused by code before any part is written.
 #[test]
 #[ignore = "live: requires docker compose mysql"]
-fn an_integer_a_float_cannot_hold_exactly_is_refused_never_rounded_mysql() {
+fn an_integer_past_the_floats_integer_range_is_refused_never_rounded_mysql() {
     require_alive(LiveService::Mysql);
     let cases: [(&str, &str, &[&str], &[&str]); 4] = [
         (
@@ -209,15 +214,15 @@ fn an_int_column_declared_float8_is_refused_by_check_and_run_postgres() {
 }
 
 /// Oracle converts an INTEGER column under float4/float8 and delivers the numbers.
+#[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn an_integer_column_declared_float_is_delivered_with_its_values_oracle() {
     require_alive(LiveService::Oracle);
     let t = OracleTable::create("ovf_or", "id INTEGER PRIMARY KEY, i INTEGER, j INTEGER");
     ora_exec(&insert_rows(t.name(), &VALUES));
-    let rig = Rig::oracle_batch(t.name())
-        .no_oracle("the subject is the float value of an integer column under an override, graded against the inserted integers")
-        .export_line("columns: {I: float8, J: float4}");
+    let rig =
+        readback_only(Rig::oracle_batch(t.name())).export_line("columns: {I: float8, J: float4}");
     rig.run_ok();
     let out = rig.out_dir();
     assert_eq!(dir_parquet_floats(&out, "i"), floats(&VALUES), "i float8");
@@ -225,6 +230,7 @@ fn an_integer_column_declared_float_is_delivered_with_its_values_oracle() {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "oracle"), allow(dead_code))]
 enum Eng {
     Mysql,
     Postgres,
@@ -290,6 +296,7 @@ impl Eng {
             .map(|(k, v)| format!("({}, {v})", k + 1))
             .collect::<Vec<_>>()
             .join(", ");
+        #[cfg(feature = "oracle")]
         if let Eng::Oracle = self {
             let t = OracleTable::create("ovf_x", &format!("id INTEGER PRIMARY KEY, v {ty}"));
             ora_exec(&format!("INSERT INTO {} (id, v) VALUES {rows}", t.name()));
@@ -457,10 +464,8 @@ fn cell_matches(ovr: &str, src: &str, got: &Option<String>) -> bool {
 fn outcome(eng: Eng, case: &Case) -> String {
     let (table, _guard) = eng.table(case.kind, case.values);
     let col = eng.col(if case.pk { "id" } else { "v" });
-    let rig = eng
-        .rig(&table)
-        .no_oracle("the subject is the value a declared override delivers, graded against the inserted rows")
-        .export_line(&format!("columns: {{{col}: {}}}", case.ovr));
+    let rig =
+        readback_only(eng.rig(&table)).export_line(&format!("columns: {{{col}: {}}}", case.ovr));
     let out = rig.run();
     let parts = files_with_extension(&rig.out_dir(), "parquet").len();
     if out.status.success() {
@@ -567,6 +572,7 @@ fn a_declared_override_delivers_the_source_or_refuses_by_code_mssql() {
     matrix(Eng::Mssql);
 }
 
+#[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn a_declared_override_delivers_the_source_or_refuses_by_code_oracle() {
@@ -588,9 +594,7 @@ fn a_columns_override_on_a_numeric_field_never_nulls_it_mongo() {
             mongodb::bson::doc! { "_id": 2, "v": 0_i32 },
         ],
     );
-    let rig = Rig::mongo_batch("c")
-        .source_url(&MongoTest::url(27017, &db))
-        .no_oracle("the subject is a columns override on a numeric Mongo field, graded against the inserted documents")
+    let rig = readback_only(Rig::mongo_batch("c").source_url(&MongoTest::url(27017, &db)))
         .export_line("columns: {v: float8}");
     let out = rig.run();
     let said = String::from_utf8_lossy(&out.stderr).into_owned();

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 // 31 -> 32 (2026-11-04): the datetime2(7) keyset cell under timestamp_ns delivers 700 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
 // 32 -> 31 (2026-11-04): the TF-1 cell closed with fix/mysql-binlog-time-fraction and its opt-out is gone.
 // 31 -> 32 (2026-11-06, #852): the SQL Server in-range nanosecond cell delivers 100 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
+// 32 -> 33 (2026-11-08): the declared-override cells (live_int_to_float_override.rs) read the parquet back themselves, one shared `readback_only` opt-out; closes when the oracle grades a column the config declares a type for.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
