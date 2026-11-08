@@ -1103,9 +1103,9 @@ fn base_rig(engine: SourceType, table: &str, mongo_url: Option<&str>) -> Rig {
     }
 }
 
-fn cdc_rig(engine: SourceType, table: &str) -> Rig {
+fn cdc_rig(engine: SourceType, table: &str, slot: &str) -> Rig {
     match engine {
-        SourceType::Postgres => Rig::pg_cdc(table, &unique_name("pm_p3_slot")),
+        SourceType::Postgres => Rig::pg_cdc(table, slot),
         SourceType::Mysql => Rig::mysql_cdc(table),
         SourceType::Mssql => Rig::mssql_cdc(table, &format!("dbo_{table}")),
         SourceType::Oracle => Rig::oracle_cdc(table),
@@ -1162,6 +1162,7 @@ fn cell_rig(
     target: Option<ExportTarget>,
     fx: Option<&Fixture>,
     out: &Path,
+    slot: &str,
 ) -> Rig {
     let missing = match engine {
         SourceType::Oracle => "PM_P3_MISSING",
@@ -1174,7 +1175,7 @@ fn cell_rig(
     };
     let mongo = fx.and_then(|f| f.mongo_url.as_deref());
     let mut rig = match mode {
-        ExportMode::Cdc => cdc_rig(engine, &table),
+        ExportMode::Cdc => cdc_rig(engine, &table, slot),
         _ => base_rig(engine, &table, mongo).mode(mode.as_str()),
     };
     if let (Some(url), true) = (mongo, matches!(mode, ExportMode::Cdc)) {
@@ -1280,7 +1281,10 @@ fn run_rig_cell(
         );
     }
     let out = tempfile::tempdir().expect("out dir");
-    let h = rig_harness(cell_rig(e, m, s, t, fx.as_ref(), out.path()));
+    let slot = unique_name("pm_p3_slot");
+    let _slot =
+        (e == SourceType::Postgres && m == ExportMode::Cdc).then(|| Slot::new(slot.clone()));
+    let h = rig_harness(cell_rig(e, m, s, t, fx.as_ref(), out.path(), &slot));
     let expect = if t.is_some() {
         Expect::Either
     } else {
