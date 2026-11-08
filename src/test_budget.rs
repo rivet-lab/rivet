@@ -28,4 +28,15 @@ mod tests {
         assert_eq!(scaled(five, false), five);
         assert_eq!(scaled(five, true), five * INSTRUMENTED_FACTOR);
     }
+
+    #[test]
+    fn the_ceiling_is_widened_exactly_when_the_build_is_instrumented() {
+        let five = Duration::from_secs(5);
+        let want = if cfg!(coverage) {
+            five * INSTRUMENTED_FACTOR
+        } else {
+            five
+        };
+        assert_eq!(ceiling(five), want);
+    }
 }
