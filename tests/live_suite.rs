@@ -329,6 +329,8 @@ mod sec_keyword_value_credentials;
 mod sec_mcp_tls;
 #[path = "live/sec_preflight_sqli.rs"]
 mod sec_preflight_sqli;
+#[path = "live/sec_state_url_query_password.rs"]
+mod sec_state_url_query_password;
 #[path = "live/sec_terminal_inject.rs"]
 mod sec_terminal_inject;
 #[path = "live/sec_tls_defaults.rs"]

@@ -330,27 +330,9 @@ impl SourceConfig {
         }
 
         if let Some(ref raw) = out.url {
-            let masked = crate::redact::redact_keyword_passwords(raw);
-            if masked != *raw {
+            let (masked, changed) = crate::redact::redact_artifact_url(raw);
+            if changed {
                 out.url = Some(masked);
-                redacted = true;
-            }
-        }
-        if let Some(ref raw) = out.url
-            && let Some((userinfo, at)) =
-                crate::url_text::credential_span(raw, crate::url_text::Mask::AnyUserinfo)
-        {
-            let mut s = String::with_capacity(raw.len());
-            s.push_str(&raw[..userinfo]);
-            s.push_str("REDACTED");
-            s.push_str(&raw[at..]);
-            out.url = Some(s);
-            redacted = true;
-        }
-        if let Some(ref raw) = out.url {
-            let scrubbed = crate::redact::redact_query_secrets(raw);
-            if scrubbed != *raw {
-                out.url = Some(scrubbed);
                 redacted = true;
             }
         }
