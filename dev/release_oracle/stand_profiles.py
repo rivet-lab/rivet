@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -34,6 +35,7 @@ AG_QUERY = ("SET NOCOUNT ON; SELECT r.replica_server_name, s.role_desc + ' ' + s
             "FROM sys.dm_hadr_availability_replica_states s JOIN sys.availability_replicas r ON r.replica_id = s.replica_id")
 AG_START = "dev/mssql-ag/setup.sh"
 SA_PASSWORD = "Rivet_Passw0rd!"
+ENV_HINT = re.compile(r"--profile (\w+) up -d(?: --wait)? ([\w-]+)")
 
 
 def is_up(url: str) -> bool:
@@ -79,7 +81,7 @@ def bring_up(profiles: dict[str, dict] | None = None, up: Callable[[str], bool] 
         gone = mounts(name, spec)
         if gone or not up(spec["url"]):
             compose([*profile_flag(name, spec), "up", "-d", "--wait", "--wait-timeout", str(UP_WAIT_SECS),
-                     *(["--force-recreate"] if gone else []), *spec["services"]])
+                     *(["--force-recreate", "--no-deps"] if gone else []), *spec["services"]])
     still: dict[str, str] = {}
     for name, spec in profiles.items():
         gone = mounts(name, spec)
@@ -161,7 +163,7 @@ def refusal(down: dict[str, str], profiles: dict[str, dict] | None = None) -> st
     if not down:
         return ""
     cmds = "; ".join(
-        f"`docker compose {' '.join(profile_flag(n, profiles[n]))} up -d --wait --force-recreate {' '.join(profiles[n]['services'])}` ({profiles[n]['url']})"
+        f"`docker compose {' '.join(profile_flag(n, profiles[n]))} up -d --wait --force-recreate --no-deps {' '.join(profiles[n]['services'])}` ({profiles[n]['url']})"
         for n in down if n in profiles
     )
     why = "; ".join(f"{n}: {w}" for n, w in down.items())
@@ -258,11 +260,11 @@ def self_test() -> None:
     state.update(a=True, b=True, c=True)
     gone = {"c": ["sc: /deleted/worktree/dev/x.xml"]}
     broken = bring_up(spec, up=is_it_up, compose=compose, mounts=lambda name, s: gone.get(name, []))
-    assert calls == [["up", "-d", "--wait", "--wait-timeout", str(UP_WAIT_SECS), "--force-recreate", "sc"]], calls
+    assert calls == [["up", "-d", "--wait", "--wait-timeout", str(UP_WAIT_SECS), "--force-recreate", "--no-deps", "sc"]], calls
     assert broken == {"c": "bind-mount source gone: sc: /deleted/worktree/dev/x.xml"}, broken
     text = refusal(broken, spec)
-    assert "c: bind-mount source gone" in text and "up -d --wait --force-recreate sc" in text, text
-    assert refusal({}, spec) == "" and "--profile b up -d --wait --force-recreate sb1 sb2" in refusal({"b": "did not come up"}, spec)
+    assert "c: bind-mount source gone" in text and "up -d --wait --force-recreate --no-deps sc" in text, text
+    assert refusal({}, spec) == "" and "--profile b up -d --wait --force-recreate --no-deps sb1 sb2" in refusal({"b": "did not come up"}, spec)
     with tempfile.TemporaryDirectory() as d:
         mounts = json.dumps([{"Type": "bind", "Source": d}, {"Type": "bind", "Source": d + "/deleted"}, {"Type": "volume", "Source": "/var/lib/docker/volumes/x"}])
         assert missing_sources(mounts) == [d + "/deleted"] and missing_sources("") == [] and missing_sources("null") == []
@@ -272,6 +274,11 @@ def self_test() -> None:
     for name, p in registry.gate_profiles().items():
         for svc in p["services"]:
             assert p.get("profile", name) in (compose_file[svc].get("profiles") or [""]), f"gate profile {name}: compose service {svc} is not in it"
+    owned = {(p.get("profile", n), s) for n, p in registry.gate_profiles().items() for s in p["services"]}
+    hints = set(ENV_HINT.findall((ROOT / "tests/common/env.rs").read_text()))
+    assert hints, "tests/common/env.rs names no `--profile P up -d SERVICE` hint to compare with the gate profiles"
+    missing = sorted(h for h in hints if h not in owned)
+    assert not missing, f"a live cell hints a stand the gate never starts (add it to dev/stand/registry.yaml gate_profiles): {missing}"
     check_self_test()
     print("stand_profiles self-test ok")
 

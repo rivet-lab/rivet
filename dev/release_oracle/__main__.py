@@ -577,6 +577,20 @@ def _skip_site_guard_self_test() -> None:
     print(f"self-test ok: all {len(sources)} harness modules name a cause on every SKIP call; a planted call without one is found")
 
 
+def _first_red_self_test() -> None:
+    """The red line a battery failure names is the failed test and its panic, never a passing test whose name says `failed`."""
+    out = ("        PASS [   0.165s] (  14/6029) rivet-cli cli::args::tests::state_reset_chunks_accepts_export_or_stuck_or_failed_alias\n"
+           "        FAIL [   9.882s] (4231/6029) rivet-cli source::mysql::folded_name::tests::a_megabyte\n"
+           "  stderr ───\n\n    thread 'source::mysql::folded_name::tests::a_megabyte' panicked at src/x.rs:579:9:\n    9.88s\n")
+    got = scenarios._first_red(out)
+    assert got == "FAIL source::mysql::folded_name::tests::a_megabyte: 9.88s", got
+    assert scenarios._first_red("       PASS [ 0.1s] (1/1) rivet-cli t::failed_alias\nerror: test run failed\n") == "error: test run failed"
+    colon = out.replace("    9.88s\n", "    expected a value:\n")
+    assert scenarios._first_red(colon) == "FAIL source::mysql::folded_name::tests::a_megabyte: expected a value:", scenarios._first_red(colon)
+    bare = "        FAIL [   9.882s] (4231/6029) rivet-cli t::quiet\n"
+    assert scenarios._first_red(bare) == "FAIL t::quiet", scenarios._first_red(bare)
+
+
 def _lanes_self_test() -> None:
     """Lanes overlap, one lane's cells never do, rows flush in list order, a raise leaves an INFRA row and the lane goes on; the upgrade
     cells sharing a source server share a lane; grading a load leaves the process environment alone."""
@@ -764,6 +778,7 @@ def _stages_self_test() -> None:
     _verdict_scope_self_test()
     _skip_cause_self_test()
     _skip_site_guard_self_test()
+    _first_red_self_test()
     _tree_identity_self_test()
     _gate_kind_self_test()
     release_path.hygiene_self_test()
@@ -1253,6 +1268,16 @@ def _self_test() -> int:
     _core.note_invariant_violations(["rivet", "run"], 'a row mentions RIVET_INTERNAL_ in its data')
     assert len(_core.INTERNAL_HITS) == 1, _core.INTERNAL_HITS
     _core.INTERNAL_HITS.clear()
+    real_sub = _core.subprocess.run
+    _core.subprocess.run = lambda a, **_k: _core.subprocess.CompletedProcess(a, 1, "", "Error: [RIVET_INTERNAL_TYPE_BUILDER] no value converter")
+    try:
+        _core.run(["cargo", "nextest"], env={"RIVET_BIN_OVERRIDE": "/previous/rivet"})
+        assert not _core.INTERNAL_HITS, "a leg driven by a binary other than the gated one is not graded"
+        _core.run(["cargo", "nextest"], env=_core.release_bin_env())
+        assert len(_core.INTERNAL_HITS) == 1, "a leg driven by the gated binary is graded"
+    finally:
+        _core.subprocess.run = real_sub
+        _core.INTERNAL_HITS.clear()
     # Known reds: an in-date entry downgrades its failure, an expired one does not, and an
     # entry nothing matched in a full run is reported as fixed.
     import datetime as _dt

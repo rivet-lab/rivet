@@ -41,6 +41,7 @@ longer loads, config read differently, contract, empty table.
 from __future__ import annotations
 
 from contextlib import closing, redirect_stdout
+import functools
 import json
 import os
 import re
@@ -189,10 +190,79 @@ def absent_note(cache: Path, version: str) -> Path:
     return cache / f"rivet-v{version}-{triple()}.absent"
 
 
+class _SameHostAuth(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect without handing the Authorization header to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlparse(newurl).netloc != urllib.parse.urlparse(req.full_url).netloc:
+            new.headers.pop("Authorization", None)
+        return new
+
+
+def _token() -> str:
+    """A GitHub token from GITHUB_TOKEN, GH_TOKEN or `gh auth token`, or empty."""
+    for key in ("GITHUB_TOKEN", "GH_TOKEN"):
+        if os.environ.get(key):
+            return os.environ[key]
+    if shutil.which("gh"):
+        p = run(["gh", "auth", "token"], timeout=10)
+        return p.stdout.strip() if p.ok else ""
+    return ""
+
+
+def _api(target: str, accept: str = "application/vnd.github+json") -> bytes:
+    """One GET against the GitHub REST API (a path under the repo, or a full asset URL), signed when a token is at hand."""
+    urllib.request.install_opener(urllib.request.build_opener(_SameHostAuth()))
+    url = target if target.startswith("https://") else f"https://api.github.com/repos/{REPO}/{target}"
+    auth = {"Authorization": f"Bearer {token}"} if (token := _token()) else {}
+    req = urllib.request.Request(url, headers={"Accept": accept, "X-GitHub-Api-Version": "2022-11-28", **auth})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return r.read()
+
+
+def _host_failed(e: BaseException) -> bool:
+    """Did the host fail (5xx, 429, no answer), rather than answer about the release (a 404 is an answer)?"""
+    return not isinstance(e, urllib.error.HTTPError) or e.code >= 500 or e.code == 429
+
+
 def latest_tag() -> str:
-    """The tag of the repo's latest published release, where its public `releases/latest` page redirects (the API answers 403 past 60 calls an hour per address)."""
-    with urllib.request.urlopen(f"https://github.com/{REPO}/releases/latest", timeout=120) as r:
-        return r.geturl().rstrip("/").rsplit("/", 1)[-1]
+    """The tag of the repo's latest published release: the public `releases/latest` redirect, the REST API when that page fails."""
+    try:
+        with urllib.request.urlopen(f"https://github.com/{REPO}/releases/latest", timeout=120) as r:
+            return r.geturl().rstrip("/").rsplit("/", 1)[-1]
+    except (urllib.error.URLError, OSError) as e:
+        if not _host_failed(e):
+            raise
+        print(f"  the releases page failed ({e}); asking the REST API")
+    try:
+        return json.loads(_api("releases/latest"))["tag_name"]
+    except (KeyError, ValueError) as e:
+        raise OSError(f"the REST API answered no tag_name: {e}") from e
+
+
+@functools.lru_cache(maxsize=None)
+def _api_assets(v: str) -> dict[str, str]:
+    """Asset name -> REST API URL of release `v`."""
+    try:
+        return {a["name"]: a["url"] for a in json.loads(_api(f"releases/tags/v{v}"))["assets"]}
+    except (KeyError, ValueError) as e:
+        raise OSError(f"the REST API listed no assets for v{v}: {e}") from e
+
+
+def _release_file(v: str, name: str, timeout: int) -> bytes:
+    """File `name` of release `v`: the public download host, the REST API when that host fails."""
+    try:
+        with urllib.request.urlopen(f"https://github.com/{REPO}/releases/download/v{v}/{name}", timeout=timeout) as r:
+            return r.read()
+    except (urllib.error.URLError, OSError) as e:
+        if not _host_failed(e):
+            raise
+        print(f"  v{v}: {name}: the download host failed ({e}); asking the REST API")
+    found = _api_assets(v).get(name)
+    if found is None:
+        raise urllib.error.HTTPError(f"{REPO}/{name}", 404, f"release v{v} has no asset {name}", None, None)  # type: ignore[arg-type]
+    return _api(found, "application/octet-stream")
 
 
 def fetch_release(v: str, cache: Path) -> int:
@@ -201,10 +271,8 @@ def fetch_release(v: str, cache: Path) -> int:
     import tarfile
 
     name = f"rivet-v{v}-{triple()}.tar.gz"
-    base = f"https://github.com/{REPO}/releases/download/v{v}"
     try:
-        with urllib.request.urlopen(f"{base}/SHA256SUMS.txt", timeout=120) as r:
-            sums = r.read().decode()
+        sums = _release_file(v, "SHA256SUMS.txt", 120).decode()
         listed = {ln.split()[-1].lstrip("*"): ln.split()[0] for ln in sums.splitlines() if ln.split()[1:]}
         name = next((n for n in asset_names(v) if n in listed), name)
         want = listed.get(name)
@@ -212,8 +280,7 @@ def fetch_release(v: str, cache: Path) -> int:
             absent_note(cache, v).write_text(f"release v{v} publishes no {name}\n")
             print(f"  v{v}: NO ASSET for this machine ({name} is not in the release's SHA256SUMS.txt)")
             return 0
-        with urllib.request.urlopen(f"{base}/{name}", timeout=600) as r:
-            data = r.read()
+        data = _release_file(v, name, 600)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             absent_note(cache, v).write_text(f"tag v{v} has no published release (HTTP 404)\n")
@@ -1344,8 +1411,68 @@ def _fetch_self_test() -> None:
             urllib.request.urlopen = host({plain: assets[plain]}, {plain: assets[plain]})
             plain_only = Path(d, "plain-only")
             assert fetch_tags(plain_only, ["v9.9.9"]) == 0 and binary_in(plain_only, "9.9.9").is_file()
+            _fetch_outage_self_test(Path(d), assets, Served)
     finally:
         urllib.request.urlopen, sys.platform = real, real_platform
+
+
+def _fetch_outage_self_test(root: Path, assets: dict[str, bytes], served: type) -> None:
+    """A 504 from the public release pages is answered by the REST API, signed when a token exists; an API outage or a 404 is not."""
+    import hashlib
+
+    files = {**assets, "SHA256SUMS.txt": "".join(f"{hashlib.sha256(d).hexdigest()}  {n}\n" for n, d in assets.items()).encode()}
+    ids = {f"https://api.github.com/repos/{REPO}/releases/assets/{i}": n for i, n in enumerate(files)}
+    calls: list[tuple[str, str, str]] = []
+
+    def outage(web: int, api: int = 0) -> Callable[..., object]:
+        def get(req: object, timeout: int = 0) -> object:
+            url = req if isinstance(req, str) else req.full_url  # type: ignore[attr-defined]
+            if not url.startswith("https://api.github.com/"):
+                raise urllib.error.HTTPError(url, web, "web", None, None)  # type: ignore[arg-type]
+            calls.append((url, req.get_header("Authorization") or "", req.get_header("Accept") or ""))  # type: ignore[attr-defined]
+            if api:
+                raise urllib.error.HTTPError(url, api, "api", None, None)  # type: ignore[arg-type]
+            if url.endswith("/releases/latest"):
+                return served(json.dumps({"tag_name": "v9.9.9"}).encode())
+            if url.endswith("/releases/tags/v9.9.9"):
+                return served(json.dumps({"assets": [{"name": n, "url": u} for u, n in ids.items()]}).encode())
+            return served(files[ids[url]])
+        return get
+
+    saved = {k: os.environ.pop(k, None) for k in ("GITHUB_TOKEN", "GH_TOKEN")}
+    real_which = shutil.which
+    try:
+        os.environ["GITHUB_TOKEN"] = "tok"
+        _api_assets.cache_clear()
+        urllib.request.urlopen = outage(504)
+        got = root / "api-signed"
+        assert fetch_tags(got, ["latest"]) == 0 and os.access(binary_in(got, "9.9.9"), os.X_OK), "a 504 from the release pages must be answered by the REST API"
+        assert calls and all(a == "Bearer tok" for _, a, _ in calls), calls
+        assert any(acc == "application/octet-stream" for _, _, acc in calls), "the asset is fetched as a download, not as JSON"
+        del os.environ["GITHUB_TOKEN"]
+        shutil.which = lambda *_a, **_k: None  # type: ignore[assignment]
+        calls.clear()
+        anon = root / "api-anonymous"
+        assert fetch_tags(anon, ["v9.9.9"]) == 0 and calls and all(a == "" for _, a, _ in calls), calls
+        urllib.request.urlopen = outage(504, 504)
+        _api_assets.cache_clear()
+        assert fetch_tags(root / "api-down", ["latest"]) == 1, "both hosts down is a failed fetch, never a pass"
+        assert fetch_tags(root / "api-down", ["v9.9.9"]) == 1 and not binary_in(root / "api-down", "9.9.9").exists()
+        urllib.request.urlopen = outage(404)
+        calls.clear()
+        assert fetch_tags(root / "no-release", ["v8.8.8"]) == 1 and not calls, "a 404 is an answer about the release: no fallback"
+        keep = _SameHostAuth().redirect_request(
+            urllib.request.Request("https://api.github.com/a", headers={"Authorization": "Bearer tok"}), None, 302, "Found", {}, "https://api.github.com/b")
+        away = _SameHostAuth().redirect_request(
+            urllib.request.Request("https://api.github.com/a", headers={"Authorization": "Bearer tok"}), None, 302, "Found", {}, "https://objects.example/b")
+        assert keep.get_header("Authorization") == "Bearer tok" and away.get_header("Authorization") is None, "the token must not follow a redirect to another host"
+    finally:
+        shutil.which = real_which
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+        _api_assets.cache_clear()
 
 
 def _self_test() -> None:
