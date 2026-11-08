@@ -154,6 +154,13 @@ pub fn mongo_rs_url() -> String {
 }
 pub const MONGO_SHARD_PORT: u16 = 27991;
 pub const MONGO_SHARD_URL: &str = "mongodb://127.0.0.1:27991/?directConnection=true";
+/// Host port of the `mongos` stand; `RIVET_TEST_MONGO_SHARD_PORT` names the one a non-default `MONGO_VERSION` cluster is published on.
+pub fn mongo_shard_port() -> u16 {
+    std::env::var("RIVET_TEST_MONGO_SHARD_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(MONGO_SHARD_PORT)
+}
 /// Host port of the `mongo-rs` stand; `RIVET_TEST_MONGO_RS_PORT` names the one a non-default `MONGO_VERSION` stand is published on.
 pub fn mongo_rs_port() -> u16 {
     std::env::var("RIVET_TEST_MONGO_RS_PORT")
@@ -470,7 +477,7 @@ impl LiveService {
             ),
             LiveService::MongoShard => (
                 "127.0.0.1",
-                MONGO_SHARD_PORT,
+                mongo_shard_port(),
                 "profile `shard` — run: docker compose --profile shard up -d --wait mongos",
             ),
             LiveService::MongoAuth => (
