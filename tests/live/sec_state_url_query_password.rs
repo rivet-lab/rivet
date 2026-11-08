@@ -136,8 +136,9 @@ fn a_query_pair_password_in_the_state_url_reaches_no_output() {
             said(&again)
         ));
     }
-    assert!(
-        leaked.is_empty(),
+    assert_eq!(
+        leaked,
+        Vec::<String>::new(),
         "STATE URL QUERY PASSWORD LEAKED into {} output(s):\n  {}",
         leaked.len(),
         leaked.join("\n  ")
@@ -195,8 +196,9 @@ fn a_query_pair_password_in_a_dead_state_url_reaches_no_output() {
             }
         }
     }
-    assert!(
-        leaked.is_empty(),
+    assert_eq!(
+        leaked,
+        Vec::<String>::new(),
         "STATE URL QUERY PASSWORD LEAKED into {} output(s):\n  {}",
         leaked.len(),
         leaked.join("\n  ")
@@ -247,8 +249,9 @@ fn a_query_pair_password_in_the_source_url_reaches_no_output() {
     }
     let _ =
         pg_connect().batch_execute(&format!("DROP OWNED BY {role}; DROP ROLE IF EXISTS {role}"));
-    assert!(
-        leaked.is_empty(),
+    assert_eq!(
+        leaked,
+        Vec::<String>::new(),
         "SOURCE URL QUERY PASSWORD LEAKED into {} output(s):\n  {}",
         leaked.len(),
         leaked.join("\n  ")

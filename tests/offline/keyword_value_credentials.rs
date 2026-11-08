@@ -271,8 +271,9 @@ fn query_forms(engine: &str) -> Vec<(&'static str, String)> {
 #[test]
 fn a_keyword_value_password_reaches_no_sink_on_any_engine() {
     let leaked = leaks_on_every_engine(|_| forms());
-    assert!(
-        leaked.is_empty(),
+    assert_eq!(
+        leaked,
+        Vec::<String>::new(),
         "KEYWORD-VALUE PASSWORD LEAKED into {} sink(s):\n  {}",
         leaked.len(),
         leaked.join("\n  ")
@@ -282,8 +283,9 @@ fn a_keyword_value_password_reaches_no_sink_on_any_engine() {
 #[test]
 fn a_query_pair_password_reaches_no_sink_on_any_engine() {
     let leaked = leaks_on_every_engine(query_forms);
-    assert!(
-        leaked.is_empty(),
+    assert_eq!(
+        leaked,
+        Vec::<String>::new(),
         "QUERY-PAIR PASSWORD LEAKED into {} sink(s):\n  {}",
         leaked.len(),
         leaked.join("\n  ")
