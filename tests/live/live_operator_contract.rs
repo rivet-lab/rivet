@@ -2740,8 +2740,9 @@ fn a_refused_cdc_run_on_a_table_without_all_column_logging_leaves_no_checkpoint_
             "supplemental",
             Then::DeliversTheSource,
             move |r| {
-                assert!(
-                    !r.checkpoint().exists(),
+                assert_eq!(
+                    std::fs::metadata(r.checkpoint()).map(|m| m.len()).ok(),
+                    None,
                     "a first CDC run refused for its prerequisite left its checkpoint"
                 );
                 ora_exec(&format!(
