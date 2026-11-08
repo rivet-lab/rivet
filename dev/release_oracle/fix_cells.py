@@ -75,8 +75,6 @@ GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-re
         "2026-11-01: #730 sibling: a finished initial snapshot was already refused by ensure_anchor on 0.32.2; the changes-only cell is the one that fails there",
     "validate_prefix_of_a_partitioned_export_verifies_that_directory_postgres":
         "2026-11-02: #755 control: a pinned --prefix verified that one directory on 0.32.2 as well; it guards the run-set validate from widening it; closes when the baseline moves past 0.32.2",
-    "cdc_to_files_still_refuses_a_partial_after_image_mysql":
-        "2026-11-08: #882 control: a partial AFTER image was already refused by the file sinks on 0.32.2; it guards the new before-image check from widening onto it; cdc_to_files_refuses_a_partial_before_image_mysql is the cell that fails there; closes when the baseline moves past 0.32.2",
     "check_still_accepts_overrides_the_run_accepts_postgres":
         "2026-11-04: #805 control: an override the run accepts passes check on 0.32.2 as well; it guards the new wire-mismatch refusal from widening onto it; the check_refuses_ cells are the ones that fail there; closes when the baseline moves past 0.32.2",
 }  # ratchet-pin: end
@@ -105,6 +103,10 @@ FIX_SCOPE: dict[str, tuple[str, str]] = {
     "a0cc571f": (
         r"^(?!in_range_values_under_the_override_keep_every_digit_and_null_stays_null$)",
         "2026-11-07: #875 in-range values and NULL were delivered right on 0.32.2; the past-range cells fail there",
+    ),
+    "c20c6403": (
+        r"^(?!cdc_to_files_still_refuses_a_partial_after_image_mysql$)",
+        "2026-11-08: #882 the partial after image was refused by the file sink on 0.32.2 as well (the control of the new before-image check); the before-image and stdout cells fail there",
     ),
 }
 

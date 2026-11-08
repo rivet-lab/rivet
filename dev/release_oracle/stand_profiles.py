@@ -36,10 +36,6 @@ AG_QUERY = ("SET NOCOUNT ON; SELECT r.replica_server_name, s.role_desc + ' ' + s
 AG_START = "dev/mssql-ag/setup.sh"
 SA_PASSWORD = "Rivet_Passw0rd!"
 ENV_HINT = re.compile(r"--profile (\w+) up -d(?: --wait)? ([\w-]+)")
-NOT_GATE_OWNED = {
-    "pgbouncer": "2026-11-08: pool profile, CI-owned pooler suite; the gate runs no live cell against it",
-    "proxysql": "2026-11-08: pool profile, CI-owned pooler suite; the gate runs no live cell against it",
-}
 
 
 def is_up(url: str) -> bool:
@@ -281,7 +277,7 @@ def self_test() -> None:
     owned = {(p.get("profile", n), s) for n, p in registry.gate_profiles().items() for s in p["services"]}
     hints = set(ENV_HINT.findall((ROOT / "tests/common/env.rs").read_text()))
     assert hints, "tests/common/env.rs names no `--profile P up -d SERVICE` hint to compare with the gate profiles"
-    missing = sorted(h for h in hints if h not in owned and h[1] not in NOT_GATE_OWNED)
+    missing = sorted(h for h in hints if h not in owned)
     assert not missing, f"a live cell hints a stand the gate never starts (add it to dev/stand/registry.yaml gate_profiles): {missing}"
     check_self_test()
     print("stand_profiles self-test ok")

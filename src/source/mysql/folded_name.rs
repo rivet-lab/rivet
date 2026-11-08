@@ -561,25 +561,42 @@ mod tests {
         assert_eq!(bytes_of(&text, per_byte), valid);
     }
 
-    /// A megabyte of hostile bytes is read in linear time and never panics.
+    /// `len` bytes of the hostile pattern.
+    fn hostile(len: usize) -> Vec<u8> {
+        [
+            0xC4, 0xB0, 0xE2, 0x84, 0xAA, 0x81, 0x30, 0x90, 0x32, 0xFF, 0x00, b'K',
+        ]
+        .into_iter()
+        .cycle()
+        .take(len)
+        .collect()
+    }
+
+    /// The fastest of three folds of `bytes` under every spelling; each fold returns text.
+    fn fastest_fold(bytes: &[u8]) -> std::time::Duration {
+        (0..3)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                for spelling in [Spelling::Utf8, Spelling::Gb18030, Spelling::Unknown] {
+                    let (text, per_byte) = lossless_text(bytes, spelling);
+                    assert!(!folded(&text, per_byte, spelling).is_empty());
+                }
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    }
+
+    /// A megabyte of hostile bytes is folded in one pass: twice the input costs under 2.75 times the time.
     #[test]
     fn a_megabyte_of_hostile_bytes_is_folded_in_one_pass() {
-        let mut hostile = Vec::with_capacity(1 << 20);
-        while hostile.len() < 1 << 20 {
-            hostile.extend_from_slice(&[
-                0xC4, 0xB0, 0xE2, 0x84, 0xAA, 0x81, 0x30, 0x90, 0x32, 0xFF, 0x00, b'K',
-            ]);
-        }
-        let start = std::time::Instant::now();
-        for spelling in [Spelling::Utf8, Spelling::Gb18030, Spelling::Unknown] {
-            let (text, per_byte) = lossless_text(&hostile, spelling);
-            let out = folded(&text, per_byte, spelling);
-            assert!(!out.is_empty());
-        }
+        let (half, whole) = (
+            fastest_fold(&hostile(512 << 10)),
+            fastest_fold(&hostile(1 << 20)),
+        );
         assert!(
-            start.elapsed() < crate::test_budget::ceiling(std::time::Duration::from_secs(5)),
-            "{:?}",
-            start.elapsed()
+            whole < half * 11 / 4,
+            "1 MiB took {whole:?} against {half:?} for 512 KiB: the fold is not linear"
         );
     }
 }
