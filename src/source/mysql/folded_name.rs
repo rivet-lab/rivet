@@ -572,9 +572,9 @@ mod tests {
         .collect()
     }
 
-    /// The fastest of three folds of `bytes` under every spelling; each fold returns text.
+    /// The fastest of five folds of `bytes` under every spelling; each fold returns text.
     fn fastest_fold(bytes: &[u8]) -> std::time::Duration {
-        (0..3)
+        (0..5)
             .map(|_| {
                 let start = std::time::Instant::now();
                 for spelling in [Spelling::Utf8, Spelling::Gb18030, Spelling::Unknown] {
@@ -587,16 +587,16 @@ mod tests {
             .unwrap()
     }
 
-    /// A megabyte of hostile bytes is folded in one pass: twice the input costs under 2.75 times the time.
+    /// A megabyte of hostile bytes is folded in one pass: eight times the input costs under 20 times the time.
     #[test]
     fn a_megabyte_of_hostile_bytes_is_folded_in_one_pass() {
-        let (half, whole) = (
-            fastest_fold(&hostile(512 << 10)),
+        let (eighth, whole) = (
+            fastest_fold(&hostile(128 << 10)),
             fastest_fold(&hostile(1 << 20)),
         );
         assert!(
-            whole < half * 11 / 4,
-            "1 MiB took {whole:?} against {half:?} for 512 KiB: the fold is not linear"
+            whole < eighth * 20,
+            "1 MiB took {whole:?} against {eighth:?} for 128 KiB: the fold is not linear"
         );
     }
 }
