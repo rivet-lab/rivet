@@ -134,6 +134,8 @@ mod retry_integration;
 mod run_summary_contract;
 #[path = "offline/scheduler_contract.rs"]
 mod scheduler_contract;
+#[path = "offline/secret_sink_matrix.rs"]
+mod secret_sink_matrix;
 
 #[path = "offline/cli_flag_coverage_guard.rs"]
 mod cli_flag_coverage_guard;
