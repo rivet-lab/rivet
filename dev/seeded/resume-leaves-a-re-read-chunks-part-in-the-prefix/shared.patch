@@ -1,0 +1,12 @@
+diff --git a/src/pipeline/chunked/resume_m8.rs b/src/pipeline/chunked/resume_m8.rs
+--- a/src/pipeline/chunked/resume_m8.rs
++++ b/src/pipeline/chunked/resume_m8.rs
+@@ -834,7 +834,7 @@
+     if reset {
+         for path in prune_superseded_attempts(summary, &state.list_chunk_tasks_for_run(run_id)?) {
+             let base = path.rsplit('/').next().unwrap_or(&path);
+-            if listed.is_none_or(|l| l.contains_key(base)) {
++            if false && listed.is_none_or(|l| l.contains_key(base)) {
+                 quarantine_move(dest, &path, run_id, &summary.export_name, stats);
+             }
+         }
