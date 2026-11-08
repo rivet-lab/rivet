@@ -273,6 +273,15 @@ def _first_match(text: str, pattern: str) -> str:
     return ""
 
 
+def _first_red(out: str) -> str:
+    """The first test nextest ended red as `STATUS name: its panic line`, else the first panic or error line."""
+    panics = nextest_panics(out)
+    for name, status in nextest_outcomes(out).items():
+        if status not in ("PASS", "LEAK"):
+            return f"{status} {name}: {panics.get(name, '')}".rstrip(": ")
+    return _first_match(out, r"panicked|^error")
+
+
 def _duckdb_list(sql: str) -> str:
     """`duckdb -noheader -list -c SQL`, stdout only.
 
@@ -1747,7 +1756,7 @@ def verify_live_only_coverage(led: Ledger) -> None:
         skip_log.write_text("")
         plain = run(
             ["env", "-u", "RIVET_STATE_URL", "-u", "RIVET_GATE_STATE_URL", "-u", "RIVET_TEST_STATE_URL",
-             "cargo", "nextest", "run", "--manifest-path", str(ROOT / "Cargo.toml")],
+             "cargo", "nextest", "run", "--no-fail-fast", "--manifest-path", str(ROOT / "Cargo.toml")],
             env={"RIVET_SKIP_LOG": str(skip_log)},
             timeout=NO_TIMEOUT,
         )
@@ -1765,9 +1774,9 @@ def verify_live_only_coverage(led: Ledger) -> None:
         else:
             _failed(
                 led, "infra", "offline", "battery", "-",
-                f"offline battery FAILED: {_first_match(plain.out, r'FAIL|panicked|error')} · "
+                f"offline battery FAILED: {_first_red(plain.out)} · "
                 f"full output: {log}",
-                _first_match(plain.out, r"FAILED|error"),
+                _first_red(plain.out),
             )
         return
     led.phase("Live-only coverage (mutants.toml exclusions vs measured offline coverage)")
@@ -1782,7 +1791,7 @@ def verify_live_only_coverage(led: Ledger) -> None:
     with led.split("live-only coverage llvm-cov battery"):
         build = run(
             ["env", "-u", "RIVET_STATE_URL", "-u", "RIVET_GATE_STATE_URL", "-u", "RIVET_TEST_STATE_URL",
-             "cargo", "llvm-cov", "nextest", "--lcov", "--output-path", str(lcov)],
+             "cargo", "llvm-cov", "nextest", "--no-fail-fast", "--lcov", "--output-path", str(lcov)],
             env={"RIVET_SKIP_LOG": str(skip_log)},
             timeout=NO_TIMEOUT,
         )
@@ -1794,8 +1803,8 @@ def verify_live_only_coverage(led: Ledger) -> None:
         _failed(
             led, "infra", "live-only", "coverage", "-",
             f"live-only-cov: the instrumented offline battery FAILED: "
-            f"{_first_match(build.out, r'FAIL|panicked|error')} · full output: {log}",
-            _first_match(build.out, r"FAILED|error"),
+            f"{_first_red(build.out)} · full output: {log}",
+            _first_red(build.out),
         )
         return
     skipped = battery_skips(skip_log)

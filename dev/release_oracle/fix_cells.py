@@ -100,6 +100,10 @@ FIX_SCOPE: dict[str, tuple[str, str]] = {
         r"^(?!an_incremental_cursor_on_a_nanosecond_timestamp_is_refused_before_it_re_exports$|an_init_generated_config_runs_on_a_key_the_oracle_planner_cannot_seek$)",
         "2026-11-07: #854 these two now declare the TIMESTAMP(9) column and 0.32.2 delivers or refuses them the same; the oracle_batch_timestamp9 and oracle_cdc_timestamp9 undeclared-refusal cells fail there",
     ),
+    "c20c6403": (
+        r"^(?!cdc_to_files_still_refuses_a_partial_after_image_mysql$)",
+        "2026-11-08: #882 the partial after image was refused by the file sink on 0.32.2 as well (the control of the new before-image check); the before-image and stdout cells fail there",
+    ),
     "a0cc571f": (
         r"^(?!in_range_values_under_the_override_keep_every_digit_and_null_stays_null$)",
         "2026-11-07: #875 in-range values and NULL were delivered right on 0.32.2; the past-range cells fail there",

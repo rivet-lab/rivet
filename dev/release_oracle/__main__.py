@@ -567,6 +567,16 @@ def _skip_site_guard_self_test() -> None:
     print(f"self-test ok: all {len(sources)} harness modules name a cause on every SKIP call; a planted call without one is found")
 
 
+def _first_red_self_test() -> None:
+    """The red line a battery failure names is the failed test and its panic, never a passing test whose name says `failed`."""
+    out = ("        PASS [   0.165s] (  14/6029) rivet-cli cli::args::tests::state_reset_chunks_accepts_export_or_stuck_or_failed_alias\n"
+           "        FAIL [   9.882s] (4231/6029) rivet-cli source::mysql::folded_name::tests::a_megabyte\n"
+           "  stderr ───\n\n    thread 'source::mysql::folded_name::tests::a_megabyte' panicked at src/x.rs:579:9:\n    9.88s\n")
+    got = scenarios._first_red(out)
+    assert got == "FAIL source::mysql::folded_name::tests::a_megabyte: 9.88s", got
+    assert scenarios._first_red("       PASS [ 0.1s] (1/1) rivet-cli t::failed_alias\nerror: test run failed\n") == "error: test run failed"
+
+
 def _lanes_self_test() -> None:
     """Lanes overlap, one lane's cells never do, rows flush in list order, a raise leaves an INFRA row and the lane goes on; the upgrade
     cells sharing a source server share a lane; grading a load leaves the process environment alone."""
@@ -754,6 +764,7 @@ def _stages_self_test() -> None:
     _verdict_scope_self_test()
     _skip_cause_self_test()
     _skip_site_guard_self_test()
+    _first_red_self_test()
     _tree_identity_self_test()
     _gate_kind_self_test()
     release_path.hygiene_self_test()

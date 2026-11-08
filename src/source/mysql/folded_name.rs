@@ -561,6 +561,9 @@ mod tests {
         assert_eq!(bytes_of(&text, per_byte), valid);
     }
 
+    /// Wall-clock ceiling for one hostile megabyte: one pass needs under a second, a quadratic one needs hours, so load cannot reach it.
+    const HOSTILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
     /// A megabyte of hostile bytes is read in linear time and never panics.
     #[test]
     fn a_megabyte_of_hostile_bytes_is_folded_in_one_pass() {
@@ -570,16 +573,20 @@ mod tests {
                 0xC4, 0xB0, 0xE2, 0x84, 0xAA, 0x81, 0x30, 0x90, 0x32, 0xFF, 0x00, b'K',
             ]);
         }
-        let start = std::time::Instant::now();
-        for spelling in [Spelling::Utf8, Spelling::Gb18030, Spelling::Unknown] {
-            let (text, per_byte) = lossless_text(&hostile, spelling);
-            let out = folded(&text, per_byte, spelling);
-            assert!(!out.is_empty());
-        }
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "{:?}",
-            start.elapsed()
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let every_spelling_folds = [Spelling::Utf8, Spelling::Gb18030, Spelling::Unknown]
+                .into_iter()
+                .all(|spelling| {
+                    let (text, per_byte) = lossless_text(&hostile, spelling);
+                    !folded(&text, per_byte, spelling).is_empty()
+                });
+            let _ = done.send(every_spelling_folds);
+        });
+        assert_eq!(
+            result.recv_timeout(HOSTILE_BUDGET),
+            Ok(true),
+            "a megabyte of hostile bytes must fold within {HOSTILE_BUDGET:?}"
         );
     }
 }

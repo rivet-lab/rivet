@@ -24,7 +24,7 @@ import yaml
 
 from dev.pytools import evidence
 from dev.release_oracle import stand_health
-from dev.release_oracle.core import Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, nextest_panics, self_skipped
+from dev.release_oracle.core import FULL_GATE, Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, nextest_panics, self_skipped
 from dev.release_oracle.live_modules import EXCLUSIVE_ENV, exclusive_tests, live_modules_env
 from dev.seeded import run_record
 
@@ -94,6 +94,7 @@ class Verdict:
     row: Row
     status: str
     detail: str
+    design: bool = False
 
 
 def parse_manifest(doc: dict, patch_dir: Path = HERE) -> list[Row]:
@@ -183,6 +184,26 @@ def cell_outcomes(out: str, skipped: dict[str, str], cells: tuple[str, ...]) -> 
     return res
 
 
+COMPILED_OUT = "compiled out: "
+HOST_OS = {"darwin": "macos", "linux": "linux", "win32": "windows"}.get(sys.platform, sys.platform)
+
+
+def compiled_out(tree: Path, cell: str, host: str = HOST_OS) -> str | None:
+    """The `#[cfg(target_os = ...)]` that keeps this cell's fn out of a build for `host`, if any."""
+    bare = cell.removeprefix(LIB)
+    for f in sorted((tree / "tests").rglob("*.rs")):
+        lines = f.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if re.match(rf"\s*(?:pub\s+)?(?:async\s+)?fn {re.escape(bare)}\b", line):
+                j = i
+                while j > 0 and lines[j - 1].lstrip().startswith("#["):
+                    j -= 1
+                    m = re.fullmatch(r'\s*#\[cfg\(target_os = "(\w+)"\)\]', lines[j])
+                    if m and m.group(1) != host:
+                        return f'#[cfg(target_os = "{m.group(1)}")] and this host is {host}'
+    return None
+
+
 def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
           skipped: dict[str, str] | None = None, stand: stand_health.StandVerdict = stand_health.ALIVE) -> Verdict:
     """CAUGHT iff a cell green on the unpatched tree is red on the patched one; `seeded=None` = the patched tree did not build; `skipped` = each control cell's own skip reason; `stand` = how the stand read while the cells ran (down or unreadable grades nothing)."""
@@ -201,7 +222,8 @@ def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
         return Verdict(row, STAND_DOWN, f"cell(s) {', '.join(hit)} failed on the stand's own panic, so no catch or miss is read")
     if not green and all(control.get(c) == "SKIP" for c in row.cells):
         why = "; ".join(f"{c}: {(skipped or {}).get(c, 'skipped')}" for c in row.cells)
-        return Verdict(row, NOT_GRADED_HERE, f"every declared cell skipped on this stand ({why})")
+        design = all((skipped or {}).get(c, "").startswith(COMPILED_OUT) for c in row.cells)
+        return Verdict(row, NOT_GRADED_HERE, f"every declared cell skipped on this stand ({why})", design)
     if not green:
         said = ", ".join(f"{c}={control.get(c, 'ABSENT')}" for c in row.cells)
         return Verdict(row, NO_CONTROL, f"no declared cell is green on the unpatched tree ({said})")
@@ -368,6 +390,10 @@ class Cargo:
         skipped = self_skipped(skip_log)
         out = cell_outcomes(p.stdout, skipped, tuple(cells))
         why = {k.split("::")[-1]: v for k, v in skipped.items()}
+        for c in cells:
+            gone = compiled_out(self.tree, c) if out.get(c) == "ABSENT" else None
+            if gone:
+                out[c], why[c.removeprefix(LIB)] = "SKIP", COMPILED_OUT + gone
         owed = [c for c in cells if self.again and out.get(c) == "SKIP" and self.again[0] in why.get(c.removeprefix(LIB), "")]
         if owed:
             # As the stage does: a self-skip naming the gate's state var runs again under it, and that leg is its verdict.
@@ -411,7 +437,7 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceili
         if v.status == CAUGHT:
             led.passed(v.row.engine, "seeded", v.row.seed, "-", msg)
         elif v.status == NOT_GRADED_HERE:
-            led.skipped(v.row.engine, "seeded", v.row.seed, "-", msg, cause=SkipCause.ENV)
+            led.skipped(v.row.engine, "seeded", v.row.seed, "-", msg, cause=SkipCause.DESIGN if v.design else SkipCause.ENV)
             here.append(f"{v.row.seed} × {v.row.engine}")
         elif v.status == NA:
             led.not_applicable(v.row.engine, "seeded", v.row.seed, "-", msg)
@@ -847,6 +873,20 @@ def self_test() -> int:
         assert probe.binaries(["offline_cell", "live_cell", "lib:u1"]) == ["--test", "top_level", "--test", "live_suite", "--lib"]
         assert probe.binaries(["live_cell", "other_live"]) == ["--test", "live_suite"]
         assert probe.binaries([]) == ["--lib"]
+        (Path(td) / "tests" / "gated.rs").write_text('#[cfg(target_os = "linux")]\n#[test]\nfn linux_cell() {}\n\n#[test]\nfn any_cell() {}\n')
+        assert compiled_out(Path(td), "linux_cell", "macos") and not compiled_out(Path(td), "linux_cell", "linux")
+        assert not compiled_out(Path(td), "any_cell", "macos") and not compiled_out(Path(td), "missing_cell", "macos")
+        other = "linux" if HOST_OS != "linux" else "macos"
+        (Path(td) / "tests" / "elsewhere.rs").write_text(f'#[cfg(target_os = "{other}")]\n#[test]\nfn elsewhere_cell() {{}}\n')
+        ran = Cargo.__new__(Cargo)
+        ran.tree, ran.env, ran.again = Path(td), {}, None
+        real_sh = globals()["sh"]
+        globals()["sh"] = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="")
+        try:
+            got, why = ran._run_group(["elsewhere_cell", "any_cell"], Path(td) / "run.log", {})
+        finally:
+            globals()["sh"] = real_sh
+        assert got == {"elsewhere_cell": "SKIP", "any_cell": "ABSENT"} and why["elsewhere_cell"].startswith(COMPILED_OUT), (got, why)
         (Path(td) / "src").mkdir()
         (Path(td) / "src" / "a.rs").write_text("fn lib_cell() {}\nfn generic_cell<T>() {}\n")
         named = Row("s", "postgres", "p", ("offline_cell", "renamed_cell", "lib:lib_cell", "lib:generic_cell", "lib:offline_cell"))
@@ -863,6 +903,9 @@ def self_test() -> int:
     v = grade(skip, {"t1": "SKIP", "t2": "SKIP"}, {}, {"t1": "no SNOWFLAKE_TEST_CONNECTION"})
     assert v.status == NOT_GRADED_HERE and "no SNOWFLAKE_TEST_CONNECTION" in v.detail, v
     assert grade(skip, {"t1": "SKIP", "t2": "FAIL"}, {}).status == NO_CONTROL, "a red control is not a stand skip"
+    gone = grade(skip, {"t1": "SKIP", "t2": "SKIP"}, {}, {"t1": COMPILED_OUT + "x", "t2": COMPILED_OUT + "x"})
+    assert gone.status == NOT_GRADED_HERE and gone.design and not v.design, (gone, v)
+    assert not grade(skip, {"t1": "SKIP", "t2": "SKIP"}, {}, {"t1": COMPILED_OUT + "x", "t2": "no creds"}).design
     assert grade(skip, {"t1": "SKIP", "t2": "PASS"}, {"t2": "SKIP"}).status == MISSED, \
         "a green control the seed made skip is no catch"
     dead = stand_health.down("the state DB stopped answering")
@@ -888,6 +931,10 @@ def self_test() -> int:
         led = Ledger(colour=False)
         assert record(led, rows) is (not red)
         assert sum(c.status.name == "SKIP" for c in led.cells) == n and led.red is red, (n, limit, led.cells)
+    for design, want in ((True, "RELEASE-READY"), (False, "NOT GRADED")):
+        led = Ledger(colour=False)
+        record(led, [Verdict(Row("s", "mysql", "p", ("t1",)), NOT_GRADED_HERE, "skipped", design)], ceiling=1)
+        assert led.verdict(FULL_GATE) == want, (design, led.verdict(FULL_GATE), "a cell compiled out on this host is a design skip; a missing stand is not")
     for status in (MISSED, STALE, BROKEN, NO_CONTROL, ABORTED):
         led = Ledger(colour=False)
         green = record(led, [Verdict(pg, CAUGHT, "t2"), Verdict(Row("s", "mysql", "p", ()), status, "x"),

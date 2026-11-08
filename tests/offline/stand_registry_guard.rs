@@ -65,6 +65,66 @@ fn env_rs_endpoints_are_the_registry_endpoints() {
     );
 }
 
+/// Every `(profile, service, port)` a live service of tests/common/env.rs asks the operator to start with `docker compose --profile`.
+fn declared_profile_services(env_rs: &str) -> Vec<(String, String, u16)> {
+    let consts: std::collections::HashMap<String, u16> =
+        regex::Regex::new(r"const (\w+): u16 = (\d+);")
+            .unwrap()
+            .captures_iter(env_rs)
+            .map(|c| (c[1].to_string(), c[2].parse().unwrap()))
+            .collect();
+    regex::Regex::new(
+        r#""127\.0\.0\.1",\s*(\w+),\s*"[^"]*docker compose --profile ([\w-]+) up -d (?:--wait )?([\w-]+)""#,
+    )
+    .unwrap()
+    .captures_iter(env_rs)
+    .map(|c| {
+        let port = c[1].parse().unwrap_or_else(|_| consts[&c[1]]);
+        (c[2].to_string(), c[3].to_string(), port)
+    })
+    .collect()
+}
+
+/// The gate profiles whose compose profile and services name `service`, with the port their URL probes.
+fn gate_ports_of(profile: &str, service: &str) -> Vec<u16> {
+    let profiles = registry::stand()["gate_profiles"].as_mapping().unwrap();
+    profiles
+        .iter()
+        .filter(|(name, spec)| {
+            spec["profile"].as_str().unwrap_or(name.as_str().unwrap()) == profile
+                && spec["services"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.as_str() == Some(service))
+        })
+        .map(|(_, spec)| {
+            let url = spec["url"].as_str().unwrap();
+            let rest = url.rsplit('@').next().unwrap().split("//").last().unwrap();
+            let host_port = rest.split(['/', '?']).next().unwrap();
+            host_port.rsplit(':').next().unwrap().parse().unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn every_profile_service_a_live_test_needs_is_a_gate_profile_probing_its_port() {
+    let declared = declared_profile_services(include_str!("../common/env.rs"));
+    assert!(
+        declared.len() >= 8,
+        "the declared-service scan found only {declared:?}"
+    );
+    let missing: Vec<String> = declared
+        .into_iter()
+        .filter(|(profile, service, port)| !gate_ports_of(profile, service).contains(port))
+        .map(|(profile, service, port)| format!("--profile {profile} {service} (port {port})"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "tests/common/env.rs asks for these stands but no gate_profiles entry in dev/stand/registry.yaml starts them and probes their port, so the gate leaves their cells NOT GRADED: {missing:?}"
+    );
+}
+
 #[test]
 fn no_bigquery_dataset_name_is_spelled_outside_the_registry() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
