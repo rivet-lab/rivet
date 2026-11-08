@@ -240,8 +240,8 @@ jobs:
   # shell on 4.x.
   mongo-versions:
     name: Mongo live (v${{ matrix.mongo_version }})
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -263,25 +263,9 @@ jobs:
           tool: cargo-nextest,uv
 
       - name: Start Mongo stack
-        # minio + fake-gcs ride along for the engine-agnostic chunking_stand
-        # Mongo cells (dest_gcs/dest_s3) — no other job has BOTH a Mongo server
-        # and these tests selected (e2e `--skip mongo` excludes them; the matrix
-        # audit found all four cells never ran in any CI job).
         run: |
           mkdir -p tests/.live-tmp
-          # `duckdb` is the CDC readback ORACLE (rivet-duckdb; tests/common/env.rs
-          # DUCKDB_CONTAINER), not a source — an independent reader, so the CDC
-          # tests do not grade rivet's output with rivet. It has no compose
-          # profile, so a bare `up -d` would start it and an EXPLICIT service list
-          # silently does not: every live_cdc_mongo test died on
-          # `docker inspect failed: No such object: rivet-duckdb`, red on all five
-          # matrix cells for at least ten consecutive nights (2026-08-16).
-          # mongo-rs2-a/-b (`replica` profile): the two-member set whose SECONDARY
-          # mongo_cdc_streams_changes_from_a_secondary reads, on :27022/:27023.
-          # clickhouse: the Mongo-into-ClickHouse cell (`a_mongo_resume_export_into_clickhouse_
-          # accumulates_every_run`) is selected by the `mongo` substring and was red on every
-          # matrix version for want of it (2026-10-13..14).
-          docker compose --profile replica up -d --wait mongo mongo-rs mongo-auth mongo-rs2-a mongo-rs2-b toxiproxy minio fake-gcs duckdb clickhouse
+          docker compose --profile replica --profile shard up -d --wait mongo mongo-rs mongo-auth mongo-rs2-a mongo-rs2-b mongos toxiproxy minio fake-gcs duckdb clickhouse
           sudo chmod -R 0777 tests/.live-tmp
 
       - name: Run Mongo live tests
@@ -299,7 +283,7 @@ jobs:
       - name: Dump Mongo logs on failure
         if: failure()
         run: |
-          for s in mongo mongo-rs mongo-auth mongo-rs2-a mongo-rs2-b; do
+          for s in $(docker compose --profile replica --profile shard ps -a --services | grep '^mongo'); do
             echo "::group::$s"; docker compose logs --no-color "$s" | tail -100; echo "::endgroup::"
           done
 
