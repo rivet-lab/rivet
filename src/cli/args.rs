@@ -920,9 +920,10 @@ mod tests {
         }
         let mut found = Vec::new();
         hidden(&Cli::command(), "rivet", &mut found);
-        assert!(
-            found.is_empty(),
-            "the credential-sink matrix reads its commands from --help: {found:?}"
+        assert_eq!(
+            found,
+            Vec::<String>::new(),
+            "the credential-sink matrix reads its commands from --help"
         );
     }
 

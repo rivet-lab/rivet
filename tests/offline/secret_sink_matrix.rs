@@ -15,10 +15,10 @@ fn matrix(args: &[&str]) -> std::process::Output {
 #[test]
 fn the_matrix_oracle_catches_a_planted_credential() {
     let out = matrix(&["--self-test"]);
-    assert!(
-        out.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "secret_sink self-test: ok",
+        "{}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
