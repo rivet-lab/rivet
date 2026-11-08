@@ -692,11 +692,6 @@ impl BatchSink for FirstBatchProbe {
     }
 }
 
-/// The scale of the `decimal(38,s)` that keeps the integer digits a wider `decimal(precision,scale)` declares, never below 0 or above 38.
-pub(crate) fn wide_decimal_remedy_scale(precision: u8, scale: i8) -> i32 {
-    (i32::from(scale) - (i32::from(precision) - 38)).clamp(0, 38)
-}
-
 /// Turns the internal "no builder" stop of a zero-row build for a `columns:` override into the coded usage refusal naming the cause and the remedy.
 pub(crate) fn refuse_unbuildable_override<T>(
     engine: &str,
@@ -723,14 +718,7 @@ pub(crate) fn refuse_unbuildable_override<T>(
             };
             format!("declare `{us}` (microseconds), or remove the override")
         }
-        RivetType::Decimal { precision, scale } => {
-            let kept = wide_decimal_remedy_scale(*precision, *scale);
-            format!(
-                "declare `decimal(38,{kept})` (the widest decimal the reader builds; it keeps the \
-                 integer digits you declared where 38 digits allow, and a value with non-zero \
-                 digits past {kept} decimal places is refused), or remove the override"
-            )
-        }
+        RivetType::Decimal { .. } => "its precision is above 38; declare the column's own `decimal(p,s)` with p <= 38 (see the source column definition), or remove the override".into(),
         _ => "declare a type the reader supports for this column, or remove the override".into(),
     };
     crate::rivet_bail!(
@@ -1310,49 +1298,24 @@ mod override_probe_tests {
         );
     }
 
-    /// A decimal override past precision 38 names the `decimal(38,s)` that keeps its integer digits, the one shape every engine's reader accepts.
+    /// A decimal override past precision 38 names the cause and the rule for the operator's own declaration, for every precision and scale a config can hold.
     #[test]
-    fn a_wide_decimal_override_without_a_builder_names_decimal_38() {
-        let err = refuse_unbuildable_override(
-            "mssql",
-            "d",
-            &crate::types::RivetType::Decimal {
-                precision: 50,
-                scale: 2,
-            },
-            internal_stop(),
-        )
-        .unwrap_err();
-        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
-        assert_eq!(
-            err.to_string(),
-            "mssql: column `d` is declared decimal(50,2) by a `columns:` override, a type the mssql reader cannot build; declare `decimal(38,0)` (the widest decimal the reader builds; it keeps the integer digits you declared where 38 digits allow, and a value with non-zero digits past 0 decimal places is refused), or remove the override"
-        );
-    }
-
-    /// The declaration the decimal refusal prints parses back to a decimal(38,s) with s in 0..=38 for every precision and scale a config can hold.
-    #[test]
-    fn the_printed_decimal_remedy_is_a_declaration_the_parser_accepts() {
-        use crate::types::{RivetType, parse_type_str};
-        for precision in 39..=76u8 {
-            for scale in -128..=precision as i8 {
-                let declared = RivetType::Decimal { precision, scale };
-                let err = refuse_unbuildable_override("oracle", "d", &declared, internal_stop())
-                    .unwrap_err()
-                    .to_string();
-                let remedy = err
-                    .split("declare `")
-                    .nth(1)
-                    .and_then(|r| r.split('`').next())
-                    .unwrap_or_else(|| panic!("{err}"));
-                match parse_type_str(remedy) {
-                    Ok(RivetType::Decimal {
-                        precision: 38,
-                        scale: 0..=38,
-                    }) => {}
-                    other => panic!("decimal({precision},{scale}) printed `{remedy}`: {other:?}"),
-                }
-            }
+    fn a_wide_decimal_override_without_a_builder_names_the_cause_and_the_rule() {
+        for (precision, scale) in [(50u8, 2i8), (50, 40), (50, -2), (39, 0), (76, 76)] {
+            let err = refuse_unbuildable_override(
+                "mssql",
+                "d",
+                &crate::types::RivetType::Decimal { precision, scale },
+                internal_stop(),
+            )
+            .unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "mssql: column `d` is declared decimal({precision},{scale}) by a `columns:` override, a type the mssql reader cannot build; its precision is above 38; declare the column's own `decimal(p,s)` with p <= 38 (see the source column definition), or remove the override"
+                )
+            );
         }
     }
 

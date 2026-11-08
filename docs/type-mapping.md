@@ -90,7 +90,7 @@ type and the remedy. MySQL has no nanosecond timestamp (DATETIME and TIMESTAMP
 hold microseconds), so `timestamp_ns` / `timestamp_tz_ns` on a MySQL column is
 refused before any row is read, even over an empty result; declare `timestamp`
 / `timestamp_tz`. A `decimal(p,s)` override past precision 38 is refused the
-same way on SQL Server and Oracle (the refusal prints the `decimal(38,s)` that keeps the declared integer digits: `s` is the declared scale minus the precision above 38, between 0 and 38; declare the source column's own `decimal(38,s)` when it holds more fractional digits). On SQL
+same way on SQL Server and Oracle (declare the source column's own `decimal(p,s)` with p <= 38, or remove the override). On SQL
 Server a value whose wire type the declared type cannot read is refused at the
 first batch with the same code.
 

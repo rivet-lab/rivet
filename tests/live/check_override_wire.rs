@@ -200,33 +200,25 @@ fn a_value_the_declared_type_cannot_read_is_refused_not_an_internal_stop_mssql()
     }
 }
 
-/// The declaration `stderr`'s refusal prints between backticks after "declare ".
-fn printed_declaration(stderr: &str) -> String {
-    stderr
-        .split("declare `")
-        .nth(1)
-        .and_then(|r| r.split('`').next())
-        .unwrap_or_else(|| panic!("no declaration in {stderr}"))
-        .to_string()
-}
+/// The message every wide-decimal refusal carries after the declared type.
+const WIDE_DECIMAL_REFUSAL: &str = "its precision is above 38; declare the column's own `decimal(p,s)` with p <= 38 (see the source column definition), or remove the override";
 
-/// A wide-decimal refusal prints `printed`, and that declaration applied as the config passes `check` and delivers `delivered` for the one source row.
-fn wide_decimal_refusal_remedy_delivers(
+/// A wide-decimal refusal names the cause and the rule, and the operator's own `valid` declaration then passes `check` and delivers `delivered` for the one source row.
+fn wide_decimal_refusal_then_valid_declaration_delivers(
     rig: impl Fn(&str, &str) -> Rig,
     column: &str,
     prefix: &str,
-    (wide, printed, delivered): (&str, &str, &str),
+    (wide, valid, delivered): (&str, &str, &str),
 ) {
     let name = unique_name(prefix);
     let out = tempfile::tempdir().unwrap();
     let refused = rig(&name, wide).dest_path(out.path().to_path_buf());
     let stderr = check_and_run_refuse_alike(refused, &name);
-    assert_eq!(printed_declaration(&stderr), printed, "{wide}: {stderr}");
+    assert!(stderr.contains(WIDE_DECIMAL_REFUSAL), "{wide}: {stderr}");
     assert!(!stderr.contains("`text`"), "{stderr}");
-    let remedy = printed_declaration(&stderr);
     let name = unique_name(prefix);
     let out = tempfile::tempdir().unwrap();
-    let applied = rig(&name, &remedy).dest_path(out.path().to_path_buf());
+    let applied = rig(&name, valid).dest_path(out.path().to_path_buf());
     let checked = applied.cli(&["check", "--export", &name]);
     assert_eq!(
         checked.status.code(),
@@ -244,44 +236,32 @@ fn wide_decimal_refusal_remedy_delivers(
     assert_eq!(
         dir_parquet_decimal_strings(out.path(), column),
         vec![delivered.to_string()],
-        "{wide} -> {remedy}"
+        "{wide} -> {valid}"
     );
 }
 
-/// The wide declarations, the remedy each prints, and the value the applied remedy must deliver for a source holding 12.5 (and 1200 for a negative scale).
-fn wide_decimal_cases() -> [(&'static str, &'static str, String, &'static str); 2] {
-    [
-        (
-            "decimal(50,40)",
-            "decimal(38,28)",
-            format!("12.5{}", "0".repeat(27)),
-            "12.5",
-        ),
-        (
-            "decimal(50,-2)",
-            "decimal(38,0)",
-            "1200".to_string(),
-            "1200",
-        ),
-    ]
-}
+/// The wide declarations, the operator's own valid declaration for a source holding 12.50, and the text it must deliver.
+const WIDE_DECIMAL_CASES: [(&str, &str, &str); 2] = [
+    ("decimal(50,2)", "decimal(10,2)", "12.50"),
+    ("decimal(50,40)", "decimal(38,2)", "12.50"),
+];
 
 #[test]
 #[ignore = "live: mssql"]
 fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_mssql() {
     require_alive(LiveService::Mssql);
-    for (wide, printed, delivered, source) in wide_decimal_cases() {
-        wide_decimal_refusal_remedy_delivers(
+    for case in WIDE_DECIMAL_CASES {
+        wide_decimal_refusal_then_valid_declaration_delivers(
             |name, declared| {
                 Rig::mssql_batch(name)
-                    .query(&format!("SELECT CAST({source} AS DECIMAL(10,2)) AS d"))
+                    .query("SELECT CAST(12.5 AS DECIMAL(10,2)) AS d")
                     .mode("full")
                     .export_line("columns:")
                     .export_line(&format!("  d: \"{declared}\""))
             },
             "d",
             "ovw_dec_ms",
-            (wide, printed, &delivered),
+            case,
         );
     }
 }
@@ -290,20 +270,18 @@ fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_mssql() {
 #[ignore = "live: oracle"]
 fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle() {
     require_alive(LiveService::Oracle);
-    for (wide, printed, delivered, source) in wide_decimal_cases() {
-        wide_decimal_refusal_remedy_delivers(
+    for case in WIDE_DECIMAL_CASES {
+        wide_decimal_refusal_then_valid_declaration_delivers(
             |name, declared| {
                 Rig::oracle_batch(name)
-                    .query(&format!(
-                        "SELECT CAST({source} AS NUMBER(10,2)) AS d FROM dual"
-                    ))
+                    .query("SELECT CAST(12.5 AS NUMBER(10,2)) AS d FROM dual")
                     .mode("full")
                     .export_line("columns:")
                     .export_line(&format!("  D: \"{declared}\""))
             },
             "D",
             "ovw_dec_or",
-            (wide, printed, &delivered),
+            case,
         );
     }
 }

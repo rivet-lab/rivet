@@ -1704,68 +1704,20 @@ mod error_code_tests {
         }
     }
 
-    /// The declaration the wide-decimal refusal prints, applied as the config, delivers a value with an integer part exactly and inside its precision.
+    /// An operator-chosen decimal(p,s) with p <= 38 over the column the wide override was refused for delivers the cents exactly and inside its precision.
     #[test]
-    fn the_printed_decimal_remedy_delivers_on_sql_server() {
+    fn a_valid_decimal_declaration_delivers_the_cents_on_sql_server() {
         use arrow::util::display::array_value_to_string;
         use tiberius::numeric::Numeric;
-        let zeros = |n: usize| "0".repeat(n);
-        let cases: [(&str, &str, i128, u8, String); 5] = [
-            (
-                "decimal(50,40)",
-                "decimal(38,28)",
-                125,
-                1,
-                format!("12.5{}", zeros(27)),
-            ),
-            ("decimal(50,-2)", "decimal(38,0)", 1200, 0, "1200".into()),
-            ("decimal(50,2)", "decimal(38,0)", 1200, 0, "1200".into()),
-            (
-                "decimal(39,38)",
-                "decimal(38,37)",
-                125,
-                2,
-                format!("1.25{}", zeros(35)),
-            ),
-            (
-                "decimal(76,76)",
-                "decimal(38,38)",
-                5,
-                1,
-                format!("0.5{}", zeros(37)),
-            ),
-        ];
-        for (wide, printed, unscaled, source_scale, delivered) in cases {
-            let wide_rivet = crate::types::parse_type_str(wide).unwrap();
-            let mapping =
-                TypeMapping::from_source(&SourceColumn::simple("c", "x", true), wide_rivet);
-            let field = build_arrow_field(&mapping).expect("override has an Arrow field");
-            let probe = build_array(
-                field.data_type(),
-                0,
-                &[],
-                "c",
-                None,
-                Some(&mapping.rivet_type),
-            );
-            let refusal = crate::source::refuse_unbuildable_override(
-                "mssql",
-                "c",
-                &mapping.rivet_type,
-                probe,
-            )
-            .unwrap_err()
-            .to_string();
-            let remedy = refusal
-                .split("declare `")
-                .nth(1)
-                .and_then(|r| r.split('`').next())
-                .expect("the refusal prints a declaration");
-            assert_eq!(remedy, printed, "{wide}");
-            let rivet = crate::types::parse_type_str(remedy).unwrap();
+        for (declared, unscaled, source_scale, delivered) in [
+            ("decimal(10,2)", 1_250i128, 2u8, "12.50"),
+            ("decimal(38,2)", 123_456, 2, "1234.56"),
+            ("decimal(38,10)", 125, 1, "12.5000000000"),
+        ] {
+            let rivet = crate::types::parse_type_str(declared).unwrap();
             let mapping = TypeMapping::from_source(&SourceColumn::simple("c", "x", true), rivet);
-            let field = build_arrow_field(&mapping).expect("remedy has an Arrow field");
-            let declared = ColumnOverrides::from([("c".to_string(), mapping.rivet_type.clone())]);
+            let field = build_arrow_field(&mapping).expect("declaration has an Arrow field");
+            let overrides = ColumnOverrides::from([("c".to_string(), mapping.rivet_type.clone())]);
             let schema = Arc::new(Schema::new(vec![field]));
             let rows = [Row::builder()
                 .column(
@@ -1774,41 +1726,21 @@ mod error_code_tests {
                     ColumnData::Numeric(Some(Numeric::new_with_scale(unscaled, source_scale))),
                 )
                 .build()];
-            let batch = mssql_rows_to_record_batch(&schema, &rows, None, &declared).unwrap();
+            let batch = mssql_rows_to_record_batch(&schema, &rows, None, &overrides).unwrap();
             let values = batch
                 .column(0)
                 .as_any()
                 .downcast_ref::<arrow::array::Decimal128Array>()
                 .expect("decimal column");
             values
-                .validate_decimal_precision(38)
-                .unwrap_or_else(|e| panic!("{wide} -> {remedy}: {e}"));
+                .validate_decimal_precision(values.precision())
+                .unwrap_or_else(|e| panic!("{declared}: {e}"));
             assert_eq!(
                 array_value_to_string(batch.column(0), 0).unwrap(),
                 delivered,
-                "{wide} -> {remedy}"
+                "{declared}"
             );
         }
-    }
-
-    /// A value with fractional digits under a remedy that keeps none is refused, never rounded.
-    #[test]
-    fn a_remedy_that_keeps_no_fraction_refuses_a_fractional_value() {
-        use tiberius::numeric::Numeric;
-        let rivet = crate::types::parse_type_str("decimal(38,0)").unwrap();
-        let mapping = TypeMapping::from_source(&SourceColumn::simple("c", "x", true), rivet);
-        let field = build_arrow_field(&mapping).expect("Arrow field");
-        let declared = ColumnOverrides::from([("c".to_string(), mapping.rivet_type.clone())]);
-        let schema = Arc::new(Schema::new(vec![field]));
-        let rows = [Row::builder()
-            .column(
-                "c",
-                ColumnType::Numericn,
-                ColumnData::Numeric(Some(Numeric::new_with_scale(1250, 2))),
-            )
-            .build()];
-        let err = mssql_rows_to_record_batch(&schema, &rows, None, &declared).unwrap_err();
-        assert!(format!("{err:#}").contains("lossy"), "{err:#}");
     }
 
     /// The schema stage refuses a wide decimal override by code, builds a narrow one, and leaves the same column without an override alone.
@@ -1829,7 +1761,12 @@ mod error_code_tests {
             mssql_columns_to_schema(rows[0].columns(), &declared("decimal(50,2)"), &rows, None)
                 .unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
-        assert!(err.to_string().contains("declare `decimal(38,0)`"), "{err}");
+        assert!(
+            err.to_string().contains(
+                "its precision is above 38; declare the column's own `decimal(p,s)` with p <= 38"
+            ),
+            "{err}"
+        );
         for ok in [declared("decimal(38,2)"), ColumnOverrides::new()] {
             let (schema, _) = mssql_columns_to_schema(rows[0].columns(), &ok, &rows, None).unwrap();
             assert_eq!(schema.fields().len(), 1);
