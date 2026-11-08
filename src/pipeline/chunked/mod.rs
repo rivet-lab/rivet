@@ -418,7 +418,17 @@ pub(crate) fn try_run_lease<'s>(
     export: &str,
     source: &str,
 ) -> Result<Option<crate::state::LoadLease<'s>>> {
-    state.take_lease_waiting(&run_lease_key(export, source), &|| {
+    try_run_lease_saying(state, export, source, crate::state::NOTHING_DONE)
+}
+
+/// [`try_run_lease`] whose wait that ran out says `outcome` of what the command did before it.
+fn try_run_lease_saying<'s>(
+    state: &'s StateStore,
+    export: &str,
+    source: &str,
+    outcome: &str,
+) -> Result<Option<crate::state::LoadLease<'s>>> {
+    state.take_lease_waiting_saying(&run_lease_key(export, source), outcome, &|| {
         let run = live_run_label(state, export, source).unwrap_or_else(|_| "a run".to_string());
         format!("the run lease of export '{export}' ({run})")
     })
@@ -439,15 +449,28 @@ pub(crate) fn claim_export_progress<'s>(
     source: &str,
     what: &str,
 ) -> Result<crate::state::LoadLease<'s>> {
-    if let Some(lease) = try_run_lease(state, export, source)? {
+    claim_export_progress_saying(state, export, source, what, None)
+}
+
+/// [`claim_export_progress`] for a command that already changed state: its refusal then says `done` of that, where a timeout of the plain claim says nothing was done.
+pub(crate) fn claim_export_progress_saying<'s>(
+    state: &'s StateStore,
+    export: &str,
+    source: &str,
+    what: &str,
+    done: Option<&str>,
+) -> Result<crate::state::LoadLease<'s>> {
+    let outcome = done.unwrap_or(crate::state::NOTHING_DONE);
+    if let Some(lease) = try_run_lease_saying(state, export, source, outcome)? {
         return Ok(lease);
     }
     crate::rivet_bail!(
         crate::error::codes::STATE_RUN_IN_PROGRESS,
         "export '{export}': cannot {what}: {} is in progress in a live rivet process, which \
          holds the export's run lease. Wait for it to finish, or stop that process (its pid \
-         ends the run id), then repeat this command.",
-        live_run_label(state, export, source)?
+         ends the run id), then repeat this command.{}",
+        live_run_label(state, export, source)?,
+        done.map(|d| format!("\n  {d}")).unwrap_or_default()
     )
 }
 

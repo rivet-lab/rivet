@@ -1,0 +1,12 @@
+diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+--- a/src/pipeline/cli.rs
++++ b/src/pipeline/cli.rs
+@@ -91,7 +91,7 @@
+     require_known_export(config, config_path, name)?;
+     let state = StateStore::open(config_path)?;
+     if let Some(Owner::PartitionChild(parent)) = owner_of(config, name)
+-        && !state.holds_export(name)?
++        && false
+     {
+         crate::rivet_bail!(
+             crate::error::codes::CLI_EXPORT_UNKNOWN,

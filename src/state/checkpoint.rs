@@ -18,7 +18,7 @@ pub struct ChunkTaskInfo {
 }
 
 /// Whether a chunk run stored under `stored` (`None`: it recorded no source) belongs to the stream reading `source`, however its source was spelled when it was stored.
-fn chunk_run_is_of(source: &str, stored: Option<&str>) -> bool {
+pub(super) fn chunk_run_is_of(source: &str, stored: Option<&str>) -> bool {
     stored.is_none_or(|s| s == source || crate::config::canonical_source_key(s) == source)
 }
 

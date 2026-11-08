@@ -16,7 +16,7 @@ mod load_lease;
 pub(crate) use cdc_snapshot_store::joins_capture;
 pub(crate) use cursor::population_of;
 pub use cursor::{Accepted, Landing, ProgressClaim, ProgressKey};
-pub use load_lease::{LoadLease, lock_wait_s, set_lock_wait};
+pub use load_lease::{LoadLease, NOTHING_DONE, lock_wait_s, set_lock_wait};
 mod load_spec_store;
 mod metrics;
 mod migrations;

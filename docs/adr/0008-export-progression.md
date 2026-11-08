@@ -108,7 +108,18 @@ and `rivet state reset-chunks -e <export>` also deletes the progression row. No 
 
 An export with `partition_by` keeps its cursor and progression rows under the names of its partitions
 (`<export>__<value>`), not under its own. `rivet state reset -e <export>` therefore clears the export's own
-rows and every stored partition's rows (cursor and progression) in one transaction, and
+rows and every stored partition's rows (cursor and progression), and
 `rivet state reset -e <export>__<value>` clears that partition's rows only. One resolver decides which stored
 names belong to a declared export (`owner_of`, `src/pipeline/cli.rs`): the exact declared name first, else the
-longest `partition_by` parent the name extends with `__` and a non-empty value.
+`partition_by` export whose name the stored name extends with `__` and a bucket label: a day, month or year
+label (`%Y-%m-%d`, `%Y-%m`, `%Y`) or `null`, whatever `partition_granularity` the export has now, so partitions
+stored before the granularity was changed stay the export's. A name with any other suffix (`events__archive`)
+is not a partition, so a reset never reaches it. The plain export of another config that carries such a label
+as its name is taken as a partition (issue 852): a mark that tells the two apart is stored for some
+partitions only (a mode `full` partition keeps no cursor row).
+The reset probes the run lease of the export and of every partition before it deletes, then clears the
+partitions in batches of 16, each batch in one transaction under its own leases, and the export last. A run
+that takes a partition's lease after the probe stops the reset between two batches: the refusal says how many
+partitions were already reset and that the export kept its state, and repeating the command finishes the
+reset. A chunked export's partition that only has a boundary row belongs to this source unless its chunk runs
+are all of another source.

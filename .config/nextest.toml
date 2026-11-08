@@ -78,6 +78,10 @@ filter = 'test(=live_cdc_column_grants::a_control_byte_after_a_dash_opens_a_comm
 threads-required = 'num-test-threads'
 
 [[profile.default.overrides]]
+filter = 'test(=live_cdc_harm::a_mongo_cdc_drain_reads_the_oplog_not_the_collection)'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
 filter = 'test(/_oracle$/)'
 test-group = 'oracle'
 

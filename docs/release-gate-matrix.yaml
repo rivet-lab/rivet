@@ -189,6 +189,9 @@ preflights:
     what: "SQLite state == Postgres state on the state-exercising golden fixtures (parallel-checkpoint, incremental, crash-resume) — the migration arrays are type-parity. CONDITIONAL, and the condition is the point: it needs a Postgres STATE backend named by RIVET_TEST_STATE_URL (the dev stand's persistent `postgres-state`, :5433) and SKIPs — loudly, never a silent pass — without one. That variable was documented NOWHERE until 2026-08-02, so this cell has read `status: test` while skipping in every run that did not happen to set it: a cell claiming coverage that an unset environment variable quietly withheld. A `status: test` whose test is opt-in must name the opt-in here, or the ledger overstates the gate. The scenario also probes the URL's host:port and SKIPs when it is unreachable, so a stopped stand cannot masquerade as a release failure."
     backends: [sqlite, postgres]
     status: test        # verify_state_migrations (commit e83656a), RED-proven int4 -> NOT RELEASABLE
+  - id: seeded_platform_rows
+    what: "the seeded-recall rows that declare a platform run on that platform in the island: --platform-rows grades only them, and an OWED row on the island host fails."
+    status: test        # verify_seeded_platform_rows (dev/release_oracle/__main__.py)
   - id: coverage_matrices
     what: "every docs/*-matrix.yaml drift-guard runs (chunking/behaviour/type-fidelity/... + release_gate + perf) so a rotted coverage ledger blocks the release, not just CI."
     status: test        # verify_coverage_matrices
@@ -442,13 +445,14 @@ infra:
     # 2026-11-06: +3 N/A rows from connection-cut-mid-row-not-retried (mssql lifts tiberius errors into text, mongo classifies a typed driver error, oracle lifts oracledb errors into text: none reaches the removed arm).
     # 2026-11-07: +1 N/A row from state-reset-skips-partition-children x mongo (partition_by is refused for a MongoDB source at config load, so no export keeps per-partition progress).
     # 2026-11-07: +2 N/A rows from PR 881 review: state-reset-holds-every-lease-at-once x postgres-state (a Postgres state lease is a row, no open file) and state-reset-misreads-stored-partitions x mongo (no partition_by on MongoDB).
-    na_ceiling: 578  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 raised 576 -> 578 by the write-queue fix: the postgres-state N/A rows of sqlite-second-overdue-writer-has-no-place and sqlite-chunk-claim-takes-no-turn, the queue being SQLite-only; 2026-11-07 raised 569 -> 576 by #882: the 7 structural N/A rows of cdc-stdout-partial-image and cdc-stdout-partial-before-image, each with its reason in dev/seeded/seeds.yaml; the 569 base is #881 with its own rows
+    na_ceiling: 584  # ratchet-pin: seeded-na (review 2027-02-01); 2026-11-07 raised 576 -> 578 by the write-queue fix: the postgres-state N/A rows of sqlite-second-overdue-writer-has-no-place and sqlite-chunk-claim-takes-no-turn, the queue being SQLite-only; 2026-11-07 raised 569 -> 576 by #882: the 7 structural N/A rows of cdc-stdout-partial-image and cdc-stdout-partial-before-image, each with its reason in dev/seeded/seeds.yaml; the 569 base is #881 with its own rows; 2026-11-08 raised 578 -> 584 by #884: six MongoDB rows (no partition_by on MongoDB) for the partition-name seeds of the second review of #881 and the granularity seed, each with its reason in dev/seeded/seeds.yaml; the postgres-state row of state-reset-half-done-says-nothing-was-done is graded, not N/A
     note: "verify_seeded_recall re-introduces every known bug class in dev/seeded/seeds.yaml as a
       source patch in a scratch worktree, builds it, and requires the declared catching cells
       (green on the unpatched tree) to go red; MISSED / STALE / BROKEN / NO-CONTROL rows fail.
       On in release-oracle-full (a run without it is a reduced gate). A row whose every declared cell
       skipped on the stand is NOT-GRADED-HERE (a SKIP row naming each skip reason) under
       not_graded_here_ceiling; every `na:` row is an N/A ledger row with its reason, held under na_ceiling;
+      a row that declares `platform:` on another host is OWED (a DESIGN skip) and graded by the island on that platform;
       a stopped cell (TIMEOUT, ABORT, SIGKILL) is ABORTED and fails, never a catch; a row with a green control and a seed that left nothing red stays MISSED.
       RESIDUAL: several classes have engines with no catching cell (see the manifest)"
   - id: cdc_standby
