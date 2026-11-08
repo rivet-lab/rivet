@@ -233,6 +233,8 @@ mod live_operator_contract;
 #[cfg(feature = "oracle")]
 #[path = "live/live_oracle.rs"]
 mod live_oracle;
+#[path = "live/live_p5_matrix.rs"]
+mod live_p5_matrix;
 #[path = "live/live_parallel_ux.rs"]
 mod live_parallel_ux;
 #[path = "live/live_parquet_roundtrip.rs"]

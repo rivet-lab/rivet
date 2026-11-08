@@ -20,6 +20,10 @@ filter = 'test(/^chunking_stand::(oracle_cells::)?stand_pool_split_/)'
 slow-timeout = { period = "300s", terminate-after = 4 }
 
 [[profile.default.overrides]]
+filter = 'test(/^live_p5_matrix::no_debris_and_an_equal_rerun_after_every_stop_/)'
+slow-timeout = { period = "300s", terminate-after = 4 }
+
+[[profile.default.overrides]]
 filter = 'test(/^live_cdc_mssql::/) or test(/^live_cdc_harm::a_mssql/)'
 slow-timeout = { period = "120s", terminate-after = 4 }
 
