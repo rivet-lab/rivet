@@ -1,6 +1,6 @@
 //! P5 (no debris after a stop, a re-run equals an uninterrupted run): the axes are read from the code and the oracle contract is strict.
 
-#[path = "../common/p5_axes.rs"]
+#[path = "../p5/axes.rs"]
 mod p5_axes;
 
 use p5_axes::*;

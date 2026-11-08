@@ -1,7 +1,9 @@
 //! P5 live matrix: a run stopped at every hook of the product, then run again, leaves no debris and delivers what an uninterrupted run delivers.
 //! The axes come from the code (`p5_axes`); the grade is `dev/release_oracle/no_debris.py` (native listings, raw state SQL, a whole-directory DuckDB glob). One line per cell.
 
-use crate::common::p5_axes as p5;
+#[allow(dead_code)]
+#[path = "../p5/axes.rs"]
+mod p5;
 use crate::common::*;
 use crate::live_sabotage::seeded;
 use serde_json::{Value, json};

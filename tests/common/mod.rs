@@ -16,7 +16,6 @@ mod mssql;
 mod mysql;
 #[cfg(feature = "oracle")]
 mod oracle;
-pub mod p5_axes;
 mod parquet;
 mod pg;
 mod refusal;
