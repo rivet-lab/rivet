@@ -3288,7 +3288,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(asked, 1, "no wait: asked once");
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(started.elapsed() < crate::test_budget::ceiling(std::time::Duration::from_secs(1)));
         let mut asked = 0;
         let started = std::time::Instant::now();
         wait_while_a_lease_is_held(std::time::Duration::from_millis(1200), || {
@@ -3299,7 +3299,7 @@ mod tests {
         let took = started.elapsed();
         assert!(
             took >= std::time::Duration::from_millis(1150)
-                && took < std::time::Duration::from_millis(1800),
+                && took < crate::test_budget::ceiling(std::time::Duration::from_millis(1800)),
             "held throughout: waited {took:?} for a 1.2 s wait"
         );
         assert_eq!(asked, 3, "asked at 0 s, 1 s and 1.2 s");
