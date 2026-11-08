@@ -719,7 +719,10 @@ pub(crate) fn refuse_unbuildable_override<T>(
             format!("declare `{us}` (microseconds), or remove the override")
         }
         RivetType::Decimal { scale, .. } => {
-            format!("declare `decimal(38,{scale})` or `text`, or remove the override")
+            format!(
+                "declare `decimal(38,{})`, or remove the override",
+                scale.min(&38)
+            )
         }
         _ => "declare a type the reader supports for this column, or remove the override".into(),
     };
@@ -1300,9 +1303,9 @@ mod override_probe_tests {
         );
     }
 
-    /// A decimal override past precision 38 names `decimal(38,s)` and `text` as the remedy.
+    /// A decimal override past precision 38 names `decimal(38,s)`, the one declaration every engine's reader accepts.
     #[test]
-    fn a_wide_decimal_override_without_a_builder_names_decimal_38_and_text() {
+    fn a_wide_decimal_override_without_a_builder_names_decimal_38() {
         let err = refuse_unbuildable_override(
             "mssql",
             "d",
@@ -1314,10 +1317,33 @@ mod override_probe_tests {
         )
         .unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
-        assert!(
-            err.to_string()
-                .contains("declare `decimal(38,2)` or `text`")
+        assert_eq!(
+            err.to_string(),
+            "mssql: column `d` is declared decimal(50,2) by a `columns:` override, a type the mssql reader cannot build; declare `decimal(38,2)`, or remove the override"
         );
+    }
+
+    /// The declaration the decimal refusal prints parses back to a decimal of precision 38 for every precision and scale a config can hold.
+    #[test]
+    fn the_printed_decimal_remedy_is_a_declaration_the_parser_accepts() {
+        use crate::types::{RivetType, parse_type_str};
+        for precision in 39..=76u8 {
+            for scale in -128..=precision as i8 {
+                let declared = RivetType::Decimal { precision, scale };
+                let err = refuse_unbuildable_override("oracle", "d", &declared, internal_stop())
+                    .unwrap_err()
+                    .to_string();
+                let remedy = err
+                    .split("declare `")
+                    .nth(1)
+                    .and_then(|r| r.split('`').next())
+                    .unwrap_or_else(|| panic!("{err}"));
+                match parse_type_str(remedy) {
+                    Ok(RivetType::Decimal { precision: 38, .. }) => {}
+                    other => panic!("decimal({precision},{scale}) printed `{remedy}`: {other:?}"),
+                }
+            }
+        }
     }
 
     /// A successful build and any other failure pass through the guard untouched.

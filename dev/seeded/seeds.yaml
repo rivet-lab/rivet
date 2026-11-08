@@ -5204,15 +5204,19 @@ seeds:
           - a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql
           - a_nanosecond_timestamp_override_is_refused_on_an_empty_source_mysql
           - a_first_cdc_run_refused_after_its_anchor_releases_it_mysql
+          - "lib:the_mysql_schema_stage_refuses_a_nanosecond_override"
       mssql:
         patch: override-without-builder-internal-stop/mssql.patch
         cells:
           - a_value_the_declared_type_cannot_read_is_refused_not_an_internal_stop_mssql
           - "lib:no_override_over_any_wire_value_ends_as_an_internal_stop"
+          - "lib:a_foreign_cell_in_a_native_column_is_an_internal_stop"
+          - "lib:the_mssql_schema_stage_refuses_a_wide_decimal_override"
       oracle:
         patch: override-without-builder-internal-stop/oracle.patch
         cells:
           - a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle
+          - "lib:the_oracle_schema_stage_refuses_a_wide_decimal_override"
       postgres:
         na: "the PostgreSQL converter raises RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH for any builder or target mismatch at its invariant guard, so no override reaches an internal stop (survey: 0 of 272 runs)"
       mongo:

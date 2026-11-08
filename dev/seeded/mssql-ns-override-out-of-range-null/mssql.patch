@@ -1,7 +1,7 @@
 diff --git a/src/source/mssql/arrow_convert.rs b/src/source/mssql/arrow_convert.rs
 --- a/src/source/mssql/arrow_convert.rs
 +++ b/src/source/mssql/arrow_convert.rs
-@@ -635,9 +635,10 @@ fn build_array(
+@@ -652,9 +652,10 @@ fn build_array(
              let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
              for row in rows {
                  match row.try_get::<NaiveDateTime, _>(idx) {
@@ -13,5 +13,5 @@ diff --git a/src/source/mssql/arrow_convert.rs b/src/source/mssql/arrow_convert.
 +                        None => b.append_null(),
 +                    },
                      Ok(None) => b.append_null(),
-                     Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
-                 }
+                     Err(e) => {
+                         return Err(cell_mismatch(

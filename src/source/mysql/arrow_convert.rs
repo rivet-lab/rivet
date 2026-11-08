@@ -2554,4 +2554,21 @@ mod override_builder_tests {
             }
         }
     }
+
+    /// The schema stage refuses a nanosecond override on a MySQL column by code, and builds the microsecond one and the undeclared column.
+    #[test]
+    fn the_mysql_schema_stage_refuses_a_nanosecond_override() {
+        use mysql::consts::ColumnType;
+        let columns = [mysql::Column::new(ColumnType::MYSQL_TYPE_DATETIME).with_name(b"ts")];
+        let declared = |ov: &str| {
+            ColumnOverrides::from([("ts".to_string(), crate::types::parse_type_str(ov).unwrap())])
+        };
+        let err = mysql_schema_and_arrow_types(&columns, &declared("timestamp_ns")).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        assert!(err.to_string().contains("declare `timestamp`"), "{err}");
+        for ok in [declared("timestamp"), ColumnOverrides::new()] {
+            let (schema, types) = mysql_schema_and_arrow_types(&columns, &ok).unwrap();
+            assert_eq!((schema.fields().len(), types.len()), (1, 1));
+        }
+    }
 }

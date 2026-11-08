@@ -278,7 +278,7 @@ pub(super) fn mssql_columns_to_schema(
                         "mssql",
                         col.name(),
                         &mapping.rivet_type,
-                        build_array(dt, idx, &[], col.name(), None),
+                        build_array(dt, idx, &[], col.name(), None, Some(&mapping.rivet_type)),
                     )?;
                 }
                 fields.push(field);
@@ -445,6 +445,7 @@ fn build_array(
     rows: &[Row],
     column: &str,
     max_value_bytes: Option<usize>,
+    declared: Option<&RivetType>,
 ) -> Result<ArrayRef> {
     macro_rules! simple {
         ($builder:ty, $pat:pat => $val:expr) => {{
@@ -465,7 +466,7 @@ fn build_array(
                     | Some(ColumnData::Numeric(None))
                     | None => b.append_null(),
                     Some(other) => {
-                        return Err(override_mismatch(column, &target.to_string(), other));
+                        return Err(cell_mismatch(declared, column, target, Some(other), ""));
                     }
                 }
             }
@@ -499,7 +500,7 @@ fn build_array(
                     | Some(ColumnData::Numeric(None))
                     | None => b.append_null(),
                     Some(other) => {
-                        return Err(override_mismatch(column, &target.to_string(), other));
+                        return Err(cell_mismatch(declared, column, target, Some(other), ""));
                     }
                 }
             }
@@ -601,7 +602,15 @@ fn build_array(
                             + UNIX_EPOCH_DAY,
                     ),
                     Ok(None) => b.append_null(),
-                    Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
+                    Err(e) => {
+                        return Err(cell_mismatch(
+                            declared,
+                            column,
+                            target,
+                            cell(row, idx),
+                            &e.to_string(),
+                        ));
+                    }
                 }
             }
             Arc::new(b.finish())
@@ -617,7 +626,15 @@ fn build_array(
                     Ok(v) => v.map(|dt| naive_micros(dt, legacy)),
                     Err(_) => match row.try_get::<chrono::DateTime<chrono::FixedOffset>, _>(idx) {
                         Ok(v) => v.map(|dt| dt.timestamp_micros()),
-                        Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
+                        Err(e) => {
+                            return Err(cell_mismatch(
+                                declared,
+                                column,
+                                target,
+                                cell(row, idx),
+                                &e.to_string(),
+                            ));
+                        }
                     },
                 };
                 match micros {
@@ -639,7 +656,15 @@ fn build_array(
                         dt, "mssql", column,
                     )?),
                     Ok(None) => b.append_null(),
-                    Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
+                    Err(e) => {
+                        return Err(cell_mismatch(
+                            declared,
+                            column,
+                            target,
+                            cell(row, idx),
+                            &e.to_string(),
+                        ));
+                    }
                 }
             }
             let arr = b.finish();
@@ -658,7 +683,15 @@ fn build_array(
                             + (t.nanosecond() as i64 / 1000),
                     ),
                     Ok(None) => b.append_null(),
-                    Err(_) => return Err(cell_mismatch(column, target, cell(row, idx))),
+                    Err(e) => {
+                        return Err(cell_mismatch(
+                            declared,
+                            column,
+                            target,
+                            cell(row, idx),
+                            &e.to_string(),
+                        ));
+                    }
                 }
             }
             Arc::new(b.finish())
@@ -671,10 +704,24 @@ fn build_array(
     Ok(arr)
 }
 
-/// The refusal for a cell the `target` builder cannot read, naming the wire type the server sent.
-fn cell_mismatch(column: &str, target: &DataType, cell: Option<&ColumnData<'_>>) -> anyhow::Error {
-    let sent = cell.map_or_else(|| "no value".to_string(), cell_type_name);
-    declared_mismatch(column, &target.to_string(), &sent)
+/// The stop for a cell the `target` builder cannot read: the coded usage refusal naming the declared type when a `columns:` override set it, an internal stop for a native column.
+fn cell_mismatch(
+    declared: Option<&RivetType>,
+    column: &str,
+    target: &DataType,
+    cell: Option<&ColumnData<'_>>,
+    detail: &str,
+) -> anyhow::Error {
+    match declared {
+        Some(d) => {
+            let sent = cell.map_or_else(|| "no value".to_string(), cell_type_name);
+            declared_mismatch(column, &d.label(), &sent)
+        }
+        None => crate::error::coded(
+            crate::error::codes::INTERNAL_TYPE_BUILDER,
+            format!("mssql column `{column}`: no {target} from {cell:?} {detail}"),
+        ),
+    }
 }
 
 /// A valued cell whose wire type a `columns:` override declared as something rivet does not convert.
@@ -826,6 +873,7 @@ pub(super) fn mssql_rows_to_record_batch(
     schema: &SchemaRef,
     rows: &[Row],
     max_value_bytes: Option<usize>,
+    overrides: &ColumnOverrides,
 ) -> Result<arrow::record_batch::RecordBatch> {
     if let Some(first) = rows.first() {
         let expected: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -835,8 +883,15 @@ pub(super) fn mssql_rows_to_record_batch(
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
     for (idx, field) in schema.fields().iter().enumerate() {
         arrays.push(
-            build_array(field.data_type(), idx, rows, field.name(), max_value_bytes)
-                .with_context(|| format!("mssql column '{}'", field.name()))?,
+            build_array(
+                field.data_type(),
+                idx,
+                rows,
+                field.name(),
+                max_value_bytes,
+                overrides.get(field.name()),
+            )
+            .with_context(|| format!("mssql column '{}'", field.name()))?,
         );
     }
     let batch = arrow::record_batch::RecordBatch::try_new(schema.clone(), arrays)?;
@@ -1024,7 +1079,9 @@ mod tests {
     #[test]
     fn text_and_variant_columns_build_and_pass_the_value_checksum() {
         use arrow::array::{Array, AsArray};
-        let batch = mssql_rows_to_record_batch(&text_schema(), &text_rows(), None).unwrap();
+        let batch =
+            mssql_rows_to_record_batch(&text_schema(), &text_rows(), None, &ColumnOverrides::new())
+                .unwrap();
         let s = batch.column(0).as_string::<i32>();
         assert_eq!((s.value(0), s.value(1)), ("h\u{e9}llo", ""));
         let v = batch.column(1).as_string::<i32>();
@@ -1072,7 +1129,8 @@ mod tests {
             .column("n", ColumnType::Int4, ColumnData::I32(Some(7)))
             .build()];
         let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Utf8, true)]));
-        let err = mssql_rows_to_record_batch(&schema, &rows, None).unwrap_err();
+        let err =
+            mssql_rows_to_record_batch(&schema, &rows, None, &ColumnOverrides::new()).unwrap_err();
         assert!(
             format!("{err:#}").contains("column `n` is declared text"),
             "{err:#}"
@@ -1579,7 +1637,14 @@ mod error_code_tests {
             let rivet = crate::types::parse_type_str(ov).unwrap();
             let mapping = TypeMapping::from_source(&SourceColumn::simple("c", "x", true), rivet);
             let field = build_arrow_field(&mapping).expect("override has an Arrow field");
-            let probe = build_array(field.data_type(), 0, &[], "c", None);
+            let probe = build_array(
+                field.data_type(),
+                0,
+                &[],
+                "c",
+                None,
+                Some(&mapping.rivet_type),
+            );
             if let Err(e) =
                 crate::source::refuse_unbuildable_override("mssql", "c", &mapping.rivet_type, probe)
             {
@@ -1589,7 +1654,9 @@ mod error_code_tests {
             let schema = Arc::new(Schema::new(vec![field]));
             for (ty, data) in &cells {
                 let rows = [Row::builder().column("c", *ty, data.clone()).build()];
-                if let Err(e) = mssql_rows_to_record_batch(&schema, &rows, None) {
+                let declared =
+                    ColumnOverrides::from([("c".to_string(), mapping.rivet_type.clone())]);
+                if let Err(e) = mssql_rows_to_record_batch(&schema, &rows, None, &declared) {
                     let code = crate::error::error_code(&e);
                     assert_ne!(
                         code,
@@ -1598,6 +1665,113 @@ mod error_code_tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A native column (no `columns:` override) whose cell the builder cannot read is an internal stop, never a blame on the operator.
+    #[test]
+    fn a_foreign_cell_in_a_native_column_is_an_internal_stop() {
+        let foreign = [
+            (DataType::Int32, ColumnData::I64(Some(1))),
+            (DataType::Int16, ColumnData::I32(Some(1))),
+            (DataType::Date32, ColumnData::I32(Some(1))),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                ColumnData::I32(Some(1)),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                ColumnData::I32(Some(1)),
+            ),
+            (
+                DataType::Time64(TimeUnit::Microsecond),
+                ColumnData::I32(Some(1)),
+            ),
+        ];
+        for (ty, data) in foreign {
+            let schema = Arc::new(Schema::new(vec![Field::new("c", ty.clone(), true)]));
+            let rows = [Row::builder().column("c", ColumnType::Int4, data).build()];
+            let err = mssql_rows_to_record_batch(&schema, &rows, None, &ColumnOverrides::new())
+                .unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_INTERNAL_TYPE_BUILDER", 6);
+            let declared = ColumnOverrides::from([("c".to_string(), RivetType::Int32)]);
+            let err = mssql_rows_to_record_batch(&schema, &rows, None, &declared).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            assert!(
+                format!("{err:#}").contains("is declared int32 by a `columns:` override"),
+                "{err:#}"
+            );
+        }
+    }
+
+    /// The declaration the wide-decimal refusal prints, applied as the config, builds the column and delivers the value.
+    #[test]
+    fn the_printed_decimal_remedy_delivers_on_sql_server() {
+        use tiberius::numeric::Numeric;
+        let wide = crate::types::parse_type_str("decimal(50,2)").unwrap();
+        let mapping = TypeMapping::from_source(&SourceColumn::simple("c", "x", true), wide);
+        let field = build_arrow_field(&mapping).expect("override has an Arrow field");
+        let probe = build_array(
+            field.data_type(),
+            0,
+            &[],
+            "c",
+            None,
+            Some(&mapping.rivet_type),
+        );
+        let refusal =
+            crate::source::refuse_unbuildable_override("mssql", "c", &mapping.rivet_type, probe)
+                .unwrap_err()
+                .to_string();
+        let remedy = refusal
+            .split("declare `")
+            .nth(1)
+            .and_then(|r| r.split('`').next())
+            .expect("the refusal prints a declaration");
+        assert_eq!(remedy, "decimal(38,2)");
+        let rivet = crate::types::parse_type_str(remedy).unwrap();
+        let mapping = TypeMapping::from_source(&SourceColumn::simple("c", "x", true), rivet);
+        let field = build_arrow_field(&mapping).expect("remedy has an Arrow field");
+        let declared = ColumnOverrides::from([("c".to_string(), mapping.rivet_type.clone())]);
+        let schema = Arc::new(Schema::new(vec![field]));
+        let rows = [Row::builder()
+            .column(
+                "c",
+                ColumnType::Numericn,
+                ColumnData::Numeric(Some(Numeric::new_with_scale(12_345, 2))),
+            )
+            .build()];
+        let batch = mssql_rows_to_record_batch(&schema, &rows, None, &declared).unwrap();
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Decimal128Array>()
+            .expect("decimal column");
+        assert_eq!(values.value(0), 12_345);
+    }
+
+    /// The schema stage refuses a wide decimal override by code, builds a narrow one, and leaves the same column without an override alone.
+    #[test]
+    fn the_mssql_schema_stage_refuses_a_wide_decimal_override() {
+        use tiberius::numeric::Numeric;
+        let rows = [Row::builder()
+            .column(
+                "d",
+                ColumnType::Numericn,
+                ColumnData::Numeric(Some(Numeric::new_with_scale(125, 2))),
+            )
+            .build()];
+        let declared = |ov: &str| {
+            ColumnOverrides::from([("d".to_string(), crate::types::parse_type_str(ov).unwrap())])
+        };
+        let err =
+            mssql_columns_to_schema(rows[0].columns(), &declared("decimal(50,2)"), &rows, None)
+                .unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        assert!(err.to_string().contains("declare `decimal(38,2)`"), "{err}");
+        for ok in [declared("decimal(38,2)"), ColumnOverrides::new()] {
+            let (schema, _) = mssql_columns_to_schema(rows[0].columns(), &ok, &rows, None).unwrap();
+            assert_eq!(schema.fields().len(), 1);
         }
     }
 }

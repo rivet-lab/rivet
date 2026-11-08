@@ -205,9 +205,14 @@ pub(super) fn oracle_schema(
     native: &[String],
     overrides: &ColumnOverrides,
 ) -> Result<Schema> {
-    let mut fields = Vec::with_capacity(metas.len());
+    schema_from_mappings(oracle_type_mappings(metas, native, overrides), overrides)
+}
+
+/// The Arrow schema for resolved column mappings; an override with no builder is refused by code, an unmapped column is named.
+fn schema_from_mappings(mappings: Vec<TypeMapping>, overrides: &ColumnOverrides) -> Result<Schema> {
+    let mut fields = Vec::with_capacity(mappings.len());
     let mut errors = Vec::new();
-    for mapping in oracle_type_mappings(metas, native, overrides) {
+    for mapping in mappings {
         match build_arrow_field(&mapping) {
             Some(f) => {
                 if let Some(dt) = mapping
@@ -1145,5 +1150,34 @@ mod override_builder_tests {
                 crate::error::assert_coded(&e, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
             }
         }
+    }
+
+    /// The schema stage refuses a wide decimal override by code, builds a narrow one, and leaves the same column without an override alone.
+    #[test]
+    fn the_oracle_schema_stage_refuses_a_wide_decimal_override() {
+        let mapping_of = |ov: &str| {
+            let rivet = crate::types::parse_type_str(ov).unwrap();
+            TypeMapping::from_source(&SourceColumn::simple("d", "number", true), rivet)
+        };
+        let declared = |ov: &str| {
+            ColumnOverrides::from([("d".to_string(), crate::types::parse_type_str(ov).unwrap())])
+        };
+        let err = schema_from_mappings(
+            vec![mapping_of("decimal(50,2)")],
+            &declared("decimal(50,2)"),
+        )
+        .unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        assert!(err.to_string().contains("declare `decimal(38,2)`"), "{err}");
+        let ok = schema_from_mappings(
+            vec![mapping_of("decimal(38,2)")],
+            &declared("decimal(38,2)"),
+        )
+        .unwrap();
+        assert_eq!(ok.fields().len(), 1);
+        let unoverridden =
+            schema_from_mappings(vec![mapping_of("decimal(50,2)")], &ColumnOverrides::new())
+                .unwrap();
+        assert_eq!(unoverridden.fields().len(), 1);
     }
 }

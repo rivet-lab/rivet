@@ -1,7 +1,7 @@
 diff --git a/src/source/oracle/arrow_convert.rs b/src/source/oracle/arrow_convert.rs
 --- a/src/source/oracle/arrow_convert.rs
 +++ b/src/source/oracle/arrow_convert.rs
-@@ -215,12 +215,7 @@ pub(super) fn oracle_schema(
+@@ -220,12 +220,7 @@ fn schema_from_mappings(mappings: Vec<TypeMapping>, overrides: &ColumnOverrides)
                      .as_ref()
                      .filter(|_| overrides.contains_key(&mapping.column_name))
                  {

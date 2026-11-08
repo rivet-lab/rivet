@@ -1,18 +1,31 @@
 diff --git a/src/source/mssql/arrow_convert.rs b/src/source/mssql/arrow_convert.rs
 --- a/src/source/mssql/arrow_convert.rs
 +++ b/src/source/mssql/arrow_convert.rs
-@@ -464,9 +464,11 @@ fn build_array(
-                     | Some(ColumnData::Guid(None))
-                     | Some(ColumnData::Numeric(None))
-                     | None => b.append_null(),
--                    Some(other) => {
--                        return Err(override_mismatch(column, &target.to_string(), other));
--                    }
-+                    Some(other) => crate::rivet_bail!(
-+                        crate::error::codes::INTERNAL_TYPE_BUILDER,
-+                        "mssql column {idx}: expected {} but row carried {other:?}",
-+                        stringify!($builder)
-+                    ),
+@@ -274,12 +274,8 @@ pub(super) fn mssql_columns_to_schema(
+                     .as_ref()
+                     .filter(|_| overrides.contains_key(col.name()))
+                 {
+-                    crate::source::refuse_unbuildable_override(
+-                        "mssql",
+-                        col.name(),
+-                        &mapping.rivet_type,
+-                        build_array(dt, idx, &[], col.name(), None, Some(&mapping.rivet_type)),
+-                    )?;
++                    let _ =
++                        build_array(dt, idx, &[], col.name(), None, Some(&mapping.rivet_type));
                  }
-             }
-             Arc::new(b.finish()) as ArrayRef
+                 fields.push(field);
+                 decoders.push((col.name().to_string(), col.column_type()));
+@@ -713,11 +709,7 @@ fn cell_mismatch(
+     detail: &str,
+ ) -> anyhow::Error {
+     match declared {
+-        Some(d) => {
+-            let sent = cell.map_or_else(|| "no value".to_string(), cell_type_name);
+-            declared_mismatch(column, &d.label(), &sent)
+-        }
+-        None => crate::error::coded(
++        Some(_) | None => crate::error::coded(
+             crate::error::codes::INTERNAL_TYPE_BUILDER,
+             format!("mssql column `{column}`: no {target} from {cell:?} {detail}"),
+         ),
