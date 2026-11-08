@@ -1,0 +1,21 @@
+diff --git a/src/pipeline/chunked/mod.rs b/src/pipeline/chunked/mod.rs
+--- a/src/pipeline/chunked/mod.rs
++++ b/src/pipeline/chunked/mod.rs
+@@ -460,7 +460,7 @@
+     what: &str,
+     done: Option<&str>,
+ ) -> Result<crate::state::LoadLease<'s>> {
+-    let outcome = done.unwrap_or(crate::state::NOTHING_DONE);
++    let outcome = crate::state::NOTHING_DONE;
+     if let Some(lease) = try_run_lease_saying(state, export, source, outcome)? {
+         return Ok(lease);
+     }
+@@ -470,7 +470,7 @@
+          holds the export's run lease. Wait for it to finish, or stop that process (its pid \
+          ends the run id), then repeat this command.{}",
+         live_run_label(state, export, source)?,
+-        done.map(|d| format!("\n  {d}")).unwrap_or_default()
++        done.map(|_| String::new()).unwrap_or_default()
+     )
+ }
+ 

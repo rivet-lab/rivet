@@ -20,6 +20,32 @@ use crate::config::{PartitionGranularity, SourceType};
 /// a NULL bucket stays queryable instead of silently dropping rows.
 pub(crate) const HIVE_NULL_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
 
+/// The child-name suffix of the NULL bucket (`<parent>__null`).
+pub(crate) const NULL_BUCKET_LABEL: &str = "null";
+
+/// Whether `value` is a bucket label of `granularity`: the text `generate_ranges` writes, round-tripped through the date.
+fn is_label_at(value: &str, granularity: PartitionGranularity) -> bool {
+    let (tail, format) = match granularity {
+        PartitionGranularity::Day => ("", "%Y-%m-%d"),
+        PartitionGranularity::Month => ("-01", "%Y-%m"),
+        PartitionGranularity::Year => ("-01-01", "%Y"),
+    };
+    NaiveDate::parse_from_str(&format!("{value}{tail}"), "%Y-%m-%d")
+        .is_ok_and(|day| day.format(format).to_string() == value)
+}
+
+/// Whether `value` is a name suffix `partition_by` gave a child at any granularity: a day, month or year label, or the NULL bucket.
+pub(crate) fn is_child_label(value: &str) -> bool {
+    value == NULL_BUCKET_LABEL
+        || [
+            PartitionGranularity::Day,
+            PartitionGranularity::Month,
+            PartitionGranularity::Year,
+        ]
+        .into_iter()
+        .any(|g| is_label_at(value, g))
+}
+
 /// One partition bucket: a Hive `col=value` value label and its half-open
 /// `[lo, hi)` date bounds (inclusive `lo`, exclusive `hi`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +254,46 @@ mod tests {
 
     fn labels(ranges: &[PartitionRange]) -> Vec<String> {
         ranges.iter().map(|r| r.label_value.clone()).collect()
+    }
+
+    #[test]
+    fn child_labels_are_the_labels_generate_ranges_yields_at_any_granularity_and_the_null_bucket() {
+        for v in [
+            "2026-01-01",
+            "2024-02-29",
+            "2026-01",
+            "1999-12",
+            "2026",
+            "1999",
+            "null",
+        ] {
+            assert!(is_child_label(v), "{v}");
+        }
+        for v in [
+            "archive",
+            "typo",
+            "",
+            "2026-1-1",
+            "2026-02-30",
+            "2026-13",
+            "2026-1",
+            "26",
+            "20260",
+            "+2026",
+            "+2026-01-01",
+            "2026-01-01 ",
+            "NULL",
+        ] {
+            assert!(!is_child_label(v), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn each_granularity_accepts_only_its_own_label_width() {
+        use PartitionGranularity::{Day, Month, Year};
+        assert!(is_label_at("2026-01-01", Day) && !is_label_at("2026-01", Day));
+        assert!(is_label_at("2026-01", Month) && !is_label_at("2026-01-01", Month));
+        assert!(is_label_at("2026", Year) && !is_label_at("2026-01", Year));
     }
 
     // ── day granularity ────────────────────────────────────────────────────

@@ -12,8 +12,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dedupe:
+    name: Dedupe against a dispatched run
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      duplicate: ${{ steps.check.outputs.duplicate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/nightly_dedupe.py check
+
+  start:
+    name: Start the nightly
+    needs: dedupe
+    if: ${{ needs.dedupe.outputs.duplicate != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "no covering dispatch run, the nightly proceeds"
+
   live-full:
     name: Full live suite (incl. content_load)
+    needs: start
     # Measured 57 min on 2026-10-02 (build 24, tests 27, the rest setup): ~1.6x.
     timeout-minutes: 90
     runs-on: ubuntu-latest
@@ -240,6 +268,7 @@ jobs:
   # shell on 4.x.
   mongo-versions:
     name: Mongo live (v${{ matrix.mongo_version }})
+    needs: start
     timeout-minutes: 60
     runs-on: ubuntu-22.04
     strategy:
@@ -333,6 +362,7 @@ jobs:
   # defect) while the run's verdict ignored them.
   cdc-version-scout:
     name: CDC vs ${{ matrix.engine }}:${{ matrix.tag }}
+    needs: start
     timeout-minutes: 30
     runs-on: ubuntu-latest
     strategy:
@@ -393,6 +423,7 @@ jobs:
   # gate on the schedule day so the nightly stays fast.
   release-compat-artifacts:
     name: Cross-version artifact exchange (plan/apply, run/validate)
+    needs: start
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
@@ -449,6 +480,7 @@ jobs:
 
   soak-cdc:
     name: CDC soak (weekly)
+    needs: start
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
@@ -487,6 +519,7 @@ jobs:
 
   mysql-statement-truth:
     name: MySQL statement truth (corpus vs the stand)
+    needs: start
     timeout-minutes: 150
     runs-on: ubuntu-latest
     steps:
@@ -521,6 +554,7 @@ jobs:
   # E2E: one nextest archive, four legs on a full stack, one census job.
   e2e-build:
     name: E2E build (nextest archive)
+    needs: start
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -771,8 +805,8 @@ jobs:
 
   e2e-matrix:
     name: E2E matrix
-    needs: [e2e]
-    if: ${{ always() }}
+    needs: [start, e2e]
+    if: ${{ always() && needs.start.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -821,8 +855,8 @@ jobs:
 
   nightly-verdict:
     name: Nightly verdict
-    needs: [live-full, mongo-versions, cdc-version-scout, release-compat-artifacts, soak-cdc, mysql-statement-truth, e2e-build, e2e, e2e-matrix]
-    if: ${{ always() }}
+    needs: [dedupe, start, live-full, mongo-versions, cdc-version-scout, release-compat-artifacts, soak-cdc, mysql-statement-truth, e2e-build, e2e, e2e-matrix]
+    if: ${{ always() && needs.start.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -840,7 +874,7 @@ jobs:
         run: |
           red=$(python3 -c 'import json,os; print(" ".join(k for k, v in json.loads(os.environ["NEEDS"]).items() if v["result"] != "success"))')
           if [ -z "$red" ]; then echo "nightly green"; exit 0; fi
-          green=$(gh run list --workflow nightly-live.yml --branch "$GITHUB_REF_NAME" --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
+          green=$(python3 .github/scripts/nightly_dedupe.py green)
           { echo "### Nightly red: $red"; python3 .github/scripts/nightly_range.py --green "$green" --head "$GITHUB_SHA"; } | tee -a "$GITHUB_STEP_SUMMARY"
           echo "::error title=Nightly red::$red"
           exit 1

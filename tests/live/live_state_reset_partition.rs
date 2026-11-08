@@ -29,14 +29,19 @@ fn partition_column(engine: SqlEngine) -> &'static str {
 }
 
 fn partitioned(engine: SqlEngine, table: &str, mode: &str, dest: &Path) -> Rig {
+    partitioned_with(engine, table, mode, &[], dest)
+}
+
+fn partitioned_with(engine: SqlEngine, table: &str, mode: &str, more: &[&str], dest: &Path) -> Rig {
     let column = partition_column(engine);
     let cursor = format!("cursor_column: {}", engine.col("id"));
     let by = format!("partition_by: {column}");
-    let lines: Vec<&str> = if mode == "incremental" {
+    let mut lines: Vec<&str> = if mode == "incremental" {
         vec![&cursor, &by]
     } else {
         vec![&by]
     };
+    lines.extend_from_slice(more);
     engine
         .staged(engine.rig(table), mode, &lines)
         .dest_path(dest.join("{partition}"))
@@ -199,12 +204,34 @@ fn reset_of_an_unknown_child_is_refused(engine: SqlEngine) {
     let dest = tempfile::tempdir().unwrap();
     let rig = partitioned(engine, &table, "incremental", dest.path());
     rig.run_ok();
+    if rig.state_count("SELECT COUNT(*) FROM export_state WHERE export_name = '{export}'") == 0 {
+        let ours = source_key(&rig);
+        rig.edit_state(
+            &format!(
+                "INSERT INTO export_state (export_name, prefix, last_cursor_value) \
+                 VALUES ('{{export}}', '{ours}', '7')"
+            ),
+            1,
+        );
+    }
     let before = state_names(&rig, &table);
     let ghost = format!("{}__1999-01-01", rig.export_name());
     let out = rig.cli(&["state", "reset", "--export", &ghost]);
     assert!(!out.status.success());
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(said.contains("RIVET_CLI_EXPORT_UNKNOWN"), "{said}");
+    let held_line = said
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Partitions held: "))
+        .unwrap_or_else(|| panic!("the refusal lists the partitions held: {said}"));
+    assert!(
+        held_line.split(", ").all(|p| p != rig.export_name()),
+        "the parent is no partition of itself: {held_line}"
+    );
+    assert!(
+        held_line.contains(&format!("{}__", rig.export_name())),
+        "{held_line}"
+    );
     assert_eq!(state_names(&rig, &table), before, "nothing was reset");
 }
 
@@ -411,6 +438,13 @@ fn child_rows(rig: &Rig, table: &str) -> i64 {
     ))
 }
 
+const CLONE_LABEL: &str = "CAST(1000 + i / 57 AS TEXT) || '-' || CAST(10 + (i / 19) % 3 AS TEXT) || '-' || CAST(10 + i % 19 AS TEXT)";
+
+/// The day label of the `i`-th extra partition, as `CLONE_LABEL` spells it.
+fn clone_label(i: i64) -> String {
+    format!("{}-{}-{}", 1000 + i / 57, 10 + (i / 19) % 3, 10 + i % 19)
+}
+
 /// `count` more partitions of the export, each with a cursor on its source and a boundary.
 fn stored_partitions(rig: &Rig, count: usize) {
     let numbers = format!(
@@ -419,7 +453,7 @@ fn stored_partitions(rig: &Rig, count: usize) {
     rig.edit_state(
         &format!(
             "{numbers} INSERT INTO export_state (export_name, prefix, last_cursor_value) \
-             SELECT '{{export}}__clone' || CAST(i AS TEXT), (SELECT prefix FROM export_state \
+             SELECT '{{export}}__' || {CLONE_LABEL}, (SELECT prefix FROM export_state \
              WHERE export_name <> '{{export}}' AND export_name LIKE '{{export}}%' LIMIT 1), '7' \
              FROM n"
         ),
@@ -428,8 +462,10 @@ fn stored_partitions(rig: &Rig, count: usize) {
     rig.edit_state(
         &format!(
             "{numbers} INSERT INTO export_progression \
-             (export_name, last_committed_strategy, last_committed_cursor) \
-             SELECT '{{export}}__clone' || CAST(i AS TEXT), 'incremental', '7' FROM n"
+             (export_name, last_committed_strategy, last_committed_cursor, \
+             last_committed_run_id, last_committed_at) \
+             SELECT '{{export}}__' || {CLONE_LABEL}, 'incremental', '7', 'r', \
+             '2026-01-01T00:00:00Z' FROM n"
         ),
         count as u64,
     );
@@ -579,7 +615,7 @@ fn reset_beside_a_run_of_one_partition(engine: SqlEngine, state: Option<&str>) {
     rig.run_ok();
     stored_partitions(&rig, 5);
     let export = rig.export_name().to_string();
-    let child = format!("{export}__clone3");
+    let child = format!("{export}__{}", clone_label(3));
     let key = rivet::pipeline::run_lease_key(&child, &source_key(&rig));
     let (states, boundaries) = (
         family_rows(&rig, "export_state"),
@@ -633,6 +669,199 @@ fn reset_beside_a_run_of_one_partition(engine: SqlEngine, state: Option<&str>) {
     assert!(out.status.success(), "{said}");
     assert_eq!(family_rows(&rig, "export_state"), 0, "{said}");
     assert_eq!(family_rows(&rig, "export_progression"), 0, "{said}");
+}
+
+fn at_granularity(engine: SqlEngine, rig: Rig, granularity: &str) -> Rig {
+    let cursor = format!("cursor_column: {}", engine.col("id"));
+    let by = format!("partition_by: {}", partition_column(engine));
+    let width = format!("partition_granularity: {granularity}");
+    engine.staged(rig, "incremental", &[&cursor, &by, &width])
+}
+
+/// After `partition_granularity` changed day to month and a run, a reset of the export clears the partitions of both granularities, the inspect commands show the old ones, and the next run into an empty destination delivers every row.
+fn reset_after_a_granularity_change_takes_every_partition(engine: SqlEngine, state: Option<&str>) {
+    engine.alive();
+    let (table, _guard) = three_days(engine);
+    let dest = tempfile::tempdir().unwrap();
+    let (rig, _state) = on_state(
+        partitioned(engine, &table, "incremental", dest.path()),
+        state,
+    );
+    rig.run_ok();
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
+    let export = rig.export_name().to_string();
+    let day_children = child_rows(&rig, "export_state");
+    assert!(day_children > 0);
+    let rig = at_granularity(engine, rig, "month");
+    rig.run_ok();
+    let shown = rig.cli(&["state", "progression", "--export", &export]);
+    let said = text_of(&shown);
+    assert!(shown.status.success(), "{said}");
+    let day_lines = said
+        .lines()
+        .filter(|l| {
+            l.split_whitespace().next().is_some_and(|n| {
+                n.starts_with(&format!("{export}__")) && n.len() == export.len() + 2 + 10
+            })
+        })
+        .count() as i64;
+    let listed = said;
+    let said = reset(&rig, &export);
+    assert!(said.contains("partition(s)"), "{said}");
+    let left = (
+        family_rows(&rig, "export_state"),
+        family_rows(&rig, "export_progression"),
+    );
+    emptied(dest.path());
+    let rig = at_granularity(engine, rig, "day");
+    rig.run_ok();
+    assert_eq!(
+        delivered(dest.path()),
+        (vec![1, 2, 3, 4, 5, 6], 6),
+        "{said}"
+    );
+    assert_eq!(left, (0, 0), "{said}");
+    assert_eq!(day_lines, day_children, "{listed}");
+}
+
+/// A reset of the export takes the partitions whose suffix is a label of its granularity and never an undeclared name that merely starts with `<export>__`.
+fn reset_takes_labels_and_never_another_exports_name(engine: SqlEngine) {
+    engine.alive();
+    let (table, _guard) = three_days(engine);
+    let dest = tempfile::tempdir().unwrap();
+    let rig = partitioned(engine, &table, "incremental", dest.path());
+    rig.run_ok();
+    let source = source_key(&rig);
+    let kept = ["archive", "2026-02-30", "x__2026-01-01"];
+    let taken = ["2026-01", "2026"];
+    for name in kept.into_iter().chain(taken) {
+        rig.edit_state(
+            &format!(
+                "INSERT INTO export_state (export_name, prefix, last_cursor_value) \
+                 VALUES ('{{export}}__{name}', '{source}', '7')"
+            ),
+            1,
+        );
+    }
+    let said = reset(&rig, rig.export_name());
+    assert!(said.contains("partition(s)"), "{said}");
+    assert_eq!(child_rows(&rig, "export_progression"), 0, "{said}");
+    assert_eq!(
+        rig.state_count("SELECT COUNT(*) FROM export_state WHERE export_name = '{export}'"),
+        0,
+        "{said}"
+    );
+    for name in taken {
+        assert_eq!(
+            rig.state_count(&format!(
+                "SELECT COUNT(*) FROM export_state WHERE export_name = '{{export}}__{name}'"
+            )),
+            0,
+            "'{}__{name}' is a partition of another granularity and goes with the reset: {said}",
+            rig.export_name()
+        );
+    }
+    for name in kept {
+        assert_eq!(
+            rig.state_count(&format!(
+                "SELECT COUNT(*) FROM export_state WHERE export_name = '{{export}}__{name}'"
+            )),
+            1,
+            "the cursor of '{}__{name}' is not a partition of the export: {said}",
+            rig.export_name()
+        );
+    }
+    emptied(dest.path());
+    rig.run_ok();
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
+}
+
+/// An inspect command refuses a name no partition could carry with the unknown-export code and shows a partition the state holds.
+fn inspect_refuses_a_typo_and_shows_a_held_partition(engine: SqlEngine) {
+    engine.alive();
+    let (table, _guard) = three_days(engine);
+    let dest = tempfile::tempdir().unwrap();
+    let rig = partitioned(engine, &table, "incremental", dest.path());
+    rig.run_ok();
+    let before = state_names(&rig, &table);
+    let held = child_of(&rig, &before, 1);
+    for cmd in [
+        &["state", "files"][..],
+        &["state", "chunks"],
+        &["state", "progression"],
+        &["journal"],
+        &["metrics"],
+    ] {
+        for name in [
+            format!("{}__typo", rig.export_name()),
+            format!("{}__1999-01-01", rig.export_name()),
+        ] {
+            let mut args = cmd.to_vec();
+            args.extend(["--export", &name]);
+            let out = rig.cli(&args);
+            let said = text_of(&out);
+            assert_eq!(out.status.code(), Some(1), "{cmd:?} {name}: {said}");
+            assert!(
+                said.contains("RIVET_CLI_EXPORT_UNKNOWN"),
+                "{cmd:?} {name}: {said}"
+            );
+        }
+    }
+    let out = rig.cli(&["state", "progression", "--export", &held]);
+    let said = text_of(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(&held), "{said}");
+    assert!(!said.contains("No progression boundaries"), "{said}");
+    assert_eq!(state_names(&rig, &table), before, "{said}");
+}
+
+/// A chunked export's partition boundaries go with a reset of the export when its chunk runs are of this source, and a partition another source's chunk runs wrote stays.
+fn reset_of_a_chunked_partitioned_export_leaves_another_sources_partition(engine: SqlEngine) {
+    engine.alive();
+    let (table, _guard) = three_days(engine);
+    let dest = tempfile::tempdir().unwrap();
+    let rig = partitioned_with(
+        engine,
+        &table,
+        "chunked",
+        &["chunk_column: id", "chunk_size: 2"],
+        dest.path(),
+    );
+    rig.run_ok();
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
+    let ours = source_key(&rig);
+    let other = "postgres://other.example:5432/elsewhere";
+    for (label, source) in [("1999-01-01", other), ("1999-01-02", ours.as_str())] {
+        rig.edit_state(
+            &format!(
+                "INSERT INTO export_progression (export_name, last_committed_strategy, \
+                 last_committed_chunk_index, last_committed_run_id, last_committed_at) \
+                 VALUES ('{{export}}__{label}', 'chunked', 3, 'r', '2026-01-01T00:00:00Z')"
+            ),
+            1,
+        );
+        rig.edit_state(
+            &format!(
+                "INSERT INTO chunk_run (run_id, export_name, source, plan_hash, status, \
+                 max_chunk_attempts, created_at, updated_at) VALUES ('run{label}', \
+                 '{{export}}__{label}', '{source}', 'h', 'completed', 3, \
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            ),
+            1,
+        );
+    }
+    let said = reset(&rig, rig.export_name());
+    assert_eq!(child_rows(&rig, "export_progression"), 1, "{said}");
+    assert_eq!(
+        rig.state_count(
+            "SELECT COUNT(*) FROM export_progression WHERE export_name = '{export}__1999-01-01'"
+        ),
+        1,
+        "the other source keeps its boundary: {said}"
+    );
+    emptied(dest.path());
+    rig.run_ok();
+    assert_eq!(delivered(dest.path()), (vec![1, 2, 3, 4, 5, 6], 6));
 }
 
 #[test]
@@ -783,4 +1012,129 @@ fn partition_reset_child_lease_pg_state_mssql() {
 #[ignore = "live: requires oracle + postgres-state"]
 fn partition_reset_child_lease_pg_state_oracle() {
     reset_beside_a_run_of_one_partition(SqlEngine::Oracle, Some("lease_or"));
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_labels_postgres() {
+    reset_takes_labels_and_never_another_exports_name(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_labels_mysql() {
+    reset_takes_labels_and_never_another_exports_name(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_labels_mssql() {
+    reset_takes_labels_and_never_another_exports_name(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_labels_oracle() {
+    reset_takes_labels_and_never_another_exports_name(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_inspect_postgres() {
+    inspect_refuses_a_typo_and_shows_a_held_partition(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_inspect_mysql() {
+    inspect_refuses_a_typo_and_shows_a_held_partition(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_inspect_mssql() {
+    inspect_refuses_a_typo_and_shows_a_held_partition(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_inspect_oracle() {
+    inspect_refuses_a_typo_and_shows_a_held_partition(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_chunked_postgres() {
+    reset_of_a_chunked_partitioned_export_leaves_another_sources_partition(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_chunked_mysql() {
+    reset_of_a_chunked_partitioned_export_leaves_another_sources_partition(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_chunked_mssql() {
+    reset_of_a_chunked_partitioned_export_leaves_another_sources_partition(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_chunked_oracle() {
+    reset_of_a_chunked_partitioned_export_leaves_another_sources_partition(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn partition_reset_granularity_postgres() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Pg, None);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn partition_reset_granularity_mysql() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Mysql, None);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_reset_granularity_mssql() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Mssql, None);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn partition_reset_granularity_oracle() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Oracle, None);
+}
+
+#[test]
+#[ignore = "live: requires postgres + postgres-state"]
+fn partition_reset_granularity_pg_state_postgres() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Pg, Some("gran_pg"));
+}
+
+#[test]
+#[ignore = "live: requires mysql + postgres-state"]
+fn partition_reset_granularity_pg_state_mysql() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Mysql, Some("gran_my"));
+}
+
+#[test]
+#[ignore = "live: requires mssql + postgres-state"]
+fn partition_reset_granularity_pg_state_mssql() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Mssql, Some("gran_ms"));
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires oracle + postgres-state"]
+fn partition_reset_granularity_pg_state_oracle() {
+    reset_after_a_granularity_change_takes_every_partition(SqlEngine::Oracle, Some("gran_or"));
 }
