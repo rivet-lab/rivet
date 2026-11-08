@@ -1,7 +1,8 @@
 diff --git a/src/pipeline/cdc_release.rs b/src/pipeline/cdc_release.rs
+index 58a19a18..a275b860 100644
 --- a/src/pipeline/cdc_release.rs
 +++ b/src/pipeline/cdc_release.rs
-@@ -135,7 +135,7 @@
+@@ -135,7 +135,7 @@ impl FirstRun {
  
      /// [`FirstRun::release_after`] against `server` for the slot.
      fn release(self, state: &StateStore, outcome: &Result<()>, server: Option<&dyn SlotServer>) {
@@ -11,10 +12,10 @@ diff --git a/src/pipeline/cdc_release.rs b/src/pipeline/cdc_release.rs
          }
          match state.cdc_delivery_recorded(&self.export) {
 diff --git a/src/source/postgres/cdc.rs b/src/source/postgres/cdc.rs
-index 22e07e2c..59b11c77 100644
+index eebc5fe4..79f687b2 100644
 --- a/src/source/postgres/cdc.rs
 +++ b/src/source/postgres/cdc.rs
-@@ -614,7 +614,6 @@ impl PgChangeStream {
+@@ -672,7 +672,6 @@ impl PgChangeStream {
          let mut client = super::connect_client(conn_str, tls)?;
          // The one prerequisite check of a run, on the stream's own connection and before the
          // slot: its refusals carry rivet's `pg cdc:` prefix, so the setup hint is never prepended.
@@ -22,7 +23,7 @@ index 22e07e2c..59b11c77 100644
          let mut bare_schema = HashMap::new();
          for cfg in configured_tables {
              if let Some(sch) = search_path_schema(&mut client, cfg)? {
-@@ -656,6 +655,7 @@ impl PgChangeStream {
+@@ -714,6 +713,7 @@ impl PgChangeStream {
                  )?;
              }
          }

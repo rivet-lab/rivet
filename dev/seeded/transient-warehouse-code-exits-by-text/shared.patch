@@ -1,4 +1,5 @@
 diff --git a/src/error.rs b/src/error.rs
+index 7081802c..246ff58e 100644
 --- a/src/error.rs
 +++ b/src/error.rs
 @@ -1320,8 +1320,9 @@ pub mod codes {
@@ -8,7 +9,7 @@ diff --git a/src/error.rs b/src/error.rs
 -    pub const LOAD_WAREHOUSE_UNAVAILABLE: Code = transient(
 +    pub const LOAD_WAREHOUSE_UNAVAILABLE: Code = environment(
          "RIVET_LOAD_WAREHOUSE_UNAVAILABLE",
-+        Retry::ByCause,
++        Retry::Never,
          "re-run the same command later; the warehouse failed with a transient error (HTTP 5xx or 429, or a job reason it documents as retryable) that rivet's retries did not outlast",
      );
      /// The warehouse answered in a shape rivet does not read.

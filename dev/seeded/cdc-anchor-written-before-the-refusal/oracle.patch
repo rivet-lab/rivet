@@ -1,7 +1,8 @@
 diff --git a/src/pipeline/cdc_release.rs b/src/pipeline/cdc_release.rs
+index 58a19a18..a275b860 100644
 --- a/src/pipeline/cdc_release.rs
 +++ b/src/pipeline/cdc_release.rs
-@@ -135,7 +135,7 @@
+@@ -135,7 +135,7 @@ impl FirstRun {
  
      /// [`FirstRun::release_after`] against `server` for the slot.
      fn release(self, state: &StateStore, outcome: &Result<()>, server: Option<&dyn SlotServer>) {
@@ -11,9 +12,10 @@ diff --git a/src/pipeline/cdc_release.rs b/src/pipeline/cdc_release.rs
          }
          match state.cdc_delivery_recorded(&self.export) {
 diff --git a/src/source/oracle/cdc.rs b/src/source/oracle/cdc.rs
+index acb401ba..8ba98cc6 100644
 --- a/src/source/oracle/cdc.rs
 +++ b/src/source/oracle/cdc.rs
-@@ -1001,7 +1001,6 @@
+@@ -1080,7 +1080,6 @@ impl OracleChangeStream {
              conn.execute(sql, &[]).ora()?;
          }
          let (_, con_name, con_dbid) = container(&conn)?;
@@ -21,7 +23,7 @@ diff --git a/src/source/oracle/cdc.rs b/src/source/oracle/cdc.rs
          let low_water = low_water_here(&conn)?;
          let identity = root_identity(&conn, con_name, con_dbid)?;
          let frontier = pin_frontier(&conn, low_water)?;
-@@ -1017,6 +1016,7 @@
+@@ -1096,6 +1095,7 @@ impl OracleChangeStream {
                  frontier
              }
          };
