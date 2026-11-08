@@ -210,20 +210,18 @@ fn printed_declaration(stderr: &str) -> String {
         .to_string()
 }
 
-/// A wide-decimal refusal prints `decimal(38,2)`, and that declaration applied as the config passes `check` and delivers the row.
+/// A wide-decimal refusal prints `printed`, and that declaration applied as the config passes `check` and delivers `delivered` for the one source row.
 fn wide_decimal_refusal_remedy_delivers(
     rig: impl Fn(&str, &str) -> Rig,
     column: &str,
     prefix: &str,
+    (wide, printed, delivered): (&str, &str, &str),
 ) {
     let name = unique_name(prefix);
     let out = tempfile::tempdir().unwrap();
-    let refused = rig(&name, "decimal(50,2)").dest_path(out.path().to_path_buf());
+    let refused = rig(&name, wide).dest_path(out.path().to_path_buf());
     let stderr = check_and_run_refuse_alike(refused, &name);
-    assert!(
-        stderr.contains("declare `decimal(38,2)`, or remove the override"),
-        "{stderr}"
-    );
+    assert_eq!(printed_declaration(&stderr), printed, "{wide}: {stderr}");
     assert!(!stderr.contains("`text`"), "{stderr}");
     let remedy = printed_declaration(&stderr);
     let name = unique_name(prefix);
@@ -243,39 +241,69 @@ fn wide_decimal_refusal_remedy_delivers(
         "{column}: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(total_parquet_rows(out.path()), 1);
+    assert_eq!(
+        dir_parquet_decimal_strings(out.path(), column),
+        vec![delivered.to_string()],
+        "{wide} -> {remedy}"
+    );
+}
+
+/// The wide declarations, the remedy each prints, and the value the applied remedy must deliver for a source holding 12.5 (and 1200 for a negative scale).
+fn wide_decimal_cases() -> [(&'static str, &'static str, String, &'static str); 2] {
+    [
+        (
+            "decimal(50,40)",
+            "decimal(38,28)",
+            format!("12.5{}", "0".repeat(27)),
+            "12.5",
+        ),
+        (
+            "decimal(50,-2)",
+            "decimal(38,0)",
+            "1200".to_string(),
+            "1200",
+        ),
+    ]
 }
 
 #[test]
 #[ignore = "live: mssql"]
 fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_mssql() {
     require_alive(LiveService::Mssql);
-    wide_decimal_refusal_remedy_delivers(
-        |name, declared| {
-            Rig::mssql_batch(name)
-                .query("SELECT CAST(1.5 AS DECIMAL(10,2)) AS d")
-                .mode("full")
-                .export_line("columns:")
-                .export_line(&format!("  d: \"{declared}\""))
-        },
-        "d",
-        "ovw_dec_ms",
-    );
+    for (wide, printed, delivered, source) in wide_decimal_cases() {
+        wide_decimal_refusal_remedy_delivers(
+            |name, declared| {
+                Rig::mssql_batch(name)
+                    .query(&format!("SELECT CAST({source} AS DECIMAL(10,2)) AS d"))
+                    .mode("full")
+                    .export_line("columns:")
+                    .export_line(&format!("  d: \"{declared}\""))
+            },
+            "d",
+            "ovw_dec_ms",
+            (wide, printed, &delivered),
+        );
+    }
 }
 
 #[test]
 #[ignore = "live: oracle"]
 fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle() {
     require_alive(LiveService::Oracle);
-    wide_decimal_refusal_remedy_delivers(
-        |name, declared| {
-            Rig::oracle_batch(name)
-                .query("SELECT CAST(1.5 AS NUMBER(10,2)) AS d FROM dual")
-                .mode("full")
-                .export_line("columns:")
-                .export_line(&format!("  D: \"{declared}\""))
-        },
-        "D",
-        "ovw_dec_or",
-    );
+    for (wide, printed, delivered, source) in wide_decimal_cases() {
+        wide_decimal_refusal_remedy_delivers(
+            |name, declared| {
+                Rig::oracle_batch(name)
+                    .query(&format!(
+                        "SELECT CAST({source} AS NUMBER(10,2)) AS d FROM dual"
+                    ))
+                    .mode("full")
+                    .export_line("columns:")
+                    .export_line(&format!("  D: \"{declared}\""))
+            },
+            "D",
+            "ovw_dec_or",
+            (wide, printed, &delivered),
+        );
+    }
 }

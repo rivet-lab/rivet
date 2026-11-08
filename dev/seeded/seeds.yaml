@@ -5221,6 +5221,27 @@ seeds:
         na: "the PostgreSQL converter raises RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH for any builder or target mismatch at its invariant guard, so no override reaches an internal stop (survey: 0 of 272 runs)"
       mongo:
         na: "a document source has no declared column wire type and takes no columns override"
+  - name: wide-decimal-remedy-not-a-declaration
+    class: "the declaration a wide decimal override refusal prints keeps the declared scale capped at 38 or a negative scale, so applied it writes out-of-precision cells or delivers a value times 100, exit 0, instead of keeping the declared integer digits"
+    history: "2026-11-08 round-2 verification of the override refusal: decimal(50,40) printed decimal(38,38) and 1.25 was written out of precision, decimal(50,-2) printed decimal(38,-2) and 1200 was delivered as 120000"
+    scope: source
+    engines:
+      mssql:
+        patch: wide-decimal-remedy-not-a-declaration/mssql.patch
+        cells:
+          - a_decimal_override_past_precision_38_is_refused_by_the_wire_check_mssql
+          - "lib:the_printed_decimal_remedy_delivers_on_sql_server"
+      oracle:
+        patch: wide-decimal-remedy-not-a-declaration/oracle.patch
+        cells:
+          - a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle
+          - "lib:the_printed_decimal_remedy_delivers_on_oracle"
+      postgres:
+        na: "a wider decimal builds as Decimal256 on PostgreSQL, so no decimal override is refused and no remedy is printed"
+      mysql:
+        na: "a wider decimal builds as Decimal256 on MySQL, so no decimal override is refused and no remedy is printed"
+      mongo:
+        na: "a document source has no declared column wire type and takes no columns override"
   - name: oracle-timestamp-ns-undeclared-truncated
     class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
     history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"

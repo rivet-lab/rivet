@@ -1152,6 +1152,78 @@ mod override_builder_tests {
         }
     }
 
+    /// The declaration the wide-decimal refusal prints, applied to the Oracle converter, delivers a value with an integer part exactly and inside its precision.
+    #[test]
+    fn the_printed_decimal_remedy_delivers_on_oracle() {
+        use arrow::array::Decimal128Array;
+        use arrow::util::display::array_value_to_string;
+        let zeros = |n: usize| "0".repeat(n);
+        let cases: [(&str, &str, &str, String); 5] = [
+            (
+                "decimal(50,40)",
+                "decimal(38,28)",
+                "12.5",
+                format!("12.5{}", zeros(27)),
+            ),
+            ("decimal(50,-2)", "decimal(38,0)", "1200", "1200".into()),
+            ("decimal(50,2)", "decimal(38,0)", "1200", "1200".into()),
+            (
+                "decimal(39,38)",
+                "decimal(38,37)",
+                "1.25",
+                format!("1.25{}", zeros(35)),
+            ),
+            (
+                "decimal(76,76)",
+                "decimal(38,38)",
+                "0.5",
+                format!("0.5{}", zeros(37)),
+            ),
+        ];
+        for (wide, printed, text, delivered) in cases {
+            let rivet = crate::types::parse_type_str(wide).unwrap();
+            let refusal = schema_from_mappings(
+                vec![TypeMapping::from_source(
+                    &SourceColumn::simple("d", "number", true),
+                    rivet.clone(),
+                )],
+                &ColumnOverrides::from([("d".to_string(), rivet)]),
+            )
+            .unwrap_err()
+            .to_string();
+            let remedy = refusal
+                .split("declare `")
+                .nth(1)
+                .and_then(|r| r.split('`').next())
+                .expect("the refusal prints a declaration");
+            assert_eq!(remedy, printed, "{wide}");
+            let rivet = crate::types::parse_type_str(remedy).unwrap();
+            let mapping =
+                TypeMapping::from_source(&SourceColumn::simple("d", "number", true), rivet);
+            let schema = schema_from_mappings(
+                vec![mapping.clone()],
+                &ColumnOverrides::from([("d".to_string(), mapping.rivet_type.clone())]),
+            )
+            .unwrap();
+            let DataType::Decimal128(p, s) = schema.field(0).data_type().clone() else {
+                panic!("{wide} -> {remedy}: not a Decimal128");
+            };
+            let scaled = decimal_str_to_scaled_i128(text, s)
+                .unwrap_or_else(|| panic!("{wide} -> {remedy}: {text} does not convert"));
+            let array = Decimal128Array::from(vec![scaled])
+                .with_precision_and_scale(p, s)
+                .unwrap();
+            array
+                .validate_decimal_precision(p)
+                .unwrap_or_else(|e| panic!("{wide} -> {remedy}: {e}"));
+            assert_eq!(
+                array_value_to_string(&array, 0).unwrap(),
+                delivered,
+                "{wide} -> {remedy}"
+            );
+        }
+    }
+
     /// The schema stage refuses a wide decimal override by code, builds a narrow one, and leaves the same column without an override alone.
     #[test]
     fn the_oracle_schema_stage_refuses_a_wide_decimal_override() {
@@ -1168,7 +1240,7 @@ mod override_builder_tests {
         )
         .unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
-        assert!(err.to_string().contains("declare `decimal(38,2)`"), "{err}");
+        assert!(err.to_string().contains("declare `decimal(38,0)`"), "{err}");
         let ok = schema_from_mappings(
             vec![mapping_of("decimal(38,2)")],
             &declared("decimal(38,2)"),
