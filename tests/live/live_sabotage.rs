@@ -654,12 +654,47 @@ fn declared_chunk_unlogged(engine: SqlEngine) {
         "fixture: the failed run left a manifest declaring its committed chunks"
     );
     rig.edit_state(
-        "DELETE FROM file_log WHERE export_name = '{export}' AND file_name LIKE '%chunk1_%'",
+        "DELETE FROM file_log WHERE export_name = '{export}' AND file_name LIKE '%chunk1\\_%' ESCAPE '\\'",
         1,
     );
     assert_eq!(rig.delivers_or_refuses(RERUN, &[]), Survived::Delivered);
     assert_eq!(declared_ids(&rig), (1..=N).collect::<Vec<_>>());
+    assert_eq!(
+        delivered_part_files(&rig),
+        declared_part_files(&rig),
+        "the superseded part is not left in the prefix beside its re-export"
+    );
     ok(rig.cli(&["validate"]));
+}
+
+/// The sorted names of the parquet files lying directly in the rig's destination.
+fn delivered_part_files(rig: &Rig) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(rig.out_dir())
+        .expect("read the destination")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".parquet"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The sorted names of the committed parts `manifest.json` declares.
+fn declared_part_files(rig: &Rig) -> Vec<String> {
+    let text = std::fs::read_to_string(rig.out_dir().join("manifest.json")).expect("read manifest");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("parse manifest");
+    let mut names: Vec<String> = doc["parts"]
+        .as_array()
+        .expect("a parts array")
+        .iter()
+        .filter(|p| p["status"] == "committed")
+        .map(|p| {
+            let path = p["path"].as_str().expect("a part path");
+            path.rsplit('/').next().unwrap_or(path).to_string()
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 /// A part the unfinished run committed, replaced by the bytes of its sibling (of another size) before the resume.

@@ -316,7 +316,7 @@ scenarios:
     oracle:   { test: a_resume_over_a_removed_committed_part_delivers_or_refuses_oracle }
 
   - id: corrupt_declared_chunk_unlogged
-    what: "a failed range-chunk run leaves a manifest declaring its committed chunks and the `file_log` row of one is gone before the resume: the resume reads that chunk again and delivers the source"
+    what: "a failed range-chunk run leaves a manifest declaring its committed chunks and the `file_log` row of one is gone before the resume: the resume reads that chunk again, delivers the source and leaves no superseded part in the prefix"
     postgres: { test: a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_postgres }
     mysql:    { test: a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_mysql }
     mssql:    { test: a_resume_over_a_declared_chunk_missing_from_file_log_delivers_the_source_mssql }

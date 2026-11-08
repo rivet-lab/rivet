@@ -177,11 +177,11 @@ fn is_surviving_attempt(
     }
 }
 
-/// Drop from a completing run's manifest the parts of chunk attempts a later attempt superseded, with their counters.
+/// Drop from a run's manifest the parts that did not complete their chunk, with their counters, and return their paths.
 pub(crate) fn prune_superseded_attempts(
     summary: &mut RunSummary,
     tasks: &[crate::state::ChunkTaskInfo],
-) -> usize {
+) -> Vec<String> {
     let surviving = surviving_attempts(tasks);
     let (kept, pruned): (Vec<_>, Vec<_>) = std::mem::take(&mut summary.manifest_parts)
         .into_iter()
@@ -199,7 +199,7 @@ pub(crate) fn prune_superseded_attempts(
         summary.files_produced = summary.files_produced.saturating_sub(1);
         summary.files_committed = summary.files_committed.saturating_sub(1);
     }
-    pruned.len()
+    pruned.into_iter().map(|p| p.path).collect()
 }
 
 /// Whether `t` is marked completed with no part and no record of having read zero rows: a state no run writes (an empty chunk completes with a row count of 0).
@@ -464,6 +464,7 @@ pub(crate) fn apply_m8_resume_decisions(
             rehydrate_and_reset(
                 state,
                 run_id,
+                &*dest,
                 summary,
                 present.as_ref(),
                 content.as_ref(),
@@ -523,6 +524,7 @@ pub(crate) fn apply_m8_resume_decisions(
         rehydrate_and_reset(
             state,
             run_id,
+            &*dest,
             summary,
             present.as_ref(),
             content.as_ref(),
@@ -728,6 +730,7 @@ pub(crate) fn apply_m8_resume_decisions(
     let rehydrated = rehydrate_and_reset(
         state,
         run_id,
+        &*dest,
         summary,
         Some(&listing_basenames(&listing)),
         super::part_keys::ContentCheck::of(plan, &*dest).as_ref(),
@@ -796,11 +799,13 @@ fn committed_part_gone(name: &str) -> anyhow::Error {
 fn rehydrate_and_reset(
     state: &StateStore,
     run_id: &str,
+    dest: &dyn Destination,
     summary: &mut RunSummary,
     present: Option<&Listed>,
     content: Option<&super::part_keys::ContentCheck<'_>>,
     stats: &mut M8Stats,
 ) -> Result<usize> {
+    let listed = present;
     let checked = match (present, content) {
         (Some(p), Some(c)) => Some(c.keep_parts_of_their_chunk(state, run_id, p)?),
         _ => None,
@@ -827,7 +832,12 @@ fn rehydrate_and_reset(
         }
     }
     if reset {
-        prune_superseded_attempts(summary, &state.list_chunk_tasks_for_run(run_id)?);
+        for path in prune_superseded_attempts(summary, &state.list_chunk_tasks_for_run(run_id)?) {
+            let base = path.rsplit('/').next().unwrap_or(&path);
+            if listed.is_none_or(|l| l.contains_key(base)) {
+                quarantine_move(dest, &path, run_id, &summary.export_name, stats);
+            }
+        }
     }
     Ok(rehydrated)
 }
@@ -2049,6 +2059,7 @@ pub(crate) mod tests {
         let n = rehydrate_and_reset(
             &state,
             run_id,
+            &dest,
             &mut summary,
             Some(&present),
             content.as_ref(),
@@ -2271,6 +2282,74 @@ pub(crate) mod tests {
         assert_eq!(status, ["completed", "pending", "pending", "completed"]);
         assert_eq!(stats.reset_for_rewrite, 2);
         assert_eq!(summary.total_rows, 20);
+        assert_eq!(prefix_files(dir.path()), [logged, rot0, rot1]);
+        assert_eq!(
+            prefix_files(&dir.path().join(QUARANTINE_PREFIX).join(run_id)),
+            [unlogged, short]
+        );
+        assert_eq!(stats.quarantined_moved, 2);
+        assert_eq!(stats.quarantine_move_failures, 0);
+    }
+
+    /// The part files directly under `dir`, sorted, without the manifest.
+    fn prefix_files(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != MANIFEST_FILENAME)
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// A chunk a `repair` re-exported has its `file_log` row under the repair's own run id, so a resume over the repaired run reads that chunk again: the data is whole, and the repaired part is moved aside rather than left beside its re-export.
+    #[test]
+    fn a_chunk_repaired_under_another_run_id_is_re_exported_and_its_part_moved_aside() {
+        let run_id = "m8run";
+        let repaired = "orders_chunk0_00000000000000bb.parquet";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(repaired), b"12345").unwrap();
+        let manifest = m8_manifest(run_id, vec![m8_part(repaired, 10, 5)]);
+        std::fs::write(
+            dir.path().join(MANIFEST_FILENAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let state =
+            crate::state::StateStore::open_at_path(&state_dir.path().join("state.db")).unwrap();
+        state.insert_chunk_tasks(run_id, &[(0, 9)]).unwrap();
+        state.claim_next_chunk_task(run_id).unwrap();
+        state
+            .complete_chunk_task(run_id, 0, 10, Some(repaired))
+            .unwrap();
+        state
+            .record_file(FilePart {
+                run_id: "repair-run",
+                export_name: "orders",
+                file_name: repaired,
+                rows: 10,
+                bytes: 5,
+                format: "parquet",
+                compression: None,
+                cursor_high: None,
+            })
+            .unwrap();
+        let plan = m8_plan(dir.path());
+        let mut summary =
+            crate::pipeline::summary::RunSummary::stub_for_testing(run_id, String::from("orders"));
+
+        let stats = apply_m8_resume_decisions(&state, run_id, &plan, &mut summary).unwrap();
+
+        assert!(summary.manifest_parts.is_empty());
+        assert_eq!(stats.reset_for_rewrite, 1);
+        assert!(prefix_files(dir.path()).is_empty());
+        assert_eq!(
+            prefix_files(&dir.path().join(QUARANTINE_PREFIX).join(run_id)),
+            [repaired]
+        );
     }
 
     /// A chunk that failed after writing parts, was re-claimed and completed in the SAME
@@ -2307,7 +2386,7 @@ pub(crate) mod tests {
             file_name: Some(won.into()),
         }];
 
-        assert_eq!(prune_superseded_attempts(&mut summary, &tasks), 1);
+        assert_eq!(prune_superseded_attempts(&mut summary, &tasks).len(), 1);
 
         let declared: Vec<&str> = summary
             .manifest_parts
