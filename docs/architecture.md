@@ -263,6 +263,7 @@ src/
   quality.rs              Data quality checks (row count, null ratio, uniqueness)
   resource.rs             RSS sampling (macOS + Linux)
   sql.rs                  Identifier quoting + cursor escaping (CC9 / CC10)
+  test_budget.rs          Test-only wall-clock ceilings, widened under coverage
   test_hook.rs            Test-only fault injection (see reference/testing.md)
 
   cli/                    Clap surface, validation, dispatch (split from a 1000-line main.rs)
