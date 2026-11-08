@@ -1,0 +1,12 @@
+diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+--- a/src/pipeline/cli.rs
++++ b/src/pipeline/cli.rs
+@@ -330,7 +330,7 @@
+         Owner::PartitionChild(parent) if !stored.iter().any(|n| n == export_name) => {
+             let children: Vec<&String> = stored
+                 .iter()
+-                .filter(|n| n.as_str() != parent.name && belongs_to(&config, n, &parent.name))
++                .filter(|n| belongs_to(&config, n, &parent.name))
+                 .collect();
+             crate::rivet_bail!(
+                 crate::error::codes::CLI_EXPORT_UNKNOWN,

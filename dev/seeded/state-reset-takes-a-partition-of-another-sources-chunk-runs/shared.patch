@@ -1,0 +1,12 @@
+diff --git a/src/state/cursor.rs b/src/state/cursor.rs
+--- a/src/state/cursor.rs
++++ b/src/state/cursor.rs
+@@ -1053,7 +1053,7 @@
+             .map(|(name, _)| name.clone())
+             .collect();
+         names.extend(boundaries.into_iter().filter(|n| {
+-            !cursor_of.contains_key(n) && chunked_here.get(n).copied().unwrap_or(true)
++            !cursor_of.contains_key(n) && true
+         }));
+         Ok(names.into_iter().collect())
+     }

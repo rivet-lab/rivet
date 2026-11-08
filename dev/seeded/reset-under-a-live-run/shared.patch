@@ -1,22 +1,32 @@
 diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
-index 30c19c56..07fa93c4 100644
 --- a/src/pipeline/cli.rs
 +++ b/src/pipeline/cli.rs
-@@ -324,13 +324,8 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
-         }
-         _ => {}
-     }
--    let claim =
--        |n: &String| super::chunked::claim_export_progress(&state, n, &source, "reset its state");
+@@ -365,12 +365,7 @@
+     config_path: &str,
+     between: impl FnOnce(),
+ ) -> Result<()> {
+-    let claim = |n: &String, done: Option<&str>| {
+-        super::chunked::claim_export_progress_saying(state, n, source, "reset its state", done)
+-    };
      let (export, children) = family.split_first().expect("the family names the export");
--    let _export_lease = claim(export)?;
--    children.iter().try_for_each(|n| claim(n).map(drop))?;
+-    let _export_lease = claim(export, None)?;
+-    children.iter().try_for_each(|n| claim(n, None).map(drop))?;
+     between();
+     let mut cleared = 0;
      for batch in children.chunks(RESET_LEASES) {
--        let _held = batch.iter().map(claim).collect::<Result<Vec<_>>>()?;
-         state.reset_all(batch, &source)?;
+@@ -380,10 +375,7 @@
+                 children.len()
+             )
+         });
+-        let _held = batch
+-            .iter()
+-            .map(|n| claim(n, done.as_deref()))
+-            .collect::<Result<Vec<_>>>()?;
++        let _ = &done;
+         state.reset_all(batch, source)?;
+         cleared += batch.len();
      }
-     state.reset(export, &source)?;
-@@ -612,12 +607,6 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
+@@ -654,12 +646,6 @@
      }
      let source = reset_chunks_source(&config, &format!("export '{export_name}'"))?;
      let state = StateStore::open(config_path)?;
@@ -29,7 +39,7 @@ index 30c19c56..07fa93c4 100644
      let n = state.reset_chunk_checkpoint(export_name, &source)?;
      // Abandoning the resume also clears the committed/verified boundary, so
      // `rivet state progression` does not report a stale chunk boundary after
-@@ -690,14 +679,6 @@ pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
+@@ -732,14 +718,6 @@
      );
  
      for name in targets {
