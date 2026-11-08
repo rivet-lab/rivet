@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Dispatches the Nightly Live workflow at 04:00 local (CET) so its results are ready by 06:30. Copy to
+     ~/Library/LaunchAgents/, fix the paths, then: launchctl load ~/Library/LaunchAgents/ai.rivet.nightly-live.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.rivet.nightly-live</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string><string>-c</string>
+    <string>date -u +"%Y-%m-%dT%H:%M:%SZ dispatch"; /opt/homebrew/bin/gh workflow run nightly-live.yml -R rivet-lab/rivet --ref main; echo "exit $?"</string>
+  </array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/YOU/night/nightly-live-dispatch.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/night/nightly-live-dispatch.log</string>
+</dict>
+</plist>
