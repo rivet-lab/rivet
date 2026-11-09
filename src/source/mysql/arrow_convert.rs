@@ -2770,4 +2770,21 @@ mod error_code_tests {
         let err = super::narrow::<i32>(1 << 40, "INT").unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
     }
+    /// A refused cell names the kind of value MySQL sent; NULL is not refused.
+    #[test]
+    fn a_wire_mismatch_names_the_kind_of_value_sent() {
+        use arrow::datatypes::DataType;
+        use mysql::Value;
+        for (v, kind) in [
+            (Value::Int(1), "MySQL sends a signed integer"),
+            (Value::UInt(1), "MySQL sends an unsigned integer"),
+            (Value::Bytes(b"x".to_vec()), "MySQL sends text or bytes"),
+            (Value::Double(1.0), "MySQL sends a DOUBLE"),
+        ] {
+            let err = super::null_or_refuse("c", &DataType::Int32, Some(&v)).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            assert!(err.to_string().contains(kind), "{kind}: {err}");
+        }
+        assert!(super::null_or_refuse("c", &DataType::Int32, Some(&Value::NULL)).is_ok());
+    }
 }
