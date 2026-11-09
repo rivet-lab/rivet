@@ -2,8 +2,8 @@
 //! Every shape below turns "could not read it" into "there was nothing there"; the
 //! count under `src/source/` may only shrink.
 
-/// Occurrences under `src/source/` on 2026-09-30 (the CDC builder refuses instead of nulling).
-const CEILING: usize = 35; // ratchet-pin: silent-degrade-shapes (review 2027-02-01)
+/// Occurrences under `src/source/`; 2026-09-30 the CDC builder refuses instead of nulling; 2026-11-08 35 -> 24: the MySQL converter refuses a value no arm reads.
+const CEILING: usize = 24; // ratchet-pin: silent-degrade-shapes (review 2027-02-01)
 
 /// The shapes that swap an unreadable value for NULL or nothing.
 const SHAPES: &[&str] = &[
