@@ -62,6 +62,7 @@ harness needs it", not "public API".
 | `plan` | `pub(crate)` | Internal execution contract — consumed by pipeline, not by tests |
 | `quality` | `pub(crate)` | Internal quality gate |
 | `sql` | `pub(crate)` | SQL identifier quoting (`quote_ident`) — internal utility, not a product surface |
+| `test_budget` | `pub(crate)` | Internal wall-clock ceilings of unit tests |
 | `test_hook` | `pub(crate)` | Internal fault-injection points for tests |
 
 ---

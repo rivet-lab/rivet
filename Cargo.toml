@@ -229,6 +229,9 @@ dev-seed = []
 # default; NOT part of the public API and never built for `cargo install`.
 fuzzing = []
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
+
 [profile.release]
 strip = true
 lto = "fat"

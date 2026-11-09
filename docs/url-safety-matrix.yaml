@@ -53,16 +53,16 @@ scenarios:
     oracle:   { test: redact_secrets_url_safety_matrix }
 
   - id: redact_delimiter_password_state_url
-    what: "the PG state-backend redactor (redact_pg_url) masks a RIVET_STATE_URL password with a raw / ? # . Round-3 regressed here."
-    postgres: { test: redact_pg_url_password_with_raw_delimiters_does_not_leak }
-    mysql:    { na: "the state backend is SQLite or PostgreSQL only — there is no mysql state URL / redact_pg_url path" }
+    what: "a RIVET_STATE_URL password with a raw / ? # is masked in every state message; the state backend has no redactor of its own, it calls redact_secrets. Round-3 regressed here."
+    postgres: { test: redact_secrets_url_safety_matrix }
+    mysql:    { na: "the state backend is SQLite or PostgreSQL only — there is no mysql state URL path" }
     mssql:    { na: "no mssql state URL" }
     mongo:    { na: "no mongo state URL" }
     oracle:   { na: "the state backend is SQLite or PostgreSQL only — there is no oracle state URL" }
 
   - id: redact_stray_at_in_query
     what: "a stray '@' in the path/query does not extend the userinfo match and echo the password (the RFC-legal ?opt=a@b shape)."
-    postgres: { test: redact_pg_url_stray_at_in_query_does_not_leak_password }
+    postgres: { test: redact_secrets_url_safety_matrix }
     mysql:    { test: redact_secrets_url_safety_matrix }
     mssql:    { test: redact_secrets_url_safety_matrix }
     mongo:    { test: redact_secrets_url_safety_matrix }
@@ -136,3 +136,43 @@ scenarios:
     mssql:    { na: "the SQL Server URL reads everything after the first `/` as the database, so a query tail names a database" }
     mongo:    { na: "no live cell: the key of a mongodb:// URL with an `@` in its query is graded by the lib cell an_at_sign_after_the_authority_does_not_make_two_hosts_one_source" }
     oracle:   { na: "parse_oracle_url takes the service name from the path and has no query tail" }
+
+  - id: query_pair_password_reaches_no_sink
+    what: "end to end on a command that fails before a server answers: a password written as a URL query pair (password, PASSWORD, Password, pass%77ord, a percent-encoded value, sslpassword, a pair after another) is in no sink - stdout, stderr, --json-errors, doctor (text and --json), init, the state DB, plan.json, .rivet/runs reports."
+    postgres: { test: a_query_pair_password_reaches_no_sink_on_any_engine }
+    mysql:    { test: a_query_pair_password_reaches_no_sink_on_any_engine }
+    mssql:    { test: a_query_pair_password_reaches_no_sink_on_any_engine }
+    mongo:    { test: a_query_pair_password_reaches_no_sink_on_any_engine }
+    oracle:   { test: a_query_pair_password_reaches_no_sink_on_any_engine }
+
+  - id: query_pair_password_percent_encoded_key
+    what: "a query pair whose key is spelled with percent escapes (pass%77ord, %70wd) is read decoded and its value masked by the general redactor, and a key that decodes to a non-secret stays."
+    postgres: { test: a_percent_encoded_query_key_that_names_a_password_is_masked }
+    mysql:    { test: a_percent_encoded_query_key_that_names_a_password_is_masked }
+    mssql:    { test: a_percent_encoded_query_key_that_names_a_password_is_masked }
+    mongo:    { test: a_percent_encoded_query_key_that_names_a_password_is_masked }
+    oracle:   { test: a_percent_encoded_query_key_that_names_a_password_is_masked }
+
+  - id: query_pair_password_state_url
+    what: "a RIVET_STATE_URL whose password is a query pair is named by doctor, check, init and state copy with the password masked, at a state that answers and at one that does not; the state backend calls the general redactor and has none of its own."
+    postgres: { test: a_query_pair_password_in_the_state_url_reaches_no_output }
+    mysql:    { na: "the state backend is SQLite or PostgreSQL only - there is no mysql state URL" }
+    mssql:    { na: "no mssql state URL" }
+    mongo:    { na: "no mongo state URL" }
+    oracle:   { na: "the state backend is SQLite or PostgreSQL only - there is no oracle state URL" }
+
+  - id: query_pair_password_state_copy_note
+    what: "the note `rivet state copy --to <pg url>` prints, and its not-empty refusal, name the target URL with a query-pair password masked."
+    postgres: { test: the_done_note_holds_no_query_password_of_the_target }
+    mysql:    { na: "the state backend is SQLite or PostgreSQL only - there is no mysql state URL" }
+    mssql:    { na: "no mssql state URL" }
+    mongo:    { na: "no mongo state URL" }
+    oracle:   { na: "the state backend is SQLite or PostgreSQL only - there is no oracle state URL" }
+
+  - id: query_pair_password_source_url_succeeding_path
+    what: "a source URL whose password is a query pair, at a server that answers, is named by check, doctor, plan and run without the password."
+    postgres: { test: a_query_pair_password_in_the_source_url_reaches_no_output }
+    mysql:    { na: "no live cell: the MySQL driver refuses an unknown URL parameter; the failing path is graded by query_pair_password_reaches_no_sink" }
+    mssql:    { na: "no live cell: the SQL Server URL reads everything after the first / as the database; the failing path is graded by query_pair_password_reaches_no_sink" }
+    mongo:    { na: "no live cell: the mongodb driver owns the query options and no stand here accepts a password pair in one; the failing path is graded by query_pair_password_reaches_no_sink" }
+    oracle:   { na: "parse_oracle_url takes the service name from the path and has no query tail; the failing path is graded by query_pair_password_reaches_no_sink" }

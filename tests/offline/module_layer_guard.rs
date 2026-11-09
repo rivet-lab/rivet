@@ -8,6 +8,10 @@ use std::path::Path;
 const LAYERS: &[(&str, &str)] = &[
     ("error", "error type, exit codes and the bail macros"),
     ("test_hook", "fault-injection points the crash tests arm"),
+    (
+        "test_budget",
+        "wall-clock ceilings of unit tests, widened under coverage",
+    ),
     ("scalar", "source scalar text parsed into typed bounds"),
     ("resource", "process memory sampling and limits"),
     ("workers", "the bounded executor every pool runs on"),

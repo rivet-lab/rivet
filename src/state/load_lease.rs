@@ -1074,7 +1074,8 @@ mod lock_wait_tests {
             "{err:#}"
         );
         assert!(
-            took >= Duration::from_millis(1150) && took < Duration::from_millis(1800),
+            took >= Duration::from_millis(1150)
+                && took < crate::test_budget::ceiling(Duration::from_millis(1800)),
             "waited {took:?} for a 1.2 s wait"
         );
         drop(held);

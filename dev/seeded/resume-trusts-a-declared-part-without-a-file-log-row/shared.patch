@@ -1,0 +1,15 @@
+diff --git a/src/pipeline/chunked/resume_m8.rs b/src/pipeline/chunked/resume_m8.rs
+--- a/src/pipeline/chunked/resume_m8.rs
++++ b/src/pipeline/chunked/resume_m8.rs
+@@ -309,7 +309,10 @@
+     let tasks = state.list_chunk_tasks_for_run(run_id)?;
+     let mut surviving = surviving_attempts(&tasks);
+     let mut missing: Vec<MissingPart> = Vec::new();
+-    for (idx, name) in under_logged_chunks(&tasks, &files) {
++    for (idx, name) in under_logged_chunks(&tasks, &files)
++        .into_iter()
++        .filter(|(_, name)| !summary.manifest_parts.iter().any(|p| p.path == *name))
++    {
+         surviving.remove(&idx.to_string());
+         missing.push((u32::try_from(idx).ok(), name));
+     }
