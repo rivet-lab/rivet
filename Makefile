@@ -407,6 +407,11 @@ SEEDED_ARGS ?=
 open-defects:  ## Every open_defect_ live cell against its line in dev/release_oracle/known_red.py; CI does not run these cells, so run this after a fixture or harness change.
 	$(LIVE) $(PY) -m dev.release_oracle.open_defects
 
+.PHONY: secret-sink
+secret-sink:  ## Credential-sink property matrix: every command x engine x credential slot x path, graded on every byte a run leaves; one verdict line per cell.
+	cargo build --bin rivet
+	$(LIVE) $(PY) -m dev.release_oracle.secret_sink --bin target/debug/rivet
+
 .PHONY: evidence-record evidence-report
 evidence-record:  ## Record the last nextest run's green live cells (target/nextest/default/junit.xml) in docs/evidence/last-green.yaml. EVIDENCE_BY=local|gate|nightly|ci.
 	$(PY) dev/pytools/evidence.py record --junit target/nextest/default/junit.xml --by $(or $(EVIDENCE_BY),local)
