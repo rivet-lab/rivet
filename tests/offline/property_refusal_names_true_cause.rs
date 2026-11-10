@@ -20,6 +20,9 @@ const R_CMD_ORDER: &str = "2026-11-10: plan, load, compact, reconcile and repair
 const R_CMD_ACCEPT: &str = "2026-11-10: validate, metrics and journal exit 0 on a config that run refuses; closes when they refuse with the same code";
 const R_REMEDY_REPORT: &str = "2026-11-10: the remedy names `rivet reconcile --report`, which reconcile does not accept; closes when the remedy names repair's --report or reconcile's --output";
 const R_REMEDY_FORCE: &str = "2026-11-10: the stale-plan remedy names --force without naming `rivet apply`; closes when the message names the apply command";
+const R_STATE_UNREAD: &str = "2026-11-10: validate never opens the state, so over a corrupt state it answers legacy_run with exit 0; closes when validate reads run_status for the prefix (owner Q1 2026-11-01) and refuses a corrupt state as STATE_FILE_CORRUPT";
+const R_COPY_EMPTY: &str = "2026-11-10: state copy reads a corrupt SQLite state as empty and stops RIVET_STATE_COPY_SOURCE_EMPTY; closes when the copy opens the file through the corrupt-state check";
+const R_WORDING_GONE: &str = "2026-11-10: the lost-checkpoint remedy leads with a bare `run the export again` while exit 5 tells a scheduler not to retry; closes when the remedy names the operator's decision first or the exit becomes retryable";
 const R_FIELD_MONGO: &str = "2026-11-10: mongo accepts batch_size 0, an empty or NUL destination path and a 300-char export name with exit 0; closes when each is refused at config load";
 
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
@@ -85,6 +88,14 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_FIELD_MONGO,
     ),
     ("remedy/RIVET_CLI_REPORT_INVALID", R_REMEDY_REPORT),
+    (
+        "site/src/error.rs/rivet_reconcile_--report",
+        R_REMEDY_REPORT,
+    ),
+    ("wording/RIVET_STATE_CHUNK_CHECKPOINT_GONE", R_WORDING_GONE),
+    ("guard/validate/state_corrupt/*", R_STATE_UNREAD),
+    ("guard/validate_--export_a/state_corrupt/*", R_STATE_UNREAD),
+    ("guard/state_copy_--to_URL/state_corrupt/*", R_COPY_EMPTY),
     ("remedy/RIVET_PLAN_ARTIFACT_STALE", R_REMEDY_FORCE),
     ("source/RIVET_VERIFY_*", R_VERIFY),
     ("source/RIVET_VALUE_TOO_LARGE", R_PREFIX),
@@ -1576,6 +1587,125 @@ fn grade_uniform(runs: &[(&str, String, i32)]) -> Result<String, String> {
     }
 }
 
+/// Commands outside `rivet state` that read the state a guard decides on.
+const STATE_READERS: &[&[&str]] = &[
+    &["validate"],
+    &["validate", "--export", "a"],
+    &["run", "--validate"],
+    &["metrics"],
+    &["journal", "--export", "a"],
+];
+
+const COPY_TARGET: &str = "postgresql://127.0.0.1:1/pm_p4";
+
+/// Every state-reading command line: `STATE_READERS` and each `rivet state` subcommand with its required arguments.
+fn state_commands() -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = STATE_READERS.iter().map(|a| cmd(a)).collect();
+    let top = help(&["state"]);
+    let mut in_block = false;
+    for line in top.lines() {
+        if line.starts_with("Commands:") {
+            in_block = true;
+            continue;
+        }
+        if !in_block || line.trim().is_empty() {
+            in_block = in_block && !line.trim().is_empty();
+            continue;
+        }
+        let Some(sub) = line.split_whitespace().next() else {
+            continue;
+        };
+        if sub == "help" {
+            continue;
+        }
+        let text = help(&["state", sub]);
+        let usage = text.lines().find(|l| l.starts_with("Usage:")).unwrap_or("");
+        let mut argv = cmd(&["state", sub]);
+        if usage.contains("--export <") {
+            argv.extend(cmd(&["--export", "a"]));
+        }
+        if usage.contains("--run-id <") {
+            argv.extend(cmd(&["--run-id", "x"]));
+        }
+        if text.contains("--to <URL>") {
+            argv.extend(cmd(&["--to", COPY_TARGET]));
+        }
+        out.push(argv);
+    }
+    out
+}
+
+/// One cell per state-reading command over a corrupt state file: each refuses as STATE_FILE_CORRUPT.
+fn guard_cells(docs: &BTreeMap<String, Doc>, out: &mut Vec<(String, Verdict)>) {
+    let id = "RIVET_STATE_FILE_CORRUPT";
+    let doc = docs.get(id).expect("corrupt-state code in errors.md");
+    let commands = state_commands();
+    for e in ENGINES {
+        for argv in &commands {
+            let mut p = state_corrupt(e);
+            p.argv = argv.clone();
+            p.argv.extend(cmd(&["-c", "CFG"]));
+            let key = format!(
+                "guard/{}/state_corrupt/{}",
+                argv.join("_").replace(COPY_TARGET, "URL"),
+                engine_name(e)
+            );
+            out.push((key, verdict(grade(id, doc, &p, &execute(&p)))));
+        }
+    }
+}
+
+/// A delivered run whose prefix is then removed: validate must stop as data integrity, not answer clean.
+fn prefix_gone_cell(e: SourceType, out: &mut Vec<(String, Verdict)>) {
+    let key = format!("guard/validate/prefix_gone/{}", engine_name(e));
+    let sel = match e {
+        SourceType::Postgres | SourceType::Mysql | SourceType::Mssql => "SELECT 1 AS x",
+        SourceType::Oracle => "SELECT 1 AS x FROM dual",
+        SourceType::Mongo => {
+            out.push((
+                key,
+                Verdict::NotGraded(
+                    "a delivered mongo run needs a seeded collection the stand registry does not name"
+                        .to_string(),
+                ),
+            ));
+            return;
+        }
+    };
+    let p = stand_run(e, &format!("    query: '{sel}'\n"), &[]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let run = execute_in(dir.path(), &p);
+    if run.exit != 0 {
+        out.push((
+            key,
+            Verdict::NotGraded(format!(
+                "the delivering run did not deliver, exit={} \"{}\"",
+                run.exit,
+                brief(run.stderr.trim())
+            )),
+        ));
+        return;
+    }
+    let _ = std::fs::remove_dir_all(dir.path().join("out"));
+    let mut q = p.clone();
+    q.argv = cmd(&["validate", "-c", "CFG"]);
+    let o = execute_in(dir.path(), &q);
+    let v = if o.exit == 3 && error_section(&o.stderr).and_then(printed_code).is_some() {
+        Ok(format!(
+            "exit=3 \"{}\"",
+            brief(error_section(&o.stderr).unwrap_or(""))
+        ))
+    } else {
+        Err(format!(
+            "prefix of a recorded delivery removed: exit={} \"{}{}\"",
+            o.exit,
+            brief(o.stdout.trim()),
+            brief(o.stderr.trim())
+        ))
+    };
+    out.push((key, verdict(v)));
+}
+
 /// Whether the stand axes run: the live mode sets it under dev/live_slot.
 fn stand_on() -> bool {
     std::env::var("RIVET_PM_P4_STAND").is_ok_and(|v| v == "1")
@@ -1628,17 +1758,22 @@ fn stand_missing(e: SourceType, name: &str) -> Probe {
         SourceType::Mssql => format!("    query: 'SELECT * FROM [{name}]'\n"),
         SourceType::Mongo => format!("    table: \"{name}\"\n"),
     };
+    stand_run(e, &sel, &[name])
+}
+
+/// A `rivet run` of export `a` on the engine's stand with the given selector lines.
+fn stand_run(e: SourceType, select: &str, witness: &[&str]) -> Probe {
     Probe {
         yaml: format!(
             "source:\n  type: {}\n  url: \"{}\"\nexports:\n{}",
             engine_name(e),
             stand_url(e),
-            export("a", &sel)
+            export("a", select)
         ),
         argv: cmd(&["run", "-c", "CFG"]),
         env: vec![],
         files: vec![],
-        witness: vec![name.to_string()],
+        witness: witness.iter().map(|w| w.to_string()).collect(),
         absent: vec![],
     }
 }
@@ -1707,6 +1842,7 @@ fn stand_axes(e: SourceType, docs: &BTreeMap<String, Doc>, out: &mut Vec<(String
     }
     let id = missing_code(e);
     let doc = docs.get(id).expect("missing-relation code in errors.md");
+    prefix_gone_cell(e, out);
     reader_cells(
         &format!("reader/live/{id}/{eng}"),
         &stand_missing(e, "pm_p4_absent"),
@@ -1886,6 +2022,7 @@ fn cells() -> Vec<(String, Verdict)> {
         };
         out.push((format!("uncoded/{name}"), v));
     }
+    guard_cells(&docs, &mut out);
     for e in ENGINES {
         reader_cells(
             &format!("reader/RIVET_SOURCE_CONNECT_FAILED/{}", engine_name(e)),
