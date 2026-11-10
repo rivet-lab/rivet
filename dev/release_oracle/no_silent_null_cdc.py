@@ -64,6 +64,15 @@ def ddl_kinds() -> list[str]:
     return sorted(kinds, key=lambda k: k == "removed")
 
 
+def row_images(text: str | None = None) -> list[str]:
+    """The `binlog_row_image` values the MySQL CDC doc block names."""
+    text = text if text is not None else (nsn.ROOT / "src/source/mysql/cdc.rs").read_text()
+    block = text.split("`binlog_row_image` decides", 1)[-1].split("rivet's change stream", 1)[0]
+    out = list(dict.fromkeys(re.findall(r"`([A-Z]{4,})`", block)))
+    if "FULL" not in out or len(out) < 2:
+        raise AssertionError(f"mysql/cdc.rs: row images {out}: the image axis cannot be read")
+    return out
+
 
 def legs() -> list[str]:
     """Snapshot, every change kind, then every DDL kind."""
@@ -302,7 +311,7 @@ def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: st
 
 
 def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], str]]:
-    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet."""
+    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet; MySQL adds every non-default row image."""
     ax = nsn.axes()
     cap = UNITS_PER_ROUND.get(engine, 64)
     seen: set[str] = set()
@@ -315,6 +324,10 @@ def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], st
                 seen.add(c.family)
                 units += [Unit(t, c, "parquet") for t in ax["targets"] if t != "none"]
         out += [(group, units[k:k + cap], "") for k in range(0, len(units), cap)]
+    if engine == "mysql":
+        default = engines.sql("mysql", CDC_STAND["mysql"], "SELECT @@global.binlog_row_image;").out
+        for image in (i for i in row_images() if i not in default):
+            out += [(cols[g:g + GROUP], [Unit("none", None, "parquet")], image) for g in range(0, len(cols), GROUP)]
     return out
 
 
@@ -349,7 +362,7 @@ def record(led: Ledger, engine: str, results: list[Result]) -> None:
 
 
 def verify_no_silent_null_cdc(led: Ledger) -> None:
-    """Every engine's change stream: snapshot, change and DDL legs, override targets."""
+    """Every engine's change stream: snapshot, change and DDL legs, override targets and MySQL row images."""
     work = Path(os.environ.get("RIVET_ORACLE_WORK") or tempfile.gettempdir()) / "no_silent_null_cdc"
     for engine in nsn.axes()["engines"]:
         t0 = time.time()
@@ -363,6 +376,8 @@ def self_test() -> None:
     assert set(CDC_STAND) == set(nsn.axes()["engines"]), f"CDC_STAND {sorted(CDC_STAND)} must name every SourceType variant"
     assert change_ops() == ["delete", "insert", "update"], change_ops()
     assert ddl_kinds()[-1] == "removed" and set(ddl_kinds()) == {"added", "removed", "type_changed"}
+    assert row_images("x `binlog_row_image` decides `FULL` ... `MINIMAL` and `NOBLOB` y rivet's change stream `ZZZZ`") == ["FULL", "MINIMAL", "NOBLOB"]
+    assert set(row_images()) >= {"FULL", "MINIMAL"}
     assert expected("snapshot", 3) == [("", 1, 0), ("", 2, 1), ("", 3, 2)]
     assert expected("update", 3) == [("update", 1, 1), ("update", 2, 2), ("update", 1001, 0), ("update", 1002, 1), ("update", 1003, 2)]
     assert expected("delete", 2) == [("delete", 1, 1), ("delete", 2, 2)] and expected("removed", 9) == [("insert", 2003, 0)]
@@ -390,7 +405,7 @@ def self_test() -> None:
     rs = grade_unit("mysql", Unit("none", None, "parquet"), [c], 3, {"snapshot": nsn._proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE]")}, {"snapshot": ok}, d, "@MINIMAL")
     assert rs[0].cell.endswith("cdc-snapshot@MINIMAL/parquet") and rs[0].verdict == REFUSED and rs[1].klass == NOT_GRADED
     shutil.rmtree(d, ignore_errors=True)
-    print(f"no_silent_null_cdc self-test ok: legs {legs()}")
+    print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 
 
 def main() -> int:
