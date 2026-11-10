@@ -1501,6 +1501,66 @@ fn raise_sites() -> BTreeMap<String, String> {
     out
 }
 
+/// Commands that read a run back after it stopped, and whether each prints the run's error.
+const READERS: &[(&str, &[&str], bool)] = &[
+    ("metrics", &["metrics", "-c", "CFG", "--export", "a"], true),
+    ("metrics_json", &["metrics", "-c", "CFG", "--json"], true),
+    ("journal", &["journal", "-c", "CFG", "--export", "a"], true),
+    ("state_runs", &["state", "runs", "-c", "CFG"], false),
+];
+
+/// The refusal text after `Error: ` and its `[CODE] `, as a reader would repeat it.
+fn refusal_text(stderr: &str) -> Option<&str> {
+    let section = error_section(stderr)?.strip_prefix("Error: ")?;
+    let body = match section.strip_prefix('[') {
+        Some(rest) => rest.split_once("] ").map_or(rest, |(_, b)| b),
+        None => section,
+    };
+    Some(body.lines().next().unwrap_or("").trim())
+}
+
+/// Grades a reader after a stopped run: it exits 0, shows the run failed, and repeats the run's code and words.
+fn grade_reader(run: &Out, carries: bool, o: &Out) -> Result<String, String> {
+    let Some(text) = refusal_text(&run.stderr) else {
+        return Err(format!("the run printed no refusal, exit={}", run.exit));
+    };
+    if o.exit != 0 {
+        return Err(format!(
+            "reader exit {}: \"{}\"",
+            o.exit,
+            brief(o.stderr.trim())
+        ));
+    }
+    let all = format!("{}{}", o.stdout, o.stderr);
+    if !all.contains("failed") {
+        return Err(format!("no failed run in \"{}\"", brief(&all)));
+    }
+    if carries {
+        if let Some(code) = error_section(&run.stderr).and_then(printed_code)
+            && !all.contains(code)
+        {
+            return Err(format!("the run printed {code}, the reader does not"));
+        }
+        let head: String = text.chars().take(48).collect();
+        if !all.contains(&head) {
+            return Err(format!("the reader does not repeat \"{head}\""));
+        }
+    }
+    Ok(format!("failed, \"{}\"", brief(text)))
+}
+
+/// One cell per reader after a run that stopped on the probe's cause.
+fn reader_cells(prefix: &str, p: &Probe, out: &mut Vec<(String, Verdict)>) {
+    let then: Vec<Vec<String>> = READERS.iter().map(|(_, a, _)| cmd(a)).collect();
+    let (run, reads) = execute_then(p, &then);
+    for ((name, _, carries), o) in READERS.iter().zip(&reads) {
+        out.push((
+            format!("{prefix}/{name}"),
+            verdict(grade_reader(&run, *carries, o)),
+        ));
+    }
+}
+
 /// Whether the stand axes run: the live mode sets it under dev/live_slot.
 fn stand_on() -> bool {
     std::env::var("RIVET_PM_P4_STAND").is_ok_and(|v| v == "1")
@@ -1632,6 +1692,11 @@ fn stand_axes(e: SourceType, docs: &BTreeMap<String, Doc>, out: &mut Vec<(String
     }
     let id = missing_code(e);
     let doc = docs.get(id).expect("missing-relation code in errors.md");
+    reader_cells(
+        &format!("reader/live/{id}/{eng}"),
+        &stand_missing(e, "pm_p4_absent"),
+        out,
+    );
     let mut names = vec!["pm_p4_absent".to_string()];
     names.extend(needles());
     for name in names {
@@ -1796,6 +1861,11 @@ fn cells() -> Vec<(String, Verdict)> {
         out.push((format!("uncoded/{name}"), v));
     }
     for e in ENGINES {
+        reader_cells(
+            &format!("reader/RIVET_SOURCE_CONNECT_FAILED/{}", engine_name(e)),
+            &connect_refused(e),
+            &mut out,
+        );
         stand_axes(e, &docs, &mut out);
     }
     out
@@ -1988,4 +2058,32 @@ fn the_wording_grader_ties_the_remedy_to_the_exit_set() {
     assert!(grade_wording(&doc(&[6], "a bug; report it")).is_ok());
     assert!(grade_wording(&doc(&[6], "fix the config")).is_err());
     assert!(grade_wording(&doc(&[5], "re-run once with `parallel: 1`")).is_ok());
+}
+
+#[test]
+fn the_reader_grader_wants_the_failure_the_code_and_the_words() {
+    let run = run_out(1, "Error: [RIVET_X_Y] table t is gone\n");
+    let ok = Out {
+        exit: 0,
+        stdout: "a failed [RIVET_X_Y] table t is gone\n".to_string(),
+        stderr: String::new(),
+    };
+    assert!(grade_reader(&run, true, &ok).is_ok());
+    let no_code = Out {
+        exit: 0,
+        stdout: "a failed table t is gone\n".to_string(),
+        stderr: String::new(),
+    };
+    assert!(
+        grade_reader(&run, true, &no_code)
+            .unwrap_err()
+            .contains("RIVET_X_Y")
+    );
+    assert!(grade_reader(&run, false, &no_code).is_ok());
+    let ok_status = Out {
+        exit: 0,
+        stdout: "a success\n".to_string(),
+        stderr: String::new(),
+    };
+    assert!(grade_reader(&run, false, &ok_status).is_err());
 }
