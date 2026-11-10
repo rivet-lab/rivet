@@ -15,39 +15,6 @@ fn engines() -> Vec<String> {
     ENGINES.iter().map(|e| e.to_string()).collect()
 }
 
-/// The CamelCase variants of `enum_name` in `rel`, one per line of the enum body.
-fn enum_variants(rel: &str, enum_name: &str) -> BTreeSet<String> {
-    let text = std::fs::read_to_string(root().join(rel)).expect("read the enum's file");
-    let needle = format!("enum {enum_name} {{");
-    let body = &text[text.find(&needle).expect("enum not found") + needle.len()..];
-    let body = &body[..body.find("\n}").expect("enum end")];
-    body.lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with("//") && !l.starts_with('#') && !l.is_empty())
-        .filter_map(|l| {
-            let id: String = l
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            id.chars()
-                .next()
-                .filter(char::is_ascii_uppercase)
-                .map(|_| id)
-        })
-        .collect()
-}
-
-fn snake(camel: &str) -> String {
-    let mut out = String::new();
-    for (i, c) in camel.chars().enumerate() {
-        if c.is_ascii_uppercase() && i > 0 {
-            out.push('_');
-        }
-        out.push(c.to_ascii_lowercase());
-    }
-    out
-}
-
 #[test]
 fn the_hook_primitives_are_the_ones_the_scanner_knows() {
     let text = std::fs::read_to_string(root().join("src/test_hook.rs")).unwrap();
@@ -111,18 +78,50 @@ fn every_hook_is_found_in_the_code_and_belongs_to_a_family() {
 }
 
 #[test]
-fn the_engine_axis_is_the_sql_engine_enum() {
-    let scanned: BTreeSet<String> = enum_variants("tests/common/sql_engine.rs", "SqlEngine")
+fn the_engine_axis_is_the_source_type_enum() {
+    let scanned: BTreeSet<String> = enum_variants(&root(), "src/config/source.rs", "SourceType")
+        .iter()
+        .map(|v| match v.as_str() {
+            "Postgres" => "pg".to_string(),
+            other => other.to_lowercase(),
+        })
+        .collect();
+    let declared: BTreeSet<String> = ENGINES.iter().map(|e| e.to_string()).collect();
+    assert_eq!(scanned, declared, "ENGINES must be the SourceType variants");
+    let sql: BTreeSet<String> = enum_variants(&root(), "tests/common/sql_engine.rs", "SqlEngine")
         .iter()
         .map(|v| v.to_lowercase())
         .collect();
-    let declared: BTreeSet<String> = ENGINES.iter().map(|e| e.to_string()).collect();
-    assert_eq!(scanned, declared, "ENGINES must be the SqlEngine variants");
+    let without_mongo: BTreeSet<String> = declared.into_iter().filter(|e| e != "mongo").collect();
+    assert_eq!(
+        sql, without_mongo,
+        "every SQL engine of SourceType has a SqlEngine to seed it"
+    );
+}
+
+#[test]
+fn a_shape_reaches_only_the_engines_that_can_run_it() {
+    let all = cells(&root(), &engines());
+    for c in &all {
+        assert!(
+            c.shape.fits(&c.engine),
+            "{} on an engine that cannot run it",
+            c.key()
+        );
+    }
+    let keys: BTreeSet<String> = all.iter().map(Cell::key).collect();
+    assert!(keys.contains("mongo/mongo_full/before_commit_rename/sigkill"));
+    assert!(!keys.contains("mongo/full/before_commit_rename/sigkill"));
+    assert!(!keys.contains("pg/mongo_full/before_commit_rename/sigkill"));
+    assert!(
+        all.iter()
+            .any(|c| c.engine == "mongo" && c.not_graded().is_none())
+    );
 }
 
 #[test]
 fn every_export_mode_has_a_shape() {
-    let modes: BTreeSet<String> = enum_variants("src/config/export.rs", "ExportMode")
+    let modes: BTreeSet<String> = enum_variants(&root(), "src/config/export.rs", "ExportMode")
         .iter()
         .map(|v| snake(v))
         .collect();
@@ -341,4 +340,178 @@ fn the_python_oracle_passes_its_own_self_test() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn the_warehouse_axis_is_the_load_target_enum() {
+    let scanned: BTreeSet<String> = enum_variants(&root(), "src/config/load.rs", "LoadTarget")
+        .iter()
+        .map(|v| snake(v))
+        .collect();
+    let declared: BTreeSet<String> = Warehouse::ALL
+        .iter()
+        .map(|w| w.label().to_string())
+        .collect();
+    assert_eq!(
+        scanned, declared,
+        "Warehouse must be the LoadTarget variants"
+    );
+    assert_eq!(
+        Warehouse::serving("src/load/clickhouse.rs"),
+        vec![Warehouse::Clickhouse]
+    );
+    assert_eq!(
+        Warehouse::serving("src/load/mod.rs"),
+        Warehouse::ALL.to_vec()
+    );
+}
+
+#[test]
+fn a_load_cell_runs_on_clickhouse_and_names_each_cloud_warehouse_it_cannot_reach() {
+    let all = cells(&root(), &engines());
+    let load: Vec<&Cell> = all.iter().filter(|c| c.shape == Shape::Load).collect();
+    assert!(
+        load.iter().any(|c| c.not_graded().is_none()),
+        "no runnable load cell"
+    );
+    for c in &load {
+        let on_stand = Warehouse::serving(&c.hook.file).contains(&Warehouse::Clickhouse);
+        if !on_stand {
+            assert!(
+                c.not_graded().is_some(),
+                "{} serves no stand warehouse",
+                c.key()
+            );
+        }
+    }
+    let keys: BTreeSet<String> = variants(&root(), &all).iter().map(Variant::key).collect();
+    assert!(keys.contains("pg/load/load_after_adopt/fault@warehouse=bigquery"));
+    assert!(!keys.iter().any(|k| k.ends_with("@warehouse=clickhouse")));
+    assert!(
+        variants(&root(), &all)
+            .iter()
+            .filter(|v| v.axis == Axis::Warehouse)
+            .all(|v| v.not_graded().is_some())
+    );
+}
+
+#[test]
+fn every_axis_reads_its_values_from_the_code() {
+    let r = root();
+    let mutation: BTreeSet<String> = Axis::Mutation.values(&r).into_iter().collect();
+    for op in ["insert", "update", "delete"] {
+        assert!(mutation.contains(op), "ChangeOp lost {op}: {mutation:?}");
+    }
+    assert!(SCHEMA_MUTATIONS.iter().all(|m| mutation.contains(*m)));
+    let refusal = Axis::Refusal.values(&r);
+    assert!(
+        refusal.contains(&"RIVET_STATE_RUN_IN_PROGRESS".to_string()),
+        "{refusal:?}"
+    );
+    assert!(refusal.len() >= 4, "errors.md busy codes: {refusal:?}");
+    let entry: BTreeSet<String> = Axis::Entry.values(&r).into_iter().collect();
+    for cmd in ["apply", "state", "load", "cdc", "compact"] {
+        assert!(entry.contains(cmd), "Commands lost {cmd}: {entry:?}");
+    }
+    assert!(!entry.contains("run"), "run is the base entry");
+    let dest: BTreeSet<String> = Axis::Destination.values(&r).into_iter().collect();
+    let want: BTreeSet<String> = ["s3", "gcs", "azure", "stdout"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(dest, want, "DestinationType beside local");
+    let state = Axis::State.values(&r);
+    assert_eq!(state[0], "postgres", "StateRef beside sqlite: {state:?}");
+    assert_eq!(Axis::Parallel.values(&r), vec!["4".to_string()]);
+}
+
+#[test]
+fn each_point_is_a_hook_the_scan_finds_and_every_axis_grades_somewhere() {
+    let names: BTreeSet<String> = hooks(&root()).into_iter().map(|h| h.name).collect();
+    for (point, _) in POINTS {
+        assert!(
+            names.contains(point),
+            "the point {point} is no hook any more"
+        );
+    }
+    let all = cells(&root(), &engines());
+    let vs = variants(&root(), &all);
+    let keys: BTreeSet<String> = vs.iter().map(Variant::key).collect();
+    assert_eq!(keys.len(), vs.len(), "variant keys repeat");
+    for axis in Axis::AT_POINTS {
+        assert!(
+            vs.iter()
+                .any(|v| v.axis == axis && v.not_graded().is_none()),
+            "the {} axis grades no variant",
+            axis.label()
+        );
+    }
+    for v in &vs {
+        if let Some(why) = v.not_graded() {
+            assert!(!why.trim().is_empty(), "{} has an empty reason", v.key());
+        }
+    }
+    assert!(keys.contains("pg/full/before_commit_rename/sigkill@mutation=truncate"));
+    assert!(keys.contains("pg/full/after_file_write/fault@entry=apply"));
+}
+
+#[test]
+fn a_host_crash_and_a_source_event_are_named_and_not_graded() {
+    let all = cells(&root(), &engines());
+    for stop in [Stop::HostCrash, Stop::SourceEvent] {
+        let of: Vec<&Cell> = all.iter().filter(|c| c.stop == stop).collect();
+        assert!(!of.is_empty(), "no {} cell", stop.label());
+        assert!(of.iter().all(|c| c.not_graded().is_some()));
+    }
+}
+
+#[test]
+fn a_known_red_entry_is_dated_matches_a_cell_and_names_a_finding() {
+    let all = cells(&root(), &engines());
+    let mut keys: Vec<String> = all.iter().map(Cell::key).collect();
+    keys.extend(variants(&root(), &all).iter().map(Variant::key));
+    keys.extend(all.iter().map(|c| {
+        format!(
+            "{}/{}/{}/sigterm_vs_sigkill",
+            c.engine,
+            c.shape.label(),
+            c.hook.name
+        )
+    }));
+    keys.extend(
+        all.iter()
+            .map(|c| format!("{}/*/{}/fault_exit_class", c.engine, c.hook.name)),
+    );
+    for k in KNOWN_RED {
+        let date = k.reason.get(..10).unwrap_or("");
+        assert!(
+            date.len() == 10
+                && date.chars().filter(|c| *c == '-').count() == 2
+                && k.reason[10..].starts_with(':'),
+            "{} has no dated reason: {:?}",
+            k.keys,
+            k.reason
+        );
+        assert!(!k.finding.is_empty(), "{} names no finding", k.keys);
+        assert!(
+            keys.iter().any(|key| glob(k.keys, key)),
+            "{} matches no cell",
+            k.keys
+        );
+        assert!(
+            ENGINES.iter().any(|e| k.keys.starts_with(&format!("{e}/"))),
+            "{} names no engine",
+            k.keys
+        );
+    }
+    assert!(glob(
+        "pg/*/before_commit_rename/sigkill",
+        "pg/full/before_commit_rename/sigkill"
+    ));
+    assert!(!glob("pg/*/x", "pg/full/y"));
+    assert!(known_red("pg/no_such_cell", "").is_none());
+    assert!(glob(
+        "pg/range/*",
+        "pg/range/after_chunk_file/fault@parallel=4"
+    ));
 }
