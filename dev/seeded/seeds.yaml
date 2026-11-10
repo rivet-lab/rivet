@@ -5649,3 +5649,37 @@ seeds:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
       oracle:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
+
+  - name: init-name-folded-into-query
+    class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
+    history: "audit 2026-11-08 finding H5-F1 (hunt 5, `rivet init` on a PostgreSQL and a MySQL table named with a line break); RED on main 2026-11-10 (`a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names`: the scaffold of table \"nl<LF>      tab\" does not parse back to that relation)"
+    scope: source
+    patch: init-name-folded-into-query/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mysql:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mssql:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mongo:
+        na: "a MongoDB export reads its collection through `table:`, never a folded `query:` block, and a name outside the table-shortcut gate is skipped with a reason (a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names covers the relational engines; the mutant lives in the query emitter)"
+      oracle:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+
+  - name: init-column-key-unquoted
+    class: "`rivet init` writes a catalog column name as a bare YAML map key in the decimal override: a name such as `#tag` is read as a comment (the override is dropped), `x ` collapses onto `x` and `&a x` loses its anchor, so a numeric column is exported under no override or under its twin's"
+    history: "found 2026-11-10 by a hunt for sites of audit finding H5-F1 (PyYAML: `c:` with `#tag: d` and `x: e` loads as only `x`); RED on main 2026-11-10 (`a_decimal_override_key_is_exactly_the_column_it_names`: no columns override for `#tag`)"
+    scope: source
+    patch: init-column-key-unquoted/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mysql:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mssql:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mongo:
+        na: "a MongoDB collection has no declared numeric precision, so init writes no decimal override and no map key from a field name (the mutant lives in the relational decimal override writer)"
+      oracle:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
