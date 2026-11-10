@@ -1309,6 +1309,9 @@ jobs:
       - name: Cargo.lock is in sync with Cargo.toml (release uses --locked)
         run: cargo metadata --locked --format-version 1 > /dev/null
       - uses: ./.github/actions/free-disk
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: uv
       - run: cargo test --all-targets
       # The semantic gates below were five jobs that each recompiled the crate to
       # re-run tests `--all-targets` had just run. They are steps now: the binaries
