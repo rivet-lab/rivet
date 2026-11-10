@@ -3,8 +3,10 @@
 use rivet::config::SourceType;
 use rivet::error::codes;
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 const RIVET_BIN: &str = env!("CARGO_BIN_EXE_rivet");
 const MATRIX: &str = "refusal_names_true_cause";
@@ -87,6 +89,9 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     ("source/RIVET_VERIFY_*", R_VERIFY),
     ("source/RIVET_VALUE_TOO_LARGE", R_PREFIX),
 ];
+
+/// Cell families only the live mode emits; their ledger entries are not stale in an offline run.
+const STAND_AXES: &[&str] = &["word/", "reader/live/", "guard/validate/prefix_gone/"];
 
 /// Whether a ledger key accepts a RED cell: an exact key, or a `prefix*` pattern.
 fn accepts(key: &str, cell: &str) -> bool {
@@ -1087,11 +1092,31 @@ fn verdict(r: Result<String, String>) -> Verdict {
 
 /// Runs the binary in a scratch directory with the probe's config, files and env.
 fn execute(p: &Probe) -> Out {
+    execute_then(p, &[]).0
+}
+
+/// Runs the probe, then each follow-up command in the same directory, config and env.
+fn execute_then(p: &Probe, then: &[Vec<String>]) -> (Out, Vec<Out>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let cfg = dir.path().join("c.yaml");
+    let first = execute_in(dir.path(), p);
+    let rest = then
+        .iter()
+        .map(|argv| {
+            let mut q = p.clone();
+            q.argv = argv.clone();
+            q.files = vec![];
+            execute_in(dir.path(), &q)
+        })
+        .collect();
+    (first, rest)
+}
+
+/// Runs the binary once in `dir` with the probe's config, files and env.
+fn execute_in(dir: &Path, p: &Probe) -> Out {
+    let cfg = dir.join("c.yaml");
     std::fs::write(&cfg, &p.yaml).expect("write config");
     for (name, body) in &p.files {
-        std::fs::write(dir.path().join(name), body).expect("write file");
+        std::fs::write(dir.join(name), body).expect("write file");
     }
     let args: Vec<String> = p
         .argv
@@ -1106,7 +1131,7 @@ fn execute(p: &Probe) -> Out {
         .collect();
     let mut c = Command::new(RIVET_BIN);
     c.args(&args)
-        .current_dir(dir.path())
+        .current_dir(dir)
         .env_remove("RIVET_STATE_URL")
         .env_remove("RIVET_TEST_STATE_URL");
     for (k, v) in &p.env {
@@ -1373,6 +1398,153 @@ fn grade_remedy(doc: &Doc, subs: &[String]) -> Result<String, String> {
     Ok(format!("{} flag(s) named, all parse", flags.len()))
 }
 
+/// Whether the stand axes run: the live mode sets it under dev/live_slot.
+fn stand_on() -> bool {
+    std::env::var("RIVET_PM_P4_STAND").is_ok_and(|v| v == "1")
+}
+
+/// The stand URL of an engine's batch source: dev/stand/registry.yaml, and tests/common/env.rs for Oracle.
+fn stand_url(e: SourceType) -> String {
+    let text = std::fs::read_to_string(root().join("dev/stand/registry.yaml")).expect("registry");
+    let reg: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).expect("registry yaml");
+    let from = |k: &str| {
+        reg["sources"][k]["url"]
+            .as_str()
+            .expect("stand url")
+            .to_string()
+    };
+    match e {
+        SourceType::Postgres => from("postgres"),
+        SourceType::Mysql => from("mysql"),
+        SourceType::Mssql => from("mssql"),
+        SourceType::Mongo => format!("{}/rivet", from("mongo")),
+        SourceType::Oracle => {
+            let env = std::fs::read_to_string(root().join("tests/common/env.rs")).expect("env.rs");
+            let line = env
+                .lines()
+                .find(|l| l.starts_with("pub const ORACLE_URL: &str = \""))
+                .expect("ORACLE_URL in tests/common/env.rs");
+            line.split('"').nth(1).expect("quoted url").to_string()
+        }
+    }
+}
+
+/// Whether something listens at the URL's host and port: a closed port is the stand down, not a verdict.
+fn listening(url: &str) -> bool {
+    let rest = url.split("://").nth(1).unwrap_or("");
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+    let hp = rest.split(['/', '?']).next().unwrap_or("");
+    hp.to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok())
+}
+
+/// A `rivet run` of export `a` reading a relation named `name` that does not exist on the stand.
+fn stand_missing(e: SourceType, name: &str) -> Probe {
+    let sel = match e {
+        SourceType::Postgres | SourceType::Oracle => {
+            format!("    query: 'SELECT * FROM \"{name}\"'\n")
+        }
+        SourceType::Mysql => format!("    query: 'SELECT * FROM `{name}`'\n"),
+        SourceType::Mssql => format!("    query: 'SELECT * FROM [{name}]'\n"),
+        SourceType::Mongo => format!("    table: \"{name}\"\n"),
+    };
+    Probe {
+        yaml: format!(
+            "source:\n  type: {}\n  url: \"{}\"\nexports:\n{}",
+            engine_name(e),
+            stand_url(e),
+            export("a", &sel)
+        ),
+        argv: cmd(&["run", "-c", "CFG"]),
+        env: vec![],
+        files: vec![],
+        witness: vec![name.to_string()],
+        absent: vec![],
+    }
+}
+
+/// The code a missing relation is refused with, one arm per engine.
+fn missing_code(e: SourceType) -> &'static str {
+    match e {
+        SourceType::Postgres | SourceType::Mysql | SourceType::Mssql | SourceType::Oracle => {
+            "RIVET_SOURCE_TABLE_NOT_FOUND"
+        }
+        SourceType::Mongo => "RIVET_SOURCE_COLLECTION_NOT_FOUND",
+    }
+}
+
+/// The text classifiers whose needles the word axis names a missing relation after.
+const CLASSIFIERS: &[(&str, &str)] = &[
+    ("src/error/retry.rs", "classify_error"),
+    ("src/pipeline/job.rs", "classify_error_message"),
+    ("src/preflight/doctor.rs", "categorize_source_error"),
+    ("src/preflight/doctor.rs", "categorize_dest_error"),
+];
+
+/// Every `contains("…")` needle in the body of each classifier.
+fn needles() -> BTreeSet<String> {
+    let lit = regex::Regex::new(r#"contains\("([^"]+)"\)"#).expect("re");
+    let mut out = BTreeSet::new();
+    for (file, name) in CLASSIFIERS {
+        let text = std::fs::read_to_string(root().join(file)).expect("classifier source");
+        let start = text
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{file}: no fn {name}"));
+        let body = &text[start..];
+        let end = body.find("\n}\n").expect("fn end");
+        for c in lit.captures_iter(&body[..end]) {
+            out.insert(c[1].to_string());
+        }
+    }
+    out
+}
+
+/// Whether a needle can be spelled as a quoted relation name on every engine.
+fn portable(needle: &str) -> bool {
+    needle.len() >= 3
+        && needle
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || " _-".contains(c))
+}
+
+/// The stand-only cells of one engine: a classifier word in a missing relation's name keeps its code and exit.
+fn stand_axes(e: SourceType, docs: &BTreeMap<String, Doc>, out: &mut Vec<(String, Verdict)>) {
+    let eng = engine_name(e);
+    if !stand_on() {
+        out.push((
+            format!("word/*/{eng}"),
+            Verdict::NotGraded("reads the live stand; the live mode grades it".to_string()),
+        ));
+        return;
+    }
+    let url = stand_url(e);
+    if !listening(&url) {
+        out.push((
+            format!("word/*/{eng}"),
+            Verdict::NotGraded(format!("the {eng} stand does not listen")),
+        ));
+        return;
+    }
+    let id = missing_code(e);
+    let doc = docs.get(id).expect("missing-relation code in errors.md");
+    let mut names = vec!["pm_p4_absent".to_string()];
+    names.extend(needles());
+    for name in names {
+        let key = format!("word/{}/{eng}", name.replace(' ', "_"));
+        if !portable(&name) {
+            out.push((
+                key,
+                Verdict::NotGraded("not a portable quoted relation name".to_string()),
+            ));
+            continue;
+        }
+        let p = stand_missing(e, &name);
+        out.push((key, verdict(grade(id, doc, &p, &execute(&p)))));
+    }
+}
+
 enum Verdict {
     Pass(String),
     Red(String),
@@ -1490,6 +1662,9 @@ fn cells() -> Vec<(String, Verdict)> {
         };
         out.push((format!("uncoded/{name}"), v));
     }
+    for e in ENGINES {
+        stand_axes(e, &docs, &mut out);
+    }
     out
 }
 
@@ -1524,6 +1699,7 @@ fn every_refusal_is_coded_and_names_the_true_cause() {
     let stale: Vec<&str> = ACCEPTED_RED
         .iter()
         .map(|(k, _)| *k)
+        .filter(|k| stand_on() || !STAND_AXES.iter().any(|a| k.starts_with(a)))
         .filter(|k| !reds.iter().any(|r| accepts(k, r)))
         .collect();
     assert_eq!(
@@ -1654,4 +1830,14 @@ fn the_literal_scan_sees_a_message_prefix_and_a_verify_token() {
         !lits.contains("RIVET_STATE_URL"),
         "an env name is not a code"
     );
+}
+
+#[test]
+fn the_word_axis_reads_every_classifier_needle() {
+    let n = needles();
+    for w in ["deadlock", "connection refused", "does not exist", "403"] {
+        assert!(n.contains(w), "{w}: {n:?}");
+    }
+    assert!(portable("lock wait timeout") && !portable("metadata.google.internal"));
+    assert!(!listening("postgresql://u:p@127.0.0.1:1/db"));
 }
