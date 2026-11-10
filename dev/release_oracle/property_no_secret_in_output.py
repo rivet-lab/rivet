@@ -331,11 +331,11 @@ OWN_STUB = {"source": "source", "state": "state", "load": "load", "bigquery key"
 class Stub:
     """A loopback listener that counts connections: it resets them (`rst`), refuses a PostgreSQL login (`pg`), answers HTTP 500 (`http`) or relays to a real server (`fwd`)."""
 
-    def __init__(self, kind: str, upstream: int = 0, body: bytes = b"") -> None:
+    def __init__(self, kind: str, upstream: int = 0, body: bytes = b"", host: str = "127.0.0.1") -> None:
         self.kind, self.count, self.password, self.wire, self.upstream, self.body = kind, 0, None, bytearray(), upstream, body
         self.sock = socket.socket()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", 0))
+        self.sock.bind((host, 0))
         self.sock.listen(64)
         self.port = self.sock.getsockname()[1]
         self._stop = False
@@ -704,12 +704,16 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
         base = f"http://127.0.0.1:{stubs['load'].port}"
         env["CANARY_CH_PW"] = canary("baseline").plain
         load = {"target": "clickhouse", "database": "canary", "user": "rivet", "url": base, "password_env": "CANARY_CH_PW"}
-        if spec.spelling == "url-userinfo":
+        spelling, _, shape = spec.spelling.partition("@")
+        if spelling == "url-userinfo":
             load["url"] = f"http://rivet:{secret.quoted}@127.0.0.1:{stubs['load'].port}"
-        elif spec.spelling == "url-query-password":
+        elif spelling == "url-query-password":
             load["url"] = f"{base}/?password={secret.quoted}"
         else:
             env["CANARY_CH_PW"] = secret.plain
+        if shape:
+            stubs["remote"] = Stub("http", host=lan_ip() or "127.0.0.1")
+            load["url"] = endpoint_url(shape, stubs["remote"].port, stubs["load"].port)
         cfg["load"] = load
         roles["load"] = secret
     if spec.slot == "bigquery":
@@ -784,6 +788,54 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
 
 DEST_CREDENTIAL_FIELD = re.compile(r"_env$|_file$|_profile$|^allow_anonymous$")
 PATH_SHAPES = ("file", "dir", "empty", "bad-json")
+
+
+ENDPOINT_FIELD = re.compile(r"^(url|endpoint)$")
+ENDPOINT_SHAPES = ("remote-http", "backslash-at")
+LAN: list[str | None] = []
+
+
+def lan_ip() -> str | None:
+    """This host's non-loopback address a remote-host stub binds to, None when the host has no route off loopback."""
+    if not LAN:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("192.0.2.1", 9))
+            ip = s.getsockname()[0]
+        except OSError:
+            ip = "127.0.0.1"
+        finally:
+            s.close()
+        LAN.append(None if ip.startswith("127.") else ip)
+    return LAN[0]
+
+
+def endpoint_url(shape: str, remote: int, local: int) -> str:
+    """An endpoint in one spelling: a plain remote `http://` host, or one a hand parser reads as loopback and a WHATWG parser dials remote."""
+    match shape:
+        case "remote-http":
+            return f"http://{lan_ip()}:{remote}"
+        case "backslash-at":
+            return f"http://{lan_ip()}:{remote}\\@127.0.0.1:{local}"
+    raise KeyError(f"endpoint shape `{shape}` has no recipe")
+
+
+def endpoint_spellings(dest_recipes: dict[str, list[str]]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Every (slot, spelling) that puts a URL-typed field of the load or destination schema on a non-loopback host."""
+    out: list[tuple[str, str]] = []
+    guards: list[str] = []
+    for defn in ("LoadSection", "DestinationConfig"):
+        for f in (f for f in schema_fields(defn) if ENDPOINT_FIELD.match(f)):
+            match (defn, f):
+                case ("LoadSection", "url"):
+                    bases = [("load", "password-env")]
+                case ("DestinationConfig", "endpoint"):
+                    bases = [("dest", sps[0]) for sps in dest_recipes.values()]
+                case other:
+                    guards.append(f"URL field `{other[0]}.{other[1]}` has no endpoint recipe")
+                    continue
+            out += [(slot, f"{b}@{shape}") for slot, b in bases for shape in ENDPOINT_SHAPES]
+    return out, guards
 
 
 def schema_fields(defn: str) -> list[str]:
@@ -883,6 +935,7 @@ def dest_scene(spelling: str, tag: str, root: Path, env: dict[str, str], stubs: 
     """The `destination:` block that carries one credential spelling; beside `allow_anonymous` no credential may reach any request."""
     stubs["dest"] = Stub("http")
     base = f"http://127.0.0.1:{stubs['dest'].port}"
+    spelling, _, endpoint_shape = spelling.partition("@")
     dest_type, rest = spelling.split(":", 1)
     field_part, _, shape = rest.partition(":")
     fields = field_part.split("+")
@@ -892,6 +945,9 @@ def dest_scene(spelling: str, tag: str, root: Path, env: dict[str, str], stubs: 
     for f in fields:
         dest.update(dest_field(f, shape or "file", tag, root, base, env, own))
     roles.update({f"anonymous {k}": v for k, v in own.items()} if "allow_anonymous" in fields else own)
+    if endpoint_shape:
+        stubs["remote"] = Stub("http", host=lan_ip() or "127.0.0.1")
+        dest["endpoint"] = endpoint_url(endpoint_shape, stubs["remote"].port, stubs["dest"].port)
     return dest
 
 
@@ -1042,6 +1098,8 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
     guards += [f"export mode `{m}` has no config recipe" for m in modes if m not in MODE_FIELDS]
     dest_recipes, dest_guards = dest_spellings(dests)
     guards += dest_guards
+    endpoint_cells, endpoint_guards = endpoint_spellings(dest_recipes)
+    guards += endpoint_guards
     guards += [f"destination type `{d}` has no credential recipe" for d in dests if d not in dest_recipes and d not in NO_CREDENTIAL]
     guards += [f"load target `{t}` has no credential recipe" for t in loads if t not in LOAD_RECIPES]
     for d in dests:
@@ -1077,6 +1135,7 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
             specs += [Spec(c, "postgres", "state", sp, "dead-state") for sp in STATE_SPELLINGS]
             specs += [Spec(c, "postgres", "state", sp, "live-state") for sp in STATE_SPELLINGS if live_state]
             specs += [Spec(c, "postgres", "load", sp) for sp in LOAD_SPELLINGS if "clickhouse" in loads]
+            specs += [Spec(c, "postgres", sl, sp) for sl, sp in endpoint_cells if lan_ip()]
             specs += [Spec(c, "postgres", "bigquery", sp) for sp in bq_spellings] if "bigquery" in loads else []
             specs += [Spec(c, "postgres", "snowflake", "private-key-file")] if "snowflake" in loads else []
             specs += [Spec(c, "postgres", "dest", sp) for d in dests for sp in dest_recipes.get(d, ())]
@@ -1276,6 +1335,10 @@ def _verify(led: Ledger, binary: Path, cmds: list[Cmd], engines: list[str], mode
             ("state-tls-success", "state over TLS success is NOT GRADED: the stand postgres runs ssl=off; the sslmode=require error path is graded"),
             ("oracle-cdc-events", "Oracle CDC with events is NOT GRADED: no Oracle stand answers")):
         led.skipped("-", "-", f"no_secret_in_output/{scenario}", "-", why, cause=SkipCause.ENV)
+    if lan_ip() is None:
+        led.skipped("-", "-", "no_secret_in_output/endpoint-remote", "-",
+                    "a credential sent to a non-loopback `http://` endpoint is NOT GRADED: this host has no non-loopback address "
+                    "for the remote stub to bind", cause=SkipCause.ENV)
     for module in SIGNER_PREFIX:
         names, _, urls = ambient_identity(module)
         if not names:
