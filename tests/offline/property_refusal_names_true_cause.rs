@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const RIVET_BIN: &str = env!("CARGO_BIN_EXE_rivet");
-const MATRIX: &str = "p4_true_cause";
+const MATRIX: &str = "refusal_names_true_cause";
 
 const R_PREFIX: &str = "2026-11-08: the oversized-value message opens with an unregistered RIVET_VALUE_TOO_LARGE prefix; closes when the prefix is dropped from both raise sites";
 const R_VERIFY: &str = "2026-11-08: validate prints a second code vocabulary absent from errors.md; closes when it joins codes::ALL or the docs list it";
@@ -1514,7 +1514,7 @@ fn every_refusal_is_coded_and_names_the_true_cause() {
     text.push_str(&format!(
         "{MATRIX} SUMMARY PASS={pass} RED={red} NOT_GRADED={ng}\n"
     ));
-    let sink = Path::new(env!("CARGO_TARGET_TMPDIR")).join("p4_true_cause_verdicts.txt");
+    let sink = Path::new(env!("CARGO_TARGET_TMPDIR")).join("refusal_names_true_cause_verdicts.txt");
     std::fs::write(&sink, &text).expect("write verdicts");
     print!("{text}");
     let fresh: Vec<&String> = reds

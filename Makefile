@@ -14,7 +14,7 @@ LIVE_SLOTS ?= 2
 LIVE = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --
 LIVE_ALL = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --all --
 
-.PHONY: pr-ready live p4-true-cause-live
+.PHONY: pr-ready live property-refusal-names-true-cause-live
 pr-ready:  ## Everything a PR must pass before it is opened; paste the summary block into the PR body. ARGS=--fast skips mutants (reported NOT RUN); ARGS='--body FILE' grades the PR body's declarations.
 	. ./.githooks/repo-venv && python3 dev/pytools/pr_ready.py run $(ARGS)
 
@@ -40,8 +40,8 @@ statement-truth-check:  ## Regenerate the corpus from the stand and diff it agai
 live:  ## Any live command inside a slot: make live CMD="cargo nextest run --run-ignored only -E 'test(x)'"
 	$(LIVE) $(CMD)
 
-p4-true-cause-live:  ## Property P4 with the stand: offline verdicts plus each refusal sabotage cell through live_slot (grades the stand NOT_GRADED rows).
-	$(LIVE) python3 dev/pytools/p4_true_cause.py live
+property-refusal-names-true-cause-live:  ## Property P4 with the stand: offline verdicts plus each refusal sabotage cell through live_slot (grades the stand NOT_GRADED rows).
+	$(LIVE) python3 dev/pytools/property_refusal_names_true_cause.py live
 
 .PHONY: test-types test-types-live test-types-property test-types-validators test-types-bigquery test-types-snowflake sweep-test-db sweep-test-cloud test-live seed-build seed-db seed-postgres seed-mysql seed-mssql seed-mongo seed-oracle seed-garbage seed-garbage-postgres seed-garbage-mysql seed-garbage-mssql
 

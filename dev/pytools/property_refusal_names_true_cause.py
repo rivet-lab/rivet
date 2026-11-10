@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Property P4 verdict lines: the offline refusal matrix plus the sabotage refusal rows run through live_slot.
 
-    p4_true_cause.py offline            run the offline matrix, print its verdict lines
-    p4_true_cause.py live               offline lines plus one line per sabotage refusal cell
-    p4_true_cause.py --self-test
+    property_refusal_names_true_cause.py offline            run the offline matrix, print its verdict lines
+    property_refusal_names_true_cause.py live               offline lines plus one line per sabotage refusal cell
+    property_refusal_names_true_cause.py --self-test
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-MATRIX = "p4_true_cause"
+MATRIX = "refusal_names_true_cause"
 VERDICT = re.compile(rf"^{MATRIX} (\S+) (PASS|RED|NOT_GRADED) (.*)$")
 
 
@@ -38,7 +38,7 @@ def summary(lines: list[str]) -> str:
 
 def run_offline() -> list[str]:
     """The offline matrix's verdict lines, read from the test binary's own stdout."""
-    cmd = ["cargo", "test", "--test", "offline_suite", "true_cause_refusal_matrix::every_refusal", "--", "--nocapture"]
+    cmd = ["cargo", "test", "--test", "offline_suite", "property_refusal_names_true_cause::every_refusal", "--", "--nocapture"]
     out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     return verdict_lines(out.stdout)
 
@@ -112,7 +112,7 @@ def self_test() -> int:
     live = yaml.safe_load((ROOT / "docs/sabotage-matrix.yaml").read_text())
     assert sabotage_cells(live), "the sabotage ledger has refusal rows"
     assert cause_key("refusal_source_cdc_grants_changed", "mysql") == "cause/RIVET_SOURCE_CDC_GRANTS_CHANGED/mysql"
-    print("p4_true_cause self-test ok")
+    print("refusal_names_true_cause self-test ok")
     return 0
 
 

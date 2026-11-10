@@ -155,6 +155,8 @@ mod load_allow_source_drift;
 mod module_layer_guard;
 #[path = "offline/nextest_groups_guard.rs"]
 mod nextest_groups_guard;
+#[path = "offline/property_refusal_names_true_cause.rs"]
+mod property_refusal_names_true_cause;
 #[path = "offline/rig_adoption_guard.rs"]
 mod rig_adoption_guard;
 #[path = "offline/rig_oracle_ratchet.rs"]
@@ -185,8 +187,6 @@ mod state_reset_family;
 mod test_checks_guard;
 #[path = "offline/time_window.rs"]
 mod time_window;
-#[path = "offline/true_cause_refusal_matrix.rs"]
-mod true_cause_refusal_matrix;
 #[path = "offline/trust_artifacts_integration.rs"]
 mod trust_artifacts_integration;
 #[path = "offline/type_capability_matrix_guard.rs"]
