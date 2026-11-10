@@ -161,6 +161,50 @@ def schema_enum(defn: str) -> list[str]:
     return vals
 
 
+SIGNER_PREFIX = {"aws": "AWS_", "azure": "AZ", "google": "GOOGLE_"}
+DECOY_KIND = ((re.compile(r"_FILE$|CREDENTIALS$"), "file"), (re.compile(r"_ENDPOINT(_URL)?$|_HOST$"), "redirect"),
+              (re.compile(r"SECRET|_KEY$|_KEY_ID$|_TOKEN$"), "secret"), (re.compile(r"_PROFILE$"), "profile"))
+METADATA_URL = re.compile(r'"(http://(?:169\.254\.169\.254|metadata\.google\.internal)[^"{]*)')
+
+
+def signer_module(dest: str) -> str | None:
+    """The reqsign module that signs the requests of one destination type, None for a type that signs nothing."""
+    match dest:
+        case "s3":
+            return "aws"
+        case "azure":
+            return "azure"
+        case "gcs":
+            return "google"
+        case "local" | "stdout":
+            return None
+    raise KeyError(f"destination type `{dest}` has no signer module")
+
+
+def signer_source(module: str) -> list[Path]:
+    """The Rust sources of one module of the reqsign version Cargo.lock pins, empty when the registry holds none."""
+    lock = (REPO / "Cargo.lock").read_text()
+    m = re.search(r'name = "reqsign"\nversion = "([^"]+)"', lock)
+    home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    roots = sorted(home.glob(f"registry/src/*/reqsign-{m.group(1)}/src/{module}")) if m else []
+    return sorted(roots[0].rglob("*.rs")) if roots else []
+
+
+def ambient_identity(module: str) -> tuple[dict[str, str], list[str], list[str]]:
+    """The environment names one signer module reads with the decoy kind each takes, its home-relative well-known files, and its fixed metadata URLs."""
+    names: dict[str, str] = {}
+    files: set[str] = set()
+    urls: set[str] = set()
+    for p in signer_source(module):
+        text = p.read_text(errors="replace")
+        for n in re.findall(r'"([A-Z][A-Z0-9]*_[A-Z0-9_]+)"', text):
+            if n.startswith(SIGNER_PREFIX[module]):
+                names[n] = next((k for rx, k in DECOY_KIND if rx.search(n)), "selector")
+        files.update(re.findall(r'"~/([^"]+)"', text) + re.findall(r'"\{config_dir\}/([^"]+)"', text))
+        urls.update(METADATA_URL.findall(text))
+    return names, sorted(files), sorted(urls)
+
+
 def product_secret_env() -> list[str]:
     """Secret-looking environment variables `src/` reads by a literal name, tests and the test seams left out."""
     found: set[str] = set()
@@ -374,6 +418,7 @@ class Scene:
     roles: dict[str, Canary]
     stubs: dict[str, Stub]
     note: str = ""
+    forbidden: dict[str, Canary] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -473,7 +518,7 @@ def state_url(spelling: str, c: Canary, port: int, user: str = "rivet", db: str 
     return f"{base}?{QUERY_KEYS[spelling]}={c.quoted}"
 
 
-def service_account_key(tag: str, token_uri: str) -> tuple[str, Canary] | None:
+def service_account_key(tag: str, token_uri: str, email: str = "canary") -> tuple[str, Canary] | None:
     """A service-account JSON whose private key body is the secret under test, or None when no RSA key can be made."""
     if not SA_KEY:
         r = subprocess.run(["openssl", "genrsa", "2048"], capture_output=True, text=True)
@@ -485,9 +530,66 @@ def service_account_key(tag: str, token_uri: str) -> tuple[str, Canary] | None:
     line = body[2]
     key = Canary(line, line[:16], line[-16:])
     doc = {"type": "service_account", "project_id": "canary-project", "private_key_id": "0123456789abcdef",
-           "private_key": pem, "client_email": "canary@canary-project.iam.gserviceaccount.com",
+           "private_key": pem, "client_email": f"{email}@canary-project.iam.gserviceaccount.com",
            "client_id": "1", "token_uri": token_uri}
     return json.dumps(doc), key
+
+
+AMBIENT_SLOTS = ("dest", "bigquery", "gcp-secret", "snowflake")
+
+
+def decoy_file(path: Path, module: str, tag: str, token_uri: str, forbidden: dict[str, Canary]) -> None:
+    """Write one ambient credential file whose every secret is forbidden: a service-account key, an AWS ini, or a token."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if module == "google":
+        email = token_canary(tag + "|email")
+        made = service_account_key(tag, token_uri, email.plain.lower())
+        path.write_text(made[0] if made else "{}")
+        forbidden[f"ambient {path.name} identity"] = Canary(email.plain.lower(), email.head.lower(), email.tail.lower())
+        return
+    a, s = token_canary(tag + "|ak"), token_canary(tag + "|sk")
+    if module == "aws":
+        head = "profile decoy" if path.name == "config" else "decoy"
+        body = f"aws_access_key_id = {a.plain}\naws_secret_access_key = {s.plain}\n"
+        path.write_text(f"[default]\n{body}[{head}]\n{body}")
+        forbidden.update({f"ambient {path.name} access key": a, f"ambient {path.name} secret key": s})
+        return
+    path.write_text(a.plain + "\n")
+    forbidden[f"ambient {path.name}"] = a
+
+
+def ambient_decoys(tag: str, root: Path, env: dict[str, str], stubs: dict[str, Stub], forbidden: dict[str, Canary]) -> None:
+    """Plant every ambient identity the signer modules read, each a forbidden canary that must never stand in for the configured credential."""
+    served = token_canary(tag + "|ambient-token")
+    forbidden["ambient served token"] = served
+    stubs["ambient"] = Stub("http", body=json.dumps({"access_token": served.plain, "token_type": "Bearer", "expires_in": 3600}).encode())
+    base = f"http://127.0.0.1:{stubs['ambient'].port}"
+    for module in SIGNER_PREFIX:
+        names, files, _ = ambient_identity(module)
+        for rel in files:
+            decoy_file(root / rel, module, f"{tag}|{rel}", base + "/token", forbidden)
+        for n, kind in sorted(names.items()):
+            if n in env:
+                continue
+            match kind:
+                case "secret":
+                    c = token_canary(f"{tag}|{n}")
+                    env[n] = c.plain
+                    forbidden[f"ambient {n}"] = c
+                case "redirect":
+                    env[n] = base
+                case "profile":
+                    env[n] = "decoy"
+                case "file":
+                    same = next((root / rel for rel in files if Path(rel).name in n.lower()), None)
+                    target = same or root / f"ambient-{n.lower()}"
+                    if not target.exists():
+                        decoy_file(target, module, f"{tag}|{n}", base + "/token", forbidden)
+                    env[n] = str(target)
+                case "selector":
+                    pass
+                case other:
+                    raise KeyError(f"decoy kind {other} of {n} has no recipe")
 
 
 def seed_state(binary: Path, root: Path, env: dict[str, str]) -> None:
@@ -511,6 +613,7 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
     env.update(variant[1])
     stubs: dict[str, Stub] = {}
     roles: dict[str, Canary] = {}
+    forbidden: dict[str, Canary] = {}
     tag = f"{spec.scenario}|{spec.engine}|{spec.path}|{spec.mode}"
     src_kind = "pg" if spec.path == "wrong-password" and spec.engine == "postgres" else "rst"
     stubs["source"] = Stub(src_kind)
@@ -602,6 +705,8 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
         else:
             cfg["notifications"] = {"slack": {"webhook_url": url, "on": ["failure"]}}
         roles["webhook"] = hook
+    if spec.slot in AMBIENT_SLOTS:
+        ambient_decoys(tag, root, env, stubs, forbidden)
     exp = {"name": EXPORT, "mode": spec.mode, "format": "parquet", "destination": dest, **MODE_FIELDS[spec.mode]}
     if spec.engine == "mongo" or spec.mode == "cdc":
         exp["table"] = "canary_orders" if spec.engine == "mongo" else "public.canary_orders"
@@ -628,7 +733,7 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
     argv += variant[2] if all(v in cmd.options for v in variant[2]) else ()
     if spec.command.name == "state copy":
         seed_state(binary, root, env)
-    return Scene(root, argv + argv_extra, env, roles, stubs)
+    return Scene(root, argv + argv_extra, env, roles, stubs, forbidden=forbidden)
 
 
 def dest_scene(spelling: str, tag: str, root: Path, env: dict[str, str], stubs: dict[str, Stub],
@@ -782,7 +887,7 @@ def run_cell(binary: Path, spec: Spec, target: dict | None = None, timeout: int 
                   f"{ {k: v.count for k, v in scene.stubs.items()} }\n{text[:900]}", flush=True)
         coded |= bool(CODE.search(text) or ERROR_LINE.search(text))
         panic |= bool(PANIC.search(text))
-        hits += leaks(scene.roles, sinks)
+        hits += leaks(scene.roles, sinks) + find_hits(scene.forbidden, sinks)
         slot_stub = scene.stubs.get({"source": "source", "ambient": "source", "state": "state", "load": "load",
                                      "bigquery": "load", "snowflake": "load", "dest": "dest", "notify": "notify",
                                      "gcp-secret": "token"}.get(spec.slot, "source"))
@@ -805,6 +910,11 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
     dest_recipes = {"s3": "s3-env-keys", "azure": "azure-env-keys", "gcs": "gcs-credentials-file"}
     guards += [f"destination type `{d}` has no credential recipe" for d in dests if d not in dest_recipes and d not in NO_CREDENTIAL]
     guards += [f"load target `{t}` has no credential recipe" for t in loads if t not in LOAD_RECIPES]
+    for d in dests:
+        try:
+            signer_module(d)
+        except KeyError as e:
+            guards.append(str(e).strip("'\""))
     known_values = set(FILL) | {"PLAN_FILE", "ENV_VAR"}
     for c in cmds:
         for g in c.required:
@@ -1026,6 +1136,17 @@ def _verify(led: Ledger, binary: Path, cmds: list[Cmd], engines: list[str], mode
             ("state-tls-success", "state over TLS success is NOT GRADED: the stand postgres runs ssl=off; the sslmode=require error path is graded"),
             ("oracle-cdc-events", "Oracle CDC with events is NOT GRADED: no Oracle stand answers")):
         led.skipped("-", "-", f"no_secret_in_output/{scenario}", "-", why, cause=SkipCause.ENV)
+    for module in SIGNER_PREFIX:
+        names, _, urls = ambient_identity(module)
+        if not names:
+            led.skipped("-", "-", f"no_secret_in_output/ambient-identity/{module}", "-",
+                        f"the reqsign {module} sources are not in the cargo registry: its ambient identities are not planted, NOT GRADED",
+                        cause=SkipCause.ENV)
+        for u in urls:
+            led.skipped("-", "-", f"no_secret_in_output/ambient-metadata/{module}", "-",
+                        f"a fall-back to the metadata server {u} is NOT GRADED: reqsign reads that fixed link-local URL with no "
+                        f"environment override (GCE_METADATA_HOST is not read), and no stub can stand on it without root",
+                        cause=SkipCause.ENV)
     led.skipped("-", "-", "no_secret_in_output/success-path", "-",
                 "right-password success path of the source engines is NOT GRADED: no provisioned canary users on the stand", cause=SkipCause.ENV)
     outs = execute(binary, specs, live, jobs)
@@ -1101,6 +1222,10 @@ def _self_test() -> None:
     wire = {"plain/request:notify": c.plain.encode() + b" " + other.plain.encode()}
     got = leaks({"webhook": c, "source": other}, wire)
     assert got and {h.role for h in got} == {"source"}, "an own credential on its own endpoint is graded, or a foreign one is not"
+    assert find_hits({"ambient AWS_ACCESS_KEY_ID": other}, {"plain/request:dest": b"Credential=" + other.plain.encode()}), \
+        "a forbidden identity on the destination's own endpoint is not graded"
+    names, files, _ = ambient_identity("aws")
+    assert not signer_source("aws") or (names.get("AWS_ACCESS_KEY_ID") == "secret" and ".aws/credentials" in files), (names, files)
     assert "token" == OWN_STUB["gcp key"] and set(OWN_STUB.values()) <= {"source", "state", "load", "dest", "notify", "token"}
     print("no_secret_in_output self-test: ok")
 
