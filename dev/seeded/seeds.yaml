@@ -3842,6 +3842,28 @@ seeds:
       mongo:
         cells: ["lib:keeping_date_resolves_the_names_and_leaves_date_for_the_apply"]
 
+  - name: state-copy-reads-the-path-as-a-uri
+    class: "`rivet state copy` splices the SQLite state path into a `file:` URI unescaped, so a path holding `#`, `?` or `%` attaches a different file (an empty one SQLite creates beside the directory, or the file a `%41` decodes to) and the copy reports 0 rows with exit 0"
+    history: "found 2026-11-10 on 0.32.2: `a#b` copied 0 rows and left a 0-byte file `a`; `a?b` copied 0 rows; `a%41b` stopped RIVET_STATE_BACKEND_FAILED; the guard opened the real file by its plain path, the attach did not"
+    scope: state
+    engines:
+      sqlite-state:
+        patch: state-copy-reads-the-path-as-a-uri/sqlite-state.patch
+        cells: ["lib:a_source_path_with_a_uri_character_is_read_as_the_file_it_names", "lib:a_missing_source_is_refused_and_not_created"]
+      postgres-state:
+        na: "`rivet state copy` reads a SQLite file and writes a PostgreSQL state; the path is the SQLite source's, a PostgreSQL state URL is never a `file:` URI"
+
+  - name: state-copy-accepts-an-attached-empty-source
+    class: "`rivet state copy` carries on when the SQLite file it attached holds no cursor and no run although the guard before it saw state, and reports an empty copy as done"
+    history: "found 2026-11-10 with state-copy-reads-the-path-as-a-uri: the only check was one made on a different open of the file"
+    scope: state
+    engines:
+      sqlite-state:
+        patch: state-copy-accepts-an-attached-empty-source/sqlite-state.patch
+        cells: ["lib:an_attached_source_with_no_state_is_refused_by_code"]
+      postgres-state:
+        na: "`rivet state copy` reads a SQLite file and writes a PostgreSQL state; the attached source is always SQLite"
+
   - name: state-copy-leaves-sequences-behind
     class: "`rivet state copy` writes the rows with their ids and leaves each serial column's sequence at 1, so the first run through the copied PostgreSQL state collides with a copied id and fails"
     history: "0.32.2 item 9, 2026-10-20: the copy writes ids explicitly; seeded so the sequence move cannot be dropped"

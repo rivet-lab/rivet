@@ -1,0 +1,11 @@
+--- a/src/state/copy.rs
++++ b/src/state/copy.rs
+@@ -154,7 +154,7 @@
+     }
+     mem.execute_batch("DETACH DATABASE src")
+         .map_err(read_failed)?;
+-    if !super::state_rows(&mem).is_ok_and(|n| n > 0) {
++    if false {
+         crate::rivet_bail!(
+             crate::error::codes::STATE_COPY_SOURCE_EMPTY,
+             "`{}` was opened for the copy and holds no cursor and no run: nothing was copied. \
