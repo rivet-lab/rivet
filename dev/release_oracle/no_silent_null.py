@@ -420,27 +420,27 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
 
     if not parts:
         return None
-    con = duckdb.connect()
-    wide: dict[str, str] = {}
-    if fmt == "parquet":
-        import pyarrow as pa
-        import pyarrow.parquet as pq
+    with duckdb.connect() as con:
+        wide: dict[str, str] = {}
+        if fmt == "parquet":
+            import pyarrow as pa
+            import pyarrow.parquet as pq
 
-        tbl = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="default")
-        wide = {f.name.lower(): f"DECIMAL({f.type.precision},{f.type.scale})" for f in tbl.schema if pa.types.is_decimal256(f.type)}
-        for f in tbl.schema:
-            if f.name.lower() in wide:
-                tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, tbl.column(f.name).cast(pa.string()))
-        con.register("nsn_parts", tbl)
-        src = "nsn_parts"
-    else:
-        src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, nullstr='\\x00nsn')"
-    desc = {r[0].lower(): wide.get(r[0].lower(), r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
-    sel = ", ".join(f'CAST("{k}" AS VARCHAR) AS "{k}"' if "TIME ZONE" in t else f'"{k}"' for k, t in desc.items())
-    cur = con.execute(f"SELECT {sel} FROM {src}")
-    names = [d[0].lower() for d in cur.description]
-    rows = [dict(zip(names, r)) for r in cur.fetchall()]
-    return desc, ({int(r[key]): r for r in rows} if key else rows), len(parts)
+            tbl = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="default")
+            wide = {f.name.lower(): f"DECIMAL({f.type.precision},{f.type.scale})" for f in tbl.schema if pa.types.is_decimal256(f.type)}
+            for f in tbl.schema:
+                if f.name.lower() in wide:
+                    tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, tbl.column(f.name).cast(pa.string()))
+            con.register("nsn_parts", tbl)
+            src = "nsn_parts"
+        else:
+            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, nullstr='\\x00nsn')"
+        desc = {r[0].lower(): wide.get(r[0].lower(), r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        sel = ", ".join(f'CAST("{k}" AS VARCHAR) AS "{k}"' if "TIME ZONE" in t else f'"{k}"' for k, t in desc.items())
+        cur = con.execute(f"SELECT {sel} FROM {src}")
+        names = [d[0].lower() for d in cur.description]
+        rows = [dict(zip(names, r)) for r in cur.fetchall()]
+        return desc, ({int(r[key]): r for r in rows} if key else rows), len(parts)
 
 
 DUCK_TYPE = {
