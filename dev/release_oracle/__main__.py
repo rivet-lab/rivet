@@ -63,8 +63,10 @@ from . import (
     guarantees,
     init_delta,
     live_modules,
-    no_silent_null,
-    no_silent_null_grants,
+    property_no_silent_null,
+    property_no_silent_null_grants,
+    property_no_silent_null_cdc,
+    property_no_silent_null_load,
     partner_shape,
     perf,
     regression,
@@ -784,8 +786,10 @@ def _stages_self_test() -> None:
     _tree_identity_self_test()
     _gate_kind_self_test()
     release_path.hygiene_self_test()
-    no_silent_null.self_test()
-    no_silent_null_grants.self_test()
+    property_no_silent_null.self_test()
+    property_no_silent_null_grants.self_test()
+    property_no_silent_null_cdc.self_test()
+    property_no_silent_null_load.self_test()
     doc = {
         "preflights": [{"id": "a", "status": "test"}, {"id": "off", "status": "gap"}],
         "infra": [{"id": "undriven", "status": "test"}],
@@ -1721,8 +1725,10 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         serial("audit suspects", lambda led: scenarios.verify_audit_suspects(led)),
         serial("cdc harm", lambda led: scenarios.verify_cdc_harm(led)),
         serial("session state", lambda led: scenarios.verify_session_state(led)),
-        serial("no silent null", lambda led: no_silent_null.verify_no_silent_null(led)),
-        serial("no silent null grants", lambda led: no_silent_null_grants.verify_no_silent_null_grants(led)),
+        serial("no silent null", lambda led: property_no_silent_null.verify_no_silent_null(led)),
+        serial("no silent null grants", lambda led: property_no_silent_null_grants.verify_no_silent_null_grants(led)),
+        serial("no silent null cdc", lambda led: property_no_silent_null_cdc.verify_no_silent_null_cdc(led)),
+        serial("no silent null load", lambda led: property_no_silent_null_load.verify_no_silent_null_load(led)),
         serial("cdc e2e", lambda led: cdc.verify_cdc_e2e(led)),
         serial("cdc differential", lambda led: cdc.verify_cdc_differential(led)),
         measured("release regression", regression.verify_release_regression),
@@ -1736,7 +1742,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         measured("field symptom replay", regression.verify_field_symptom_replay),
         measured("scale memory", regression.verify_scale_memory),
         measured("flat rss", guarantees.verify_flat_rss),
-        measured("no silent null full", no_silent_null.verify_no_silent_null_full),
+        measured("no silent null full", property_no_silent_null.verify_no_silent_null_full),
         serial("byte-identical parts", lambda led: guarantees.verify_byte_identical_parts(led)),
         serial("state backend parity", lambda led: state_parity.verify_state_backend_parity(led, **state)),
         warehouse("shared state", lambda led: shared_state.verify_shared_state_same_name(led)),

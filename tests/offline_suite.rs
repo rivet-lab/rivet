@@ -110,8 +110,6 @@ mod mysql_wire_type_fixture_guard;
 mod oneshot_budget;
 // Not a test module: the shared non-vacuity rule the grep-shaped guards call so
 // a moved subject fails LOUDLY instead of grading the empty set.
-#[path = "offline/no_silent_null_guard.rs"]
-mod no_silent_null_guard;
 #[path = "offline/nonvacuity.rs"]
 mod nonvacuity;
 #[path = "offline/open_defects_guard.rs"]
@@ -122,6 +120,8 @@ mod oracle_read_scope_guard;
 mod perf_matrix_guard;
 #[path = "offline/planner_fuzz.rs"]
 mod planner_fuzz;
+#[path = "offline/property_no_silent_null.rs"]
+mod property_no_silent_null;
 #[path = "offline/rebaseline_remedy_one_home.rs"]
 mod rebaseline_remedy_one_home;
 #[path = "offline/redaction_invariant.rs"]
