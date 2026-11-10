@@ -157,6 +157,8 @@ mod load_allow_source_drift;
 mod module_layer_guard;
 #[path = "offline/nextest_groups_guard.rs"]
 mod nextest_groups_guard;
+#[path = "offline/property_refusal_names_true_cause.rs"]
+mod property_refusal_names_true_cause;
 #[path = "offline/rig_adoption_guard.rs"]
 mod rig_adoption_guard;
 #[path = "offline/rig_oracle_ratchet.rs"]
