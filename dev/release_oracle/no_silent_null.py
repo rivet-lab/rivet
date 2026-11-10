@@ -57,8 +57,9 @@ STAND_TRIES = 5
 RECHECKS = 2
 DELIVERED, REFUSED, DECLARED = "delivered", "refused", "declared_lossy"
 HIDDEN, SHAPE = "HIDDEN_COLUMN_DELIVERED", "LEG_SHAPE_DIFFERS"
+BLIND = "INTEGRITY_BLIND"
 COLUMNS, PARTS = "COLUMN_SET_DIFFERS", "PART_SET_DIFFERS"
-FAIL_CLASSES = (NULLED, WRONG, SPLIT, UNCODED, IGNORED, EMPTY, CRASH, UNGRADED, HIDDEN, SHAPE, COLUMNS, PARTS)
+FAIL_CLASSES = (NULLED, WRONG, SPLIT, UNCODED, IGNORED, EMPTY, CRASH, UNGRADED, HIDDEN, SHAPE, COLUMNS, PARTS, BLIND)
 NOT_GRADED = "NOT_GRADED"
 LOAD_TARGETS_NOT_GRADED = "load targets that re-type (BigQuery, ClickHouse, Snowflake) need a second client on a warehouse; no cell reads one yet"
 
@@ -721,9 +722,17 @@ def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str
         want = frozenset(["id", col.name.lower(), *(["nsn_ts"] if mode == "time_window" else [])])
         r = grade_run(engine, cell, p, check, fid, d / f"out-{fmt}", fmt, col, n_rows, target, list(col.lits), want)
         out.append(r)
+        if r.klass in (NULLED, WRONG):
+            out.append(integrity(cell, rivet(["validate", "-c", str(cfg), "--depth", "full"], env, d), r))
     shutil.rmtree(d, ignore_errors=True)
     return out
 
+
+def integrity(cell: str, v: core.Proc, harmed: Result) -> Result:
+    """The verdict of `rivet validate --depth full` over a run whose values the second reader found changed: exit 0 is an integrity check blind to the harm."""
+    if v.returncode == 0:
+        return Result(f"{cell}/integrity", DELIVERED, BLIND, f"validate --depth full exit 0 over a {harmed.klass} cell: {harmed.detail}"[:300])
+    return Result(f"{cell}/integrity", REFUSED, "", f"validate exit {v.returncode}", (CODE.search(v.stderr + v.stdout) or [None, ""])[1])
 
 
 def grid(engine: str, cols: list[Col], tier: str) -> list[tuple[Col, str, str, tuple[str, ...]]]:
@@ -930,7 +939,7 @@ def _run_engine(engine: str, tier: str, work: Path, url: str, progress) -> tuple
 
 def pairs_of(results: list[Result]) -> list[str]:
     """The sorted source->override pairs of the cells, with the mode and format cut off."""
-    return sorted({re.sub(r"/(full|incremental|chunked|time_window|cdc-[\w@]+)/\w+$", "", r.cell.split("/", 1)[1]) for r in results})
+    return sorted({re.sub(r"/(full|incremental|chunked|time_window|cdc-[\w@]+)/\w+(/integrity)?$", "", r.cell.split("/", 1)[1]) for r in results})
 
 
 def digest(results: list[Result]) -> str:
@@ -1028,6 +1037,8 @@ def self_test() -> None:
     assert parse_lit("mysql", "'a\\\\b'") == "a\\b" and parse_lit("mysql", "'l\\nf'") == "l\nf" and parse_lit("mysql", "'n\\0l'") == "n\0l"
     assert parse_lit("postgres", "'a\\b'") == "a\\b" and parse_lit("oracle", "TO_DATE('2024-02-29 13:14:15','YYYY-MM-DD HH24:MI:SS')") == "2024-02-29 13:14:15"
     assert parse_lit("postgres", "'\\x00ff01'::bytea") == b"\x00\xff\x01" and parse_lit("postgres", "'{\"n\":1}'::jsonb") == '{"n":1}' and parse_lit("mysql", "b'101'") == 5
+    harmed = Result("c", DELIVERED, NULLED, "1 non-NULL value delivered as NULL")
+    assert integrity("c", _proc(0), harmed).klass == BLIND and integrity("c", _proc(3, "[RIVET_VALIDATE_CHECKSUM]"), harmed).klass == ""
     sib = {c.native: c for c in columns("mysql")}
     assert {"TIME(1)", "TIME(3)", "TIME(5)"} <= set(sib) and "'-00:00:00.5'" in sib["TIME(1)"].lits and "'-00:00:00.555'" in sib["TIME(3)"].lits
     hostile = next(c for n, c in sib.items() if "\U0001F600" in n)
