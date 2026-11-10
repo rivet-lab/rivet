@@ -14,7 +14,7 @@ LIVE_SLOTS ?= 2
 LIVE = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --
 LIVE_ALL = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --all --
 
-.PHONY: pr-ready live
+.PHONY: pr-ready live property-refusal-names-true-cause-live
 pr-ready:  ## Everything a PR must pass before it is opened; paste the summary block into the PR body. ARGS=--fast skips mutants (reported NOT RUN); ARGS='--body FILE' grades the PR body's declarations.
 	. ./.githooks/repo-venv && python3 dev/pytools/pr_ready.py run $(ARGS)
 
@@ -39,6 +39,9 @@ statement-truth-check:  ## Regenerate the corpus from the stand and diff it agai
 
 live:  ## Any live command inside a slot: make live CMD="cargo nextest run --run-ignored only -E 'test(x)'"
 	$(LIVE) $(CMD)
+
+property-refusal-names-true-cause-live:  ## Property P4 with the stand: offline verdicts plus each refusal sabotage cell through live_slot (grades the stand NOT_GRADED rows).
+	$(LIVE) python3 dev/pytools/property_refusal_names_true_cause.py live
 
 .PHONY: test-types test-types-live test-types-property test-types-validators test-types-bigquery test-types-snowflake sweep-test-db sweep-test-cloud test-live seed-build seed-db seed-postgres seed-mysql seed-mssql seed-mongo seed-oracle seed-garbage seed-garbage-postgres seed-garbage-mysql seed-garbage-mssql
 
@@ -411,6 +414,11 @@ open-defects:  ## Every open_defect_ live cell against its line in dev/release_o
 secret-sink:  ## Credential-sink property matrix: every command x engine x credential slot x path, graded on every byte a run leaves; one verdict line per cell.
 	cargo build --bin rivet
 	$(LIVE) $(PY) -m dev.release_oracle.secret_sink --bin target/debug/rivet
+
+.PHONY: property-no-debris-after-stop
+property-no-debris-after-stop:  ## Property matrix P5: every engine x shape x hook x stop, then a re-run; no debris and the re-run equals an uninterrupted run. One verdict line per cell; RIVET_NO_DEBRIS_AFTER_STOP_CELLS=<substring> narrows it. Takes one live slot.
+	cargo test --test offline_suite property_no_debris_after_stop
+	$(LIVE) cargo nextest run --test live_suite --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_no_debris_after_stop::/)'
 
 .PHONY: evidence-record evidence-report
 evidence-record:  ## Record the last nextest run's green live cells (target/nextest/default/junit.xml) in docs/evidence/last-green.yaml. EVIDENCE_BY=local|gate|nightly|ci.
