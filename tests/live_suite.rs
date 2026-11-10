@@ -311,6 +311,11 @@ mod preflight_missing_table;
 mod preflight_target_fail_note;
 #[path = "live/property_check_equals_run.rs"]
 mod property_check_equals_run;
+#[path = "live/property_no_debris_after_stop.rs"]
+mod property_no_debris_after_stop;
+#[allow(dead_code)]
+#[path = "live/property_no_debris_after_stop_axes.rs"]
+mod property_no_debris_after_stop_axes;
 #[path = "live/quality_live.rs"]
 mod quality_live;
 #[path = "live/roast_metric_validated_ordering.rs"]
