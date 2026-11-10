@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 from collections import Counter
+from contextlib import closing
 
 import duckdb
 
@@ -51,15 +52,13 @@ def _sqlite_count(path: str, sql: str, args: tuple) -> int:
     """One COUNT over the SQLite state; a state or table not created yet counts zero."""
     if not os.path.exists(path):
         return 0
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        return con.execute(sql, args).fetchone()[0]
-    except sqlite3.OperationalError as e:
-        if "no such table" in str(e):
-            return 0
-        raise
-    finally:
-        con.close()
+    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as con:
+        try:
+            return con.execute(sql, args).fetchone()[0]
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e):
+                return 0
+            raise
 
 
 def _pg_count(url: str, sql: str, args: tuple) -> int:
@@ -67,13 +66,10 @@ def _pg_count(url: str, sql: str, args: tuple) -> int:
     lit = sql
     for a in args:
         lit = lit.replace("?", "'" + str(a).replace("'", "''") + "'", 1)
-    con = duckdb.connect()
-    try:
+    with closing(duckdb.connect()) as con:
         con.execute("LOAD postgres")
         con.execute("ATTACH ? AS pg (TYPE postgres, READ_ONLY)", [url])
         return con.execute("SELECT * FROM postgres_query('pg', ?)", [lit]).fetchone()[0]
-    finally:
-        con.close()
 
 
 RUNNING_SQL = "SELECT COUNT(*) FROM run_status WHERE status = 'running' AND export_name = ?"
@@ -103,8 +99,7 @@ def glob_ids(out_dir: str, id_column: str) -> list:
     """Every id the whole output directory holds, read by one DuckDB glob over all its Parquet files."""
     if not any(n.endswith(".parquet") for n in walk(out_dir)):
         return []
-    con = duckdb.connect()
-    try:
+    with closing(duckdb.connect()) as con:
         pattern = os.path.join(out_dir, "**", "*.parquet")
         rel = con.execute("SELECT * FROM read_parquet(?, union_by_name = true)", [pattern])
         names = [d[0] for d in rel.description]
@@ -112,8 +107,6 @@ def glob_ids(out_dir: str, id_column: str) -> list:
         if col is None:
             raise ShapeError(f"no column {id_column!r} in {names}")
         return [r[0] for r in con.execute(f'SELECT "{col}" FROM read_parquet(?, union_by_name = true)', [pattern]).fetchall()]
-    finally:
-        con.close()
 
 
 def native_oracle(cell: dict) -> list[dict]:
@@ -165,11 +158,10 @@ def checked(findings) -> list[dict]:
 
 def _write_parquet(path: str, ids: list) -> None:
     """A Parquet file of one `id` column."""
-    con = duckdb.connect()
-    con.execute("CREATE TABLE t(id BIGINT)")
-    con.executemany("INSERT INTO t VALUES (?)", [(i,) for i in ids])
-    con.execute(f"COPY t TO '{path}' (FORMAT parquet)")
-    con.close()
+    with closing(duckdb.connect()) as con:
+        con.execute("CREATE TABLE t(id BIGINT)")
+        con.executemany("INSERT INTO t VALUES (?)", [(i,) for i in ids])
+        con.execute(f"COPY t TO '{path}' (FORMAT parquet)")
 
 
 def _fixture(root: str, debris: bool) -> dict:
@@ -177,14 +169,13 @@ def _fixture(root: str, debris: bool) -> dict:
     out = os.path.join(root, "out_dirty" if debris else "out_clean")
     os.makedirs(out)
     db = os.path.join(root, "dirty.db" if debris else "clean.db")
-    con = sqlite3.connect(db)
-    con.execute("CREATE TABLE run_status (run_id TEXT, export_name TEXT, status TEXT)")
-    con.execute("CREATE TABLE state_lease (lease_key TEXT, holder TEXT, expires_at TEXT)")
-    if debris:
-        con.execute("INSERT INTO run_status VALUES ('r_1', 'e', 'running')")
-        con.execute("INSERT INTO state_lease VALUES ('k', 'h', 'x')")
-    con.commit()
-    con.close()
+    with closing(sqlite3.connect(db)) as con:
+        con.execute("CREATE TABLE run_status (run_id TEXT, export_name TEXT, status TEXT)")
+        con.execute("CREATE TABLE state_lease (lease_key TEXT, holder TEXT, expires_at TEXT)")
+        if debris:
+            con.execute("INSERT INTO run_status VALUES ('r_1', 'e', 'running')")
+            con.execute("INSERT INTO state_lease VALUES ('k', 'h', 'x')")
+        con.commit()
     before = {"files": walk(out), "running": 0, "leases": 0}
     _write_parquet(os.path.join(out, "a.parquet"), [1, 2, 3] if not debris else [1, 2, 2, 9])
     if debris:
