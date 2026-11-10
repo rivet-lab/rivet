@@ -14,7 +14,7 @@ LIVE_SLOTS ?= 2
 LIVE = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --
 LIVE_ALL = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --all --
 
-.PHONY: pr-ready live
+.PHONY: pr-ready live property-refusal-names-true-cause-live
 pr-ready:  ## Everything a PR must pass before it is opened; paste the summary block into the PR body. ARGS=--fast skips mutants (reported NOT RUN); ARGS='--body FILE' grades the PR body's declarations.
 	. ./.githooks/repo-venv && python3 dev/pytools/pr_ready.py run $(ARGS)
 
@@ -39,6 +39,9 @@ statement-truth-check:  ## Regenerate the corpus from the stand and diff it agai
 
 live:  ## Any live command inside a slot: make live CMD="cargo nextest run --run-ignored only -E 'test(x)'"
 	$(LIVE) $(CMD)
+
+property-refusal-names-true-cause-live:  ## Property P4 with the stand: offline verdicts plus each refusal sabotage cell through live_slot (grades the stand NOT_GRADED rows).
+	$(LIVE) python3 dev/pytools/property_refusal_names_true_cause.py live
 
 .PHONY: test-types test-types-live test-types-property test-types-validators test-types-bigquery test-types-snowflake sweep-test-db sweep-test-cloud test-live seed-build seed-db seed-postgres seed-mysql seed-mssql seed-mongo seed-oracle seed-garbage seed-garbage-postgres seed-garbage-mysql seed-garbage-mssql
 
@@ -244,6 +247,12 @@ seed-garbage-mssql:
 # one, and the three stages then run and grade for real — the driver's banner and
 # its closing line are keyed on the baseline rather than on this flag, so such a
 # run is reported honestly instead of being announced as a skip it was not.
+property-no-silent-null:  ## Property matrix: every non-NULL source value is delivered equal or refused by code, never NULL (smoke tier; ARGS="--tier full" for the weekly one). Takes one live slot.
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null --engine all $(ARGS)
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_grants
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_cdc --engine all
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_load
+
 release-oracle:  ## Release gate, BARE: only what is already in your shell. With no RIVET_PREV_RELEASE_BIN in your environment the prev-release comparison is GIVEN UP by name (cannot support a tag); with one exported, those three stages run and grade. The replica/standby topology rows are GIVEN UP by name too (a down stand is SKIP here, FAIL in release-oracle-full). Read the SKIP count — with nothing set it is ~95 PASS / 60 SKIP and still prints RELEASE-READY.
 	$(LIVE_ALL) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies $(ARGS)
 
