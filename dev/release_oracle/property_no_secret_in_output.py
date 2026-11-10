@@ -1132,7 +1132,7 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
                 for m in modes:
                     if m in MODE_FIELDS and m != "full":
                         specs.append(Spec(c, e, "source", "userinfo", "dead-host", m))
-            specs += [Spec(c, "postgres", "state", sp, "dead-state") for sp in STATE_SPELLINGS]
+            specs += [Spec(c, "postgres", "state", sp, "dead-state", m) for sp in STATE_SPELLINGS for m in modes if m in MODE_FIELDS]
             specs += [Spec(c, "postgres", "state", sp, "live-state") for sp in STATE_SPELLINGS if live_state]
             specs += [Spec(c, "postgres", "load", sp) for sp in LOAD_SPELLINGS if "clickhouse" in loads]
             specs += [Spec(c, "postgres", sl, sp) for sl, sp in endpoint_cells if lan_ip()]
