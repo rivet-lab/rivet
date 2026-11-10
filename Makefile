@@ -421,6 +421,11 @@ property-cloud-legs:  ## Cloud legs of the property matrices (BigQuery, Snowflak
 	cargo test --test offline_suite property_cloud_legs
 	$(LIVE) $(PY) -m dev.release_oracle.cloud_legs --tier cloud
 
+.PHONY: property-no-secret-in-output
+property-no-secret-in-output:  ## Credential-sink property matrix: every command x engine x credential slot x path, graded on every byte a run leaves; one verdict line per cell.
+	cargo build --bin rivet
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_secret_in_output --bin target/debug/rivet
+
 .PHONY: property-no-debris-after-stop
 property-no-debris-after-stop:  ## Property matrix P5: every engine x shape x hook x stop, then a re-run; no debris and the re-run equals an uninterrupted run. One verdict line per cell; RIVET_NO_DEBRIS_AFTER_STOP_CELLS=<substring> narrows it. Takes one live slot.
 	cargo test --test offline_suite property_no_debris_after_stop
