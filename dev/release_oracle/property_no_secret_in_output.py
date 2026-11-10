@@ -551,7 +551,8 @@ def decoy_file(path: Path, module: str, tag: str, token_uri: str, forbidden: dic
     if module == "aws":
         head = "profile decoy" if path.name == "config" else "decoy"
         body = f"aws_access_key_id = {a.plain}\naws_secret_access_key = {s.plain}\n"
-        path.write_text(f"[default]\n{body}[{head}]\n{body}")
+        with path.open("a") as fh:
+            fh.write(f"[default]\n{body}[{head}]\n{body}")
         forbidden.update({f"ambient {path.name} access key": a, f"ambient {path.name} secret key": s})
         return
     path.write_text(a.plain + "\n")
@@ -736,30 +737,117 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
     return Scene(root, argv + argv_extra, env, roles, stubs, forbidden=forbidden)
 
 
+DEST_CREDENTIAL_FIELD = re.compile(r"_env$|_file$|_profile$|^allow_anonymous$")
+PATH_SHAPES = ("file", "dir", "empty", "bad-json")
+
+
+def schema_fields(defn: str) -> list[str]:
+    """The property names of one `$defs` entry of the config schema, in schema order."""
+    return list(json.loads((REPO / "schemas" / "rivet.schema.json").read_text())["$defs"][defn]["properties"])
+
+
+def credential_field_dests(field: str) -> tuple[str, ...]:
+    """The destination types one credential field of `DestinationConfig` configures."""
+    match field:
+        case "access_key_env" | "secret_key_env" | "session_token_env" | "aws_profile":
+            return ("s3",)
+        case "account_key_env" | "sas_token_env":
+            return ("azure",)
+        case "credentials_file":
+            return ("gcs",)
+        case "allow_anonymous":
+            return ("s3", "azure", "gcs")
+    raise KeyError(f"destination credential field `{field}` has no recipe")
+
+
+def dest_spellings(dests: list[str]) -> tuple[dict[str, list[str]], list[str]]:
+    """Every credential spelling per destination type: each credential field alone (a path field in every shape) and every pair of them."""
+    per: dict[str, list[str]] = {d: [] for d in dests}
+    guards: list[str] = []
+    for f in (f for f in schema_fields("DestinationConfig") if DEST_CREDENTIAL_FIELD.search(f)):
+        try:
+            for d in credential_field_dests(f):
+                per.setdefault(d, []).append(f)
+        except KeyError as e:
+            guards.append(str(e).strip("'\""))
+    out: dict[str, list[str]] = {}
+    for d, fields in per.items():
+        singles = [f"{d}:{f}:{sh}" for f in fields for sh in (PATH_SHAPES if f.endswith("_file") else ("",))]
+        out[d] = [sp.rstrip(":") for sp in singles] + [f"{d}:{a}+{b}" for a, b in itertools.combinations(fields, 2)]
+    return {d: sps for d, sps in out.items() if sps}, guards
+
+
+def dest_field(field: str, shape: str, tag: str, root: Path, base: str, env: dict[str, str], roles: dict[str, Canary]) -> dict:
+    """The destination keys, environment and files one credential field takes in one shape."""
+    match field:
+        case "access_key_env" | "session_token_env":
+            ak, sk = token_canary(tag + "ak"), token_canary(tag + "sk")
+            env.update({"CANARY_AK": ak.plain, "CANARY_SK": sk.plain})
+            roles.update({"s3 access key": ak, "s3 secret key": sk})
+            keys = {"access_key_env": "CANARY_AK", "secret_key_env": "CANARY_SK"}
+            if field == "session_token_env":
+                st = token_canary(tag + "st")
+                env["CANARY_ST"] = st.plain
+                roles["s3 session token"] = st
+                keys["session_token_env"] = "CANARY_ST"
+            return keys
+        case "secret_key_env":
+            sk = token_canary(tag + "sk")
+            env["CANARY_SK"] = sk.plain
+            roles["s3 secret key"] = sk
+            return {"secret_key_env": "CANARY_SK"}
+        case "aws_profile":
+            ak, sk = token_canary(tag + "pak"), token_canary(tag + "psk")
+            (root / ".aws").mkdir(exist_ok=True)
+            with (root / ".aws" / "credentials").open("a") as fh:
+                fh.write(f"[canary]\naws_access_key_id = {ak.plain}\naws_secret_access_key = {sk.plain}\n")
+            roles.update({"s3 access key": ak, "s3 secret key": sk})
+            return {"aws_profile": "canary"}
+        case "account_key_env":
+            key = token_canary(tag + "key")
+            env["CANARY_AZ_KEY"] = key.plain
+            roles["azure account key"] = key
+            return {"account_key_env": "CANARY_AZ_KEY"}
+        case "sas_token_env":
+            sas = token_canary(tag + "sas")
+            env["CANARY_AZ_SAS"] = sas.plain
+            roles["azure sas token"] = sas
+            return {"sas_token_env": "CANARY_AZ_SAS"}
+        case "credentials_file":
+            made = service_account_key(tag, f"{base}/token")
+            p = root / "gcs.json"
+            match shape:
+                case "file":
+                    p.write_text(made[0] if made else "{}")
+                case "dir":
+                    p.mkdir()
+                case "empty":
+                    p.write_text("")
+                case "bad-json":
+                    p.write_text(made[0][: len(made[0]) // 2] if made else "{")
+            if made and shape in ("file", "bad-json"):
+                roles["gcs key"] = made[1]
+            return {"credentials_file": "gcs.json"}
+        case "allow_anonymous":
+            return {"allow_anonymous": True}
+    raise KeyError(f"destination credential field `{field}` has no recipe")
+
+
 def dest_scene(spelling: str, tag: str, root: Path, env: dict[str, str], stubs: dict[str, Stub],
                roles: dict[str, Canary]) -> dict:
-    """The `destination:` block that carries one cloud credential spelling."""
+    """The `destination:` block that carries one credential spelling; beside `allow_anonymous` no credential may reach any request."""
     stubs["dest"] = Stub("http")
     base = f"http://127.0.0.1:{stubs['dest'].port}"
-    if spelling == "s3-env-keys":
-        ak, sk, st = token_canary(tag + "ak"), token_canary(tag + "sk"), token_canary(tag + "st")
-        env.update({"CANARY_AK": ak.plain, "CANARY_SK": sk.plain, "CANARY_ST": st.plain})
-        roles.update({"s3 access key": ak, "s3 secret key": sk, "s3 session token": st})
-        return {"type": "s3", "bucket": "canary", "prefix": "p", "region": "us-east-1", "endpoint": base,
-                "access_key_env": "CANARY_AK", "secret_key_env": "CANARY_SK", "session_token_env": "CANARY_ST"}
-    if spelling == "azure-env-keys":
-        key, sas = token_canary(tag + "key"), token_canary(tag + "sas")
-        env.update({"CANARY_AZ_KEY": key.plain, "CANARY_AZ_SAS": sas.plain})
-        roles.update({"azure account key": key, "azure sas token": sas})
-        return {"type": "azure", "bucket": "canary", "prefix": "p", "account_name": "canaryacct", "endpoint": base,
-                "account_key_env": "CANARY_AZ_KEY"}
-    if spelling == "gcs-credentials-file":
-        made = service_account_key(tag, f"{base}/token")
-        if made:
-            (root / "gcs.json").write_text(made[0])
-            roles["gcs key"] = made[1]
-        return {"type": "gcs", "bucket": "canary", "prefix": "p", "endpoint": base, "credentials_file": "gcs.json"}
-    raise ValueError(f"no destination recipe for spelling {spelling}")
+    dest_type, rest = spelling.split(":", 1)
+    field_part, _, shape = rest.partition(":")
+    fields = field_part.split("+")
+    dest: dict = {"type": dest_type, "bucket": "canary", "prefix": "p", "endpoint": base}
+    dest.update({"s3": {"region": "us-east-1"}, "azure": {"account_name": "canaryacct"}}.get(dest_type, {}))
+    own: dict[str, Canary] = {}
+    for f in fields:
+        dest.update(dest_field(f, shape or "file", tag, root, base, env, own))
+    roles.update({f"anonymous {k}": v for k, v in own.items()} if "allow_anonymous" in fields else own)
+    return dest
 
 
 def pick(group: tuple[Arg, ...], spec: Spec) -> Arg:
@@ -907,7 +995,8 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
     guards: list[str] = []
     guards += [f"source engine `{e}` has no URL scheme recipe" for e in engines if e not in SCHEME]
     guards += [f"export mode `{m}` has no config recipe" for m in modes if m not in MODE_FIELDS]
-    dest_recipes = {"s3": "s3-env-keys", "azure": "azure-env-keys", "gcs": "gcs-credentials-file"}
+    dest_recipes, dest_guards = dest_spellings(dests)
+    guards += dest_guards
     guards += [f"destination type `{d}` has no credential recipe" for d in dests if d not in dest_recipes and d not in NO_CREDENTIAL]
     guards += [f"load target `{t}` has no credential recipe" for t in loads if t not in LOAD_RECIPES]
     for d in dests:
@@ -939,11 +1028,11 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
             specs += [Spec(c, "postgres", "load", sp) for sp in LOAD_SPELLINGS if "clickhouse" in loads]
             specs += [Spec(c, "postgres", "bigquery", "service-account-key")] if "bigquery" in loads else []
             specs += [Spec(c, "postgres", "snowflake", "private-key-file")] if "snowflake" in loads else []
-            specs += [Spec(c, "postgres", "dest", dest_recipes[d]) for d in dests if d in dest_recipes]
+            specs += [Spec(c, "postgres", "dest", sp) for d in dests for sp in dest_recipes.get(d, ())]
             specs += [Spec(c, "postgres", "notify", sp) for sp in ("webhook-url", "webhook-url-env")]
             specs += [Spec(c, "postgres", "gcp-secret", sp, pa) for sp in GCP_SECRET_SPELLINGS for pa in ("fetch-fail", "fetch-token")]
             if live_source:
-                specs += [Spec(c, "postgres", "dest", dest_recipes[d], "live-source") for d in dests if d in dest_recipes]
+                specs += [Spec(c, "postgres", "dest", dest_recipes[d][0], "live-source") for d in dests if d in dest_recipes]
                 specs += [Spec(c, "postgres", "notify", sp, "live-source") for sp in ("webhook-url", "webhook-url-env")]
         elif src_flag:
             for e in engines:
