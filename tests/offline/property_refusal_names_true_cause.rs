@@ -1561,6 +1561,21 @@ fn reader_cells(prefix: &str, p: &Probe, out: &mut Vec<(String, Verdict)>) {
     }
 }
 
+/// Grades one cause across engines: every engine prints the same code and exits the same.
+fn grade_uniform(runs: &[(&str, String, i32)]) -> Result<String, String> {
+    let shapes: BTreeSet<(&str, i32)> = runs.iter().map(|(_, c, x)| (c.as_str(), *x)).collect();
+    let list = runs
+        .iter()
+        .map(|(e, c, x)| format!("{e}={c}/{x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if shapes.len() == 1 {
+        Ok(list)
+    } else {
+        Err(format!("engines disagree: {list}"))
+    }
+}
+
 /// Whether the stand axes run: the live mode sets it under dev/live_slot.
 fn stand_on() -> bool {
     std::env::var("RIVET_PM_P4_STAND").is_ok_and(|v| v == "1")
@@ -1757,6 +1772,7 @@ fn cells() -> Vec<(String, Verdict)> {
         };
         out.push((format!("source/{id}"), v));
     }
+    let mut seen: BTreeMap<&str, Vec<(&str, String, i32)>> = BTreeMap::new();
     for (id, inj) in INJECTORS {
         let Some(doc) = docs.get(*id) else { continue };
         match inj {
@@ -1772,6 +1788,13 @@ fn cells() -> Vec<(String, Verdict)> {
                     }
                     let p = f(e);
                     let o = execute(&p);
+                    let printed = error_section(&o.stderr)
+                        .and_then(printed_code)
+                        .unwrap_or("uncoded")
+                        .to_string();
+                    seen.entry(*id)
+                        .or_default()
+                        .push((engine_name(e), printed, o.exit));
                     let v = verdict(grade(id, doc, &p, &o));
                     out.push((format!("cause/{id}/{}", engine_name(e)), v));
                     offline_axes(id, doc, e, &p, &commands, &mut out);
@@ -1791,12 +1814,15 @@ fn cells() -> Vec<(String, Verdict)> {
             }
             Inj::Internal => {
                 let ev = format!(
-                    "kind {}: an invariant, no operator cause to inject",
+                    "kind {}: an invariant with no operator cause; no test hook raises it (RIVET_TEST_PANIC_AT simulates a crash, not this stop), grading needs a product hook",
                     doc.kind
                 );
                 out.push((format!("cause/{id}/-"), Verdict::NotGraded(ev)));
             }
         }
+    }
+    for (id, runs) in &seen {
+        out.push((format!("uniform/{id}"), verdict(grade_uniform(runs))));
     }
     for (id, label, f) in FIELDS {
         let Some(doc) = docs.get(*id) else { continue };
@@ -2086,4 +2112,23 @@ fn the_reader_grader_wants_the_failure_the_code_and_the_words() {
         stderr: String::new(),
     };
     assert!(grade_reader(&run, false, &ok_status).is_err());
+}
+
+#[test]
+fn the_uniform_grader_goes_red_on_a_code_or_exit_split() {
+    let same = [
+        ("postgres", "RIVET_A".to_string(), 1),
+        ("mysql", "RIVET_A".to_string(), 1),
+    ];
+    assert!(grade_uniform(&same).is_ok());
+    let code = [
+        ("postgres", "RIVET_A".to_string(), 1),
+        ("mysql", "RIVET_B".to_string(), 1),
+    ];
+    assert!(grade_uniform(&code).is_err());
+    let exit = [
+        ("postgres", "RIVET_A".to_string(), 1),
+        ("mysql", "RIVET_A".to_string(), 2),
+    ];
+    assert!(grade_uniform(&exit).is_err());
 }
