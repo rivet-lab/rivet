@@ -48,3 +48,16 @@ fn the_no_silent_null_cdc_axis_passes_its_own_self_test() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// The load axis reads its targets from `LoadTarget` and grades a NULL read back from the warehouse.
+#[test]
+fn the_no_silent_null_load_axis_passes_its_own_self_test() {
+    let out = run("dev.release_oracle.no_silent_null_load");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "no_silent_null_load fails its self-test:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -61,7 +61,6 @@ BLIND = "INTEGRITY_BLIND"
 COLUMNS, PARTS = "COLUMN_SET_DIFFERS", "PART_SET_DIFFERS"
 FAIL_CLASSES = (NULLED, WRONG, SPLIT, UNCODED, IGNORED, EMPTY, CRASH, UNGRADED, HIDDEN, SHAPE, COLUMNS, PARTS, BLIND)
 NOT_GRADED = "NOT_GRADED"
-LOAD_TARGETS_NOT_GRADED = "load targets that re-type (BigQuery, ClickHouse, Snowflake) need a second client on a warehouse; no cell reads one yet"
 
 
 def _enum_variants(path: str, name: str) -> list[str]:
@@ -1002,7 +1001,6 @@ def run_tier(led: Ledger, tier: str) -> None:
             continue
         record(led, engine, results, tier)
         led.ok(f"{engine}: {len(results)} cells in {time.time() - t0:.0f}s")
-    led.skipped("-", "-", SCENARIO, "-", f"{SCENARIO}: {LOAD_TARGETS_NOT_GRADED}", cause=SkipCause.REDUCED)
     for mode in (m for m in axes()["modes"] if m not in MODE_SHAPES and m != "cdc"):
         led.skipped("-", "-", SCENARIO, "-", f"{SCENARIO}: mode {mode} not graded (no cell shape yet)", cause=SkipCause.REDUCED)
 
@@ -1265,7 +1263,6 @@ def main() -> int:
         for k in FAIL_CLASSES:
             for r in sorted(groups[k], key=lambda r: r.cell)[:12]:
                 print(f"  {k}: {r.cell}: {r.detail}")
-    results.append(Result("load-targets/*", REFUSED, NOT_GRADED, LOAD_TARGETS_NOT_GRADED))
     lines = [verdict_line(r) for r in sorted(results, key=lambda r: r.cell)] + [summary_line(results)]
     print("\n".join(lines))
     if ns.out:

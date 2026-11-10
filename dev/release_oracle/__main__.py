@@ -66,6 +66,7 @@ from . import (
     no_silent_null,
     no_silent_null_grants,
     no_silent_null_cdc,
+    no_silent_null_load,
     partner_shape,
     perf,
     regression,
@@ -788,6 +789,7 @@ def _stages_self_test() -> None:
     no_silent_null.self_test()
     no_silent_null_grants.self_test()
     no_silent_null_cdc.self_test()
+    no_silent_null_load.self_test()
     doc = {
         "preflights": [{"id": "a", "status": "test"}, {"id": "off", "status": "gap"}],
         "infra": [{"id": "undriven", "status": "test"}],
@@ -1726,6 +1728,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         serial("no silent null", lambda led: no_silent_null.verify_no_silent_null(led)),
         serial("no silent null grants", lambda led: no_silent_null_grants.verify_no_silent_null_grants(led)),
         serial("no silent null cdc", lambda led: no_silent_null_cdc.verify_no_silent_null_cdc(led)),
+        serial("no silent null load", lambda led: no_silent_null_load.verify_no_silent_null_load(led)),
         serial("cdc e2e", lambda led: cdc.verify_cdc_e2e(led)),
         serial("cdc differential", lambda led: cdc.verify_cdc_differential(led)),
         measured("release regression", regression.verify_release_regression),
