@@ -307,9 +307,6 @@ mod live_three_cycles;
 mod live_type_policy;
 #[path = "live/live_wave_apply.rs"]
 mod live_wave_apply;
-#[allow(dead_code)]
-#[path = "p5/axes.rs"]
-mod p5;
 #[path = "live/preflight_missing_table.rs"]
 mod preflight_missing_table;
 #[path = "live/preflight_target_fail_note.rs"]
