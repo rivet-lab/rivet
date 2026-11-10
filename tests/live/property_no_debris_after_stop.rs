@@ -189,8 +189,16 @@ fn clean_ids(src: Src, shape: axes::Shape) -> Vec<i64> {
 
 /// The `running` run_status rows of the rig's export; zero while the state is not created yet.
 fn running_rows(rig: &Rig) -> i64 {
-    if rig.state_url(&[]).is_some() {
-        return rig.state_count(RUNNING_ROWS);
+    if let Some(url) = rig.state_url(&[]) {
+        return postgres::Client::connect(&url, postgres::NoTls)
+            .and_then(|mut con| {
+                con.query_one(
+                    RUNNING_ROWS.replace("{export}", rig.export_name()).as_str(),
+                    &[],
+                )
+            })
+            .map(|r| r.get(0))
+            .unwrap_or(0);
     }
     let path = rig.config_path().with_file_name(".rivet_state.db");
     rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
