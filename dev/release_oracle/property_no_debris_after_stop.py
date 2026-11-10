@@ -74,7 +74,8 @@ def _pg_one(url: str, sql: str, args: tuple):
         lit = lit.replace("?", "'" + str(a).replace("'", "''") + "'", 1)
     with closing(duckdb.connect()) as con:
         con.execute("LOAD postgres")
-        con.execute("ATTACH ? AS pg (TYPE postgres, READ_ONLY)", [url])
+        quoted = url.replace("'", "''")
+        con.execute(f"ATTACH '{quoted}' AS pg (TYPE postgres, READ_ONLY)")
         try:
             row = con.execute("SELECT * FROM postgres_query('pg', ?)", [lit]).fetchone()
         except duckdb.Error as e:

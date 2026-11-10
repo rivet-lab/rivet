@@ -781,7 +781,9 @@ fn grade(
     let mut again = String::new();
     let mut tail = String::new();
     if rerun {
-        let resume: &[&str] = if matches!(cell.shape, axes::Shape::Range | axes::Shape::Keyset) {
+        let resume: &[&str] = if rerun_rig.is_none()
+            && matches!(cell.shape, axes::Shape::Range | axes::Shape::Keyset)
+        {
             &["--resume"]
         } else {
             &[]

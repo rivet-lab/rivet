@@ -996,7 +996,78 @@ pub struct KnownRed {
 }
 
 /// The accepted REDs of this matrix; a RED no entry covers fails the matrix, and so does an entry no RED meets in a whole run.
-pub const KNOWN_RED: &[KnownRed] = &[];
+pub const KNOWN_RED: &[KnownRed] = &[
+    KnownRed {
+        keys: "pg/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "pg/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+    KnownRed {
+        keys: "pg/*",
+        finding: "run_end:success_rows_exceed_clean_exits",
+        reason: "2026-11-10: PR-RUN-END NODEBRIS-SUCCESS-ROWS (HS-C4, EP-3), the state holds more success run_status rows than invocations that exited 0; closes when only an exit-0 run is recorded success.",
+    },
+    KnownRed {
+        keys: "mysql/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "mysql/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+    KnownRed {
+        keys: "mysql/*",
+        finding: "run_end:success_rows_exceed_clean_exits",
+        reason: "2026-11-10: PR-RUN-END NODEBRIS-SUCCESS-ROWS (HS-C4, EP-3), the state holds more success run_status rows than invocations that exited 0; closes when only an exit-0 run is recorded success.",
+    },
+    KnownRed {
+        keys: "mssql/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "mssql/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+    KnownRed {
+        keys: "mssql/*",
+        finding: "run_end:success_rows_exceed_clean_exits",
+        reason: "2026-11-10: PR-RUN-END NODEBRIS-SUCCESS-ROWS (HS-C4, EP-3), the state holds more success run_status rows than invocations that exited 0; closes when only an exit-0 run is recorded success.",
+    },
+    KnownRed {
+        keys: "oracle/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "oracle/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+    KnownRed {
+        keys: "oracle/*",
+        finding: "run_end:success_rows_exceed_clean_exits",
+        reason: "2026-11-10: PR-RUN-END NODEBRIS-SUCCESS-ROWS (HS-C4, EP-3), the state holds more success run_status rows than invocations that exited 0; closes when only an exit-0 run is recorded success.",
+    },
+    KnownRed {
+        keys: "mongo/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "mongo/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+];
 
 /// Whether `key` matches `pattern`, where `*` matches any run of characters.
 pub fn glob(pattern: &str, key: &str) -> bool {
