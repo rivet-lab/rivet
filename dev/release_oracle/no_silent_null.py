@@ -18,7 +18,10 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
+from uuid import UUID
+from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -61,9 +64,9 @@ LOAD_TARGETS_NOT_GRADED = "load targets that re-type (BigQuery, ClickHouse, Snow
 
 
 def _enum_variants(path: str, name: str) -> list[str]:
-    """The variant names of `pub enum <name>` in a product source file, snake_cased."""
+    """The variant names of `pub enum <name>` or `pub(crate) enum <name>` in a product source file, snake_cased."""
     text = (ROOT / path).read_text()
-    m = re.search(r"pub(?:\([a-z]*\))? enum %s \{(.*?)\n\}" % name, text, re.S)
+    m = re.search(r"pub(?:\(crate\))? enum %s \{(.*?)\n\}" % name, text, re.S)
     if not m:
         raise AssertionError(f"{path}: enum {name} not found: the grid cannot be read from the product")
     body = re.sub(r"///[^\n]*|//[^\n]*", "", m.group(1))
@@ -381,7 +384,86 @@ def _target_family(target: str) -> str:
         target, "int" if target.startswith("int") else "decimal" if target.startswith("decimal") else "other")
 
 
-def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: bool = False) -> str:
+_ZONE = re.compile(r"\s+([A-Za-z]+/[A-Za-z_]+)$")
+_OFFSET = re.compile(r"\s*(?:(UTC|Z)|([+-]\d{2})(?::?(\d{2}))?)$")
+TEMPORAL_SLACK = {("mssql", "DATETIME"): timedelta(milliseconds=4), ("mssql", "SMALLDATETIME"): timedelta(seconds=30)}
+
+
+def instant(v):
+    """A date, a signed time of day as a timedelta, or a UTC-naive datetime of a temporal value or its text; None when it reads as no instant."""
+    if isinstance(v, datetime):
+        return v.astimezone(timezone.utc).replace(tzinfo=None) if v.tzinfo else v
+    if isinstance(v, (date, timedelta)):
+        return v
+    if isinstance(v, dtime):
+        return timedelta(hours=v.hour, minutes=v.minute, seconds=v.second, microseconds=v.microsecond)
+    if not isinstance(v, str):
+        return None
+    s, zone = v.strip().replace("T", " "), None
+    if m := _ZONE.search(s):
+        s, zone = s[:m.start()], ZoneInfo(m.group(1))
+    elif (m := _OFFSET.search(s)) and ":" in s[:m.start()] and (m.group(1) or len(s[:m.start()]) > 10 or m.group(2)[0] == "+"):
+        sign, hh, mm = (1, 0, 0) if m.group(1) else (1 if m.group(2)[0] == "+" else -1, int(m.group(2)[1:]), int(m.group(3) or 0))
+        s, zone = s[:m.start()], timezone(sign * timedelta(hours=hh, minutes=mm))
+    try:
+        if len(s) == 10 and s[4] == "-":
+            return date.fromisoformat(s)
+        if m := re.fullmatch(r"(-?)(\d+):(\d{2}):(\d{2})(?:\.(\d+))?", s):
+            t = timedelta(hours=int(m[2]), minutes=int(m[3]), seconds=int(m[4]), microseconds=int((m[5] or "")[:6].ljust(6, "0")))
+            return -t if m[1] else t
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return d.replace(tzinfo=zone).astimezone(timezone.utc).replace(tzinfo=None) if zone else d
+
+
+def _same_instant(engine: str, native: str, exp: str, got) -> str:
+    """OK, WRONG or PRESENCE for a temporal source value against a delivered instant or its text."""
+    e, g = instant(exp), instant(got)
+    if e is None or g is None:
+        return WRONG if e is None and isinstance(got, (date, dtime, timedelta)) else "PRESENCE"
+    if type(e) is date and type(g) is datetime:
+        e = datetime.combine(e, dtime())
+    if type(g) is date and type(e) is datetime:
+        g = datetime.combine(g, dtime())
+    if type(e) is not type(g):
+        return "PRESENCE"
+    slack = TEMPORAL_SLACK.get((engine, native.upper()), timedelta(microseconds=1))
+    return "OK" if abs(e - g) < slack else WRONG
+
+
+def _same_bytes(exp: bytes, got) -> str:
+    """OK, WRONG or PRESENCE for a binary source value; a fixed-width column may pad with zero bytes."""
+    if isinstance(got, (bytes, bytearray, memoryview)):
+        g = bytes(got)
+        return "OK" if g == exp or (g[:len(exp)] == exp and not g[len(exp):].strip(b"\0")) else WRONG
+    if isinstance(got, str) and got.strip().lower().removeprefix("\\x").removeprefix("0x").rstrip("0") == exp.hex().rstrip("0"):
+        return "OK"
+    return "PRESENCE"
+
+
+def compare_other(engine: str, native: str, exp, target: str, got) -> str:
+    """OK, WRONG or PRESENCE for a family-`other` or text source value: as an instant, JSON, UUID, bytes or text."""
+    if isinstance(exp, bytes):
+        return _same_bytes(exp, got)
+    if not isinstance(exp, str):
+        return "PRESENCE"
+    n = native.upper()
+    if TEMPORAL.fullmatch(n) or n.startswith("TIME") or isinstance(got, (date, dtime, timedelta)):
+        return _same_instant(engine, native, exp, got)
+    if isinstance(got, UUID) or n in ("UUID", "UNIQUEIDENTIFIER"):
+        return "OK" if str(got).lower() == exp.lower() else WRONG if isinstance(got, (str, UUID)) else "PRESENCE"
+    if n in ("JSON", "JSONB") and isinstance(got, str):
+        try:
+            return "OK" if json.loads(got) == json.loads(exp) else WRONG
+        except ValueError:
+            return WRONG
+    if isinstance(got, str):
+        return "OK" if got.rstrip(" ") == exp.rstrip(" ") else WRONG
+    return "PRESENCE"
+
+
+def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: bool = False, native: str = "") -> str:
     """OK, PRESENCE (not comparable), NULLED or WRONG for one delivered cell against its source literal."""
     exp = parse_lit(engine, src_lit)
     if exp is None:
@@ -403,11 +485,9 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
         if tf == "bool" and not isinstance(exp, bool):
             return "OK" if (g != 0) == (e != 0) and e in (0, 1) else WRONG
         return "OK" if abs(g - e) <= tolerance(src_family, target, e) else WRONG
-    if isinstance(exp, str):
-        if src_family == "text" and tf in ("text", "other") and isinstance(got, str) and exp.isascii() and got.isascii() and target in ("none", "text"):
-            return "OK" if got.rstrip() == exp.rstrip() else WRONG
+    if exp is ...:
         return "PRESENCE"
-    return "PRESENCE"
+    return compare_other(engine, native, exp, target, got)
 
 
 def config(engine: str, url_env: str, mode: str, fmt: str, col: str, target: str, out: str, cols: tuple[str, ...] | None = None) -> str:
@@ -477,12 +557,13 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
     if not parts:
         return None
     with duckdb.connect() as con:
+        con.execute("SET TimeZone = 'UTC'")
         wide: dict[str, str] = {}
         if fmt == "parquet":
             import pyarrow as pa
             import pyarrow.parquet as pq
 
-            tbl = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="default")
+            tbl = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="permissive")
             wide = {f.name.lower(): f"DECIMAL({f.type.precision},{f.type.scale})" for f in tbl.schema if pa.types.is_decimal256(f.type)}
             for f in tbl.schema:
                 if f.name.lower() in wide:
@@ -594,7 +675,7 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
     nulled, wrong = [], []
     for i in range(1, n_rows + 1):
         lit = src_lits[i - 1] if i - 1 < len(src_lits) else "NULL"
-        v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv")
+        v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native)
         if v == NULLED:
             nulled.append(lit)
         elif v == WRONG:
@@ -642,6 +723,7 @@ def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str
         out.append(r)
     shutil.rmtree(d, ignore_errors=True)
     return out
+
 
 
 def grid(engine: str, cols: list[Col], tier: str) -> list[tuple[Col, str, str, tuple[str, ...]]]:
@@ -848,7 +930,7 @@ def _run_engine(engine: str, tier: str, work: Path, url: str, progress) -> tuple
 
 def pairs_of(results: list[Result]) -> list[str]:
     """The sorted source->override pairs of the cells, with the mode and format cut off."""
-    return sorted({re.sub(r"/(full|incremental|chunked|time_window)/\w+$", "", r.cell.split("/", 1)[1]) for r in results})
+    return sorted({re.sub(r"/(full|incremental|chunked|time_window|cdc-[\w@]+)/\w+$", "", r.cell.split("/", 1)[1]) for r in results})
 
 
 def digest(results: list[Result]) -> str:
@@ -961,6 +1043,25 @@ def self_test() -> None:
     assert compare("mysql", "5", "bool", "none", True) == "OK" and compare("mysql", "0", "bool", "none", False) == "OK"
     assert compare("mysql", "'abc'", "text", "int4", 3) == WRONG and compare("mysql", "'abc'", "text", "none", "abc") == "OK"
     assert compare("mysql", "-2147483648", "int", "decimal(9,2)", Decimal("0.00")) == WRONG
+    assert compare("mysql", "'b'", "other", "none", "c", native="ENUM('a','b','c')") == WRONG and compare("mysql", "'x,z'", "other", "none", "x,z", native="SET('x','y','z')") == "OK"
+    assert compare("mysql", "'\U0001F600'", "other", "none", "?", native="ENUM('a')") == WRONG, "a 4-byte label delivered as `?` is a changed value"
+    assert compare("mysql", "'üñíçødé'", "text", "none", "Ã¼Ã±", native="VARCHAR(200)") == WRONG, "non-ASCII text is compared, not only seen"
+    assert compare("postgres", "'2019-02-03 08:07:06.554433+05'", "other", "none", datetime(2019, 2, 3, 3, 7, 6, 554433, tzinfo=timezone.utc), native="TIMESTAMPTZ") == "OK"
+    assert compare("postgres", "'2019-02-03 08:07:06.554433+05'", "other", "none", "2019-02-03 08:07:06.554433", native="TIMESTAMPTZ") == WRONG, "an offset dropped on the way"
+    assert compare("mssql", "'2026-06-23 10:00:00 +05:30'", "other", "none", "2026-06-23 04:30:00+00", native="DATETIMEOFFSET") == "OK"
+    assert compare("mysql", "'14:30:00.123456'", "other", "none", dtime(14, 30, 0, 123456), native="TIME(6)") == "OK"
+    assert compare("mysql", "'-00:00:00.5'", "other", "none", dtime(0, 0, 0, 500000), native="TIME(1)") == WRONG, "a negative time delivered positive"
+    assert compare("mysql", "'-00:00:00.5'", "other", "text", "-00:00:00.5", native="TIME(1)") == "OK"
+    assert compare("oracle", "TO_DATE('0001-01-01','YYYY-MM-DD')", "other", "none", datetime(1, 1, 1), native="DATE") == "OK"
+    assert compare("oracle", "TO_TIMESTAMP_TZ('2024-07-01 10:00:00 Europe/Berlin','YYYY-MM-DD HH24:MI:SS TZR')", "other", "none", "2024-07-01 08:00:00+00", native="TIMESTAMP(6) WITH TIME ZONE") == "OK"
+    assert compare("mssql", "'2026-01-15T13:45:30.127'", "other", "none", datetime(2026, 1, 15, 13, 45, 30, 126667), native="DATETIME") == "OK"
+    assert compare("postgres", "'2024-03-15'", "other", "none", date(2024, 3, 16), native="DATE") == WRONG
+    assert compare("mysql", "'12'", "text", "date", date(2012, 1, 1), native="TEXT") == WRONG, "text delivered as a date it never was"
+    assert compare("postgres", '\'{"k": "v", "n": 42}\'', "other", "none", '{"n":42,"k":"v"}', native="JSONB") == "OK"
+    assert compare("postgres", "'{\"n\":1}'::jsonb", "other", "none", '{"n":2}', native="JSONB") == WRONG
+    assert compare("mssql", "'12345678-1234-1234-1234-123456789012'", "other", "none", UUID("12345678-1234-1234-1234-123456789012"), native="UNIQUEIDENTIFIER") == "OK"
+    assert compare("mssql", "0xAB", "other", "none", b"\xab\0\0", native="BINARY(8)") == "OK" and compare("mysql", "0xDEADBEEF", "other", "none", b"\xde\xad", native="VARBINARY(4)") == WRONG
+    assert compare("postgres", "ARRAY[1, NULL, 3]", "other", "none", [1, None, 3], native="INTEGER[]") == "PRESENCE"
     assert compare("oracle", "-0.000000000000000000000000000000000000001", "decimal", "float4", -1.0000002153053333e-39) == "OK", "a float4 subnormal rounds at its own step"
     assert tolerance("int", "float4", Decimal(2 ** 24)) == Decimal(2) and tolerance("int", "int8", Decimal(5)) == 0
     assert _int_range("TINYINT") == (-128, 127) and _int_range("INT UNSIGNED") == (0, 2 ** 32 - 1) and _int_range("NUMBER(9)") == (-999999999, 999999999)
