@@ -120,6 +120,8 @@ mod oracle_read_scope_guard;
 mod perf_matrix_guard;
 #[path = "offline/planner_fuzz.rs"]
 mod planner_fuzz;
+#[path = "offline/property_no_silent_null.rs"]
+mod property_no_silent_null;
 #[path = "offline/rebaseline_remedy_one_home.rs"]
 mod rebaseline_remedy_one_home;
 #[path = "offline/redaction_invariant.rs"]
