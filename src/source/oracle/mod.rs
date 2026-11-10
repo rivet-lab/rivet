@@ -748,11 +748,11 @@ impl Source for OracleSource {
     ) -> Result<Vec<TypeMapping>> {
         let projection = self.projected(query)?;
         let metas = self.describe(&projection.sql)?;
-        Ok(arrow_convert::oracle_type_mappings(
+        arrow_convert::oracle_type_mappings(
             &metas[..projection.native.len()],
             &projection.native,
             column_overrides,
-        ))
+        )
     }
 
     /// Source-harm counters over the run window (needs SELECT on V$SYSSTAT /

@@ -131,7 +131,7 @@ pub(crate) fn refuse_override_wire_mismatch(
     config_dir: &std::path::Path,
     params: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
-    if column_overrides.is_empty() || export.mode == crate::config::ExportMode::Cdc {
+    if column_overrides.is_empty() {
         return Ok(());
     }
     let url = config.source.resolve_url()?;
@@ -1123,7 +1123,7 @@ exports:
     }
 
     #[test]
-    fn the_override_probe_connects_only_for_a_batch_export_with_overrides() {
+    fn the_override_probe_connects_for_every_export_with_overrides_cdc_included() {
         let config = cfg_from(OVERRIDE_PROBE_CFG);
         let with =
             crate::plan::parse_column_overrides_pub(&config.exports[0].columns, "batch").unwrap();
@@ -1137,8 +1137,8 @@ exports:
             "no override, nothing to read"
         );
         assert!(
-            probe(&config, &config.exports[1], &with).is_ok(),
-            "a CDC export is graded by its capture, not by a row read"
+            probe(&config, &config.exports[1], &with).is_err(),
+            "a CDC export with overrides opens the source too, so the table grades its pairs"
         );
     }
 

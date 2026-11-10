@@ -266,15 +266,14 @@ pub(crate) fn type_mappings_on(
     let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
     let stmt = prepare_fresh(client, &wrapped)?;
     let hints = pg_numeric_catalog_hints_opt(client, query);
-    Ok(stmt
-        .columns()
+    stmt.columns()
         .iter()
         .map(|col| {
-            let rivet = rivet_type_for_pg_column(col, column_overrides, hints.as_ref());
+            let rivet = rivet_type_for_pg_column(col, column_overrides, hints.as_ref())?;
             let source = SourceColumn::simple(col.name(), col.type_().name(), true);
-            TypeMapping::from_source(&source, rivet)
+            Ok(TypeMapping::from_source(&source, rivet))
         })
-        .collect())
+        .collect()
 }
 
 fn introspect_pg_on(

@@ -33,6 +33,7 @@ mod delivery;
 mod fidelity;
 pub(crate) mod ident;
 mod mapping;
+pub(crate) mod override_table;
 mod override_type;
 pub mod policy;
 mod rivet_type;
@@ -49,6 +50,7 @@ pub use fidelity::TypeFidelity;
 // Public surface for contract/integration tests; not referenced from the binary.
 #[allow(unused_imports)]
 pub use mapping::{TypeMapping, build_arrow_field, derive_fidelity, rivet_type_to_arrow};
+pub use override_table::{override_is_read, resolve_column};
 pub use override_type::{parse_column_overrides, parse_type_str};
 pub(crate) use override_type::{refuse_cursor_case_miss, refuse_override_case_miss};
 pub use policy::plan_columns;
@@ -149,18 +151,6 @@ pub fn overrides_for_unit<V: Clone>(
     }
 }
 
-/// The override precedence shared by every source engine: a `columns:` override
-/// wins; otherwise fall back to the engine's autodetected type. Keeping it in
-/// one place is why PostgreSQL and MySQL resolution can't drift on precedence —
-/// each driver supplies only its own `autodetect` closure.
-pub fn resolve_or(
-    overrides: &ColumnOverrides,
-    column: &str,
-    autodetect: impl FnOnce() -> RivetType,
-) -> RivetType {
-    overrides.get(column).cloned().unwrap_or_else(autodetect)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,32 +177,6 @@ mod tests {
         assert!(!is_time_of_day(-1));
     }
 
-    #[test]
-    fn resolve_or_prefers_override_then_autodetect() {
-        let mut ov = ColumnOverrides::new();
-        ov.insert(
-            "amount".into(),
-            RivetType::Decimal {
-                precision: 18,
-                scale: 2,
-            },
-        );
-        // Override wins, autodetect not even called.
-        assert_eq!(
-            resolve_or(&ov, "amount", || panic!(
-                "autodetect must not run when overridden"
-            )),
-            RivetType::Decimal {
-                precision: 18,
-                scale: 2
-            }
-        );
-        // No override → autodetect.
-        assert_eq!(
-            resolve_or(&ov, "other", || RivetType::Int64),
-            RivetType::Int64
-        );
-    }
     use crate::types::mapping::{META_FIDELITY, META_LOGICAL_TYPE, META_NATIVE_TYPE};
     use arrow::datatypes::DataType;
 
