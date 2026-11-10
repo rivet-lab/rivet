@@ -14,6 +14,12 @@ const R_VERIFY: &str = "2026-11-08: validate prints a second code vocabulary abs
 const R_STATE: &str = "2026-11-08: an unopenable SQLite state path stops uncoded; closes when the open error is raised as STATE_NOT_WRITABLE";
 const R_CONNECT: &str = "2026-11-08: an unreachable source stops uncoded; closes when the connect error is raised as SOURCE_CONNECT_FAILED";
 
+const R_CMD_ORDER: &str = "2026-11-10: plan, load, compact, reconcile and repair stop at their own precheck before the config error names the true cause; closes when the config error is raised first";
+const R_CMD_ACCEPT: &str = "2026-11-10: validate, metrics and journal exit 0 on a config that run refuses; closes when they refuse with the same code";
+const R_REMEDY_REPORT: &str = "2026-11-10: the remedy names `rivet reconcile --report`, which reconcile does not accept; closes when the remedy names repair's --report or reconcile's --output";
+const R_REMEDY_FORCE: &str = "2026-11-10: the stale-plan remedy names --force without naming `rivet apply`; closes when the message names the apply command";
+const R_FIELD_MONGO: &str = "2026-11-10: mongo accepts batch_size 0, an empty or NUL destination path and a 300-char export name with exit 0; closes when each is refused at config load";
+
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
 const ACCEPTED_RED: &[(&str, &str)] = &[
     ("cause/RIVET_SOURCE_CONNECT_FAILED/mongo", R_CONNECT),
@@ -26,27 +32,69 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     ("cause/RIVET_STATE_NOT_WRITABLE/mysql", R_STATE),
     ("cause/RIVET_STATE_NOT_WRITABLE/oracle", R_STATE),
     ("cause/RIVET_STATE_NOT_WRITABLE/postgres", R_STATE),
+    ("decoy/RIVET_STATE_NOT_WRITABLE/*", R_STATE),
+    ("decoy/RIVET_SOURCE_CONNECT_FAILED/*", R_CONNECT),
+    (
+        "cmd/plan/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
+        R_CMD_ORDER,
+    ),
+    (
+        "cmd/load/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
+        R_CMD_ORDER,
+    ),
+    (
+        "cmd/compact/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
+        R_CMD_ORDER,
+    ),
+    (
+        "cmd/reconcile/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
+        R_CMD_ORDER,
+    ),
+    (
+        "cmd/repair/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
+        R_CMD_ORDER,
+    ),
+    (
+        "cmd/validate/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
+        R_CMD_ACCEPT,
+    ),
+    (
+        "cmd/metrics/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
+        R_CMD_ACCEPT,
+    ),
+    (
+        "cmd/journal/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
+        R_CMD_ACCEPT,
+    ),
+    (
+        "field/RIVET_CONFIG_VALUE_OUT_OF_RANGE/batch_size_0/mongo",
+        R_FIELD_MONGO,
+    ),
+    (
+        "field/RIVET_CONFIG_PATH_UNSAFE/destination_path_empty/mongo",
+        R_FIELD_MONGO,
+    ),
+    (
+        "field/RIVET_CONFIG_PATH_UNSAFE/destination_path_nul/mongo",
+        R_FIELD_MONGO,
+    ),
+    (
+        "field/RIVET_CONFIG_PATH_UNSAFE/export_name_300/mongo",
+        R_FIELD_MONGO,
+    ),
+    ("remedy/RIVET_CLI_REPORT_INVALID", R_REMEDY_REPORT),
+    ("remedy/RIVET_PLAN_ARTIFACT_STALE", R_REMEDY_FORCE),
+    ("source/RIVET_VERIFY_*", R_VERIFY),
     ("source/RIVET_VALUE_TOO_LARGE", R_PREFIX),
-    ("source/RIVET_VERIFY_CDC_POSITION", R_VERIFY),
-    ("source/RIVET_VERIFY_CONTENT_UNMET", R_VERIFY),
-    ("source/RIVET_VERIFY_LIST_ERROR", R_VERIFY),
-    ("source/RIVET_VERIFY_MANIFEST_INCONSISTENT", R_VERIFY),
-    ("source/RIVET_VERIFY_MANIFEST_MISSING", R_VERIFY),
-    ("source/RIVET_VERIFY_MANIFEST_READ_ERROR", R_VERIFY),
-    ("source/RIVET_VERIFY_MANIFEST_REQUIRED", R_VERIFY),
-    ("source/RIVET_VERIFY_PARTITION_NOT_DELIVERED", R_VERIFY),
-    ("source/RIVET_VERIFY_PART_CHECKSUM_MISMATCH", R_VERIFY),
-    ("source/RIVET_VERIFY_PART_MISSING", R_VERIFY),
-    ("source/RIVET_VERIFY_PART_ROW_COUNT", R_VERIFY),
-    ("source/RIVET_VERIFY_PART_SIZE_MISMATCH", R_VERIFY),
-    ("source/RIVET_VERIFY_RUN_NOT_SUCCESSFUL", R_VERIFY),
-    ("source/RIVET_VERIFY_SUCCESS_MALFORMED", R_VERIFY),
-    ("source/RIVET_VERIFY_SUCCESS_READ_ERROR", R_VERIFY),
-    ("source/RIVET_VERIFY_SUCCESS_STALE", R_VERIFY),
-    ("source/RIVET_VERIFY_UNTRACKED_OBJECT", R_VERIFY),
-    ("source/RIVET_VERIFY_VALUE_CHECKSUM", R_VERIFY),
-    ("source/RIVET_VERIFY_VALUE_CHECK_NOT_AVAILABLE", R_VERIFY),
 ];
+
+/// Whether a ledger key accepts a RED cell: an exact key, or a `prefix*` pattern.
+fn accepts(key: &str, cell: &str) -> bool {
+    match key.strip_suffix('*') {
+        Some(prefix) => cell.starts_with(prefix),
+        None => key == cell,
+    }
+}
 
 /// How a code's cause is injected.
 #[derive(Clone, Copy)]
@@ -58,6 +106,7 @@ enum Inj {
 }
 
 /// One injected cause: the config, the command, and the bytes the refusal must carry.
+#[derive(Clone)]
 struct Probe {
     yaml: String,
     argv: Vec<String>,
@@ -697,6 +746,7 @@ const UNCODED: &[(&str, &[&str])] = &[
 struct Doc {
     kind: String,
     exits: BTreeSet<i32>,
+    action: String,
 }
 
 fn root() -> PathBuf {
@@ -721,6 +771,7 @@ fn doc_codes() -> BTreeMap<String, Doc> {
             Doc {
                 kind: cells[2].to_string(),
                 exits,
+                action: cells[4].to_string(),
             },
         );
     }
@@ -768,6 +819,270 @@ fn literal_codes() -> BTreeSet<String> {
         }
     }
     out
+}
+
+/// Words a text classifier might read as a cause, put in place of an export name.
+const DECOYS: &[&str] = &["timeout", "login", "token", "403", "denied"];
+
+type TwinProbe = fn(SourceType) -> Probe;
+/// A valid counterpart of each offline cause: the same input with the guarded property made valid.
+const TWINS: &[(&str, TwinProbe)] = &[
+    ("RIVET_CONFIG_NO_EXPORTS", one_export),
+    ("RIVET_CONFIG_CHUNK_COUNT_INVALID", twin_chunk_count),
+    ("RIVET_CONFIG_DUPLICATE_EXPORT", one_export),
+    ("RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH", one_export),
+    ("RIVET_CONFIG_FILE_UNREADABLE", one_export),
+    ("RIVET_CONFIG_YAML_INVALID", one_export),
+    ("RIVET_CONFIG_SOURCE_CONNECTION_INVALID", one_export),
+    ("RIVET_CONFIG_SECRET_UNSET", twin_secret_set),
+    ("RIVET_CONFIG_EXPORT_SOURCE_INVALID", one_export),
+    ("RIVET_CONFIG_MODE_SETTING_INVALID", twin_incremental),
+    ("RIVET_CONFIG_DESTINATION_AUTH_INVALID", twin_s3_plain),
+    ("RIVET_CONFIG_DESTINATION_ENDPOINT_UNSAFE", twin_s3_loopback),
+    ("RIVET_CONFIG_VALUE_OUT_OF_RANGE", twin_level_3),
+    ("RIVET_CONFIG_CDC_SHAPE_INVALID", twin_cdc_two_tables),
+    ("RIVET_CONFIG_CSV_COMPRESSION_UNSUPPORTED", twin_csv),
+    ("RIVET_CONFIG_TLS_VERIFICATION_DOWNGRADE", twin_tls_verified),
+    ("RIVET_CONFIG_LOAD_BLOCK_INVALID", one_export),
+    ("RIVET_CONFIG_PATH_UNSAFE", twin_safe_name),
+    ("RIVET_CONFIG_ROW_HASH_INVALID", twin_row_hash),
+    ("RIVET_CONFIG_COLUMN_OVERRIDE_TABLE_UNKNOWN", one_export),
+    ("RIVET_STATE_URL_SCHEME_UNSUPPORTED", twin_state_sqlite),
+    ("RIVET_STATE_NOT_WRITABLE", twin_state_sqlite),
+    ("RIVET_STATE_FILE_CORRUPT", twin_state_absent),
+    ("RIVET_CLI_EXPORT_UNKNOWN", twin_run_export_a),
+];
+
+type FieldProbe = fn(SourceType) -> Probe;
+/// Offline causes with a value other than the one in the injector: `(code, label, probe)`.
+const FIELDS: &[(&str, &str, FieldProbe)] = &[
+    (
+        "RIVET_CONFIG_VALUE_OUT_OF_RANGE",
+        "batch_size_0",
+        field_batch_zero,
+    ),
+    (
+        "RIVET_CONFIG_PATH_UNSAFE",
+        "destination_path_empty",
+        field_path_empty,
+    ),
+    (
+        "RIVET_CONFIG_PATH_UNSAFE",
+        "destination_path_nul",
+        field_path_nul,
+    ),
+    (
+        "RIVET_CONFIG_PATH_UNSAFE",
+        "export_name_300",
+        field_name_300,
+    ),
+];
+
+fn one_export(e: SourceType) -> Probe {
+    on(e, "", &export("a", QUERY), &[])
+}
+
+fn twin_chunk_count(e: SourceType) -> Probe {
+    let x = format!("{QUERY}    mode: chunked\n    chunk_column: id\n    chunk_count: 2\n");
+    on(e, "", &export("a", &x), &[])
+}
+
+fn twin_secret_set(e: SourceType) -> Probe {
+    let mut p = on(
+        e,
+        "",
+        &export("a", "    query: \"SELECT ${RIVET_PM_P4_SURELY_UNSET}\"\n"),
+        &[],
+    );
+    p.env = vec![("RIVET_PM_P4_SURELY_UNSET", "1".to_string())];
+    p
+}
+
+fn twin_incremental(e: SourceType) -> Probe {
+    let x = format!("{QUERY}    mode: incremental\n    cursor_column: id\n");
+    on(e, "", &export("a", &x), &[])
+}
+
+fn twin_s3_plain(e: SourceType) -> Probe {
+    with_dest(e, "      type: s3\n      bucket: b\n", &[])
+}
+
+fn twin_s3_loopback(e: SourceType) -> Probe {
+    with_dest(
+        e,
+        "      type: s3\n      bucket: b\n      endpoint: http://127.0.0.1:9\n",
+        &[],
+    )
+}
+
+fn twin_level_3(e: SourceType) -> Probe {
+    let x = format!("{QUERY}    compression_level: 3\n");
+    on(e, "", &export("a", &x), &[])
+}
+
+/// Two tables in one export, or one table per export on SQL Server, where `tables:` is refused.
+fn twin_cdc_two_tables(e: SourceType) -> Probe {
+    if matches!(e, SourceType::Mssql) {
+        return on(
+            e,
+            "",
+            &export(
+                "a",
+                "    mode: cdc\n    table: t\n    cdc:\n      slot: s\n",
+            ),
+            &[],
+        );
+    }
+    on(
+        e,
+        "",
+        &export(
+            "a",
+            "    mode: cdc\n    tables: [t, u]\n    cdc:\n      slot: s\n",
+        ),
+        &[],
+    )
+}
+
+fn twin_csv(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml = p.yaml.replace("format: parquet", "format: csv");
+    p
+}
+
+fn twin_tls_verified(e: SourceType) -> Probe {
+    on(
+        e,
+        "  tls:\n    mode: verify-full\n",
+        &export("a", QUERY),
+        &[],
+    )
+}
+
+fn twin_safe_name(e: SourceType) -> Probe {
+    on(e, "", &export("escape", QUERY), &[])
+}
+
+fn twin_row_hash(e: SourceType) -> Probe {
+    let x = format!("{QUERY}    meta_columns:\n      row_hash: [id]\n");
+    on(e, "", &export("a", &x), &[])
+}
+
+fn twin_state_sqlite(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.argv = cmd(&["state", "show", "-c", "CFG"]);
+    p.env = vec![("RIVET_STATE_URL", "sqlite:x.db".to_string())];
+    p
+}
+
+fn twin_state_absent(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.argv = cmd(&["state", "show", "-c", "CFG"]);
+    p
+}
+
+fn twin_run_export_a(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.argv = cmd(&["run", "-c", "CFG", "--export", "a"]);
+    p
+}
+
+fn field_batch_zero(e: SourceType) -> Probe {
+    let x = format!("{QUERY}    tuning:\n      batch_size: 0\n");
+    on(e, "", &export("a", &x), &["batch_size"])
+}
+
+fn field_path_empty(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml = p.yaml.replace("path: ./out", "path: \"\"");
+    p
+}
+
+fn field_path_nul(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml = p.yaml.replace("path: ./out", "path: \"a\\0b\"");
+    p
+}
+
+fn field_name_300(e: SourceType) -> Probe {
+    on(e, "", &export(&"a".repeat(300), QUERY), &[])
+}
+
+/// Every decoy and command variant of one offline probe, each graded like the base cell.
+fn offline_axes(
+    id: &str,
+    doc: &Doc,
+    e: SourceType,
+    p: &Probe,
+    commands: &[String],
+    out: &mut Vec<(String, Verdict)>,
+) {
+    let eng = engine_name(e);
+    let twin = match TWINS.iter().find(|(t, _)| *t == id) {
+        Some((_, f)) => {
+            let t = f(e);
+            verdict(grade_twin(id, p, &execute(&t)))
+        }
+        None => Verdict::NotGraded(
+            "no offline valid twin: a valid source needs a live engine".to_string(),
+        ),
+    };
+    out.push((format!("twin/{id}/{eng}"), twin));
+    if p.yaml.contains("  - name: a\n") {
+        for word in DECOYS {
+            let q = renamed(p, word);
+            let v = verdict(grade(id, doc, &q, &execute(&q)));
+            out.push((format!("decoy/{id}/{word}/{eng}"), v));
+        }
+    }
+    if p.argv.first().map(String::as_str) == Some("check") && p.argv.iter().any(|a| a == "CFG") {
+        let mut q = p.clone();
+        q.argv.insert(0, "--json-errors".to_string());
+        out.push((
+            format!("json/{id}/{eng}"),
+            verdict(grade_json(id, &execute(&q))),
+        ));
+        for sub in commands.iter().filter(|s| s.as_str() != "check") {
+            let mut q = p.clone();
+            let mut args = vec![sub.as_str(), "-c", "CFG"];
+            if help(&[sub.as_str()]).contains("--export <") {
+                args.extend(["--export", "a"]);
+            }
+            q.argv = cmd(&args);
+            let o = execute(&q);
+            let v = if sub == "doctor" {
+                grade_doctor(id, doc, &q, &o)
+            } else {
+                grade(id, doc, &q, &o)
+            };
+            out.push((format!("cmd/{sub}/{id}/{eng}"), verdict(v)));
+        }
+    }
+}
+
+/// Grades `doctor` by the cause on its `[FAIL]` lines, since its summary line carries a generic code.
+fn grade_doctor(id: &str, doc: &Doc, p: &Probe, o: &Out) -> Result<String, String> {
+    let fails: Vec<&str> = o
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("[FAIL]"))
+        .collect();
+    if fails.is_empty() {
+        return grade(id, doc, p, o);
+    }
+    let synthetic = Out {
+        exit: o.exit,
+        stdout: String::new(),
+        stderr: format!("Error: [{id}] {}", fails.join(" ")),
+    };
+    grade(id, doc, p, &synthetic)
+}
+
+fn verdict(r: Result<String, String>) -> Verdict {
+    match r {
+        Ok(ev) => Verdict::Pass(ev),
+        Err(ev) => Verdict::Red(ev),
+    }
 }
 
 /// Runs the binary in a scratch directory with the probe's config, files and env.
@@ -862,7 +1177,24 @@ fn grade(id: &str, doc: &Doc, p: &Probe, o: &Out) -> Result<String, String> {
             brief(section)
         ));
     }
+    if let Some(why) = message_shape(section) {
+        return Err(format!("{why} in \"{}\"", brief(section)));
+    }
     Ok(format!("exit={} \"{}\"", o.exit, brief(section)))
+}
+
+/// The first message-shape fault in a refusal: a Rust Debug repr or an equal `N exceeds N` pair.
+fn message_shape(s: &str) -> Option<String> {
+    let debug =
+        regex::Regex::new(r"\b(Some|None|Ok|Err)\(|\b[A-Z][A-Za-z]+ \{ [a-z_]+: ").expect("re");
+    if let Some(m) = debug.find(s) {
+        return Some(format!("rust Debug repr `{}`", m.as_str()));
+    }
+    let pair =
+        regex::Regex::new(r"(\d+(?:\.\d+)?) ?(?:[A-Za-z]+ )?exceeds (\d+(?:\.\d+)?)").expect("re");
+    pair.captures_iter(s)
+        .find(|c| c[1] == c[2])
+        .map(|c| format!("equal pair `{}`", &c[0]))
 }
 
 /// Grades a cause that has no code: it must fail without any registry code.
@@ -878,6 +1210,167 @@ fn grade_uncoded(o: &Out) -> Result<String, String> {
         return Err("an uncoded cause exited 0".to_string());
     }
     Ok(format!("exit={} \"{}\"", o.exit, brief(o.stderr.trim())))
+}
+
+/// Grades a valid counterpart: no registry code of the cause, and none of its witness words.
+fn grade_twin(id: &str, base: &Probe, o: &Out) -> Result<String, String> {
+    let all = format!("{}{}", o.stdout, o.stderr);
+    if all.contains(&format!("[{id}]")) {
+        return Err(format!(
+            "a valid input is refused by {id}: \"{}\"",
+            brief(o.stderr.trim())
+        ));
+    }
+    if let Some(w) = base.witness.iter().find(|w| o.stderr.contains(w.as_str())) {
+        return Err(format!(
+            "a valid input prints the cause's words `{w}`: \"{}\"",
+            brief(o.stderr.trim())
+        ));
+    }
+    Ok(format!("exit={} \"{}\"", o.exit, brief(o.stderr.trim())))
+}
+
+/// The probe with its export renamed to a decoy word that a text classifier might read as a cause.
+fn renamed(p: &Probe, word: &str) -> Probe {
+    let mut q = p.clone();
+    q.yaml = q
+        .yaml
+        .replace("  - name: a\n", &format!("  - name: {word}\n"));
+    q.witness = q
+        .witness
+        .iter()
+        .map(|w| {
+            w.replace("'a'", &format!("'{word}'"))
+                .replace("exports: a", &format!("exports: {word}"))
+        })
+        .collect();
+    q
+}
+
+/// Grades a `--json-errors` run: some JSON object on either stream carries the injected code.
+fn grade_json(id: &str, o: &Out) -> Result<String, String> {
+    let codes: Vec<String> = format!("{}\n{}", o.stdout, o.stderr)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter_map(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
+        .collect();
+    match codes.last() {
+        Some(c) if c == id => Ok(format!("exit={} code={c}", o.exit)),
+        Some(c) => Err(format!("json code {c}, injected {id}")),
+        None => Err(format!(
+            "no json error object: exit={} \"{}\"",
+            o.exit,
+            brief(o.stderr.trim())
+        )),
+    }
+}
+
+/// The subcommands clap lists under `rivet --help`, and the ones that take `--config`.
+fn subcommands() -> (Vec<String>, Vec<String>) {
+    let top = help(&[]);
+    let mut subs = vec![];
+    let mut in_block = false;
+    for line in top.lines() {
+        if line.starts_with("Commands:") {
+            in_block = true;
+            continue;
+        }
+        if in_block {
+            if line.trim().is_empty() {
+                break;
+            }
+            if let Some(name) = line.split_whitespace().next()
+                && !name.starts_with('-')
+                && name != "help"
+            {
+                subs.push(name.to_string());
+            }
+        }
+    }
+    let with_config = subs
+        .iter()
+        .filter(|s| help(&[s.as_str()]).contains("--config"))
+        .cloned()
+        .collect();
+    (subs, with_config)
+}
+
+/// The `--help` text of `rivet <args>`, from the binary itself.
+fn help(args: &[&str]) -> String {
+    let o = Command::new(RIVET_BIN)
+        .args(args)
+        .arg("--help")
+        .output()
+        .expect("spawn rivet");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
+}
+
+/// Every `--flag` a remedy names, with the command words after `rivet` it belongs to.
+fn remedy_flags(action: &str) -> Vec<(Vec<String>, String)> {
+    let mut out = vec![];
+    for seg in action.split("rivet ").skip(1) {
+        let words: Vec<String> = seg
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| "`.,;:()'\"".contains(c))
+                    .to_string()
+            })
+            .collect();
+        let first = words.first().cloned().unwrap_or_default();
+        let second = words
+            .get(1)
+            .filter(|w| {
+                !w.starts_with('-') && w.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+            })
+            .cloned();
+        for w in words.iter().skip(1) {
+            if w.starts_with("--")
+                && w.len() > 2
+                && w[2..].chars().all(|c| c.is_ascii_lowercase() || c == '-')
+            {
+                let mut cmd = vec![first.clone()];
+                cmd.extend(second.clone());
+                out.push((cmd, w.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Grades a remedy statically: it exists, and every flag it names is in the help of the command it names.
+fn grade_remedy(doc: &Doc, subs: &[String]) -> Result<String, String> {
+    if doc.action.trim().is_empty() {
+        return Err("no remedy text".to_string());
+    }
+    let flags = remedy_flags(&doc.action);
+    for (cmd, flag) in &flags {
+        let first = &cmd[0];
+        let helps: Vec<String> = if subs.contains(first) {
+            let mut v = vec![help(&[first.as_str()])];
+            if let Some(second) = cmd.get(1) {
+                let h = help(&[first.as_str(), second.as_str()]);
+                if !h.contains("error:") {
+                    v.push(h);
+                }
+            }
+            v
+        } else if first.starts_with('-') || first.is_empty() {
+            vec![help(&[])]
+        } else {
+            continue;
+        };
+        if !helps.iter().any(|h| h.contains(flag.as_str())) {
+            return Err(format!(
+                "remedy names `{flag}`, absent from `rivet {} --help`",
+                cmd.join(" ")
+            ));
+        }
+    }
+    Ok(format!("{} flag(s) named, all parse", flags.len()))
 }
 
 enum Verdict {
@@ -907,6 +1400,7 @@ fn cells() -> Vec<(String, Verdict)> {
     let docs = doc_codes();
     let rows = sabotage_rows();
     let mut out: Vec<(String, Verdict)> = vec![];
+    let (subs, commands) = subcommands();
     let registry: BTreeSet<&str> = codes::ALL.iter().map(|c| c.id).collect();
     let mut every: BTreeSet<String> = docs.keys().cloned().collect();
     every.extend(registry.iter().map(|s| s.to_string()));
@@ -938,11 +1432,9 @@ fn cells() -> Vec<(String, Verdict)> {
                     }
                     let p = f(e);
                     let o = execute(&p);
-                    let v = match grade(id, doc, &p, &o) {
-                        Ok(ev) => Verdict::Pass(ev),
-                        Err(ev) => Verdict::Red(ev),
-                    };
+                    let v = verdict(grade(id, doc, &p, &o));
                     out.push((format!("cause/{id}/{}", engine_name(e)), v));
+                    offline_axes(id, doc, e, &p, &commands, &mut out);
                 }
             }
             Inj::Stand => {
@@ -965,6 +1457,23 @@ fn cells() -> Vec<(String, Verdict)> {
                 out.push((format!("cause/{id}/-"), Verdict::NotGraded(ev)));
             }
         }
+    }
+    for (id, label, f) in FIELDS {
+        let Some(doc) = docs.get(*id) else { continue };
+        for e in ENGINES {
+            let p = f(e);
+            let v = match verdict(grade(id, doc, &p, &execute(&p))) {
+                Verdict::Red(ev) if ev.contains("nothing is listening") => Verdict::NotGraded(
+                    "connect runs before this check; the offline stand refuses first, graded live"
+                        .to_string(),
+                ),
+                v => v,
+            };
+            out.push((format!("field/{id}/{label}/{}", engine_name(e)), v));
+        }
+    }
+    for (id, doc) in &docs {
+        out.push((format!("remedy/{id}"), verdict(grade_remedy(doc, &subs))));
     }
     for (name, argv) in UNCODED {
         let p = Probe {
@@ -1008,9 +1517,15 @@ fn every_refusal_is_coded_and_names_the_true_cause() {
     let sink = Path::new(env!("CARGO_TARGET_TMPDIR")).join("p4_true_cause_verdicts.txt");
     std::fs::write(&sink, &text).expect("write verdicts");
     print!("{text}");
-    let accepted: BTreeSet<String> = ACCEPTED_RED.iter().map(|(k, _)| k.to_string()).collect();
-    let fresh: Vec<_> = reds.difference(&accepted).collect();
-    let stale: Vec<_> = accepted.difference(&reds).collect();
+    let fresh: Vec<&String> = reds
+        .iter()
+        .filter(|r| !ACCEPTED_RED.iter().any(|(k, _)| accepts(k, r)))
+        .collect();
+    let stale: Vec<&str> = ACCEPTED_RED
+        .iter()
+        .map(|(k, _)| *k)
+        .filter(|k| !reds.iter().any(|r| accepts(k, r)))
+        .collect();
     assert_eq!(
         fresh,
         Vec::<&String>::new(),
@@ -1018,7 +1533,7 @@ fn every_refusal_is_coded_and_names_the_true_cause() {
     );
     assert_eq!(
         stale,
-        Vec::<&String>::new(),
+        Vec::<&str>::new(),
         "ACCEPTED_RED entries no longer RED, remove them"
     );
 }
@@ -1067,6 +1582,7 @@ fn doc_exit(exits: &[i32]) -> Doc {
     Doc {
         kind: "usage".to_string(),
         exits: exits.iter().copied().collect(),
+        action: "fix it".to_string(),
     }
 }
 

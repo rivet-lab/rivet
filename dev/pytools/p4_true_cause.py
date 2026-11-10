@@ -74,12 +74,17 @@ def run_live_cell(test: str) -> tuple[str, str]:
     return verdict, f"{test}: {tail}"
 
 
+def cause_key(row: str, engine: str) -> str:
+    """The offline cause key of a refusal row, so the live verdict replaces the stand NOT_GRADED line."""
+    return f"cause/RIVET_{row.removeprefix('refusal_').upper()}/{engine}"
+
+
 def run_live() -> list[str]:
     """One line per sabotage refusal cell: its test's verdict, or the reason it is not graded."""
     doc = yaml.safe_load((ROOT / "docs/sabotage-matrix.yaml").read_text())
     lines = []
     for row, engine, cell in sabotage_cells(doc):
-        key = f"live/{row}/{engine}"
+        key = cause_key(row, engine)
         if "test" in cell:
             verdict, ev = run_live_cell(cell["test"])
         else:
@@ -106,6 +111,7 @@ def self_test() -> int:
     assert [c[:2] for c in sabotage_cells(doc)] == [("refusal_a", e) for e in engines]
     live = yaml.safe_load((ROOT / "docs/sabotage-matrix.yaml").read_text())
     assert sabotage_cells(live), "the sabotage ledger has refusal rows"
+    assert cause_key("refusal_source_cdc_grants_changed", "mysql") == "cause/RIVET_SOURCE_CDC_GRANTS_CHANGED/mysql"
     print("p4_true_cause self-test ok")
     return 0
 
