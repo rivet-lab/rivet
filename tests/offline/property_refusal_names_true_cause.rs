@@ -1265,34 +1265,67 @@ fn grade_json(id: &str, o: &Out) -> Result<String, String> {
     }
 }
 
-/// The subcommands clap lists under `rivet --help`, and the ones that take `--config`.
+/// One leaf of `rivet schema cli --json`: its path and whether the refusal invariant applies to its role.
+struct RegistryLeaf {
+    path: String,
+    refusal: bool,
+}
+
+/// Every leaf command with its role's invariants, read from the binary's own registry.
+fn registry() -> Vec<RegistryLeaf> {
+    let o = Command::new(RIVET_BIN)
+        .args(["schema", "cli", "--json"])
+        .output()
+        .expect("spawn rivet");
+    assert!(o.status.success(), "rivet schema cli --json failed");
+    let json: serde_json::Value = serde_json::from_slice(&o.stdout).expect("registry json");
+    json["leaves"]
+        .as_array()
+        .expect("leaves")
+        .iter()
+        .map(|l| RegistryLeaf {
+            path: l["path"].as_str().expect("path").to_string(),
+            refusal: l["invariants"]["refusal_names_true_cause"]
+                .as_bool()
+                .expect("refusal flag"),
+        })
+        .collect()
+}
+
+/// The top-level commands of the registry, and the one-word leaves whose role grades refusals and that take `--config`.
 fn subcommands() -> (Vec<String>, Vec<String>) {
-    let top = help(&[]);
-    let mut subs = vec![];
-    let mut in_block = false;
-    for line in top.lines() {
-        if line.starts_with("Commands:") {
-            in_block = true;
-            continue;
-        }
-        if in_block {
-            if line.trim().is_empty() {
-                break;
-            }
-            if let Some(name) = line.split_whitespace().next()
-                && !name.starts_with('-')
-                && name != "help"
-            {
-                subs.push(name.to_string());
-            }
+    let leaves = registry();
+    let mut subs: Vec<String> = vec![];
+    for l in &leaves {
+        let top = l.path.split(' ').next().unwrap_or_default().to_string();
+        if !subs.contains(&top) {
+            subs.push(top);
         }
     }
-    let with_config = subs
+    let with_config = leaves
         .iter()
-        .filter(|s| help(&[s.as_str()]).contains("--config"))
-        .cloned()
+        .filter(|l| l.refusal && !l.path.contains(' '))
+        .filter(|l| help(&[l.path.as_str()]).contains("--config"))
+        .map(|l| l.path.clone())
         .collect();
     (subs, with_config)
+}
+
+/// A NOT_GRADED row for each leaf whose role grades refusals and that no `cmd/` cell drives.
+fn ungraded_leaves(commands: &[String]) -> Vec<(String, Verdict)> {
+    registry()
+        .into_iter()
+        .filter(|l| l.refusal && !commands.contains(&l.path))
+        .map(|l| {
+            (
+                format!("cmd/{}/-", l.path.replace(' ', "-")),
+                Verdict::NotGraded(format!(
+                    "role says refusals are graded; no cell drives `rivet {}` with a faulty config",
+                    l.path
+                )),
+            )
+        })
+        .collect()
 }
 
 /// The `--help` text of `rivet <args>`, from the binary itself.
@@ -1475,6 +1508,7 @@ fn cells() -> Vec<(String, Verdict)> {
     for (id, doc) in &docs {
         out.push((format!("remedy/{id}"), verdict(grade_remedy(doc, &subs))));
     }
+    out.extend(ungraded_leaves(&commands));
     for (name, argv) in UNCODED {
         let p = Probe {
             yaml: String::new(),
