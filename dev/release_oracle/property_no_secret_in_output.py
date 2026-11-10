@@ -798,14 +798,8 @@ LAN: list[str | None] = []
 def lan_ip() -> str | None:
     """This host's non-loopback address a remote-host stub binds to, None when the host has no route off loopback."""
     if not LAN:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("192.0.2.1", 9))
-            ip = s.getsockname()[0]
-        except OSError:
-            ip = "127.0.0.1"
-        finally:
-            s.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            ip = s.getsockname()[0] if s.connect_ex(("192.0.2.1", 9)) == 0 else "127.0.0.1"
         LAN.append(None if ip.startswith("127.") else ip)
     return LAN[0]
 
