@@ -499,10 +499,8 @@ def seed_state(binary: Path, root: Path, env: dict[str, str]) -> None:
     env = {k: v for k, v in env.items() if k != "RIVET_STATE_URL"}
     subprocess.run([str(binary), "state", "show", "--config", str(seedp)], cwd=root, env=env, capture_output=True, timeout=120,
                    stdin=subprocess.DEVNULL)
-    db = sqlite3.connect(root / ".rivet_state.db")
-    with db:
+    with contextlib.closing(sqlite3.connect(root / ".rivet_state.db")) as db, db:
         db.execute("INSERT OR REPLACE INTO export_state (export_name, last_cursor_value, last_run_at) VALUES (?, '1', '2026-01-01T00:00:00Z')", (EXPORT,))
-    db.close()
 
 
 def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tuple[str, ...]], binary: Path,
@@ -703,7 +701,7 @@ class Outcome:
 
 
 AUTH_FAILED = re.compile(r"authentication failed|28P01|password authentication", re.I)
-AUTH_SHAPED = re.compile(r"authenticat|password|login|denied|unauthori|credential|scram", re.I)
+AUTH_SHAPED = re.compile(r"authentic|password|login|denied|unauthori|credential|scram", re.I)
 CODE = re.compile(r"RIVET_[A-Z0-9_]+")
 ERROR_LINE = re.compile(r"^Error:|\bERROR\b|\"error\"", re.M)
 
@@ -1094,11 +1092,10 @@ def _self_test() -> None:
     assert find_hits({"r": c}, {"s": json.dumps({"p": c.plain}, ensure_ascii=False).encode()}), "a raw-UTF-8 JSON canary is not found"
     with tempfile.TemporaryDirectory() as tmp:
         dbp = Path(tmp) / "s.db"
-        db = sqlite3.connect(dbp)
-        db.execute("create table t(v text)")
-        db.execute("insert into t values (?)", (c.plain,))
-        db.commit()
-        db.close()
+        with contextlib.closing(sqlite3.connect(dbp)) as db:
+            db.execute("create table t(v text)")
+            db.execute("insert into t values (?)", (c.plain,))
+            db.commit()
         assert find_hits({"r": c}, {"d": _db_dump(dbp)}), "the state DB dump does not carry the stored value"
     other = canary("other")
     wire = {"plain/request:notify": c.plain.encode() + b" " + other.plain.encode()}
