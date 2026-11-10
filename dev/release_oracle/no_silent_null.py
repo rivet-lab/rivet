@@ -1003,7 +1003,7 @@ def run_tier(led: Ledger, tier: str) -> None:
         record(led, engine, results, tier)
         led.ok(f"{engine}: {len(results)} cells in {time.time() - t0:.0f}s")
     led.skipped("-", "-", SCENARIO, "-", f"{SCENARIO}: {LOAD_TARGETS_NOT_GRADED}", cause=SkipCause.REDUCED)
-    for mode in (m for m in axes()["modes"] if m not in MODE_SHAPES):
+    for mode in (m for m in axes()["modes"] if m not in MODE_SHAPES and m != "cdc"):
         led.skipped("-", "-", SCENARIO, "-", f"{SCENARIO}: mode {mode} not graded (no cell shape yet)", cause=SkipCause.REDUCED)
 
 
