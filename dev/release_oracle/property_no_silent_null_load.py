@@ -57,7 +57,8 @@ def ensure_bucket() -> None:
     req = urllib.request.Request(f"{GCS}/storage/v1/b?project=test", data=json.dumps({"name": BUCKET}).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     try:
-        urllib.request.urlopen(req, timeout=30).read()
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
     except urllib.error.HTTPError as e:
         if e.code != 409:
             raise
