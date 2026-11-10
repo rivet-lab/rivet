@@ -195,6 +195,9 @@ preflights:
   - id: coverage_matrices
     what: "every docs/*-matrix.yaml drift-guard runs (chunking/behaviour/type-fidelity/... + release_gate + perf) so a rotted coverage ledger blocks the release, not just CI."
     status: test        # verify_coverage_matrices
+  - id: property_matrices
+    what: "each of the five ADR 0040 properties (no_secret_in_output, no_silent_null, check_equals_run, refusal_names_true_cause, no_debris_after_stop) has its property_<name> matrix on the tree, and no property_* file grades a property the registry does not hold; the registry is dev/release_oracle/properties.py."
+    status: test        # verify_property_matrices (dev/release_oracle/properties.py)
   - id: gif_currency
     what: "the instructional GIFs still show commands this binary accepts. They are binary assets, so no test reads them and no diff flags them — a GIF demonstrating a rejected flag is documentation that lies, and re-rendering does not fix it (the tape has to change). Ran in the gate since it was written; had NO ledger row until 2026-08-02, when the guard stopped reading a hand-typed module list and started deriving it."
     status: test        # verify_gif_currency (dev/release_oracle/gifs.py)

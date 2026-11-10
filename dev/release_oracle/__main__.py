@@ -65,6 +65,7 @@ from . import (
     live_modules,
     partner_shape,
     perf,
+    properties,
     regression,
     release_path,
     scenarios,
@@ -937,6 +938,7 @@ def _self_test() -> int:
 
     seeded.self_test()
     guarantees.self_test()
+    properties.self_test()
     _oracle_restart_self_test()
     cdc.self_test()
     seed_charset.self_test()
@@ -1704,6 +1706,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         serial("auth", lambda led: scenarios.verify_auth(led)),
         serial("cdc standby", lambda led: scenarios.verify_cdc_standby(led)),
         serial("coverage matrices", lambda led: scenarios.verify_coverage_matrices(led)),
+        serial("property matrices", lambda led: properties.verify_property_matrices(led)),
         serial("flag surface", lambda led: blessed_flow.verify_flag_surface(led)),
         serial("run strict", lambda led: blessed_flow.verify_run_strict(led)),
         serial("gif currency", lambda led: gifs.verify_gif_currency(led, bless=ns.bless_gifs)),
