@@ -1,4 +1,4 @@
-"""Secret-sink matrix: a credential canary written into any credential slot never reaches any output.
+"""no_secret_in_output matrix: a credential canary written into any credential slot never reaches any output.
 
 Every axis is read from the product: the command tree from `rivet --help` recursion, the engines, destination types, load
 targets and export modes from schemas/rivet.schema.json, the secret-bearing environment variables from src/. A command or
@@ -33,10 +33,10 @@ import urllib.parse
 from pathlib import Path
 
 try:
-    from . import secret_sink_known
+    from . import property_no_secret_in_output_known
     from .core import Ledger, SkipCause, Status, rivet_bin
 except ImportError:  # pragma: no cover
-    import secret_sink_known  # type: ignore
+    import property_no_secret_in_output_known  # type: ignore
     from core import Ledger, SkipCause, Status, rivet_bin  # type: ignore
 
 __all__ = ["verify_credential_never_reaches_a_sink"]
@@ -390,7 +390,7 @@ class Spec:
     @property
     def scenario(self) -> str:
         """The ledger scenario: command, slot and spelling."""
-        return f"secret-sink/{self.command.name}/{self.slot}:{self.spelling}"
+        return f"no_secret_in_output/{self.command.name}/{self.slot}:{self.spelling}"
 
     @property
     def store(self) -> str:
@@ -874,7 +874,7 @@ def grade(led: Ledger, outs: list[Outcome]) -> tuple[dict[str, int], set[int]]:
         elif o.hits:
             kinds = {h.sink.split("/", 1)[1].split(":")[0] for h in o.hits}
             cell = {"command": s.command.name, "engine": s.engine, "slot": s.slot, "spelling": s.spelling}
-            known, in_date = secret_sink_known.match(cell, kinds)
+            known, in_date = property_no_secret_in_output_known.match(cell, kinds)
             first = o.hits[0]
             msg = (f"LEAK {label}: {first.role} [{first.form}] in {first.sink}: {first.line!r} "
                    f"({len(o.hits)} hit(s) across {sorted({h.sink for h in o.hits})})")
@@ -910,7 +910,7 @@ def grade(led: Ledger, outs: list[Outcome]) -> tuple[dict[str, int], set[int]]:
 
 def stale_known(used: set[int]) -> list[str]:
     """Known-leak entries no cell matched: they are fixed and must be removed."""
-    return [k.reason for k in secret_sink_known.KNOWN_LEAKS if id(k) not in used]
+    return [k.reason for k in property_no_secret_in_output_known.KNOWN_LEAKS if id(k) not in used]
 
 
 def stand_target(engine: str) -> dict | None:
@@ -1008,44 +1008,44 @@ def _verify(led: Ledger, binary: Path, cmds: list[Cmd], engines: list[str], mode
     """Build the matrix, run it and record the verdicts."""
     specs, guards = cell_matrix(cmds, engines, modes, dests, loads, set(live) - {"postgres"}, state_target_ is not None, "postgres" in live)
     if state_target_ is None:
-        led.skipped("postgres", "-", "secret-sink/state-success-live", "-",
+        led.skipped("postgres", "-", "no_secret_in_output/state-success-live", "-",
                     f"state URL success path against a real postgres state database is NOT GRADED: {state_why}", cause=SkipCause.ENV)
     live = {**live, **({"state": state_target_} if state_target_ else {})}
     guards += [f"`rivet {n}` has no cell in the matrix" for n in sorted({c.name for c in cmds} - {s.command.name for s in specs})]
     if only:
         specs = [s for s in specs if only in s.scenario or only in s.engine or only in s.store]
     for g in guards:
-        led.failed("-", "-", "secret-sink/guard", "-", f"secret-sink matrix has no recipe: {g}")
+        led.failed("-", "-", "no_secret_in_output/guard", "-", f"no_secret_in_output matrix has no recipe: {g}")
     for e in SCHEME:
         if e not in live:
-            led.skipped(e, "-", "secret-sink/wrong-password-live", "-",
+            led.skipped(e, "-", "no_secret_in_output/wrong-password-live", "-",
                         f"wrong-password against a real {e} server is NOT GRADED: " + ("no stand answers for it" if live_tier else "live tier off"), cause=SkipCause.ENV)
     for scenario, why in (
             ("warehouse-load-success-path", "the warehouse load error path (clickhouse, BigQuery, Snowflake reached after staging) is NOT GRADED: `rivet load` refuses a local destination and no object-store emulator stages a bucket; the config-time refusals are graded"),
             ("gcp-secret-resolved", "the resolved Secret Manager value reaching a sink is NOT GRADED: the endpoint is a const https URL (src/config/gcp_secret.rs:14) with no mock seam and the stand holds no Google project; the fetch-fail and token paths are graded"),
             ("state-tls-success", "state over TLS success is NOT GRADED: the stand postgres runs ssl=off; the sslmode=require error path is graded"),
             ("oracle-cdc-events", "Oracle CDC with events is NOT GRADED: no Oracle stand answers")):
-        led.skipped("-", "-", f"secret-sink/{scenario}", "-", why, cause=SkipCause.ENV)
-    led.skipped("-", "-", "secret-sink/success-path", "-",
+        led.skipped("-", "-", f"no_secret_in_output/{scenario}", "-", why, cause=SkipCause.ENV)
+    led.skipped("-", "-", "no_secret_in_output/success-path", "-",
                 "right-password success path of the source engines is NOT GRADED: no provisioned canary users on the stand", cause=SkipCause.ENV)
     outs = execute(binary, specs, live, jobs)
     counts, used = grade(led, outs)
     if not only:
         for reason in stale_known(used):
-            led.failed("-", "-", "secret-sink/known-leak", "-", f"known-leak entry matched no cell, it is fixed: remove it ({reason})")
+            led.failed("-", "-", "no_secret_in_output/known-leak", "-", f"known-leak entry matched no cell, it is fixed: remove it ({reason})")
     never = sorted({o.spec.command.name for o in outs if o.spec.slot == "source" and not any(
         p.reached for p in outs if p.spec.command.name == o.spec.command.name and p.spec.slot == "source")})
     for eng in engines:
         if eng in SCHEME and not any(o.reached for o in outs if o.spec.engine == eng and o.spec.slot == "source"):
-            led.skipped(eng, "-", "secret-sink/engine-reach", "-",
+            led.skipped(eng, "-", "no_secret_in_output/engine-reach", "-",
                         f"no command ever connected to the {eng} source stub: every {eng} cell is clean but ungraded", cause=SkipCause.ENV)
     reach = {sl: sorted({o.spec.command.name for o in outs if o.spec.slot == sl and o.reached}) for sl in sorted({o.spec.slot for o in outs})}
     for sl, reached_by in reach.items():
         if not reached_by:
-            led.skipped("-", "-", f"secret-sink/slot-reach/{sl}", "-",
+            led.skipped("-", "-", f"no_secret_in_output/slot-reach/{sl}", "-",
                         f"no command ever connected to the {sl} credential slot: its cells are clean but ungraded", cause=SkipCause.ENV)
-    led.ok(f"secret-sink: slot reach (commands that connected): { {sl: len(c) for sl, c in reach.items()} }")
-    led.ok(f"secret-sink: {len(specs)} cells over {len(cmds)} commands, {len(engines)} engines, {len(modes)} modes: {counts}; "
+    led.ok(f"no_secret_in_output: slot reach (commands that connected): { {sl: len(c) for sl, c in reach.items()} }")
+    led.ok(f"no_secret_in_output: {len(specs)} cells over {len(cmds)} commands, {len(engines)} engines, {len(modes)} modes: {counts}; "
            f"commands that never connect to a source: {never}")
 
 
@@ -1102,7 +1102,7 @@ def _self_test() -> None:
     got = leaks({"webhook": c, "source": other}, wire)
     assert got and {h.role for h in got} == {"source"}, "an own credential on its own endpoint is graded, or a foreign one is not"
     assert "token" == OWN_STUB["gcp key"] and set(OWN_STUB.values()) <= {"source", "state", "load", "dest", "notify", "token"}
-    print("secret_sink self-test: ok")
+    print("no_secret_in_output self-test: ok")
 
 
 def main() -> int:
@@ -1131,8 +1131,8 @@ def main() -> int:
     for c in led.cells:
         word = verdict.get(c.status, "NOT_GRADED")
         tally[word] += 1
-        print(f"secret-sink {c.engine}/{c.scenario}/{c.store} {word} {' '.join(c.detail.split())[:400]}")
-    print(f"secret-sink summary PASS={tally['PASS']} RED={tally['RED']} NOT_GRADED={tally['NOT_GRADED']} cells={len(led.cells)}")
+        print(f"no_secret_in_output {c.engine}/{c.scenario}/{c.store} {word} {' '.join(c.detail.split())[:400]}")
+    print(f"no_secret_in_output summary PASS={tally['PASS']} RED={tally['RED']} NOT_GRADED={tally['NOT_GRADED']} cells={len(led.cells)}")
     return 1 if led.red else 0
 
 
