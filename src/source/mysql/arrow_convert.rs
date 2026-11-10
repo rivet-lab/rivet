@@ -414,6 +414,8 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Float(v)) => Some(*v),
             Some(Value::Double(v)) => Some(*v as f32),
+            Some(Value::Int(v)) => Some(*v as f32),
+            Some(Value::UInt(v)) => Some(*v as f32),
             Some(Value::Bytes(bv)) => {
                 bytes_to_str(bv).and_then(crate::types::decimal::decimal_text_to_float)
             }
@@ -424,6 +426,8 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Float(v)) => Some(*v as f64),
             Some(Value::Double(v)) => Some(*v),
+            Some(Value::Int(v)) => Some(*v as f64),
+            Some(Value::UInt(v)) => Some(*v as f64),
             Some(Value::Bytes(bv)) => {
                 bytes_to_str(bv).and_then(crate::types::decimal::decimal_text_to_float)
             }
@@ -671,6 +675,75 @@ fn parse_time_str_to_micros(s: &str) -> Option<i64> {
     Some(if neg { -total } else { total })
 }
 
+/// Largest integer magnitude a `float8` holds exactly (2^53).
+const F64_EXACT_INT_MAX: i128 = 1 << 53;
+/// Largest integer magnitude a `float4` holds exactly (2^24).
+const F32_EXACT_INT_MAX: i128 = 1 << 24;
+
+/// A MySQL integer under a `float4`/`float8` override as a float, or a coded refusal when the float cannot hold it exactly.
+fn exact_float(v: i128, max: i128, kind: &str, wider: &str, column: &str) -> Result<f64> {
+    if v.abs() > max {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "column `{column}` is declared {kind} by a `columns:` override but holds {v}, which a \
+             {kind} cannot hold exactly (exact up to {max}) — rivet refuses rather than rounding \
+             it. {wider}"
+        );
+    }
+    Ok(v as f64)
+}
+
+/// [`exact_float`] for `float8`.
+fn exact_f64(v: i128, column: &str) -> Result<f64> {
+    exact_float(
+        v,
+        F64_EXACT_INT_MAX,
+        "float8",
+        "Declare `decimal(20,0)` to keep the integer, or remove the override.",
+        column,
+    )
+}
+
+/// [`exact_float`] for `float4`.
+fn exact_f32(v: i128, column: &str) -> Result<f32> {
+    exact_float(
+        v,
+        F32_EXACT_INT_MAX,
+        "float4",
+        "Declare `float8` (exact up to 9007199254740992) or `decimal(20,0)`, or remove the override.",
+        column,
+    )
+    .map(|f| f as f32)
+}
+
+/// The kind of value MySQL sent, for a refusal.
+fn wire_kind(v: &Value) -> &'static str {
+    match v {
+        Value::NULL => "NULL",
+        Value::Bytes(_) => "text or bytes",
+        Value::Int(_) => "a signed integer",
+        Value::UInt(_) => "an unsigned integer",
+        Value::Float(_) => "a FLOAT",
+        Value::Double(_) => "a DOUBLE",
+        Value::Date(..) => "a date or datetime",
+        Value::Time(..) => "a TIME",
+    }
+}
+
+/// A cell no arm of the `target` builder converts: NULL stays NULL, any other value is refused by code, never written as NULL.
+fn null_or_refuse(column: &str, target: &DataType, cell: Option<&Value>) -> Result<()> {
+    match cell {
+        None | Some(Value::NULL) => Ok(()),
+        Some(other) => crate::rivet_bail!(
+            crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+            "column `{column}` is read as {target} but MySQL sends {} — rivet does not convert \
+             it, and writing it as NULL would lose every value. Remove the `columns:` override, \
+             or CAST the column to that type in the export's `query:`.",
+            wire_kind(other)
+        ),
+    }
+}
+
 // Structurally parallel to `postgres::arrow_convert::build_array` — both
 // dispatch on the resolved target Arrow type (the schema's single decision) and
 // read the wire value into the matching builder. The dispatch skeletons look
@@ -695,7 +768,10 @@ fn build_array(
                     Some(Value::UInt(v)) => b.append_value(*v != 0),
                     // BIT(1) columns arrive as raw big-endian bytes, not decimal strings.
                     Some(Value::Bytes(bv)) => b.append_value(bit_bytes_to_u64(bv) != 0),
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -712,7 +788,10 @@ fn build_array(
                         Some(v) => b.append_value(narrow::<i16>(v, "smallint")?),
                         None => b.append_null(),
                     },
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -727,7 +806,10 @@ fn build_array(
                         Some(v) => b.append_value(narrow::<i32>(v, "int")?),
                         None => b.append_null(),
                     },
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -745,7 +827,10 @@ fn build_array(
                             b.append_null();
                         }
                     }
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -763,7 +848,10 @@ fn build_array(
                         Some(v) => b.append_value(v),
                         None => b.append_null(),
                     },
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -774,13 +862,18 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Float(v)) => b.append_value(*v),
                     Some(Value::Double(v)) => b.append_value(*v as f32),
+                    Some(Value::Int(v)) => b.append_value(exact_f32(*v as i128, column)?),
+                    Some(Value::UInt(v)) => b.append_value(exact_f32(*v as i128, column)?),
                     Some(Value::Bytes(bv)) => match bytes_to_str(bv)
                         .and_then(crate::types::decimal::decimal_text_to_float)
                     {
                         Some(v) => b.append_value(v),
                         None => b.append_null(),
                     },
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -791,13 +884,18 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Float(v)) => b.append_value(*v as f64),
                     Some(Value::Double(v)) => b.append_value(*v),
+                    Some(Value::Int(v)) => b.append_value(exact_f64(*v as i128, column)?),
+                    Some(Value::UInt(v)) => b.append_value(exact_f64(*v as i128, column)?),
                     Some(Value::Bytes(bv)) => match bytes_to_str(bv)
                         .and_then(crate::types::decimal::decimal_text_to_float)
                     {
                         Some(v) => b.append_value(v),
                         None => b.append_null(),
                     },
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -831,7 +929,10 @@ fn build_array(
                             "{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}"
                         ));
                     }
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -844,7 +945,10 @@ fn build_array(
                         value_within_ceiling(column, bv.len(), max_value_bytes)?;
                         b.append_value(bv);
                     }
-                    _ => b.append_null(),
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        b.append_null();
+                    }
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -915,7 +1019,10 @@ fn build_array(
                         )
                         .ok()
                     }),
-                    _ => None,
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        None
+                    }
                 };
                 match d {
                     Some(date) => {
@@ -943,7 +1050,10 @@ fn build_array(
                     Some(Value::Bytes(bv)) => bytes_to_str(bv).and_then(|s| {
                         chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()
                     }),
-                    _ => None,
+                    other => {
+                        null_or_refuse(column, arrow_type, other)?;
+                        None
+                    }
                 };
                 match dt {
                     Some(dt) => b.append_value(dt.and_utc().timestamp_micros()),
@@ -959,8 +1069,8 @@ fn build_array(
             }
         }
         // Exact decimal path: column override declared decimal(p,s) for a MySQL DECIMAL column.
-        DataType::Decimal128(p, s) => mysql_decimal_to_decimal128(*p, *s, col_idx, rows),
-        DataType::Decimal256(p, s) => mysql_decimal_to_decimal256(*p, *s, col_idx, rows),
+        DataType::Decimal128(p, s) => mysql_decimal_to_decimal128(*p, *s, col_idx, rows, column),
+        DataType::Decimal256(p, s) => mysql_decimal_to_decimal256(*p, *s, col_idx, rows, column),
         // Fail loud (slice A), symmetric with the PostgreSQL path.
         // `mysql_schema_and_arrow_types` already proved every column resolves to
         // a supported Arrow type, so an unhandled type here is a should-never-
@@ -987,8 +1097,10 @@ fn mysql_decimal_to_decimal128(
     scale: i8,
     col_idx: usize,
     rows: &[mysql::Row],
+    column: &str,
 ) -> Result<Arc<dyn Array>> {
     use crate::types::decimal::decimal_str_to_scaled_i128;
+    let target = DataType::Decimal128(precision, scale);
     let mut b = Decimal128Builder::with_capacity(rows.len());
     for row in rows {
         match row.as_ref(col_idx) {
@@ -1028,7 +1140,10 @@ fn mysql_decimal_to_decimal128(
                     ));
                 }
             },
-            _ => b.append_null(),
+            other => {
+                null_or_refuse(column, &target, other)?;
+                b.append_null();
+            }
         }
     }
     Ok(Arc::new(
@@ -1056,10 +1171,12 @@ fn mysql_decimal_to_decimal256(
     scale: i8,
     col_idx: usize,
     rows: &[mysql::Row],
+    column: &str,
 ) -> Result<Arc<dyn Array>> {
     // Decimal256 (precision > 38): scale straight into i256 so values beyond
     // i128 are not truncated.
     use crate::types::decimal::{decimal_str_to_scaled_i256, scale_int_to_i256};
+    let target = DataType::Decimal256(precision, scale);
     let mut b = Decimal256Builder::with_capacity(rows.len());
     for row in rows {
         match row.as_ref(col_idx) {
@@ -1099,7 +1216,10 @@ fn mysql_decimal_to_decimal256(
                     ));
                 }
             },
-            _ => b.append_null(),
+            other => {
+                null_or_refuse(column, &target, other)?;
+                b.append_null();
+            }
         }
     }
     Ok(Arc::new(
@@ -1945,6 +2065,18 @@ mod roast_mysql_bit_decode_tests {
             Some(-2.5),
             "a text-wire float"
         );
+        assert_eq!(s.float32(col("i16"), 0), Some(-12345.0), "Int as float32");
+        assert_eq!(s.float64(col("i16"), 0), Some(-12345.0), "Int as float64");
+        assert_eq!(
+            s.float32(col("u64"), 0),
+            Some(18_000_000_000_000_000_000_u64 as f32),
+            "UInt as float32"
+        );
+        assert_eq!(
+            s.float64(col("u64"), 0),
+            Some(18_000_000_000_000_000_000_u64 as f64),
+            "UInt as float64"
+        );
         // decimal keeps the UNSCALED integer: 150.05 at scale 2 is 15005.
         assert_eq!(s.decimal128(col("dec"), 0, 2), Some(15005));
         assert_eq!(
@@ -2141,14 +2273,13 @@ mod roast_mysql_bit_decode_tests {
         );
     }
 
-    /// The grid cells whose correct answer is an ERROR or a NULL, not a value.
+    /// The grid cells whose correct answer is an ERROR, not a value.
     ///
     /// These are only reachable through `Value::UInt`, and only with a magnitude
     /// past `i64::MAX` — the same measured quirk that hid them in the first place.
     /// A `BIGINT UNSIGNED` past the signed range must FAIL LOUD rather than wrap
     /// into a negative, and a negative signed value asked for an unsigned column
-    /// must null rather than reinterpret its bits. Both are silent-corruption
-    /// contracts, so a test that only checks the happy path is the wrong shape.
+    /// is refused rather than reinterpreted or nulled.
     #[test]
     fn build_array_fails_loud_instead_of_wrapping_an_out_of_range_unsigned() {
         for (label, dt) in [
@@ -2167,16 +2298,157 @@ mod roast_mysql_bit_decode_tests {
         }
 
         // The `*v >= 0` guard on UInt64's signed input: a negative can neither be
-        // represented nor bit-reinterpreted, so it must fall through to NULL.
+        // represented nor bit-reinterpreted, so it is refused, never written as NULL.
         let (def, bytes) = v_int(-1);
         let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
-        let arr = build_array(&DataType::UInt64, 0, &rows, false, "c", None)
-            .expect("a negative into UInt64 is a NULL, not an error");
-        assert!(
-            arr.is_null(0),
-            "a negative signed value must NULL on an unsigned builder, never \
-             reinterpret its bits as a huge positive"
-        );
+        let err = build_array(&DataType::UInt64, 0, &rows, false, "c", None)
+            .expect_err("a negative into UInt64 is a refusal, not a NULL");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+    }
+
+    /// An integer under `float4`/`float8` is the same number up to 2^24 / 2^53 and refused by code past it.
+    #[test]
+    fn an_integer_is_a_float_only_when_the_float_holds_it_exactly() {
+        use arrow::array::AsArray;
+        use arrow::datatypes::{Float32Type, Float64Type};
+        let build = |cell: Cell, dt: &DataType| {
+            let (def, bytes) = cell;
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            build_array(dt, 0, &rows, false, "c", None)
+        };
+        let (m53, m24) = (1i64 << 53, 1i64 << 24);
+        for (cell, want) in [
+            (v_int(7), 7.0),
+            (v_int(-5), -5.0),
+            (v_int(0), 0.0),
+            (v_int(m53), m53 as f64),
+            (v_int(-m53), -m53 as f64),
+            (v_uint(m53 as u64), m53 as f64),
+        ] {
+            let a = build(cell, &DataType::Float64).unwrap();
+            assert_eq!(a.as_primitive::<Float64Type>().value(0), want);
+        }
+        for (cell, want) in [
+            (v_int(7), 7.0),
+            (v_int(m24), m24 as f32),
+            (v_int(-m24), -m24 as f32),
+            (v_uint(m24 as u64), m24 as f32),
+        ] {
+            let a = build(cell, &DataType::Float32).unwrap();
+            assert_eq!(a.as_primitive::<Float32Type>().value(0), want);
+        }
+        let past: Vec<(Cell, DataType)> = vec![
+            (v_int(m53 + 1), DataType::Float64),
+            (v_int(-m53 - 1), DataType::Float64),
+            (v_uint(u64::MAX), DataType::Float64),
+            (v_int(m24 + 1), DataType::Float32),
+            (v_int(-m24 - 1), DataType::Float32),
+            (v_uint(m24 as u64 + 1), DataType::Float32),
+        ];
+        for (cell, dt) in past {
+            let err = build(cell, &dt).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            let said = err.to_string();
+            assert!(said.contains("column `c` is declared float"), "{said}");
+            assert!(said.contains("Declare `"), "{said}");
+        }
+    }
+
+    /// A value of a kind a target's arms do not read is refused by code, never appended as NULL; a source NULL stays NULL.
+    #[test]
+    fn a_value_no_arm_reads_is_refused_and_a_source_null_stays_null() {
+        let ts = DataType::Timestamp(TimeUnit::Microsecond, None);
+        let refused: Vec<(&str, Cell, DataType)> = vec![
+            ("double>bool", v_double(1.5), DataType::Boolean),
+            ("double>i16", v_double(1.5), DataType::Int16),
+            ("double>i32", v_double(1.5), DataType::Int32),
+            ("double>i64", v_double(1.5), DataType::Int64),
+            ("float>i64", v_float(0.5), DataType::Int64),
+            ("double>u64", v_double(1.5), DataType::UInt64),
+            ("int>u64 negative", v_int(-1), DataType::UInt64),
+            ("time>utf8", v_time(false, 0, 10, 20, 30, 0), DataType::Utf8),
+            ("time>i64", v_time(false, 0, 10, 20, 30, 0), DataType::Int64),
+            (
+                "time>f64",
+                v_time(false, 0, 10, 20, 30, 0),
+                DataType::Float64,
+            ),
+            ("date>i64", v_date(2026, 6, 23, 0, 0, 0, 0), DataType::Int64),
+            (
+                "date>f64",
+                v_date(2026, 6, 23, 0, 0, 0, 0),
+                DataType::Float64,
+            ),
+            (
+                "date>bool",
+                v_date(2026, 6, 23, 0, 0, 0, 0),
+                DataType::Boolean,
+            ),
+            ("int>binary", v_int(7), DataType::Binary),
+            ("double>binary", v_double(1.5), DataType::Binary),
+            ("int>date32", v_int(7), DataType::Date32),
+            ("double>date32", v_double(1.5), DataType::Date32),
+            ("int>timestamp", v_int(7), ts.clone()),
+            ("double>timestamp", v_double(1.5), ts.clone()),
+            ("double>dec128", v_double(1.5), DataType::Decimal128(10, 2)),
+            ("double>dec256", v_double(1.5), DataType::Decimal256(50, 2)),
+        ];
+        for (label, (def, bytes), dt) in refused {
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            let err = build_array(&dt, 0, &rows, false, "c", None)
+                .err()
+                .unwrap_or_else(|| panic!("{label}: must be refused, was built"));
+            crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            let said = err.to_string();
+            assert!(said.contains("column `c` is read as "), "{label}: {said}");
+            assert!(said.contains("writing it as NULL"), "{label}: {said}");
+        }
+        for dt in [
+            DataType::Boolean,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::Binary,
+            DataType::Date32,
+            ts.clone(),
+            DataType::Decimal128(10, 2),
+            DataType::Decimal256(50, 2),
+        ] {
+            let rows = fetch_binary_rows(vec![v_int(0).0], vec![vec![None]]);
+            let a = build_array(&dt, 0, &rows, false, "c", None).unwrap();
+            assert_eq!((a.len(), a.null_count()), (1, 1), "{dt}");
+        }
+    }
+
+    /// Text that does not parse and a zero date are still NULL, as before the refusal of unread kinds.
+    #[test]
+    fn unparsable_text_and_a_zero_date_stay_null() {
+        let ts = DataType::Timestamp(TimeUnit::Microsecond, None);
+        let cases: Vec<(&str, Cell, DataType)> = vec![
+            ("text>i16", v_bytes(b"abc"), DataType::Int16),
+            ("text>i32", v_bytes(b"abc"), DataType::Int32),
+            ("text>i64", v_bytes(b"abc"), DataType::Int64),
+            ("text>f32", v_bytes(b"abc"), DataType::Float32),
+            ("text>f64", v_bytes(b"abc"), DataType::Float64),
+            ("text>date32", v_bytes(b"garbage"), DataType::Date32),
+            ("text>timestamp", v_bytes(b"garbage"), ts.clone()),
+            (
+                "zero date>date32",
+                v_date(0, 0, 0, 0, 0, 0, 0),
+                DataType::Date32,
+            ),
+            ("zero date>timestamp", v_date(0, 0, 0, 0, 0, 0, 0), ts),
+        ];
+        for (label, (def, bytes), dt) in cases {
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            let a = build_array(&dt, 0, &rows, false, "c", None)
+                .unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_eq!((a.len(), a.null_count()), (1, 1), "{label}");
+        }
     }
 
     /// The temporal half of the grid, graded on the RAW primitive.
@@ -2497,5 +2769,22 @@ mod error_code_tests {
     fn a_value_overflowing_its_declared_width_is_refused_by_code() {
         let err = super::narrow::<i32>(1 << 40, "INT").unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+    }
+    /// A refused cell names the kind of value MySQL sent; NULL is not refused.
+    #[test]
+    fn a_wire_mismatch_names_the_kind_of_value_sent() {
+        use arrow::datatypes::DataType;
+        use mysql::Value;
+        for (v, kind) in [
+            (Value::Int(1), "MySQL sends a signed integer"),
+            (Value::UInt(1), "MySQL sends an unsigned integer"),
+            (Value::Bytes(b"x".to_vec()), "MySQL sends text or bytes"),
+            (Value::Double(1.0), "MySQL sends a DOUBLE"),
+        ] {
+            let err = super::null_or_refuse("c", &DataType::Int32, Some(&v)).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            assert!(err.to_string().contains(kind), "{kind}: {err}");
+        }
+        assert!(super::null_or_refuse("c", &DataType::Int32, Some(&Value::NULL)).is_ok());
     }
 }
