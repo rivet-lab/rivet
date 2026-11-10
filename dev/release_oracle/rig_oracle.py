@@ -1438,6 +1438,7 @@ def grade(spec: dict) -> dict:
                 ora.db.sql("CREATE OR REPLACE TEMP TABLE got AS " + " UNION ALL BY NAME ".join(f"({x})" for x in legs))
                 if cumulative and key:
                     kl = ", ".join(_qi(k) for k in key)
+                    extra += duplicate_deliveries(ora, "got", key, graded)
                     # A delta cannot express a delete: a key an EARLIER run delivered (graded then) that the source no longer holds is not owed.
                     fresh = [i for i, m in enumerate(graded) if m in spec["new_manifests"]] or [-1]
                     on = " AND ".join(f"CAST(s.{_qi(k)} AS VARCHAR) = CAST(g.{_qi(k)} AS VARCHAR)" for k in key)
@@ -1490,6 +1491,16 @@ def grade(spec: dict) -> dict:
     return out
 
 
+def duplicate_deliveries(ora, rel: str, key: list[str], graded: list[str]) -> list[str]:
+    """One finding per key a single manifest of `rel` (rows tagged `__mseq`, the index into `graded`) delivered more than once."""
+    kl = ", ".join(_qi(k) for k in key)
+    shown = ", ".join(f"coalesce(CAST({_qi(k)} AS VARCHAR), 'NULL')" for k in key)
+    rows = ora.rows(
+        f"SELECT __mseq, concat_ws(', ', {shown}), count(*) FROM {rel} GROUP BY __mseq, {kl} HAVING count(*) > 1 ORDER BY 1, 2 LIMIT 5"
+    )
+    return [f"DELIVERY: manifest `{graded[m]}` delivered key ({k}) {n} times in one run" for m, k, n in rows]
+
+
 def _prep(engine: str, cdc: bool) -> tuple[dict, set[str], dict, dict]:
     """(ledger rows, TEXT forms, source-side renders, DuckDB config) for one session over `engine`."""
     rows, forms = ledger(engine, "cdc" if cdc else "batch")
@@ -1515,6 +1526,25 @@ def _clickhouse(load: dict, password: str, sql: str) -> str:
     u = urlsplit(load.get("url") or "http://127.0.0.1:8123")
     auth = f"user={quote(str(load.get('user') or 'default'))}&password={quote(password)}"
     return f"read_parquet('{u.scheme}://{u.netloc}/?{auth}&query={quote(sql + ' FORMAT Parquet')}')"
+
+
+def bq_table_types(ora, fq: str) -> list[str]:
+    """The BigQuery `table_type` of `project.dataset.table` (a VIEW is no storage-API table); empty when the table or its dataset does not exist."""
+    proj, ds, leaf = fq.split(".")
+    sql = f"SELECT table_type FROM `{proj}.{ds}`.INFORMATION_SCHEMA.TABLES WHERE table_name = '{leaf}'"
+    try:
+        return [r[0] for r in ora.rows(f"SELECT * FROM bigquery_query('bq', {_lit(sql)})")]
+    except Exception as e:  # noqa: BLE001
+        if "Not found: Dataset" in str(e):
+            return []
+        raise
+
+
+def absent_table(target: str, fq: str, n_src: int, notes: list[str], detail: str = "") -> dict:
+    """The verdict on a warehouse table that does not exist: a FAIL while the source holds rows (ClickHouse: always), else a named skip."""
+    if n_src or target == "clickhouse":
+        return {"failures": [f"WAREHOUSE {target} `{fq}`: the table does not exist while the source holds {n_src} row(s){detail}"], "notes": notes}
+    return {"skip": f"`{fq}` does not exist and the source holds no row: nothing to compare", "notes": notes}
 
 
 def load_run_filter(spec: dict) -> str:
@@ -1607,6 +1637,7 @@ def grade_load(spec: dict) -> dict:
         key = spec.get("key") or key
         ora.db.sql(f"CREATE OR REPLACE TEMP TABLE source_rows AS SELECT * FROM {src}")
         src = "source_rows"
+        n_src = ora.scalar("SELECT count(*) FROM source_rows")
         if target == "clickhouse":
             db = str(load.get("database") or "default")
             password = spec.get("password") or ""
@@ -1637,10 +1668,7 @@ def grade_load(spec: dict) -> dict:
                    f"WHERE table_schema = {_lit(sf_schema.upper())} AND table_name IN ({_lit(leaf.upper())}, {_lit(leaf.upper() + '__CHANGES')}, {_lit(leaf.upper() + '__CHANGES__MERGING')})")
             kinds = dict(ora.rows(f"SELECT * FROM {ora.snowflake(sql)}"))
             if leaf.upper() not in kinds:
-                if not ora.scalar(f"SELECT count(*) FROM {_state_table(ora, spec, 'load_run')} "
-                                  f"WHERE {mine} AND status = 'success' AND rows_loaded > 0"):
-                    return {"skip": f"no load has written `{fq}` yet (every load row for `{spec['export']}` loaded 0 rows)", "notes": notes}
-                return {"failures": [f"WAREHOUSE: `{fq}` does not exist in Snowflake ({sorted(kinds)} do)"], "notes": notes}
+                return absent_table(target, fq, n_src, notes, f" (the schema holds {sorted(kinds)})")
             # Snowflake folds an unquoted name to upper case; each column is read under the source's own spelling.
             spelled = {c.upper(): c for c, _ in _columns(ora, "source_rows")}
 
@@ -1665,12 +1693,8 @@ def grade_load(spec: dict) -> dict:
             ds = str(load.get("dataset"))
             # One catalog listing (seconds); a BigQuery query job costs ~10 s, a storage read ~2 s and reads tables only.
             tables = {r[0] for r in ora.rows("SELECT table_name FROM duckdb_tables() WHERE database_name = 'bq'")}
-            if leaf not in tables and not ora.scalar(
-                f"SELECT count(*) FROM {_state_table(ora, spec, 'load_run')} "
-                f"WHERE {mine} AND status = 'success' AND rows_loaded > 0"
-            ):
-                # Every success row is a skip ("up to date", 0 rows): nothing was ever loaded, so there is no table to grade.
-                return {"skip": f"no load has written `{fq}` yet (every load row for `{spec['export']}` loaded 0 rows)", "notes": notes}
+            if leaf not in tables and not bq_table_types(ora, fq):
+                return absent_table(target, fq, n_src, notes)
             rel = f"bq.{ds}.{leaf}" if leaf in tables else f"bigquery_query('bq', {_lit(f'SELECT * FROM `{fq}`')})"
             wh_types = {}
             buffered = f"{leaf}__changes" in tables
@@ -1678,9 +1702,7 @@ def grade_load(spec: dict) -> dict:
             if buffered:
                 # `<table>__changes` beside a VIEW is the changelog+view layout (the view is the current state);
                 # beside a base TABLE (or no base yet) it is base_buffer's uncompacted buffer.
-                proj, ds_ = fq.split(".")[:2]
-                sql = f"SELECT table_type FROM `{proj}.{ds_}`.INFORMATION_SCHEMA.TABLES WHERE table_name = '{leaf}'"
-                kind = [r[0] for r in ora.rows(f"SELECT * FROM bigquery_query('bq', {_lit(sql)})")]
+                kind = bq_table_types(ora, fq)
                 buffered = kind != ["VIEW"]
                 base = bool(kind)
                 if buffered and not base:
@@ -1688,7 +1710,7 @@ def grade_load(spec: dict) -> dict:
                 if not buffered:
                     rel = f"bigquery_query('bq', {_lit(f'SELECT * FROM `{fq}`')})"  # a view has no storage-API read
         if not wh_types and target == "clickhouse":
-            return {"failures": [f"WAREHOUSE: `{fq}` does not exist in ClickHouse database `{db}`"], "notes": notes}
+            return absent_table(target, fq, n_src, notes, f" (ClickHouse database `{db}`)")
         if buffered and spec.get("verb") == "compact":
             return {"failures": [f"WAREHOUSE {target} `{fq}`: `rivet compact` exited 0 and left `{leaf}__changes` behind"], "notes": notes}
         if buffered and not key:
@@ -2083,7 +2105,135 @@ def _self_test() -> None:
     _stdout_self_test()
     _mongo_mixed_id_self_test()
     _zone_less_self_test()
+    _absent_table_self_test()
+    _folded_duplicate_self_test()
     print("rig_oracle self-test ok")
+
+
+def _fake_session():
+    """A `duck.Oracle` stand-in class: in-memory DuckDB with a rivet state DB holding `Session.loads` and an empty warehouse catalog."""
+
+    class Session(_Mem):
+        """In-memory DuckDB with a rivet state DB holding `loads`."""
+
+        def __init__(self, **_kw) -> None:
+            super().__init__()
+            self.db.sql("ATTACH ':memory:' AS st")
+            self.db.sql("CREATE TABLE st.load_run (export_name VARCHAR, target_table VARCHAR, status VARCHAR, rows_loaded BIGINT, finished_at VARCHAR)")
+            for row in Session.loads:
+                self.db.sql("INSERT INTO st.load_run VALUES (?, ?, ?, ?, ?)", params=row)
+
+        def rows(self, sql: str) -> list:
+            """Every row of `sql`; a BigQuery query answers `Session.types`."""
+            return [(t,) for t in Session.types] if "bigquery_query(" in sql else super().rows(sql)
+
+        def snowflake(self, _sql: str) -> str:
+            """An empty Snowflake `INFORMATION_SCHEMA` answer."""
+            return "(SELECT NULL::VARCHAR AS a, NULL::VARCHAR AS b WHERE false)"
+
+        loads: list = []
+        types: list = []
+
+    return Session
+
+
+def _fake_source(n: int):
+    """A `_source` stand-in over `n` rows keyed by `id`."""
+    rel = "(SELECT * FROM range(1, " + str(n + 1) + ") v(id))" if n else "(SELECT NULL::BIGINT AS id WHERE false)"
+    return lambda *_a, **_k: (rel, ["id"], {"id": "BIGINT"})
+
+
+def _absent_table_self_test() -> None:
+    """A warehouse table absent while the source holds rows is a FAIL on every warehouse, whatever `load_run` says; an empty source on BigQuery and Snowflake is a named skip."""
+    from unittest import mock
+
+    from . import duck
+
+    Session = _fake_session()
+
+    def empty_catalog(*_a, **_k) -> str:
+        """An empty ClickHouse `system.columns` answer."""
+        return "(SELECT NULL::VARCHAR AS name, NULL::VARCHAR AS type WHERE false)"
+
+    targets = {
+        "bigquery": {"target": "bigquery", "project": "p", "dataset": "d"},
+        "snowflake": {"target": "snowflake", "database": "DB", "schema": "S", "account": "a", "user": "u"},
+        "clickhouse": {"target": "clickhouse", "database": "db"},
+    }
+
+    def graded_load(target: str, n_src: int, loads: list, types: list | None = None) -> dict:
+        Session.loads, Session.types = loads, types or []
+        spec = {"engine": "postgres", "mode": "batch", "state": "", "url": "postgresql://x/y", "export": "t", "table": "public.t", "load": targets[target]}
+        with mock.patch.object(duck, "Oracle", Session), mock.patch(f"{__name__}._source", _fake_source(n_src)), mock.patch(f"{__name__}._clickhouse", empty_catalog):
+            return grade_load(spec)
+
+    leaf = {"bigquery": "p.d.public_t", "snowflake": "DB.S.public_t", "clickhouse": "db.public_t"}
+
+    def zero(t: str) -> list:
+        """One success `load_run` row that loaded nothing."""
+        return [("public_t", leaf[t], "success", 0, "2026-11-10T00:00:00Z")]
+
+    def earlier(t: str) -> list:
+        """That row, after an earlier invocation that loaded rows."""
+        return zero(t) + [("public_t", leaf[t], "success", 5, "2026-11-09T00:00:00Z")]
+
+    for t in targets:
+        for loads in (zero(t), earlier(t)):
+            v = graded_load(t, 3, loads)
+            assert "skip" not in v and any("does not exist" in x and "3 row(s)" in x for x in v.get("failures", [])), \
+                f"{t}: a table absent while the source holds rows is a FAIL, whatever load_run says: {v}"
+    for t in ("bigquery", "snowflake"):
+        assert "skip" in graded_load(t, 0, zero(t)), f"{t}: an empty source and no table has nothing to compare"
+    assert graded_load("clickhouse", 0, zero("clickhouse")).get("failures"), "clickhouse keeps failing an absent table"
+    try:
+        graded_load("bigquery", 3, zero("bigquery"), ["VIEW"])
+    except Exception as e:  # noqa: BLE001
+        assert "bigquery_query" in str(e), f"a BigQuery view is read through a query job, not called absent: {e}"
+    else:
+        raise AssertionError("a BigQuery view must reach its read, which the stand-in cannot serve")
+
+
+def _folded_duplicate_self_test() -> None:
+    """A key delivered twice in one run of a cumulative export is a finding naming the key and the manifest; one delivered by two runs is an update."""
+    import tempfile
+    from unittest import mock
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from . import duck
+
+    Session = _fake_session()
+
+    def delivered(root: str, runs: list[list[list[int]]]) -> list[str]:
+        names = []
+        for i, parts in enumerate(runs):
+            files = []
+            for j, ids in enumerate(parts):
+                pq.write_table(pa.table({"id": pa.array(ids, pa.int64())}), os.path.join(root, f"r{i}-{j}.parquet"))
+                files.append({"path": f"r{i}-{j}.parquet"})
+            doc = {"status": "success", "run_id": f"run{i}", "finished_at": f"2026-11-10T00:0{i}:00Z", "row_count": sum(map(len, parts)), "parts": files,
+                   "source": {"extraction": {"cursor_column": "id", "cursor_high": str(max(map(max, parts)))}}}
+            with open(os.path.join(root, f"manifest-{i}.json"), "w") as fh:
+                json.dump(doc, fh)
+            names.append(f"manifest-{i}.json")
+        return names
+
+    def graded_run(runs: list[list[list[int]]], n_src: int = 3) -> dict:
+        with tempfile.TemporaryDirectory() as d:
+            names = delivered(d, runs)
+            spec = {"engine": "postgres", "mode": "batch", "cumulative": True, "url": "postgresql://x/y", "table": "public.t", "out_dir": d,
+                    "snapshot_dir": os.path.join(d, "snapshot"), "manifests": names, "new_manifests": names[-1:], "snapshot_manifests": [], "new_snapshot_manifests": []}
+            with mock.patch.object(duck, "Oracle", Session), mock.patch(f"{__name__}._source", _fake_source(n_src)):
+                return grade(spec)
+
+    clean = graded_run([[[1, 2, 3]]])
+    assert not clean["failures"], f"a run delivering each key once is sound: {clean['failures']}"
+    twice = graded_run([[[1, 2, 3], [3]]])
+    assert any("manifest-0.json" in x and "(3)" in x and "2 times" in x for x in twice["failures"]), \
+        f"a key delivered twice in one run is a finding naming the key and the manifest: {twice['failures']}"
+    reload = graded_run([[[1, 2]], [[2, 3]]])
+    assert not reload["failures"], f"a key an earlier run delivered and a later run delivers again is an update, not a duplicate: {reload['failures']}"
 
 
 def _zone_less_self_test() -> None:
