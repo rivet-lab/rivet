@@ -158,6 +158,8 @@ mod live_init;
 mod live_init_delta;
 #[path = "live/live_init_extended.rs"]
 mod live_init_extended;
+#[path = "live/live_int_to_float_override.rs"]
+mod live_int_to_float_override;
 #[path = "live/live_keyset.rs"]
 mod live_keyset;
 #[path = "live/live_keyset_composite.rs"]
@@ -307,6 +309,11 @@ mod live_wave_apply;
 mod preflight_missing_table;
 #[path = "live/preflight_target_fail_note.rs"]
 mod preflight_target_fail_note;
+#[path = "live/property_no_debris_after_stop.rs"]
+mod property_no_debris_after_stop;
+#[allow(dead_code)]
+#[path = "live/property_no_debris_after_stop_axes.rs"]
+mod property_no_debris_after_stop_axes;
 #[path = "live/quality_live.rs"]
 mod quality_live;
 #[path = "live/roast_metric_validated_ordering.rs"]

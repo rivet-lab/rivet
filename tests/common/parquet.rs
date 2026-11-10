@@ -674,6 +674,51 @@ pub fn dir_parquet_has_column(dir: &Path, col: &str) -> bool {
     })
 }
 
+/// The float values (`None` for NULL) of column `col` across every `.parquet` under `dir`, in file and row order; the column must be Float32 or Float64.
+pub fn dir_parquet_floats(dir: &Path, col: &str) -> Vec<Option<f64>> {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::{DataType, Float32Type, Float64Type};
+    let mut out = Vec::new();
+    for path in files_with_extension(dir, "parquet") {
+        for batch in reader(&path) {
+            let batch = batch.unwrap();
+            let c = column_ci(&batch, col).unwrap_or_else(|| panic!("column {col} present"));
+            match c.data_type() {
+                DataType::Float32 => {
+                    let a = c.as_primitive::<Float32Type>();
+                    (0..a.len())
+                        .for_each(|i| out.push(a.is_valid(i).then(|| f64::from(a.value(i)))));
+                }
+                DataType::Float64 => {
+                    let a = c.as_primitive::<Float64Type>();
+                    (0..a.len()).for_each(|i| out.push(a.is_valid(i).then(|| a.value(i))));
+                }
+                other => panic!("{col} decodes as {other:?}, not a float"),
+            }
+        }
+    }
+    out
+}
+
+/// Arrow's rendering of column `col` (`None` for NULL) across every `.parquet` under `dir`, in file and row order.
+pub fn dir_parquet_display(dir: &Path, col: &str) -> Vec<Option<String>> {
+    use arrow::array::Array;
+    let mut out = Vec::new();
+    for path in files_with_extension(dir, "parquet") {
+        for batch in reader(&path) {
+            let batch = batch.unwrap();
+            let c = column_ci(&batch, col).unwrap_or_else(|| panic!("column {col} present"));
+            (0..c.len()).for_each(|i| {
+                out.push(
+                    c.is_valid(i)
+                        .then(|| arrow::util::display::array_value_to_string(c, i).unwrap()),
+                )
+            });
+        }
+    }
+    out
+}
+
 /// Assert the intra-transaction `__seq` conformance case: `out` holds exactly
 /// `n` updates of ONE PK done in a SINGLE transaction, so they share one
 /// `__pos`, `__seq` is the distinct order `0..n-1`, and the greatest-`__seq`

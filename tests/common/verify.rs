@@ -1632,7 +1632,7 @@ fn decide(
 }
 
 /// The uv-synced interpreter, resolved once: `uv run` reports a Python killed by a signal as a bare exit 1.
-fn oracle_python() -> &'static str {
+pub(crate) fn oracle_python() -> &'static str {
     static PY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PY.get_or_init(|| {
         let out = std::process::Command::new("uv")

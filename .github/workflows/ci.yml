@@ -292,7 +292,7 @@ jobs:
           key: mutants-outcomes-v2-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
       # Prebuilt binaries: `cargo install` compiled cargo-mutants from source
       # on every cold cache (68s on PR #314).
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         if: steps.scope.outputs.code == 'true'
         with:
           tool: cargo-mutants,cargo-llvm-cov
@@ -551,7 +551,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: mutants
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-mutants
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -834,7 +834,7 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         with:
           key: mutants
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         if: steps.scope.outputs.code == 'true'
         with:
           tool: cargo-mutants
@@ -1263,7 +1263,7 @@ jobs:
       - name: The release oracle's env-flag grammar is one grammar
         run: python3 -m dev.release_oracle --self-test
       # uv: the rig oracle's self-test writes and reads parquet through the pinned duckdb/pyarrow.
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: uv
       - name: The value canon and the rig oracle's graders self-test
@@ -1309,6 +1309,9 @@ jobs:
       - name: Cargo.lock is in sync with Cargo.toml (release uses --locked)
         run: cargo metadata --locked --format-version 1 > /dev/null
       - uses: ./.github/actions/free-disk
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: uv
       - run: cargo test --all-targets
       # The semantic gates below were five jobs that each recompiled the crate to
       # re-run tests `--all-targets` had just run. They are steps now: the binaries
@@ -1381,7 +1384,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny check
@@ -1396,7 +1399,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: zizmor@1.31.1
       - name: Install actionlint
