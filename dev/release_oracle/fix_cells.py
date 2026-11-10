@@ -15,6 +15,11 @@ The cells run on the SQLite state only: the previous binary must neither migrate
 nor be refused by the gate's Postgres state. A cell that needs one self-skips
 there and is recorded SKIP with its reason.
 
+A `fix` commit touching `src/` that credits no live cell (its test is a lib test, or the cell changed only
+through a helper) proves nothing on the previous release: it is NOT PROVEN and fails the stage unless NO_LIVE_CELL
+names the test that sees its defect, with a dated reason; that row is a SKIP, never a PASS.
+A selection on the command line that matches no fix cell fails, naming what it did not match.
+
 A fix commit that rewrote many cells mechanically (a port-env rename) credits
 every body it changed; FIX_SCOPE names, per commit, the one pattern of cells that
 commit is the fix for. A cell that fails on the previous release only because its
@@ -39,7 +44,7 @@ from pathlib import Path
 from . import stand_health
 from .core import ROOT, Ledger, SkipCause, run
 
-__all__ = ["verify_fix_cells", "GREEN_ON_PREV", "FIX_SCOPE"]
+__all__ = ["verify_fix_cells", "GREEN_ON_PREV", "FIX_SCOPE", "NO_LIVE_CELL"]
 
 SCEN = "fix_cells"
 GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else "git"
@@ -109,6 +114,25 @@ FIX_SCOPE: dict[str, tuple[str, str]] = {
         "2026-11-08: #882 the partial after image was refused by the file sink on 0.32.2 as well (the control of the new before-image check); the before-image and stdout cells fail there",
     ),
 }
+#: Fix commit (short sha) → (a test that sees its defect, reason) for a fix that credits no live cell. Shrink-only.
+NO_LIVE_CELL: dict[str, tuple[str, str]] = {
+    "0130d0db": ("parquet_bytes_match_the_v0_32_2_digests", "2026-11-10: superseded by d7867ec8 (#754), which dropped the write-call splitting; the byte golden grades the shipped writer; closes when the baseline moves past 0.32.2"),
+    "6993e9fb": ("a_job_failed_with_a_transient_reason_is_unavailable_and_retryable", "2026-11-10: lib test, seed bigquery-transient-job-error-final; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "c62b2f09": ("an_existing_change_log_that_this_load_would_corrupt_is_refused", "2026-11-10: lib test, seed clickhouse-paren-sorting-key; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "d7867ec8": ("parquet_bytes_match_the_v0_32_2_digests", "2026-11-10: the byte golden holds the 0.32.2 digests itself, seed parquet-writer-bytes-move-from-release; closes when the baseline moves past 0.32.2"),
+    "3f610778": ("stand_pool_split_resume_grows_postgres", "2026-11-10: the live cell changed through the run_pool_split_rerun_with helper, so its body is unedited; RED on main at #756, not run on 0.32.2; closes when the baseline moves past 0.32.2"),
+    "2377caa1": ("sqlite_state_decides_liveness_by_literal_path_containment", "2026-11-10: lib test, seed state-prefix-match-reads-text-as-pattern; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "123acb80": ("a_named_credentials_file_that_is_no_key_stops_the_load", "2026-11-10: lib test, seed named-credential-falls-back; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "9c962422": ("ambient_access_keys_never_replace_a_named_profile", "2026-11-10: offline test, seed named-profile-falls-back; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "ed13affb": ("a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not", "2026-11-10: lib test, seed number-text-without-its-label; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "b1d452a2": ("a_baseline_loaded_alone_is_cleaned_under_cleanup_source", "2026-11-10: lib test only, no seed; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "3154de1c": ("the_probe_reads_its_globals_without_a_full_variables_scan", "2026-11-10: lib test only, no seed; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "e523454a": ("a_query_pair_whose_key_names_a_password_is_masked_in_any_case", "2026-11-10: lib test, seed query-password-key-by-suffix-family; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "1aeea54f": ("postgres_system_store_is_not_a_second_anchor", "2026-11-10: offline test, seed ca-file-second-trust-anchor; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "208823de": ("mysql_system_store_is_not_a_second_anchor", "2026-11-10: offline test, seed ca-file-second-trust-anchor; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "3bd8620c": ("a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints", "2026-11-10: lib test, seed token-endpoint-transient-final; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "8679e73f": ("a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn", "2026-11-10: lib test, seed sqlite-chunk-claim-takes-no-turn; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+}
 
 
 def git(*args: str) -> str:
@@ -136,14 +160,21 @@ def touched(before: str, after: str) -> set[str]:
     return {name for name, body in tests_in(after).items() if was.get(name) != body}
 
 
-def credited(tag: str) -> list[tuple[str, str, str]]:
-    """(full sha, subject, cell) for every live test a `fix` commit since `tag` that touches `src/` added or edited."""
+def fixes(tag: str) -> list[tuple[str, str, list[str]]]:
+    """(full sha, subject, files) of every `fix` commit since `tag` that touches `src/`."""
     out = []
     for line in git("log", "--no-merges", "--reverse", "--format=%H%x02%s", f"{tag}..HEAD").splitlines():
         sha, subject = line.split("\x02", 1)
         files = git("diff-tree", "--no-commit-id", "--name-only", "-r", sha).split()
-        if not FIX.match(subject) or not any(f.startswith("src/") for f in files):
-            continue
+        if FIX.match(subject) and any(f.startswith("src/") for f in files):
+            out.append((sha, subject, files))
+    return out
+
+
+def credited(fixed: list[tuple[str, str, list[str]]]) -> list[tuple[str, str, str]]:
+    """(full sha, subject, cell) for every live test the `fixed` commits added or edited."""
+    out = []
+    for sha, subject, files in fixed:
         for f in files:
             if f.startswith("tests/live/") and f.endswith(".rs"):
                 before = subprocess.run([GIT, "show", f"{sha}^:{f}"], cwd=ROOT, capture_output=True, text=True).stdout
@@ -156,12 +187,53 @@ def scoped(sha: str, name: str, scope: dict[str, tuple[str, str]]) -> bool:
     return all(re.search(pat, name) for known, (pat, _) in scope.items() if sha.startswith(known))
 
 
-def fix_cells(tag: str, scope: dict[str, tuple[str, str]] | None = None) -> dict[str, str]:
-    """Bare cell name → the `fix` commit since `tag` that added or edited it (the last one wins)."""
+def live_cells(seen: list[tuple[str, str, str]], scope: dict[str, tuple[str, str]] | None = None) -> list[tuple[str, str, str]]:
+    """The `seen` credits that are in scope, still in tests/live, and not an open defect's."""
     scope = FIX_SCOPE if scope is None else scope
     now = {n for f in sorted((ROOT / "tests" / "live").glob("*.rs")) for n in tests_in(f.read_text())}
-    cells = {name: f"{sha[:8]} {subject}" for sha, subject, name in credited(tag) if scoped(sha, name, scope)}
-    return {n: why for n, why in cells.items() if n in now and not n.startswith("open_defect_")}
+    return [(sha, subject, name) for sha, subject, name in seen
+            if scoped(sha, name, scope) and name in now and not name.startswith("open_defect_")]
+
+
+def fix_cells(seen: list[tuple[str, str, str]], scope: dict[str, tuple[str, str]] | None = None) -> dict[str, str]:
+    """Bare cell name → the `fix` commit that added or edited it (the last one wins)."""
+    return {name: f"{sha[:8]} {subject}" for sha, subject, name in live_cells(seen, scope)}
+
+
+def uncelled(fixed: list[tuple[str, str, list[str]]], kept: list[tuple[str, str, str]]) -> list[tuple[str, str]]:
+    """(sha, subject) of every `fixed` commit that has no cell among `kept`."""
+    has = {sha for sha, _, _ in kept}
+    return [(sha, subject) for sha, subject, _ in fixed if sha not in has]
+
+
+def test_fns() -> set[str]:
+    """Every `fn name(` under src/ and tests/."""
+    return {n for d in ("src", "tests") for f in (ROOT / d).rglob("*.rs") for n in re.findall(r"\bfn (\w+)\(", f.read_text())}
+
+
+def grade_uncelled(missing: list[tuple[str, str]], ledger: dict[str, tuple[str, str]], fns: set[str], tag: str) -> list[tuple[str, str, str]]:
+    """(status, id, line) per fix commit with no live cell and per ledger entry that no such commit uses."""
+    rows = []
+    for sha, subject in missing:
+        known = next((k for k in ledger if sha.startswith(k)), None)
+        if known is None:
+            rows.append(("FAIL", sha[:8], f"NOT PROVEN: {subject} touches src/ and credits no live cell, so nothing of it runs on {tag}. "
+                         "Edit the live #[test] it is the fix for, or name the test that sees its defect in fix_cells.NO_LIVE_CELL"))
+        elif ledger[known][0] not in fns:
+            rows.append(("FAIL", sha[:8], f"NOT PROVEN: NO_LIVE_CELL names {ledger[known][0]}, which no file under src/ or tests/ defines"))
+        else:
+            rows.append(("SKIP", sha[:8], f"NOT RUN on {tag}: {subject} credits no live cell; its test is {ledger[known][0]} ({ledger[known][1]})"))
+    used = {k for k in ledger for sha, _ in missing if sha.startswith(k)}
+    rows += [("FAIL", k, f"STALE: no fix commit since {tag} lacks a live cell under it; remove it from NO_LIVE_CELL") for k in sorted(set(ledger) - used)]
+    return rows
+
+
+def select(cells: dict[str, str], allowed: dict[str, str], only: list[str] | None) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """`cells` and `allowed` cut to the names in `only`, and the names in `only` that are in neither."""
+    if not only:
+        return cells, allowed, []
+    return ({c: w for c, w in cells.items() if c in only}, {c: w for c, w in allowed.items() if c in only},
+            sorted(n for n in set(only) if n not in cells and n not in allowed))
 
 
 def stale_scope(seen: list[tuple[str, str, str]], scope: dict[str, tuple[str, str]]) -> list[str]:
@@ -213,17 +285,19 @@ def verify_fix_cells(led: Ledger, only: list[str] | None = None) -> None:
         return
     try:
         tag = prev_tag(prev)
-        cells = fix_cells(tag)
+        fixed = fixes(tag)
+        seen = credited(fixed)
+        cells = fix_cells(seen)
     except (ValueError, subprocess.CalledProcessError) as e:
         led.failed("all", "-", SCEN, "-", f"fix cells: the set could not be derived: {e}", getattr(e, "stderr", "") or "")
         return
-    allowed = GREEN_ON_PREV
-    if only:
-        cells = {c: w for c, w in cells.items() if c in only}
-        allowed = {c: w for c, w in allowed.items() if c in only}
+    cells, allowed, unmatched = select(cells, GREEN_ON_PREV, only)
+    if unmatched:
+        led.failed("all", "-", SCEN, "-", f"fix cells: the selection names no fix cell since {tag}: {', '.join(unmatched)}")
     if not cells:
         n = len(git("log", "--no-merges", "--format=%h", f"{tag}..HEAD").split())
-        led.passed("all", "-", SCEN, "-", f"fix cells: no fix commit among the {n} since {tag} adds or edits a live cell")
+        if not unmatched:
+            led.passed("all", "-", SCEN, "-", f"fix cells: no fix commit among the {n} since {tag} adds or edits a live cell")
         verdicts, skipped, panics = {}, {}, {}
     else:
         since = stand_health.BOOK.mark()
@@ -242,9 +316,14 @@ def verify_fix_cells(led: Ledger, only: list[str] | None = None) -> None:
             led.skipped("all", "-", SCEN, cell, f"fix cell · {cell} — {line}", cause=SkipCause.ENV)
         else:
             record[status]("all", "-", SCEN, "-", f"fix cell · {cell} — {line}")
-    for known in [] if only else stale_scope(credited(tag), FIX_SCOPE):
+    for known in [] if only else stale_scope(seen, FIX_SCOPE):
         led.failed("all", "-", SCEN, "-", f"fix scope · {known} — STALE: its commit is not among the fixes since {tag}, "
                    "or its pattern no longer separates the cells it credits; remove it from FIX_SCOPE")
+    for status, sha, line in [] if only else grade_uncelled(uncelled(fixed, live_cells(seen)), NO_LIVE_CELL, test_fns(), tag):
+        if status == "SKIP":
+            led.skipped("all", "-", SCEN, sha, f"fix commit · {sha} — {line}", cause=SkipCause.DESIGN)
+        else:
+            led.failed("all", "-", SCEN, "-", f"fix commit · {sha} — {line}")
 
 
 def _self_test() -> None:
@@ -286,6 +365,24 @@ def _self_test() -> None:
     here = {n for f in (ROOT / "tests" / "live").glob("*.rs") for n in tests_in(f.read_text())}
     assert len(here) > 1000, f"the test pattern reads {len(here)} live cells: it stopped matching"
     assert all(why.strip() for why in GREEN_ON_PREV.values()), "a GREEN_ON_PREV entry has no reason"
+    fixed = [("aa11aa11", "fix: a", ["src/a.rs"]), ("bb22bb22", "fix: b", ["src/b.rs"]), ("cc33cc33", "fix: c", ["src/c.rs"])]
+    assert uncelled(fixed, [("aa11aa11", "fix: a", "cell_a")]) == [("bb22bb22", "fix: b"), ("cc33cc33", "fix: c")], "a fix with a cell is celled"
+    assert uncelled(fixed, []) == [(sha, subject) for sha, subject, _ in fixed], "no cell at all leaves every fix uncelled"
+    ledger = {"bb22": ("lib_b", "r"), "cc33": ("gone_fn", "r"), "ee55": ("lib_b", "r")}
+    missing = [("bb22bb22", "fix: b"), ("cc33cc33", "fix: c"), ("dd44dd44", "fix: d")]
+    credit = {i: (s, line) for s, i, line in grade_uncelled(missing, ledger, {"lib_b"}, "v1.2.3")}
+    assert credit["bb22bb22"][0] == "SKIP" and credit["bb22bb22"][1].startswith("NOT RUN on v1.2.3"), credit["bb22bb22"]
+    assert credit["cc33cc33"][0] == "FAIL" and "gone_fn" in credit["cc33cc33"][1], "a ledger entry naming no test is not a proof"
+    assert credit["dd44dd44"][0] == "FAIL" and credit["dd44dd44"][1].startswith("NOT PROVEN"), "a fix that credits nothing and is not listed fails"
+    assert credit["ee55"][0] == "FAIL" and credit["ee55"][1].startswith("STALE"), credit["ee55"]
+    assert grade_uncelled([], {}, set(), "v1.2.3") == [], "no uncelled fix and no entry grades nothing"
+    kept, free, unmatched = select({"x": "w", "y": "w"}, {"z": "r"}, ["x", "typo", "z"])
+    assert (kept, free, unmatched) == ({"x": "w"}, {"z": "r"}, ["typo"]), "a name that is no fix cell is reported"
+    assert select({"x": "w"}, {"z": "r"}, None) == ({"x": "w"}, {"z": "r"}, []) and select({"x": "w"}, {}, ["a", "b"])[2] == ["a", "b"]
+    fns = test_fns()
+    assert len(fns) > 1000, f"the fn pattern reads {len(fns)} functions: it stopped matching"
+    assert all(len(k) == 8 and fn in fns for k, (fn, _) in NO_LIVE_CELL.items()), "a NO_LIVE_CELL entry names no test or a short sha"
+    assert all(re.match(r"\d{4}-\d{2}-\d{2}: \S", why) for _, why in NO_LIVE_CELL.values()), "a NO_LIVE_CELL entry has no dated reason"
     print("self-test ok: a fix cell that passes on the previous release fails the stage; a listed control does not")
 
 
