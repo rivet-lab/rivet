@@ -1,0 +1,49 @@
+diff --git a/src/source/mysql/arrow_convert.rs b/src/source/mysql/arrow_convert.rs
+index 439c83af..011ad774 100644
+--- a/src/source/mysql/arrow_convert.rs
++++ b/src/source/mysql/arrow_convert.rs
+@@ -414,8 +414,6 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
+         match self.rows[row].as_ref(col) {
+             Some(Value::Float(v)) => Some(*v),
+             Some(Value::Double(v)) => Some(*v as f32),
+-            Some(Value::Int(v)) => Some(*v as f32),
+-            Some(Value::UInt(v)) => Some(*v as f32),
+             Some(Value::Bytes(bv)) => {
+                 bytes_to_str(bv).and_then(crate::types::decimal::decimal_text_to_float)
+             }
+@@ -426,8 +424,6 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
+         match self.rows[row].as_ref(col) {
+             Some(Value::Float(v)) => Some(*v as f64),
+             Some(Value::Double(v)) => Some(*v),
+-            Some(Value::Int(v)) => Some(*v as f64),
+-            Some(Value::UInt(v)) => Some(*v as f64),
+             Some(Value::Bytes(bv)) => {
+                 bytes_to_str(bv).and_then(crate::types::decimal::decimal_text_to_float)
+             }
+@@ -733,7 +729,7 @@ fn wire_kind(v: &Value) -> &'static str {
+ /// A cell no arm of the `target` builder converts: NULL stays NULL, any other value is refused by code, never written as NULL.
+ fn null_or_refuse(column: &str, target: &DataType, cell: Option<&Value>) -> Result<()> {
+     match cell {
+-        None | Some(Value::NULL) => Ok(()),
++        _ => Ok(()),
+         Some(other) => crate::rivet_bail!(
+             crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+             "column `{column}` is read as {target} but MySQL sends {} — rivet does not convert \
+@@ -862,8 +858,6 @@ fn build_array(
+                 match row.as_ref(col_idx) {
+                     Some(Value::Float(v)) => b.append_value(*v),
+                     Some(Value::Double(v)) => b.append_value(*v as f32),
+-                    Some(Value::Int(v)) => b.append_value(exact_f32(*v as i128, column)?),
+-                    Some(Value::UInt(v)) => b.append_value(exact_f32(*v as i128, column)?),
+                     Some(Value::Bytes(bv)) => match bytes_to_str(bv)
+                         .and_then(crate::types::decimal::decimal_text_to_float)
+                     {
+@@ -884,8 +878,6 @@ fn build_array(
+                 match row.as_ref(col_idx) {
+                     Some(Value::Float(v)) => b.append_value(*v as f64),
+                     Some(Value::Double(v)) => b.append_value(*v),
+-                    Some(Value::Int(v)) => b.append_value(exact_f64(*v as i128, column)?),
+-                    Some(Value::UInt(v)) => b.append_value(exact_f64(*v as i128, column)?),
+                     Some(Value::Bytes(bv)) => match bytes_to_str(bv)
+                         .and_then(crate::types::decimal::decimal_text_to_float)
+                     {
