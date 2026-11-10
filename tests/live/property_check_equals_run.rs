@@ -1707,7 +1707,7 @@ fn oracle_scenario(_: &str, _: impl FnOnce(Rig, &str) -> Rig) -> CdcScenario {
 
 /// A CDC table with its stream and a rig whose URL travels in [`URL_ENV`], or the reason the stand cannot make it.
 fn cdc_scenario(e: SourceType) -> Result<CdcScenario, String> {
-    const LABEL: &str = "pm_check_equals_run_cdc";
+    const LABEL: &str = "pm_cer_cdc";
     const COLS: &str = "id INT PRIMARY KEY, v BIGINT";
     let shape = |r: Rig, _: &str| r.source_url_env(URL_ENV).no_oracle(NO_ORACLE);
     caught(|| match e {
