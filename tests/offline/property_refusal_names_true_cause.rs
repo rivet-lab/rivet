@@ -1398,6 +1398,64 @@ fn grade_remedy(doc: &Doc, subs: &[String]) -> Result<String, String> {
     Ok(format!("{} flag(s) named, all parse", flags.len()))
 }
 
+/// Whether a remedy leads with repeating the same command, nothing changed first.
+fn bare_retry(action: &str) -> bool {
+    regex::Regex::new(r"(?i)^(run( it| the export| the load)? again|retry|wait)\b")
+        .expect("re")
+        .is_match(action.trim())
+}
+
+/// Grades a code's remedy against its exit set: a bare retry is retryable, exit 2 names a retry, exit 6 says report.
+fn grade_wording(doc: &Doc) -> Result<String, String> {
+    let a = doc.action.to_lowercase();
+    if bare_retry(&doc.action) && !doc.exits.contains(&2) {
+        return Err(format!(
+            "remedy leads with a bare retry, exit {:?} is not retryable: \"{}\"",
+            doc.exits,
+            brief(&doc.action)
+        ));
+    }
+    let retry_words = ["again", "retry", "wait", "re-run"];
+    if doc.exits == BTreeSet::from([2]) && !retry_words.iter().any(|w| a.contains(w)) {
+        return Err(format!(
+            "exit 2 only, the remedy names no retry: \"{}\"",
+            brief(&doc.action)
+        ));
+    }
+    if doc.exits.contains(&6) && !a.contains("report") {
+        return Err(format!(
+            "exit 6, the remedy does not say report: \"{}\"",
+            brief(&doc.action)
+        ));
+    }
+    Ok(format!("exit {:?}: \"{}\"", doc.exits, brief(&doc.action)))
+}
+
+/// Every `rivet <command> --flag` a non-comment line of src names, keyed by file and command.
+fn raise_sites() -> BTreeMap<String, String> {
+    let re = regex::Regex::new(r"`(rivet [^`]*--[a-z][^`]*)`").expect("re");
+    let mut files = vec![];
+    rs_files(&root().join("src"), &mut files);
+    let mut out = BTreeMap::new();
+    for f in files {
+        let rel = f
+            .strip_prefix(root())
+            .expect("under root")
+            .display()
+            .to_string();
+        for line in std::fs::read_to_string(&f).expect("read").lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for c in re.captures_iter(line) {
+                let words: Vec<&str> = c[1].split_whitespace().collect();
+                out.insert(format!("site/{rel}/{}", words.join("_")), c[1].to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Whether the stand axes run: the live mode sets it under dev/live_slot.
 fn stand_on() -> bool {
     std::env::var("RIVET_PM_P4_STAND").is_ok_and(|v| v == "1")
@@ -1646,6 +1704,15 @@ fn cells() -> Vec<(String, Verdict)> {
     }
     for (id, doc) in &docs {
         out.push((format!("remedy/{id}"), verdict(grade_remedy(doc, &subs))));
+        out.push((format!("wording/{id}"), verdict(grade_wording(doc))));
+    }
+    for (key, text) in raise_sites() {
+        let site = Doc {
+            kind: String::new(),
+            exits: BTreeSet::new(),
+            action: text,
+        };
+        out.push((key, verdict(grade_remedy(&site, &subs))));
     }
     for (name, argv) in UNCODED {
         let p = Probe {
@@ -1840,4 +1907,19 @@ fn the_word_axis_reads_every_classifier_needle() {
     }
     assert!(portable("lock wait timeout") && !portable("metadata.google.internal"));
     assert!(!listening("postgresql://u:p@127.0.0.1:1/db"));
+}
+
+#[test]
+fn the_wording_grader_ties_the_remedy_to_the_exit_set() {
+    let doc = |exits: &[i32], action: &str| Doc {
+        kind: String::new(),
+        exits: exits.iter().copied().collect(),
+        action: action.to_string(),
+    };
+    assert!(grade_wording(&doc(&[2], "run again: the server was busy")).is_ok());
+    assert!(grade_wording(&doc(&[5], "run the export again: it starts over")).is_err());
+    assert!(grade_wording(&doc(&[2], "fix the url")).is_err());
+    assert!(grade_wording(&doc(&[6], "a bug; report it")).is_ok());
+    assert!(grade_wording(&doc(&[6], "fix the config")).is_err());
+    assert!(grade_wording(&doc(&[5], "re-run once with `parallel: 1`")).is_ok());
 }
