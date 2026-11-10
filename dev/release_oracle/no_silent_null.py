@@ -81,7 +81,15 @@ def override_targets() -> list[str]:
     names = [re.findall(r'"([a-z0-9_ ]+)"', a)[0] for a in arms]
     if len(names) < 15 or "float4" not in names or "decimal(" not in fn:
         raise AssertionError(f"override_type.rs: parsed {names}: the override grid cannot be read from the product")
-    return [*names, "decimal(9,2)", "decimal(18,4)", "decimal(38,10)", "decimal(60,10)"]
+    return [*names, "decimal(9,2)", "decimal(18,4)", "decimal(38,10)", "decimal(60,10)", *negative_scale_targets(text)]
+
+
+def negative_scale_targets(text: str) -> list[str]:
+    """`decimal(p,-s)` targets, one per Arrow decimal width, when `parse_decimal_params` parses the scale as a signed integer."""
+    m = re.search(r"let scale: (\w+) =", text.split("fn parse_decimal_params", 1)[1])
+    if not m:
+        raise AssertionError("override_type.rs: parse_decimal_params has no `let scale: <type>`: the scale axis cannot be read")
+    return ["decimal(18,-2)", "decimal(60,-2)"] if m.group(1).startswith("i") else []
 
 
 def rivet_types() -> list[str]:
@@ -881,6 +889,9 @@ def self_test() -> None:
     assert {"postgres", "mysql", "mssql", "oracle", "mongo"} <= set(ax["engines"]), ax["engines"]
     assert {"full", "incremental", "chunked", "cdc"} <= set(ax["modes"]) and set(ax["formats"]) == {"parquet", "csv"}, ax
     assert {"none", "float4", "float8", "int8", "bool", "decimal(38,10)", "text"} <= set(ax["targets"]), ax["targets"]
+    assert {"decimal(18,-2)", "decimal(60,-2)"} <= set(ax["targets"]) and negative_scale_targets("fn parse_decimal_params let scale: u8 =") == []
+    assert compare("mysql", "-2147483648", "int", "decimal(18,-2)", Decimal("-2147483600")) == WRONG, "a negative scale rounds away digits"
+    assert compare("mysql", "-2147483600", "int", "decimal(18,-2)", Decimal("-2147483600")) == "OK"
     assert parse_lit("mysql", "NULL") is None and parse_lit("oracle", "''") is None and parse_lit("mysql", "''") == ""
     assert parse_lit("mysql", "-5") == Decimal(-5) and parse_lit("mysql", "'a''b'") == "a'b" and parse_lit("postgres", "TRUE") is True
     assert parse_lit("mysql", "UNHEX('00')") is ...
