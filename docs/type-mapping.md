@@ -86,8 +86,23 @@ plain `timestamp` is microsecond with full date range. An Oracle
 
 The override path is safe: a `uid: uuid` declaration tries to parse each
 cell — either 16 raw bytes (BINARY(16) layout) or a 36-char canonical text
-form. **Parse failures emit `NULL`, never silent garbage.** Same convention
-as `decimal` overrides whose values do not parse cleanly.
+form. **Text that does not parse emits `NULL`, never silent garbage.** Same
+convention as `decimal` overrides whose values do not parse cleanly. A value
+the declared type cannot read at all is a different case and is never `NULL`:
+
+- **MySQL integer under `float4`/`float8`** is delivered as the same number
+  while the float holds it exactly (up to 2^24 for `float4`, 2^53 for
+  `float8`). Past that the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE`
+  (exit 5) naming the column and the value; the remedy is `decimal(20,0)` or
+  `float8`, or removing the override.
+- **MySQL value of a kind the declared type does not read** (a `DOUBLE`
+  under `int8`, a `TIME` under `text`, an integer under `date`) stops with
+  `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1); the remedy is removing the
+  override or a `CAST` in the export's `query:`. A source `NULL` stays `NULL`.
+- **PostgreSQL** refuses the same mismatch at `check` with
+  `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`; **SQL Server** and **Oracle** stop
+  on the run (the table of outcomes per engine is pinned by
+  `a_declared_override_delivers_the_source_or_refuses_by_code_*`).
 
 `rivet init` does **not** apply heuristics ("column is 36 chars wide and
 named `uid_*` → probably UUID") — guessing risks misclassifying a non-UUID
