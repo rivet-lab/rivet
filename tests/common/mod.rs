@@ -54,6 +54,7 @@ pub use sql_engine::*;
 pub use state::*;
 pub use storage::*;
 pub use toxi::*;
+pub(crate) use verify::oracle_python;
 pub use warehouse::*;
 
 static NAME_COUNTER: AtomicU64 = AtomicU64::new(0);
