@@ -22,19 +22,18 @@ def append_run(path: Path, *, sha: str, complete: bool, green: bool, dirty: bool
 
 
 def refusal(sha: str, record: Path) -> str | None:
-    """Why `sha` may not be tagged on recall's account: no complete, green recall of exactly this sha from a clean tree in `record`."""
+    """Why `sha` may not be tagged on recall's account: the latest recall of exactly this sha in `record` is not complete, green and from a clean tree."""
     if not record.is_file():
         return f"no seeded-recall record at {record}: run `make seeded-recall` on {sha[:12]}"
-    seen = 0
+    seen, last = 0, None
     for line in record.read_text().splitlines():
         try:
             rec = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(rec, dict) or rec.get("sha") != sha:
-            continue
-        seen += 1
-        if rec.get("complete") is True and rec.get("green") is True and rec.get("dirty") is False:
-            return None
-    also = f" ({seen} incomplete, red or dirty run(s) of it, which cannot support a tag)" if seen else ""
+        if isinstance(rec, dict) and rec.get("sha") == sha:
+            seen, last = seen + 1, rec
+    if last is not None and last.get("complete") is True and last.get("green") is True and last.get("dirty") is False:
+        return None
+    also = f" (the latest of {seen} run(s) of it is incomplete, red or dirty, and an earlier green cannot support a tag)" if seen else ""
     return f"no complete green seeded recall of {sha[:12]} in {record}{also}: run `make seeded-recall` with no --seeds or --engines"

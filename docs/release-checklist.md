@@ -154,7 +154,7 @@ link remain after the first run; the built binary must still name the sha.
 
 - [ ] A `pilot-*` check that is not `PASS` blocks the release.
 - [ ] A `release-notes-*` check that is not `PASS` (a false release note) blocks the release.
-- [ ] A `cloud-*` smoke that is `FAIL` blocks only when a re-run repeats it; `verdict.json` lists what blocks.
+- [ ] A `cloud-*` smoke that is `FAIL` in any attempt blocks: it is re-run once, a pass after a failure is `FLAKY` (not a pass) and keeps the first failure's line; `verdict.json` lists what blocks.
 - [ ] Every other check is reported and decided by the release owner.
 
 ---

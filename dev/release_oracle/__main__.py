@@ -876,7 +876,9 @@ def _stand_down_self_test() -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             scenarios._module_red(led, "s", "leg", "t_dead", "live test requires Postgres reachable on 127.0.0.1:5433.", Path("x.log"), since)
             scenarios._module_red(led, "s", "leg", "t_panic", "assertion failed: rows == 3", Path("x.log"), since)
-        assert [c.status for c in led.cells] == [Status.INFRA, Status.FAIL], "a panic that names the stand is INFRA, a product panic stays FAIL"
+            scenarios._module_red(led, "s", "leg", "t_oracle", "oracle error: dev/release_oracle/rig_oracle.py grade exited exit status: 1", Path("x.log"), since)
+        assert [c.status for c in led.cells] == [Status.INFRA, Status.FAIL, Status.INFRA], \
+            "a panic that names the stand or the oracle's own crash is INFRA, a product panic stays FAIL"
         book.note(stand_health.WATCH + "containers", stand_health.down("stand container rivet-postgres-1 died"))
         led = led_of()
         with contextlib.redirect_stdout(io.StringIO()):

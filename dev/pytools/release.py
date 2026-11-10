@@ -399,12 +399,17 @@ def self_test() -> int:
     recall_cases = [
         ([], "no seeded-recall record"),
         ([run(sha=other)], "no complete green"),
-        ([run(complete=False)], "1 incomplete, red or dirty"),
-        ([run(green=False)], "1 incomplete, red or dirty"),
-        ([run(dirty=True)], "1 incomplete, red or dirty"),
-        ([run(dirty=None)], "1 incomplete, red or dirty"),
+        ([run(complete=False)], "latest of 1 run(s)"),
+        ([run(green=False)], "latest of 1 run(s)"),
+        ([run(dirty=True)], "latest of 1 run(s)"),
+        ([run(dirty=None)], "latest of 1 run(s)"),
         (["not json", run()], None),
         ([run(complete=False), run()], None),
+        ([run(green=False), run()], None),
+        ([run(), run(green=False)], "latest of 2 run(s)"),
+        ([run(), run(complete=False)], "latest of 2 run(s)"),
+        ([run(), run(dirty=True)], "latest of 2 run(s)"),
+        ([run(), run(green=False), run(sha=other)], "latest of 2 run(s)"),
     ]
     with tempfile.TemporaryDirectory() as d:
         for i, (lines, want) in enumerate(recall_cases):
