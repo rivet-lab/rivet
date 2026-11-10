@@ -205,6 +205,38 @@ def ambient_identity(module: str) -> tuple[dict[str, str], list[str], list[str]]
     return names, sorted(files), sorted(urls)
 
 
+REDIRECT_ENV_NAME = re.compile(r"ENDPOINT|_HOST$|_ADDR$")
+
+
+def product_redirect_env() -> list[str]:
+    """Environment variables `src/` reads by a literal name that move where an authenticated request goes, tests and test seams left out."""
+    found: set[str] = set()
+    for p in (REPO / "src").rglob("*.rs"):
+        if "tests" in p.parts or p.name.startswith("tests") or p.name == "test_hook.rs":
+            continue
+        found.update(n for n in ENV_READ.findall(p.read_text(errors="replace")) if REDIRECT_ENV_NAME.search(n) and not n.startswith("RIVET_TEST_"))
+    return sorted(found)
+
+
+def redirect_slot(name: str) -> str:
+    """The credential slot whose requests one redirecting environment variable moves."""
+    match name:
+        case "RIVET_BQ_API_ENDPOINT":
+            return "bigquery"
+    raise KeyError(f"redirecting environment variable `{name}` has no recipe")
+
+
+def bigquery_spellings() -> list[str]:
+    """The BigQuery leg's credential sources: the ambient key, each destination key field the leg signs with, and each redirecting variable."""
+    fields = [f"destination-{f}" for f in schema_fields("DestinationConfig")
+              if DEST_CREDENTIAL_FIELD.search(f) and f != "allow_anonymous" and "gcs" in credential_field_dests(f)]
+    redirects = []
+    for n in product_redirect_env():
+        with contextlib.suppress(KeyError):
+            redirects += [f"redirect-{n}"] if redirect_slot(n) == "bigquery" else []
+    return ["service-account-key", *fields, *redirects]
+
+
 def product_secret_env() -> list[str]:
     """Secret-looking environment variables `src/` reads by a literal name, tests and the test seams left out."""
     found: set[str] = set()
@@ -681,12 +713,25 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
         cfg["load"] = load
         roles["load"] = secret
     if spec.slot == "bigquery":
-        stubs["load"] = Stub("http")
+        token = token_canary(tag + "bqtoken")
+        redirect = spec.spelling.startswith("redirect-")
+        body = json.dumps({"access_token": token.plain, "token_type": "Bearer", "expires_in": 3600}).encode() if redirect else b""
+        stubs["load"] = Stub("http", body=body)
         made = service_account_key(tag, f"http://127.0.0.1:{stubs['load'].port}/token")
         if made:
-            (root / "sa.json").write_text(made[0])
-            env["GOOGLE_APPLICATION_CREDENTIALS"] = str(root / "sa.json")
+            key_file = "bq.json" if spec.spelling.startswith("destination-") else "sa.json"
+            (root / key_file).write_text(made[0])
+            if key_file == "sa.json":
+                env["GOOGLE_APPLICATION_CREDENTIALS"] = str(root / key_file)
             roles["bigquery key"] = made[1]
+        if spec.spelling.startswith("destination-"):
+            stubs["dest"] = Stub("http")
+            dest = {"type": "gcs", "bucket": "canary", "prefix": "p", "endpoint": f"http://127.0.0.1:{stubs['dest'].port}",
+                    spec.spelling.removeprefix("destination-"): "bq.json"}
+        if redirect:
+            stubs["redirect"] = Stub("http")
+            env[spec.spelling.removeprefix("redirect-")] = f"http://127.0.0.1:{stubs['redirect'].port}"
+            roles["gcp access token"] = token
         cfg["load"] = {"target": "bigquery", "project": "canary-project", "dataset": "canary"}
     if spec.slot == "snowflake":
         key = token_canary(tag)
@@ -1004,6 +1049,12 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
             signer_module(d)
         except KeyError as e:
             guards.append(str(e).strip("'\""))
+    bq_spellings = bigquery_spellings()
+    for n in product_redirect_env():
+        try:
+            redirect_slot(n)
+        except KeyError as e:
+            guards.append(str(e).strip("'\""))
     known_values = set(FILL) | {"PLAN_FILE", "ENV_VAR"}
     for c in cmds:
         for g in c.required:
@@ -1026,7 +1077,7 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
             specs += [Spec(c, "postgres", "state", sp, "dead-state") for sp in STATE_SPELLINGS]
             specs += [Spec(c, "postgres", "state", sp, "live-state") for sp in STATE_SPELLINGS if live_state]
             specs += [Spec(c, "postgres", "load", sp) for sp in LOAD_SPELLINGS if "clickhouse" in loads]
-            specs += [Spec(c, "postgres", "bigquery", "service-account-key")] if "bigquery" in loads else []
+            specs += [Spec(c, "postgres", "bigquery", sp) for sp in bq_spellings] if "bigquery" in loads else []
             specs += [Spec(c, "postgres", "snowflake", "private-key-file")] if "snowflake" in loads else []
             specs += [Spec(c, "postgres", "dest", sp) for d in dests for sp in dest_recipes.get(d, ())]
             specs += [Spec(c, "postgres", "notify", sp) for sp in ("webhook-url", "webhook-url-env")]
