@@ -19,6 +19,12 @@ const R_PLAN: &str =
 const R_LOADS: &str = "2026-11-10: state loads on a config path that does not exist prints an empty list and exits 0; closes when it opens the config through the seam its state siblings use";
 const R_STRICT: &str = "2026-11-08: check --strict refuses a config target run accepts; closes when run and check agree on config target";
 
+const R_TYPE: &str = "2026-11-10: check, doctor, plan and init pass a column type or override run refuses (unsafe mapping, unrepresentable value, exit 6 type builder); closes when the pre-run commands type each column through the seam run writes with";
+const R_PRIOR: &str = "2026-11-10: check, doctor and plan pass over stored state run refuses (a cursor another destination or export owns, a lost CDC checkpoint); closes when the pre-run commands read state and checkpoint through run's guard";
+const R_UNCODED: &str = "2026-11-10: run or a pre-run command refuses without a RIVET_ code, so the pair cannot agree on the stop; closes when each refusal is raised through its coded seam";
+const R_URL: &str = "2026-11-10: check passes a mongodb URL without a database that run refuses as invalid; closes when check parses the source URL through run's parser";
+const R_STRICT_TYPE: &str = "2026-11-10: check --strict refuses an unsafe type mapping run delivers; closes when run and check --strict read one type-safety verdict";
+
 /// RED signatures accepted on main: `<pair> pre[..]` or `<pair> pre[..] run[..]` and a dated reason with what closes it; the list only shrinks.
 const ACCEPTED_RED: &[(&str, &str)] = &[
     (
@@ -143,14 +149,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_PLAN,
     ),
     (
-        "plan-apply pre[exit=1 code=RIVET_PLAN_NOTHING_TO_PLAN] run[exit=1 code=RIVET_SOURCE_CDC_PREREQUISITE]",
-        R_WRAP,
-    ),
-    (
-        "plan-apply pre[exit=1 code=RIVET_PLAN_NOTHING_TO_PLAN] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
-        R_WRAP,
-    ),
-    (
         "plan-apply pre[exit=1 code=RIVET_PLAN_SOURCE_UNREADABLE] run[exit=1 code=-]",
         R_WRAP,
     ),
@@ -176,6 +174,160 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     ),
     (
         "plan-apply pre[exit=1 code=RIVET_PLAN_SOURCE_UNREADABLE] run[exit=1 code=RIVET_SOURCE_TABLE_NOT_FOUND]",
+        R_WRAP,
+    ),
+    (
+        "cdc-run pre[exit=1 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
+        R_UNCODED,
+    ),
+    ("check-run pre[exit=0 code=-] run[exit=1 code=-]", R_CHECK),
+    (
+        "check-run pre[exit=0 code=-] run[exit=1 code=RIVET_CONFIG_SOURCE_URL_INVALID]",
+        R_URL,
+    ),
+    (
+        "check-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
+        R_CHECK,
+    ),
+    (
+        "check-run pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
+        R_TYPE,
+    ),
+    (
+        "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_CDC_CHECKPOINT_INVALID]",
+        R_PRIOR,
+    ),
+    (
+        "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_VALUE_UNREPRESENTABLE]",
+        R_TYPE,
+    ),
+    (
+        "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_DESTINATION_MISMATCH]",
+        R_PRIOR,
+    ),
+    (
+        "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_OWNER_MISMATCH]",
+        R_PRIOR,
+    ),
+    (
+        "check-run pre[exit=0 code=-] run[exit=6 code=RIVET_INTERNAL_TYPE_BUILDER]",
+        R_TYPE,
+    ),
+    (
+        "check-run pre[exit=1 code=RIVET_PLAN_REJECTED] run[exit=1 code=-]",
+        R_UNCODED,
+    ),
+    (
+        "check-strict-run pre[exit=0 code=-] run[exit=1 code=-]",
+        R_CHECK,
+    ),
+    (
+        "check-strict-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
+        R_CHECK,
+    ),
+    (
+        "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_CDC_CHECKPOINT_INVALID]",
+        R_PRIOR,
+    ),
+    (
+        "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_VALUE_UNREPRESENTABLE]",
+        R_TYPE,
+    ),
+    (
+        "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_DESTINATION_MISMATCH]",
+        R_PRIOR,
+    ),
+    (
+        "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_OWNER_MISMATCH]",
+        R_PRIOR,
+    ),
+    (
+        "check-strict-run pre[exit=0 code=-] run[exit=6 code=RIVET_INTERNAL_TYPE_BUILDER]",
+        R_TYPE,
+    ),
+    (
+        "check-strict-run pre[exit=1 code=RIVET_CLI_PREFLIGHT_FAILED] run[exit=1 code=-]",
+        R_UNCODED,
+    ),
+    (
+        "check-strict-run pre[exit=1 code=RIVET_CLI_PREFLIGHT_FAILED] run[exit=1 code=RIVET_CONFIG_SOURCE_URL_INVALID]",
+        R_WRAP,
+    ),
+    (
+        "check-strict-run pre[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING] run[exit=0 code=-]",
+        R_STRICT_TYPE,
+    ),
+    (
+        "doctor-run pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
+        R_TYPE,
+    ),
+    (
+        "doctor-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_CDC_CHECKPOINT_INVALID]",
+        R_PRIOR,
+    ),
+    (
+        "doctor-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_VALUE_UNREPRESENTABLE]",
+        R_TYPE,
+    ),
+    (
+        "doctor-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_DESTINATION_MISMATCH]",
+        R_PRIOR,
+    ),
+    (
+        "doctor-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_OWNER_MISMATCH]",
+        R_PRIOR,
+    ),
+    (
+        "doctor-run pre[exit=0 code=-] run[exit=6 code=RIVET_INTERNAL_TYPE_BUILDER]",
+        R_TYPE,
+    ),
+    (
+        "doctor-run pre[exit=1 code=RIVET_CLI_PREFLIGHT_FAILED] run[exit=1 code=RIVET_CONFIG_SECRET_UNSET]",
+        R_WRAP,
+    ),
+    (
+        "doctor-run pre[exit=1 code=RIVET_CLI_PREFLIGHT_FAILED] run[exit=1 code=RIVET_CONFIG_SOURCE_URL_INVALID]",
+        R_WRAP,
+    ),
+    (
+        "doctor-run pre[exit=1 code=RIVET_CLI_PREFLIGHT_FAILED] run[exit=1 code=RIVET_CONFIG_TLS_CA_INVALID]",
+        R_WRAP,
+    ),
+    (
+        "init-run pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
+        R_TYPE,
+    ),
+    ("plan-apply pre[exit=0 code=-] run[exit=1 code=-]", R_PLAN),
+    (
+        "plan-apply pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
+        R_TYPE,
+    ),
+    (
+        "plan-apply pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_VALUE_UNREPRESENTABLE]",
+        R_TYPE,
+    ),
+    (
+        "plan-apply pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_DESTINATION_MISMATCH]",
+        R_PRIOR,
+    ),
+    (
+        "plan-apply pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_OWNER_MISMATCH]",
+        R_PRIOR,
+    ),
+    (
+        "plan-apply pre[exit=0 code=-] run[exit=6 code=RIVET_INTERNAL_TYPE_BUILDER]",
+        R_TYPE,
+    ),
+    (
+        "plan-apply pre[exit=1 code=-] run[exit=1 code=-]",
+        R_UNCODED,
+    ),
+    (
+        "plan-apply pre[exit=1 code=RIVET_PLAN_SOURCE_UNREADABLE] run[exit=1 code=RIVET_CONFIG_SECRET_UNSET]",
+        R_WRAP,
+    ),
+    (
+        "plan-apply pre[exit=1 code=RIVET_PLAN_SOURCE_UNREADABLE] run[exit=1 code=RIVET_CONFIG_TLS_CA_INVALID]",
         R_WRAP,
     ),
 ];
