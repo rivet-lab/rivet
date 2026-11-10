@@ -36,10 +36,14 @@ def summary(lines: list[str]) -> str:
     return f"{MATRIX} TOTAL PASS={n['PASS']} RED={n['RED']} NOT_GRADED={n['NOT_GRADED']}"
 
 
-def run_offline() -> list[str]:
-    """The offline matrix's verdict lines, read from the test binary's own stdout."""
+def run_offline(stand: bool) -> list[str]:
+    """The matrix's verdict lines from the test binary's stdout; `stand` adds the stand axes under live_slot."""
     cmd = ["cargo", "test", "--test", "offline_suite", "property_refusal_names_true_cause::every_refusal", "--", "--nocapture"]
-    out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    env = dict(os.environ)
+    if stand:
+        cmd = [sys.executable, "dev/pytools/live_slot.py", "--", *cmd]
+        env.update(RIVET_PM_P4_STAND="1", RIVET_ALLOW_WORKTREE_LIVE="1")
+    out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env)
     return verdict_lines(out.stdout)
 
 
@@ -61,8 +65,24 @@ def grade_live(passed: bool, ran: bool) -> str:
     return "PASS" if passed else "RED"
 
 
+def test_paths(listing: str) -> dict[str, list[str]]:
+    """Each bare test name of a `--list` output, with every module path that defines it."""
+    paths: dict[str, list[str]] = {}
+    for ln in listing.splitlines():
+        if ln.endswith(": test"):
+            path = ln.removesuffix(": test")
+            paths.setdefault(path.rsplit("::", 1)[-1], []).append(path)
+    return paths
+
+
+def live_tests() -> dict[str, list[str]]:
+    """The ignored tests of live_suite, by bare name."""
+    cmd = ["cargo", "test", "--test", "live_suite", "--", "--list", "--ignored"]
+    return test_paths(subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True).stdout)
+
+
 def run_live_cell(test: str) -> tuple[str, str]:
-    """Runs one sabotage test through live_slot; returns its verdict and evidence."""
+    """Runs one sabotage test by its full path through live_slot; returns its verdict and evidence."""
     cmd = [sys.executable, "dev/pytools/live_slot.py", "--", "cargo", "test", "--test", "live_suite", test, "--", "--ignored", "--exact"]
     env = {**os.environ, "RIVET_ALLOW_WORKTREE_LIVE": "1"}
     out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env)
@@ -82,16 +102,27 @@ def cause_key(row: str, engine: str) -> str:
 def run_live() -> list[str]:
     """One line per sabotage refusal cell: its test's verdict, or the reason it is not graded."""
     doc = yaml.safe_load((ROOT / "docs/sabotage-matrix.yaml").read_text())
+    tests = live_tests()
     lines = []
     for row, engine, cell in sabotage_cells(doc):
         key = cause_key(row, engine)
         if "test" in cell:
-            verdict, ev = run_live_cell(cell["test"])
+            paths = tests.get(cell["test"], [])
+            if len(paths) == 1:
+                verdict, ev = run_live_cell(paths[0])
+            else:
+                verdict, ev = "NOT_GRADED", f"{cell['test']}: {len(paths)} tests in live_suite carry this name"
         else:
             kind = "na" if "na" in cell else "gap"
             verdict, ev = "NOT_GRADED", f"{kind}: {cell.get(kind)}"
         lines.append(f"{MATRIX} {key} {verdict} {ev}")
     return lines
+
+
+def merge_live(offline: list[str], live: list[str]) -> list[str]:
+    """The offline lines without the `cause/X/-` stand line of a code the live rows grade per engine, then the live rows."""
+    graded = {VERDICT.match(ln).group(1).rsplit("/", 1)[0] + "/-" for ln in live}
+    return [ln for ln in offline if VERDICT.match(ln).group(1) not in graded] + live
 
 
 def self_test() -> int:
@@ -111,7 +142,13 @@ def self_test() -> int:
     assert [c[:2] for c in sabotage_cells(doc)] == [("refusal_a", e) for e in engines]
     live = yaml.safe_load((ROOT / "docs/sabotage-matrix.yaml").read_text())
     assert sabotage_cells(live), "the sabotage ledger has refusal rows"
+    listing = "a::b::t_one: test\nc::t_one: test\nd::t_two: test\n2 tests, 0 benchmarks\n"
+    assert test_paths(listing) == {"t_one": ["a::b::t_one", "c::t_one"], "t_two": ["d::t_two"]}, test_paths(listing)
     assert cause_key("refusal_source_cdc_grants_changed", "mysql") == "cause/RIVET_SOURCE_CDC_GRANTS_CHANGED/mysql"
+    stand = f"{MATRIX} cause/RIVET_A/- NOT_GRADED needs the live stand; sabotage row refusal_a injects it"
+    other = f"{MATRIX} cause/RIVET_B/- NOT_GRADED needs the live stand; no sabotage row refusal_b"
+    row = f"{MATRIX} cause/RIVET_A/postgres PASS t: test result: ok. 1 passed"
+    assert merge_live([ok, stand, other], [row]) == [ok, other, row]
     print("refusal_names_true_cause self-test ok")
     return 0
 
@@ -123,9 +160,9 @@ def main(argv: list[str]) -> int:
     if argv[1:] not in (["offline"], ["live"]):
         print(__doc__)
         return 2
-    lines = run_offline()
+    lines = run_offline(argv[1] == "live")
     if argv[1] == "live":
-        lines += run_live()
+        lines = merge_live(lines, run_live())
     print("\n".join(lines))
     print(summary(lines))
     return 0

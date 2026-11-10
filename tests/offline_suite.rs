@@ -122,6 +122,10 @@ mod oracle_read_scope_guard;
 mod perf_matrix_guard;
 #[path = "offline/planner_fuzz.rs"]
 mod planner_fuzz;
+#[path = "offline/property_no_secret_in_output.rs"]
+mod property_no_secret_in_output;
+#[path = "offline/property_no_silent_null.rs"]
+mod property_no_silent_null;
 #[path = "offline/rebaseline_remedy_one_home.rs"]
 mod rebaseline_remedy_one_home;
 #[path = "offline/redaction_invariant.rs"]
@@ -138,8 +142,6 @@ mod retry_integration;
 mod run_summary_contract;
 #[path = "offline/scheduler_contract.rs"]
 mod scheduler_contract;
-#[path = "offline/secret_sink_matrix.rs"]
-mod secret_sink_matrix;
 
 #[path = "offline/cli_flag_coverage_guard.rs"]
 mod cli_flag_coverage_guard;

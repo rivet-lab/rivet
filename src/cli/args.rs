@@ -956,7 +956,7 @@ mod tests {
         assert_eq!(
             found,
             Vec::<String>::new(),
-            "the credential-sink matrix reads its commands from --help"
+            "the no_secret_in_output matrix reads its commands from --help"
         );
     }
 

@@ -247,6 +247,12 @@ seed-garbage-mssql:
 # one, and the three stages then run and grade for real — the driver's banner and
 # its closing line are keyed on the baseline rather than on this flag, so such a
 # run is reported honestly instead of being announced as a skip it was not.
+property-no-silent-null:  ## Property matrix: every non-NULL source value is delivered equal or refused by code, never NULL (smoke tier; ARGS="--tier full" for the weekly one). Takes one live slot.
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null --engine all $(ARGS)
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_grants
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_cdc --engine all
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_load
+
 release-oracle:  ## Release gate, BARE: only what is already in your shell. With no RIVET_PREV_RELEASE_BIN in your environment the prev-release comparison is GIVEN UP by name (cannot support a tag); with one exported, those three stages run and grade. The replica/standby topology rows are GIVEN UP by name too (a down stand is SKIP here, FAIL in release-oracle-full). Read the SKIP count — with nothing set it is ~95 PASS / 60 SKIP and still prints RELEASE-READY.
 	$(LIVE_ALL) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies $(ARGS)
 
@@ -410,10 +416,10 @@ SEEDED_ARGS ?=
 open-defects:  ## Every open_defect_ live cell against its line in dev/release_oracle/known_red.py; CI does not run these cells, so run this after a fixture or harness change.
 	$(LIVE) $(PY) -m dev.release_oracle.open_defects
 
-.PHONY: secret-sink
-secret-sink:  ## Credential-sink property matrix: every command x engine x credential slot x path, graded on every byte a run leaves; one verdict line per cell.
+.PHONY: property-no-secret-in-output
+property-no-secret-in-output:  ## Credential-sink property matrix: every command x engine x credential slot x path, graded on every byte a run leaves; one verdict line per cell.
 	cargo build --bin rivet
-	$(LIVE) $(PY) -m dev.release_oracle.secret_sink --bin target/debug/rivet
+	$(LIVE) $(PY) -m dev.release_oracle.property_no_secret_in_output --bin target/debug/rivet
 
 .PHONY: property-no-debris-after-stop
 property-no-debris-after-stop:  ## Property matrix P5: every engine x shape x hook x stop, then a re-run; no debris and the re-run equals an uninterrupted run. One verdict line per cell; RIVET_NO_DEBRIS_AFTER_STOP_CELLS=<substring> narrows it. Takes one live slot.

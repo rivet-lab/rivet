@@ -1,4 +1,4 @@
-"""Accepted credential leaks of the secret-sink matrix: each entry names the cells it covers, why it is accepted and when it expires."""
+"""Accepted credential leaks of the no_secret_in_output matrix: each entry names the cells it covers, why it is accepted and when it expires."""
 
 from __future__ import annotations
 
