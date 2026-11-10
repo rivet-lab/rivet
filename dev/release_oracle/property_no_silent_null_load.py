@@ -17,9 +17,9 @@ from pathlib import Path
 import yaml
 
 from . import core, engines
-from . import no_silent_null as nsn
+from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
-from .no_silent_null import DELIVERED, EMPTY, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
+from .property_no_silent_null import DELIVERED, EMPTY, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
 
 SCENARIO = "no_silent_null_load"
 TABLE = "pm_no_silent_null_l"

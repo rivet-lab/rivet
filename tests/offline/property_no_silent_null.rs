@@ -1,4 +1,4 @@
-//! The no-silent-NULL property matrix grades its own grader offline; its live cells run through `make no-silent-null`.
+//! The no-silent-NULL property matrix grades its own grader offline; its live cells run through `make property-no-silent-null`.
 
 use std::process::{Command, Output};
 
@@ -13,7 +13,7 @@ fn run(module: &str) -> Output {
 /// Every failure class fires on its exact harm and every `RivetType` variant has a sample family.
 #[test]
 fn the_no_silent_null_matrix_passes_its_own_self_test() {
-    let out = run("dev.release_oracle.no_silent_null");
+    let out = run("dev.release_oracle.property_no_silent_null");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -26,7 +26,7 @@ fn the_no_silent_null_matrix_passes_its_own_self_test() {
 /// The grants-CDC axis grades hidden, NULL and shape-differing columns.
 #[test]
 fn the_no_silent_null_grants_axis_passes_its_own_self_test() {
-    let out = run("dev.release_oracle.no_silent_null_grants");
+    let out = run("dev.release_oracle.property_no_silent_null_grants");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -39,7 +39,7 @@ fn the_no_silent_null_grants_axis_passes_its_own_self_test() {
 /// The change-stream axis reads its legs from the product and grades NULL, changed and missing change rows.
 #[test]
 fn the_no_silent_null_cdc_axis_passes_its_own_self_test() {
-    let out = run("dev.release_oracle.no_silent_null_cdc");
+    let out = run("dev.release_oracle.property_no_silent_null_cdc");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -52,7 +52,7 @@ fn the_no_silent_null_cdc_axis_passes_its_own_self_test() {
 /// The load axis reads its targets from `LoadTarget` and grades a NULL read back from the warehouse.
 #[test]
 fn the_no_silent_null_load_axis_passes_its_own_self_test() {
-    let out = run("dev.release_oracle.no_silent_null_load");
+    let out = run("dev.release_oracle.property_no_silent_null_load");
     assert_eq!(
         out.status.code(),
         Some(0),

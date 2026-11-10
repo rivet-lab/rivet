@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 from . import core
-from . import no_silent_null as nsn
+from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
 
 ENGINE = "mysql_cdc_grants"
