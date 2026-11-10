@@ -416,6 +416,11 @@ SEEDED_ARGS ?=
 open-defects:  ## Every open_defect_ live cell against its line in dev/release_oracle/known_red.py; CI does not run these cells, so run this after a fixture or harness change.
 	$(LIVE) $(PY) -m dev.release_oracle.open_defects
 
+.PHONY: property-cloud-legs
+property-cloud-legs:  ## Cloud legs of the property matrices (BigQuery, Snowflake, GCS, S3, Azure): the offline tier replays recorded server answers, the cloud tier runs against the real test project and is NOT_GRADED without credentials. Takes one live slot.
+	cargo test --test offline_suite property_cloud_legs
+	$(LIVE) $(PY) -m dev.release_oracle.cloud_legs --tier cloud
+
 .PHONY: property-no-debris-after-stop
 property-no-debris-after-stop:  ## Property matrix P5: every engine x shape x hook x stop, then a re-run; no debris and the re-run equals an uninterrupted run. One verdict line per cell; RIVET_NO_DEBRIS_AFTER_STOP_CELLS=<substring> narrows it. Takes one live slot.
 	cargo test --test offline_suite property_no_debris_after_stop

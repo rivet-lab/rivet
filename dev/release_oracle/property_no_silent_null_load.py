@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from . import core, engines
+from . import cloud_legs, core, engines
 from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
 from .property_no_silent_null import DELIVERED, EMPTY, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
@@ -28,19 +28,16 @@ CH_URL = "http://127.0.0.1:8123"
 CH_USER, CH_PASSWORD, CH_PASSWORD_ENV = "rivet", "rivet", "RIVET_TEST_CH_PASSWORD"
 GCS = "http://127.0.0.1:4443"
 BUCKET = "pm-no-silent-null"
-NOT_REACHABLE = {
-    "bigquery": "no BigQuery project is granted to this matrix's environment (BigQuery is not in CI); the loader's types are graded offline by bq_rest::stand",
-    "snowflake": "no Snowflake connection is granted to this matrix's environment; a billed account is needed for a second-client read-back",
-}
 WORKERS = 6
 MONGO_NOT_GRADED = "MongoDB stages the `document` blob as one text column; the batch grid grades its value"
 
 
 def load_targets() -> list[str]:
-    """The warehouses `rivet load` writes, from `LoadTarget`; each needs a stand or a NOT_GRADED reason."""
+    """The warehouses `rivet load` writes, from `LoadTarget`; the cloud ones are graded by cloud_legs, the rest here on the stand."""
     found = nsn._enum_variants("src/config/load.rs", "LoadTarget")
-    if set(found) - set(NOT_REACHABLE) != {"clickhouse"}:
-        raise AssertionError(f"LoadTarget variants {found}: a target has neither a stand nor a NOT_GRADED reason")
+    cloud = {name for kind, name, _ in cloud_legs.legs() if kind == "warehouse"}
+    if set(found) - cloud != {"clickhouse"}:
+        raise AssertionError(f"LoadTarget variants {found}: a target is neither a cloud leg nor the stand's ClickHouse")
     return found
 
 
@@ -168,18 +165,18 @@ def run_engine(engine: str, work: Path) -> list[Result]:
 
 
 def run_all(work: Path) -> list[Result]:
-    """Every engine into every load target: ClickHouse on the stand, the rest NOT_GRADED."""
-    results = [Result(f"*/load-{t}", REFUSED, NOT_GRADED, NOT_REACHABLE[t]) for t in load_targets() if t in NOT_REACHABLE]
+    """Every engine into ClickHouse on the stand; the cloud warehouses are cloud_legs cells."""
+    load_targets()
+    results: list[Result] = []
     for engine in nsn.axes()["engines"]:
         results += run_engine(engine, work)
     return results
 
 
 def verify_no_silent_null_load(led: Ledger) -> None:
-    """Every engine's columns loaded into ClickHouse and read back by the harness; unreachable warehouses are REDUCED skips."""
+    """Every engine's columns loaded into ClickHouse and read back by the harness."""
     work = Path(os.environ.get("RIVET_ORACLE_WORK") or tempfile.gettempdir()) / "no_silent_null_load"
-    for t in (t for t in load_targets() if t in NOT_REACHABLE):
-        led.skipped("-", "-", SCENARIO, "-", f"{SCENARIO}[{t}]: {NOT_REACHABLE[t]}", cause=SkipCause.REDUCED)
+    load_targets()
     for engine in nsn.axes()["engines"]:
         results = run_engine(engine, work)
         groups = nsn.summary(engine, results)

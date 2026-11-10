@@ -40,6 +40,8 @@ mod init_snowflake_flags;
 mod memory_throttle_wiring;
 #[path = "offline/one_sanitizer_guard.rs"]
 mod one_sanitizer_guard;
+#[path = "offline/property_cloud_legs.rs"]
+mod property_cloud_legs;
 #[path = "offline/property_no_debris_after_stop.rs"]
 mod property_no_debris_after_stop;
 #[path = "offline/renderer_locality_guard.rs"]
