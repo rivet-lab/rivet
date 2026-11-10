@@ -936,7 +936,8 @@ fn one_keeper_renews_every_lease_and_reports_the_one_that_is_gone() {
     let Some(state) = ScratchState::create("lk_keeper") else {
         return;
     };
-    let store = StateStore::open_at_ref(&StateRef::Postgres(state.url())).expect("open the state");
+    let store =
+        StateStore::open_at_ref(&StateRef::Postgres(state.url().into())).expect("open the state");
     let leases: Vec<_> = ["a", "b", "c"]
         .iter()
         .map(|k| {

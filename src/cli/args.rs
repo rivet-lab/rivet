@@ -131,7 +131,7 @@ pub enum Commands {
         /// `mongodb://` (engine chosen from the scheme). Visible in `ps`; prefer
         /// `--source-env`/`--source-file` outside local dev.
         #[arg(long, group = "cdc_source")]
-        source: Option<String>,
+        source: Option<crate::secret::Secret>,
         /// Name of an environment variable holding the database URL.
         #[arg(long, value_name = "ENV_VAR", group = "cdc_source")]
         source_env: Option<String>,
@@ -303,7 +303,7 @@ pub enum Commands {
         /// Database URL (postgresql://, mysql://, sqlserver://, mongodb://, or oracle://). Visible in shell history / `ps`;
         /// prefer `--source-env` or `--source-file` for anything other than local dev.
         #[arg(long, group = "source_spec")]
-        source: Option<String>,
+        source: Option<crate::secret::Secret>,
         /// Name of an environment variable holding the database URL (e.g. DATABASE_URL).
         /// The URL never touches the command line.
         #[arg(long, value_name = "ENV_VAR", group = "source_spec")]
@@ -434,7 +434,7 @@ pub enum Commands {
             requires = "staging_bucket",
             conflicts_with = "bigquery_project"
         )]
-        clickhouse_url: Option<String>,
+        clickhouse_url: Option<crate::secret::Secret>,
         /// The ClickHouse database the load creates its tables in (with `--clickhouse-url`).
         #[arg(
             long = "clickhouse-database",
@@ -815,7 +815,7 @@ pub enum StateAction {
         config: String,
         /// The PostgreSQL state to copy into; defaults to RIVET_STATE_URL
         #[arg(long, value_name = "URL")]
-        to: Option<String>,
+        to: Option<crate::secret::Secret>,
     },
     /// Shrink a SQLite state DB: rewrite it without the free pages deletes and migrations
     /// leave behind (takes the write lock while it runs; PostgreSQL state is left to autovacuum)
@@ -860,6 +860,39 @@ pub enum ValidateFormat {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    /// Every argument that takes a connection URL parses into a `Secret`, never a plain string.
+    #[test]
+    fn every_connection_url_argument_parses_into_a_secret() {
+        use clap::CommandFactory;
+        fn walk(cmd: &clap::Command, path: &str, seen: &mut Vec<String>, plain: &mut Vec<String>) {
+            for arg in cmd.get_arguments() {
+                let Some(long) = arg.get_long() else { continue };
+                if long == "source" || long == "to" || long.ends_with("url") {
+                    let at = format!("{path} --{long}");
+                    if arg.get_value_parser().type_id()
+                        != std::any::TypeId::of::<crate::secret::Secret>()
+                    {
+                        plain.push(at.clone());
+                    }
+                    seen.push(at);
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), seen, plain);
+            }
+        }
+        let (mut seen, mut plain) = (Vec::new(), Vec::new());
+        walk(&Cli::command(), "rivet", &mut seen, &mut plain);
+        assert!(
+            seen.len() >= 4,
+            "the walk found the URL arguments: {seen:?}"
+        );
+        assert!(
+            plain.is_empty(),
+            "a URL argument parses into a plain string: {plain:?}"
+        );
+    }
 
     /// Helper: try to parse a `rivet init …` invocation through clap. The leading
     /// `["rivet", "init"]` is added so we exercise the real subcommand router.

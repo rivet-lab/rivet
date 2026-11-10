@@ -349,7 +349,7 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         })
         .collect();
     crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
-        &config.source.resolve_url()?,
+        config.source.resolve_url()?.expose(),
         config.source.tls.as_ref(),
         &tables,
         &declared,
@@ -389,7 +389,11 @@ pub(super) fn initial_snapshot_pending(
     let catalog_read: Option<String> = match (engine, &cdc.capture_instance) {
         (CdcEngine::Mssql, Some(ci)) => {
             let Some((schema, table)) =
-                crate::source::mssql::cdc::source_object_of_capture_instance(&url, ci, tls)?
+                crate::source::mssql::cdc::source_object_of_capture_instance(
+                    url.expose(),
+                    ci,
+                    tls,
+                )?
             else {
                 crate::rivet_bail!(
                     crate::error::codes::SOURCE_CDC_PREREQUISITE,
@@ -419,9 +423,11 @@ pub(super) fn initial_snapshot_pending(
         _ => None,
     };
     let mysql_reads = match engine {
-        CdcEngine::Mysql => {
-            crate::source::mysql::cdc::MysqlChangeStream::baseline_reads(&url, tls, &tables)?
-        }
+        CdcEngine::Mysql => crate::source::mysql::cdc::MysqlChangeStream::baseline_reads(
+            url.expose(),
+            tls,
+            &tables,
+        )?,
         _ => Default::default(),
     };
     let mut table_dests = Vec::with_capacity(tables.len());
@@ -485,7 +491,7 @@ pub(super) fn initial_snapshot_pending(
     let (pending_idx, prior) = snapshot_plan(&done_flags, ckpt_resume);
     if writes_before_the_drain(&pending_idx) {
         engine.refuse_unmet_prerequisites(
-            &url,
+            url.expose(),
             tls,
             &tables,
             DrainMode::from_until_current(cdc.until_current),
@@ -497,7 +503,7 @@ pub(super) fn initial_snapshot_pending(
         .map_err(|why| crate::error::coded(crate::error::codes::CONFIG_CDC_SHAPE_INVALID, why))?;
 
     engine.ensure_anchor(
-        &url,
+        url.expose(),
         &slot,
         cdc.capture_instance.as_deref(),
         ckpt_path.as_deref(),

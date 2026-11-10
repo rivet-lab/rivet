@@ -108,6 +108,8 @@ mod mysql_binlog_time_fraction;
 mod mysql_wire_type_fixture_guard;
 #[path = "offline/oneshot_budget.rs"]
 mod oneshot_budget;
+#[path = "offline/secret_expose_ratchet.rs"]
+mod secret_expose_ratchet;
 // Not a test module: the shared non-vacuity rule the grep-shaped guards call so
 // a moved subject fails LOUDLY instead of grading the empty set.
 #[path = "offline/nonvacuity.rs"]

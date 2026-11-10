@@ -894,13 +894,13 @@ impl Config {
 
         if self.source.has_url_fields() {
             let url_count = [
-                &self.source.url,
-                &self.source.url_env,
-                &self.source.url_file,
-                &self.source.url_secret,
+                self.source.url.is_some(),
+                self.source.url_env.is_some(),
+                self.source.url_file.is_some(),
+                self.source.url_secret.is_some(),
             ]
             .iter()
-            .filter(|u| u.is_some())
+            .filter(|set| **set)
             .count();
             if url_count > 1 {
                 crate::config_bail!(

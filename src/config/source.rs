@@ -2,9 +2,10 @@
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use super::resolve::resolve_env_vars;
+use crate::secret::Secret;
 use crate::tuning::{TuningConfig, TuningProfile};
 
 /// Chars to percent-encode in a URL userinfo (user / password) component: encode
@@ -23,7 +24,8 @@ pub struct SourceConfig {
     #[serde(rename = "type")]
     pub source_type: SourceType,
 
-    pub url: Option<String>,
+    #[serde(serialize_with = "serialize_masked_url")]
+    pub url: Option<Secret>,
     pub url_env: Option<String>,
     pub url_file: Option<String>,
     /// Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`.
@@ -33,7 +35,8 @@ pub struct SourceConfig {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
-    pub password: Option<String>,
+    #[serde(serialize_with = "serialize_marker")]
+    pub password: Option<Secret>,
     pub password_env: Option<String>,
     /// Google Secret Manager secret holding the password: `projects/<p>/secrets/<s>[/versions/<n>]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,6 +74,22 @@ pub struct SourceConfig {
     /// `grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns_from: Option<ColumnsFrom>,
+}
+
+/// A URL as a persisted plan holds it: credentials masked.
+fn serialize_masked_url<S: Serializer>(url: &Option<Secret>, out: S) -> Result<S::Ok, S::Error> {
+    match url {
+        Some(u) => out.serialize_some(&crate::redact::redact_artifact_url(u.expose()).0),
+        None => out.serialize_none(),
+    }
+}
+
+/// A secret as a persisted plan holds it: the marker, never the value.
+fn serialize_marker<S: Serializer>(value: &Option<Secret>, out: S) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(_) => out.serialize_some(crate::secret::REDACTED),
+        None => out.serialize_none(),
+    }
 }
 
 /// Where the source's column list comes from.
@@ -330,9 +349,9 @@ impl SourceConfig {
         }
 
         if let Some(ref raw) = out.url {
-            let (masked, changed) = crate::redact::redact_artifact_url(raw);
+            let (masked, changed) = crate::redact::redact_artifact_url(raw.expose());
             if changed {
-                out.url = Some(masked);
+                out.url = Some(masked.into());
                 redacted = true;
             }
         }
@@ -356,7 +375,7 @@ impl SourceConfig {
             || self.url_secret.is_some()
     }
 
-    fn build_url_from_fields(&self) -> crate::error::Result<String> {
+    fn build_url_from_fields(&self) -> crate::error::Result<Secret> {
         // First-user-friendly errors: name the missing field, suggest a
         // concrete value, and remind the operator that `url_env` is the
         // alternative path so they don't bounce.  See
@@ -374,12 +393,8 @@ impl SourceConfig {
             .as_deref()
             .ok_or_else(|| structured_field_missing("database"))?;
 
-        // SecOps: keep the plaintext password inside a `Zeroizing<String>` until it
-        // is spliced into the final URL, so the standalone password buffer is
-        // wiped on drop (the final URL still lives as a plain String but is
-        // shorter-lived and dropped by the driver constructor).
-        let password: zeroize::Zeroizing<String> =
-            zeroize::Zeroizing::new(match (&self.password, &self.password_env, &self.password_secret) {
+        let password: Secret =
+            Secret::new(match (&self.password, &self.password_env, &self.password_secret) {
                 (Some(p), None, None) => {
                     static WARNED: std::sync::Once = std::sync::Once::new();
                     WARNED.call_once(|| {
@@ -387,7 +402,7 @@ impl SourceConfig {
                             "source config contains plaintext password -- consider using password_env"
                         );
                     });
-                    resolve_env_vars(p)?
+                    resolve_env_vars(p.expose())?
                 }
                 (None, Some(env), None) => std::env::var(env).map_err(|_| {
                     crate::error::coded(
@@ -399,6 +414,7 @@ impl SourceConfig {
                     )
                 })?,
                 (None, None, Some(secret)) => super::gcp_secret::gcp_secret(secret)?
+                    .expose()
                     .trim_end_matches(['\r', '\n'])
                     .to_string(),
                 (None, None, None) => String::new(),
@@ -423,16 +439,16 @@ impl SourceConfig {
         let user_enc = utf8_percent_encode(user, USERINFO);
         let host = bracket_ipv6(host);
         if password.is_empty() {
-            Ok(format!(
+            Ok(Secret::new(format!(
                 "{}://{}@{}:{}/{}",
                 scheme, user_enc, host, port, database
-            ))
+            )))
         } else {
-            let pw_enc = utf8_percent_encode(password.as_str(), USERINFO);
-            Ok(format!(
+            let pw_enc = utf8_percent_encode(password.expose(), USERINFO);
+            Ok(Secret::new(format!(
                 "{}://{}:{}@{}:{}/{}",
                 scheme, user_enc, pw_enc, host, port, database
-            ))
+            )))
         }
     }
 
@@ -444,7 +460,10 @@ impl SourceConfig {
 
     /// [`Self::state_key`], or why this config names no source.
     pub fn try_state_key(&self) -> crate::error::Result<String> {
-        Ok(source_state_key(self.source_type, &self.resolve_url()?))
+        Ok(source_state_key(
+            self.source_type,
+            self.resolve_url()?.expose(),
+        ))
     }
 
     /// The `search_path` this source's URL sets, which decides the schema an unqualified name is read from; empty when it sets none.
@@ -452,13 +471,13 @@ impl SourceConfig {
         match self.source_type {
             SourceType::Postgres => self
                 .resolve_url()
-                .map(|u| url_search_path(&u))
+                .map(|u| url_search_path(u.expose()))
                 .unwrap_or_default(),
             _ => String::new(),
         }
     }
 
-    pub fn resolve_url(&self) -> crate::error::Result<String> {
+    pub fn resolve_url(&self) -> crate::error::Result<Secret> {
         if self.has_url_fields() && self.has_structured_fields() {
             return Err(mixed_connection_methods());
         }
@@ -485,7 +504,7 @@ impl SourceConfig {
             Secret(&'a str),
         }
         let (raw, source) = match (&self.url, &self.url_env, &self.url_file, &self.url_secret) {
-            (Some(u), None, None, None) => (u.clone(), UrlSource::InlineYaml),
+            (Some(u), None, None, None) => (u.expose().to_string(), UrlSource::InlineYaml),
             (None, Some(env), None, None) => (
                 std::env::var(env).map_err(|_| {
                     crate::error::coded(
@@ -514,7 +533,7 @@ impl SourceConfig {
                 UrlSource::File(file),
             ),
             (None, None, None, Some(secret)) => (
-                super::gcp_secret::gcp_secret(secret)?.trim().to_string(),
+                super::gcp_secret::gcp_secret(secret)?.expose().trim().to_string(),
                 UrlSource::Secret(secret),
             ),
             _ => crate::config_bail!(crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
@@ -568,7 +587,7 @@ impl SourceConfig {
             );
         }
 
-        Ok(resolved)
+        Ok(Secret::new(resolved))
     }
 }
 
@@ -994,7 +1013,7 @@ mod tests {
         src.url_secret = Some("projects/p/secrets/url-of-test".into());
         assert!(src.has_url_fields() && !src.has_structured_fields());
         assert_eq!(
-            src.resolve_url().unwrap(),
+            src.resolve_url().unwrap().expose(),
             "postgresql://u:p@db.host:5432/app"
         );
         src.host = Some("h".into());
@@ -1006,7 +1025,7 @@ mod tests {
         src.user = Some("u".into());
         src.database = Some("app".into());
         src.password_secret = Some("projects/p/secrets/pw-of-test".into());
-        let url = src.resolve_url().unwrap();
+        let url = src.resolve_url().unwrap().expose().to_string();
         assert!(url.contains(":s3cret@db.host"), "{url}");
     }
 
@@ -1018,7 +1037,10 @@ mod tests {
         std::fs::write(&file, "  postgresql://db.host:5432/app\n").unwrap();
         let mut src = make_source(SourceType::Postgres);
         src.url_file = Some(file.to_string_lossy().into_owned());
-        assert_eq!(src.resolve_url().unwrap(), "postgresql://db.host:5432/app");
+        assert_eq!(
+            src.resolve_url().unwrap().expose(),
+            "postgresql://db.host:5432/app"
+        );
         src.url_file = Some(dir.path().join("absent.url").to_string_lossy().into_owned());
         let err = src.resolve_url().unwrap_err().to_string();
         assert!(
@@ -1081,14 +1103,18 @@ mod tests {
             src.url = Some(raw.into());
             let (redacted, flag) = src.redact_for_artifact();
             assert!(flag, "a masked password is flagged: {raw}");
-            assert_eq!(redacted.url.as_deref(), Some(want), "{raw}");
+            assert_eq!(
+                redacted.url.as_ref().map(|u| u.expose()),
+                Some(want),
+                "{raw}"
+            );
         }
         let mut src = make_source(SourceType::Postgres);
         src.url = Some("host=/var/run/postgresql user=u dbname=d".into());
         let (kept, flag) = src.redact_for_artifact();
         assert!(!flag, "nothing to mask, nothing flagged");
         assert_eq!(
-            kept.url.as_deref(),
+            kept.url.as_ref().map(|u| u.expose()),
             Some("host=/var/run/postgresql user=u dbname=d")
         );
     }
@@ -1111,7 +1137,7 @@ mod tests {
         src.url = Some("postgresql://user:hunter2@db.example.com:5432/app".into());
         let (redacted, flag) = src.redact_for_artifact();
         assert!(flag, "URL redaction flagged");
-        let url = redacted.url.unwrap();
+        let url = redacted.url.unwrap().expose().to_string();
         assert!(!url.contains("hunter2"), "password must not appear: {url}");
         assert!(url.contains("REDACTED"), "placeholder must appear: {url}");
         assert!(url.contains("@db.example.com"), "host retained: {url}");
@@ -1131,7 +1157,7 @@ mod tests {
         src.url = Some("postgresql://user@db.example.com:5432/app".into());
         let (redacted, flag) = src.redact_for_artifact();
         assert!(flag, "bare user@ is still userinfo and gets redacted");
-        let url = redacted.url.unwrap();
+        let url = redacted.url.unwrap().expose().to_string();
         assert!(url.contains("REDACTED"), "userinfo replaced: {url}");
         assert!(!url.contains("user@"), "bare username removed: {url}");
     }
@@ -1153,7 +1179,7 @@ mod tests {
         src.url = Some("mysql://root:pass@127.0.0.1:3306/mydb".into());
         let (redacted, flag) = src.redact_for_artifact();
         assert!(flag);
-        let url = redacted.url.unwrap();
+        let url = redacted.url.unwrap().expose().to_string();
         assert!(url.contains("REDACTED"), "{url}");
         assert!(!url.contains("pass"), "{url}");
     }
@@ -1167,7 +1193,7 @@ mod tests {
         src.user = Some("alice".into());
         src.database = Some("warehouse".into());
         src.port = Some(5433);
-        let url = src.resolve_url().unwrap();
+        let url = src.resolve_url().unwrap().expose().to_string();
         assert_eq!(url, "postgresql://alice@pg.internal:5433/warehouse");
     }
 
@@ -1177,7 +1203,7 @@ mod tests {
         src.host = Some("my.internal".into());
         src.user = Some("bob".into());
         src.database = Some("orders".into());
-        let url = src.resolve_url().unwrap();
+        let url = src.resolve_url().unwrap().expose().to_string();
         assert_eq!(url, "mysql://bob@my.internal:3306/orders");
     }
 
@@ -1250,7 +1276,7 @@ mod tests {
     fn resolve_url_direct_url_passthrough() {
         let mut src = make_source(SourceType::Postgres);
         src.url = Some("postgresql://carol@pg.example.com:5432/db".into());
-        let url = src.resolve_url().unwrap();
+        let url = src.resolve_url().unwrap().expose().to_string();
         assert_eq!(url, "postgresql://carol@pg.example.com:5432/db");
     }
 
@@ -1303,7 +1329,7 @@ mod tests {
             let mut src = make_source(SourceType::Postgres);
             src.url = Some(url.into());
             let (redacted, flag) = src.redact_for_artifact();
-            let out = redacted.url.unwrap();
+            let out = redacted.url.unwrap().expose().to_string();
             assert!(flag, "{url} must be flagged");
             assert!(!out.contains(secret), "{secret} leaked: {out}");
             assert!(out.contains("db.example.com"), "host kept: {out}");
@@ -1334,7 +1360,11 @@ mod tests {
         src.url = Some("postgresql://rivet:p@ssw0rd@db.example.com:5432/orders".into());
         let (redacted, flag) = src.redact_for_artifact();
         assert!(flag, "URL with userinfo must be flagged as redacted");
-        let url = redacted.url.expect("url retained after redaction");
+        let url = redacted
+            .url
+            .expect("url retained after redaction")
+            .expose()
+            .to_string();
         assert!(
             !url.contains("ssw0rd"),
             "password tail after embedded @ must not leak into artifact: {url}"
@@ -1370,7 +1400,11 @@ mod tests {
         src.user = Some("rivet".into());
         src.password = Some("pa/s:s@w?rd#x".into());
         src.database = Some("orders".into());
-        let url = src.resolve_url().expect("url built from fields");
+        let url = src
+            .resolve_url()
+            .expect("url built from fields")
+            .expose()
+            .to_string();
         assert!(
             !url.contains("pa/s:s@w?rd#x"),
             "raw password with delimiters must not appear un-encoded: {url}"
@@ -1394,7 +1428,11 @@ mod tests {
         src.user = Some(r"dom\svc".into());
         src.password = Some("p:a/s@s?w#d!%x".into());
         src.database = Some("rivet".into());
-        let url = src.resolve_url().expect("mssql url built from fields");
+        let url = src
+            .resolve_url()
+            .expect("mssql url built from fields")
+            .expose()
+            .to_string();
         let parsed =
             crate::source::mssql::parse_mssql_url(&url).expect("built mssql url must parse back");
         assert_eq!(parsed.user, r"dom\svc", "user round-trips");
@@ -1414,10 +1452,14 @@ mod tests {
         src.user = Some("app@x".into());
         src.password = Some("p:a/s@s?w#d!%x".into());
         src.database = Some("FREEPDB1".into());
-        let url = src.resolve_url().expect("oracle url built from fields");
+        let url = src
+            .resolve_url()
+            .expect("oracle url built from fields")
+            .expose()
+            .to_string();
         let parsed = crate::source::oracle::parse_oracle_url(&url).expect("it parses back");
         assert_eq!(parsed.user, "app@x");
-        assert_eq!(parsed.password, "p:a/s@s?w#d!%x");
+        assert_eq!(parsed.password.expose(), "p:a/s@s?w#d!%x");
         assert_eq!(parsed.service, "FREEPDB1");
     }
 }

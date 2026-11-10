@@ -7,14 +7,14 @@ use super::*;
 fn src_with_password(password: Option<&str>, url: Option<&str>) -> SourceConfig {
     SourceConfig {
         source_type: SourceType::Postgres,
-        url: url.map(String::from),
+        url: url.map(Into::into),
         url_env: None,
         url_file: None,
         url_secret: None,
         host: Some("db.example.com".into()),
         port: Some(5432),
         user: Some("rivet".into()),
-        password: password.map(String::from),
+        password: password.map(Into::into),
         password_env: Some("DB_PASSWORD".into()),
         password_secret: None,
         database: Some("prod".into()),
@@ -49,7 +49,7 @@ fn redact_password_embedded_in_url() {
     );
     let (safe, redacted) = src.redact_for_artifact();
     assert!(redacted);
-    let url = safe.url.unwrap();
+    let url = safe.url.unwrap().expose().to_string();
     assert!(
         !url.contains("s3cret"),
         "plaintext password must not remain: {url}"
@@ -70,7 +70,7 @@ fn redact_url_without_userinfo_is_unchanged() {
     let (safe, redacted) = src.redact_for_artifact();
     assert!(!redacted, "no secrets → no redaction flag");
     assert_eq!(
-        safe.url.as_deref(),
+        safe.url.as_ref().map(|u| u.expose()),
         Some("postgresql://db.example.com:5432/prod")
     );
 }
@@ -118,7 +118,7 @@ fn redact_does_not_confuse_at_in_path() {
     let (safe, redacted) = src.redact_for_artifact();
     assert!(!redacted);
     assert_eq!(
-        safe.url.as_deref(),
+        safe.url.as_ref().map(|u| u.expose()),
         Some("postgresql://db.example.com/prod?filter=a@b")
     );
 }
@@ -307,4 +307,36 @@ exports:
         msg.contains("non-loopback"),
         "expected the non-loopback exfil rejection, got: {msg}"
     );
+}
+
+#[test]
+fn a_resolved_url_of_every_engine_prints_no_credential() {
+    for (source_type, url) in [
+        (
+            SourceType::Postgres,
+            "postgresql://rivet:hunter2@db:5432/prod",
+        ),
+        (SourceType::Mysql, "mysql://rivet:hunter2@db:3306/prod"),
+        (SourceType::Mssql, "sqlserver://rivet:hunter2@db:1433/prod"),
+        (
+            SourceType::Oracle,
+            "oracle://rivet:hunter2@db:1521/FREEPDB1",
+        ),
+        (SourceType::Mongo, "mongodb://rivet:hunter2@db:27017/prod"),
+    ] {
+        let mut src = src_with_password(None, Some(url));
+        src.source_type = source_type;
+        (src.host, src.port, src.user, src.password_env, src.database) =
+            (None, None, None, None, None);
+        let resolved = src.resolve_url().expect("url resolves");
+        assert_eq!(resolved.expose(), url);
+        for text in [
+            format!("{resolved}"),
+            format!("{resolved:?}"),
+            format!("{src:?}"),
+            format!("{src:#?}"),
+        ] {
+            assert!(!text.contains("hunter2"), "{url}: {text}");
+        }
+    }
 }

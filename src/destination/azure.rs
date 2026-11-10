@@ -154,19 +154,15 @@ pub type AzureDestination = CloudDestination<AzureBackend>;
 /// Zero-sized backend marker carrying Azure's operator construction.
 pub struct AzureBackend;
 
-/// Read a credential from an env var into a `Zeroizing<String>`.
-///
-/// SecOps: same treatment as `S3Destination::read_credential_env` — the
-/// underlying heap buffer is zeroed on drop. OpenDAL stores its own copy
-/// inside reqsign; this wrapper only protects our transient handle.
-fn read_credential_env(env_name: &str, label: &str) -> Result<zeroize::Zeroizing<String>> {
+/// Read a credential from an env var into a [`crate::secret::Secret`].
+fn read_credential_env(env_name: &str, label: &str) -> Result<crate::secret::Secret> {
     let value = std::env::var(env_name).map_err(|_| {
         crate::error::coded(
             crate::error::codes::CONFIG_SECRET_UNSET,
             format!("env var '{}' not set for Azure {}", env_name, label),
         )
     })?;
-    Ok(zeroize::Zeroizing::new(value))
+    Ok(crate::secret::Secret::new(value))
 }
 
 impl CloudBackend for AzureBackend {
@@ -216,7 +212,7 @@ impl CloudBackend for AzureBackend {
             } => {
                 builder = builder.account_name(&account_name);
                 let key = read_credential_env(&key_env, "account key")?;
-                builder = builder.account_key(key.as_str());
+                builder = builder.account_key(key.expose());
             }
             DestinationCredential::AzureSas {
                 account_name,
@@ -224,7 +220,7 @@ impl CloudBackend for AzureBackend {
             } => {
                 builder = builder.account_name(&account_name);
                 let raw = read_credential_env(&sas_env, "SAS token")?;
-                let token = raw.trim_start_matches('?');
+                let token = raw.expose().trim_start_matches('?');
                 enforce_sas_expiry(token)?;
                 builder = builder.sas_token(token);
             }

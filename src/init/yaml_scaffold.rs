@@ -860,7 +860,9 @@ fn load_block_lines(
             })
     };
     if let (Some(url), Some(database)) = (
-        dest.clickhouse_url.as_deref(),
+        dest.clickhouse_url
+            .as_ref()
+            .map(crate::secret::Secret::expose),
         dest.clickhouse_database.as_deref(),
     ) {
         if let Some(lines) = refused("clickhouse") {
