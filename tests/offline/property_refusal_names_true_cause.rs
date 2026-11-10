@@ -24,7 +24,9 @@ const R_STATE_UNREAD: &str = "2026-11-10: validate never opens the state, so ove
 const R_COPY_EMPTY: &str = "2026-11-10: state copy reads a corrupt SQLite state as empty and stops RIVET_STATE_COPY_SOURCE_EMPTY; closes when the copy opens the file through the corrupt-state check";
 const R_WORDING_GONE: &str = "2026-11-10: the lost-checkpoint remedy leads with a bare `run the export again` while exit 5 tells a scheduler not to retry; closes when the remedy names the operator's decision first or the exit becomes retryable";
 const R_FIELD_MONGO: &str = "2026-11-10: mongo accepts batch_size 0, an empty or NUL destination path and a 300-char export name with exit 0; closes when each is refused at config load";
-
+const R_READER_CODE: &str = "2026-11-10: metrics and journal repeat a stopped run's words without the code the run printed; closes when the run history records the refusal code beside its text";
+const R_WORD_CLASSIFY: &str = "2026-11-10: a missing MySQL table named after a classifier word is refused as that word's cause (STATEMENT_TIMEOUT for `max_execution_time`); closes when the classifier reads the server's error number, not words that echo the relation name";
+const R_PREFIX_GONE: &str = "2026-11-10: validate answers exit 0 when the prefix of a recorded delivery is removed; closes when validate refuses a recorded delivery whose prefix holds no manifest";
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
 const ACCEPTED_RED: &[(&str, &str)] = &[
     ("cause/RIVET_SOURCE_CONNECT_FAILED/mongo", R_CONNECT),
@@ -99,6 +101,68 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     ("remedy/RIVET_PLAN_ARTIFACT_STALE", R_REMEDY_FORCE),
     ("source/RIVET_VERIFY_*", R_VERIFY),
     ("source/RIVET_VALUE_TOO_LARGE", R_PREFIX),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/postgres/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/postgres/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/postgres/journal",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mysql/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mysql/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mysql/journal",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mssql/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mssql/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mssql/journal",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/oracle/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/oracle/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/oracle/journal",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_COLLECTION_NOT_FOUND/mongo/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_COLLECTION_NOT_FOUND/mongo/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_COLLECTION_NOT_FOUND/mongo/journal",
+        R_READER_CODE,
+    ),
+    ("word/max_execution_time/mysql", R_WORD_CLASSIFY),
+    ("guard/validate/prefix_gone/*", R_PREFIX_GONE),
 ];
 
 /// Cell families only the live mode emits; their ledger entries are not stale in an offline run.
@@ -1814,6 +1878,14 @@ fn needles() -> BTreeSet<String> {
     out
 }
 
+/// Whether a name passes the `table:` identifier gate (src/config/export.rs).
+fn identifier(name: &str) -> bool {
+    let mut c = name.chars();
+    c.next()
+        .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
+}
+
 /// Whether a needle can be spelled as a quoted relation name on every engine.
 fn portable(needle: &str) -> bool {
     needle.len() >= 3
@@ -1856,6 +1928,15 @@ fn stand_axes(e: SourceType, docs: &BTreeMap<String, Doc>, out: &mut Vec<(String
             out.push((
                 key,
                 Verdict::NotGraded("not a portable quoted relation name".to_string()),
+            ));
+            continue;
+        }
+        if e == SourceType::Mongo && !identifier(&name) {
+            out.push((
+                key,
+                Verdict::NotGraded(
+                    "a MongoDB `table:` takes identifier segments only and has no `query:`; the config refuses this name before the reader".to_string(),
+                ),
             ));
             continue;
         }

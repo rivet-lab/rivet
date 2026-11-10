@@ -119,6 +119,12 @@ def run_live() -> list[str]:
     return lines
 
 
+def merge_live(offline: list[str], live: list[str]) -> list[str]:
+    """The offline lines without the `cause/X/-` stand line of a code the live rows grade per engine, then the live rows."""
+    graded = {VERDICT.match(ln).group(1).rsplit("/", 1)[0] + "/-" for ln in live}
+    return [ln for ln in offline if VERDICT.match(ln).group(1) not in graded] + live
+
+
 def self_test() -> int:
     """Checks the line grammar, the counts and the live grading on synthetic input."""
     ok = f"{MATRIX} cause/RIVET_X/postgres PASS exit=1 \"Error: [RIVET_X] m\""
@@ -139,6 +145,10 @@ def self_test() -> int:
     listing = "a::b::t_one: test\nc::t_one: test\nd::t_two: test\n2 tests, 0 benchmarks\n"
     assert test_paths(listing) == {"t_one": ["a::b::t_one", "c::t_one"], "t_two": ["d::t_two"]}, test_paths(listing)
     assert cause_key("refusal_source_cdc_grants_changed", "mysql") == "cause/RIVET_SOURCE_CDC_GRANTS_CHANGED/mysql"
+    stand = f"{MATRIX} cause/RIVET_A/- NOT_GRADED needs the live stand; sabotage row refusal_a injects it"
+    other = f"{MATRIX} cause/RIVET_B/- NOT_GRADED needs the live stand; no sabotage row refusal_b"
+    row = f"{MATRIX} cause/RIVET_A/postgres PASS t: test result: ok. 1 passed"
+    assert merge_live([ok, stand, other], [row]) == [ok, other, row]
     print("refusal_names_true_cause self-test ok")
     return 0
 
@@ -152,7 +162,7 @@ def main(argv: list[str]) -> int:
         return 2
     lines = run_offline(argv[1] == "live")
     if argv[1] == "live":
-        lines += run_live()
+        lines = merge_live(lines, run_live())
     print("\n".join(lines))
     print(summary(lines))
     return 0
