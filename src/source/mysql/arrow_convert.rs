@@ -2027,17 +2027,20 @@ mod roast_mysql_bit_decode_tests {
     #[test]
     fn a_uuid_override_refuses_a_value_it_cannot_parse_instead_of_nulling_it() {
         let fsb = DataType::FixedSizeBinary(16);
-        for (label, (def, bytes)) in [("text", v_bytes(b"not-a-uuid")), ("int", v_int(7))] {
+        for (label, code, (def, bytes)) in [
+            (
+                "text",
+                "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
+                v_bytes(b"not-a-uuid"),
+            ),
+            ("int", "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", v_int(7)),
+        ] {
             let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
             let err = build_array(&fsb, 0, &rows, false, "u", None).unwrap_err();
             let coded = err
                 .downcast_ref::<crate::error::CodedError>()
                 .expect("coded");
-            assert_eq!(
-                coded.code(),
-                "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
-                "{label}"
-            );
+            assert_eq!(coded.code(), code, "{label}");
             assert!(
                 err.to_string().contains("column `u` is declared uuid"),
                 "{label}: {err}"
