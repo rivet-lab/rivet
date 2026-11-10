@@ -5393,9 +5393,37 @@ seeds:
       postgres:
         na: "PostgreSQL refuses a nanosecond override with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (live check_override_wire cells a_nanosecond_timestamp_override_is_refused_by_the_wire_check_postgres), so no value reaches a nanosecond builder"
       mysql:
-        na: "MySQL has no nanosecond builder: a timestamp_ns override stops the run with RIVET_INTERNAL_TYPE_BUILDER before any value is read, so no value reaches a nanosecond builder"
+        na: "MySQL has no nanosecond builder: a timestamp_ns override is refused at the schema stage with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any value is read (seed override-without-builder-internal-stop), so no value reaches a nanosecond builder"
       mongo:
         na: "a document source has no declared column wire type and no builder takes a nanosecond override"
+  - name: override-without-builder-internal-stop
+    class: "a `columns:` override the source reader cannot build (a nanosecond timestamp on MySQL, a value of another wire type on SQL Server, a decimal past precision 38 on SQL Server or Oracle) stops the run as RIVET_INTERNAL_TYPE_BUILDER exit 6, which the gate reads as a rivet bug, instead of the coded usage refusal RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1"
+    history: "2026-11-08 gate d6581394: the MySQL cell a_first_cdc_run_refused_after_its_anchor_releases_it_mysql graded exit 6 as the expected refusal and the run-integrity invariant failed on RIVET_INTERNAL_; 20 of 160 MySQL and 169 of 272 SQL Server override-by-column runs stopped that way on main"
+    scope: source
+    engines:
+      mysql:
+        patch: override-without-builder-internal-stop/mysql.patch
+        cells:
+          - a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql
+          - a_nanosecond_timestamp_override_is_refused_on_an_empty_source_mysql
+          - a_first_cdc_run_refused_after_its_anchor_releases_it_mysql
+          - "lib:the_mysql_schema_stage_refuses_a_nanosecond_override"
+      mssql:
+        patch: override-without-builder-internal-stop/mssql.patch
+        cells:
+          - a_value_the_declared_type_cannot_read_is_refused_not_an_internal_stop_mssql
+          - "lib:no_override_over_any_wire_value_ends_as_an_internal_stop"
+          - "lib:a_foreign_cell_in_a_native_column_is_an_internal_stop"
+          - "lib:the_mssql_schema_stage_refuses_a_wide_decimal_override"
+      oracle:
+        patch: override-without-builder-internal-stop/oracle.patch
+        cells:
+          - a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle
+          - "lib:the_oracle_schema_stage_refuses_a_wide_decimal_override"
+      postgres:
+        na: "the PostgreSQL converter raises RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH for any builder or target mismatch at its invariant guard, so no override reaches an internal stop (survey: 0 of 272 runs)"
+      mongo:
+        na: "a document source has no declared column wire type and takes no columns override"
   - name: oracle-timestamp-ns-undeclared-truncated
     class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
     history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"
