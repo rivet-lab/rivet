@@ -545,6 +545,7 @@ struct Harness<'a> {
     apply: Box<dyn Fn(&Path) -> Output + 'a>,
     cdc: Option<CallFn<'a>>,
     init: Option<CallFn<'a>>,
+    stream: bool,
     export: Option<String>,
     config: PathBuf,
 }
@@ -664,11 +665,12 @@ fn pre_args(pre: &str, export: Option<&str>, plan: &Path) -> Vec<String> {
     v
 }
 
-/// Whether the cell's harness can drive `pre`: an init cell drives init alone, a CDC cell adds `rivet cdc`.
+/// Whether the cell's harness can drive `pre`: an init cell drives init alone, a CDC cell adds `rivet cdc` and drops the batch-only plan.
 fn drives(h: &Harness, pre: &str) -> bool {
     match pre {
         "init" => h.init.is_some(),
         "cdc" => h.cdc.is_some() && h.init.is_none(),
+        "plan" => !h.stream && h.init.is_none(),
         _ => h.init.is_none(),
     }
 }
@@ -752,13 +754,18 @@ fn rig_harness<'a>(rig: &'a Rig, extra: &[(String, String)], all: bool) -> Harne
         apply: Box::new(move |p| rig.apply_env(p, &[], &env_refs(&e3))),
         cdc: None,
         init: None,
+        stream: false,
     }
 }
 
 /// [`rig_harness`] with `rivet cdc` over the rig's own stream as a second pre-run.
 fn cdc_harness(rig: &Rig) -> Harness<'_> {
     let mut h = rig_harness(rig, &[], false);
-    h.cdc = Some(Box::new(move || rig.cli_cdc_raw(true, &[])));
+    let own = rig.checkpoint().with_file_name("cdc-cli.ckpt");
+    h.stream = true;
+    h.cdc = Some(Box::new(move || {
+        rig.cli_cdc_raw(false, &["--checkpoint", &own.display().to_string()])
+    }));
     h
 }
 
@@ -804,6 +811,7 @@ fn raw_harness_in(
         apply: Box::new(move |p| go3(vec!["apply".into(), p.to_str().unwrap().into()])),
         cdc: None,
         init: None,
+        stream: false,
     }
 }
 
@@ -1498,6 +1506,7 @@ fn init_harness<'a>(table: &str, url: &str, dir: &Path, fallback: &'a Rig) -> Ha
         }),
         apply: Box::new(|_: &Path| -> Output { unreachable!("an init cell drives init alone") }),
         cdc: None,
+        stream: false,
         init: Some(Box::new(move || {
             rivet_command(
                 &[
@@ -1639,7 +1648,10 @@ fn run_cdc_scenario_cell(
             &format!("no fixture: {why}"),
         );
     }
-    let h = cdc_harness(&sc.rig);
+    let mut h = cdc_harness(&sc.rig);
+    if lost {
+        h.cdc = None;
+    }
     let expect = if lost { Expect::Refuse } else { Expect::Pass };
     for (pair, o, ev) in grade_cell(&h, expect, codes) {
         emit(rows, &format!("{key}/{pair}"), o, &ev);
