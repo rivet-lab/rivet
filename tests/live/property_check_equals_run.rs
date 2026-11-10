@@ -1,4 +1,4 @@
-//! Property P3: every pre-run command passes only what `run` (or `apply`) will do; one generated matrix, graded by exit class and registry code.
+//! Property check_equals_run: every pre-run command passes only what `run` (or `apply`) will do; one generated matrix, graded by exit class and registry code.
 
 use crate::common::*;
 use rivet::config::{ExportMode, SourceType};
@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-const MATRIX: &str = "check-equals-run";
+const MATRIX: &str = "check_equals_run";
 
 const R_WRAP: &str = "2026-11-08: doctor and plan wrap a stop in their own code where run names it; closes when each passes the stop's code through";
 const R_CODES: &str = "2026-11-08: check and run name one stop with two codes; closes when both read the stop from one seam";
@@ -445,7 +445,7 @@ fn show(v: &Verdict) -> String {
     format!("exit={} code={}", v.exit, v.code.as_deref().unwrap_or("-"))
 }
 
-/// The P3 verdict of one pre-run command against its executor.
+/// The verdict of one pre-run command against its executor.
 fn grade(
     pre: &Verdict,
     exec: &Verdict,
@@ -545,10 +545,17 @@ struct Pair {
     exec: &'static str,
 }
 
-/// The role of a top-level command; an unclassified command fails the matrix loudly.
-fn pair_of(cmd: &str) -> Vec<Pair> {
-    match cmd {
-        "check" => vec![
+/// What the matrix does with one leaf of the CLI tree: grade it as pre-run pairs, or print why it has none.
+enum Role {
+    Pairs(Vec<Pair>),
+    Unpaired(&'static str),
+}
+
+/// The role of one leaf command (`state reset-chunks`); an unclassified leaf fails the matrix loudly.
+fn role_of(leaf: &str) -> Role {
+    const STATE: &str = "state reads or edits the state DB, not an export's pre-run; its lifecycle rows need a lease fixture";
+    match leaf {
+        "check" => Role::Pairs(vec![
             Pair {
                 pre: "check",
                 exec: "run",
@@ -557,40 +564,66 @@ fn pair_of(cmd: &str) -> Vec<Pair> {
                 pre: "check-strict",
                 exec: "run",
             },
-        ],
-        "doctor" => vec![Pair {
+        ]),
+        "doctor" => Role::Pairs(vec![Pair {
             pre: "doctor",
             exec: "run",
-        }],
-        "plan" => vec![Pair {
+        }]),
+        "plan" => Role::Pairs(vec![Pair {
             pre: "plan",
             exec: "apply",
-        }],
-        "init" | "run" | "apply" | "load" | "cdc" | "validate" | "compact" | "state"
-        | "completions" | "repair" | "reconcile" | "metrics" | "schema" | "journal" => vec![],
+        }]),
+        "init" => Role::Unpaired(
+            "init writes a config from a catalog read; the generated config is not run by this matrix",
+        ),
+        "validate" => Role::Unpaired(
+            "validate reads a delivery after a run; it has no run to agree with before one",
+        ),
+        "run" | "apply" => Role::Unpaired("the executor side of a pair, not a pre-run command"),
+        "load" => Role::Unpaired(
+            "load writes a warehouse; its adapter executor is not driven by this matrix",
+        ),
+        "cdc" => Role::Unpaired("cdc streams from the source; graded by the CDC suites"),
+        "compact" | "repair" | "reconcile" => {
+            Role::Unpaired("writes or repairs output; no pre-run to agree with")
+        }
+        "completions" | "metrics" | "journal" | "schema config" | "schema cli"
+        | "schema errors" => Role::Unpaired("reads or prints; no pre-run to agree with"),
+        "state show" | "state reset" | "state accept" | "state files" | "state reset-chunks"
+        | "state chunks" | "state progression" | "state runs" | "state finish-run"
+        | "state copy" | "state vacuum" | "state loads" => Role::Unpaired(STATE),
         other => panic!(
-            "rivet {other}: a new command; classify it as a pre-run command or not in pair_of"
+            "rivet {other}: a new command; classify it in role_of as a pre-run pair or with a reason"
         ),
     }
 }
 
-/// The top-level commands of the CLI tree, from `rivet schema cli`.
-fn cli_commands() -> Vec<String> {
+/// The leaf commands of the CLI tree (no subcommands of their own), from `rivet schema cli`.
+fn cli_leaves() -> Vec<String> {
     let out = rivet_command(&["schema", "cli"], &[])
         .output()
         .expect("rivet schema cli");
     assert!(out.status.success(), "rivet schema cli failed");
-    String::from_utf8_lossy(&out.stdout)
+    let all: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| l.strip_prefix("## `rivet "))
         .filter_map(|l| l.strip_suffix('`'))
-        .filter(|c| !c.contains(' '))
         .map(str::to_string)
+        .collect();
+    all.iter()
+        .filter(|c| !all.iter().any(|o| o.starts_with(&format!("{c} "))))
+        .cloned()
         .collect()
 }
 
 fn pairs() -> Vec<Pair> {
-    cli_commands().iter().flat_map(|c| pair_of(c)).collect()
+    cli_leaves()
+        .iter()
+        .flat_map(|c| match role_of(c) {
+            Role::Pairs(p) => p,
+            Role::Unpaired(_) => vec![],
+        })
+        .collect()
 }
 
 fn pre_args(pre: &str, export: &str, plan: &Path) -> Vec<String> {
@@ -652,7 +685,7 @@ fn grade_cell(
         .collect()
 }
 
-const URL_ENV: &str = "PM_P3_URL";
+const URL_ENV: &str = "PM_CHECK_EQUALS_RUN_URL";
 
 /// A harness over a rig whose source URL travels in the environment, so a sealed plan can be applied.
 fn rig_harness(rig: Rig) -> Harness {
@@ -687,7 +720,7 @@ fn raw_harness(yaml: String, dir: PathBuf, url: Option<String>) -> Harness {
     let go = std::rc::Rc::new(go);
     let (go2, go3) = (go.clone(), go.clone());
     Harness {
-        export: "pm_p3".into(),
+        export: "pm_check_equals_run".into(),
         config,
         cli: Box::new(move |args| {
             let mut v: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -701,7 +734,7 @@ fn raw_harness(yaml: String, dir: PathBuf, url: Option<String>) -> Harness {
                     "--config".into(),
                     c2.to_str().unwrap().into(),
                     "--export".into(),
-                    "pm_p3".into(),
+                    "pm_check_equals_run".into(),
                 ],
                 &d2,
             )
@@ -724,7 +757,7 @@ fn raw_query(e: SourceType) -> &'static str {
     match e {
         SourceType::Postgres | SourceType::Mysql | SourceType::Mssql => "query: \"SELECT 1 AS id\"",
         SourceType::Oracle => "query: \"SELECT 1 AS id FROM dual\"",
-        SourceType::Mongo => "table: pm_p3_t",
+        SourceType::Mongo => "table: pm_check_equals_run_t",
     }
 }
 
@@ -737,7 +770,7 @@ fn raw_yaml(e: SourceType, shape: Shape, dir: &Path) -> String {
     let conn = match shape {
         Shape::SecretMalformed => "url_secret: not-a-secret".to_string(),
         Shape::SecretMissing => {
-            "url_secret: projects/pm-p3-nonexistent/secrets/pm-p3-none/versions/latest".to_string()
+            "url_secret: projects/pm-check-equals-run-nonexistent/secrets/pm-check-equals-run-none/versions/latest".to_string()
         }
         Shape::Clean
         | Shape::OverrideRefused
@@ -746,7 +779,7 @@ fn raw_yaml(e: SourceType, shape: Shape, dir: &Path) -> String {
         | Shape::UnknownTable
         | Shape::GrantGap
         | Shape::SecretMock
-        | Shape::UnknownTarget => "url_env: PM_P3_URL".to_string(),
+        | Shape::UnknownTarget => "url_env: PM_CHECK_EQUALS_RUN_URL".to_string(),
     };
     let grants = if shape == Shape::GrantGap {
         "\n  columns_from: grants"
@@ -759,7 +792,7 @@ fn raw_yaml(e: SourceType, shape: Shape, dir: &Path) -> String {
         ""
     };
     format!(
-        "source:\n  type: {}\n  {conn}{grants}\nexports:\n  - name: pm_p3\n    {}\n    mode: full\n    format: parquet{target}\n    destination: {{ type: local, path: \"{}\" }}\n",
+        "source:\n  type: {}\n  {conn}{grants}\nexports:\n  - name: pm_check_equals_run\n    {}\n    mode: full\n    format: parquet{target}\n    destination: {{ type: local, path: \"{}\" }}\n",
         engine_label(e),
         raw_query(e),
         dir.join("out").display()
@@ -863,9 +896,9 @@ fn stand_free(engine: SourceType, shape: Shape) -> bool {
     }
 }
 
-/// The engines this run covers: all, or the one named by `PM_P3_ENGINE`.
+/// The engines this run covers: all, or the one named by `PM_CHECK_EQUALS_RUN_ENGINE`.
 fn selected_engines() -> Vec<SourceType> {
-    let only = std::env::var("PM_P3_ENGINE").ok();
+    let only = std::env::var("PM_CHECK_EQUALS_RUN_ENGINE").ok();
     engines()
         .into_iter()
         .filter(|e| only.as_deref().is_none_or(|o| o == engine_key(*e)))
@@ -918,11 +951,14 @@ fn run_raw_cells(
 
 #[test]
 fn the_axes_come_from_the_code() {
-    let cmds = cli_commands();
+    let leaves = cli_leaves();
     assert!(
-        cmds.iter().any(|c| c == "run") && cmds.iter().any(|c| c == "check"),
-        "{cmds:?}"
+        leaves.iter().any(|c| c == "run") && leaves.iter().any(|c| c == "state reset-chunks"),
+        "{leaves:?}"
     );
+    for leaf in &leaves {
+        role_of(leaf);
+    }
     let pairs: Vec<String> = pairs()
         .iter()
         .map(|p| format!("{}-{}", p.pre, p.exec))
@@ -1039,7 +1075,7 @@ fn live_url(e: SourceType) -> String {
         SourceType::Mysql => MYSQL_URL.to_string(),
         SourceType::Mssql => MSSQL_URL.to_string(),
         SourceType::Oracle => ORACLE_URL.to_string(),
-        SourceType::Mongo => format!("{MONGO_URL}/pm_p3_db"),
+        SourceType::Mongo => format!("{MONGO_URL}/pm_check_equals_run_db"),
     }
 }
 
@@ -1055,8 +1091,8 @@ fn fixture(engine: SourceType, mode: ExportMode) -> Result<Fixture, String> {
         Some(eng) => {
             eng.alive();
             let (table, guard) = match mode {
-                ExportMode::Chunked => eng.range_table("pm_p3_t"),
-                _ => eng.table("pm_p3_t"),
+                ExportMode::Chunked => eng.range_table("pm_check_equals_run_t"),
+                _ => eng.table("pm_check_equals_run_t"),
             };
             eng.insert(&table, 1..=5, 10, Some(3));
             Fixture {
@@ -1067,9 +1103,9 @@ fn fixture(engine: SourceType, mode: ExportMode) -> Result<Fixture, String> {
         }
         None if engine == SourceType::Mongo => {
             require_alive(LiveService::Mongo);
-            let db = unique_name("pm_p3_db");
+            let db = unique_name("pm_check_equals_run_db");
             let m = MongoTest::connect(27017, &db);
-            let table = unique_name("pm_p3_c");
+            let table = unique_name("pm_check_equals_run_c");
             m.seed_int_id(&table, 5);
             Fixture {
                 table,
@@ -1165,8 +1201,8 @@ fn cell_rig(
     slot: &str,
 ) -> Rig {
     let missing = match engine {
-        SourceType::Oracle => "PM_P3_MISSING",
-        _ => "pm_p3_missing",
+        SourceType::Oracle => "PM_CHECK_EQUALS_RUN_MISSING",
+        _ => "pm_check_equals_run_missing",
     };
     let table = match (&fx, shape) {
         (_, Shape::UnknownTable) => missing.to_string(),
@@ -1181,7 +1217,7 @@ fn cell_rig(
     if let (Some(url), true) = (mongo, matches!(mode, ExportMode::Cdc)) {
         rig = rig.source_url(url);
     }
-    let cursor = (shape == Shape::CursorMissing).then_some("pm_p3_missing_col");
+    let cursor = (shape == Shape::CursorMissing).then_some("pm_check_equals_run_missing_col");
     for l in mode_lines(engine, mode, cursor) {
         rig = rig.export_line(&l);
     }
@@ -1226,7 +1262,7 @@ impl Drop for MysqlUser {
 /// A MySQL login that may read only `id` of `table`, with its URL.
 fn mysql_gap(table: &str) -> (String, MysqlUser) {
     use ::mysql::prelude::Queryable;
-    let user = unique_name("pm_p3_u");
+    let user = unique_name("pm_check_equals_run_u");
     let db = MYSQL_URL.rsplit('/').next().unwrap().to_string();
     let mut root = mysql_root_connect();
     root.query_drop(format!("CREATE USER '{user}'@'%' IDENTIFIED BY 'rivet'"))
@@ -1281,7 +1317,7 @@ fn run_rig_cell(
         );
     }
     let out = tempfile::tempdir().expect("out dir");
-    let slot = unique_name("pm_p3_slot");
+    let slot = unique_name("pm_check_equals_run_slot");
     let _slot =
         (e == SourceType::Postgres && m == ExportMode::Cdc).then(|| Slot::new(slot.clone()));
     let h = rig_harness(cell_rig(e, m, s, t, fx.as_ref(), out.path(), &slot));
@@ -1304,7 +1340,7 @@ fn run_mysql_grant_gap(rows: &mut Vec<String>, codes: &BTreeSet<String>) {
     let (url, _user) = mysql_gap(&fx.table);
     let dir = tempfile::tempdir().expect("dir").keep();
     let yaml = format!(
-        "source:\n  type: mysql\n  url_env: PM_P3_URL\n  columns_from: grants\nexports:\n  - name: pm_p3\n    query: \"SELECT * FROM {}\"\n    mode: full\n    format: parquet\n    destination: {{ type: local, path: \"{}\" }}\n",
+        "source:\n  type: mysql\n  url_env: PM_CHECK_EQUALS_RUN_URL\n  columns_from: grants\nexports:\n  - name: pm_check_equals_run\n    query: \"SELECT * FROM {}\"\n    mode: full\n    format: parquet\n    destination: {{ type: local, path: \"{}\" }}\n",
         fx.table,
         dir.join("out").display()
     );
@@ -1348,21 +1384,19 @@ fn the_live_matrix_agrees() {
         run_mysql_grant_gap(&mut rows, &codes);
     }
     run_raw_cells(false, &live_url, &mut rows, &codes);
-    emit(
-        &mut rows,
-        "any/any/any/-/init-run",
-        Outcome::NotGraded,
-        "init writes a config from a catalog read; the generated config is not yet run by this matrix",
-    );
-    emit(
-        &mut rows,
-        "any/any/any/-/validate-run",
-        Outcome::NotGraded,
-        "validate reads a delivery after a run; it has no run to agree with before one",
-    );
+    for leaf in cli_leaves() {
+        if let Role::Unpaired(why) = role_of(&leaf) {
+            emit(
+                &mut rows,
+                &format!("any/any/any/-/{}", leaf.replace(' ', "-")),
+                Outcome::NotGraded,
+                why,
+            );
+        }
+    }
     summary(&rows);
     if let Ok(path) = std::env::var("PM_CHECK_EQUALS_RUN_LOG") {
         std::fs::write(path, rows.join("\n") + "\n").expect("write the verdict log");
     }
-    assert_ledger(&rows, std::env::var("PM_P3_ENGINE").is_err());
+    assert_ledger(&rows, std::env::var("PM_CHECK_EQUALS_RUN_ENGINE").is_err());
 }
