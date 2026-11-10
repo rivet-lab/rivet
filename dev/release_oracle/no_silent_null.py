@@ -63,7 +63,7 @@ LOAD_TARGETS_NOT_GRADED = "load targets that re-type (BigQuery, ClickHouse, Snow
 def _enum_variants(path: str, name: str) -> list[str]:
     """The variant names of `pub enum <name>` in a product source file, snake_cased."""
     text = (ROOT / path).read_text()
-    m = re.search(r"pub enum %s \{(.*?)\n\}" % name, text, re.S)
+    m = re.search(r"pub(?:\([a-z]*\))? enum %s \{(.*?)\n\}" % name, text, re.S)
     if not m:
         raise AssertionError(f"{path}: enum {name} not found: the grid cannot be read from the product")
     body = re.sub(r"///[^\n]*|//[^\n]*", "", m.group(1))
@@ -206,7 +206,7 @@ def _edges_bool(engine: str, native: str, delivery: str) -> list[str]:
 def _edges_text(engine: str, native: str, delivery: str) -> list[str]:
     """Empty, blank, numeric-looking and NULL-looking strings."""
     empty = [] if engine == "oracle" else ["''"]
-    return [*empty, "'a'", "' '", "'12'", "'-5'", "'1.5'", "'NULL'", "'0'"]
+    return [*empty, "'a'", "' '", "'12'", "'-5'", "'1.5'", "'NULL'", "'0'", "'12abc'", "' 42'"]
 
 
 def _edges_other(engine: str, native: str, delivery: str) -> list[str]:
@@ -220,7 +220,32 @@ def _edges_other(engine: str, native: str, delivery: str) -> list[str]:
     if n in ("JSON", "JSONB"):
         cast = "::" + n.lower() if engine == "postgres" else ""
         return [f"'{{}}'{cast}", f"'null'{cast}"]
+    if re.fullmatch(r"(ENUM|SET)\(.*\)", native, re.S):
+        return [f"'{v}'" for v in re.findall(r"'((?:[^'\\]|\\.|'')*)'", native)]
+    if engine == "mysql" and re.fullmatch(r"TIME(\(\d\))?", n):
+        fsp = int((re.search(r"\d", n) or ["0"])[0])
+        frac = lambda d: f".{d * fsp}" if fsp else ""
+        if fsp < 6:
+            return [f"'-00:00:00{frac('5')}'", f"'-838:59:59{frac('0')}'", f"'838:59:59'", f"'-01:02:03{frac('1')}'", "'00:00:00'"]
+        return ["'00:00:00'", "'23:59:59.999999'"]
     return []
+
+
+HOSTILE_LABELS = ("a\\\\b", "l\\nf", "c\\rr", "n\\0l", "\U0001F600", "x\\\\y")
+TIME_WIDTHS = (1, 3, 5)
+
+
+def siblings(engine: str, rows: list[dict]) -> list[dict]:
+    """Ledger-shaped rows derived from the engine's own native types: an ENUM with hostile labels, and one TIME per binlog fraction width."""
+    out = []
+    for r in rows:
+        n = r["native_type"].upper()
+        if engine == "mysql" and n.startswith("ENUM("):
+            labels = ",".join(f"'{v}'" for v in HOSTILE_LABELS)
+            out.append({"native_type": f"ENUM({labels})", "sample": [], "delivery": r["delivery"]})
+        if engine == "mysql" and re.fullmatch(r"TIME(\(\d\))?", n):
+            out += [{"native_type": f"TIME({w})", "sample": [], "delivery": r["delivery"]} for w in TIME_WIDTHS]
+    return list({r["native_type"]: r for r in out}.values())
 
 
 FAMILY_EDGES = {"int": _edges_int, "decimal": _edges_decimal, "float4": _edges_float, "float8": _edges_float, "bool": _edges_bool,
@@ -240,7 +265,8 @@ def edge_literals(engine: str, native: str, delivery: str) -> list[str]:
 def columns(engine: str) -> list[Col]:
     """The seed columns of one SQL engine: every ledger row, its samples and the family edges."""
     cols = []
-    for i, r in enumerate(ledger_rows(engine)):
+    rows = ledger_rows(engine)
+    for i, r in enumerate([*rows, *siblings(engine, rows)]):
         lits = list(dict.fromkeys([*r["sample"], *edge_literals(engine, r["native_type"], r["delivery"])]))
         cols.append(Col(f"c{i:02d}", r["native_type"], r["delivery"], family(r["native_type"], r["delivery"]), tuple(lits)))
     return cols
@@ -287,6 +313,13 @@ def ledger_setup(engine: str) -> list[str]:
 
 _NUM = re.compile(r"[+-]?\d+(\.\d+)?([eE][+-]?\d+)?")
 _STR = re.compile(r"N?'((?:[^']|'')*)'")
+_STR_MYSQL = re.compile(r"'((?:[^'\\]|\\.|'')*)'", re.S)
+_MYSQL_ESC = {"0": "\0", "n": "\n", "r": "\r", "t": "\t", "b": "\b", "Z": "\x1a"}
+_TS_FUNC = re.compile(r"(?:TO_DATE|TO_TIMESTAMP_TZ|TO_TIMESTAMP)\('([^']*)'\s*,\s*'[^']*'\)|(?:DATE|TIMESTAMP) '([^']*)'", re.I)
+_HEX = re.compile(r"0x([0-9A-Fa-f]*)|(?:UNHEX|HEXTORAW)\('([0-9A-Fa-f]*)'\)", re.I)
+_PG_HEX = re.compile(r"'\\x([0-9A-Fa-f]*)'(?:::bytea)?")
+_BITS = re.compile(r"b'([01]+)'")
+_CAST = re.compile(r"('(?:[^']|'')*')::[a-z_]+")
 
 
 def parse_lit(engine: str, lit: str):
@@ -298,8 +331,23 @@ def parse_lit(engine: str, lit: str):
         return Decimal(s)
     if s.upper() in ("TRUE", "FALSE"):
         return s.upper() == "TRUE"
-    m = _STR.fullmatch(s)
-    return m.group(1).replace("''", "'") if m else ...
+    if m := _BITS.fullmatch(s):
+        return Decimal(int(m.group(1), 2))
+    if m := _HEX.fullmatch(s):
+        return bytes.fromhex(m.group(1) or m.group(2) or "")
+    if engine == "postgres" and (m := _PG_HEX.fullmatch(s)):
+        return bytes.fromhex(m.group(1))
+    if m := _TS_FUNC.fullmatch(s):
+        return m.group(1) if m.group(1) is not None else m.group(2)
+    if engine == "postgres" and (m := _CAST.fullmatch(s)):
+        return parse_lit(engine, m.group(1))
+    m = (_STR_MYSQL if engine == "mysql" else _STR).fullmatch(s)
+    if not m:
+        return ...
+    body = m.group(1).replace("''", "'")
+    if engine == "mysql":
+        return re.sub(r"\\(.)", lambda e: _MYSQL_ESC.get(e.group(1), e.group(1)), body, flags=re.S)
+    return body
 
 
 def _num(v):
@@ -894,7 +942,15 @@ def self_test() -> None:
     assert compare("mysql", "-2147483600", "int", "decimal(18,-2)", Decimal("-2147483600")) == "OK"
     assert parse_lit("mysql", "NULL") is None and parse_lit("oracle", "''") is None and parse_lit("mysql", "''") == ""
     assert parse_lit("mysql", "-5") == Decimal(-5) and parse_lit("mysql", "'a''b'") == "a'b" and parse_lit("postgres", "TRUE") is True
-    assert parse_lit("mysql", "UNHEX('00')") is ...
+    assert parse_lit("mysql", "UNHEX('00')") == b"\0" and parse_lit("mysql", "JSON_OBJECT('a',1)") is ...
+    assert parse_lit("mysql", "'a\\\\b'") == "a\\b" and parse_lit("mysql", "'l\\nf'") == "l\nf" and parse_lit("mysql", "'n\\0l'") == "n\0l"
+    assert parse_lit("postgres", "'a\\b'") == "a\\b" and parse_lit("oracle", "TO_DATE('2024-02-29 13:14:15','YYYY-MM-DD HH24:MI:SS')") == "2024-02-29 13:14:15"
+    assert parse_lit("postgres", "'\\x00ff01'::bytea") == b"\x00\xff\x01" and parse_lit("postgres", "'{\"n\":1}'::jsonb") == '{"n":1}' and parse_lit("mysql", "b'101'") == 5
+    sib = {c.native: c for c in columns("mysql")}
+    assert {"TIME(1)", "TIME(3)", "TIME(5)"} <= set(sib) and "'-00:00:00.5'" in sib["TIME(1)"].lits and "'-00:00:00.555'" in sib["TIME(3)"].lits
+    hostile = next(c for n, c in sib.items() if "\U0001F600" in n)
+    assert {parse_lit("mysql", v) for v in hostile.lits} >= {"a\\b", "l\nf", "c\rr", "n\0l", "\U0001F600"}, hostile.lits
+    assert "'12abc'" in edge_literals("mysql", "TEXT", "Utf8") and "' 42'" in edge_literals("mysql", "TEXT", "Utf8")
     assert compare("mysql", "NULL", "int", "float4", None) == "OK"
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", "", csv=True) == NULLED and compare("mysql", "''", "text", "none", "", csv=True) == "OK"
