@@ -1,4 +1,4 @@
-"""P5 oracle: native listings and a whole-directory DuckDB glob grade a stopped run and its re-run, never rivet's manifests or `state show`."""
+"""property_no_debris_after_stop oracle: native listings and a whole-directory DuckDB glob grade a stopped run and its re-run, never rivet's manifests or `state show`."""
 
 from __future__ import annotations
 
@@ -252,7 +252,7 @@ def self_test() -> None:
                 v = grade_with(fake, cell)["verdict"]
                 assert v in (NOT_GRADED, RED), f"{name} oracle gave {v}"
                 assert v != PASS
-    print("no_debris self-test: ok")
+    print("property_no_debris_after_stop self-test: ok")
 
 
 def main(argv: list[str]) -> int:

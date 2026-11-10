@@ -1,4 +1,4 @@
-//! P5 axes (no debris after a stop, and a re-run equals an uninterrupted run): every axis is read from the code, never typed here.
+//! no_debris_after_stop axes (no debris after a stop, and a re-run equals an uninterrupted run): every axis is read from the code, never typed here.
 //! Hooks come from `src/` call sites and the `src/test_hook.rs` table, engines and modes from their enums; per-value data is a `match` with no `_` arm.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -500,17 +500,17 @@ impl Verdict {
     }
 }
 
-/// `P5 <key> <verdict> <evidence>`, one line.
+/// `no_debris_after_stop <key> <verdict> <evidence>`, one line.
 pub fn line(key: &str, v: Verdict, evidence: &str) -> String {
     let one = evidence.replace('\n', " ");
-    format!("P5 {key} {} {one}", v.word())
+    format!("no_debris_after_stop {key} {} {one}", v.word())
 }
 
-/// `P5 SUMMARY pass=.. red=.. not_graded=..`.
+/// `no_debris_after_stop SUMMARY pass=.. red=.. not_graded=..`.
 pub fn summary(verdicts: &[Verdict]) -> String {
     let n = |w| verdicts.iter().filter(|v| **v == w).count();
     format!(
-        "P5 SUMMARY pass={} red={} not_graded={}",
+        "no_debris_after_stop SUMMARY pass={} red={} not_graded={}",
         n(Verdict::Pass),
         n(Verdict::Red),
         n(Verdict::NotGraded)

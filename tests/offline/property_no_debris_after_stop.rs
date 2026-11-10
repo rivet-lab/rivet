@@ -1,9 +1,9 @@
-//! P5 (no debris after a stop, a re-run equals an uninterrupted run): the axes are read from the code and the oracle contract is strict.
+//! no_debris_after_stop (no debris after a stop, a re-run equals an uninterrupted run): the axes are read from the code and the oracle contract is strict.
 
-#[path = "../p5/axes.rs"]
-mod p5_axes;
+#[path = "../live/property_no_debris_after_stop_axes.rs"]
+mod property_no_debris_after_stop_axes;
 
-use p5_axes::*;
+use property_no_debris_after_stop_axes::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -60,7 +60,7 @@ fn the_hook_primitives_are_the_ones_the_scanner_knows() {
     let extra: Vec<_> = in_code.difference(&known).collect();
     assert!(
         extra.is_empty(),
-        "src/test_hook.rs has primitive(s) {extra:?} that P5 has no Kind for: a new way to stop a run is a new axis value"
+        "src/test_hook.rs has primitive(s) {extra:?} that no_debris_after_stop has no Kind for: a new way to stop a run is a new axis value"
     );
     let gone: Vec<_> = known.difference(&in_code).collect();
     assert!(
@@ -131,7 +131,7 @@ fn every_export_mode_has_a_shape() {
     assert_eq!(
         none,
         Vec::<&String>::new(),
-        "export mode(s) have no Shape in p5_axes"
+        "export mode(s) have no Shape in property_no_debris_after_stop_axes"
     );
 }
 
@@ -307,7 +307,7 @@ fn a_sigterm_is_held_to_the_sigkill_of_the_same_point() {
 fn a_verdict_line_and_its_summary_carry_the_counts() {
     assert_eq!(
         line("pg/full/a/fault", Verdict::Red, "x\ny"),
-        "P5 pg/full/a/fault RED x y"
+        "no_debris_after_stop pg/full/a/fault RED x y"
     );
     assert_eq!(
         summary(&[
@@ -316,7 +316,7 @@ fn a_verdict_line_and_its_summary_carry_the_counts() {
             Verdict::Red,
             Verdict::NotGraded
         ]),
-        "P5 SUMMARY pass=1 red=2 not_graded=1"
+        "no_debris_after_stop SUMMARY pass=1 red=2 not_graded=1"
     );
 }
 
@@ -329,7 +329,7 @@ fn the_python_oracle_passes_its_own_self_test() {
             "--quiet",
             "python",
             "-m",
-            "dev.release_oracle.no_debris",
+            "dev.release_oracle.property_no_debris_after_stop",
             "--self-test",
         ])
         .current_dir(root())

@@ -1,11 +1,8 @@
-//! P5 live matrix: a run stopped at every hook of the product, then run again, leaves no debris and delivers what an uninterrupted run delivers.
-//! The axes come from the code (`p5_axes`); the grade is `dev/release_oracle/no_debris.py` (native listings, raw state SQL, a whole-directory DuckDB glob). One line per cell.
+//! Live matrix: a run stopped at every hook, then run again, leaves no debris and delivers what an uninterrupted run does.
 
-#[allow(dead_code)]
-#[path = "../p5/axes.rs"]
-mod p5;
 use crate::common::*;
 use crate::live_sabotage::seeded;
+use crate::property_no_debris_after_stop_axes as axes;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -54,7 +51,11 @@ fn source_ids(engine: SqlEngine, table: &str) -> Vec<i64> {
 fn oracle(verb: &str, spec: &Value) -> Result<String, String> {
     use std::io::Write as _;
     let mut child = std::process::Command::new(oracle_python())
-        .args(["-m", "dev.release_oracle.no_debris", verb])
+        .args([
+            "-m",
+            "dev.release_oracle.property_no_debris_after_stop",
+            verb,
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -105,8 +106,8 @@ fn snapshot(spec: &Value) -> Value {
 }
 
 /// What a snapshot holds of the things a stop may leave.
-fn left_of(snap: &Value) -> p5::Left {
-    p5::Left {
+fn left_of(snap: &Value) -> axes::Left {
+    axes::Left {
         staged: snap["files"]
             .as_object()
             .map_or(0, |f| f.keys().filter(|k| k.ends_with(".tmp")).count()),
@@ -116,14 +117,14 @@ fn left_of(snap: &Value) -> p5::Left {
 }
 
 /// A rig of `shape` over `table` delivering to a local directory.
-fn rig_for(engine: SqlEngine, table: &str, shape: p5::Shape) -> Rig {
+fn rig_for(engine: SqlEngine, table: &str, shape: axes::Shape) -> Rig {
     let (mode, lines) = shape.export().expect("a runnable shape");
     engine.staged(engine.rig(table), mode, lines)
 }
 
 /// The ids an uninterrupted run of `shape` delivers, read from its whole output directory.
-fn clean_ids(engine: SqlEngine, shape: p5::Shape) -> Vec<i64> {
-    let (table, _guard) = seeded(engine, "pm_p5");
+fn clean_ids(engine: SqlEngine, shape: axes::Shape) -> Vec<i64> {
+    let (table, _guard) = seeded(engine, "pm_nodebris");
     let source = source_ids(engine, &table);
     let rig = rig_for(engine, &table, shape);
     rig.run_ok();
@@ -161,14 +162,14 @@ fn gone(run: &mut Spawned<'_>) -> bool {
 }
 
 /// Start the run armed to park at `hook`, wait until it waits there, send `how`, reap it.
-fn parked_and_signalled(rig: &Rig, hook: &p5::Hook, how: p5::Stop) -> Result<(), String> {
+fn parked_and_signalled(rig: &Rig, hook: &axes::Hook, how: axes::Stop) -> Result<(), String> {
     let marker_dir = tempfile::tempdir().expect("a marker dir outside the destination");
     let marker = marker_dir.path().join("window");
     let marker_text = marker.display().to_string();
     let armed = hook.armed(PARK_MS);
     let mut envs: Vec<(&str, &str)> = vec![(hook.kind.env(), &armed)];
     match hook.kind {
-        p5::Kind::PauseAt => envs.push(("RIVET_TEST_PAUSE_MARKER", &marker_text)),
+        axes::Kind::PauseAt => envs.push(("RIVET_TEST_PAUSE_MARKER", &marker_text)),
         _ => envs.push(("RIVET_TEST_BLOCK_MS", PARK_MS)),
     }
     let mut run = rig.spawn_args_env(&[], &envs);
@@ -179,7 +180,7 @@ fn parked_and_signalled(rig: &Rig, hook: &p5::Hook, how: p5::Stop) -> Result<(),
             return Err(format!("the run ended before it parked at {}", hook.name));
         }
         let ready = match hook.kind {
-            p5::Kind::PauseAt => marker.exists(),
+            axes::Kind::PauseAt => marker.exists(),
             _ => {
                 let seen = format!(
                     "{:?}/{}/{}",
@@ -211,9 +212,9 @@ fn parked_and_signalled(rig: &Rig, hook: &p5::Hook, how: p5::Stop) -> Result<(),
         return Err(format!("the run ended while parked at {}", hook.name));
     }
     let sig = match how {
-        p5::Stop::Kill => libc::SIGKILL,
-        p5::Stop::Term => libc::SIGTERM,
-        p5::Stop::Fault => unreachable!("a fault is not a signal"),
+        axes::Stop::Kill => libc::SIGKILL,
+        axes::Stop::Term => libc::SIGTERM,
+        axes::Stop::Fault => unreachable!("a fault is not a signal"),
     };
     let rc = unsafe { libc::kill(run.id() as i32, sig) };
     if rc != 0 {
@@ -225,14 +226,14 @@ fn parked_and_signalled(rig: &Rig, hook: &p5::Hook, how: p5::Stop) -> Result<(),
 /// One cell: stop, snapshot, run again, grade. Returns the verdict, its evidence and what the stop left.
 fn grade_cell(
     engine: SqlEngine,
-    cell: &p5::Cell,
-    clean: &mut BTreeMap<p5::Shape, Vec<i64>>,
-) -> (p5::Verdict, String, Option<p5::Left>) {
+    cell: &axes::Cell,
+    clean: &mut BTreeMap<axes::Shape, Vec<i64>>,
+) -> (axes::Verdict, String, Option<axes::Left>) {
     let clean_set = clean
         .entry(cell.shape)
         .or_insert_with(|| clean_ids(engine, cell.shape))
         .clone();
-    let (table, _guard) = seeded(engine, "pm_p5");
+    let (table, _guard) = seeded(engine, "pm_nodebris");
     let source = source_ids(engine, &table);
     let rig = rig_for(engine, &table, cell.shape);
     let base = spec(&rig, &table, &source);
@@ -241,7 +242,7 @@ fn grade_cell(
     let mut note = String::new();
     let mut rerun = true;
     match cell.stop {
-        p5::Stop::Fault => {
+        axes::Stop::Fault => {
             let armed = cell.hook.armed("0");
             let out = rig.run_with_envs(&[(cell.hook.kind.env(), &armed)]);
             let said = String::from_utf8_lossy(&out.stderr);
@@ -249,7 +250,7 @@ fn grade_cell(
                 out.status.code() == Some(70) || said.contains(&format!("'{}", cell.hook.name));
             if !reached {
                 return (
-                    p5::Verdict::NotGraded,
+                    axes::Verdict::NotGraded,
                     format!(
                         "hook not reached on this shape, run exited {:?}",
                         out.status.code()
@@ -262,9 +263,9 @@ fn grade_cell(
                 note = "fault retried through, no re-run; ".into();
             }
         }
-        p5::Stop::Term | p5::Stop::Kill => {
+        axes::Stop::Term | axes::Stop::Kill => {
             if let Err(why) = parked_and_signalled(&rig, &cell.hook, cell.stop) {
-                return (p5::Verdict::NotGraded, why, None);
+                return (axes::Verdict::NotGraded, why, None);
             }
         }
     }
@@ -277,7 +278,7 @@ fn grade_cell(
     let mut again = String::new();
     let mut tail = String::new();
     if rerun {
-        let resume: &[&str] = if matches!(cell.shape, p5::Shape::Range | p5::Shape::Keyset) {
+        let resume: &[&str] = if matches!(cell.shape, axes::Shape::Range | axes::Shape::Keyset) {
             &["--resume"]
         } else {
             &[]
@@ -311,11 +312,11 @@ fn grade_cell(
     grade["before"] = before;
     grade["clean_ids"] = json!(clean_set);
     let (verdict, evidence) =
-        p5::oracle_verdict(oracle("grade", &grade).as_deref().map_err(String::clone));
+        axes::oracle_verdict(oracle("grade", &grade).as_deref().map_err(String::clone));
     match (verdict, again.is_empty()) {
-        (p5::Verdict::NotGraded, _) => (verdict, evidence, Some(left)),
+        (axes::Verdict::NotGraded, _) => (verdict, evidence, Some(left)),
         (_, false) => (
-            p5::Verdict::Red,
+            axes::Verdict::Red,
             format!("{held}; {again}; {evidence}"),
             Some(left),
         ),
@@ -338,38 +339,38 @@ fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
 /// Every cell of `engine`: one line each, the SIGTERM-versus-SIGKILL comparison, a summary; any RED fails the test.
 fn matrix(engine: SqlEngine, name: &str) {
     engine.alive();
-    let only = std::env::var("RIVET_P5_CELLS").ok();
-    let all = p5::cells(Path::new(env!("CARGO_MANIFEST_DIR")), &[name.to_string()]);
+    let only = std::env::var("RIVET_NO_DEBRIS_AFTER_STOP_CELLS").ok();
+    let all = axes::cells(Path::new(env!("CARGO_MANIFEST_DIR")), &[name.to_string()]);
     let mut verdicts = vec![];
     let mut reds = vec![];
     let mut clean = BTreeMap::new();
-    let mut pairs: BTreeMap<String, (Option<p5::Left>, Option<p5::Left>)> = BTreeMap::new();
+    let mut pairs: BTreeMap<String, (Option<axes::Left>, Option<axes::Left>)> = BTreeMap::new();
     for cell in all
         .iter()
         .filter(|c| only.as_deref().is_none_or(|o| c.key().contains(o)))
     {
         let (verdict, evidence, left) = match cell.not_graded() {
-            Some(why) => (p5::Verdict::NotGraded, why, None),
+            Some(why) => (axes::Verdict::NotGraded, why, None),
             None => catch_unwind(AssertUnwindSafe(|| grade_cell(engine, cell, &mut clean)))
                 .unwrap_or_else(|p| {
                     (
-                        p5::Verdict::NotGraded,
+                        axes::Verdict::NotGraded,
                         format!("the cell could not run: {}", panic_text(&p)),
                         None,
                     )
                 }),
         };
-        let line = p5::line(&cell.key(), verdict, &evidence);
+        let line = axes::line(&cell.key(), verdict, &evidence);
         println!("{line}");
-        if verdict == p5::Verdict::Red {
+        if verdict == axes::Verdict::Red {
             reds.push(line);
         }
         verdicts.push(verdict);
         let group = format!("{}/{}/{}", cell.engine, cell.shape.label(), cell.hook.name);
         match cell.stop {
-            p5::Stop::Term => pairs.entry(group).or_default().0 = left,
-            p5::Stop::Kill => pairs.entry(group).or_default().1 = left,
-            p5::Stop::Fault => {}
+            axes::Stop::Term => pairs.entry(group).or_default().0 = left,
+            axes::Stop::Kill => pairs.entry(group).or_default().1 = left,
+            axes::Stop::Fault => {}
         }
     }
     for (group, pair) in pairs {
@@ -377,21 +378,25 @@ fn matrix(engine: SqlEngine, name: &str) {
             continue;
         };
         let key = format!("{group}/sigterm_vs_sigkill");
-        let line = match p5::term_worse_than_kill(term, kill) {
+        let line = match axes::term_worse_than_kill(term, kill) {
             Some(why) => {
-                let line = p5::line(&key, p5::Verdict::Red, &why);
+                let line = axes::line(&key, axes::Verdict::Red, &why);
                 reds.push(line.clone());
-                verdicts.push(p5::Verdict::Red);
+                verdicts.push(axes::Verdict::Red);
                 line
             }
             None => {
-                verdicts.push(p5::Verdict::Pass);
-                p5::line(&key, p5::Verdict::Pass, "SIGTERM left no more than SIGKILL")
+                verdicts.push(axes::Verdict::Pass);
+                axes::line(
+                    &key,
+                    axes::Verdict::Pass,
+                    "SIGTERM left no more than SIGKILL",
+                )
             }
         };
         println!("{line}");
     }
-    println!("{}", p5::summary(&verdicts));
+    println!("{}", axes::summary(&verdicts));
     assert!(
         reds.is_empty(),
         "{} RED cell(s):\n{}",
