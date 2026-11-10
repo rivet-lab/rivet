@@ -413,6 +413,11 @@ SEEDED_ARGS ?=
 open-defects:  ## Every open_defect_ live cell against its line in dev/release_oracle/known_red.py; CI does not run these cells, so run this after a fixture or harness change.
 	$(LIVE) $(PY) -m dev.release_oracle.open_defects
 
+.PHONY: property-no-debris-after-stop
+property-no-debris-after-stop:  ## Property matrix P5: every engine x shape x hook x stop, then a re-run; no debris and the re-run equals an uninterrupted run. One verdict line per cell; RIVET_NO_DEBRIS_AFTER_STOP_CELLS=<substring> narrows it. Takes one live slot.
+	cargo test --test offline_suite property_no_debris_after_stop
+	$(LIVE) cargo nextest run --test live_suite --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_no_debris_after_stop::/)'
+
 .PHONY: evidence-record evidence-report
 evidence-record:  ## Record the last nextest run's green live cells (target/nextest/default/junit.xml) in docs/evidence/last-green.yaml. EVIDENCE_BY=local|gate|nightly|ci.
 	$(PY) dev/pytools/evidence.py record --junit target/nextest/default/junit.xml --by $(or $(EVIDENCE_BY),local)
