@@ -378,7 +378,7 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_LOAD_SPLIT_GENERATIONS_MIXED", Inj::Stand),
     ("RIVET_LOAD_SPEC_MISSING", Inj::Stand),
     ("RIVET_MCP_REQUEST_INVALID", Inj::Stand),
-    ("RIVET_PLAN_ARTIFACT_INVALID", Inj::Stand),
+    ("RIVET_PLAN_ARTIFACT_INVALID", Inj::Offline(plan_garbage)),
     ("RIVET_PLAN_CHUNK_KEY_UNUSABLE", Inj::Stand),
     ("RIVET_STATE_BACKEND_FAILED", Inj::Stand),
     ("RIVET_STATE_FILE_CORRUPT", Inj::Offline(state_corrupt)),
@@ -741,6 +741,33 @@ fn state_unwritable(e: SourceType) -> Probe {
     p
 }
 
+fn plan_garbage(_e: SourceType) -> Probe {
+    artifact("not json at all")
+}
+
+/// `rivet apply p.json` over a plan file with the given bytes.
+fn artifact(body: &str) -> Probe {
+    Probe {
+        yaml: String::new(),
+        argv: cmd(&["apply", "p.json"]),
+        env: vec![],
+        files: vec![("p.json", body.to_string())],
+        witness: vec!["p.json".to_string()],
+        absent: vec![],
+    }
+}
+
+/// Plan files `rivet plan` never wrote, each refused as an invalid artifact.
+const ARTIFACTS: &[(&str, &str)] = &[
+    ("empty", ""),
+    ("empty_object", "{}"),
+    ("array", "[]"),
+    ("truncated", "{\"rivet_version\": \"0."),
+    ("yaml", "source:\n  type: postgres\nexports: []\n"),
+    ("null", "null"),
+    ("nul_bytes", "\0\0\0"),
+];
+
 /// A refusal-by-design cause with no registry code: clap's own usage errors.
 const UNCODED: &[(&str, &[&str])] = &[
     ("unknown_flag", &["check", "--no-such-flag-pm-p4"]),
@@ -1062,6 +1089,12 @@ fn offline_axes(
             };
             out.push((format!("cmd/{sub}/{id}/{eng}"), verdict(v)));
         }
+        let mut q = p.clone();
+        q.argv = cmd(&["apply", "CFG"]);
+        out.push((
+            format!("cmd/apply/{id}/{eng}"),
+            verdict(grade(id, doc, &q, &execute(&q))),
+        ));
     }
 }
 
@@ -1206,6 +1239,18 @@ fn grade(id: &str, doc: &Doc, p: &Probe, o: &Out) -> Result<String, String> {
         return Err(format!("{why} in \"{}\"", brief(section)));
     }
     Ok(format!("exit={} \"{}\"", o.exit, brief(section)))
+}
+
+/// Grades a run against whatever registry code it printed: documented, in its exit set, naming the witness.
+fn grade_coded(docs: &BTreeMap<String, Doc>, p: &Probe, o: &Out) -> Result<String, String> {
+    let section = error_section(&o.stderr).unwrap_or("");
+    let Some(id) = printed_code(section) else {
+        return grade("RIVET_?", &doc_exit(&[]), p, o);
+    };
+    let Some(doc) = docs.get(id) else {
+        return Err(format!("printed {id}, absent from errors.md"));
+    };
+    grade(id, doc, p, o)
 }
 
 /// The first message-shape fault in a refusal: a Rust Debug repr or an equal `N exceeds N` pair.
@@ -1714,6 +1759,27 @@ fn cells() -> Vec<(String, Verdict)> {
         };
         out.push((key, verdict(grade_remedy(&site, &subs))));
     }
+    let invalid = "RIVET_PLAN_ARTIFACT_INVALID";
+    let doc = docs.get(invalid).expect("plan artifact code in errors.md");
+    for (variant, body) in ARTIFACTS {
+        let p = artifact(body);
+        out.push((
+            format!("artifact/{variant}"),
+            verdict(grade(invalid, doc, &p, &execute(&p))),
+        ));
+        let mut q = p.clone();
+        q.argv.insert(1, "--json-errors".to_string());
+        out.push((
+            format!("artifact-json/{variant}"),
+            verdict(grade_json(invalid, &execute(&q))),
+        ));
+    }
+    let mut gone = artifact("");
+    gone.files = vec![];
+    out.push((
+        "artifact/absent".to_string(),
+        verdict(grade_coded(&docs, &gone, &execute(&gone))),
+    ));
     for (name, argv) in UNCODED {
         let p = Probe {
             yaml: String::new(),
