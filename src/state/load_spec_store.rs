@@ -16,6 +16,8 @@ pub struct LoadSpecColumn {
     pub nullable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finer_than_microsecond: bool,
 }
 
 impl LoadSpecColumn {
@@ -28,7 +30,14 @@ impl LoadSpecColumn {
             fidelity: m.fidelity,
             nullable: m.nullable,
             warnings: m.warnings.clone(),
+            finer_than_microsecond: false,
         }
+    }
+
+    /// This column, marked as one the source declares finer than a microsecond when `finer` names it.
+    pub fn marked_finer(mut self, finer: &[String]) -> Self {
+        self.finer_than_microsecond = finer.contains(&self.name);
+        self
     }
 
     /// The mapping this column stands for, its Arrow type re-derived from the Rivet type.
@@ -57,6 +66,17 @@ pub struct LoadSpec {
     pub run_id: Option<String>,
     pub origin: String,
     pub captured_at: String,
+}
+
+impl LoadSpec {
+    /// The recorded columns the source declares finer than a microsecond.
+    pub fn finer_than_microsecond_columns(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .filter(|c| c.finer_than_microsecond)
+            .map(|c| c.name.clone())
+            .collect()
+    }
 }
 
 impl StateStore {
@@ -355,6 +375,7 @@ mod tests {
 
     fn col(name: &str, rivet_type: RivetType) -> LoadSpecColumn {
         LoadSpecColumn {
+            finer_than_microsecond: false,
             name: name.into(),
             source_type: "native".into(),
             rivet_type,

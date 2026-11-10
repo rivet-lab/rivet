@@ -40,6 +40,9 @@ pub struct TypeReportRow {
     /// Materialization / load-schema hint (L5) to recover the native type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cast_sql: Option<String>,
+    /// How the column lands against what a load key or order needs of it.
+    #[serde(skip)]
+    pub key_landing: crate::load::key_admission::KeyLanding,
 }
 
 /// One export's type-report data — or, for a multiplex `tables:` CDC export, ONE
@@ -469,6 +472,7 @@ pub struct CapturedUnit {
     pub table: Option<String>,
     pub mappings: Vec<crate::types::TypeMapping>,
     pub primary_key: Option<Vec<String>>,
+    pub finer_than_microsecond: Vec<String>,
 }
 
 /// Capture from the source, at run time, everything `rivet load` later plans from without it.
@@ -506,13 +510,65 @@ pub fn capture_load_units(
                 }),
                 None => None,
             };
+            let finer_than_microsecond = match unit.relation.as_deref() {
+                Some(relation) => {
+                    src.finer_than_microsecond_columns(relation)
+                        .unwrap_or_else(|e| {
+                            log::warn!(
+                                "export '{}': could not read the sub-microsecond columns of \
+                             `{relation}`: {e:#}",
+                                export.name
+                            );
+                            Vec::new()
+                        })
+                }
+                None => Vec::new(),
+            };
             Ok(CapturedUnit {
                 table: unit.table,
                 mappings,
                 primary_key,
+                finer_than_microsecond,
             })
         })
         .collect()
+}
+
+/// Refuses an incremental export whose load orders or keys by a column that lands inexactly, from what the source resolves now.
+pub(crate) fn refuse_inexact_load_keys(
+    config: &Config,
+    export: &ExportConfig,
+    column_overrides: &ColumnOverrides,
+    config_dir: &std::path::Path,
+    params: Option<&std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    let mode = crate::plan::load_settings::load_mode_of(config, export);
+    if config.load.is_none() || mode != crate::plan::load_settings::LoadMode::Incremental {
+        return Ok(());
+    }
+    for unit in capture_load_units(config, export, column_overrides, config_dir, params)? {
+        let Some(load) =
+            crate::plan::load_settings::effective_load(config, export, unit.table.as_deref())
+        else {
+            continue;
+        };
+        let pk: Vec<String> = match &load.pk {
+            crate::config::load::KeyColumns::Columns(cols) => cols.clone(),
+            crate::config::load::KeyColumns::Auto => unit.primary_key.clone().unwrap_or_default(),
+            crate::config::load::KeyColumns::None => Vec::new(),
+        };
+        crate::load::key_admission::admit_load_keys(
+            &export.name,
+            mode,
+            crate::plan::build::continued_key(config, export).or(export.cursor_column.as_deref()),
+            &pk,
+            &crate::load::key_admission::landings_of_mappings(
+                &unit.mappings,
+                &unit.finer_than_microsecond,
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 /// #32 (column-applicability): downgrade every overridden column whose override
@@ -573,7 +629,12 @@ fn collect_one(
 ) -> Result<ExportTypeReport> {
     let mappings = probe_mappings(src, query, column_overrides)?;
     Ok(report_from_mappings(
-        export, table, mappings, policy, target,
+        export,
+        table,
+        mappings,
+        policy,
+        target,
+        &[],
     ))
 }
 
@@ -598,6 +659,7 @@ pub fn report_from_mappings(
     mappings: Vec<crate::types::TypeMapping>,
     policy: &TypePolicy,
     target: Option<ExportTarget>,
+    finer_than_microsecond: &[String],
 ) -> ExportTypeReport {
     let mut violations = policy.validate(&mappings);
 
@@ -668,6 +730,10 @@ pub fn report_from_mappings(
                 target_note,
                 autoload_type,
                 cast_sql,
+                key_landing: crate::load::key_admission::KeyLanding::of(
+                    m,
+                    finer_than_microsecond.contains(&m.column_name),
+                ),
             }
         })
         .collect();
@@ -1504,6 +1570,7 @@ exports:
     #[test]
     fn col_width_short_values_returns_minimum_8() {
         let row = TypeReportRow {
+            key_landing: Default::default(),
             column: "a".into(),
             source_type: "b".into(),
             rivet_type: "c".into(),
@@ -1524,6 +1591,7 @@ exports:
     fn the_target_table_renders_the_typed_target_and_autoload() {
         use crate::types::target::BqType;
         let row = TypeReportRow {
+            key_landing: Default::default(),
             column: "payload".into(),
             source_type: "jsonb".into(),
             rivet_type: "json".into(),
@@ -1595,6 +1663,7 @@ exports:
     #[test]
     fn col_width_long_value_returns_that_length() {
         let row = TypeReportRow {
+            key_landing: Default::default(),
             column: "a_very_long_column_name".into(),
             source_type: "int8".into(),
             rivet_type: "int8".into(),

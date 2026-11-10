@@ -477,6 +477,11 @@ pub trait Source: Send {
         None
     }
 
+    /// The `datetime2` / `datetimeoffset` / `TIMESTAMP` columns of `table` the catalog declares finer than a microsecond; empty where the engine has none.
+    fn finer_than_microsecond_columns(&mut self, _table: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// The primary key columns of `table` in key order; `None` when it has none
     /// or the engine cannot tell.
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {

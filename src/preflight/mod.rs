@@ -531,6 +531,13 @@ pub fn check(
             config_dir,
             params,
         )?;
+        type_report::refuse_inexact_load_keys(
+            &config,
+            export,
+            &column_overrides,
+            config_dir,
+            params,
+        )?;
     }
 
     // Whether the check ends clean (no strict failure, no target-fail column).
@@ -750,6 +757,7 @@ pub fn load_type_reports(
             match state.load_spec(&export.name, unit.as_deref(), &source) {
                 Ok(Some(spec)) if !spec.columns.is_empty() => {
                     let mappings = spec.columns.iter().map(|c| c.to_mapping()).collect();
+                    let finer = spec.finer_than_microsecond_columns();
                     if let Some(pk) = spec.primary_key {
                         keys.insert((export.name.clone(), unit.clone()), pk);
                     }
@@ -759,6 +767,7 @@ pub fn load_type_reports(
                         mappings,
                         &policy,
                         Some(target),
+                        &finer,
                     ));
                 }
                 Ok(_) => failures.push(format!(
@@ -1137,6 +1146,7 @@ mod tests {
     fn failing_table_report(export: &str, table: &str, n: usize) -> type_report::ExportTypeReport {
         let columns = (0..n)
             .map(|i| type_report::TypeReportRow {
+                key_landing: Default::default(),
                 column: format!("c{i}"),
                 source_type: "-".into(),
                 rivet_type: "-".into(),
@@ -1367,6 +1377,7 @@ mod tests {
                 Some("orders"),
                 "",
                 &[crate::state::LoadSpecColumn {
+                    finer_than_microsecond: false,
                     name: "id".into(),
                     source_type: "bigint".into(),
                     rivet_type: crate::types::RivetType::Int64,

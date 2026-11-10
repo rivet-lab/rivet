@@ -378,6 +378,12 @@ CDC (change streams) emits the same two-column shape prefixed with the
    `timestamp_ns` (the cursor literal then carries all 9 digits), a `datetime2(6)`
    (or coarser) cursor, or an integer/identity cursor.
 
+   **Primary key of an incremental or CDC load:** a `datetime2(7)` / `datetimeoffset(7)` (or Oracle `TIMESTAMP(7..9)` read as `timestamp`) key column
+   lands at microseconds, so two rows that differ only below a microsecond would collapse into one row of the current-state view.
+   `rivet load` and `rivet check` refuse it with `RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT` (exit 5) until `timestamp_ns` / `timestamp_tz_ns` is declared or a `pk:` that
+   does not depend on it is named; parts already extracted hold microseconds, so run `rivet state reset --export <name>` and the export again before the reload. A table already loaded keeps its column type: drop its change log and view first.
+   A cursor that lands as text (a bare Oracle `NUMBER`) is refused the same way for an incremental load: declare `int64` or `decimal(p,s)`.
+
 (MySQL `DECIMAL` now resolves its precision/scale from the wire column
 definition — no override needed; see the MySQL section.)
 

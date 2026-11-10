@@ -19,6 +19,7 @@ pub(crate) mod bq_rest;
 pub mod cdc;
 mod clickhouse;
 pub mod compact;
+pub mod key_admission;
 pub(crate) mod ledger;
 pub mod orchestrate;
 pub(crate) mod part_pos;
