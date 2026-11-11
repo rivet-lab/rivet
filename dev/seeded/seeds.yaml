@@ -5756,6 +5756,74 @@ seeds:
       oracle:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
 
+  - name: seek-literal-typed-by-value
+    class: "a boundary literal of a keyset, range, split or incremental seek is typed from the VALUE (a non-ASCII value is a Unicode literal) instead of from the key column, so on a SQL Server varchar key the page is ordered by the column collation and sought by Unicode rules: rows lost or repeated at a page boundary, exit 0"
+    history: "found 2026-11-11 (the escape_mssql_literal ponytail note); RED on main 2026-11-11: a varchar key of a, e-acute+quote+z, e-acute-a, e-acute-z, e-acute-a, e-acute-b, z read 4 of 7 rows under parallel, incremental and keyset_incremental (rig oracle: source-only e-acute-a, e-acute-a, e-acute-b)"
+    scope: source
+    engines:
+      mssql:
+        patch: seek-literal-typed-by-value/mssql.patch
+        cells: [keyset_over_an_mssql_varchar_key_reads_every_key_under_the_default_sql_collation, parallel_keyset_over_an_mssql_varchar_key_reads_every_non_ascii_key_once, incremental_over_an_mssql_varchar_cursor_takes_every_later_non_ascii_key_once, keyset_incremental_over_an_mssql_varchar_key_takes_every_later_non_ascii_key_once, order_equals_seek_mssql, "lib:a_non_ascii_mssql_boundary_takes_the_keys_own_type"]
+      postgres:
+        na: "a PostgreSQL boundary is one E-string literal for every value, untyped, so the server resolves it to the key column type; order_equals_seek_postgres grades it"
+      mysql:
+        na: "a MySQL cursor is a bound parameter and a range or split boundary a quoted literal, both converted to the key column charset and collation by the server; order_equals_seek_mysql grades it"
+      oracle:
+        na: "an Oracle cursor is a bind converted to the key column type and a range boundary a quoted literal, never typed by value; order_equals_seek_oracle grades it"
+      mongo:
+        na: "MongoDB keyset paging is not a SQL path"
+
+  - name: pg-test-decoding-header-cut-at-first-separator
+    class: "the PostgreSQL CDC reader cuts a `test_decoding` line at the first `: ` instead of at the operation: a schema, table or column name holding `: ` drops every change of the table, the slot advances and the run exits 0 with rows 0"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P1a); RED on main: the relation `s: x.orders` delivers 0 of 2 source rows, rig oracle COUNT(*) source 2 delivered 0"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-test-decoding-header-cut-at-first-separator/postgres.patch
+        cells: [pg_cdc_a_relation_name_holding_colon_space_is_delivered_not_dropped, "lib:a_relation_holding_colon_space_is_cut_at_the_operation", "lib:a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered"]
+      mysql:
+        na: "MySQL row events carry typed cells by ordinal; there is no text line to cut"
+      mssql:
+        na: "SQL Server change-table rows are typed driver columns; there is no text line to cut"
+      mongo:
+        na: "MongoDB change events are BSON documents; there is no text line to cut"
+      oracle:
+        na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
+
+  - name: pg-test-decoding-column-name-cut-at-bracket
+    class: "the PostgreSQL CDC reader reads a column name up to the first `[` and its type up to the first `]:`: a column name holding `[` or `]:` is delivered under the wrong name, with the wrong value, or as a NULL key on a delete"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P1b); RED on main: a table with columns k[1 and a[b]:c delivers 2 rows where the source holds 1, rig oracle COUNT(*) source 1 delivered 2"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-test-decoding-column-name-cut-at-bracket/postgres.patch
+        cells: [pg_cdc_column_names_holding_brackets_are_delivered_under_their_own_names, "lib:hostile_column_names_come_back_whole", "lib:a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered"]
+      mysql:
+        na: "MySQL row events carry typed cells by ordinal; there is no text line to cut"
+      mssql:
+        na: "SQL Server change-table rows are typed driver columns; there is no text line to cut"
+      mongo:
+        na: "MongoDB change events are BSON documents; there is no text line to cut"
+      oracle:
+        na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
+
+  - name: pg-bit-literal-delivered-as-server-text
+    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text is `110`, with exit 0 (batch refuses these columns with RIVET_TYPE_UNSAFE_MAPPING)"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P2); RED on main: the run exits 0 and delivers B'110', rig oracle VALUES differing column(s) flags, vb"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-bit-literal-delivered-as-server-text/postgres.patch
+        cells: [pg_cdc_a_bit_column_is_refused_not_delivered_as_the_decoders_literal, pg_cdc_a_bit_column_refusal_precedes_the_snapshot_and_leaves_only_a_failure_record, pg_cdc_a_bit_column_refusal_remedy_delivers_the_rows_the_refused_run_held, "lib:the_catalog_check_names_exactly_the_bit_typed_columns"]
+      mysql:
+        na: "MySQL BIT(n) is decoded from a typed binlog cell as an integer (mysql type_bit cell), never read from a decoder's text literal"
+      mssql:
+        na: "SQL Server BIT is a typed driver column, never read from a decoder's text literal"
+      mongo:
+        na: "MongoDB has no bit string type and change events are BSON documents"
+      oracle:
+        na: "Oracle has no bit string type and its change rows are typed LogMiner columns"
+
   - name: load-key-landed-type-not-admitted
     class: "the keyed load admits its order and key columns by name alone, so an incremental cursor that lands as text (an Oracle bare NUMBER) is ranked as a string by the current-state view (99 stays after 100), and a primary-key column the source declares finer than a microsecond (an MSSQL datetime2(7)) lands at microseconds and collapses rows into one, both with exit 0"
     history: "hunt axis 1 claims 1 and 2, RED on main 2026-11-10: Oracle (2,99) to (2,100) left 99 in the view with exit 0; MSSQL rows at .1234561 and .1234569 gave one view row"
@@ -5833,3 +5901,23 @@ seeds:
           - "lib:a_remote_plaintext_url_is_refused_when_the_client_is_built"
           - "lib:a_remote_plaintext_webhook_is_refused_before_any_request"
           - "lib:a_remote_plaintext_api_endpoint_is_refused"
+
+  - name: mongo-id-types-mixed-under-a-keyed-view
+    class: a MongoDB CDC export whose keyed `load:` block merges on the flat `_id` column is accepted over `_id` values of more than one BSON type, so the current-state view merges distinct documents and a delete of one removes the other
+    history: "H5-F7 (2026-11-10): RED on main c13bc29c on Mongo 4.4, 5.0 and 8.0 into ClickHouse (8 source documents, 4 view rows; a delete of string `1` tombstoned key `1` and removed the live int 1; exit 0 with only a WARN)"
+    scope: source
+    patch: mongo-id-types-mixed-under-a-keyed-view/mongo.patch
+    engines:
+      postgres:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mysql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mssql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      oracle:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mongo:
+        cells:
+          - a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write
+          - a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type
+          - "lib:a_second_type_is_refused_and_not_recorded"

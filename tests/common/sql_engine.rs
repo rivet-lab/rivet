@@ -191,7 +191,7 @@ impl SqlEngine {
     }
 
     /// `text` as a string literal of this engine (`NULL` for none).
-    fn text_literal(self, text: Option<&str>) -> String {
+    pub fn text_literal(self, text: Option<&str>) -> String {
         let Some(text) = text else {
             return "NULL".to_string();
         };

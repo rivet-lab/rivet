@@ -1269,10 +1269,9 @@ fn mssql_cdc_case_only_table_mismatch_must_not_silently_drop_events() {
 
     let anchor = run_rivet_env(&["run", "--config", cfg.to_str().unwrap()], &[]);
     if !anchor.status.success() {
-        let why = String::from_utf8_lossy(&anchor.stderr);
-        assert!(
-            why.contains("no configured table matches"),
-            "the anchor run failed for an unrelated reason:\n{why}"
+        assert_refused(
+            &anchor,
+            Refused::by_code("RIVET_CONFIG_CDC_CAPTURE_INSTANCE_MISMATCH", 1),
         );
         return;
     }
@@ -1285,6 +1284,10 @@ fn mssql_cdc_case_only_table_mismatch_must_not_silently_drop_events() {
 
     let o = run_rivet_env(&["run", "--config", cfg.to_str().unwrap()], &[]);
     if !o.status.success() {
+        assert_refused(
+            &o,
+            Refused::by_code("RIVET_CONFIG_CDC_CAPTURE_INSTANCE_MISMATCH", 1),
+        );
         return;
     }
 

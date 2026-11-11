@@ -42,8 +42,12 @@ mod memory_throttle_wiring;
 mod one_sanitizer_guard;
 #[path = "offline/property_no_debris_after_stop.rs"]
 mod property_no_debris_after_stop;
+#[path = "offline/property_no_silent_null_cloud_legs.rs"]
+mod property_no_silent_null_cloud_legs;
 #[path = "offline/renderer_locality_guard.rs"]
 mod renderer_locality_guard;
+#[path = "offline/seek_order_matrix.rs"]
+mod seek_order_matrix;
 #[path = "offline/skip_is_not_a_pass_guard.rs"]
 mod skip_is_not_a_pass_guard;
 #[path = "offline/tls_ca_file_sole_anchor.rs"]
@@ -61,6 +65,8 @@ mod capture_markers;
 mod cdc_cli_claims_checkpoint;
 #[path = "offline/cdc_cli_surface_guard.rs"]
 mod cdc_cli_surface_guard;
+#[path = "offline/mongo_keyed_id_types_refusal.rs"]
+mod mongo_keyed_id_types_refusal;
 
 #[path = "offline/cdc_evidence_matrix_guard.rs"]
 mod cdc_evidence_matrix_guard;
@@ -145,6 +151,8 @@ mod scheduler_contract;
 
 #[path = "offline/cli_flag_coverage_guard.rs"]
 mod cli_flag_coverage_guard;
+#[path = "offline/compatibility_doc_guard.rs"]
+mod compatibility_doc_guard;
 #[path = "offline/compose_image_pins_guard.rs"]
 mod compose_image_pins_guard;
 #[path = "offline/error_code_ratchet.rs"]

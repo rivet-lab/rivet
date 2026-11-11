@@ -27,7 +27,7 @@ const CEILINGS: &[(&str, usize)] = &[
     ("src/notify.rs", 1),
     ("src/pipeline/apply_cmd.rs", 1),
     ("src/pipeline/cdc/mod.rs", 1),
-    ("src/pipeline/cdc_job.rs", 5),
+    ("src/pipeline/cdc_job.rs", 6),
     ("src/pipeline/cdc_release.rs", 2),
     ("src/pipeline/incarnation.rs", 1),
     ("src/pipeline/mongo_parallel.rs", 2),

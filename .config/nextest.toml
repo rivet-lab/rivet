@@ -24,6 +24,10 @@ filter = 'test(/^property_no_debris_after_stop::no_debris_and_an_equal_rerun_aft
 slow-timeout = { period = "300s", terminate-after = 24 }
 
 [[profile.default.overrides]]
+filter = 'test(/^seek_order_matrix::/)'
+slow-timeout = { period = "300s", terminate-after = 12 }
+
+[[profile.default.overrides]]
 filter = 'test(/^live_cdc_mssql::/) or test(/^live_cdc_harm::a_mssql/)'
 slow-timeout = { period = "120s", terminate-after = 4 }
 
@@ -60,10 +64,6 @@ slow-timeout = { period = "900s", terminate-after = 4 }
 [[profile.default.overrides]]
 filter = 'test(=property_refusal_names_true_cause::every_refusal_is_coded_and_names_the_true_cause)'
 slow-timeout = { period = "900s", terminate-after = 2 }
-
-[profile.ci]
-retries = 1
-fail-fast = false
 
 [[profile.default.overrides]]
 filter = 'test(/^soak_spill::/)'
