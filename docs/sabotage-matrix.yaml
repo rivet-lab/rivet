@@ -1236,11 +1236,11 @@ scenarios:
     oracle:   { na: "a SQL keyset key is read and compared by its column type; the type-bracketed `$gt` seek is MongoDB's" }
 
   - id: refusal_source_id_types_mixed
-    what: "RIVET_SOURCE_ID_TYPES_MIXED: a MongoDB `mode: cdc` export whose `load:` declares key columns and whose collection holds `_id` values of more than one BSON type, at the snapshot, at the stream open, on a change of a second type, or at `rivet load`"
+    what: "RIVET_SOURCE_ID_TYPES_MIXED: a MongoDB `mode: cdc` export whose `load:` keys the view (key columns, or the default `pk: auto` that resolves to `_id`) and whose collection holds `_id` values of more than one BSON type, at the snapshot, at the stream open, on a change of a second type, or at `rivet load`"
     postgres: { na: "a SQL key column has one declared type; a MongoDB `_id` can hold any BSON type per document" }
     mysql:    { na: "a SQL key column has one declared type; a MongoDB `_id` can hold any BSON type per document" }
     mssql:    { na: "a SQL key column has one declared type; a MongoDB `_id` can hold any BSON type per document" }
-    mongo:    { gap: "asserted by its code and exit class on a live stand (live_clickhouse_load: a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write, a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type, a_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes); the walk with its remedies needs a rig cell: refuse twice, load with `mode: full`, and one wrong remedy" }
+    mongo:    { gap: "asserted by its code and exit class on a live stand (live_clickhouse_load: a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write, a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type, a_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes, and the default-`pk` siblings a_default_pk_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write, a_default_pk_mongo_cdc_stream_refuses_an_event_of_a_second_id_type, a_default_pk_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes); the walk with its remedies needs a rig cell: refuse twice, load with `mode: full`, and one wrong remedy" }
     oracle:   { na: "a SQL key column has one declared type; a MongoDB `_id` can hold any BSON type per document" }
 
   - id: refusal_init_cdc_name_taken
