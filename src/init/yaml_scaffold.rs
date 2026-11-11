@@ -3848,7 +3848,7 @@ mod tests {
             ..Default::default()
         };
         let clickhouse = InitYamlDestination {
-            clickhouse_url: Some("http://ch:8123".into()),
+            clickhouse_url: Some("https://ch:8443".into()),
             clickhouse_database: Some("raw".into()),
             gcs_bucket: Some("b".into()),
             ..Default::default()
@@ -4969,7 +4969,7 @@ mod load_block_tests {
     fn a_clickhouse_load_block_carries_its_connection_and_no_layout() {
         let dest = InitYamlDestination {
             gcs_bucket: Some("b".into()),
-            clickhouse_url: Some("http://ch:8123".into()),
+            clickhouse_url: Some("https://ch:8443".into()),
             clickhouse_database: Some("raw".into()),
             clickhouse_user: Some("loader".into()),
             ..Default::default()
@@ -4978,7 +4978,7 @@ mod load_block_tests {
             load_block_lines(&dest, true, None, &mut ScaffoldDecisions::default()).join("\n");
         for want in [
             "  target: clickhouse",
-            "  url: http://ch:8123",
+            "  url: https://ch:8443",
             "  database: raw",
             "  user: loader",
             "  password_env: CLICKHOUSE_PASSWORD",

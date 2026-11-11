@@ -1256,6 +1256,7 @@ pub fn build_loader(
             password_env,
             named_collection,
             ca_file,
+            allow_plaintext,
         } => Box::new(
             clickhouse::ClickhouseLoader::new(
                 url,
@@ -1266,6 +1267,7 @@ pub fn build_loader(
             )
             .named_collection(named_collection.clone())
             .ca_file(ca_file.clone())
+            .allow_plaintext(*allow_plaintext)
             .cluster_by(plan.clustering.columns().to_vec())
             .partition_by(plan.partition.as_ref().map(|p| p.expr.clone()))
             .cdc(plan.mode == plan::LoadMode::Cdc)

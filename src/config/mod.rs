@@ -587,6 +587,28 @@ impl Config {
         self.validate_layout_has_a_compacting_warehouse()?;
         self.validate_a_default_base_has_a_baseline()?;
         self.validate_cdc_has_a_loadable_target()?;
+        self.validate_outbound_urls_are_not_remote_plaintext()?;
+        Ok(())
+    }
+
+    /// A ClickHouse `load.url` or a literal Slack `webhook_url` that is `http://` on a remote host is refused when the config is read.
+    fn validate_outbound_urls_are_not_remote_plaintext(&self) -> crate::error::Result<()> {
+        if let Some(load::LoadTarget::Clickhouse {
+            url,
+            allow_plaintext,
+            ..
+        }) = self.load.as_ref().map(|l| &l.target)
+        {
+            url::require_https_clickhouse_url(url, *allow_plaintext)?;
+        }
+        if let Some(url) = self
+            .notifications
+            .as_ref()
+            .and_then(|n| n.slack.as_ref())
+            .and_then(|s| s.webhook_url.as_deref())
+        {
+            url::require_https_webhook(url)?;
+        }
         Ok(())
     }
 

@@ -1863,6 +1863,7 @@ fn a_clickhouse_load_names_its_own_fields_and_refuses_foreign_ones() {
             password_env: "CH_PW".into(),
             named_collection: None,
             ca_file: None,
+            allow_plaintext: false,
         }
     );
     let pulled = Config::from_yaml(&cfg(&format!("{own}  named_collection: gcs_raw\n")))
@@ -1888,4 +1889,109 @@ fn a_clickhouse_load_names_its_own_fields_and_refuses_foreign_ones() {
     ));
     let layout = err(&format!("{own}  layout: base_buffer\n"));
     assert!(layout.contains("does not run on ClickHouse"), "{layout}");
+}
+
+fn plaintext_cfg(load_url: &str, load_extra: &str, notifications: &str) -> String {
+    format!(
+        "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\nexports:\n  - name: t\n    \
+         table: t\n    mode: full\n    format: parquet\n    \
+         destination: {{ type: gcs, bucket: b, prefix: t/ }}\nload:\n  target: clickhouse\n  \
+         url: \"{load_url}\"\n  database: d\n  user: u\n  password_env: CH_PW\n{load_extra}{notifications}"
+    )
+}
+
+/// A ClickHouse `load.url` that is `http://` on a remote host is refused by code; https, loopback and the opt-in load.
+#[test]
+fn a_remote_plaintext_clickhouse_url_is_refused_unless_allowed() {
+    let refused = |url: &str, extra: &str| {
+        let e = Config::from_yaml(&plaintext_cfg(url, extra, "")).unwrap_err();
+        (
+            crate::error::error_code(&e).map(str::to_string),
+            format!("{e:#}"),
+        )
+    };
+    let (code, text) = refused("http://clickhouse.internal:8123", "");
+    assert_eq!(
+        code.as_deref(),
+        Some("RIVET_CONFIG_REMOTE_PLAINTEXT"),
+        "{text}"
+    );
+    assert!(text.contains("`clickhouse.internal:8123`"), "{text}");
+    assert!(text.contains("load.allow_plaintext: true"), "{text}");
+    assert!(text.contains("https://"), "{text}");
+    for url in [
+        "HTTP://ch.example.com",
+        "http://u:pw@ch.example.com:8123",
+        "http://10.0.0.5:8123",
+    ] {
+        let (code, text) = refused(url, "");
+        assert_eq!(
+            code.as_deref(),
+            Some("RIVET_CONFIG_REMOTE_PLAINTEXT"),
+            "{url}: {text}"
+        );
+        assert!(!text.contains("pw@"), "{text}");
+    }
+    for ok in [
+        "https://ch.example.com:8443",
+        "http://localhost:8123",
+        "http://127.0.0.1:8123",
+        "http://[::1]:8123",
+    ] {
+        Config::from_yaml(&plaintext_cfg(ok, "", "")).unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+    }
+    let allowed = Config::from_yaml(&plaintext_cfg(
+        "http://clickhouse.internal:8123",
+        "  allow_plaintext: true\n",
+        "",
+    ))
+    .expect("the operator's opt-in");
+    assert!(matches!(
+        allowed.load.expect("load").target,
+        load::LoadTarget::Clickhouse {
+            allow_plaintext: true,
+            ..
+        }
+    ));
+}
+
+/// `allow_plaintext` is a ClickHouse field; another warehouse carrying it is refused.
+#[test]
+fn allow_plaintext_is_refused_on_another_warehouse() {
+    let cfg = "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\nexports:\n  - name: t\n    \
+         table: t\n    mode: full\n    format: parquet\n    \
+         destination: { type: gcs, bucket: b, prefix: t/ }\nload:\n  target: bigquery\n  project: p\n  dataset: d\n  allow_plaintext: true\n";
+    let err = format!("{:#}", Config::from_yaml(cfg).unwrap_err());
+    assert!(
+        err.contains("carries `allow_plaintext`, a `clickhouse` field"),
+        "{err}"
+    );
+}
+
+/// A literal Slack `webhook_url` that is `http://` on a remote host is refused by code; https and loopback load.
+#[test]
+fn a_remote_plaintext_slack_webhook_is_refused() {
+    let slack = |url: &str| {
+        format!("notifications:\n  slack:\n    webhook_url: \"{url}\"\n    on: [failure]\n")
+    };
+    let e = Config::from_yaml(&plaintext_cfg(
+        "https://ch.example.com",
+        "",
+        &slack("http://hooks.internal/services/T000/B000/SECRETPATH"),
+    ))
+    .unwrap_err();
+    assert_eq!(
+        crate::error::error_code(&e),
+        Some("RIVET_CONFIG_REMOTE_PLAINTEXT")
+    );
+    let text = format!("{e:#}");
+    assert!(text.contains("`hooks.internal`"), "{text}");
+    assert!(!text.contains("SECRETPATH"), "{text}");
+    for ok in [
+        "https://hooks.slack.com/services/T000/B000/X",
+        "http://127.0.0.1:9/services/T000/B000/X",
+    ] {
+        Config::from_yaml(&plaintext_cfg("https://ch.example.com", "", &slack(ok)))
+            .unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+    }
 }

@@ -1824,6 +1824,14 @@
           ],
           "default": null
         },
+        "allow_plaintext": {
+          "description": "ClickHouse: allow an `http://` `url` on a remote host, sending the password and every row in cleartext; only for a trusted network.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
         "cleanup_source": {
           "description": "After a successful load, delete the staged Parquet under the export prefix.",
           "type": "boolean",

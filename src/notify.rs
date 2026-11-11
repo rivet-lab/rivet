@@ -94,12 +94,20 @@ pub fn maybe_send(config: Option<&NotificationsConfig>, summary: &RunSummary) {
         }
     };
 
+    if let Err(e) = post_summary(&url, summary) {
+        log::error!("slack notification not sent: {e:#}");
+    }
+}
+
+/// Post the run summary to `url` unless the webhook is refused as remote plaintext; a failed delivery is only logged.
+fn post_summary(url: &str, summary: &RunSummary) -> crate::error::Result<()> {
+    crate::config::url::require_https_webhook(url)?;
     let payload = build_slack_payload(summary);
 
     match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .and_then(|c| c.post(&url).json(&payload).send())
+        .and_then(|c| c.post(url).json(&payload).send())
     {
         Ok(resp) if resp.status().is_success() => {
             log::info!("slack notification sent for '{}'", summary.export_name);
@@ -108,21 +116,39 @@ pub fn maybe_send(config: Option<&NotificationsConfig>, summary: &RunSummary) {
             log::warn!("slack notification failed: HTTP {}", resp.status());
         }
         Err(e) => {
-            // WITHOUT the URL (round-8): reqwest's Display appends
-            // ` for url (...)` on connect/DNS/timeout errors, and a Slack
-            // webhook keeps its SECRET in the URL *path* — which
-            // redact_url_passwords (userinfo-only) cannot touch. Printing `e`
-            // raw shipped the posting credential to stderr/log aggregators on
-            // every delivery failure.
             log::warn!("slack notification failed: {}", e.without_url());
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{NotificationsConfig, NotifyEvent, SlackConfig};
+
+    #[test]
+    fn a_remote_plaintext_webhook_is_refused_before_any_request() {
+        let summary = stub_summary("failed", None);
+        let e =
+            post_summary("http://hooks.internal/services/T0/B0/SECRETPATH", &summary).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_CONFIG_REMOTE_PLAINTEXT")
+        );
+        let text = format!("{e:#}");
+        assert!(text.contains("`hooks.internal`"), "{text}");
+        assert!(!text.contains("SECRETPATH"), "{text}");
+    }
+
+    #[test]
+    fn a_loopback_or_https_webhook_is_attempted_and_a_failed_delivery_is_not_an_error() {
+        let summary = stub_summary("failed", None);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/services/T0/B0/X", listener.local_addr().unwrap());
+        drop(listener);
+        assert!(post_summary(&url, &summary).is_ok());
+    }
 
     fn stub_summary(status: &str, schema_changed: Option<bool>) -> RunSummary {
         let mut s = RunSummary::stub_for_testing("test_run", "test_export");

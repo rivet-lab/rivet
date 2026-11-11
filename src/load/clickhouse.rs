@@ -58,6 +58,8 @@ pub struct ClickhouseLoader {
     partition_by: Option<String>,
     /// A PEM file of extra root certificates for an `https://` URL.
     ca_file: Option<String>,
+    /// The operator allowed an `http://` `url` on a remote host.
+    allow_plaintext: bool,
     client: OnceLock<reqwest::blocking::Client>,
     /// Where every statement the server answered is recorded under its query id.
     journal: crate::load::result::JobJournal,
@@ -84,6 +86,7 @@ impl ClickhouseLoader {
             named_collection: None,
             partition_by: None,
             ca_file: None,
+            allow_plaintext: false,
             client: OnceLock::new(),
             journal: Default::default(),
         }
@@ -98,6 +101,12 @@ impl ClickhouseLoader {
     /// Trust the root certificates in `ca_file` beside the built-in ones.
     pub(crate) fn ca_file(mut self, ca_file: Option<String>) -> Self {
         self.ca_file = ca_file;
+        self
+    }
+
+    /// Allow an `http://` URL on a remote host (the operator's opt-in).
+    pub(crate) fn allow_plaintext(mut self, allow: bool) -> Self {
+        self.allow_plaintext = allow;
         self
     }
 
@@ -141,6 +150,7 @@ impl ClickhouseLoader {
         if let Some(c) = self.client.get() {
             return Ok(c);
         }
+        crate::config::url::require_https_clickhouse_url(&self.url, self.allow_plaintext)?;
         let c = http_client(self.ca_file.as_deref())?;
         Ok(self.client.get_or_init(|| c))
     }
@@ -2063,6 +2073,29 @@ mod tests {
         assert_eq!(parse_pair("x\t3"), None);
     }
 
+    /// The first statement of a remote `http://` loader is refused by code before any socket opens; https, loopback and the opt-in build the client.
+    #[test]
+    fn a_remote_plaintext_url_is_refused_when_the_client_is_built() {
+        let loader = |url: &str| ClickhouseLoader::new(url, "raw", "u", "P", Default::default());
+        let e = loader("http://ch.internal:8123/").client().unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_CONFIG_REMOTE_PLAINTEXT")
+        );
+        let text = format!("{e:#}");
+        assert!(text.contains("`ch.internal:8123`"), "{text}");
+        assert!(text.contains("load.allow_plaintext: true"), "{text}");
+        for ok in ["https://ch.internal:8443", "http://127.0.0.1:8123"] {
+            assert!(loader(ok).client().is_ok(), "{ok}");
+        }
+        assert!(
+            loader("http://ch.internal:8123")
+                .allow_plaintext(true)
+                .client()
+                .is_ok()
+        );
+    }
+
     /// The pure SQL and naming helpers, each pinned to its exact text.
     #[test]
     fn ddl_names_and_error_trimming_render_exactly() {
@@ -2116,6 +2149,7 @@ mod tests {
             password_env: "RIVET_CH_WIRE_TEST_PASSWORD".into(),
             named_collection: None,
             ca_file: None,
+            allow_plaintext: false,
         };
         let cdc = crate::load::build_loader(&plan, "run", &Default::default());
         let err = cdc

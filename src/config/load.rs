@@ -99,6 +99,9 @@ struct RawLoadSection {
     /// by a private CA, beside the built-in public roots; a relative path is read beside the config file.
     #[serde(default)]
     ca_file: Option<String>,
+    /// ClickHouse: allow an `http://` `url` on a remote host, sending the password and every row in cleartext; only for a trusted network.
+    #[serde(default)]
+    allow_plaintext: Option<bool>,
     /// After a successful load, delete the staged Parquet under the export prefix.
     #[serde(default)]
     cleanup_source: bool,
@@ -206,6 +209,13 @@ impl TryFrom<RawLoadSection> for LoadSection {
             ),
             ("ca_file", &r.ca_file, &[LoadTargetKind::Clickhouse]),
         ];
+        if r.allow_plaintext.is_some() && r.target != LoadTargetKind::Clickhouse {
+            return Err(format!(
+                "`load:` targets `{}` but carries `allow_plaintext`, a `clickhouse` field — remove it \
+                 (it would be silently ignored, masking a mis-configured load)",
+                r.target.name()
+            ));
+        }
         let foreign = fields
             .iter()
             .chain(optional.iter())
@@ -261,6 +271,7 @@ impl TryFrom<RawLoadSection> for LoadSection {
                     password_env: take(&r.password_env),
                     named_collection: r.named_collection.clone(),
                     ca_file: r.ca_file.clone(),
+                    allow_plaintext: r.allow_plaintext.unwrap_or(false),
                 }
             }
         };
@@ -353,6 +364,7 @@ pub enum LoadTarget {
         password_env: String,
         named_collection: Option<String>,
         ca_file: Option<String>,
+        allow_plaintext: bool,
     },
 }
 
@@ -1185,6 +1197,7 @@ mod partition_form_tests {
             password_env: "P".into(),
             named_collection: None,
             ca_file: None,
+            allow_plaintext: false,
         };
         assert_eq!(
             [bq.compacts(), sf.compacts(), ch.compacts()],
