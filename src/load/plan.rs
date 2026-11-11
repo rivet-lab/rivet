@@ -305,7 +305,7 @@ pub struct LoadPlan {
     /// Why this table cannot load, found at plan time; the table fails alone, the others still load.
     pub refusal: Option<String>,
     /// How each column lands against what a load key or order needs of it.
-    pub landings: Vec<crate::load::key_admission::ColumnLanding>,
+    pub landings: Vec<crate::preflight::key_admission::ColumnLanding>,
 }
 
 impl LoadPlan {
@@ -315,7 +315,7 @@ impl LoadPlan {
             crate::rivet_bail!(crate::error::codes::LOAD_LOOKALIKE_COLUMN, "{why}");
         }
         self.reserved_column_refusal()?;
-        crate::load::key_admission::admit_load_keys(
+        crate::preflight::key_admission::admit_load_keys(
             &self.export_name,
             self.mode,
             self.cursor_column.as_deref(),
@@ -674,7 +674,7 @@ fn build_plans_keyed(
         // fields the old JSON mirror happened to declare. `autoload_type` is
         // carried only when it DIVERGES (`collect_report`'s rule), so an absent
         // one means "same as native".
-        let landings = crate::load::key_admission::landings(&report.columns);
+        let landings = crate::preflight::key_admission::landings(&report.columns);
         let mut specs: Vec<TargetColumnSpec> = report
             .columns
             .into_iter()
@@ -2870,7 +2870,7 @@ load:
     /// An incremental table whose cursor lands as text, or whose primary key collapses below a microsecond, is refused alone on every load target; the same columns under `full`, and an exact landing, load.
     #[test]
     fn a_key_column_landing_inexactly_refuses_its_own_table_on_every_target() {
-        use crate::load::key_admission::KeyLanding;
+        use crate::preflight::key_admission::KeyLanding;
         let loads = [
             "{ target: bigquery, project: p, dataset: d, pk: [id], cluster_by: none }",
             "{ target: snowflake, account: a, user: u, private_key_path: /k.p8, storage_integration: i, database: d, schema: s, warehouse: w, pk: [id], cluster_by: none }",

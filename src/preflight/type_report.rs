@@ -42,7 +42,7 @@ pub struct TypeReportRow {
     pub cast_sql: Option<String>,
     /// How the column lands against what a load key or order needs of it.
     #[serde(skip)]
-    pub key_landing: crate::load::key_admission::KeyLanding,
+    pub key_landing: crate::preflight::key_admission::KeyLanding,
 }
 
 /// One export's type-report data — or, for a multiplex `tables:` CDC export, ONE
@@ -557,12 +557,12 @@ pub(crate) fn refuse_inexact_load_keys(
             crate::config::load::KeyColumns::Auto => unit.primary_key.clone().unwrap_or_default(),
             crate::config::load::KeyColumns::None => Vec::new(),
         };
-        crate::load::key_admission::admit_load_keys(
+        crate::preflight::key_admission::admit_load_keys(
             &export.name,
             mode,
             crate::plan::build::continued_key(config, export).or(export.cursor_column.as_deref()),
             &pk,
-            &crate::load::key_admission::landings_of_mappings(
+            &crate::preflight::key_admission::landings_of_mappings(
                 &unit.mappings,
                 &unit.finer_than_microsecond,
             ),
@@ -730,7 +730,7 @@ pub fn report_from_mappings(
                 target_note,
                 autoload_type,
                 cast_sql,
-                key_landing: crate::load::key_admission::KeyLanding::of(
+                key_landing: crate::preflight::key_admission::KeyLanding::of(
                     m,
                     finer_than_microsecond.contains(&m.column_name),
                 ),

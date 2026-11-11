@@ -1,6 +1,6 @@
-diff --git a/src/load/key_admission.rs b/src/load/key_admission.rs
---- a/src/load/key_admission.rs
-+++ b/src/load/key_admission.rs
+diff --git a/src/preflight/key_admission.rs b/src/preflight/key_admission.rs
+--- a/src/preflight/key_admission.rs
++++ b/src/preflight/key_admission.rs
 @@ -18,13 +18,13 @@ impl KeyLanding {
      /// The landing of one resolved mapping; `finer` is the catalog fact that the source declares the column finer than a microsecond.
      pub fn of(m: &TypeMapping, finer: bool) -> Self {

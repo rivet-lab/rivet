@@ -1,21 +1,28 @@
 diff --git a/src/pipeline/load_spec.rs b/src/pipeline/load_spec.rs
-index c5844867..d962bfbc 100644
 --- a/src/pipeline/load_spec.rs
 +++ b/src/pipeline/load_spec.rs
-@@ -53,15 +53,8 @@ fn record_from_run(
-     primary_key: Option<&[String]>,
+@@ -55,18 +55,16 @@
+     finer_than_microsecond: &[String],
      run_id: &str,
  ) -> Result<()> {
--    let columns: Vec<LoadSpecColumn> = mappings.iter().map(LoadSpecColumn::from_mapping).collect();
+-    let columns: Vec<LoadSpecColumn> = mappings
+-        .iter()
+-        .map(|m| LoadSpecColumn::from_mapping(m).marked_finer(finer_than_microsecond))
+-        .collect();
 -    state.record_load_spec(
 -        &export.name,
 -        None,
--        config_source_key,
++    let _ = (
+         config_source_key,
 -        &columns,
--        primary_key,
--        run_id,
++        export,
++        state,
++        mappings,
+         primary_key,
++        finer_than_microsecond,
+         run_id,
 -    )
-+    let _ = (config_source_key, export, state, mappings, primary_key, run_id);
++    );
 +    Ok(())
  }
  

@@ -1250,6 +1250,16 @@ mod override_probe_tests {
         assert_eq!(src.sink_stopped, Some(true));
     }
 
+    /// An engine that does not override the catalog read declares no column finer than a microsecond.
+    #[test]
+    fn a_source_without_the_catalog_read_declares_no_finer_column() {
+        let mut src = Scripted::default();
+        assert_eq!(
+            src.finer_than_microsecond_columns("t").unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
     #[test]
     fn no_override_or_a_document_source_reads_nothing() {
         let mut src = Scripted {

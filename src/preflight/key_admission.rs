@@ -109,7 +109,8 @@ pub fn admit_load_keys(
 ) -> Result<()> {
     let find = |name: &str| {
         columns.iter().find(|c| {
-            let folded = super::latin_fold(&c.column).unwrap_or_else(|| c.column.clone());
+            let folded =
+                crate::types::ident::latin_fold(&c.column).unwrap_or_else(|| c.column.clone());
             folded.eq_ignore_ascii_case(name)
         })
     };
@@ -379,13 +380,25 @@ mod tests {
             column("code", "number", KeyLanding::NumberAsText),
             column("at", "datetime2", KeyLanding::FinerThanMicrosecond),
         ];
-        admit_load_keys(
+        let admitted = admit_load_keys(
             "e",
             LoadMode::Incremental,
             Some("at"),
             &["code".to_string()],
             &cols,
+        );
+        assert!(admitted.is_ok(), "{admitted:?}");
+        let refused = admit_load_keys(
+            "e",
+            LoadMode::Incremental,
+            Some("code"),
+            &["at".to_string()],
+            &cols,
         )
-        .unwrap();
+        .unwrap_err();
+        assert_eq!(
+            crate::error::code_of(&refused).map(|c| c.id),
+            Some(crate::error::codes::LOAD_KEY_COLUMN_LANDS_INEXACT.id)
+        );
     }
 }

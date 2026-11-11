@@ -589,7 +589,7 @@ mod tests {
     /// What the Oracle mapper lands a catalog type as is what a load key or order is admitted by: a bare NUMBER or FLOAT lands as text that orders as text, an exact NUMBER and a text column do not.
     #[test]
     fn an_oracle_number_landing_as_text_is_not_admitted_as_an_order_column() {
-        use crate::load::key_admission::KeyLanding;
+        use crate::preflight::key_admission::KeyLanding;
         use crate::types::SourceColumn;
         let landing = |kind, native: &str, p, s| {
             let rivet = autodetect(kind, native, p, s, native);

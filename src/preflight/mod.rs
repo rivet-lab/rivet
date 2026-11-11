@@ -5,6 +5,7 @@ pub(crate) use postgres::table_from_simple_query;
 pub(crate) mod cdc_health;
 pub(crate) mod cursor_expr;
 mod doctor;
+pub mod key_admission;
 mod mongo;
 mod mssql;
 mod mysql;

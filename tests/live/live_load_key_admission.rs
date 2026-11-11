@@ -52,22 +52,31 @@ fn oracle_number_cursor_is_refused(kind: WarehouseKind) {
         before,
         "a refused load touches no warehouse object"
     );
-    let text = rig.refuses_twice_then(
+    let text = rig.refuses_twice_and_walks_out(
         &["load"],
         w.load_envs(),
         INEXACT,
-        vec![Remedy::new(
-            "Declare `VER` under the export's `columns:` with a numeric type",
-            Then::DeliversTheSource,
-            |rig| {
-                rebaseline(rig);
-                rig.amend_export_lines(&["columns: { VER: int64 }"]);
-                SqlEngine::Oracle.exec(&format!(
-                    "UPDATE {table} SET ver = 100, v = 'new2' WHERE id = 2"
-                ));
-                rig.run_ok();
-            },
-        )],
+        vec![
+            Remedy::new(
+                "Declare `VER` under the export's `columns:` with a numeric type",
+                Then::DeliversTheSource,
+                |rig| {
+                    rebaseline(rig);
+                    rig.amend_export_lines(&["columns: { VER: int64 }"]);
+                    SqlEngine::Oracle.exec(&format!(
+                        "UPDATE {table} SET ver = 100, v = 'new2' WHERE id = 2"
+                    ));
+                    rig.run_ok();
+                },
+            ),
+            Remedy::wrong(
+                "declared the column and reloaded without running the export again",
+                Then::Refuses(INEXACT),
+                |rig| {
+                    rig.amend_export_lines(&["columns: { VER: int64 }"]);
+                },
+            ),
+        ],
     );
     assert!(
         text.contains("orders `99` after `100`")
@@ -177,6 +186,74 @@ fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
     );
 }
 
+/// An Oracle `TIMESTAMP(9)` primary-key column declared as microsecond `timestamp`: the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond.
+#[cfg(feature = "oracle")]
+fn oracle_sub_microsecond_key_is_refused(kind: WarehouseKind) {
+    let e = SqlEngine::Oracle;
+    e.alive();
+    let Some(mut w) = Warehouse::of(kind, "kadmo") else {
+        return;
+    };
+    let (table, _guard) = e.create(
+        "kadmo",
+        "dev NUMBER(10) NOT NULL, ts TIMESTAMP(9) NOT NULL, seq NUMBER(10) NOT NULL",
+    );
+    w.adopt(&table);
+    e.exec(&format!(
+        "INSERT INTO {table} (dev, ts, seq) VALUES (1, TIMESTAMP '2024-01-01 00:00:00.123456100', 1)"
+    ));
+    let mut rig = w
+        .shape(
+            e.staged(
+                e.rig(&table),
+                "incremental",
+                &["cursor_column: seq", "columns: { TS: timestamp }"],
+            ),
+            "DEV, TS",
+        )
+        .no_oracle(
+            "the TIMESTAMP(9) rows differ below a microsecond, which the oracle reads the delivered column at; the view is read back by the second client",
+        );
+    rig.run_ok();
+    e.exec(&format!(
+        "INSERT INTO {table} (dev, ts, seq) VALUES (1, TIMESTAMP '2024-01-01 00:00:00.123456900', 2)"
+    ));
+    rig.run_ok();
+    let before = w.fingerprint(&rig, &table);
+
+    assert_refused(&rig.cli(&["check"]), INEXACT);
+    let refused = rig.cli_env(&["load"], w.load_envs());
+    assert_refused(&refused, INEXACT);
+    assert_refused(&rig.cli_env(&["load"], w.load_envs()), INEXACT);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        text.contains("primary-key column `TS` is a `timestamp(9)`")
+            && text.contains("as `timestamp_ns`"),
+        "the refusal names the key column, its source type and the remedy:\n{text}"
+    );
+    assert_eq!(
+        w.fingerprint(&rig, &table),
+        before,
+        "a refused load touches no warehouse object"
+    );
+
+    rebaseline(&rig);
+    rig.replace_export_line("columns:", "columns: { TS: timestamp_ns }");
+    let run = rig.cli(&["run"]);
+    assert!(run.status.success(), "the remedy's run: {run:?}");
+    let load = rig.cli_env(&["load"], w.load_envs());
+    assert!(load.status.success(), "the remedy's load: {load:?}");
+    assert_eq!(
+        w.pairs(&rig, &table, "SEQ", "DEV", false, false),
+        vec![(1, 1), (2, 1)],
+        "both rows that differ below a microsecond are in the view"
+    );
+}
+
 /// An MSSQL primary-key column at or under a microsecond loads as it did before the admission, one view row per source row.
 fn mssql_exact_key_is_admitted(kind: WarehouseKind) {
     let e = SqlEngine::Mssql;
@@ -240,6 +317,13 @@ fn an_oracle_text_cursor_is_admitted_into_clickhouse() {
         "ID",
         1,
     );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle + clickhouse + fake-gcs"]
+fn an_oracle_sub_microsecond_key_is_refused_into_clickhouse() {
+    oracle_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse);
 }
 
 #[test]
