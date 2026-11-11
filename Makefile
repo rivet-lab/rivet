@@ -426,6 +426,11 @@ property-no-debris-after-stop:  ## Property matrix P5: every engine x shape x ho
 	cargo test --test offline_suite property_no_debris_after_stop
 	$(LIVE) cargo nextest run --test live_suite --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_no_debris_after_stop::/)'
 
+.PHONY: property-order-equals-seek
+property-order-equals-seek:  ## Property matrix order_equals_seek: every engine x text key type x seeking mode seeks where the page order ends. One verdict line per cell. Takes one live slot.
+	cargo test --test offline_suite property_order_equals_seek
+	$(LIVE) cargo nextest run --test live_suite --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_order_equals_seek::/)'
+
 .PHONY: evidence-record evidence-report
 evidence-record:  ## Record the last nextest run's green live cells (target/nextest/default/junit.xml) in docs/evidence/last-green.yaml. EVIDENCE_BY=local|gate|nightly|ci.
 	$(PY) dev/pytools/evidence.py record --junit target/nextest/default/junit.xml --by $(or $(EVIDENCE_BY),local)

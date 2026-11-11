@@ -7,7 +7,7 @@
 //!
 //! Dialect deltas vs PG/MySQL (routed through the shared seams):
 //! - identifier quoting `[col]` (`sql::quote_ident`)
-//! - cursor literal `N'…'` with `''` escaping (`query::cursor_rhs`)
+//! - cursor literal `'…'` with `''` escaping, typed by the key itself when non-ASCII (`query::cursor_rhs`)
 //! - introspection via `sys.*` catalog views
 //!
 //! Supported today: snapshot / incremental / chunked (range) and keyset

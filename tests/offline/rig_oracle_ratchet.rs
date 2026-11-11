@@ -57,7 +57,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 626 -> 628 (2026-11-03): #792 parallel composite keyset cells, same tuple read. Closes with the line above.
 // 628 -> 623 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); five helper calls left.
 // 623 -> 626 (2026-11-06): mid-row cut cells read count + id set back through DuckDB; closed when they move to the rig oracle.
-const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
+// 626 -> 621 (2026-11-11): the mssql varchar keyset cell grades through the rig oracle; five helper calls left.
+const DUCKDB_HELPER_CEILING: usize = 621; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];

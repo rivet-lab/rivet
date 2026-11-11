@@ -316,6 +316,9 @@ mod property_no_debris_after_stop;
 #[allow(dead_code)]
 #[path = "live/property_no_debris_after_stop_axes.rs"]
 mod property_no_debris_after_stop_axes;
+
+#[path = "live/property_order_equals_seek.rs"]
+mod property_order_equals_seek;
 #[path = "live/quality_live.rs"]
 mod quality_live;
 #[path = "live/roast_metric_validated_ordering.rs"]

@@ -1,0 +1,22 @@
+--- a/src/source/query.rs
++++ b/src/source/query.rs
+@@ -572,17 +572,8 @@
+ }
+ 
+ /// A text key literal: plain `'…'` when ASCII, else `N'…'` read through `ISNULL` against the key itself so it takes the key's own type, code page and collation.
+-fn mssql_text_literal(value: &str, of: KeyOf) -> String {
+-    let lit = escape_mssql_literal(value);
+-    if value.is_ascii() {
+-        return lit;
+-    }
+-    format!(
+-        "ISNULL((SELECT TOP 1 {expr} FROM ({base}) {ty} WHERE 1 = 0), {lit})",
+-        expr = of.expr,
+-        base = of.base,
+-        ty = derived(SourceType::Mssql, "_rivet_ty"),
+-    )
++fn mssql_text_literal(value: &str, _of: KeyOf) -> String {
++    escape_mssql_literal(value)
+ }
+ 
+ /// Quote `s` as a T-SQL literal: `'…'` when ASCII, `N'…'` otherwise, `'` doubled.

@@ -281,16 +281,17 @@ pub(crate) fn sample_key_boundaries(
     // Incremental (iteration 3): sample percentiles of only the NEW rows,
     // `(floor, ceil]`, as inline per-dialect literals (never a bind param).
     let mut preds: Vec<String> = Vec::new();
+    let of = crate::source::query::KeyOf { base, expr: &k };
     if let Some(lo) = floor {
         preds.push(format!(
             "{k} > {}",
-            crate::source::query::inline_literal(st, lo)
+            crate::source::query::inline_literal(st, lo, of)
         ));
     }
     if let Some(hi) = ceil {
         preds.push(format!(
             "{k} <= {}",
-            crate::source::query::inline_literal(st, hi)
+            crate::source::query::inline_literal(st, hi, of)
         ));
     }
     let where_clause = if preds.is_empty() {
@@ -549,13 +550,16 @@ fn run_keyset_parallel(
         let anchor = progress.cursor()?.last_cursor_value;
         let st = plan.source.source_type;
         let key_q = crate::sql::quote_ident(st, &kp.key_column);
-        // The source answers "is anything past the anchor" in its own collation.
+        let of = crate::source::query::KeyOf {
+            base: &plan.base_query,
+            expr: &key_q,
+        };
         let past_anchor = anchor
             .as_deref()
             .map(|a| {
                 format!(
                     " WHERE {key_q} > {}",
-                    crate::source::query::inline_literal(st, a)
+                    crate::source::query::inline_literal(st, a, of)
                 )
             })
             .unwrap_or_default();

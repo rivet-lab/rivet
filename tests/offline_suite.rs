@@ -42,6 +42,9 @@ mod memory_throttle_wiring;
 mod one_sanitizer_guard;
 #[path = "offline/property_no_debris_after_stop.rs"]
 mod property_no_debris_after_stop;
+
+#[path = "offline/property_order_equals_seek.rs"]
+mod property_order_equals_seek;
 #[path = "offline/renderer_locality_guard.rs"]
 mod renderer_locality_guard;
 #[path = "offline/skip_is_not_a_pass_guard.rs"]
