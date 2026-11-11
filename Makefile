@@ -416,6 +416,11 @@ SEEDED_ARGS ?=
 open-defects:  ## Every open_defect_ live cell against its line in dev/release_oracle/known_red.py; CI does not run these cells, so run this after a fixture or harness change.
 	$(LIVE) $(PY) -m dev.release_oracle.open_defects
 
+.PHONY: property-cloud-legs
+property-cloud-legs:  ## Cloud legs of the property matrices (BigQuery, Snowflake, GCS, S3, Azure): the offline tier replays recorded server answers, the cloud tier runs against the real test project and is NOT_GRADED without credentials. Takes one live slot.
+	cargo test --test offline_suite property_no_silent_null_cloud_legs
+	$(LIVE) $(PY) -m dev.release_oracle.cloud_legs --tier cloud
+
 .PHONY: property-no-secret-in-output
 property-no-secret-in-output:  ## Credential-sink property matrix: every command x engine x credential slot x path, graded on every byte a run leaves; one verdict line per cell.
 	cargo build --bin rivet

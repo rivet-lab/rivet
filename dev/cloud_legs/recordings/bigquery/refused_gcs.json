@@ -1,0 +1,160 @@
+{
+ "exchanges": [
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1794326703/",
+   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/_SUCCESS/1794326717071468\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2F_SUCCESS\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2F_SUCCESS?generation=1794326717071468&alt=media\",\n      \"name\": \"pm_cl_1794326703/_SUCCESS\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326717071468\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"22\",\n      \"md5Hash\": \"Ieu+FHXzRTZBSGMN3eoWQw==\",\n      \"crc32c\": \"IMgJ+g==\",\n      \"etag\": \"COyA1PTj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:17.136Z\",\n      \"updated\": \"2026-11-10T16:05:17.136Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:17.136Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:17.136Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json/1794326716470341\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json?generation=1794326716470341&alt=media\",\n      \"name\": \"pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326716470341\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"1627\",\n      \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n      \"crc32c\": \"QOvPUA==\",\n      \"etag\": \"CMWor/Tj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:16.611Z\",\n      \"updated\": \"2026-11-10T16:05:16.611Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:16.611Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:16.611Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/manifest.json/1794326715944537\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json?generation=1794326715944537&alt=media\",\n      \"name\": \"pm_cl_1794326703/manifest.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326715944537\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"1627\",\n      \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n      \"crc32c\": \"QOvPUA==\",\n      \"etag\": \"CNmcj/Tj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:15.999Z\",\n      \"updated\": \"2026-11-10T16:05:15.999Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:15.999Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:15.999Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet/1794326714893872\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fpm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fpm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet?generation=1794326714893872&alt=media\",\n      \"name\": \"pm_cl_1794326703/pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326714893872\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"3628\",\n      \"md5Hash\": \"zBhPdhNJWtPMgR7swyYSHw==\",\n      \"crc32c\": \"ydMODQ==\",\n      \"etag\": \"CLCMz/Pj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:14.950Z\",\n      \"updated\": \"2026-11-10T16:05:14.950Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:14.950Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:14.950Z\"\n    }\n  ]\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "x-guploader-uploadid": "AFy3sg3ye3PwDSgVfvIQWAwOIgANzlhvxd-XJjYAhvP_XIZc1TjHfpj7Q2aG4WdiLMcymEfiI57cK5o"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1794326703/manifest.json/1794326715944537\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json?generation=1794326715944537&alt=media\",\n  \"name\": \"pm_cl_1794326703/manifest.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1794326715944537\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"1627\",\n  \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n  \"crc32c\": \"QOvPUA==\",\n  \"etag\": \"CNmcj/Tj/ZcDEAE=\",\n  \"timeCreated\": \"2026-11-10T16:05:15.999Z\",\n  \"updated\": \"2026-11-10T16:05:15.999Z\",\n  \"timeStorageClassUpdated\": \"2026-11-10T16:05:15.999Z\",\n  \"timeFinalized\": \"2026-11-10T16:05:15.999Z\"\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "etag": "CNmcj/Tj/ZcDEAE=",
+    "x-guploader-uploadid": "AFy3sg0kpevLfvNLhGc60VdI1LDL7ECkuD7V69Y1wqWKlhFfQ3dENmiBhpT0unGgtWt8hrWSJjCEKxY"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json/1794326716470341\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json?generation=1794326716470341&alt=media\",\n  \"name\": \"pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1794326716470341\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"1627\",\n  \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n  \"crc32c\": \"QOvPUA==\",\n  \"etag\": \"CMWor/Tj/ZcDEAE=\",\n  \"timeCreated\": \"2026-11-10T16:05:16.611Z\",\n  \"updated\": \"2026-11-10T16:05:16.611Z\",\n  \"timeStorageClassUpdated\": \"2026-11-10T16:05:16.611Z\",\n  \"timeFinalized\": \"2026-11-10T16:05:16.611Z\"\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "etag": "CMWor/Tj/ZcDEAE=",
+    "x-guploader-uploadid": "AFy3sg1EfvypXV3BpFWYFsUFOr5MSmaCjVImnOeTAo8e-KDZAEtRGnqpcZFgXkGkqs1YdS37xpGH6jI"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json?alt=media",
+   "reply": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1794326703_20261110T160510.824_34607\",\n  \"export_name\": \"pm_cl_1794326703\",\n  \"export_family\": \"pm_cl_1794326703\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-10T16:05:10.824570+00:00\",\n  \"finished_at\": \"2026-11-10T16:05:15.102238+00:00\",\n  \"status\": \"success\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null,\n    \"extraction\": {\n      \"strategy\": \"full\"\n    }\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1794326703/\"\n  },\n  \"format\": \"parquet\",\n  \"compression\": \"zstd\",\n  \"schema_fingerprint\": \"xxh3:3a6c6dd427f59088\",\n  \"row_count\": 3,\n  \"part_count\": 1,\n  \"parts\": [\n    {\n      \"part_id\": 1,\n      \"path\": \"pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"rows\": 3,\n      \"size_bytes\": 3628,\n      \"content_fingerprint\": \"xxh3:99b7d91c43dcabfe\",\n      \"content_md5\": \"zBhPdhNJWtPMgR7swyYSHw==\",\n      \"status\": \"committed\"\n    }\n  ],\n  \"column_checksums\": [\n    {\n      \"name\": \"b\",\n      \"checksum\": \"11924082411917654982\"\n    },\n    {\n      \"name\": \"d\",\n      \"checksum\": \"9191451980062244416\"\n    },\n    {\n      \"name\": \"dt\",\n      \"checksum\": \"1039778078260860768\"\n    },\n    {\n      \"name\": \"f\",\n      \"checksum\": \"321901482400033168\"\n    },\n    {\n      \"name\": \"id\",\n      \"checksum\": \"1497313029409361006\"\n    },\n    {\n      \"name\": \"n\",\n      \"checksum\": \"8753111977186632689\"\n    },\n    {\n      \"name\": \"s\",\n      \"checksum\": \"6140134720023259184\"\n    },\n    {\n      \"name\": \"ts\",\n      \"checksum\": \"2810176234351584735\"\n    }\n  ],\n  \"checksum_render\": \"xxh3-64-sum-v2\"\n}",
+   "reply_headers": {
+    "content-type": "application/octet-stream",
+    "etag": "CNmcj/Tj/ZcDEAE=",
+    "x-goog-hash": "crc32c=QOvPUA==,md5=J+G+cUDYe11FPiHl2PbSiQ==",
+    "x-guploader-uploadid": "AFy3sg3cBx9eoxqWk6hXJsQtdf7Jrdyl7JJ-UQusP-hW4tcNqUUZ_oNzpqvxqimUB2-dySvSg_9j8Qg"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json?alt=media",
+   "reply": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1794326703_20261110T160510.824_34607\",\n  \"export_name\": \"pm_cl_1794326703\",\n  \"export_family\": \"pm_cl_1794326703\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-10T16:05:10.824570+00:00\",\n  \"finished_at\": \"2026-11-10T16:05:15.102238+00:00\",\n  \"status\": \"success\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null,\n    \"extraction\": {\n      \"strategy\": \"full\"\n    }\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1794326703/\"\n  },\n  \"format\": \"parquet\",\n  \"compression\": \"zstd\",\n  \"schema_fingerprint\": \"xxh3:3a6c6dd427f59088\",\n  \"row_count\": 3,\n  \"part_count\": 1,\n  \"parts\": [\n    {\n      \"part_id\": 1,\n      \"path\": \"pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"rows\": 3,\n      \"size_bytes\": 3628,\n      \"content_fingerprint\": \"xxh3:99b7d91c43dcabfe\",\n      \"content_md5\": \"zBhPdhNJWtPMgR7swyYSHw==\",\n      \"status\": \"committed\"\n    }\n  ],\n  \"column_checksums\": [\n    {\n      \"name\": \"b\",\n      \"checksum\": \"11924082411917654982\"\n    },\n    {\n      \"name\": \"d\",\n      \"checksum\": \"9191451980062244416\"\n    },\n    {\n      \"name\": \"dt\",\n      \"checksum\": \"1039778078260860768\"\n    },\n    {\n      \"name\": \"f\",\n      \"checksum\": \"321901482400033168\"\n    },\n    {\n      \"name\": \"id\",\n      \"checksum\": \"1497313029409361006\"\n    },\n    {\n      \"name\": \"n\",\n      \"checksum\": \"8753111977186632689\"\n    },\n    {\n      \"name\": \"s\",\n      \"checksum\": \"6140134720023259184\"\n    },\n    {\n      \"name\": \"ts\",\n      \"checksum\": \"2810176234351584735\"\n    }\n  ],\n  \"checksum_render\": \"xxh3-64-sum-v2\"\n}",
+   "reply_headers": {
+    "content-type": "application/octet-stream",
+    "etag": "CMWor/Tj/ZcDEAE=",
+    "x-goog-hash": "crc32c=QOvPUA==,md5=J+G+cUDYe11FPiHl2PbSiQ==",
+    "x-guploader-uploadid": "AFy3sg20Sag2Eeo4eSuELar0YIY8pA8jOSDhRYW0uxWnL-rX03K8geIHAg_o2SJY-rx_vg4ZOhz9cQM"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1794326703/",
+   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/_SUCCESS/1794326717071468\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2F_SUCCESS\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2F_SUCCESS?generation=1794326717071468&alt=media\",\n      \"name\": \"pm_cl_1794326703/_SUCCESS\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326717071468\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"22\",\n      \"md5Hash\": \"Ieu+FHXzRTZBSGMN3eoWQw==\",\n      \"crc32c\": \"IMgJ+g==\",\n      \"etag\": \"COyA1PTj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:17.136Z\",\n      \"updated\": \"2026-11-10T16:05:17.136Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:17.136Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:17.136Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json/1794326716470341\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json?generation=1794326716470341&alt=media\",\n      \"name\": \"pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326716470341\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"1627\",\n      \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n      \"crc32c\": \"QOvPUA==\",\n      \"etag\": \"CMWor/Tj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:16.611Z\",\n      \"updated\": \"2026-11-10T16:05:16.611Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:16.611Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:16.611Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/manifest.json/1794326715944537\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json?generation=1794326715944537&alt=media\",\n      \"name\": \"pm_cl_1794326703/manifest.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326715944537\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"1627\",\n      \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n      \"crc32c\": \"QOvPUA==\",\n      \"etag\": \"CNmcj/Tj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:15.999Z\",\n      \"updated\": \"2026-11-10T16:05:15.999Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:15.999Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:15.999Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet/1794326714893872\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fpm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fpm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet?generation=1794326714893872&alt=media\",\n      \"name\": \"pm_cl_1794326703/pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326714893872\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"3628\",\n      \"md5Hash\": \"zBhPdhNJWtPMgR7swyYSHw==\",\n      \"crc32c\": \"ydMODQ==\",\n      \"etag\": \"CLCMz/Pj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:14.950Z\",\n      \"updated\": \"2026-11-10T16:05:14.950Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:14.950Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:14.950Z\"\n    }\n  ]\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "x-guploader-uploadid": "AFy3sg22zCXi_wcHxDMf34A-RNsEBNcDD93cbmmZglhVkptJCZuy6xsfDBPsTlnyhVRSlvPDitEFeFJqQo8KOA"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1794326703/manifest.json/1794326715944537\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json?generation=1794326715944537&alt=media\",\n  \"name\": \"pm_cl_1794326703/manifest.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1794326715944537\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"1627\",\n  \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n  \"crc32c\": \"QOvPUA==\",\n  \"etag\": \"CNmcj/Tj/ZcDEAE=\",\n  \"timeCreated\": \"2026-11-10T16:05:15.999Z\",\n  \"updated\": \"2026-11-10T16:05:15.999Z\",\n  \"timeStorageClassUpdated\": \"2026-11-10T16:05:15.999Z\",\n  \"timeFinalized\": \"2026-11-10T16:05:15.999Z\"\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "etag": "CNmcj/Tj/ZcDEAE=",
+    "x-guploader-uploadid": "AFy3sg24NApHMIjIgQeACnIDwMNX2rlPcHuCW8whFvPIojtN6rtlhS8-jh5Ahf8r7XcAS_VmyZ-LF4A"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json",
+   "reply": "{\n  \"kind\": \"storage#object\",\n  \"id\": \"rivet_data_test/pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json/1794326716470341\",\n  \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n  \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json?generation=1794326716470341&alt=media\",\n  \"name\": \"pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n  \"bucket\": \"rivet_data_test\",\n  \"generation\": \"1794326716470341\",\n  \"metageneration\": \"1\",\n  \"storageClass\": \"STANDARD\",\n  \"size\": \"1627\",\n  \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n  \"crc32c\": \"QOvPUA==\",\n  \"etag\": \"CMWor/Tj/ZcDEAE=\",\n  \"timeCreated\": \"2026-11-10T16:05:16.611Z\",\n  \"updated\": \"2026-11-10T16:05:16.611Z\",\n  \"timeStorageClassUpdated\": \"2026-11-10T16:05:16.611Z\",\n  \"timeFinalized\": \"2026-11-10T16:05:16.611Z\"\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "etag": "CMWor/Tj/ZcDEAE=",
+    "x-guploader-uploadid": "AFy3sg2XbTXPjC1NBtXZ_UxdVp8CF8Wulan30nAJxRG7DELTBNmdSJ2f18VkGg_0_wI8Y3i7"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json?alt=media",
+   "reply": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1794326703_20261110T160510.824_34607\",\n  \"export_name\": \"pm_cl_1794326703\",\n  \"export_family\": \"pm_cl_1794326703\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-10T16:05:10.824570+00:00\",\n  \"finished_at\": \"2026-11-10T16:05:15.102238+00:00\",\n  \"status\": \"success\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null,\n    \"extraction\": {\n      \"strategy\": \"full\"\n    }\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1794326703/\"\n  },\n  \"format\": \"parquet\",\n  \"compression\": \"zstd\",\n  \"schema_fingerprint\": \"xxh3:3a6c6dd427f59088\",\n  \"row_count\": 3,\n  \"part_count\": 1,\n  \"parts\": [\n    {\n      \"part_id\": 1,\n      \"path\": \"pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"rows\": 3,\n      \"size_bytes\": 3628,\n      \"content_fingerprint\": \"xxh3:99b7d91c43dcabfe\",\n      \"content_md5\": \"zBhPdhNJWtPMgR7swyYSHw==\",\n      \"status\": \"committed\"\n    }\n  ],\n  \"column_checksums\": [\n    {\n      \"name\": \"b\",\n      \"checksum\": \"11924082411917654982\"\n    },\n    {\n      \"name\": \"d\",\n      \"checksum\": \"9191451980062244416\"\n    },\n    {\n      \"name\": \"dt\",\n      \"checksum\": \"1039778078260860768\"\n    },\n    {\n      \"name\": \"f\",\n      \"checksum\": \"321901482400033168\"\n    },\n    {\n      \"name\": \"id\",\n      \"checksum\": \"1497313029409361006\"\n    },\n    {\n      \"name\": \"n\",\n      \"checksum\": \"8753111977186632689\"\n    },\n    {\n      \"name\": \"s\",\n      \"checksum\": \"6140134720023259184\"\n    },\n    {\n      \"name\": \"ts\",\n      \"checksum\": \"2810176234351584735\"\n    }\n  ],\n  \"checksum_render\": \"xxh3-64-sum-v2\"\n}",
+   "reply_headers": {
+    "content-type": "application/octet-stream",
+    "etag": "CMWor/Tj/ZcDEAE=",
+    "x-goog-hash": "crc32c=QOvPUA==,md5=J+G+cUDYe11FPiHl2PbSiQ==",
+    "x-guploader-uploadid": "AFy3sg3b5egv2QVRTz8__rXM0fc4rJE4FN9vcPoO26wbxO2k6TYTzO5diGvcKr_4cXZIRqGYKhsrTq8"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json?alt=media",
+   "reply": "{\n  \"manifest_version\": 1,\n  \"run_id\": \"pm_cl_1794326703_20261110T160510.824_34607\",\n  \"export_name\": \"pm_cl_1794326703\",\n  \"export_family\": \"pm_cl_1794326703\",\n  \"mode\": \"batch\",\n  \"started_at\": \"2026-11-10T16:05:10.824570+00:00\",\n  \"finished_at\": \"2026-11-10T16:05:15.102238+00:00\",\n  \"status\": \"success\",\n  \"source\": {\n    \"engine\": \"postgres\",\n    \"schema\": null,\n    \"table\": null,\n    \"extraction\": {\n      \"strategy\": \"full\"\n    }\n  },\n  \"destination\": {\n    \"kind\": \"gcs\",\n    \"uri\": \"gs://rivet_data_test/pm_cl_1794326703/\"\n  },\n  \"format\": \"parquet\",\n  \"compression\": \"zstd\",\n  \"schema_fingerprint\": \"xxh3:3a6c6dd427f59088\",\n  \"row_count\": 3,\n  \"part_count\": 1,\n  \"parts\": [\n    {\n      \"part_id\": 1,\n      \"path\": \"pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"rows\": 3,\n      \"size_bytes\": 3628,\n      \"content_fingerprint\": \"xxh3:99b7d91c43dcabfe\",\n      \"content_md5\": \"zBhPdhNJWtPMgR7swyYSHw==\",\n      \"status\": \"committed\"\n    }\n  ],\n  \"column_checksums\": [\n    {\n      \"name\": \"b\",\n      \"checksum\": \"11924082411917654982\"\n    },\n    {\n      \"name\": \"d\",\n      \"checksum\": \"9191451980062244416\"\n    },\n    {\n      \"name\": \"dt\",\n      \"checksum\": \"1039778078260860768\"\n    },\n    {\n      \"name\": \"f\",\n      \"checksum\": \"321901482400033168\"\n    },\n    {\n      \"name\": \"id\",\n      \"checksum\": \"1497313029409361006\"\n    },\n    {\n      \"name\": \"n\",\n      \"checksum\": \"8753111977186632689\"\n    },\n    {\n      \"name\": \"s\",\n      \"checksum\": \"6140134720023259184\"\n    },\n    {\n      \"name\": \"ts\",\n      \"checksum\": \"2810176234351584735\"\n    }\n  ],\n  \"checksum_render\": \"xxh3-64-sum-v2\"\n}",
+   "reply_headers": {
+    "content-type": "application/octet-stream",
+    "etag": "CNmcj/Tj/ZcDEAE=",
+    "x-goog-hash": "crc32c=QOvPUA==,md5=J+G+cUDYe11FPiHl2PbSiQ==",
+    "x-guploader-uploadid": "AFy3sg0xOJJZ5OUdiyp0IcUQIOBjkVMWjWhE89r_pxhcwhqVIoy-XeCzaCsUnQdaDgn6wux6tMSuF_E"
+   },
+   "request_headers": {},
+   "status": 200
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/storage/v1/b/rivet_data_test/o?prefix=pm_cl_1794326703/",
+   "reply": "{\n  \"kind\": \"storage#objects\",\n  \"items\": [\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/_SUCCESS/1794326717071468\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2F_SUCCESS\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2F_SUCCESS?generation=1794326717071468&alt=media\",\n      \"name\": \"pm_cl_1794326703/_SUCCESS\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326717071468\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"22\",\n      \"md5Hash\": \"Ieu+FHXzRTZBSGMN3eoWQw==\",\n      \"crc32c\": \"IMgJ+g==\",\n      \"etag\": \"COyA1PTj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:17.136Z\",\n      \"updated\": \"2026-11-10T16:05:17.136Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:17.136Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:17.136Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json/1794326716470341\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest-pm_cl_1794326703_20261110T160510.824_34607.json?generation=1794326716470341&alt=media\",\n      \"name\": \"pm_cl_1794326703/manifest-pm_cl_1794326703_20261110T160510.824_34607.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326716470341\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"1627\",\n      \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n      \"crc32c\": \"QOvPUA==\",\n      \"etag\": \"CMWor/Tj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:16.611Z\",\n      \"updated\": \"2026-11-10T16:05:16.611Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:16.611Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:16.611Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/manifest.json/1794326715944537\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fmanifest.json?generation=1794326715944537&alt=media\",\n      \"name\": \"pm_cl_1794326703/manifest.json\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326715944537\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"1627\",\n      \"md5Hash\": \"J+G+cUDYe11FPiHl2PbSiQ==\",\n      \"crc32c\": \"QOvPUA==\",\n      \"etag\": \"CNmcj/Tj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:15.999Z\",\n      \"updated\": \"2026-11-10T16:05:15.999Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:15.999Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:15.999Z\"\n    },\n    {\n      \"kind\": \"storage#object\",\n      \"id\": \"rivet_data_test/pm_cl_1794326703/pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet/1794326714893872\",\n      \"selfLink\": \"https://www.googleapis.com/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fpm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"mediaLink\": \"https://storage.googleapis.com/download/storage/v1/b/rivet_data_test/o/pm_cl_1794326703%2Fpm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet?generation=1794326714893872&alt=media\",\n      \"name\": \"pm_cl_1794326703/pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet\",\n      \"bucket\": \"rivet_data_test\",\n      \"generation\": \"1794326714893872\",\n      \"metageneration\": \"1\",\n      \"storageClass\": \"STANDARD\",\n      \"size\": \"3628\",\n      \"md5Hash\": \"zBhPdhNJWtPMgR7swyYSHw==\",\n      \"crc32c\": \"ydMODQ==\",\n      \"etag\": \"CLCMz/Pj/ZcDEAE=\",\n      \"timeCreated\": \"2026-11-10T16:05:14.950Z\",\n      \"updated\": \"2026-11-10T16:05:14.950Z\",\n      \"timeStorageClassUpdated\": \"2026-11-10T16:05:14.950Z\",\n      \"timeFinalized\": \"2026-11-10T16:05:14.950Z\"\n    }\n  ]\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8",
+    "x-guploader-uploadid": "AFy3sg1bwOv3pT29vqto9jl0GD6SU0g1Kezo0Bs3yd2b7eqmbRYBzPMT6zkv9A29uRaisD8ii29nPf4"
+   },
+   "request_headers": {},
+   "status": 200
+  }
+ ],
+ "meta": {}
+}
