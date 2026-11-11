@@ -36,6 +36,12 @@ def summary(lines: list[str]) -> str:
     return f"{MATRIX} TOTAL PASS={n['PASS']} RED={n['RED']} NOT_GRADED={n['NOT_GRADED']}"
 
 
+def exit_code(lines: list[str]) -> int:
+    """1 when any cell is RED, 2 when no cell is PASS, else 0."""
+    verdicts = [m.group(2) for m in map(VERDICT.match, lines) if m and m.group(1) != "SUMMARY"]
+    return 1 if "RED" in verdicts else 0 if "PASS" in verdicts else 2
+
+
 def run_offline(stand: bool) -> list[str]:
     """The matrix's verdict lines from the test binary's stdout; `stand` adds the stand axes under live_slot."""
     cmd = ["cargo", "test", "--test", "offline_suite", "property_refusal_names_true_cause::every_refusal", "--", "--nocapture"]
@@ -149,6 +155,7 @@ def self_test() -> int:
     other = f"{MATRIX} cause/RIVET_B/- NOT_GRADED needs the live stand; no sabotage row refusal_b"
     row = f"{MATRIX} cause/RIVET_A/postgres PASS t: test result: ok. 1 passed"
     assert merge_live([ok, stand, other], [row]) == [ok, other, row]
+    assert [exit_code([ok]), exit_code([ok, red]), exit_code([ok, ng]), exit_code([ng]), exit_code([])] == [0, 1, 0, 2, 2]
     print("refusal_names_true_cause self-test ok")
     return 0
 
@@ -165,7 +172,7 @@ def main(argv: list[str]) -> int:
         lines = merge_live(lines, run_live())
     print("\n".join(lines))
     print(summary(lines))
-    return 0
+    return exit_code(lines)
 
 
 if __name__ == "__main__":

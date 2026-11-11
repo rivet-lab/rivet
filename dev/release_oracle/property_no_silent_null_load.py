@@ -181,17 +181,8 @@ def verify_no_silent_null_load(led: Ledger) -> None:
     for t in (t for t in load_targets() if t in NOT_REACHABLE):
         led.skipped("-", "-", SCENARIO, "-", f"{SCENARIO}[{t}]: {NOT_REACHABLE[t]}", cause=SkipCause.REDUCED)
     for engine in nsn.axes()["engines"]:
-        results = run_engine(engine, work)
-        groups = nsn.summary(engine, results)
-        bad = {k: v for k, v in groups.items() if k and k != NOT_GRADED and v}
-        if groups[NOT_GRADED]:
-            led.skipped(engine, "-", SCENARIO, "-", f"{SCENARIO}[{engine}]: {len(groups[NOT_GRADED])} of {len(results)} cells not graded: {groups[NOT_GRADED][0].detail[:200]}",
-                        cause=SkipCause.REDUCED if engine == "mongo" else SkipCause.ENV, target=CH_URL)
-        for klass, rs in bad.items():
-            led.failed(engine, "-", SCENARIO, "-", f"{SCENARIO}[{engine}]: {klass} over {len(nsn.pairs_of(rs))} source->override pairs #{nsn.digest(rs)}",
-                       "\n".join(f"{r.cell}: {r.detail}" for r in sorted(rs, key=lambda r: r.cell)[:60]))
-        if not bad and len(groups[NOT_GRADED]) < len(results):
-            led.passed(engine, "-", SCENARIO, "-", f"{SCENARIO}[{engine}]: {len(results)} columns read back from ClickHouse")
+        nsn.record(led, engine, run_engine(engine, work), scenario=SCENARIO, target=CH_URL, what="columns read back from ClickHouse",
+                   cause=SkipCause.REDUCED if engine == "mongo" else SkipCause.ENV)
 
 
 def self_test() -> None:
@@ -235,12 +226,10 @@ def main() -> int:
         return 0
     results = run_all(Path(ns.work))
     lines = [nsn.verdict_line(r).replace(nsn.SCENARIO, SCENARIO, 1) for r in sorted(results, key=lambda r: r.cell)]
-    red = sum(1 for r in results if r.klass and r.klass != NOT_GRADED)
-    ng = sum(1 for r in results if r.klass == NOT_GRADED)
-    print("\n".join([*lines, f"{SCENARIO} summary PASS={len(results) - red - ng} RED={red} NOT_GRADED={ng}"]))
+    print("\n".join([*lines, nsn.summary_line(results).replace(nsn.SCENARIO, SCENARIO, 1)]))
     if ns.out:
         Path(ns.out).write_text("\n".join(json.dumps(r.__dict__) for r in results))
-    return 0
+    return nsn.exit_code(results)
 
 
 if __name__ == "__main__":
