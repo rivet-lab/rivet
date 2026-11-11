@@ -98,11 +98,19 @@ pub(crate) fn build_incremental_query(
     };
     let prefix = prefix.as_str();
     let cursor = cursor_expr(plan, prefix, source_type);
+    let bare = cursor_expr(plan, "", source_type);
 
     let mut preds: Vec<String> = Vec::new();
     let mut cursor_param = None;
     if let Some(val) = cursor_value {
-        let (rhs, param) = cursor_rhs(source_type, val);
+        let (rhs, param) = cursor_rhs(
+            source_type,
+            val,
+            KeyOf {
+                base: base_query,
+                expr: &bare,
+            },
+        );
         preds.push(format!("{cursor} > {rhs}"));
         cursor_param = param;
     }
@@ -191,7 +199,12 @@ fn settle_predicates(
         let young = cursor_expr(plan, &young_ref, source_type);
         let mut young_where = vec![format!("{young} IS NOT NULL")];
         if let Some(v) = last {
-            young_where.push(format!("{young} > {}", inline_literal(source_type, v)));
+            let bare = cursor_expr(plan, "", source_type);
+            let of = KeyOf {
+                base: base_query,
+                expr: &bare,
+            };
+            young_where.push(format!("{young} > {}", inline_literal(source_type, v, of)));
         }
         young_where.push(format!("{} >= {threshold}", target(&young_ref)));
         preds.push(format!(
@@ -303,7 +316,14 @@ pub(crate) fn build_tuple_keyset_query(
     let order = cols.join(", ");
     let lits = |vals: &[String]| -> Vec<String> {
         vals.iter()
-            .map(|v| inline_literal(source_type, v))
+            .zip(&cols)
+            .map(|(v, col)| {
+                let of = KeyOf {
+                    base: base_query,
+                    expr: col,
+                };
+                inline_literal(source_type, v, of)
+            })
             .collect()
     };
     let preds: Vec<String> = [
@@ -385,19 +405,21 @@ pub(crate) fn build_keyset_query_bounded(
 ) -> BuiltQuery {
     let key = quote_ident(source_type, key_column);
     let page = page_limit_clause(source_type, limit);
-    // Upper bound is always an in-SQL literal (implicit-cast to the key type, same
-    // as the cursor RHS on PG/MSSQL), so it never consumes the bind slot.
+    let of = KeyOf {
+        base: base_query,
+        expr: &key,
+    };
     let upper_pred = |joiner: &str| match upper {
         Some(hi) => format!(
             "{joiner}{k} <= {lit}",
             k = key,
-            lit = inline_literal(source_type, hi)
+            lit = inline_literal(source_type, hi, of)
         ),
         None => String::new(),
     };
     match last {
         Some(val) => {
-            let (rhs, cursor_param) = cursor_rhs(source_type, val);
+            let (rhs, cursor_param) = cursor_rhs(source_type, val, of);
             BuiltQuery {
                 sql: format!(
                     "SELECT * FROM ({base}) {from_rivet} WHERE {k} > {rhs}{up} ORDER BY {k} {page}",
@@ -439,12 +461,16 @@ pub(crate) fn wrap_key_range(
         return base_query.to_string();
     }
     let key = quote_ident(source_type, key_column);
+    let of = KeyOf {
+        base: base_query,
+        expr: &key,
+    };
     let mut preds: Vec<String> = Vec::with_capacity(2);
     if let Some(lo) = lo {
-        preds.push(format!("{key} > {}", inline_literal(source_type, lo)));
+        preds.push(format!("{key} > {}", inline_literal(source_type, lo, of)));
     }
     if let Some(hi) = hi {
-        preds.push(format!("{key} <= {}", inline_literal(source_type, hi)));
+        preds.push(format!("{key} <= {}", inline_literal(source_type, hi, of)));
     }
     format!(
         "SELECT * FROM ({base}) {from_split} WHERE {preds}",
@@ -454,14 +480,19 @@ pub(crate) fn wrap_key_range(
     )
 }
 
-/// In-SQL literal for a key value, per dialect — the injection-safe inline form
-/// (never a bind param). MySQL/PG/MSSQL all implicit-cast a quoted literal to the
-/// key's column type, so a numeric key compares correctly against `'250001'`.
-pub(crate) fn inline_literal(source_type: SourceType, value: &str) -> String {
+/// The key expression a seek literal is compared against, and the query it ranges over.
+#[derive(Clone, Copy)]
+pub(crate) struct KeyOf<'a> {
+    pub base: &'a str,
+    pub expr: &'a str,
+}
+
+/// In-SQL literal for a key value, per dialect: the injection-safe inline form, never a bind param.
+pub(crate) fn inline_literal(source_type: SourceType, value: &str, of: KeyOf) -> String {
     match source_type {
         SourceType::Mysql => escape_mysql_literal(value),
         SourceType::Postgres => escape_pg_literal(value),
-        SourceType::Mssql => mssql_cursor_literal(value),
+        SourceType::Mssql => mssql_cursor_literal(value, of),
         SourceType::Oracle => escape_oracle_literal(value),
         SourceType::Mongo => unreachable!(
             "inline_literal: MongoDB keyset paging is not a SQL path (guarded by full-mode-only validation)"
@@ -503,15 +534,11 @@ pub(crate) fn first_row_probe_sql(source_type: SourceType, base: &str) -> String
 ///   `standard_conforming_strings`. No parameter binding (the `postgres` crate
 ///   needs a concrete type for binds; the column may be timestamp, bigint,
 ///   uuid, etc. — a text literal lets the server implicitly cast).
-fn cursor_rhs(source_type: SourceType, value: &str) -> (String, Option<String>) {
+fn cursor_rhs(source_type: SourceType, value: &str, of: KeyOf) -> (String, Option<String>) {
     match source_type {
         SourceType::Mysql => ("?".to_string(), Some(value.to_string())),
         SourceType::Postgres => (escape_pg_literal(value), None),
-        // SQL Server: in-SQL `N'…'` unicode literal, server implicit-casts to the
-        // column type (same rationale as Postgres — the keyset/cursor column may
-        // be int, datetime2, uniqueidentifier, …). No backslash escaping in
-        // T-SQL; only `'` is doubled.
-        SourceType::Mssql => (mssql_cursor_literal(value), None),
+        SourceType::Mssql => (mssql_cursor_literal(value, of), None),
         // Oracle: a bind, converted to the column type through the session's pinned
         // NLS masks (the cursor's text form is rivet's own ISO rendering).
         SourceType::Oracle => (":1".to_string(), Some(value.to_string())),
@@ -527,11 +554,11 @@ pub(crate) fn escape_oracle_literal(s: &str) -> String {
 }
 
 /// A T-SQL literal: a timestamp (`T` or space form) is typed `DATETIME2(7)` in ISO `T` form (fraction rounded to 100 ns), so it parses the same under any `DATEFORMAT`.
-fn mssql_cursor_literal(value: &str) -> String {
+fn mssql_cursor_literal(value: &str, of: KeyOf) -> String {
     use chrono::DurationRound;
     let iso = value.replacen(' ', "T", 1);
     let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&iso, "%Y-%m-%dT%H:%M:%S%.f") else {
-        return escape_mssql_literal(value);
+        return mssql_text_literal(value, of);
     };
     // Rounded, not cut: a legacy DATETIME (n/300 s) converts to DATETIME2 rounded, so a cut bound sits below its own row.
     let fitted = dt
@@ -544,9 +571,22 @@ fn mssql_cursor_literal(value: &str) -> String {
     format!("CAST({} AS DATETIME2(7))", escape_mssql_literal(&fitted))
 }
 
-/// Quote `s` as a T-SQL literal: plain `'…'` when ASCII (compares in a varchar key's own sort order), `N'…'` otherwise.
+/// A text key literal: plain `'…'` when ASCII, else `N'…'` read through `ISNULL` against the key itself so it takes the key's own type, code page and collation.
+fn mssql_text_literal(value: &str, of: KeyOf) -> String {
+    let lit = escape_mssql_literal(value);
+    if value.is_ascii() {
+        return lit;
+    }
+    format!(
+        "ISNULL((SELECT TOP 1 {expr} FROM ({base}) {ty} WHERE 1 = 0), {lit})",
+        expr = of.expr,
+        base = of.base,
+        ty = derived(SourceType::Mssql, "_rivet_ty"),
+    )
+}
+
+/// Quote `s` as a T-SQL literal: `'…'` when ASCII, `N'…'` otherwise, `'` doubled.
 pub(crate) fn escape_mssql_literal(s: &str) -> String {
-    // ponytail: a NON-ASCII value on a varchar key under a SQL_* collation still seeks by the Unicode order; exact fix needs the key's type in the plan.
     let mut out = String::with_capacity(s.len() + 4);
     out.push_str(if s.is_ascii() { "'" } else { "N'" });
     for c in s.chars() {
@@ -1226,31 +1266,115 @@ mod tests {
     #[test]
     fn a_mssql_timestamp_cursor_is_typed_so_a_datetime_column_accepts_it() {
         assert_eq!(
-            mssql_cursor_literal("2024-01-01T10:00:00.456667"),
+            mssql_cursor_literal("2024-01-01T10:00:00.456667", OF),
             "CAST('2024-01-01T10:00:00.4566670' AS DATETIME2(7))"
         );
         assert_eq!(
-            mssql_cursor_literal("2024-01-01T10:00:00.123456789"),
+            mssql_cursor_literal("2024-01-01T10:00:00.123456789", OF),
             "CAST('2024-01-01T10:00:00.1234568' AS DATETIME2(7))",
             "a nanosecond fraction is rounded to the 100 ns DATETIME2 holds"
         );
         assert_eq!(
-            mssql_cursor_literal("250001"),
+            mssql_cursor_literal("250001", OF),
             "'250001'",
             "a number stays a plain literal"
         );
         assert_eq!(
-            mssql_cursor_literal("2024-01-01"),
+            mssql_cursor_literal("2024-01-01", OF),
             "'2024-01-01'",
             "a date stays a plain literal"
         );
-        assert_eq!(mssql_cursor_literal("O'Brien"), "'O''Brien'");
-        assert_eq!(mssql_cursor_literal("Zoë"), "N'Zoë'");
+        assert_eq!(mssql_cursor_literal("O'Brien", OF), "'O''Brien'");
         assert_eq!(
-            mssql_cursor_literal("2024-05-10 10:00:00"),
+            mssql_cursor_literal("2024-05-10 10:00:00", OF),
             "CAST('2024-05-10T10:00:00.0000000' AS DATETIME2(7))",
             "a space-form timestamp is sent in the DATEFORMAT-independent T form"
         );
+    }
+
+    const OF: KeyOf = KeyOf {
+        base: "SELECT * FROM t",
+        expr: "[k]",
+    };
+
+    #[test]
+    fn a_non_ascii_mssql_boundary_takes_the_keys_own_type() {
+        assert_eq!(
+            mssql_cursor_literal("Zoë", OF),
+            "ISNULL((SELECT TOP 1 [k] FROM (SELECT * FROM t) AS _rivet_ty WHERE 1 = 0), N'Zoë')"
+        );
+        assert_eq!(
+            mssql_cursor_literal("é'z", OF),
+            "ISNULL((SELECT TOP 1 [k] FROM (SELECT * FROM t) AS _rivet_ty WHERE 1 = 0), N'é''z')"
+        );
+        let q = build_keyset_query_bounded(
+            "SELECT * FROM t",
+            "k",
+            Some("é"),
+            Some("ü"),
+            5,
+            SourceType::Mssql,
+        );
+        assert_eq!(
+            q.sql,
+            "SELECT * FROM (SELECT * FROM t) AS _rivet WHERE [k] > ISNULL((SELECT TOP 1 [k] FROM (SELECT * FROM t) AS _rivet_ty WHERE 1 = 0), N'é') AND [k] <= ISNULL((SELECT TOP 1 [k] FROM (SELECT * FROM t) AS _rivet_ty WHERE 1 = 0), N'ü') ORDER BY [k] OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY"
+        );
+    }
+
+    #[test]
+    fn the_seek_sql_next_to_a_non_ascii_mssql_boundary_is_unchanged() {
+        let q = build_keyset_query_bounded(
+            "SELECT * FROM t",
+            "k",
+            Some("abc"),
+            Some("xyz"),
+            5,
+            SourceType::Mssql,
+        );
+        assert_eq!(
+            q.sql,
+            "SELECT * FROM (SELECT * FROM t) AS _rivet WHERE [k] > 'abc' AND [k] <= 'xyz' ORDER BY [k] OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY"
+        );
+        assert_eq!(
+            wrap_key_range(
+                "SELECT * FROM t",
+                "k",
+                Some("1"),
+                Some("9"),
+                SourceType::Mssql
+            ),
+            "SELECT * FROM (SELECT * FROM t) AS _rivet_split WHERE [k] > '1' AND [k] <= '9'"
+        );
+        for v in ["abc", "Zoë", "é'z"] {
+            let of = KeyOf {
+                base: "SELECT * FROM t",
+                expr: "k",
+            };
+            assert_eq!(
+                inline_literal(SourceType::Postgres, v, of),
+                escape_pg_literal(v)
+            );
+            assert_eq!(
+                inline_literal(SourceType::Mysql, v, of),
+                escape_mysql_literal(v)
+            );
+            assert_eq!(
+                inline_literal(SourceType::Oracle, v, of),
+                escape_oracle_literal(v)
+            );
+            assert_eq!(
+                cursor_rhs(SourceType::Postgres, v, of),
+                (escape_pg_literal(v), None)
+            );
+            assert_eq!(
+                cursor_rhs(SourceType::Mysql, v, of),
+                ("?".to_string(), Some(v.to_string()))
+            );
+            assert_eq!(
+                cursor_rhs(SourceType::Oracle, v, of),
+                (":1".to_string(), Some(v.to_string()))
+            );
+        }
     }
 
     #[test]

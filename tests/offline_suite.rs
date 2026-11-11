@@ -46,6 +46,8 @@ mod property_no_debris_after_stop;
 mod property_no_silent_null_cloud_legs;
 #[path = "offline/renderer_locality_guard.rs"]
 mod renderer_locality_guard;
+#[path = "offline/seek_order_matrix.rs"]
+mod seek_order_matrix;
 #[path = "offline/skip_is_not_a_pass_guard.rs"]
 mod skip_is_not_a_pass_guard;
 #[path = "offline/tls_ca_file_sole_anchor.rs"]
