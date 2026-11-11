@@ -159,7 +159,7 @@ pub(crate) fn keyed_tables(
 }
 
 /// The min and max `_id` of `collection` by BSON order, or `None` for an empty one.
-pub(super) fn id_span_on(
+pub(crate) fn id_span_on(
     session: &MongoSession,
     collection: &str,
 ) -> Result<Option<(Document, Document)>> {
@@ -184,14 +184,27 @@ pub(crate) fn persisted(checkpoint: Option<&std::path::Path>) -> Result<IdTypes>
     })
 }
 
-/// Refuse when a keyed collection already holds more than one `_id` type, read from the server and from `known`.
+/// Admit one change's `_id` into `types` when its collection is keyed; other collections and keyless events pass.
+pub(crate) fn admit_change(
+    types: &mut IdTypes,
+    keyed: &[String],
+    collection: Option<&str>,
+    document_key: Option<&Document>,
+) -> Result<()> {
+    match (collection, document_key.and_then(|k| k.get("_id"))) {
+        (Some(coll), Some(id)) if keyed.iter().any(|k| k == coll) => types.admit(coll, id),
+        _ => Ok(()),
+    }
+}
+
+/// Refuse when a keyed collection already holds more than one `_id` type, read through `span_of` and from `known`.
 pub(crate) fn guard_keyed(
-    session: &MongoSession,
     mut known: IdTypes,
     keyed: &[String],
+    mut span_of: impl FnMut(&str) -> Result<Option<(Document, Document)>>,
 ) -> Result<IdTypes> {
     for collection in keyed {
-        let span = match id_span_on(session, collection) {
+        let span = match span_of(collection) {
             Ok(span) => span,
             Err(e) => {
                 log::warn!(
@@ -275,6 +288,73 @@ mod tests {
              BSON type, drop the change-log table, delete the CDC checkpoint and re-run for a \
              fresh snapshot (loading mixed-type `_id` under a keyed load is tracked in #926)"
         );
+    }
+
+    fn span(lo: Bson, hi: Bson) -> Result<Option<(Document, Document)>> {
+        Ok(Some((doc! { "_id": lo }, doc! { "_id": hi })))
+    }
+
+    #[test]
+    fn a_keyed_collection_whose_ends_differ_in_type_is_refused() {
+        let keyed = vec!["c".to_string()];
+        let err = guard_keyed(IdTypes::default(), &keyed, |_| {
+            span(Bson::Int32(1), Bson::String("1".into()))
+        })
+        .unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_ID_TYPES_MIXED", 5);
+    }
+
+    #[test]
+    fn a_uniform_empty_or_unreadable_collection_is_admitted_and_recorded() {
+        let keyed = vec!["c".to_string()];
+        let uniform = guard_keyed(IdTypes::default(), &keyed, |_| {
+            span(Bson::Int32(1), Bson::Int64(9))
+        })
+        .unwrap();
+        assert_eq!(uniform.brackets("c"), vec![0]);
+        let empty = guard_keyed(IdTypes::default(), &keyed, |_| Ok(None)).unwrap();
+        assert!(empty.brackets("c").is_empty());
+        let unreadable =
+            guard_keyed(IdTypes::default(), &keyed, |_| Err(anyhow::anyhow!("down"))).unwrap();
+        assert!(unreadable.brackets("c").is_empty());
+    }
+
+    #[test]
+    fn a_type_known_from_the_checkpoint_joins_the_server_ends() {
+        let mut known = IdTypes::default();
+        known.admit("c", &Bson::String("a".into())).unwrap();
+        let keyed = vec!["c".to_string()];
+        let err = guard_keyed(known, &keyed, |_| span(Bson::Int32(1), Bson::Int32(2))).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_ID_TYPES_MIXED", 5);
+    }
+
+    #[test]
+    fn a_change_is_admitted_only_for_a_keyed_collection() {
+        let keyed = vec!["c".to_string()];
+        let mut t = IdTypes::default();
+        let key = |id: Bson| doc! { "_id": id };
+        admit_change(&mut t, &keyed, Some("c"), Some(&key(Bson::Int32(1)))).unwrap();
+        assert_eq!(t.brackets("c"), vec![0]);
+        let err = admit_change(
+            &mut t,
+            &keyed,
+            Some("c"),
+            Some(&key(Bson::String("1".into()))),
+        )
+        .unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_ID_TYPES_MIXED", 5);
+        admit_change(
+            &mut t,
+            &keyed,
+            Some("other"),
+            Some(&key(Bson::String("x".into()))),
+        )
+        .unwrap();
+        assert!(t.brackets("other").is_empty());
+        admit_change(&mut t, &keyed, None, Some(&key(Bson::Null))).unwrap();
+        admit_change(&mut t, &keyed, Some("c"), None).unwrap();
+        admit_change(&mut t, &keyed, Some("c"), Some(&doc! { "x": 1 })).unwrap();
+        assert_eq!(t.brackets("c"), vec![0]);
     }
 
     #[test]

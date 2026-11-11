@@ -7079,3 +7079,64 @@ mod overwritten_delta_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mixed_mongo_ids_tests {
+    use super::*;
+
+    /// A config with one CDC export `orders` of `source_type`, its checkpoint `./o.ckpt` holding `idt`.
+    fn cfg_with_ckpt(
+        dir: &std::path::Path,
+        source_type: &str,
+        idt: serde_json::Value,
+    ) -> (crate::config::Config, String) {
+        let yaml = format!(
+            "source:\n  type: {source_type}\n  url: \"{source_type}://u:p@127.0.0.1:1/app\"\n\
+             exports:\n  - name: orders\n    table: orders\n    mode: cdc\n    format: parquet\n    \
+             cdc:\n      checkpoint: ./o.ckpt\n    destination: {{ type: gcs, bucket: b, prefix: \"p/\" }}\n"
+        );
+        let path = dir.join("rivet.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        crate::source::cdc::Position::new(serde_json::json!({ "idt": idt }))
+            .save(&dir.join("o.ckpt"))
+            .unwrap();
+        let path = path.display().to_string();
+        (crate::config::Config::load(&path).unwrap(), path)
+    }
+
+    fn plan(export: &str, unit: Option<&str>) -> load::plan::LoadPlan {
+        let mut plan = load::plan::test_plan(load::plan::LoadMode::Cdc, "gs://b/p/");
+        plan.export_name = export.into();
+        plan.unit = unit.map(str::to_string);
+        plan
+    }
+
+    /// A MongoDB CDC load whose checkpoint records two `_id` types is refused by code before any append.
+    #[test]
+    fn a_mongo_load_over_a_mixed_checkpoint_is_refused_by_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, path) = cfg_with_ckpt(dir.path(), "mongo", serde_json::json!({"orders": [0, 2]}));
+        let err = refuse_mixed_mongo_ids(&cfg, &plan("orders", None), &path).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_ID_TYPES_MIXED", 5);
+    }
+
+    /// A uniform checkpoint, another source, an unknown export and another unit's collection all load.
+    #[test]
+    fn a_uniform_foreign_or_unmatched_load_is_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mongo, path) = cfg_with_ckpt(dir.path(), "mongo", serde_json::json!({"orders": [0]}));
+        refuse_mixed_mongo_ids(&mongo, &plan("orders", None), &path).unwrap();
+
+        let (mixed, path) =
+            cfg_with_ckpt(dir.path(), "mongo", serde_json::json!({"orders": [0, 2]}));
+        refuse_mixed_mongo_ids(&mixed, &plan("elsewhere", None), &path).unwrap();
+        refuse_mixed_mongo_ids(&mixed, &plan("orders", Some("other")), &path).unwrap();
+        let err =
+            refuse_mixed_mongo_ids(&mixed, &plan("orders", Some("orders")), &path).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_ID_TYPES_MIXED", 5);
+
+        let (mysql, path) =
+            cfg_with_ckpt(dir.path(), "mysql", serde_json::json!({"orders": [0, 2]}));
+        refuse_mixed_mongo_ids(&mysql, &plan("orders", None), &path).unwrap();
+    }
+}

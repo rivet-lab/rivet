@@ -302,7 +302,10 @@ pub(super) fn refuse_mixed_id_types(
         config.source.resolve_url()?.expose(),
         config.source.tls.as_ref(),
     )?;
-    crate::source::mongo::id_types::guard_keyed(&session, known, &keyed).map(|_| ())
+    crate::source::mongo::id_types::guard_keyed(known, &keyed, |c| {
+        crate::source::mongo::id_types::id_span_on(&session, c)
+    })
+    .map(|_| ())
 }
 
 /// Refuse a run whose recorded checkpoint file is gone; writes nothing.

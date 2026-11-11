@@ -506,7 +506,9 @@ impl MongoChangeStream {
             .as_ref()
             .map(|pos| super::id_types::IdTypes::from_checkpoint(&pos.0))
             .unwrap_or_default();
-        let id_types = super::id_types::guard_keyed(&session, known, keyed_tables)?;
+        let id_types = super::id_types::guard_keyed(known, keyed_tables, |c| {
+            super::id_types::id_span_on(&session, c)
+        })?;
         let resume = loaded.map(|pos| decode_resume_token(&pos.0)).transpose()?;
         // A checkpoint path with NO persisted position ⇒ a fresh checkpointed
         // run: it must pin its anchor at open (see below).
@@ -1095,11 +1097,12 @@ impl ChangeStream for MongoChangeStream {
             // (dropDatabase / a collection-stream drop) → a loud terminal error.
             match classify_op(&cse.operation_type) {
                 OpClass::Row => {
-                    if let Some(coll) = cse.ns.as_ref().and_then(|n| n.coll.as_deref())
-                        && keyed_tables.iter().any(|k| k == coll)
-                        && let Some(id) = cse.document_key.as_ref().and_then(|dk| dk.get("_id"))
-                        && let Err(e) = id_types.admit(coll, id)
-                    {
+                    if let Err(e) = super::id_types::admit_change(
+                        id_types,
+                        keyed_tables,
+                        cse.ns.as_ref().and_then(|n| n.coll.as_deref()),
+                        cse.document_key.as_ref(),
+                    ) {
                         return Some(Err(e));
                     }
                     // Heterogeneous-`_id` display-collision warning (once per
@@ -1779,5 +1782,15 @@ mod error_code_tests {
     fn an_unrecognised_resume_token_checkpoint_is_refused_by_code() {
         let err = super::decode_resume_token(&serde_json::json!({ "foo": 1 })).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CHECKPOINT_INVALID", 5);
+    }
+
+    /// Anchoring against a server that cannot be reached fails and pins nothing.
+    #[test]
+    fn anchoring_an_unreachable_server_fails_and_writes_no_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ckpt = dir.path().join("o.ckpt");
+        let url = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
+        super::pin_checkpoint_at_current(url, None, &ckpt).unwrap_err();
+        assert!(!ckpt.exists());
     }
 }
