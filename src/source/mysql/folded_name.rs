@@ -339,25 +339,10 @@ mod tests {
         ]
     }
 
-    /// Names found by `mentions_name` over `text`, and the fastest of three searches' time.
-    fn timed_search(names: &[String], text: &[u8]) -> (std::time::Duration, usize) {
-        (0..3)
-            .map(|_| {
-                let started = std::time::Instant::now();
-                let hits = names
-                    .iter()
-                    .filter(|n| mentions_name(true, n, text))
-                    .count();
-                (started.elapsed(), hits)
-            })
-            .min()
-            .expect("three runs")
-    }
-
-    /// Four times the text costs under eight times the time, whatever else the machine is doing.
+    /// Eight times the text costs about eight times the CPU, whatever else the machine is doing.
     #[test]
     fn a_hostile_four_megabytes_is_read_in_one_pass() {
-        const MB: usize = 1 << 20;
+        use crate::test_budget::{SCALE, SMALL, linear_cost};
         let names: Vec<String> = [
             "kikikikikikikikiki",
             "ikikikikikikikikik",
@@ -373,26 +358,18 @@ mod tests {
         .iter()
         .map(|n| n.to_string())
         .collect();
-        let small = hostile_shapes(MB);
-        let large = hostile_shapes(4 * MB);
+        let small = hostile_shapes(SMALL);
+        let large = hostile_shapes(SMALL * SCALE);
         for ((label, small, _), (_, large, owed)) in small.into_iter().zip(large) {
             let names = names.clone();
-            let (done, result) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = done.send((timed_search(&names, &small), timed_search(&names, &large)));
-            });
-            let ((t_small, hits_small), (t_large, hits_large)) = result
-                .recv_timeout(std::time::Duration::from_secs(120))
-                .unwrap_or_else(|why| {
-                    panic!("NAME SEARCH NOT LINEAR: {label}: no answer in 120 s: {why}")
+            let (hits_small, hits_large) =
+                linear_cost(label, small, large, move |text: &Vec<u8>| {
+                    names
+                        .iter()
+                        .filter(|n| mentions_name(true, n, text))
+                        .count()
                 });
             assert_eq!((hits_small, hits_large), (owed, owed), "{label}");
-            let floor = std::time::Duration::from_millis(50);
-            let ratio = t_large.as_secs_f64() / t_small.max(floor).as_secs_f64();
-            assert!(
-                ratio < 8.0,
-                "NAME SEARCH NOT LINEAR: {label}: 1 MB {t_small:?}, 4 MB {t_large:?}, x{ratio:.1}"
-            );
         }
     }
 
@@ -572,31 +549,20 @@ mod tests {
         .collect()
     }
 
-    /// The fastest of five folds of `bytes` under every spelling; each fold returns text.
-    fn fastest_fold(bytes: &[u8]) -> std::time::Duration {
-        (0..5)
-            .map(|_| {
-                let start = std::time::Instant::now();
+    /// A hostile text is folded in one pass: eight times the bytes cost about eight times the CPU, under every spelling.
+    #[test]
+    fn a_megabyte_of_hostile_bytes_is_folded_in_one_pass() {
+        use crate::test_budget::{SCALE, SMALL, linear_cost};
+        linear_cost(
+            "fold",
+            hostile(SMALL),
+            hostile(SMALL * SCALE),
+            |bytes: &Vec<u8>| {
                 for spelling in [Spelling::Utf8, Spelling::Gb18030, Spelling::Unknown] {
                     let (text, per_byte) = lossless_text(bytes, spelling);
                     assert!(!folded(&text, per_byte, spelling).is_empty());
                 }
-                start.elapsed()
-            })
-            .min()
-            .unwrap()
-    }
-
-    /// A megabyte of hostile bytes is folded in one pass: eight times the input costs under 20 times the time.
-    #[test]
-    fn a_megabyte_of_hostile_bytes_is_folded_in_one_pass() {
-        let (eighth, whole) = (
-            fastest_fold(&hostile(128 << 10)),
-            fastest_fold(&hostile(1 << 20)),
-        );
-        assert!(
-            whole < eighth * 20,
-            "1 MiB took {whole:?} against {eighth:?} for 128 KiB: the fold is not linear"
+            },
         );
     }
 }

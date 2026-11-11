@@ -477,6 +477,11 @@ pub trait Source: Send {
         None
     }
 
+    /// The `datetime2` / `datetimeoffset` / `TIMESTAMP` columns of `table` the catalog declares finer than a microsecond; empty where the engine has none.
+    fn finer_than_microsecond_columns(&mut self, _table: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// The primary key columns of `table` in key order; `None` when it has none
     /// or the engine cannot tell.
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {
@@ -1246,6 +1251,16 @@ mod override_probe_tests {
             )]
         );
         assert_eq!(src.sink_stopped, Some(true));
+    }
+
+    /// An engine that does not override the catalog read declares no column finer than a microsecond.
+    #[test]
+    fn a_source_without_the_catalog_read_declares_no_finer_column() {
+        let mut src = Scripted::default();
+        assert_eq!(
+            src.finer_than_microsecond_columns("t").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

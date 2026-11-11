@@ -3322,6 +3322,7 @@ mod tests {
     }
 
     fn td_expect(cells: &[(String, String, TdCell)]) -> (Vec<String>, Vec<RivetValue>) {
+        let sql_null = RivetValue::Null;
         (
             cells.iter().map(|(n, _, _)| n.clone()).collect(),
             cells
@@ -3329,7 +3330,7 @@ mod tests {
                 .map(|(_, _, c)| match c {
                     TdCell::Text(v) => RivetValue::Bytes(v.clone().into_bytes()),
                     TdCell::Int(i) => RivetValue::Int(*i),
-                    TdCell::Null => RivetValue::Null,
+                    TdCell::Null => sql_null.clone(),
                 })
                 .collect(),
         )
