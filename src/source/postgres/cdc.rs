@@ -642,14 +642,11 @@ impl PgChangeStream {
                 super::prepare_fresh(client, &format!("SELECT * FROM {table}")).map_err(|e| {
                     table_probe_refusal(table, e.code().map(|c| c.code()), &e.to_string())
                 })?;
-            let bits =
-                decoder_rewritten_columns(probe.columns().iter().map(|c| (c.name(), c.type_())));
-            if !bits.is_empty() {
-                crate::rivet_bail!(
-                    crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED,
-                    "{}",
-                    rewritten_type_refusal(table.trim(), &bits)
-                );
+            if let Some(why) = bit_column_refusal(
+                table.trim(),
+                probe.columns().iter().map(|c| (c.name(), c.type_())),
+            ) {
+                crate::rivet_bail!(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED, "{why}");
             }
         }
         Ok(())
@@ -1894,6 +1891,15 @@ fn decoder_rewritten_columns<'a>(
                 .then(|| format!("{name} ({label})"))
         })
         .collect()
+}
+
+/// The refusal for a captured relation when any of its columns has a type the decoder rewrites.
+fn bit_column_refusal<'a>(
+    relation: &str,
+    columns: impl IntoIterator<Item = (&'a str, &'a postgres::types::Type)>,
+) -> Option<String> {
+    let bits = decoder_rewritten_columns(columns);
+    (!bits.is_empty()).then(|| rewritten_type_refusal(relation, &bits))
 }
 
 /// The refusal for a captured relation whose columns have a type the decoder rewrites, with its remedy.
@@ -4275,6 +4281,13 @@ mod tests {
                 .map(|(n, t)| (*n, t)),
         );
         assert!(none.is_empty(), "{none:?}");
+        assert!(bit_column_refusal("public.t", [("id", &Type::INT4)]).is_none());
+        let refusal = bit_column_refusal("public.t", [("id", &Type::INT4), ("flags", &Type::BIT)])
+            .expect("a bit column is refused");
+        assert!(
+            refusal.starts_with("pg cdc: public.t: column(s) [flags (bit)] are bit strings"),
+            "{refusal}"
+        );
     }
 
     /// The bit refusal names the relation, the ALTER, the slot drop and the re-baseline in one message.
