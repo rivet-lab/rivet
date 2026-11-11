@@ -61,6 +61,17 @@ GUARD_HOMES = ("tests/", "dev/pytools/", "dev/release_oracle/", ".github/", "doc
 NO_CHANGE = re.compile(r"no user-visible change", re.I)
 RATCHET_HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)ratchets raised", re.I)
 HEADING = re.compile(r"^\s*(?:#+\s|\*\*[^*]+\*\*\s*$)")
+INVARIANTS_HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)invariants\b", re.I)
+ANSWERED = re.compile(r"\bI([1-5])\b(.*)")
+SEAMS = (
+    ("src/cli/", "a command"),
+    ("src/config/", "a config field"),
+    ("src/source/", "a source or a type converter"),
+    ("src/types/", "a type converter"),
+    ("src/destination/", "a destination or an output sink"),
+    ("src/format/", "an output sink"),
+    ("src/load/", "a write leg"),
+)
 
 
 def git(*args: str, check: bool = True) -> str:
@@ -251,11 +262,11 @@ def unmarked_pins() -> list[str]:
     return out
 
 
-def declared(body: str) -> str:
-    """The text of the PR body's "Ratchets raised" section (empty when absent)."""
+def section(body: str, heading: re.Pattern) -> str:
+    """The text of the PR body's section under `heading` (empty when absent)."""
     lines, on, out = body.splitlines(), False, []
     for line in lines:
-        if RATCHET_HEADING.match(line):
+        if heading.match(line):
             on = True
             continue
         if on and HEADING.match(line):
@@ -267,8 +278,29 @@ def declared(body: str) -> str:
 
 def undeclared(raises: list[str], body: str) -> list[str]:
     """Raised pins whose NAME the body's "Ratchets raised" section does not mention."""
-    section = declared(body)
-    return [r for r in raises if r.split(" ")[0].rsplit(":", 1)[1] not in section]
+    said = section(body, RATCHET_HEADING)
+    return [r for r in raises if r.split(" ")[0].rsplit(":", 1)[1] not in said]
+
+
+def invariants_verdict(changed: list[str], body: str | None, root: Path = ROOT) -> tuple[str, str]:
+    """(verdict, line): a change where a command, source, destination, type, sink, write leg or config field lives answers I1-I5 under `## Invariants` (ADR 0040 D3)."""
+    gone = [path for path, _ in SEAMS if not (root / path).is_dir()]
+    if gone:
+        return "FAIL", f"the seam paths {', '.join(gone)} are gone from the tree: update SEAMS in dev/pytools/pr_ready.py"
+    hit = sorted({what for path, what in SEAMS for c in changed if c.startswith(path)})
+    if not hit:
+        return "N/A", "no change where a command, source, destination, type, sink, write leg or config field lives"
+    where = f"{len([c for c in changed if c.startswith(tuple(p for p, _ in SEAMS))])} file(s) where {' / '.join(hit)} lives changed"
+    remedy = ("add `## Invariants` to the PR body with one line per I1-I5: does the change touch it, which seam holds it,"
+              " which property matrix cell grades it ('not applicable' is an answer, silence is not; ADR 0040 D3)")
+    if body is None:
+        return "DECLARE", f"{where}: {remedy}"
+    answered = {m.group(1) for line in section(body, INVARIANTS_HEADING).splitlines()
+                if (m := ANSWERED.search(line)) and re.search(r"\w", m.group(2))}
+    missing = [f"I{n}" for n in range(1, 6) if str(n) not in answered]
+    if missing:
+        return "FAIL", f"{where}; {', '.join(missing)} not answered: {remedy}"
+    return "PASS", f"{where}; I1-I5 answered"
 
 
 # ── CHANGELOG ───────────────────────────────────────────────────────────────
@@ -337,6 +369,7 @@ def branch_rows(base: str, body: str | None, expiry: bool) -> list[tuple[str, st
     head_log = git("show", "HEAD:CHANGELOG.md")
     base_log = git("show", f"{mb}:CHANGELOG.md")
     rows.append(("CHANGELOG", *changelog_verdict(changed, base_log, head_log, body)))
+    rows.append(("invariants declared", *invariants_verdict(changed, body)))
     return rows
 
 
@@ -629,6 +662,17 @@ def self_test() -> int:
         names = [r[0] for r in branch_rows("HEAD", None, expiry=True)]
     assert "review dates" in names and asked == [True], f"the branch rules carry the review-dates row, graded as asked: {names} {asked}"
 
+    seam = ["src/source/mysql/arrow_convert.rs", "tests/a.rs"]
+    full = ("## Invariants\n| # | touches |\n|---|---|\n| I1 | no credential |\n- I2: refused by code\n- I3: not applicable\n"
+            "- I4: coded\n- I5: not applicable\n## Evidence\nx\n")
+    assert invariants_verdict(["tests/a.rs", "dev/x.py"], "")[0] == "N/A", "a change off the seams needs no section"
+    assert invariants_verdict(seam, None)[0] == "DECLARE", "make pr-ready without --body asks for the section"
+    assert invariants_verdict(seam, "## Why\nx\n")[0] == "FAIL", "a seam change with no Invariants section must fail"
+    assert invariants_verdict(seam, full) == ("PASS", "1 file(s) where a source or a type converter lives changed; I1-I5 answered"), invariants_verdict(seam, full)
+    assert "I3 not answered" in invariants_verdict(seam, full.replace("I3: not applicable", "I3:"))[1], "a blank answer is silence"
+    assert invariants_verdict(seam, "## Why\nI1 a I2 b I3 c I4 d I5 e\n## Invariants\nnone\n")[0] == "FAIL", "answers outside the section do not count"
+    with tempfile.TemporaryDirectory() as t:
+        assert "gone from the tree" in invariants_verdict(seam, full, Path(t))[1], "a renamed seam path must not empty the check"
     log = "# C\n\n## Unreleased\n\n### Fixed\n- a\n\n## 0.30.0\n- old\n"
     new = log.replace("- a\n", "- a\n- b\n")
     assert changelog_verdict(["src/a.rs"], log, log, "## Why\n")[0] == "FAIL"
