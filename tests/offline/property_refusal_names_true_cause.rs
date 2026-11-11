@@ -20,13 +20,11 @@ const R_CMD_ORDER: &str = "2026-11-10: plan, load, compact, reconcile and repair
 const R_CMD_ACCEPT: &str = "2026-11-10: validate, metrics and journal exit 0 on a config that run refuses; closes when they refuse with the same code";
 const R_REMEDY_REPORT: &str = "2026-11-10: the remedy names `rivet reconcile --report`, which reconcile does not accept; closes when the remedy names repair's --report or reconcile's --output";
 const R_REMEDY_FORCE: &str = "2026-11-10: the stale-plan remedy names --force without naming `rivet apply`; closes when the message names the apply command";
-const R_STATE_UNREAD: &str = "2026-11-10: validate never opens the state, so over a corrupt state it answers legacy_run with exit 0; closes when validate reads run_status for the prefix (owner Q1 2026-11-01) and refuses a corrupt state as STATE_FILE_CORRUPT";
 const R_COPY_EMPTY: &str = "2026-11-10: state copy reads a corrupt SQLite state as empty and stops RIVET_STATE_COPY_SOURCE_EMPTY; closes when the copy opens the file through the corrupt-state check";
 const R_WORDING_GONE: &str = "2026-11-10: the lost-checkpoint remedy leads with a bare `run the export again` while exit 5 tells a scheduler not to retry; closes when the remedy names the operator's decision first or the exit becomes retryable";
 const R_FIELD_MONGO: &str = "2026-11-10: mongo accepts batch_size 0, an empty or NUL destination path and a 300-char export name with exit 0; closes when each is refused at config load";
 const R_READER_CODE: &str = "2026-11-10: metrics and journal repeat a stopped run's words without the code the run printed; closes when the run history records the refusal code beside its text";
 const R_WORD_CLASSIFY: &str = "2026-11-10: a missing MySQL table named after a classifier word is refused as that word's cause (STATEMENT_TIMEOUT for `max_execution_time`); closes when the classifier reads the server's error number, not words that echo the relation name";
-const R_PREFIX_GONE: &str = "2026-11-10: validate answers exit 0 when the prefix of a recorded delivery is removed; closes when validate refuses a recorded delivery whose prefix holds no manifest";
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
 const ACCEPTED_RED: &[(&str, &str)] = &[
     ("cause/RIVET_SOURCE_CONNECT_FAILED/mongo", R_CONNECT),
@@ -95,8 +93,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_REMEDY_REPORT,
     ),
     ("wording/RIVET_STATE_CHUNK_CHECKPOINT_GONE", R_WORDING_GONE),
-    ("guard/validate/state_corrupt/*", R_STATE_UNREAD),
-    ("guard/validate_--export_a/state_corrupt/*", R_STATE_UNREAD),
     ("guard/state_copy_--to_URL/state_corrupt/*", R_COPY_EMPTY),
     ("remedy/RIVET_PLAN_ARTIFACT_STALE", R_REMEDY_FORCE),
     ("source/RIVET_VERIFY_*", R_VERIFY),
@@ -162,11 +158,10 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_READER_CODE,
     ),
     ("word/max_execution_time/mysql", R_WORD_CLASSIFY),
-    ("guard/validate/prefix_gone/*", R_PREFIX_GONE),
 ];
 
 /// Cell families only the live mode emits; their ledger entries are not stale in an offline run.
-const STAND_AXES: &[&str] = &["word/", "reader/live/", "guard/validate/prefix_gone/"];
+const STAND_AXES: &[&str] = &["word/", "reader/live/"];
 
 /// Whether a ledger key accepts a RED cell: an exact key, or a `prefix*` pattern.
 fn accepts(key: &str, cell: &str) -> bool {
@@ -1788,11 +1783,9 @@ fn prefix_gone_cell(e: SourceType, out: &mut Vec<(String, Verdict)>) {
     let mut q = p.clone();
     q.argv = cmd(&["validate", "-c", "CFG"]);
     let o = execute_in(dir.path(), &q);
-    let v = if o.exit == 3 && error_section(&o.stderr).and_then(printed_code).is_some() {
-        Ok(format!(
-            "exit=3 \"{}\"",
-            brief(error_section(&o.stderr).unwrap_or(""))
-        ))
+    let verdict_code = "[RIVET_VERIFY_DELIVERY_ABSENT]";
+    let v = if o.exit == 3 && o.stdout.contains(verdict_code) {
+        Ok(format!("exit=3 {verdict_code}"))
     } else {
         Err(format!(
             "prefix of a recorded delivery removed: exit={} \"{}{}\"",

@@ -407,6 +407,13 @@ guarantees:
       mssql: { test: validate_reads_every_partition_mssql, asserts: "exactly the deleted partition fails" }
       oracle: { test: validate_reads_every_partition_oracle, asserts: "exactly the deleted partition fails" }
 
+  - id: validate_refuses_a_prefix_whose_recorded_delivery_is_gone
+    stated:
+      - file: docs/cloud-destinations.md
+        sentence: "When the state records a successful run of the export at that destination the prefix is not legacy: `rivet validate` exits 3 with `RIVET_VERIFY_DELIVERY_ABSENT`."
+    held_by:
+      postgres: { test: validate_fails_on_a_recorded_delivery_that_is_gone_s3, asserts: "the verdict names the gone delivery under its verify code and the remedy" }
+
   - id: check_and_doctor_skip_a_backfill_recipe_in_a_whole_config
     stated:
       - file: docs/cdc-full-cycle.md

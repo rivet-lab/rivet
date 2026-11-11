@@ -349,6 +349,14 @@ impl StateStore {
         Self::open_sqlite(config_path)
     }
 
+    /// [`StateStore::open`] for a reader: a SQLite state that does not exist yet is `None` and is not created.
+    pub fn open_if_present(config_path: &str) -> Result<Option<Self>> {
+        if !Self::names_a_server() && !Self::state_db_path(config_path).exists() {
+            return Ok(None);
+        }
+        Self::open(config_path).map(Some)
+    }
+
     /// Whether `RIVET_STATE_URL` names a state server, so the state does not live beside the config.
     pub fn names_a_server() -> bool {
         Self::names_a_server_in(state_url_var().as_ref().map(crate::secret::Secret::expose))

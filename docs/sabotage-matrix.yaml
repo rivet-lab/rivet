@@ -251,6 +251,14 @@ scenarios:
     mongo:    { test: validate_sees_a_removed_part_mongo }
     oracle:   { test: validate_sees_a_removed_part_oracle }
 
+  - id: corrupt_prefix_removed
+    what: "the whole prefix of a recorded delivery removed (parts, manifest and `_SUCCESS`): `validate` fails naming RIVET_VERIFY_DELIVERY_ABSENT, the next run delivers"
+    postgres: { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_postgres }
+    mysql:    { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mysql }
+    mssql:    { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mssql }
+    mongo:    { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mongo }
+    oracle:   { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_oracle }
+
   - id: corrupt_chunk_task_marked_completed
     what: "an unfinished range-chunk run whose pending task is marked `completed` in chunk_task: the resume delivers the source or refuses"
     postgres: { test: a_resume_over_a_task_marked_completed_delivers_or_refuses_postgres }

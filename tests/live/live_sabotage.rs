@@ -432,6 +432,7 @@ enum Harm {
     PartTruncated,
     PartReplacedByItsSibling,
     PartRemoved,
+    PrefixRemoved,
 }
 
 /// Damage `rig`'s complete export.
@@ -460,6 +461,13 @@ fn harm(rig: &Rig, how: Harm) {
         Harm::PartTruncated => rig.damage(&part(0), Damage::Truncated),
         Harm::PartReplacedByItsSibling => rig.damage(&part(0), Damage::ReplacedBy(&part(1))),
         Harm::PartRemoved => rig.damage(&part(0), Damage::Removed),
+        Harm::PrefixRemoved => {
+            for gone in rig.manifest_parts() {
+                rig.damage(&gone, Damage::Removed);
+            }
+            rig.damage(&manifest, Damage::Removed);
+            rig.damage(&rig.out_dir().join("_SUCCESS"), Damage::Removed);
+        }
     }
 }
 
@@ -3272,6 +3280,53 @@ fn validate_fails_on_a_marker_without_a_manifest_oracle() {
 #[ignore = "live: requires docker compose mongo"]
 fn validate_fails_on_a_marker_without_a_manifest_mongo() {
     validate_sees_mongo(Harm::ManifestRemoved, "RIVET_VERIFY_");
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_postgres() {
+    validate_sees_sql(
+        SqlEngine::Pg,
+        Harm::PrefixRemoved,
+        "RIVET_VERIFY_DELIVERY_ABSENT",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mysql() {
+    validate_sees_sql(
+        SqlEngine::Mysql,
+        Harm::PrefixRemoved,
+        "RIVET_VERIFY_DELIVERY_ABSENT",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mssql() {
+    validate_sees_sql(
+        SqlEngine::Mssql,
+        Harm::PrefixRemoved,
+        "RIVET_VERIFY_DELIVERY_ABSENT",
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_oracle() {
+    validate_sees_sql(
+        SqlEngine::Oracle,
+        Harm::PrefixRemoved,
+        "RIVET_VERIFY_DELIVERY_ABSENT",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mongo() {
+    validate_sees_mongo(Harm::PrefixRemoved, "RIVET_VERIFY_DELIVERY_ABSENT");
 }
 
 #[test]

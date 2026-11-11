@@ -5859,3 +5859,30 @@ seeds:
         na: "a MongoDB collection has no declared numeric precision, so init writes no decimal override and no map key from a field name (the mutant lives in the relational decimal override writer)"
       oracle:
         cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+
+  - name: validate-reads-a-lost-delivery-as-never-delivered
+    class: "a verifier that reads the absence of its evidence as never delivered: `rivet validate` took a prefix with no manifest and no `_SUCCESS` for a legacy run and exited 0 although the state recorded a successful run of the export at exactly that destination"
+    history: "owner decision Q1 2026-11-01; RED on main 2026-11-11 (`a_prefix_of_a_recorded_delivery_that_holds_nothing_exits_3_by_code`: exit 0 over a recorded delivery whose prefix holds nothing)"
+    scope: source
+    patch: validate-reads-a-lost-delivery-as-never-delivered/shared.patch
+    engines:
+      postgres:
+        cells:
+          - a_prefix_of_a_recorded_delivery_that_holds_nothing_exits_3_by_code
+          - validate_fails_on_a_recorded_delivery_that_is_gone_s3
+          - validate_fails_on_a_recorded_delivery_that_is_gone_gcs
+          - validate_fails_on_a_recorded_delivery_that_is_gone_azure
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_postgres
+          - "lib:a_recorded_delivery_with_no_manifest_is_a_fatal_failure_naming_export_and_remedy"
+      mysql:
+        cells:
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mysql
+      mssql:
+        cells:
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mssql
+      oracle:
+        cells:
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_oracle
+      mongo:
+        cells:
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mongo

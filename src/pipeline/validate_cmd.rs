@@ -24,9 +24,9 @@
 //!   `rivet reconcile`, which already exists.
 //! - Per-byte re-fingerprint of every part (`--validate --deep`, future).
 //!
-//! Exit code: `0` if `passed` (or the legacy-run case where the verifier
-//! cannot certify but no failures were seen); non-zero on any explicit
-//! failure (`PartMissing`, `PartSizeMismatch`, `SuccessMarkerStale`, …).
+//! Exit code: `0` if `passed` (or a never-delivered prefix: no manifest, no `_SUCCESS`, no recorded
+//! success of the export there); `3` on any explicit failure (`PartMissing`, `PartSizeMismatch`,
+//! `SuccessMarkerStale`, `RecordedDeliveryAbsent`, …).
 
 use std::path::Path;
 
@@ -213,6 +213,8 @@ pub fn run_validate_command(
         }
     }
 
+    settle_recorded_deliveries(config_path, &mut all_results)?;
+
     match format {
         ValidateOutputFormat::Pretty => {
             render_pretty(&mut std::io::stdout().lock(), &all_results, &hard_failures)
@@ -280,6 +282,34 @@ pub fn run_validate_command(
     Ok(())
 }
 
+/// Turn each bare absent-manifest verdict of a batch export into a lost delivery when the state records a successful run of the export at that destination; an unreadable state is refused by its own code.
+fn settle_recorded_deliveries(config_path: &str, results: &mut [ExportVerdict]) -> Result<()> {
+    if !results
+        .iter()
+        .any(|r| r.recorded_as.is_some() && r.verification.is_bare_legacy())
+    {
+        return Ok(());
+    }
+    let Some(state) = crate::state::StateStore::open_if_present(config_path)? else {
+        return Ok(());
+    };
+    for r in results.iter_mut() {
+        let ExportVerdict {
+            resolved_prefix,
+            verification,
+            recorded_as: Some((export, uri)),
+            ..
+        } = r
+        else {
+            continue;
+        };
+        if verification.is_bare_legacy() && state.has_recorded_success(export, uri)? {
+            verification.require_recorded_delivery(resolved_prefix, export);
+        }
+    }
+    Ok(())
+}
+
 /// Exit-code predicate for one export's verdict: non-zero iff the verifier
 /// surfaced an explicit failure (`has_failures` — "a reason an orchestrator
 /// should refuse the run") on a verdict that did not pass.  Both documented
@@ -297,6 +327,7 @@ struct ExportVerdict {
     name: String,
     resolved_prefix: String,
     verification: ManifestVerification,
+    recorded_as: Option<(String, String)>,
 }
 
 /// Render the destination's resolved prefix for human/JSON output.
@@ -372,6 +403,9 @@ fn verify_one_prefix(
     hard_failures: &mut Vec<String>,
 ) {
     let resolved_prefix = resolved_prefix_for_display(&expanded_dest);
+    let recorded_as = (export.mode != crate::config::ExportMode::Cdc
+        && target.prefix_override.is_none())
+    .then(|| (export.name.clone(), expanded_dest.uri()));
     let dest = match crate::destination::create_destination(&expanded_dest) {
         Ok(d) => d,
         Err(e) => {
@@ -432,6 +466,7 @@ fn verify_one_prefix(
                 name: display_name.clone(),
                 resolved_prefix,
                 verification: v,
+                recorded_as,
             });
             // CDC-specific: re-read the parts and confirm `__pos` stayed in
             // source-log order (no reorder / no part-boundary overlap). The
@@ -845,6 +880,7 @@ mod tests {
             name: "orders".into(),
             resolved_prefix: "./output/orders/".into(),
             verification: ManifestVerification::legacy(),
+            recorded_as: None,
         };
         let mut out: Vec<u8> = Vec::new();
         render_pretty(&mut out, std::slice::from_ref(&verdict), &[]);
