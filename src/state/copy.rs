@@ -21,20 +21,23 @@ pub struct CopyReport {
 
 /// The SQLite file `config` keeps its state in and the PostgreSQL state to copy it into:
 /// `--to`, else a PostgreSQL `RIVET_STATE_URL`.
-pub fn endpoints(config: &str, to: Option<String>) -> Result<(std::path::PathBuf, String)> {
+pub fn endpoints(
+    config: &str,
+    to: Option<crate::secret::Secret>,
+) -> Result<(std::path::PathBuf, crate::secret::Secret)> {
     endpoints_in(config, to, super::state_url_var())
 }
 
 /// [`endpoints`] over the value of `RIVET_STATE_URL`.
 fn endpoints_in(
     config: &str,
-    to: Option<String>,
-    env: Option<String>,
-) -> Result<(std::path::PathBuf, String)> {
+    to: Option<crate::secret::Secret>,
+    env: Option<crate::secret::Secret>,
+) -> Result<(std::path::PathBuf, crate::secret::Secret)> {
     let target = match to {
         Some(url) => url,
-        None => match env.as_deref() {
-            Some(url) if super::postgres_state_url(url)?.is_some() => url.to_string(),
+        None => match env.as_ref() {
+            Some(url) if super::postgres_state_url(url.expose())?.is_some() => url.clone(),
             _ => crate::rivet_bail!(
                 crate::error::codes::STATE_COPY_TARGET_MISSING,
                 "`rivet state copy` needs the PostgreSQL state to copy into: pass \
@@ -42,7 +45,7 @@ fn endpoints_in(
             ),
         },
     };
-    if super::postgres_state_url(&target)?.is_none() {
+    if super::postgres_state_url(target.expose())?.is_none() {
         crate::rivet_bail!(
             crate::error::codes::STATE_COPY_TARGET_MISSING,
             "`--to` names a SQLite state; `rivet state copy` copies into a PostgreSQL state \
@@ -50,8 +53,8 @@ fn endpoints_in(
         );
     }
     let source = env
-        .as_deref()
-        .and_then(|url| super::sqlite_state_path(url, config))
+        .as_ref()
+        .and_then(|url| super::sqlite_state_path(url.expose(), config))
         .unwrap_or_else(|| super::config_dir_of(config).join(super::STATE_DB_NAME));
     Ok((source, target))
 }
@@ -59,7 +62,7 @@ fn endpoints_in(
 /// What the operator does after a copy: the state to name from now on, the way back, the checkpoint files.
 pub fn done_note(
     source: &Path,
-    target: &str,
+    target: &crate::secret::Secret,
     report: &CopyReport,
     checkpoints: &[std::path::PathBuf],
 ) -> String {
@@ -72,8 +75,8 @@ pub fn done_note(
         std::fs::canonicalize(source)
             .unwrap_or_else(|_| source.to_path_buf())
             .display(),
-        crate::redact::redact_secrets(target),
-        crate::redact::redact_secrets(target),
+        crate::redact::redact_secrets(target.expose()),
+        crate::redact::redact_secrets(target.expose()),
     );
     if !checkpoints.is_empty() {
         note.push_str(
@@ -101,7 +104,7 @@ pub fn copy_sqlite_to_postgres(source: &Path, target_url: &str) -> Result<CopyRe
     let from = in_memory_copy(source)?;
     super::migrations::migrate(&from)?;
     drop(super::StateStore::open_at_ref(&super::StateRef::Postgres(
-        target_url.to_string(),
+        target_url.into(),
     ))?);
     let mut client = super::connect_pg(target_url)?;
     let mut tx = client.transaction().map_err(|e| pg_failed("begin", &e))?;
@@ -454,7 +457,7 @@ mod tests {
         ] {
             let note = done_note(
                 std::path::Path::new("/c/.rivet_state.db"),
-                target,
+                &target.into(),
                 &report,
                 &[],
             );
@@ -470,12 +473,8 @@ mod tests {
     #[test]
     fn the_target_is_to_or_a_postgres_state_url_and_the_source_the_configs_sqlite_file() {
         let at = |to: Option<&str>, env: Option<&str>| {
-            endpoints_in(
-                "/c/rivet.yaml",
-                to.map(str::to_string),
-                env.map(str::to_string),
-            )
-            .map(|(s, t)| (s.display().to_string(), t))
+            endpoints_in("/c/rivet.yaml", to.map(Into::into), env.map(Into::into))
+                .map(|(s, t)| (s.display().to_string(), t.expose().to_string()))
         };
         assert_eq!(
             at(Some(PG), None).unwrap(),
@@ -515,7 +514,9 @@ mod tests {
         const MARK: &str = "rivet_state_url_child_marker";
         if std::env::args().any(|a| a == MARK) {
             assert_eq!(
-                super::super::state_url_var().as_deref(),
+                super::super::state_url_var()
+                    .as_ref()
+                    .map(crate::secret::Secret::expose),
                 Some("postgresql://u@h/db")
             );
             return;

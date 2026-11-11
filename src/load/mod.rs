@@ -1258,7 +1258,7 @@ pub fn build_loader(
             ca_file,
         } => Box::new(
             clickhouse::ClickhouseLoader::new(
-                url,
+                url.expose(),
                 database,
                 user,
                 password_env,

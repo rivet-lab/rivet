@@ -40,6 +40,9 @@ pub struct TypeReportRow {
     /// Materialization / load-schema hint (L5) to recover the native type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cast_sql: Option<String>,
+    /// How the column lands against what a load key or order needs of it.
+    #[serde(skip)]
+    pub key_landing: crate::preflight::key_admission::KeyLanding,
 }
 
 /// One export's type-report data — or, for a multiplex `tables:` CDC export, ONE
@@ -135,7 +138,8 @@ pub(crate) fn refuse_override_wire_mismatch(
         return Ok(());
     }
     let url = config.source.resolve_url()?;
-    let mut src = connect_source(config, &url, config.source.tls.as_ref())?;
+    let url = url.expose();
+    let mut src = connect_source(config, url, config.source.tls.as_ref())?;
     for (table, query) in report_units(export, config_dir, params)? {
         let overrides = unit_overrides(export, table.as_deref(), column_overrides);
         source::refuse_override_wire_mismatch(
@@ -258,9 +262,10 @@ pub fn collect_reports(
         on_unresolved,
     } = ctx;
     let url = config.source.resolve_url()?;
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
-    let units = resolved_units(config, export, &url, tls, config_dir, params, on_unresolved)?;
-    let mut src = connect_source(config, &url, tls)?;
+    let units = resolved_units(config, export, url, tls, config_dir, params, on_unresolved)?;
+    let mut src = connect_source(config, url, tls)?;
 
     units
         .into_iter()
@@ -469,6 +474,7 @@ pub struct CapturedUnit {
     pub table: Option<String>,
     pub mappings: Vec<crate::types::TypeMapping>,
     pub primary_key: Option<Vec<String>>,
+    pub finer_than_microsecond: Vec<String>,
 }
 
 /// Capture from the source, at run time, everything `rivet load` later plans from without it.
@@ -480,17 +486,18 @@ pub fn capture_load_units(
     params: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<Vec<CapturedUnit>> {
     let url = config.source.resolve_url()?;
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
     let units = resolved_units(
         config,
         export,
-        &url,
+        url,
         tls,
         config_dir,
         params,
         OnUnresolvedCapture::Fail,
     )?;
-    let mut src = connect_source(config, &url, tls)?;
+    let mut src = connect_source(config, url, tls)?;
     units
         .into_iter()
         .map(|unit| {
@@ -506,13 +513,86 @@ pub fn capture_load_units(
                 }),
                 None => None,
             };
+            let finer_than_microsecond = match unit.relation.as_deref() {
+                Some(relation) => {
+                    src.finer_than_microsecond_columns(relation)
+                        .unwrap_or_else(|e| {
+                            log::warn!(
+                                "export '{}': could not read the sub-microsecond columns of \
+                             `{relation}`: {e:#}",
+                                export.name
+                            );
+                            Vec::new()
+                        })
+                }
+                None => Vec::new(),
+            };
             Ok(CapturedUnit {
                 table: unit.table,
                 mappings,
                 primary_key,
+                finer_than_microsecond,
             })
         })
         .collect()
+}
+
+/// Refuses an incremental export whose load orders or keys by a column that lands inexactly, from what the source resolves now.
+pub(crate) fn refuse_inexact_load_keys(
+    config: &Config,
+    export: &ExportConfig,
+    column_overrides: &ColumnOverrides,
+    config_dir: &std::path::Path,
+    params: Option<&std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    if admits_load_keys(config, export) {
+        refuse_captured_units(
+            config,
+            export,
+            &capture_load_units(config, export, column_overrides, config_dir, params)?,
+        )
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether the export loads incrementally, the only mode whose keys are admitted by their landing at check.
+fn admits_load_keys(config: &Config, export: &ExportConfig) -> bool {
+    config.load.is_some()
+        && crate::plan::load_settings::load_mode_of(config, export)
+            == crate::plan::load_settings::LoadMode::Incremental
+}
+
+/// Refuses the captured units whose cursor or primary key lands inexactly.
+fn refuse_captured_units(
+    config: &Config,
+    export: &ExportConfig,
+    units: &[CapturedUnit],
+) -> Result<()> {
+    let mode = crate::plan::load_settings::load_mode_of(config, export);
+    for unit in units {
+        let Some(load) =
+            crate::plan::load_settings::effective_load(config, export, unit.table.as_deref())
+        else {
+            continue;
+        };
+        let pk: Vec<String> = match &load.pk {
+            crate::config::load::KeyColumns::Columns(cols) => cols.clone(),
+            crate::config::load::KeyColumns::Auto => unit.primary_key.clone().unwrap_or_default(),
+            crate::config::load::KeyColumns::None => Vec::new(),
+        };
+        crate::preflight::key_admission::admit_load_keys(
+            &export.name,
+            mode,
+            crate::plan::build::continued_key(config, export).or(export.cursor_column.as_deref()),
+            &pk,
+            &crate::preflight::key_admission::landings_of_mappings(
+                &unit.mappings,
+                &unit.finer_than_microsecond,
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 /// #32 (column-applicability): downgrade every overridden column whose override
@@ -573,7 +653,12 @@ fn collect_one(
 ) -> Result<ExportTypeReport> {
     let mappings = probe_mappings(src, query, column_overrides)?;
     Ok(report_from_mappings(
-        export, table, mappings, policy, target,
+        export,
+        table,
+        mappings,
+        policy,
+        target,
+        &[],
     ))
 }
 
@@ -598,6 +683,7 @@ pub fn report_from_mappings(
     mappings: Vec<crate::types::TypeMapping>,
     policy: &TypePolicy,
     target: Option<ExportTarget>,
+    finer_than_microsecond: &[String],
 ) -> ExportTypeReport {
     let mut violations = policy.validate(&mappings);
 
@@ -668,6 +754,10 @@ pub fn report_from_mappings(
                 target_note,
                 autoload_type,
                 cast_sql,
+                key_landing: crate::preflight::key_admission::KeyLanding::of(
+                    m,
+                    finer_than_microsecond.contains(&m.column_name),
+                ),
             }
         })
         .collect();
@@ -1504,6 +1594,7 @@ exports:
     #[test]
     fn col_width_short_values_returns_minimum_8() {
         let row = TypeReportRow {
+            key_landing: Default::default(),
             column: "a".into(),
             source_type: "b".into(),
             rivet_type: "c".into(),
@@ -1524,6 +1615,7 @@ exports:
     fn the_target_table_renders_the_typed_target_and_autoload() {
         use crate::types::target::BqType;
         let row = TypeReportRow {
+            key_landing: Default::default(),
             column: "payload".into(),
             source_type: "jsonb".into(),
             rivet_type: "json".into(),
@@ -1595,6 +1687,7 @@ exports:
     #[test]
     fn col_width_long_value_returns_that_length() {
         let row = TypeReportRow {
+            key_landing: Default::default(),
             column: "a_very_long_column_name".into(),
             source_type: "int8".into(),
             rivet_type: "int8".into(),
@@ -1609,5 +1702,99 @@ exports:
         };
         let w = col_width(&[row], |r| r.column.len());
         assert_eq!(w, "a_very_long_column_name".len());
+    }
+    fn keyed_cfg(mode: &str, load: bool, pk: &str) -> Config {
+        let load = if load {
+            format!(
+                "load: {{ target: clickhouse, url: \"http://127.0.0.1:1\", database: d, user: u, password_env: P{pk} }}\n"
+            )
+        } else {
+            String::new()
+        };
+        let cursor = if mode == "incremental" {
+            "    cursor_column: VER\n"
+        } else {
+            ""
+        };
+        cfg_from(&format!(
+            "source:\n  type: oracle\n  url: \"oracle://u:p@127.0.0.1:1/x\"\n{load}exports:\n  - name: e\n    table: T\n    mode: {mode}\n{cursor}    format: parquet\n    destination:\n      type: local\n      path: /tmp/x\n"
+        ))
+    }
+
+    fn unit(
+        native: &str,
+        rivet: crate::types::RivetType,
+        pk: Option<&[&str]>,
+        finer: &[&str],
+    ) -> CapturedUnit {
+        let col = |name: &str| {
+            crate::types::TypeMapping::from_source(
+                &crate::types::SourceColumn::simple(name, native, false),
+                rivet.clone(),
+            )
+        };
+        CapturedUnit {
+            table: None,
+            mappings: vec![col("VER"), col("TS")],
+            primary_key: pk.map(|p| p.iter().map(|s| s.to_string()).collect()),
+            finer_than_microsecond: finer.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    const INEXACT: &str = "RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT";
+
+    /// Key admission at check reads only an incremental export that has a load block.
+    #[test]
+    fn key_admission_reads_only_an_incremental_export_with_a_load() {
+        for (mode, load, want) in [
+            ("incremental", true, true),
+            ("incremental", false, false),
+            ("full", true, false),
+            ("full", false, false),
+        ] {
+            let c = keyed_cfg(mode, load, "");
+            assert_eq!(
+                admits_load_keys(&c, &c.exports[0]),
+                want,
+                "{mode} load={load}"
+            );
+        }
+    }
+
+    /// A captured unit whose cursor lands as text is refused by code; a numeric landing is not.
+    #[test]
+    fn a_captured_cursor_that_lands_as_text_is_refused_and_a_number_is_not() {
+        let c = keyed_cfg("incremental", true, "");
+        let text = unit("NUMBER", crate::types::RivetType::String, None, &[]);
+        let err = refuse_captured_units(&c, &c.exports[0], &[text]).unwrap_err();
+        assert_eq!(crate::error::error_code(&err), Some(INEXACT), "{err:#}");
+        let number = unit("NUMBER", crate::types::RivetType::Int64, None, &[]);
+        refuse_captured_units(&c, &c.exports[0], &[number]).unwrap();
+        refuse_captured_units(&c, &c.exports[0], &[]).unwrap();
+    }
+
+    /// A key declared finer than a microsecond is refused whether `pk:` names it, leaves it to the recorded key, or the unit has none; `pk: none` names no key.
+    #[test]
+    fn a_captured_key_finer_than_a_microsecond_is_refused_by_the_key_the_load_uses() {
+        let micros = crate::types::RivetType::Timestamp {
+            unit: crate::types::TimeUnit::Microsecond,
+            timezone: None,
+        };
+        let finer = |pk: Option<&[&str]>| unit("datetime2", micros.clone(), pk, &["TS"]);
+        let refused = |load_pk: &str, u: CapturedUnit| {
+            let c = keyed_cfg("incremental", true, load_pk);
+            refuse_captured_units(&c, &c.exports[0], &[u])
+                .err()
+                .and_then(|e| crate::error::error_code(&e))
+        };
+        assert_eq!(refused(", pk: [TS]", finer(None)), Some(INEXACT));
+        assert_eq!(refused("", finer(Some(&["TS"]))), Some(INEXACT));
+        assert_eq!(
+            refused("", finer(None)),
+            None,
+            "no key recorded, none to collapse"
+        );
+        assert_eq!(refused(", pk: none", finer(Some(&["TS"]))), None);
+        assert_eq!(refused(", pk: [VER]", finer(Some(&["TS"]))), None);
     }
 }

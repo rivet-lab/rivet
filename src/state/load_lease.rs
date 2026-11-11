@@ -557,7 +557,8 @@ impl StateStore {
             StateRef::Postgres(url) => {
                 let ttl = lease_ttl_s();
                 let host = host_name();
-                let keeper = keeper_for(url, ttl).map_err(|e| keeper_unavailable(key, &e))?;
+                let keeper =
+                    keeper_for(url.expose(), ttl).map_err(|e| keeper_unavailable(key, &e))?;
                 let granted = Instant::now();
                 let holder = format!(
                     "{host}:{}:{}",

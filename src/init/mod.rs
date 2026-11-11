@@ -712,7 +712,7 @@ pub struct InitYamlDestination {
     pub bigquery_project: Option<String>,
     pub bigquery_dataset: Option<String>,
     /// `--clickhouse-url` / `--clickhouse-database`: the same, for a ClickHouse load.
-    pub clickhouse_url: Option<String>,
+    pub clickhouse_url: Option<crate::secret::Secret>,
     pub clickhouse_database: Option<String>,
     pub clickhouse_user: Option<String>,
     /// `--snowflake-*`: the same, for a Snowflake load (all five, or none).

@@ -898,8 +898,8 @@ def known_defect_covers(cls: str, failures: list[str]) -> bool:
     return bool(failures) and all(KNOWN_DEFECT_CLASSES[cls](f) for f in failures)
 
 
-def _text_form_mismatches(parts: list[str], row_of: dict, forms: set[str]) -> list[str]:
-    """A column the ledger delivers as a TEXT form must carry that form in its `rivet.text_form` field metadata."""
+def _text_form_mismatches(parts: list[str], row_of: dict, forms: set[str], overrides: dict | None = None) -> list[str]:
+    """A column the ledger delivers as a TEXT form must carry that form in its `rivet.text_form` field metadata; a `columns:` override is graded against its declared type instead."""
     import pyarrow.parquet as pq
 
     if not parts:
@@ -907,7 +907,7 @@ def _text_form_mismatches(parts: list[str], row_of: dict, forms: set[str]) -> li
     schema = pq.read_schema(parts[0])
     bad = []
     for col, r in row_of.items():
-        if r.get("known_defect") or r.get("delivery") not in forms or col not in schema.names:
+        if r.get("known_defect") or r.get("delivery") not in forms or col not in schema.names or col in (overrides or {}):
             continue
         got = (schema.field(col).metadata or {}).get(b"rivet.text_form", b"").decode()
         if got != r["delivery"]:
@@ -1344,7 +1344,7 @@ def grade_stdout(spec: dict) -> dict:
         dst = _parts(ora, [printed], fmt) if os.path.getsize(printed) else None
         n = ora.scalar(f"SELECT count(*) FROM {dst}") if dst else 0
         f, row_of, collapse = _value_findings(ora, engine, fmt, native, rows, "source_rows", dst, key, partial)
-        extra = _text_form_mismatches([printed], row_of, forms) if dst and fmt == "parquet" else []
+        extra = _text_form_mismatches([printed], row_of, forms, spec.get("overrides")) if dst and fmt == "parquet" else []
         extra += stdout_ledger(ora, spec, n)
     failures = grade_findings(f, rows, forms, native, engine != "mongo" and fmt == "parquet", spec.get("overrides") or {}, collapse)
     facts = {k: v for k, v in f.items() if k not in ("pairs", "dst_cols", "src_stats", "dst_stats")}
@@ -1495,7 +1495,7 @@ def grade(spec: dict) -> dict:
             extra.append(f"DELTA: the first run in this destination resumed from cursor_low {first['cursor_low']!r}, a cursor no graded run of this stream ended at")
         if cumulative and not cdc:
             save_delta_window(spec, record, graded)
-        f["text_form"] = _text_form_mismatches(new_parts, row_of, forms) if fmt == "parquet" else []
+        f["text_form"] = _text_form_mismatches(new_parts, row_of, forms, spec.get("overrides")) if fmt == "parquet" else []
         if spec.get("partition_by") and new_parts:
             extra += misfiled(ora, new_parts, spec["partition_by"])
         part_rows = ora.scalar(f"SELECT count(*) FROM {_parts(ora, new_parts, fmt)}") if new_parts else 0
@@ -2053,6 +2053,17 @@ def _self_test() -> None:
     assert one("DECIMAL(20,2)", "DOUBLE", "NUMERIC(20,2)", overrides={"c": "decimal(20,2)"}), "a `columns:` override is graded against its type"
     assert not one("DECIMAL(20,2)", "DECIMAL(20,2)", "NUMERIC(20,2)", overrides={"c": "decimal(20, 2)"})
     assert not one("DECIMAL(20,2)", "DOUBLE", "NUMERIC(20,2)", overrides={"c": None}), "a load names its overrides, not their parquet types"
+    import tempfile
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    with tempfile.TemporaryDirectory() as tmp:
+        part = os.path.join(tmp, "p.parquet")
+        pq.write_table(pa.table({"c": pa.array([1], pa.int64())}), part)
+        ledger = {"c": {"delivery": "decimal_plain"}}
+        assert _text_form_mismatches([part], ledger, {"decimal_plain"}), "a ledger text form the part does not label is a finding"
+        assert not _text_form_mismatches([part], ledger, {"decimal_plain"}, {"c": "int64"}), "a `columns:` override is graded against its declared type, not the ledger text form"
     assert one("VARCHAR", "DOUBLE", "NUMERIC(50,2)"), "a numeric read as text is graded from its catalog type"
     assert one("VARCHAR", "DOUBLE", "NUMBER"), "an unbounded NUMBER delivered as a double is a loss"
     assert one("VARCHAR", "BIGINT", "VARCHAR(10)"), "a text column delivered as a number is a loss"

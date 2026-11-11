@@ -57,18 +57,18 @@ pub struct Args {
 
     /// PostgreSQL connection URL
     #[arg(long, default_value = "postgresql://rivet:rivet@localhost:5432/rivet")]
-    pub pg_url: String,
+    pub pg_url: rivet::secret::Secret,
 
     /// MySQL connection URL
     #[arg(long, default_value = "mysql://rivet:rivet@localhost:3306/rivet")]
-    pub mysql_url: String,
+    pub mysql_url: rivet::secret::Secret,
 
     /// SQL Server connection URL (sqlserver://user:pass@host:port/db)
     #[arg(
         long,
         default_value = "sqlserver://sa:Rivet_Passw0rd!@127.0.0.1:1433/rivet"
     )]
-    pub mssql_url: String,
+    pub mssql_url: rivet::secret::Secret,
 
     /// Batch size for realistic INSERT path (Postgres realistic uses COPY instead)
     #[arg(long, default_value = "1000")]
