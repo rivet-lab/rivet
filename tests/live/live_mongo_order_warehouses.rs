@@ -475,24 +475,24 @@ fn shard_cell(wh: Wh, label: &str) {
     let db = unique_name(label);
     let _guard = wh.guard(&coll);
     let _db = MongoDbGuard {
-        port: MONGO_SHARD_PORT,
+        port: mongo_shard_port(),
         db: db.clone(),
     };
-    let m = MongoTest::connect(MONGO_SHARD_PORT, &db);
+    let m = MongoTest::connect(mongo_shard_port(), &db);
     m.shard_collection(&coll, &SHARD_SPLITS);
     for id in 1..=SHARD_DOCS {
         m.upsert_set(&coll, id, "v", "0");
     }
     let rig = wh
         .shaped(
-            Rig::mongo_cdc(&coll).source_url(&MongoTest::url(MONGO_SHARD_PORT, &db)),
+            Rig::mongo_cdc(&coll).source_url(&MongoTest::url(mongo_shard_port(), &db)),
             &coll,
             false,
         )
         .cdc("initial: snapshot")
         .cdc("rollover: 2");
     rig.run_ok();
-    let mover = ChunkMover::start(MONGO_SHARD_PORT, &db, &coll, vec![5, 25, 45]);
+    let mover = ChunkMover::start(mongo_shard_port(), &db, &coll, vec![5, 25, 45]);
     for (rounds, hook) in [
         (0..4, "cdc_after_checkpoint_before_ack"),
         (4..8, "cdc_after_flush_before_ack"),

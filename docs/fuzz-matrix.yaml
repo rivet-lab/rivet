@@ -36,7 +36,7 @@ scenarios:
     oracle:   { test: config_from_yaml }
 
   - id: fuzz_cdc_wire_decode
-    what: "decoding a CDC change record off the replication wire into typed cells"
+    what: "decoding a CDC change record off the replication wire into typed cells; the render-then-parse round trip with hostile names and values is a proptest in the offline suite (a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered)"
     postgres: { test: pg_test_decoding }
     mysql:    { gap: "binary binlog events are decoded by the patched mysql_common fork (blackbeam/rust_mysql_common#200); a property test over arbitrary binlog TIME bytes is open (2026-11-04), closes when the fuzz crate drives the fork decoder" }
     mssql:    { na: "change-table rows arrive as tiberius typed ColumnData (binary protocol, driver-decoded); Rivet only maps the enum in cell_to_rivet" }

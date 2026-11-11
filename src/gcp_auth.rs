@@ -36,10 +36,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::secret::Secret;
 use anyhow::{Context, Result};
 use reqsign::{GoogleToken, GoogleTokenLoad};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use crate::error::retry::{
     MAX_TRANSIENT_RETRIES, is_transient_status, poll_interval, should_back_off,
@@ -93,8 +93,8 @@ struct AdcFile {
     cred_type: String,
     // ── authorized_user ──────────────────────────────────────────────────
     client_id: Option<String>,
-    client_secret: Option<String>,
-    refresh_token: Option<String>,
+    client_secret: Option<Secret>,
+    refresh_token: Option<Secret>,
     /// The project billed for API quota when the caller is a USER credential.
     /// `gcloud auth application-default login` writes it; JSON APIs that meter
     /// per-project (BigQuery) reject a user token without it.
@@ -105,7 +105,7 @@ struct AdcFile {
     /// BigQuery records on the job.
     client_email: Option<String>,
     /// PEM-encoded RSA private key. THE secret in a key file.
-    private_key: Option<String>,
+    private_key: Option<Secret>,
     /// Token endpoint to POST the assertion to, and the assertion's `aud`.
     /// Present in every key file Google issues; defaults to the well-known
     /// endpoint when absent so a hand-trimmed file still works.
@@ -132,8 +132,8 @@ pub(crate) enum AdcCredentials {
 pub(crate) struct UserCredentials {
     client_id: String,
     // SecOps: long-lived secrets; heap zeroed on drop, never logged.
-    client_secret: Zeroizing<String>,
-    refresh_token: Zeroizing<String>,
+    client_secret: Secret,
+    refresh_token: Secret,
     quota_project: Option<String>,
     token_uri: String,
 }
@@ -143,7 +143,7 @@ pub(crate) struct ServiceAccountKey {
     client_email: String,
     // SecOps: THE secret. Heap zeroed on drop; never logged, never rendered by
     // `Debug`, and never echoed into an error (see [`Self::encoding_key`]).
-    private_key_pem: Zeroizing<String>,
+    private_key_pem: Secret,
     /// Both the POST target and the assertion's `aud` — Google requires them
     /// to match, so one field feeds both.
     token_uri: String,
@@ -168,8 +168,8 @@ impl AdcCredentials {
     pub(crate) fn user_for_test(client_id: &str, client_secret: &str, refresh_token: &str) -> Self {
         Self::User(UserCredentials {
             client_id: client_id.to_string(),
-            client_secret: Zeroizing::new(client_secret.to_string()),
-            refresh_token: Zeroizing::new(refresh_token.to_string()),
+            client_secret: Secret::new(client_secret.to_string()),
+            refresh_token: Secret::new(refresh_token.to_string()),
             quota_project: None,
             token_uri: GOOGLE_TOKEN_URL.to_string(),
         })
@@ -207,8 +207,8 @@ impl AdcCredentials {
     /// A key that tells two identities apart even when they share a public principal (every `gcloud` user login shares one OAuth client id); never logged.
     pub(crate) fn cache_key(&self) -> String {
         let secret = match self {
-            Self::User(u) => u.refresh_token.as_bytes(),
-            Self::ServiceAccount(sa) => sa.private_key_pem.as_bytes(),
+            Self::User(u) => u.refresh_token.expose().as_bytes(),
+            Self::ServiceAccount(sa) => sa.private_key_pem.expose().as_bytes(),
         };
         format!(
             "{}|{}|{:016x}",
@@ -249,7 +249,7 @@ impl AdcCredentials {
     /// SecOps: the returned body carries secret material (a refresh token, or a
     /// freshly signed assertion) — it is `Zeroizing` so the heap buffer is wiped
     /// once the request is dispatched.
-    pub(crate) fn grant_body(&self, scope: &str) -> Result<Zeroizing<String>> {
+    pub(crate) fn grant_body(&self, scope: &str) -> Result<Secret> {
         match self {
             Self::User(u) => Ok(u.refresh_grant_body()),
             Self::ServiceAccount(sa) => sa.jwt_bearer_grant_body(scope, unix_now()?),
@@ -267,12 +267,12 @@ impl UserCredentials {
     /// whatever the user consented to at `application-default login`
     /// (cloud-platform in practice) — which is why one grant serves GCS and
     /// BigQuery alike.
-    fn refresh_grant_body(&self) -> Zeroizing<String> {
-        Zeroizing::new(format!(
+    fn refresh_grant_body(&self) -> Secret {
+        Secret::new(format!(
             "grant_type=refresh_token&client_id={}&client_secret={}&refresh_token={}",
             urlenc(&self.client_id),
-            urlenc(&self.client_secret),
-            urlenc(&self.refresh_token),
+            urlenc(self.client_secret.expose()),
+            urlenc(self.refresh_token.expose()),
         ))
     }
 }
@@ -323,13 +323,13 @@ impl ServiceAccountKey {
     ///
     /// This is the whole reason rivet no longer shells out to `gcloud` for a
     /// service account: everything the subprocess did is these three lines.
-    fn jwt_bearer_grant_body(&self, scope: &str, now_unix: u64) -> Result<Zeroizing<String>> {
+    fn jwt_bearer_grant_body(&self, scope: &str, now_unix: u64) -> Result<Secret> {
         let assertion = self.sign_assertion(&self.claims(scope, now_unix))?;
-        Ok(jwt_bearer_grant_body(&assertion))
+        Ok(jwt_bearer_grant_body(assertion.expose()))
     }
 
     /// RS256-sign the claim set, returning the compact-serialised JWT.
-    fn sign_assertion(&self, claims: &JwtBearerClaims) -> Result<Zeroizing<String>> {
+    fn sign_assertion(&self, claims: &JwtBearerClaims) -> Result<Secret> {
         let key = self.encoding_key()?;
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         // SecOps: an encoding failure must not carry the library's error text
@@ -343,7 +343,7 @@ impl ServiceAccountKey {
                 ),
             )
         })?;
-        Ok(Zeroizing::new(token))
+        Ok(Secret::new(token))
     }
 
     /// Parse the PEM into a signing key.
@@ -354,15 +354,17 @@ impl ServiceAccountKey {
     /// replacement names the file's own `client_email` (public) and the field
     /// at fault, which is everything an operator needs to fix it.
     fn encoding_key(&self) -> Result<jsonwebtoken::EncodingKey> {
-        jsonwebtoken::EncodingKey::from_rsa_pem(self.private_key_pem.as_bytes()).map_err(|_| {
-            crate::error::coded(
-                crate::error::codes::DEST_CREDENTIALS_INVALID,
-                format!(
-                    "service account {}: `private_key` is not a PEM-encoded RSA private key",
-                    self.client_email
-                ),
-            )
-        })
+        jsonwebtoken::EncodingKey::from_rsa_pem(self.private_key_pem.expose().as_bytes()).map_err(
+            |_| {
+                crate::error::coded(
+                    crate::error::codes::DEST_CREDENTIALS_INVALID,
+                    format!(
+                        "service account {}: `private_key` is not a PEM-encoded RSA private key",
+                        self.client_email
+                    ),
+                )
+            },
+        )
     }
 }
 
@@ -370,8 +372,8 @@ impl ServiceAccountKey {
 ///
 /// SecOps: `Zeroizing` because the assertion is a bearer credential for its
 /// hour — anyone holding it can mint the same access token.
-fn jwt_bearer_grant_body(assertion: &str) -> Zeroizing<String> {
-    Zeroizing::new(format!(
+fn jwt_bearer_grant_body(assertion: &str) -> Secret {
+    Secret::new(format!(
         "grant_type={}&assertion={}",
         urlenc(JWT_BEARER_GRANT_TYPE),
         urlenc(assertion),
@@ -391,7 +393,7 @@ fn unix_now() -> Result<u64> {
 
 #[derive(Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    access_token: Secret,
     // RFC 6749 makes `expires_in` optional (Google always sends it). Default
     // 0 so an absent TTL reads as already-stale — refresh on every call —
     // never a token pinned with an invented lifetime.
@@ -518,7 +520,7 @@ impl AdcUserTokenLoader {
             if should_back_off(attempt) {
                 tokio::time::sleep(poll_interval(attempt)).await;
             }
-            match request_grant(client, url, &body).await {
+            match request_grant(client, url, body.expose()).await {
                 Ok(minted) => break minted,
                 Err(failure) => attempt = after_failed_attempt(attempt, url, failure)?,
             }
@@ -526,7 +528,7 @@ impl AdcUserTokenLoader {
         log::debug!("GCS: ADC access token minted (expires_in={expires_in}s)");
 
         let token = GoogleToken::new(
-            &access_token,
+            access_token.expose(),
             usize::try_from(expires_in).unwrap_or(usize::MAX),
             GCS_SCOPE,
         );
@@ -657,7 +659,7 @@ async fn request_grant(
     client: &reqwest::Client,
     url: &str,
     body: &str,
-) -> Result<(String, u64), GrantFailure> {
+) -> Result<(Secret, u64), GrantFailure> {
     let resp = client
         .post(url)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -674,7 +676,7 @@ async fn request_grant(
 
 /// Parse the OAuth token-endpoint response, capturing the access token and
 /// its TTL (see [`TokenResponse`] for the absent-`expires_in` contract).
-pub(crate) fn parse_token_response(data: &str) -> Result<(String, u64)> {
+pub(crate) fn parse_token_response(data: &str) -> Result<(Secret, u64)> {
     let token: TokenResponse = serde_json::from_str(data).map_err(|e| {
         crate::error::coded(
             crate::error::codes::DEST_CREDENTIALS_INVALID,
@@ -774,11 +776,11 @@ pub(crate) fn load_adc_credentials() -> Result<Option<AdcCredentials>> {
 
     // SecOps: the raw ADC file contains a long-lived `refresh_token`; wipe the
     // heap buffer as soon as parsing is done.
-    let data = Zeroizing::new(
+    let data = Secret::new(
         std::fs::read_to_string(&path)
             .with_context(|| format!("reading ADC file {}", path.display()))?,
     );
-    parse_adc_file(&data).with_context(|| format!("parsing ADC file {}", path.display()))
+    parse_adc_file(data.expose()).with_context(|| format!("parsing ADC file {}", path.display()))
 }
 
 fn urlenc(s: &str) -> String {
@@ -849,8 +851,8 @@ fn parse_authorized_user(adc: AdcFile) -> Result<AdcCredentials> {
     })?;
     Ok(AdcCredentials::User(UserCredentials {
         client_id,
-        client_secret: Zeroizing::new(client_secret),
-        refresh_token: Zeroizing::new(refresh_token),
+        client_secret,
+        refresh_token,
         quota_project: adc.quota_project_id,
         token_uri: GOOGLE_TOKEN_URL.to_string(),
     }))
@@ -871,7 +873,7 @@ fn parse_service_account(adc: AdcFile) -> Result<AdcCredentials> {
     })?;
     let key = ServiceAccountKey {
         client_email,
-        private_key_pem: Zeroizing::new(private_key),
+        private_key_pem: private_key,
         // A key file Google issues always names the endpoint; default it so a
         // hand-trimmed file is a working credential rather than a 400 from an
         // assertion whose `aud` is the empty string.
@@ -906,7 +908,7 @@ pub(crate) struct BlockingAdcTokenSource {
 /// without reqsign's `GoogleToken` wrapper (the REST client sends a raw
 /// `Authorization: Bearer` header, no signer involved).
 struct MintedAccessToken {
-    token: Zeroizing<String>,
+    token: Secret,
     minted_at: Instant,
     expires_in_secs: u64,
 }
@@ -963,7 +965,7 @@ impl BlockingAdcTokenSource {
     /// A live access token: the cached one while it has more than
     /// [`REFRESH_THRESHOLD`] of life left, otherwise a fresh refresh_token grant.
     /// A fresh token, minted at most once however many threads ask concurrently.
-    pub(crate) fn access_token(&self) -> Result<Zeroizing<String>> {
+    pub(crate) fn access_token(&self) -> Result<Secret> {
         let mut cache = self.minted.lock().expect("ADC token cache poisoned");
         if let Some(fresh) = cache
             .as_ref()
@@ -981,7 +983,7 @@ impl BlockingAdcTokenSource {
     }
 
     /// One round trip to the token endpoint; the caller caches the result.
-    fn request_token(&self) -> Result<(Zeroizing<String>, u64)> {
+    fn request_token(&self) -> Result<(Secret, u64)> {
         log::info!(
             "BigQuery: minting an access token from ADC {} credentials ({})",
             self.creds.credential_kind(),
@@ -994,9 +996,9 @@ impl BlockingAdcTokenSource {
             if should_back_off(attempt) {
                 std::thread::sleep(poll_interval(attempt));
             }
-            match self.request_grant_once(url, &body) {
+            match self.request_grant_once(url, body.expose()) {
                 Ok((access_token, expires_in)) => {
-                    return Ok((Zeroizing::new(access_token), expires_in));
+                    return Ok((access_token, expires_in));
                 }
                 Err(failure) => attempt = after_failed_attempt(attempt, url, failure)?,
             }
@@ -1004,7 +1006,7 @@ impl BlockingAdcTokenSource {
     }
 
     /// One POST of `body` to the token endpoint, judged by its status.
-    fn request_grant_once(&self, url: &str, body: &str) -> Result<(String, u64), GrantFailure> {
+    fn request_grant_once(&self, url: &str, body: &str) -> Result<(Secret, u64), GrantFailure> {
         let resp = self
             .http
             .post(url)
@@ -1097,8 +1099,8 @@ mod tests {
         assert_eq!(c.principal(), "cid");
         let u = expect_user(&c);
         assert_eq!(u.client_id, "cid");
-        assert_eq!(u.client_secret.as_str(), "csec");
-        assert_eq!(u.refresh_token.as_str(), "rtoken");
+        assert_eq!(u.client_secret.expose(), "csec");
+        assert_eq!(u.refresh_token.expose(), "rtoken");
         // An ADC file that names no quota project reads as None, never as a
         // fabricated one — the BigQuery client then bills its own project.
         assert_eq!(c.quota_project(), None);
@@ -1138,10 +1140,10 @@ mod tests {
         .unwrap();
         let body = c.grant_body(BIGQUERY_SCOPE).unwrap();
         assert_eq!(
-            body.as_str(),
+            body.expose(),
             "grant_type=refresh_token&client_id=c%20id&client_secret=s%2Fec&refresh_token=r%2Btok"
         );
-        assert!(!body.contains("scope"), "{}", body.as_str());
+        assert!(!body.expose().contains("scope"), "{}", body.expose());
     }
 
     #[test]
@@ -1300,7 +1302,7 @@ mod tests {
             r#"{"access_token": "ya29.x", "expires_in": 3599, "token_type": "Bearer", "scope": "s"}"#,
         )
         .unwrap();
-        assert_eq!(tok, "ya29.x");
+        assert_eq!(tok.expose(), "ya29.x");
         assert_eq!(ttl, 3599);
     }
 
@@ -1507,12 +1509,12 @@ mod tests {
             .sign_assertion(&sa.claims(GCS_SCOPE, 1_700_000_000))
             .unwrap();
 
-        let parts: Vec<&str> = assertion.split('.').collect();
+        let parts: Vec<&str> = assertion.expose().split('.').collect();
         assert_eq!(
             parts.len(),
             3,
             "compact JWT serialisation: {}",
-            assertion.as_str()
+            assertion.expose()
         );
 
         let header: serde_json::Value = serde_json::from_slice(&b64url(parts[0])).unwrap();
@@ -1549,7 +1551,7 @@ mod tests {
     fn jwt_bearer_grant_body_is_the_rfc7523_grant() {
         let body = jwt_bearer_grant_body("aGVhZGVy.cGF5bG9hZA.c2ln");
         assert_eq!(
-            body.as_str(),
+            body.expose(),
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer\
              &assertion=aGVhZGVy.cGF5bG9hZA.c2ln"
         );
@@ -1564,10 +1566,11 @@ mod tests {
         let c = sa_credentials();
         let body = c.grant_body(BIGQUERY_SCOPE).unwrap();
         let assertion = body
+            .expose()
             .strip_prefix(
                 "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=",
             )
-            .unwrap_or_else(|| panic!("not a jwt-bearer grant: {}", body.as_str()));
+            .unwrap_or_else(|| panic!("not a jwt-bearer grant: {}", body.expose()));
 
         let payload: serde_json::Value =
             serde_json::from_slice(&b64url(assertion.split('.').nth(1).unwrap())).unwrap();
@@ -1584,7 +1587,7 @@ mod tests {
             .nth(1)
             .expect("the PEM has a body line");
         assert!(
-            !body.contains(key_body),
+            !body.expose().contains(key_body),
             "the grant body must not carry key material"
         );
     }
@@ -1600,7 +1603,7 @@ mod tests {
             .as_secs();
         let c = sa_credentials();
         let body = c.grant_body(GCS_SCOPE).unwrap();
-        let assertion = body.rsplit("assertion=").next().unwrap();
+        let assertion = body.expose().rsplit("assertion=").next().unwrap();
         let payload: serde_json::Value =
             serde_json::from_slice(&b64url(assertion.split('.').nth(1).unwrap())).unwrap();
         let iat = payload["iat"].as_u64().expect("iat is a number");
@@ -1674,7 +1677,7 @@ mod tests {
     fn sa_credentials_with_marked_key() -> AdcCredentials {
         AdcCredentials::ServiceAccount(ServiceAccountKey {
             client_email: TEST_SA_EMAIL.to_string(),
-            private_key_pem: Zeroizing::new(
+            private_key_pem: Secret::new(
                 "-----BEGIN PRIVATE KEY-----PRIVATEKEYMARKER-----END PRIVATE KEY-----".to_string(),
             ),
             token_uri: GOOGLE_TOKEN_URL.to_string(),
@@ -1831,7 +1834,7 @@ mod tests {
                 let (src, start) = (Arc::clone(&src), Arc::clone(&start));
                 std::thread::spawn(move || {
                     start.wait();
-                    src.access_token().map(|t| t.to_string())
+                    src.access_token().map(|t| t.expose().to_string())
                 })
             })
             .collect();
@@ -1873,7 +1876,7 @@ mod error_code_tests {
         crate::error::assert_coded(&err, "RIVET_DEST_CREDENTIALS_INVALID", 1);
         let key = ServiceAccountKey {
             client_email: "sa@example.iam.gserviceaccount.com".into(),
-            private_key_pem: Zeroizing::new("not a key".into()),
+            private_key_pem: Secret::new("not a key"),
             token_uri: "https://oauth2.googleapis.com/token".into(),
         };
         let err = key.encoding_key().err().expect("not a PEM key");
@@ -1905,7 +1908,7 @@ mod token_endpoint_tests {
     fn mint_blocking(creds: AdcCredentials) -> Result<String> {
         within(move || {
             let source = BlockingAdcTokenSource::new(creds, reqwest::blocking::Client::new());
-            source.access_token().map(|t| t.to_string())
+            source.access_token().map(|t| t.expose().to_string())
         })
     }
 

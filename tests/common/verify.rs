@@ -948,7 +948,7 @@ impl Case {
         let raw = match (s(src, "url"), s(src, "url_env"), s(src, "url_file")) {
             (Some(u), _, _) => u.to_string(),
             (_, Some(k), _) => env_of(envs, k).ok_or(format!("source.url_env `{k}` is not set"))?,
-            (_, _, Some(f)) => std::fs::read_to_string(self.cwd.join(f))
+            (_, _, Some(f)) => std::fs::read_to_string(self.config_dir.join(f))
                 .map_err(|err| format!("source.url_file `{f}`: {err}"))?
                 .trim()
                 .to_string(),

@@ -114,6 +114,14 @@ scenarios:
     mongo:    { test: a_sharded_mongo_run_delivers_every_write_committed_before_it_started, note: "mongos merges the change streams of two shards; the end-to-end cell is a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_into_clickhouse_as_the_source" }
     oracle:   { na: "an Oracle source is one redo stream per instance read through LogMiner; a single SCN order covers it, so no second stream can trail the position" }
 
+  - id: cdc_sharded_source_below_6_0_opens_its_stream
+    what: "a CDC run on a sharded source of a version that has no pre-images (MongoDB 4.4 and 5.0) opens its change stream and delivers every write, instead of stopping on the server's refusal of the pre-image request"
+    postgres: { na: "a PostgreSQL source is one instance; its logical decoding takes no per-version option that a sharded layout rejects" }
+    mysql:    { na: "a MySQL source is one binlog stream; the binlog reader takes no per-version option that a sharded layout rejects" }
+    mssql:    { na: "a SQL Server source reads its capture tables; no per-version stream option exists to be rejected" }
+    mongo:    { test: a_sharded_mongo_run_delivers_every_write_committed_before_it_started, note: "the nightly mongo-versions job runs it on 4.4 and 5.0 against a two-shard cluster; the request rule is pinned by the_pre_image_request_follows_the_server_version" }
+    oracle:   { na: "an Oracle source is read through LogMiner; no per-version stream option exists to be rejected" }
+
   - id: cdc_until_current_open_bound_two_runs
     what: "DEFER-NOT-DROP: a writer commits through run 1, which terminates and captures a prefix; run 2 drains the tail; the distinct-id union re-read from the parquet equals the SOURCE id set. Termination is load-bearing on the open-time bound for PostgreSQL (continuous slot re-peek — the PG variant runs rollover: 5, the RED shape that hung the pre-bound code) AND MongoDB (a tailable change stream that never empty-polls under sustained writes — the cluster-time bound stops it; disabling the pin hangs the sustained-writes test); MySQL (NON_BLOCK EOF) and SQL Server (Agent scan-gap empty poll) terminate natively, so their bound is a precise-stop refinement and their test proves defer-not-drop (each verified fix-invariant for termination by a disable-bound probe)"
     postgres: { test: roast_pg_until_current_open_bound_two_runs_lose_nothing }
@@ -385,3 +393,11 @@ scenarios:
     mssql:    { na: "no consume-retention coupling — the change table is trimmed by the CDC cleanup job on its own schedule; the reader's from-LSN cursor does not pin it" }
     mongo:    { na: "no consume-retention coupling — the oplog is a fixed-size capped collection, overwritten regardless of any resume token" }
     oracle:   { na: "no consume-retention coupling — LogMiner reads redo and archived logs; nothing on the server is pinned for rivet (ADR-0037 OR11), and a purge past the checkpoint fails loud (oracle_cdc_resume_past_log_retention_fails_loudly)" }
+
+  - id: cdc_names_holding_separators
+    what: "a schema, table or column name holding the wire's own separators (`: `, `[`, `]:`, quotes) is delivered under its own name with its own value, never cut at the first separator, dropped, or shifted onto another column"
+    postgres: { test: pg_cdc_a_relation_name_holding_colon_space_is_delivered_not_dropped }
+    mysql:    { na: "row events are binary typed cells with column ordinals; no text line is cut" }
+    mssql:    { na: "change-table rows are typed driver columns addressed by name; no text line is cut" }
+    mongo:    { na: "change events are BSON documents; no text line is cut" }
+    oracle:   { na: "LogMiner rows are decoded through typed column lists, not one text line cut by separators" }

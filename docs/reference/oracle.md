@@ -101,7 +101,7 @@ stops the query at the budget.
 |---|---|
 | `NUMBER(1..9, 0)` / `NUMBER(10..18, 0)` | Int32 / Int64 |
 | `NUMBER(p, s)` otherwise | Decimal128(p, s); `s > p` widens to (s, s), negative `s` to (p − s, 0) |
-| bare `NUMBER`, `FLOAT` | exact decimal text (Utf8) with a warning — declare `columns:` to load it as a number |
+| bare `NUMBER`, `FLOAT` | exact decimal text (Utf8) with a warning — declare `columns:` to load it as a number; as the cursor of an incremental load it is refused (`RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT`, exit 5) until declared, because the warehouse orders text `99` after `100` |
 | `BINARY_FLOAT` / `BINARY_DOUBLE` | Float32 / Float64 (NaN, ±Inf kept) |
 | `BOOLEAN` (23ai and later) | Boolean |
 | `DATE`, `TIMESTAMP(0..6)` | Timestamp(µs) |

@@ -416,6 +416,11 @@ SEEDED_ARGS ?=
 open-defects:  ## Every open_defect_ live cell against its line in dev/release_oracle/known_red.py; CI does not run these cells, so run this after a fixture or harness change.
 	$(LIVE) $(PY) -m dev.release_oracle.open_defects
 
+.PHONY: property-cloud-legs
+property-cloud-legs:  ## Cloud legs of the property matrices (BigQuery, Snowflake, GCS, S3, Azure): the offline tier replays recorded server answers, the cloud tier runs against the real test project and is NOT_GRADED without credentials. Takes one live slot.
+	cargo test --test offline_suite property_no_silent_null_cloud_legs
+	$(LIVE) $(PY) -m dev.release_oracle.cloud_legs --tier cloud
+
 .PHONY: property-no-secret-in-output
 property-no-secret-in-output:  ## Credential-sink property matrix: every command x engine x credential slot x path, graded on every byte a run leaves; one verdict line per cell.
 	cargo build --bin rivet
@@ -425,6 +430,16 @@ property-no-secret-in-output:  ## Credential-sink property matrix: every command
 property-no-debris-after-stop:  ## Property matrix P5: every engine x shape x hook x stop, then a re-run; no debris and the re-run equals an uninterrupted run. One verdict line per cell; RIVET_NO_DEBRIS_AFTER_STOP_CELLS=<substring> narrows it. Takes one live slot.
 	cargo test --test offline_suite property_no_debris_after_stop
 	$(LIVE) cargo nextest run --test live_suite --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_no_debris_after_stop::/)'
+
+.PHONY: seek-order-matrix
+seek-order-matrix:  ## Seek-order matrix (order_equals_seek): every engine x text key type x seeking mode seeks where the page order ends. One verdict line per cell. Takes one live slot.
+	cargo test --test offline_suite seek_order_matrix
+	$(LIVE) cargo nextest run --test live_suite --run-ignored only --no-fail-fast --no-capture -E 'test(/^seek_order_matrix::/)'
+
+.PHONY: property-check-equals-run
+property-check-equals-run:  ## Property matrix check_equals_run: every pre-run command passes only what run or apply will do. Takes one live slot.
+	cargo nextest run --test live_suite -E 'test(/^property_check_equals_run::/)'
+	$(LIVE) cargo nextest run --test live_suite --all-features --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_check_equals_run::/)'
 
 .PHONY: evidence-record evidence-report
 evidence-record:  ## Record the last nextest run's green live cells (target/nextest/default/junit.xml) in docs/evidence/last-green.yaml. EVIDENCE_BY=local|gate|nightly|ci.

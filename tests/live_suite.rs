@@ -128,6 +128,8 @@ mod live_cli_flags;
 mod live_clickhouse_load;
 #[path = "live/live_config_knob_counts.rs"]
 mod live_config_knob_counts;
+#[path = "live/live_config_paths.rs"]
+mod live_config_paths;
 #[path = "live/live_content_load.rs"]
 mod live_content_load;
 #[path = "live/live_continued_key_load.rs"]
@@ -170,6 +172,8 @@ mod live_keyset_key_type;
 mod live_keyset_metrics;
 #[path = "live/live_keyset_parallel.rs"]
 mod live_keyset_parallel;
+#[path = "live/live_load_key_admission.rs"]
+mod live_load_key_admission;
 #[path = "live/live_load_lease_keeper.rs"]
 mod live_load_lease_keeper;
 #[path = "live/live_load_partition_batches.rs"]
@@ -316,6 +320,7 @@ mod property_no_debris_after_stop;
 #[allow(dead_code)]
 #[path = "live/property_no_debris_after_stop_axes.rs"]
 mod property_no_debris_after_stop_axes;
+
 #[path = "live/quality_live.rs"]
 mod quality_live;
 #[path = "live/roast_metric_validated_ordering.rs"]
@@ -344,6 +349,8 @@ mod sec_state_url_query_password;
 mod sec_terminal_inject;
 #[path = "live/sec_tls_defaults.rs"]
 mod sec_tls_defaults;
+#[path = "live/seek_order_matrix.rs"]
+mod seek_order_matrix;
 
 #[path = "live/oracle_sensitivity.rs"]
 mod oracle_sensitivity;

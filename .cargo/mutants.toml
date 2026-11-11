@@ -629,6 +629,11 @@ exclude_re = [
     # the_recipe_column_types_reach_the_stream_and_the_recorded_spec (Decimal(12,4)
     # from the recipe must land in the spec).
     "replace capture_and_record -> Result<\\(\\)>",
+    # 2026-11-11: `capture_load_units` and `refuse_inexact_load_keys` open the source at `rivet check`. Live: an_oracle_number_cursor_is_refused_into_clickhouse (the check refusal), each stub applied by hand.
+    "replace capture_load_units -> Result<Vec<CapturedUnit>> with Ok\\(vec!\\[\\]\\)",
+    "replace refuse_inexact_load_keys -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    # 2026-11-11: the default `Source::finer_than_microsecond_columns` already returns an empty list, so `Ok(vec![])` is the same value; the other stubs are killed offline.
+    "replace Source::finer_than_microsecond_columns -> Result<Vec<String>> with Ok\\(vec!\\[\\]\\)",
     # information_schema query; the empty/non-empty decision is `split_key_list`.
     # Live: a_wide_composite_key_is_recorded_whole_mysql (the GROUP_CONCAT case).
     "replace <impl super::Source for MysqlSource>::primary_key -> Result<Option<Vec<String>>>",

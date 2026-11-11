@@ -1205,48 +1205,52 @@ mod tests {
         assert_eq!(skip_blank("-- only a comment"), "");
     }
 
-    /// One megabyte of each hostile shape is read in one pass, inside the budget.
-    #[test]
-    fn the_relation_readers_are_linear_on_a_hostile_megabyte() {
-        const MB: usize = 1 << 20;
-        let shapes = [
-            ("dashes", "-".repeat(MB), false),
-            ("open blocks", "/*".repeat(MB / 2), false),
-            ("closed blocks", "/**/".repeat(MB / 4), false),
-            ("open parentheses", "(".repeat(MB), false),
-            ("double quotes", "\"".repeat(MB), false),
-            ("`from` repeated", "from ".repeat(MB / 5), true),
+    /// The hostile shapes of a query, about `mb` bytes each, with whether `single_relation` names a relation in it.
+    fn relation_shapes(mb: usize) -> Vec<(&'static str, String, bool)> {
+        vec![
+            ("dashes", "-".repeat(mb), false),
+            ("open blocks", "/*".repeat(mb / 2), false),
+            ("closed blocks", "/**/".repeat(mb / 4), false),
+            ("open parentheses", "(".repeat(mb), false),
+            ("double quotes", "\"".repeat(mb), false),
+            ("`from` repeated", "from ".repeat(mb / 5), true),
             (
                 "a name of a megabyte of parts",
-                format!("SELECT a FROM {}", "a.".repeat(MB / 2)),
+                format!("SELECT a FROM {}", "a.".repeat(mb / 2)),
                 false,
             ),
             (
                 "a quoted name never closed",
-                format!("SELECT a FROM \"{}", "a".repeat(MB)),
+                format!("SELECT a FROM \"{}", "a".repeat(mb)),
                 false,
             ),
             (
                 "blanks after FROM",
-                format!("SELECT a FROM{}t", " ".repeat(MB)),
+                format!("SELECT a FROM{}t", " ".repeat(mb)),
                 true,
             ),
             (
                 "comments after FROM",
-                format!("SELECT a FROM {}t", "--\n".repeat(MB / 3)),
+                format!("SELECT a FROM {}t", "--\n".repeat(mb / 3)),
                 true,
             ),
-        ];
-        for (label, input, named) in shapes {
-            let (done, result) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let read = single_relation(&input, true).is_some();
-                let _ = done.send((read, outer_from_relation(&input), row_set(&input).len()));
+        ]
+    }
+
+    /// Hostile queries are read in one pass: the same answer at a CPU cost that grows with the input.
+    #[test]
+    fn the_relation_readers_are_linear_on_a_hostile_megabyte() {
+        use crate::test_budget::{SCALE, SMALL, linear_cost};
+        for ((label, small, named), (_, large, _)) in relation_shapes(SMALL)
+            .into_iter()
+            .zip(relation_shapes(SMALL * SCALE))
+        {
+            let (got_small, got_large) = linear_cost(label, small, large, |input: &String| {
+                let read = single_relation(input, true).is_some();
+                let _ = (outer_from_relation(input), row_set(input).len());
+                read
             });
-            let (read, _, _) = result
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap_or_else(|why| panic!("RELATION READER NOT LINEAR: {label}: {why}"));
-            assert_eq!(read, named, "{label}");
+            assert_eq!((got_small, got_large), (named, named), "{label}");
         }
     }
 

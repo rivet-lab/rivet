@@ -29,6 +29,7 @@ pub(super) fn record_after_run(
             state,
             mappings,
             summary.open_primary_key.as_deref(),
+            &summary.open_finer_than_microsecond,
             &summary.run_id,
         ),
         // Capturing costs a second source connection, so pay it only for a configured load.
@@ -51,9 +52,13 @@ fn record_from_run(
     state: &StateStore,
     mappings: &[crate::types::TypeMapping],
     primary_key: Option<&[String]>,
+    finer_than_microsecond: &[String],
     run_id: &str,
 ) -> Result<()> {
-    let columns: Vec<LoadSpecColumn> = mappings.iter().map(LoadSpecColumn::from_mapping).collect();
+    let columns: Vec<LoadSpecColumn> = mappings
+        .iter()
+        .map(|m| LoadSpecColumn::from_mapping(m).marked_finer(finer_than_microsecond))
+        .collect();
     state.record_load_spec(
         &export.name,
         None,
@@ -83,7 +88,7 @@ fn capture_and_record(
         let columns: Vec<LoadSpecColumn> = unit
             .mappings
             .iter()
-            .map(LoadSpecColumn::from_mapping)
+            .map(|m| LoadSpecColumn::from_mapping(m).marked_finer(&unit.finer_than_microsecond))
             .collect();
         state.record_load_spec(
             &export.name,

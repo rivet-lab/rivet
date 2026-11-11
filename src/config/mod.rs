@@ -1,3 +1,4 @@
+mod anchor;
 mod cdc;
 pub(crate) mod credential_file;
 pub mod cursor;
@@ -139,40 +140,49 @@ impl Config {
             Self::from_yaml(&resolved).map_err(|e| e.context(format!("config file '{}'", path)))?;
         config.record_queries_as_written(&contents);
         config.anchor_paths(path, std::env::current_dir().ok())?;
-        config.anchor_credential_files(path, std::env::current_dir().ok())?;
+        config.anchor_files(path, std::env::current_dir().ok())?;
         Ok(config)
     }
 
-    /// Anchor every relative `credentials_file` to the config file's directory and read it through the one key reader, so a named key that is missing or unusable stops the load; refuses while only the working directory (where earlier releases read it) holds the file.
-    fn anchor_credential_files(
+    /// Anchor every relative file a config names (`url_file`, `tls.ca_file`, the load target's key and CA, each export's `credentials_file`) to the config file's directory through the one `Anchor`; a named Google key is read through the one key reader, so one that is missing or unusable stops the load.
+    fn anchor_files(
         &mut self,
         config_path: &str,
         cwd: Option<std::path::PathBuf>,
     ) -> crate::error::Result<()> {
-        let Some(dir) = std::path::absolute(config_path)
-            .ok()
-            .and_then(|p| p.parent().map(destination::normalized))
-        else {
+        let Some(anchor) = anchor::Anchor::of(config_path, cwd) else {
             return Ok(());
         };
+        if let Some(written) = self.source.url_file.clone() {
+            self.source.url_file = Some(anchor.file("source: url_file", &written)?);
+        }
+        if let Some(tls) = &mut self.source.tls
+            && let Some(written) = tls.ca_file.clone()
+        {
+            tls.ca_file = Some(anchor.file("source: tls.ca_file", &written)?);
+        }
+        if let Some(load) = &mut self.load {
+            match &mut load.target {
+                load::LoadTarget::Snowflake {
+                    private_key_path, ..
+                } => {
+                    *private_key_path = anchor.file("load: private_key_path", private_key_path)?;
+                }
+                load::LoadTarget::Clickhouse {
+                    ca_file: Some(ca_file),
+                    ..
+                } => {
+                    *ca_file = anchor.file("load: ca_file", ca_file)?;
+                }
+                _ => {}
+            }
+        }
         for export in &mut self.exports {
             let Some(written) = export.destination.credentials_file.clone() else {
                 continue;
             };
-            let anchored = credential_file::anchor(&dir, &written);
             let field = format!("export '{}': credentials_file", export.name);
-            let old = cwd
-                .as_ref()
-                .map(|c| destination::normalized(&c.join(&written)));
-            if !std::path::Path::new(&anchored).exists()
-                && let Some(old) = old.filter(|o| o.exists())
-            {
-                crate::rivet_bail!(
-                    crate::error::codes::CONFIG_SECRET_UNSET,
-                    "{field} '{written}' is relative and now names {anchored} (beside the config), while {} (under the working directory, where earlier releases read it) holds a file and {anchored} holds none: move the key to {anchored}, or make credentials_file absolute",
-                    old.display()
-                );
-            }
+            let anchored = anchor.file(&field, &written)?;
             credential_file::google_key(&field, &anchored)?;
             export.destination.credentials_file = Some(anchored);
         }
@@ -894,13 +904,13 @@ impl Config {
 
         if self.source.has_url_fields() {
             let url_count = [
-                &self.source.url,
-                &self.source.url_env,
-                &self.source.url_file,
-                &self.source.url_secret,
+                self.source.url.is_some(),
+                self.source.url_env.is_some(),
+                self.source.url_file.is_some(),
+                self.source.url_secret.is_some(),
             ]
             .iter()
-            .filter(|u| u.is_some())
+            .filter(|set| **set)
             .count();
             if url_count > 1 {
                 crate::config_bail!(

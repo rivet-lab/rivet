@@ -22,7 +22,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `type` | `postgres` \| `mysql` \| `mssql` \| `oracle` \| `mongo` | **yes** |  |
 | `url` | `string` |  |  |
 | `url_env` | `string` |  |  |
-| `url_file` | `string` |  |  |
+| `url_file` | `string` |  | File holding the URL; a relative path is read beside the config file, whatever directory rivet starts from. |
 | `url_secret` | `string` |  | Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`. |
 | `host` | `string` |  |  |
 | `port` | `integer` |  |  |
@@ -52,7 +52,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | Field | Type | Required | Description |
 |-------|------|:--------:|-------------|
 | `mode` | `disable` \| `require` \| `verify-ca` \| `verify-full` |  | Enforcement level. See [`TlsMode`]. |
-| `ca_file` | `string` |  | PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set. |
+| `ca_file` | `string` |  | PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set; a relative path is read beside the config file. |
 | `accept_invalid_certs` | `boolean` |  | Accept certificates not chained to a trusted CA. Dangerous — disables server authentication — and only honored when explicitly `true`. |
 | `accept_invalid_hostnames` | `boolean` |  | Accept certificates whose subjectAltName does not match the connection hostname. Dangerous — disables hostname verification. |
 
@@ -191,7 +191,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `project` | `string` |  | BigQuery: the project the dataset lives in. |
 | `dataset` | `string` |  | BigQuery: the dataset the tables are created in. |
 | `account` | `string` |  | Snowflake: the account identifier — `myorg-myaccount`, or a locator such as `xy12345.us-east-1`. |
-| `private_key_path` | `string` |  | Snowflake: the unencrypted PKCS#8 private key file of the user's key pair. |
+| `private_key_path` | `string` |  | Snowflake: the unencrypted PKCS#8 private key file of the user's key pair; a relative path is read beside the config file. |
 | `role` | `string` |  | Snowflake: the role the statements run under; the user's default when omitted. |
 | `warehouse` | `string` |  | Snowflake: the virtual warehouse the load runs on. |
 | `database` | `string` |  | Snowflake / ClickHouse: the database the tables are created in. |
@@ -201,7 +201,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `user` | `string` |  | Snowflake / ClickHouse: the user the load authenticates as. |
 | `password_env` | `string` |  | ClickHouse: the env var holding that user's password. |
 | `named_collection` | `string` |  | ClickHouse: a server-side named collection holding the bucket's URL and HMAC keys; ClickHouse then reads the Parquet itself instead of rivet sending it. |
-| `ca_file` | `string` |  | ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed by a private CA, beside the built-in public roots. |
+| `ca_file` | `string` |  | ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed by a private CA, beside the built-in public roots; a relative path is read beside the config file. |
 | `cleanup_source` | `boolean` |  | After a successful load, delete the staged Parquet under the export prefix. |
 | `pk` | `auto` \| `none` |  | Dedup key of the incremental/CDC current-state view: `auto` (the source primary key `rivet run` recorded), `none`, or explicit columns; ignored for `full`. |
 | `layout` | `log_view` \| `base_buffer` |  | `log_view` or `base_buffer` — where the current state lives (`log_view` is deprecated). Absent derives it from the target: on Snowflake an incremental or CDC export is base+buffer (`log_view` keeps the changelog and its view); on BigQuery a CDC stream with a `backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs `target: bigquery` or `snowflake` — `rivet compact` merges the buffer into the base, and ClickHouse has none. |

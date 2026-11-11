@@ -512,6 +512,22 @@ scenarios:
     mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only and a `cdc` stream is refused at run time for these names (src/source/cdc/mod.rs); the plan-level refusal is engine-independent and unit-tested (a_plan_pinned_to_its_run_refuses_a_reserved_source_column)" }
     oracle:   { na: "an unquoted Oracle identifier cannot start with an underscore, so the fixture helper cannot create the column; the plan-level refusal reads only the recorded column names, which the other engines' cells and the unit test exercise" }
 
+  - id: load_cursor_landing_as_text
+    what: "2026-11-10 finding: an incremental load whose cursor column lands as text (a bare Oracle NUMBER) is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5) on every attempt and by `rivet check`, before any warehouse statement; declaring the column `int64` and running the export again then delivers the source, ordered as a number across a digit boundary"
+    postgres: { na: "a PostgreSQL numeric lands as an integer or a decimal and no PostgreSQL type that orders as a number lands as text; the classification of a text landing is unit-tested at the shared seam (preflight::key_admission)" }
+    mysql:    { na: "a MySQL numeric lands as an integer or a decimal and no MySQL type that orders as a number lands as text; the classification is unit-tested at the shared seam (preflight::key_admission)" }
+    mssql:    { na: "a SQL Server numeric lands as an integer or a decimal and no SQL Server type that orders as a number lands as text; the classification is unit-tested at the shared seam (preflight::key_admission)" }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only; there is no incremental cursor" }
+    oracle:   { test: an_oracle_number_cursor_is_refused_into_clickhouse }
+
+  - id: load_primary_key_landing_finer_than_microsecond
+    what: "2026-11-10 finding: an incremental load whose primary-key column is a SQL Server datetime2(7) or an Oracle TIMESTAMP(7..9) declared as `timestamp` (landed at microseconds) is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5) on every attempt and by `rivet check`, before any warehouse statement; declaring the column `timestamp_ns` and running the export again then keeps both rows that differ below a microsecond"
+    postgres: { na: "a PostgreSQL timestamp holds at most microseconds, so the landing loses nothing" }
+    mysql:    { na: "a MySQL datetime/timestamp holds at most microseconds, so the landing loses nothing" }
+    mssql:    { test: an_mssql_sub_microsecond_key_is_refused_into_clickhouse }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only and its key is the document _id" }
+    oracle:   { test: an_oracle_sub_microsecond_key_is_refused_into_clickhouse }
+
   - id: missing_relation_exits_by_its_code
     what: "2026-11-04 finding VP-8 (seam stop-class): a source table or collection the source does not hold is refused by its code (RIVET_SOURCE_TABLE_NOT_FOUND, RIVET_SOURCE_COLLECTION_NOT_FOUND) with exit 1 whatever words its name holds; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exited 2 on SQL Server, Oracle and MongoDB because the exit was read from the message text that holds the name, and 1 on PostgreSQL and MySQL; the plain-named neighbours (users, orders_archive) exit 1 everywhere"
     postgres: { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_postgres }

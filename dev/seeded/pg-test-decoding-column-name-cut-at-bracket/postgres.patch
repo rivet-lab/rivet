@@ -1,0 +1,14 @@
+diff --git a/src/source/postgres/td_line.rs b/src/source/postgres/td_line.rs
+index 44d2336..36cd5c2 100644
+--- a/src/source/postgres/td_line.rs
++++ b/src/source/postgres/td_line.rs
+@@ -99,6 +99,9 @@ fn column(s: &str) -> Option<(RawColumn, &str)> {
+ 
+ /// A column name at the start of `s`: a quoted identifier to its closing quote, or a bare `[A-Za-z0-9_]` run; followed by the `[` of its type.
+ fn read_name(s: &str) -> Option<(String, &str)> {
++    let end = s.find('[')?;
++    return Some((s[..end].trim_matches('"').to_string(), &s[end..]));
++    #[allow(unreachable_code)]
+     if let Some(quoted) = s.strip_prefix('"') {
+         let end = closing_quote(quoted)?;
+         let after = &quoted[end + 1..];

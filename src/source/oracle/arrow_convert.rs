@@ -605,6 +605,49 @@ pub(super) fn rows_to_batch(
 mod tests {
     use super::*;
 
+    /// What the Oracle mapper lands a catalog type as is what a load key or order is admitted by: a bare NUMBER or FLOAT lands as text that orders as text, an exact NUMBER and a text column do not.
+    #[test]
+    fn an_oracle_number_landing_as_text_is_not_admitted_as_an_order_column() {
+        use crate::preflight::key_admission::KeyLanding;
+        use crate::types::SourceColumn;
+        let landing = |kind, native: &str, p, s| {
+            let rivet = autodetect(kind, native, p, s, native);
+            let mapping =
+                TypeMapping::from_source(&SourceColumn::simple("K", native, false), rivet);
+            KeyLanding::of(&deliver_number_text(mapping, kind, p, s), false)
+        };
+        for (kind, native, p, s) in [
+            (OraKind::Number, "number", 0, 0),
+            (OraKind::Number, "number", 0, -127),
+            (OraKind::Number, "number", 38, 39),
+            (OraKind::Number, "number", 126, -127),
+        ] {
+            assert_eq!(
+                landing(kind, native, p, s),
+                KeyLanding::NumberAsText,
+                "{native} {p} {s}"
+            );
+        }
+        for (kind, native, p, s) in [
+            (OraKind::Number, "number", 10, 0),
+            (OraKind::Number, "number", 9, 0),
+            (OraKind::Number, "number", 12, 2),
+            (OraKind::Number, "number", 38, 0),
+            (OraKind::BinaryFloat, "binary_float", 0, 0),
+            (OraKind::BinaryDouble, "binary_double", 0, 0),
+            (OraKind::Text, "varchar", 0, 0),
+            (OraKind::Text, "nchar", 0, 0),
+            (OraKind::Date, "date", 0, 0),
+            (OraKind::Timestamp, "timestamp", 6, 6),
+        ] {
+            assert_eq!(
+                landing(kind, native, p, s),
+                KeyLanding::Exact,
+                "{native} {p} {s}"
+            );
+        }
+    }
+
     /// The seam over what an Oracle catalog type is delivered as: integer NUMBERs, text, DATE and zone-less timestamps to the microsecond key a seek.
     #[test]
     fn an_oracle_catalog_type_keys_a_seek_by_what_it_is_delivered_as() {

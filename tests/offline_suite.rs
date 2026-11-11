@@ -42,8 +42,12 @@ mod memory_throttle_wiring;
 mod one_sanitizer_guard;
 #[path = "offline/property_no_debris_after_stop.rs"]
 mod property_no_debris_after_stop;
+#[path = "offline/property_no_silent_null_cloud_legs.rs"]
+mod property_no_silent_null_cloud_legs;
 #[path = "offline/renderer_locality_guard.rs"]
 mod renderer_locality_guard;
+#[path = "offline/seek_order_matrix.rs"]
+mod seek_order_matrix;
 #[path = "offline/skip_is_not_a_pass_guard.rs"]
 mod skip_is_not_a_pass_guard;
 #[path = "offline/tls_ca_file_sole_anchor.rs"]
@@ -108,6 +112,8 @@ mod mysql_binlog_time_fraction;
 mod mysql_wire_type_fixture_guard;
 #[path = "offline/oneshot_budget.rs"]
 mod oneshot_budget;
+#[path = "offline/secret_expose_ratchet.rs"]
+mod secret_expose_ratchet;
 // Not a test module: the shared non-vacuity rule the grep-shaped guards call so
 // a moved subject fails LOUDLY instead of grading the empty set.
 #[path = "offline/nonvacuity.rs"]
@@ -143,10 +149,14 @@ mod scheduler_contract;
 
 #[path = "offline/cli_flag_coverage_guard.rs"]
 mod cli_flag_coverage_guard;
+#[path = "offline/compatibility_doc_guard.rs"]
+mod compatibility_doc_guard;
 #[path = "offline/compose_image_pins_guard.rs"]
 mod compose_image_pins_guard;
 #[path = "offline/error_code_ratchet.rs"]
 mod error_code_ratchet;
+#[path = "offline/invariant_ratchets.rs"]
+mod invariant_ratchets;
 #[path = "offline/known_red_guard.rs"]
 mod known_red_guard;
 #[path = "offline/live_only_purity_gate.rs"]
@@ -179,6 +189,8 @@ mod schema_evolution;
 mod seam_bypass_guard;
 #[path = "offline/silent_degrade_ratchet.rs"]
 mod silent_degrade_ratchet;
+#[path = "offline/site_ledger.rs"]
+mod site_ledger;
 #[path = "offline/slot_guard_order_guard.rs"]
 mod slot_guard_order_guard;
 #[path = "offline/sprawl_ratchets.rs"]

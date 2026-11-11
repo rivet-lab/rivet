@@ -968,25 +968,35 @@ def summary_line(results: list[Result]) -> str:
     return f"{SCENARIO} summary PASS={len(results) - red - ng} RED={red} NOT_GRADED={ng}"
 
 
-def failure_message(engine: str, klass: str, rs: list[Result]) -> str:
+def failure_message(engine: str, klass: str, rs: list[Result], scenario: str = SCENARIO) -> str:
     """The one ledger line of a failure class on one engine: the same on every tier for the same failing pairs."""
-    return f"{SCENARIO}[{engine}]: {klass} over {len(pairs_of(rs))} source->override pairs #{digest(rs)}"
+    return f"{scenario}[{engine}]: {klass} over {len(pairs_of(rs))} source->override pairs #{digest(rs)}"
 
 
-def record(led: Ledger, engine: str, results: list[Result], tier: str) -> None:
-    """Write one engine's results to the ledger: a FAIL row per failure class, or the PASS row with the counts."""
+def exit_code(results: list[Result]) -> int:
+    """A matrix CLI's exit: 1 when any cell is red, 2 when no cell was graded, else 0."""
+    if any(r.klass and r.klass != NOT_GRADED for r in results):
+        return 1
+    return 0 if any(not r.klass for r in results) else 2
+
+
+def record(led: Ledger, engine: str, results: list[Result], tier: str = "", *, scenario: str = SCENARIO,
+           cause: SkipCause = SkipCause.ENV, target: str | None = None, what: str = "cells graded by a second reader") -> None:
+    """Write one engine's results to the ledger, the one place every no_silent_null axis does it: a skip for cells not graded, a FAIL row per failure class, and a PASS row only when at least one cell was graded and none failed."""
     groups = summary(engine, results)
-    counts = {v: sum(r.verdict == v for r in results) for v in (DELIVERED, REFUSED, DECLARED)}
-    head = f"{SCENARIO}[{engine}] {tier}: {len(results)} cells graded by a second reader; " + ", ".join(f"{v} {n}" for v, n in counts.items())
+    graded = [r for r in results if r.klass != NOT_GRADED]
+    counts = {v: sum(r.verdict == v for r in graded) for v in (DELIVERED, REFUSED, DECLARED)}
+    label = f"{scenario}[{engine}]" + (f" {tier}" if tier else "")
     bad = {k: v for k, v in groups.items() if k and k != NOT_GRADED and v}
-    if groups[NOT_GRADED]:
-        led.skipped(engine, "-", SCENARIO, "-", f"{SCENARIO}[{engine}] {tier}: {len(groups[NOT_GRADED])} of {len(results)} cells not graded: {groups[NOT_GRADED][0].detail[:200]}",
-                    cause=SkipCause.ENV, target=STAND.get(engine, engine))
+    if groups[NOT_GRADED] or not results:
+        why = groups[NOT_GRADED][0].detail[:200] if results else "the axis returned no cell"
+        led.skipped(engine, "-", scenario, "-", f"{label}: {len(groups[NOT_GRADED])} of {len(results)} cells not graded: {why}",
+                    cause=cause, target=target or STAND.get(engine, engine))
     for klass, rs in bad.items():
-        led.failed(engine, "-", SCENARIO, "-", failure_message(engine, klass, rs),
+        led.failed(engine, "-", scenario, "-", failure_message(engine, klass, rs, scenario),
                    "\n".join(f"{r.cell}: {r.detail}" for r in sorted(rs, key=lambda r: r.cell)[:60]))
-    if not bad:
-        led.passed(engine, "-", SCENARIO, "-", head)
+    if not bad and graded:
+        led.passed(engine, "-", scenario, "-", f"{label}: {len(graded)} {what}; " + ", ".join(f"{v} {n}" for v, n in counts.items()))
 
 
 def run_tier(led: Ledger, tier: str) -> None:
@@ -1121,6 +1131,12 @@ def self_test() -> None:
     assert [c.status.name for c in led.cells] == ["PASS", "FAIL"], [c.status for c in led.cells]
     record(led, "mysql", [Result("mysql/INT->none/full/parquet", DELIVERED), Result("mysql/INT->int8/full/parquet", REFUSED, NOT_GRADED)], "smoke")
     assert [c.status.name for c in led.cells][2:] == ["SKIP", "PASS"], "a not-graded cell is a skip row beside the pass, never a silent pass"
+    n0 = len(led.cells)
+    record(led, "mysql", [Result("mysql/INT->int8/full/parquet", REFUSED, NOT_GRADED), Result("mysql/INT->int4/full/parquet", REFUSED, NOT_GRADED)], "smoke")
+    record(led, "mysql", [], "smoke")
+    assert [c.status.name for c in led.cells][n0:] == ["SKIP", "SKIP"], "an axis where no cell was graded, or none returned, never records a PASS"
+    assert exit_code([Result("c", DELIVERED)]) == 0 and exit_code([Result("c", DELIVERED), Result("d", REFUSED, NOT_GRADED)]) == 0
+    assert exit_code([Result("c", DELIVERED, NULLED)]) == 1 and exit_code([Result("c", REFUSED, NOT_GRADED)]) == 2 and exit_code([]) == 2, "red exits 1, nothing graded exits 2"
     mixed = [Result("m/INT UNSIGNED->none/full/parquet", DELIVERED), Result("m/INT->float4/full/parquet", DELIVERED, NULLED, "20 fields"), Result("m/X->none/full/parquet", REFUSED, NOT_GRADED, "stand")]
     lines = [verdict_line(r) for r in mixed]
     assert [ln.split(" ")[2] for ln in lines] == ["PASS", "RED", "NOT_GRADED"] and all(len(ln.split(" ", 3)) == 4 for ln in lines), lines
@@ -1268,7 +1284,7 @@ def main() -> int:
     if ns.out:
         Path(ns.out).write_text("\n".join(json.dumps(r.__dict__) for r in results))
     print(f"{len(results)} cells in {time.time() - t0:.0f}s")
-    return 0
+    return exit_code(results)
 
 
 if __name__ == "__main__":

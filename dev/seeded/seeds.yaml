@@ -3790,6 +3790,56 @@ seeds:
         cells: ["lib:a_relative_path_has_moved_only_when_the_old_place_alone_holds_the_export"]
       oracle:
         cells: ["lib:a_relative_path_has_moved_only_when_the_old_place_alone_holds_the_export"]
+  - name: url-file-follows-the-cwd
+    class: "a relative path the config names (`url_file`, `tls.ca_file`, `load.private_key_path`, `load.ca_file`) is read against the directory rivet is started from while state and destination resolve beside the config, so a run from another directory delivers a different database into the config's destination, exit 0"
+    history: "2026-11-08 - audit H6-F1: `rivet run -c ../proj/rivet.yaml` from a directory holding its own `db.url` delivered 3 rows of the other database into `proj/out`, exit 0, and `run_status` held two successes of one export from two source URLs; fixed by anchoring every relative file field to the config file's directory once at config load (`Config::anchor_files` through `Anchor::file`)"
+    scope: source
+    patch: url-file-follows-the-cwd/shared.patch
+    engines:
+      postgres:
+        cells:
+          - "lib:a_relative_url_file_is_read_beside_the_config"
+          - "lib:every_path_field_is_anchored_beside_the_config"
+          - url_file_follows_the_config_postgres
+      mysql:
+        cells:
+          - "lib:every_path_field_is_anchored_beside_the_config"
+          - url_file_follows_the_config_mysql
+      mssql:
+        cells:
+          - "lib:every_path_field_is_anchored_beside_the_config"
+          - url_file_follows_the_config_mssql
+      mongo:
+        cells: ["lib:a_relative_url_file_is_read_beside_the_config", "lib:every_path_field_is_anchored_beside_the_config"]
+      oracle:
+        cells:
+          - "lib:every_path_field_is_anchored_beside_the_config"
+          - url_file_follows_the_config_oracle
+  - name: url-file-moved-by-the-upgrade
+    class: "the transition guard for a relative config file does not fire, so the upgrade to the config-anchored path silently stops reading the file under the working directory: a run that used to read it now reads another file or none, exit 0 or a message naming the wrong cause"
+    history: "2026-11-08 - audit H6-F1 (precedent #617 and #773): the run from the parent directory exited 1 `RIVET_CONFIG_SECRET_UNSET` with a hint naming the wrong cause while the file existed beside the config; fixed by `Anchor::file`, the one decision every relative file field of `Config::anchor_files` makes before any command opens it"
+    scope: source
+    patch: url-file-moved-by-the-upgrade/shared.patch
+    engines:
+      postgres:
+        cells:
+          - "lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"
+          - url_file_only_the_working_directory_holds_postgres
+          - a_url_file_moved_by_upgrading_the_pinned_release_is_refused_until_the_file_follows
+      mysql:
+        cells:
+          - "lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"
+          - url_file_only_the_working_directory_holds_mysql
+      mssql:
+        cells:
+          - "lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"
+          - url_file_only_the_working_directory_holds_mssql
+      mongo:
+        cells: ["lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"]
+      oracle:
+        cells:
+          - "lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"
+          - url_file_only_the_working_directory_holds_oracle
   - name: foreign-lease-taken-before-expiry
     class: "a run lease whose holder names another host is judged by a local pid probe, so a run on a live host loses its lease to a run here before the lease expires"
     history: "2026-10-16 - harness: the dead-owner cells damaged `chunk-run:<export>` after the run lease became `chunk-run:<export>@<source hash>`, so on a PostgreSQL state they failed on `changed 0 row(s)` and on SQLite they were skipped; no cell could catch a takeover rule that ignored the host (fixed by deriving the key through `run_lease_key` and keeping a Postgres state in the cell)"
@@ -3841,6 +3891,17 @@ seeds:
         cells: ["lib:keeping_date_resolves_the_names_and_leaves_date_for_the_apply"]
       mongo:
         cells: ["lib:keeping_date_resolves_the_names_and_leaves_date_for_the_apply"]
+
+  - name: state-copy-reads-the-path-as-a-uri
+    class: "`rivet state copy` splices the SQLite state path into a `file:` URI unescaped, so a path holding `#`, `?` or `%` attaches a different file (an empty one SQLite creates beside the directory, or the file a `%41` decodes to), and a source that holds no state after the attach is copied as empty: 0 rows, exit 0"
+    history: "found 2026-11-10 on 0.32.2: `a#b` copied 0 rows and left a 0-byte file `a`; `a?b` copied 0 rows; `a%41b` stopped RIVET_STATE_BACKEND_FAILED; the guard opened the real file by its plain path, the attach did not"
+    scope: state
+    engines:
+      sqlite-state:
+        patch: state-copy-reads-the-path-as-a-uri/sqlite-state.patch
+        cells: ["lib:a_source_path_with_a_uri_character_is_read_as_the_file_it_names", "lib:a_missing_source_is_refused_and_not_created", "lib:an_attached_source_with_no_state_is_refused_by_code"]
+      postgres-state:
+        na: "`rivet state copy` reads a SQLite file and writes a PostgreSQL state; the path is the SQLite source's, a PostgreSQL state URL is never a `file:` URI"
 
   - name: state-copy-leaves-sequences-behind
     class: "`rivet state copy` writes the rows with their ids and leaves each serial column's sequence at 1, so the first run through the copied PostgreSQL state collides with a copied id and fails"
@@ -5645,6 +5706,23 @@ seeds:
       oracle:
         na: "the Oracle source lifts oracledb errors into text read by is_oracle_lost_session, a different arm from the one this seed removes"
 
+  - name: mongo-sharded-cdc-requests-pre-images-below-6-0
+    class: a MongoDB CDC stream asks the server for pre-images whatever its version, and a sharded cluster before 6.0 refuses that option (error 51771), so every run on a sharded 4.4 or 5.0 cluster stops before reading a change
+    history: nightly Mongo matrix 2026-11-08 - the sharded cells failed on 4.4 and 5.0 and were left out of the workflow; reproduced on 4.4.30 and 5.0.33 sharded clusters
+    scope: source
+    engines:
+      postgres:
+        na: "a PostgreSQL stream has no pre-image request whose acceptance depends on the server version"
+      mysql:
+        na: "a MySQL binlog stream has no pre-image request whose acceptance depends on the server version"
+      mssql:
+        na: "a SQL Server capture stream has no pre-image request whose acceptance depends on the server version"
+      oracle:
+        na: "an Oracle LogMiner stream has no pre-image request whose acceptance depends on the server version"
+      mongo:
+        patch: mongo-sharded-cdc-requests-pre-images-below-6-0/mongo.patch
+        cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, "lib:the_pre_image_request_follows_the_server_version"]
+
   - name: state-url-query-password-unmasked
     class: "a PostgreSQL state URL is named with only its `user:password@` part masked, so a password written as a query pair (`?password=`, `?sslpassword=`, any case) is printed by `rivet doctor` and by `rivet state copy --to`"
     history: "hunt-2 F3, 2026-11-08: RED on main 10bcf9bf (doctor `[OK]  State (postgres postgresql://u@h:5433/postgres?password=Qp7ZkStateSecretX9&options=...)`; the `state copy` done note held the same URL twice)"
@@ -5677,3 +5755,124 @@ seeds:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
       oracle:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
+
+  - name: seek-literal-typed-by-value
+    class: "a boundary literal of a keyset, range, split or incremental seek is typed from the VALUE (a non-ASCII value is a Unicode literal) instead of from the key column, so on a SQL Server varchar key the page is ordered by the column collation and sought by Unicode rules: rows lost or repeated at a page boundary, exit 0"
+    history: "found 2026-11-11 (the escape_mssql_literal ponytail note); RED on main 2026-11-11: a varchar key of a, e-acute+quote+z, e-acute-a, e-acute-z, e-acute-a, e-acute-b, z read 4 of 7 rows under parallel, incremental and keyset_incremental (rig oracle: source-only e-acute-a, e-acute-a, e-acute-b)"
+    scope: source
+    engines:
+      mssql:
+        patch: seek-literal-typed-by-value/mssql.patch
+        cells: [keyset_over_an_mssql_varchar_key_reads_every_key_under_the_default_sql_collation, parallel_keyset_over_an_mssql_varchar_key_reads_every_non_ascii_key_once, incremental_over_an_mssql_varchar_cursor_takes_every_later_non_ascii_key_once, keyset_incremental_over_an_mssql_varchar_key_takes_every_later_non_ascii_key_once, order_equals_seek_mssql, "lib:a_non_ascii_mssql_boundary_takes_the_keys_own_type"]
+      postgres:
+        na: "a PostgreSQL boundary is one E-string literal for every value, untyped, so the server resolves it to the key column type; order_equals_seek_postgres grades it"
+      mysql:
+        na: "a MySQL cursor is a bound parameter and a range or split boundary a quoted literal, both converted to the key column charset and collation by the server; order_equals_seek_mysql grades it"
+      oracle:
+        na: "an Oracle cursor is a bind converted to the key column type and a range boundary a quoted literal, never typed by value; order_equals_seek_oracle grades it"
+      mongo:
+        na: "MongoDB keyset paging is not a SQL path"
+
+  - name: pg-test-decoding-header-cut-at-first-separator
+    class: "the PostgreSQL CDC reader cuts a `test_decoding` line at the first `: ` instead of at the operation: a schema, table or column name holding `: ` drops every change of the table, the slot advances and the run exits 0 with rows 0"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P1a); RED on main: the relation `s: x.orders` delivers 0 of 2 source rows, rig oracle COUNT(*) source 2 delivered 0"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-test-decoding-header-cut-at-first-separator/postgres.patch
+        cells: [pg_cdc_a_relation_name_holding_colon_space_is_delivered_not_dropped, "lib:a_relation_holding_colon_space_is_cut_at_the_operation", "lib:a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered"]
+      mysql:
+        na: "MySQL row events carry typed cells by ordinal; there is no text line to cut"
+      mssql:
+        na: "SQL Server change-table rows are typed driver columns; there is no text line to cut"
+      mongo:
+        na: "MongoDB change events are BSON documents; there is no text line to cut"
+      oracle:
+        na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
+
+  - name: pg-test-decoding-column-name-cut-at-bracket
+    class: "the PostgreSQL CDC reader reads a column name up to the first `[` and its type up to the first `]:`: a column name holding `[` or `]:` is delivered under the wrong name, with the wrong value, or as a NULL key on a delete"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P1b); RED on main: a table with columns k[1 and a[b]:c delivers 2 rows where the source holds 1, rig oracle COUNT(*) source 1 delivered 2"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-test-decoding-column-name-cut-at-bracket/postgres.patch
+        cells: [pg_cdc_column_names_holding_brackets_are_delivered_under_their_own_names, "lib:hostile_column_names_come_back_whole", "lib:a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered"]
+      mysql:
+        na: "MySQL row events carry typed cells by ordinal; there is no text line to cut"
+      mssql:
+        na: "SQL Server change-table rows are typed driver columns; there is no text line to cut"
+      mongo:
+        na: "MongoDB change events are BSON documents; there is no text line to cut"
+      oracle:
+        na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
+
+  - name: pg-bit-literal-delivered-as-server-text
+    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text is `110`, with exit 0 (batch refuses these columns with RIVET_TYPE_UNSAFE_MAPPING)"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P2); RED on main: the run exits 0 and delivers B'110', rig oracle VALUES differing column(s) flags, vb"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-bit-literal-delivered-as-server-text/postgres.patch
+        cells: [pg_cdc_a_bit_column_is_refused_not_delivered_as_the_decoders_literal, pg_cdc_a_bit_column_refusal_precedes_the_snapshot_and_leaves_only_a_failure_record, pg_cdc_a_bit_column_refusal_remedy_delivers_the_rows_the_refused_run_held, "lib:the_catalog_check_names_exactly_the_bit_typed_columns"]
+      mysql:
+        na: "MySQL BIT(n) is decoded from a typed binlog cell as an integer (mysql type_bit cell), never read from a decoder's text literal"
+      mssql:
+        na: "SQL Server BIT is a typed driver column, never read from a decoder's text literal"
+      mongo:
+        na: "MongoDB has no bit string type and change events are BSON documents"
+      oracle:
+        na: "Oracle has no bit string type and its change rows are typed LogMiner columns"
+
+  - name: load-key-landed-type-not-admitted
+    class: "the keyed load admits its order and key columns by name alone, so an incremental cursor that lands as text (an Oracle bare NUMBER) is ranked as a string by the current-state view (99 stays after 100), and a primary-key column the source declares finer than a microsecond (an MSSQL datetime2(7)) lands at microseconds and collapses rows into one, both with exit 0"
+    history: "hunt axis 1 claims 1 and 2, RED on main 2026-11-10: Oracle (2,99) to (2,100) left 99 in the view with exit 0; MSSQL rows at .1234561 and .1234569 gave one view row"
+    scope: source
+    patch: load-key-landed-type-not-admitted/shared.patch
+    engines:
+      postgres:
+        na: "a PostgreSQL numeric lands as a decimal and a timestamp is at most a microsecond, so no key column lands as text or finer-collapsed"
+      mysql:
+        na: "a MySQL DECIMAL lands as a decimal and DATETIME(6) is at most a microsecond, so no key column lands as text or finer-collapsed"
+      mssql:
+        cells: [an_mssql_sub_microsecond_key_is_refused_into_clickhouse, "lib:a_microsecond_landing_is_finer_only_where_the_source_says_so"]
+      mongo:
+        na: "MongoDB has no cursor_column type landing as text and its timestamps are at most a millisecond"
+      oracle:
+        cells: [an_oracle_number_cursor_is_refused_into_clickhouse, an_oracle_sub_microsecond_key_is_refused_into_clickhouse, "lib:an_oracle_number_landing_as_text_is_not_admitted_as_an_order_column"]
+      lib:
+        cells: ["lib:a_text_number_with_its_plain_decimal_form_is_a_text_landing", "lib:a_numeric_source_type_landing_as_text_is_told_from_native_text", "lib:a_microsecond_landing_is_finer_only_where_the_source_says_so"]
+
+  - name: init-name-folded-into-query
+    class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
+    history: "audit 2026-11-08 finding H5-F1 (hunt 5, `rivet init` on a PostgreSQL and a MySQL table named with a line break); RED on main 2026-11-10 (`a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names`: the scaffold of table \"nl<LF>      tab\" does not parse back to that relation)"
+    scope: source
+    patch: init-name-folded-into-query/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mysql:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mssql:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mongo:
+        na: "a MongoDB export reads its collection through `table:`, never a folded `query:` block, and a name outside the table-shortcut gate is skipped with a reason (a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names covers the relational engines; the mutant lives in the query emitter)"
+      oracle:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+
+  - name: init-column-key-unquoted
+    class: "`rivet init` writes a catalog column name as a bare YAML map key in the decimal override: a name such as `#tag` is read as a comment (the override is dropped), `x ` collapses onto `x` and `&a x` loses its anchor, so a numeric column is exported under no override or under its twin's"
+    history: "found 2026-11-10 by a hunt for sites of audit finding H5-F1 (PyYAML: `c:` with `#tag: d` and `x: e` loads as only `x`); RED on main 2026-11-10 (`a_decimal_override_key_is_exactly_the_column_it_names`: no columns override for `#tag`)"
+    scope: source
+    patch: init-column-key-unquoted/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mysql:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mssql:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mongo:
+        na: "a MongoDB collection has no declared numeric precision, so init writes no decimal override and no map key from a field name (the mutant lives in the relational decimal override writer)"
+      oracle:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]

@@ -70,8 +70,12 @@ INT_BITS = {
     "UINTEGER": (32, False), "UBIGINT": (64, False), "UHUGEINT": (128, False),
 }
 INT_DIGITS = {8: 3, 16: 5, 32: 10, 64: 20, 128: 39}
-#: (native source type, delivered DuckDB type) pairs the scanner's wider reading would misgrade: MySQL YEAR is 1901..2155.
-NATIVE_FITS = {("YEAR", "SMALLINT"), ("BINARY_FLOAT", "FLOAT")}
+#: (native source type, delivered DuckDB type) -> dated reason: a pair the scanner's reading would misgrade, or a documented landing no parity ledger row can carry.
+NATIVE_FITS = {
+    ("YEAR", "SMALLINT"): "2026-11-11: MySQL YEAR is 1901..2155, the scanner reads it wider",
+    ("BINARY_FLOAT", "FLOAT"): "2026-11-11: the Oracle BINARY_FLOAT ledger row delivers Float32, which DuckDB reads as FLOAT",
+    ("VECTOR", "VARCHAR"): "2026-11-11: an Oracle VECTOR is serialised to text on the server (docs/reference/oracle.md); no CDC parity row builds one",
+}
 #: Scanner settings that make the source read faithful (the same values tests/live/live_cdc_type_parity.rs sets in its own session):
 #: PostgreSQL's binary COPY drops char(n) padding; MySQL's scanner reads TINYINT(1) as BOOLEAN and its session zone moves TIMESTAMPs.
 SCANNER_SETTINGS = {
@@ -140,6 +144,31 @@ def type_loss(src: str, dst: str) -> str | None:
     if src.startswith("TIME"):
         return None if dst.startswith("TIME") else "a time of day delivered as a non-time"
     return None
+
+
+def type_family(t: str) -> str:
+    """The kind of value a DuckDB type holds: exact numbers, floats, text, wall-clock or instant timestamps, dates, times; any other type is its own family."""
+    if t in INT_BITS or _decimal(t):
+        return "exact number"
+    if t in ("FLOAT", "DOUBLE"):
+        return "float"
+    if t in ("VARCHAR", "JSON"):
+        return "text"
+    if t == "TIMESTAMP WITH TIME ZONE":
+        return "instant"
+    if t in TS_RANK:
+        return "date" if t == "DATE" else "wall-clock timestamp"
+    return "time" if t.startswith("TIME") else t
+
+
+def unpinned_loss(src: str, dst: str) -> str | None:
+    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text); a decimal past DuckDB's 38 digits is only ever read as exact text (Decimal256, docs/reference/config.md)."""
+    if (why := type_loss(src, dst)) is not None or src == dst:
+        return why
+    if dst == "VARCHAR" and (d := _decimal(src)) and d[0] > 38:
+        return None
+    fs, fd = type_family(src), type_family(dst)
+    return None if fs == fd else f"a {fs} delivered as a {fd}, and no ledger row pins the column"
 
 
 #: A declared source type that is text in the source itself (not text only because the oracle projected it).
@@ -230,6 +259,7 @@ def ledger(engine: str, mode: str) -> tuple[dict, set[str]]:
     rows = [{**r, "render": {**by_delivery.get(r.get("delivery"), {}), **(r.get("render") or {})},
              **{ch_keys[k]: v for k, v in (r.get("clickhouse") or {}).items()}} if isinstance(r, dict) else r for r in rows]
     out = {norm_native(r["native_type"]): r for r in rows if isinstance(r, dict) and r.get("native_type")}
+    out.update({re.sub(r" (NOT )?NULL$", "", k): r for k, r in list(out.items()) if re.search(r" (NOT )?NULL$", k)})
     for n, r in out.items():
         for render in (r.get("render") or {}, r.get("today_render") or {}):
             if render.get("canon") not in (None, *CANONS):
@@ -562,6 +592,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     if engine == "mongo":
         from .value_diff import mongo_mixed_id_source
 
+        if not spec["database"]:
+            raise Unreachable(f"the mongodb URL names no database, so the collection `{leaf}` cannot be read")
         mixed = mongo_mixed_id_source(ora, spec["url"], spec["database"], leaf)
         # The scanner infers a schema (flattening nested keys); only `_id` is shared with the document blob.
         return mixed or f'(SELECT "_id" FROM mg.{spec["database"]}.{_qi(leaf)})', ["_id"], native
@@ -611,6 +643,11 @@ def _attach(spec: dict) -> dict:
 def _columns(ora, rel: str) -> list[tuple[str, str]]:
     """(name, DuckDB type) of every column of `rel`."""
     return [(r[0], str(r[1])) for r in ora.rows(f"DESCRIBE SELECT * FROM {rel}")]
+
+
+def range_window(col: str, ranges: list) -> str:
+    """The predicate that keeps rows whose `col` lies in one of the inclusive integer `ranges`, by value whether the source reads the column as a number or as text (an Oracle NUMBER)."""
+    return " OR ".join(f"CAST({_qi(col)} AS DECIMAL(38,9)) BETWEEN {int(lo)} AND {int(hi)}" for lo, hi in ranges)
 
 
 def _is_num(t: str) -> bool:
@@ -796,8 +833,9 @@ def grade_findings(
     overrides: dict | None = None,
     collapse: frozenset = frozenset(),
     null_class: frozenset = frozenset(),
+    unpinned_strict: bool = True,
 ) -> list[str]:
-    """Every disagreement in the findings `f`, one line each; empty means the run is sound. A column with a ledger row is graded against the row's delivery (a `known_defect` row may deliver its `today_delivery` instead, nothing else); one without is graded as not narrower than its catalog type; a `columns:` override against the type it declares (`None`: not graded here)."""
+    """Every disagreement in the findings `f`, one line each; empty means the run is sound. A column with a ledger row is graded against the row's delivery (a `known_defect` row may deliver its `today_delivery` instead, nothing else); one without is graded as not narrower than its catalog type and, unless `unpinned_strict` is off (a warehouse maps types by its own rules), of the same kind; a `columns:` override against the type it declares (`None`: not graded here)."""
     bad = []
     overrides = overrides or {}
     if f.get("dst_cols"):
@@ -822,7 +860,7 @@ def grade_findings(
         src_t = (catalog_duck(nat) or (st if nat and TEXT_NATIVE.match(nat) else None)) if st == "VARCHAR" else st
         if want is not None and want != dt:
             bad.append(f"TYPE: `{col}` ({nat}): the type ledger delivers {row['delivery']} ({want}), delivered {dt}")
-        elif want is None and src_t and (why := type_loss(src_t, dt)) is not None:
+        elif want is None and src_t and (why := (unpinned_loss if unpinned_strict else type_loss)(src_t, dt)) is not None:
             bad.append(f"TYPE: `{col}` source {src_t} delivered as {dt}: {why}")
     if "src_count" in f:
         if f["src_count"] != f["dst_count"]:
@@ -874,8 +912,8 @@ def known_defect_covers(cls: str, failures: list[str]) -> bool:
     return bool(failures) and all(KNOWN_DEFECT_CLASSES[cls](f) for f in failures)
 
 
-def _text_form_mismatches(parts: list[str], row_of: dict, forms: set[str]) -> list[str]:
-    """A column the ledger delivers as a TEXT form must carry that form in its `rivet.text_form` field metadata."""
+def _text_form_mismatches(parts: list[str], row_of: dict, forms: set[str], overrides: dict | None = None) -> list[str]:
+    """A column the ledger delivers as a TEXT form must carry that form in its `rivet.text_form` field metadata; a `columns:` override is graded against its declared type instead."""
     import pyarrow.parquet as pq
 
     if not parts:
@@ -883,7 +921,7 @@ def _text_form_mismatches(parts: list[str], row_of: dict, forms: set[str]) -> li
     schema = pq.read_schema(parts[0])
     bad = []
     for col, r in row_of.items():
-        if r.get("known_defect") or r.get("delivery") not in forms or col not in schema.names:
+        if r.get("known_defect") or r.get("delivery") not in forms or col not in schema.names or col in (overrides or {}):
             continue
         got = (schema.field(col).metadata or {}).get(b"rivet.text_form", b"").decode()
         if got != r["delivery"]:
@@ -1320,7 +1358,7 @@ def grade_stdout(spec: dict) -> dict:
         dst = _parts(ora, [printed], fmt) if os.path.getsize(printed) else None
         n = ora.scalar(f"SELECT count(*) FROM {dst}") if dst else 0
         f, row_of, collapse = _value_findings(ora, engine, fmt, native, rows, "source_rows", dst, key, partial)
-        extra = _text_form_mismatches([printed], row_of, forms) if dst and fmt == "parquet" else []
+        extra = _text_form_mismatches([printed], row_of, forms, spec.get("overrides")) if dst and fmt == "parquet" else []
         extra += stdout_ledger(ora, spec, n)
     failures = grade_findings(f, rows, forms, native, engine != "mongo" and fmt == "parquet", spec.get("overrides") or {}, collapse)
     facts = {k: v for k, v in f.items() if k not in ("pairs", "dst_cols", "src_stats", "dst_stats")}
@@ -1449,9 +1487,7 @@ def grade(spec: dict) -> dict:
                     dst = "(SELECT * EXCLUDE (__mseq) FROM got)"
         rc = spec.get("range_column")
         if spec.get("replay") and rc and rc in {c for c, _ in _columns(ora, "source_rows")}:
-            # A sealed plan owes exactly the source rows inside the chunk ranges it carries (inclusive, as planned).
-            within = " OR ".join(f"{_qi(rc)} BETWEEN {int(lo)} AND {int(hi)}" for lo, hi in spec["ranges"])
-            src = f"(SELECT * FROM {src} WHERE {within})"
+            src = f"(SELECT * FROM {src} WHERE {range_window(rc, spec['ranges'])})"
         elif spec.get("replay") and not cumulative and dst and key:
             # A sealed plan's ranges were computed when it was planned; the source may have moved since. A `--resume` plans the
             # keys the source holds now (src/pipeline/chunked `replan_resumed_run`, keyset `plan_unread_tail`): a plain run's grade.
@@ -1471,7 +1507,7 @@ def grade(spec: dict) -> dict:
             extra.append(f"DELTA: the first run in this destination resumed from cursor_low {first['cursor_low']!r}, a cursor no graded run of this stream ended at")
         if cumulative and not cdc:
             save_delta_window(spec, record, graded)
-        f["text_form"] = _text_form_mismatches(new_parts, row_of, forms) if fmt == "parquet" else []
+        f["text_form"] = _text_form_mismatches(new_parts, row_of, forms, spec.get("overrides")) if fmt == "parquet" else []
         if spec.get("partition_by") and new_parts:
             extra += misfiled(ora, new_parts, spec["partition_by"])
         part_rows = ora.scalar(f"SELECT count(*) FROM {_parts(ora, new_parts, fmt)}") if new_parts else 0
@@ -1821,7 +1857,7 @@ def grade_load(spec: dict) -> dict:
     ledgered = frozenset(c for c, r in ch_of.items() if r.get("clickhouse"))
     null_class = frozenset(c for c, xs in defects.items() if None in xs)
     bad = grade_findings(f, {}, forms, native, engine != "mongo", dict.fromkeys([*(spec.get("overrides") or {}), *ledgered]),
-                         collapse=collapse, null_class=null_class)
+                         collapse=collapse, null_class=null_class, unpinned_strict=False)
     bad += clickhouse_type_findings(ch_of, row_of, wh_types, native, key, created_zone_less(spec)) if target == "clickhouse" else []
     bad += [f"WAREHOUSE: {n}" for n in notes if "still exist" in n]
     out = {"failures": [f"WAREHOUSE {target} `{fq}`: {b}" for b in bad], "notes": notes,
@@ -2029,11 +2065,33 @@ def _self_test() -> None:
     assert one("DECIMAL(20,2)", "DOUBLE", "NUMERIC(20,2)", overrides={"c": "decimal(20,2)"}), "a `columns:` override is graded against its type"
     assert not one("DECIMAL(20,2)", "DECIMAL(20,2)", "NUMERIC(20,2)", overrides={"c": "decimal(20, 2)"})
     assert not one("DECIMAL(20,2)", "DOUBLE", "NUMERIC(20,2)", overrides={"c": None}), "a load names its overrides, not their parquet types"
+    import tempfile
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    with tempfile.TemporaryDirectory() as tmp:
+        part = os.path.join(tmp, "p.parquet")
+        pq.write_table(pa.table({"c": pa.array([1], pa.int64())}), part)
+        ledger = {"c": {"delivery": "decimal_plain"}}
+        assert _text_form_mismatches([part], ledger, {"decimal_plain"}), "a ledger text form the part does not label is a finding"
+        assert not _text_form_mismatches([part], ledger, {"decimal_plain"}, {"c": "int64"}), "a `columns:` override is graded against its declared type, not the ledger text form"
     assert one("VARCHAR", "DOUBLE", "NUMERIC(50,2)"), "a numeric read as text is graded from its catalog type"
     assert one("VARCHAR", "DOUBLE", "NUMBER"), "an unbounded NUMBER delivered as a double is a loss"
     assert one("VARCHAR", "BIGINT", "VARCHAR(10)"), "a text column delivered as a number is a loss"
     assert not one("VARCHAR", "TIMESTAMP", "DATETIME2"), "a temporal the oracle renders as text is the ledger's to grade"
     assert one("TIMESTAMP WITH TIME ZONE", "TIMESTAMP", "TIMESTAMPTZ(3)")
+    for st, to, nat in (("DECIMAL(14,2)", "DOUBLE", "DECIMAL(14,2)"), ("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), ("BOOLEAN", "BIGINT", "BOOL"),
+                        ("TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "DATETIME"), ("UUID", "BLOB", "UUID"), ("INTEGER", "DOUBLE", "INT")):
+        assert one(st, to, nat), f"{st} delivered as {to} with no ledger row is a finding"
+        assert bool(one(st, to, nat, unpinned_strict=False)) == bool(type_loss(st, to)), f"{st} as {to}: the warehouse leg grades by its own mapping"
+    assert not one("DECIMAL(14,2)", "DECIMAL(14,2)", "DECIMAL(14,2)") and not one("INTEGER", "BIGINT", "INT"), "an exact or wider same-kind delivery is not a finding"
+    assert not one("VARCHAR", "VARCHAR", "NUMERIC(40,20)") and not one("VARCHAR", "VARCHAR", "DECIMAL(65,0)"), "a decimal past 38 digits is read as exact text"
+    assert one("VARCHAR", "VARCHAR", "NUMERIC(12,2)") and one("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), "a decimal DuckDB holds is not delivered as text"
+    assert not one("DOUBLE[]", "VARCHAR", "VECTOR"), "an Oracle VECTOR is delivered as text"
+    assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
+    my_rows = globals()["ledger"]("mysql", "batch")[0]
+    assert my_rows.get("TIMESTAMP(6)") is not None and my_rows.get("TIMESTAMP(6)") is my_rows.get("TIMESTAMP(6) NULL"), "a catalog TIMESTAMP(6) finds the row declared with its nullability"
     class Flaky:
         """A DuckDB stand-in whose first `fail` calls raise `err`."""
 
@@ -2104,6 +2162,7 @@ def _self_test() -> None:
     _ndjson_self_test()
     _stdout_self_test()
     _mongo_mixed_id_self_test()
+    _range_window_self_test()
     _zone_less_self_test()
     _absent_table_self_test()
     _folded_duplicate_self_test()
@@ -2308,6 +2367,24 @@ def _mongo_mixed_id_self_test() -> None:
     with _Mem() as ora:
         ora.db.sql('CREATE TABLE s AS SELECT 1::BIGINT AS "_id"')
         assert 'CAST("_id" AS BIGINT)' in mongo_document_columns(ora, "s", "parts"), "a homogeneous `_id` keeps its typed cast"
+
+
+def _range_window_self_test() -> None:
+    """A sealed plan's chunk ranges select source rows by value for a numeric and a text key, and a mongodb URL without a database is a named skip."""
+    ranges = [[1, 2], [3, 4], [5, 5]]
+    with _Mem() as ora:
+        ora.db.sql("CREATE TABLE num AS SELECT * FROM (VALUES (1::BIGINT), (2), (3), (5), (6)) v(\"ID\")")
+        ora.db.sql("CREATE TABLE txt AS SELECT CAST(\"ID\" AS VARCHAR) AS \"ID\" FROM num")
+        for rel in ("num", "txt"):
+            window = range_window("ID", ranges)
+            assert ora.rows(f"SELECT count(*) FROM (SELECT * FROM {rel} WHERE {window})") == [(4,)], f"{rel}: the ranges keep ids 1,2,3,5"
+            assert _columns(ora, f"(SELECT * FROM {rel} WHERE {window})"), f"{rel}: the windowed relation describes"
+    try:
+        _source(None, {"engine": "mongo", "url": "mongodb://h:1/", "database": "", "table": "c"}, {})
+    except Unreachable as e:
+        assert "no database" in str(e), e
+    else:
+        raise AssertionError("a mongodb URL with no database must be a named skip, never a driver traceback")
 
 
 class _Mem:

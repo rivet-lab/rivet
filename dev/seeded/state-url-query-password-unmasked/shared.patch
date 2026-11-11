@@ -1,7 +1,7 @@
 diff --git a/src/state/mod.rs b/src/state/mod.rs
 --- a/src/state/mod.rs
 +++ b/src/state/mod.rs
-@@ -371,7 +371,7 @@
+@@ -372,7 +372,7 @@
                      ),
                  )
              })?;
@@ -13,14 +13,14 @@ diff --git a/src/state/mod.rs b/src/state/mod.rs
 diff --git a/src/state/copy.rs b/src/state/copy.rs
 --- a/src/state/copy.rs
 +++ b/src/state/copy.rs
-@@ -72,8 +72,8 @@
+@@ -75,8 +75,8 @@
          std::fs::canonicalize(source)
              .unwrap_or_else(|_| source.to_path_buf())
              .display(),
--        crate::redact::redact_secrets(target),
--        crate::redact::redact_secrets(target),
-+        crate::redact::redact_url_passwords(target),
-+        crate::redact::redact_url_passwords(target),
+-        crate::redact::redact_secrets(target.expose()),
+-        crate::redact::redact_secrets(target.expose()),
++        crate::redact::redact_url_passwords(target.expose()),
++        crate::redact::redact_url_passwords(target.expose()),
      );
      if !checkpoints.is_empty() {
          note.push_str(
