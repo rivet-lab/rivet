@@ -597,6 +597,16 @@ mod tests {
     use crate::config::SourceType;
 
     #[test]
+    fn nulled_cells_record_a_positive_count_and_ignore_a_zero_one() {
+        let cells = NulledCells::default();
+        cells.add("none", 0);
+        assert!(cells.snapshot().is_empty(), "a zero count leaves no entry");
+        cells.add("d", 1);
+        cells.add("d", 2);
+        assert_eq!(cells.snapshot(), vec![("d".to_string(), 3)]);
+    }
+
+    #[test]
     fn snapshot_strategy_contracts() {
         let s = ExtractionStrategy::Snapshot;
         assert!(!s.needs_cursor_state());

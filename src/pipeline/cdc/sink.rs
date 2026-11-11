@@ -2495,6 +2495,66 @@ mod tests {
         );
     }
 
+    /// `flush` warns once per column with the count of MySQL zero dates it wrote as NULL, and stays silent when it nulled none.
+    #[test]
+    fn flush_warns_with_the_count_of_zero_dates_it_nulled_and_is_silent_otherwise() {
+        use crate::pipeline::run::run_tail_tests::{
+            captured_warnings_mentioning, install_warn_capture,
+        };
+        install_warn_capture();
+        let names =
+            |col: &str| -> std::sync::Arc<[String]> { std::sync::Arc::from(vec![col.to_string()]) };
+        let run = |col: &str, cells: Vec<RivetValue>| {
+            let events: Vec<ChangeEvent> = cells
+                .into_iter()
+                .map(|v| ChangeEvent {
+                    after: Some(vec![v]),
+                    image_names: Some(names(col)),
+                    ..insert(0)
+                })
+                .collect();
+            let mut cols = vec![TypeMapping {
+                column_name: col.into(),
+                source_native_type: "date".into(),
+                rivet_type: crate::types::RivetType::String,
+                arrow_type: Some(DataType::Utf8),
+                ..int_col().remove(0)
+            }];
+            let mut schema = None;
+            let sch = ensure_schema(
+                &mut schema,
+                &mut cols,
+                &events,
+                &crate::config::RowHash::default(),
+            )
+            .unwrap();
+            flush(
+                &events,
+                &sch,
+                &cols,
+                crate::source::cdc::CdcEngine::Mysql,
+                &crate::config::RowHash::default(),
+                None,
+                &Default::default(),
+            )
+            .unwrap();
+            captured_warnings_mentioning(&format!("`{col}`"))
+        };
+        let zero = || RivetValue::Bytes(value::ZERO_DATE.to_vec());
+        let real = || RivetValue::Bytes(b"2026-01-02".to_vec());
+        assert_eq!(
+            run(
+                "zd_nulled_col",
+                vec![zero(), real(), zero(), RivetValue::Null]
+            ),
+            vec![crate::source::mysql::zero_date_warning("zd_nulled_col", 2)]
+        );
+        assert_eq!(
+            run("zd_clean_col", vec![real(), RivetValue::Null, real()]),
+            Vec::<String>::new()
+        );
+    }
+
     /// The file sink's `flush` refuses a before image short of its names under a whole after image (the stdout loop's rule), and writes a key-only one named by `before_names` and a whole one.
     #[test]
     fn flush_refuses_a_partial_before_image_and_writes_a_named_or_whole_one() {

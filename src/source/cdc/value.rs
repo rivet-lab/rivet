@@ -1745,6 +1745,11 @@ mod tests {
         assert!(!counted("timestamp", V::Null));
         assert!(!counted("date", V::Null));
         assert!(!counted("year", V::Bytes(b"2026".to_vec())));
+        for native in ["date", "datetime(6)"] {
+            let text = V::Bytes(b"2026-01-02".to_vec());
+            assert_eq!(fix(native).apply(&text).unwrap(), text, "{native}");
+            assert!(!counted(native, text), "{native}");
+        }
         assert_eq!(
             fix("timestamp").apply(&V::Bytes(b"1".to_vec())).unwrap(),
             V::DateTime(chrono::DateTime::from_timestamp(1, 0).unwrap().naive_utc()),

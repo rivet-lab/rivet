@@ -596,6 +596,20 @@ fn note_nulled_accumulates_per_column_in_the_plan_shared_counter() {
     );
 }
 
+#[test]
+fn a_pipelined_sink_reports_nulled_cells_into_the_plan_shared_counter() {
+    let inner = minimal_sink();
+    let shared = inner.nulled_cells.clone();
+    let mut p = PipelinedSink::spawn_with_sink(inner);
+    p.note_nulled("b", 2);
+    p.note_nulled("a", 1);
+    p.note_nulled("b", 3);
+    assert_eq!(
+        shared.snapshot(),
+        vec![("a".to_string(), 1), ("b".to_string(), 5)]
+    );
+}
+
 // ─── helpers ─────────────────────────────────────────────────
 
 fn minimal_sink() -> ExportSink {
