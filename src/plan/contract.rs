@@ -8,6 +8,34 @@ use crate::config::{
 };
 use crate::tuning::SourceTuning;
 
+/// Run-wide count, per column, of source cells written as NULL because the target type cannot hold them.
+#[derive(Debug, Default)]
+pub struct NulledCells(std::sync::Mutex<std::collections::BTreeMap<String, u64>>);
+
+impl NulledCells {
+    /// Adds `n` cells to `column`.
+    pub fn add(&self, column: &str, n: u64) {
+        if n > 0 {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(column.to_string())
+                .or_default() += n;
+        }
+    }
+
+    /// The per-column counts, sorted by column name.
+    pub fn snapshot(&self) -> Vec<(String, u64)> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(c, n)| (c.clone(), *n))
+            .collect()
+    }
+}
+
 /// Parameters for chunked extraction, pre-resolved from config and tuning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkedPlan {
@@ -103,7 +131,7 @@ pub struct ResolvedRunPlan {
     pub parts_landed: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Run-wide per-column count of source cells written as NULL because the target type cannot hold them; runtime only.
     #[serde(skip, default)]
-    pub nulled_cells: std::sync::Arc<crate::source::NulledCells>,
+    pub nulled_cells: std::sync::Arc<NulledCells>,
     /// The export's declared source table (`table:`), carried VERBATIM.
     ///
     /// The manifest's source identity is built from this. It used to be derived

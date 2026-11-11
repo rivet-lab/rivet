@@ -235,34 +235,6 @@ pub trait BatchSink {
     fn note_nulled(&mut self, _column: &str, _n: u64) {}
 }
 
-/// Run-wide count, per column, of source cells written as NULL because the target type cannot hold them.
-#[derive(Debug, Default)]
-pub struct NulledCells(std::sync::Mutex<std::collections::BTreeMap<String, u64>>);
-
-impl NulledCells {
-    /// Adds `n` cells to `column`.
-    pub fn add(&self, column: &str, n: u64) {
-        if n > 0 {
-            *self
-                .0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(column.to_string())
-                .or_default() += n;
-        }
-    }
-
-    /// The per-column counts, sorted by column name.
-    pub fn snapshot(&self) -> Vec<(String, u64)> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(c, n)| (c.clone(), *n))
-            .collect()
-    }
-}
-
 /// Read-only inputs for a single export call.
 ///
 /// Packs the parameters that used to live as 5 positional args on

@@ -62,7 +62,7 @@ enum SinkMsg {
 pub(crate) struct PipelinedSink {
     tx: Option<SyncSender<SinkMsg>>,
     worker: Option<JoinHandle<Result<ExportSink>>>,
-    nulled_cells: std::sync::Arc<crate::source::NulledCells>,
+    nulled_cells: std::sync::Arc<crate::plan::NulledCells>,
 }
 
 impl PipelinedSink {

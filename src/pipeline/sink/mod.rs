@@ -46,7 +46,7 @@ pub(crate) struct ExportSink {
     pub(in crate::pipeline) bytes_read: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The RUN-wide count of parts at the destination, shared from `plan.parts_landed`.
     pub(in crate::pipeline) parts_landed: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    nulled_cells: std::sync::Arc<crate::source::NulledCells>,
+    nulled_cells: std::sync::Arc<crate::plan::NulledCells>,
     part_rows: usize,
     /// Cursor column name (with internal columns), set from plan at construction.
     /// When `Some`, `on_batch` extracts the last cursor value inline so we never
