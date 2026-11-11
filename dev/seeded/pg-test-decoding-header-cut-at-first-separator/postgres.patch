@@ -1,0 +1,13 @@
+diff --git a/src/source/postgres/td_line.rs b/src/source/postgres/td_line.rs
+index 44d2336..28e5446 100644
+--- a/src/source/postgres/td_line.rs
++++ b/src/source/postgres/td_line.rs
+@@ -29,7 +29,7 @@ pub(crate) struct Line<'a> {
+ /// The relation list and the rest of a `table <relations>: <rest>` line, cut at the first `: ` outside quotes.
+ fn table_head(data: &str) -> Option<(&str, &str)> {
+     let rest = data.strip_prefix("table ")?;
+-    let sep = find_outside_quotes(rest, ": ")?;
++    let sep = rest.find(": ")?;
+     Some((&rest[..sep], &rest[sep + 2..]))
+ }
+ 

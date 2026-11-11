@@ -7,12 +7,13 @@ PostgreSQL and MySQL run the **full end-to-end suite** on each release —
 `doctor`, `check`, every export mode (full / incremental / chunked / time_window),
 every output format (CSV / Parquet) with every compression codec, `reconcile`,
 recovery scenarios, state management, date-chunking, and `rivet init`. The
-release gate runs that suite against a **representative set** — PostgreSQL 14,
-16 and 18, MySQL 8.0 and 8.4 — chosen as oldest-supported, primary target and
-newest; the remaining supported versions share the same code paths and are
-spot-checked rather than gated on every release. No version-specific code paths
-exist to skip: the same Rust driver builds and the same YAML configs drive every
-target. **SQL Server** and
+release gate runs that suite against the **primary targets only** — PostgreSQL 16
+and MySQL 8.0 (MySQL 8.4 runs the statement-truth cells). The other versions
+share the same code paths and the same Rust driver and YAML configs, but the
+gate does not start them: the **Exercised by** column below says, version by
+version, whether the release gate, the nightly CI, an operator-run manual matrix
+or nothing runs it. `tests/offline/compatibility_doc_guard.rs` fails when a row
+claims more than the compose files and the nightly workflow start. **SQL Server** and
 **MongoDB** carry their own scope and CI coverage, detailed below.
 
 **MongoDB** (the OSS JSON-blob source — batch + CDC) rides its own dedicated CI
@@ -22,29 +23,32 @@ time_window modes). See [mongodb.md](mongodb.md).
 
 ## Supported versions
 
-| Engine     | Versions | Status |
-|------------|---------:|--------|
-| PostgreSQL |       12 | Supported |
-| PostgreSQL |       13 | Supported |
-| PostgreSQL |       14 | Supported (release gate) |
-| PostgreSQL |       15 | Supported |
-| PostgreSQL |       16 | Supported (primary target, release gate) |
-| PostgreSQL |       17 | Supported |
-| PostgreSQL |       18 | Supported (release gate) |
-| MySQL      |      5.7 | Supported (EOL upstream Oct 2023) |
-| MySQL      |      8.0 | Supported (primary target, release gate) |
-| MySQL      |      8.4 | Supported (release gate) |
-| SQL Server |     2022 | **GA** (source engine; see scope below) |
-| MongoDB    |      4.4 | Supported |
-| MongoDB    |      5.0 | Supported |
-| MongoDB    |      6.0 | Supported |
-| MongoDB    |      7.0 | Supported (primary target) |
-| MongoDB    |      8.0 | Supported |
+| Engine     | Versions | Exercised by |
+|------------|---------:|--------------|
+| PostgreSQL |       12 | Manual (`legacy` profile) |
+| PostgreSQL |       13 | Manual (`legacy` profile) |
+| PostgreSQL |       14 | Manual (`legacy` profile) |
+| PostgreSQL |       15 | Manual (`legacy` profile) |
+| PostgreSQL |       16 | Release gate (primary target) |
+| PostgreSQL |       17 | Not exercised |
+| PostgreSQL |       18 | Manual (`dev/stand`) |
+| MySQL      |      5.7 | Manual (`legacy` profile; EOL upstream Oct 2023) |
+| MySQL      |      8.0 | Release gate (primary target) |
+| MySQL      |      8.4 | Release gate (statement-truth cells only) |
+| SQL Server |     2022 | Release gate; **GA** (source engine; see scope below) |
+| MongoDB    |      4.4 | Nightly (CI matrix) |
+| MongoDB    |      5.0 | Nightly (CI matrix) |
+| MongoDB    |      6.0 | Nightly (CI matrix) |
+| MongoDB    |      7.0 | Release gate (primary target); nightly (CI matrix) |
+| MongoDB    |      8.0 | Nightly (CI matrix) |
 | Oracle     | 26ai Free (23.26) | **Preview** — batch, plus bounded CDC to files (no continuous CDC; a CDC export cannot feed `load:`); see [oracle.md](oracle.md) |
 
 "Primary target" means the version that runs the e2e suite by default in the
 local `docker-compose.yaml` top-level `postgres` / `mysql` / `mssql` / `mongo` services.
-"Legacy" versions are opt-in under the `legacy` compose profile (see below).
+"Manual" versions run only when an operator starts them: the `legacy` compose
+profile (see below) or the version-matrix stand in `dev/stand`
+(`python3 -m dev.pytools.legacy_stand`). "Not exercised" versions are listed as
+expected to work, and nothing in the repository starts them.
 
 ### SQL Server (MSSQL) — current scope
 
@@ -260,6 +264,8 @@ every setting as rivet found it.
 `mode: cdc` reads the slot the same way. Its `test_decoding` reader parses the server's text of
 every value, so each read of the slot runs in a transaction of its own that sets the four formats
 and `extra_float_digits = 3` with `SET LOCAL`.
+A `bit` or `bit varying` column is refused with `RIVET_SOURCE_CDC_CELL_UNSUPPORTED`: the reader's
+text for it (`B'110'`) is not the server's text (`110`).
 
 ## What "passes" means per target
 

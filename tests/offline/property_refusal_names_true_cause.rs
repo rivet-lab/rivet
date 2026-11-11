@@ -336,6 +336,7 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_LOAD_TARGET_NOT_RIVETS", Inj::Stand),
     ("RIVET_LOAD_IDENTIFIER_UNSAFE", Inj::Stand),
     ("RIVET_LOAD_KEY_COLUMN_INVALID", Inj::Stand),
+    ("RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT", Inj::Stand),
     ("RIVET_LOAD_PRIMARY_KEY_MISSING", Inj::Stand),
     ("RIVET_LOAD_RESERVED_COLUMN", Inj::Stand),
     ("RIVET_LOAD_LOOKALIKE_COLUMN", Inj::Stand),

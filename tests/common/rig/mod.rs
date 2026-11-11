@@ -457,6 +457,16 @@ impl Rig {
         self
     }
 
+    /// Delete every object under the fake-gcs destination of the primary export; returns how many went.
+    pub fn empty_fake_gcs_destination(&self) -> usize {
+        match &self.cloud_dest {
+            Some(CloudDest::Gcs { bucket, prefix, .. }) => {
+                crate::common::fake_gcs_delete_prefix(bucket, &format!("{prefix}/{}/", self.name))
+            }
+            _ => panic!("empty_fake_gcs_destination: the rig has no fake-gcs destination"),
+        }
+    }
+
     /// The [`Rig::dest_s3`] destination naming `aws_profile: <profile>`, beside its env keys when `keys` is set.
     pub fn dest_s3_with_profile(
         mut self,

@@ -5777,6 +5777,76 @@ seeds:
       oracle:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
 
+  - name: pg-test-decoding-header-cut-at-first-separator
+    class: "the PostgreSQL CDC reader cuts a `test_decoding` line at the first `: ` instead of at the operation: a schema, table or column name holding `: ` drops every change of the table, the slot advances and the run exits 0 with rows 0"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P1a); RED on main: the relation `s: x.orders` delivers 0 of 2 source rows, rig oracle COUNT(*) source 2 delivered 0"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-test-decoding-header-cut-at-first-separator/postgres.patch
+        cells: [pg_cdc_a_relation_name_holding_colon_space_is_delivered_not_dropped, "lib:a_relation_holding_colon_space_is_cut_at_the_operation", "lib:a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered"]
+      mysql:
+        na: "MySQL row events carry typed cells by ordinal; there is no text line to cut"
+      mssql:
+        na: "SQL Server change-table rows are typed driver columns; there is no text line to cut"
+      mongo:
+        na: "MongoDB change events are BSON documents; there is no text line to cut"
+      oracle:
+        na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
+
+  - name: pg-test-decoding-column-name-cut-at-bracket
+    class: "the PostgreSQL CDC reader reads a column name up to the first `[` and its type up to the first `]:`: a column name holding `[` or `]:` is delivered under the wrong name, with the wrong value, or as a NULL key on a delete"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P1b); RED on main: a table with columns k[1 and a[b]:c delivers 2 rows where the source holds 1, rig oracle COUNT(*) source 1 delivered 2"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-test-decoding-column-name-cut-at-bracket/postgres.patch
+        cells: [pg_cdc_column_names_holding_brackets_are_delivered_under_their_own_names, "lib:hostile_column_names_come_back_whole", "lib:a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered"]
+      mysql:
+        na: "MySQL row events carry typed cells by ordinal; there is no text line to cut"
+      mssql:
+        na: "SQL Server change-table rows are typed driver columns; there is no text line to cut"
+      mongo:
+        na: "MongoDB change events are BSON documents; there is no text line to cut"
+      oracle:
+        na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
+
+  - name: pg-bit-literal-delivered-as-server-text
+    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text is `110`, with exit 0 (batch refuses these columns with RIVET_TYPE_UNSAFE_MAPPING)"
+    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P2); RED on main: the run exits 0 and delivers B'110', rig oracle VALUES differing column(s) flags, vb"
+    scope: source
+    engines:
+      postgres:
+        patch: pg-bit-literal-delivered-as-server-text/postgres.patch
+        cells: [pg_cdc_a_bit_column_is_refused_not_delivered_as_the_decoders_literal, pg_cdc_a_bit_column_refusal_precedes_the_snapshot_and_leaves_only_a_failure_record, pg_cdc_a_bit_column_refusal_remedy_delivers_the_rows_the_refused_run_held, "lib:the_catalog_check_names_exactly_the_bit_typed_columns"]
+      mysql:
+        na: "MySQL BIT(n) is decoded from a typed binlog cell as an integer (mysql type_bit cell), never read from a decoder's text literal"
+      mssql:
+        na: "SQL Server BIT is a typed driver column, never read from a decoder's text literal"
+      mongo:
+        na: "MongoDB has no bit string type and change events are BSON documents"
+      oracle:
+        na: "Oracle has no bit string type and its change rows are typed LogMiner columns"
+
+  - name: load-key-landed-type-not-admitted
+    class: "the keyed load admits its order and key columns by name alone, so an incremental cursor that lands as text (an Oracle bare NUMBER) is ranked as a string by the current-state view (99 stays after 100), and a primary-key column the source declares finer than a microsecond (an MSSQL datetime2(7)) lands at microseconds and collapses rows into one, both with exit 0"
+    history: "hunt axis 1 claims 1 and 2, RED on main 2026-11-10: Oracle (2,99) to (2,100) left 99 in the view with exit 0; MSSQL rows at .1234561 and .1234569 gave one view row"
+    scope: source
+    patch: load-key-landed-type-not-admitted/shared.patch
+    engines:
+      postgres:
+        na: "a PostgreSQL numeric lands as a decimal and a timestamp is at most a microsecond, so no key column lands as text or finer-collapsed"
+      mysql:
+        na: "a MySQL DECIMAL lands as a decimal and DATETIME(6) is at most a microsecond, so no key column lands as text or finer-collapsed"
+      mssql:
+        cells: [an_mssql_sub_microsecond_key_is_refused_into_clickhouse, "lib:a_microsecond_landing_is_finer_only_where_the_source_says_so"]
+      mongo:
+        na: "MongoDB has no cursor_column type landing as text and its timestamps are at most a millisecond"
+      oracle:
+        cells: [an_oracle_number_cursor_is_refused_into_clickhouse, an_oracle_sub_microsecond_key_is_refused_into_clickhouse, "lib:an_oracle_number_landing_as_text_is_not_admitted_as_an_order_column"]
+      lib:
+        cells: ["lib:a_text_number_with_its_plain_decimal_form_is_a_text_landing", "lib:a_numeric_source_type_landing_as_text_is_told_from_native_text", "lib:a_microsecond_landing_is_finer_only_where_the_source_says_so"]
+
   - name: init-name-folded-into-query
     class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
     history: "audit 2026-11-08 finding H5-F1 (hunt 5, `rivet init` on a PostgreSQL and a MySQL table named with a line break); RED on main 2026-11-10 (`a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names`: the scaffold of table \"nl<LF>      tab\" does not parse back to that relation)"

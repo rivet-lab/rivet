@@ -105,11 +105,8 @@ def bq_dataset_exists(project: str, dataset: str) -> bool:
     return st == 200
 
 
-def bq_scalar(project: str, sql: str) -> str | None:
-    """First cell of a standard-SQL query, waited for; None when no rows or a NULL cell.
-
-    A failed query raises — it must never read as an empty answer (-1, "absent").
-    """
+def _bq_query(project: str, sql: str) -> dict:
+    """The completed result of a standard-SQL query; a failed query raises, never reads as an empty answer."""
     st, b = _bq("POST", f"/projects/{project}/queries",
                 {"query": sql, "useLegacySql": False, "timeoutMs": 120_000})
     if st != 200:
@@ -121,9 +118,30 @@ def bq_scalar(project: str, sql: str) -> str | None:
                            f"?location={loc}&timeoutMs=120000")
         if st != 200:
             raise RuntimeError(f"bigquery: query results → {st} {b}\n{sql}")
+    return b
+
+
+def bq_scalar(project: str, sql: str) -> str | None:
+    """First cell of a standard-SQL query, waited for; None when no rows or a NULL cell."""
+    b = _bq_query(project, sql)
     if not b.get("rows"):
         return None
     return b["rows"][0]["f"][0]["v"]
+
+
+def bq_rows(project: str, sql: str) -> list[dict]:
+    """Every row of a standard-SQL query as {column: value as BigQuery's REST text, or None for NULL}."""
+    b = _bq_query(project, sql)
+    names = [f["name"] for f in b.get("schema", {}).get("fields", [])]
+    return [dict(zip(names, (c["v"] for c in r["f"]))) for r in b.get("rows", [])]
+
+
+def bq_tables(project: str, dataset: str) -> list[str]:
+    """The table ids of a dataset; a missing dataset has none."""
+    st, b = _bq("GET", f"/projects/{project}/datasets/{dataset}/tables")
+    if st not in (200, 404):
+        raise RuntimeError(f"bigquery: list tables {dataset} → {st} {b}")
+    return [t["tableReference"]["tableId"] for t in b.get("tables", [])]
 
 
 def gcs_list(bucket: str, prefix: str) -> list[str]:

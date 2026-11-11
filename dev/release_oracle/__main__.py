@@ -67,6 +67,7 @@ from . import (
     property_no_silent_null_grants,
     property_no_silent_null_cdc,
     property_no_silent_null_load,
+    cloud_legs,
     partner_shape,
     perf,
     properties,
@@ -844,11 +845,12 @@ def _matrix_exit_code_self_test() -> None:
     }
     exempt = {
         "property_no_debris_after_stop": "a JSON verb tool, it prints no matrix and the Rust test grades the verdict",
-        "property_no_secret_in_output": "exits on its own ledger's red rows, graded by its self-test",
     }
     swept = {f.stem for d in (HERE, ROOT / "dev" / "pytools") for f in d.glob("property_*.py")
              if any(isinstance(n, ast.FunctionDef) and n.name == "main" for n in ast.parse(f.read_text()).body)}
-    assert swept == set(table) | set(exempt), f"a property matrix CLI is not in the exit-code table: {sorted(swept ^ (set(table) | set(exempt)))}"
+    ledger_cli = {"property_no_secret_in_output"}
+    known = set(table) | set(exempt) | ledger_cli
+    assert swept == known, f"a property matrix CLI is not in the exit-code table: {sorted(swept ^ known)}"
     for name, (mod, runner, stub, call) in table.items():
         for cell, want in ((ok, 0), (red, 1), (ng, 2)):
             with mock.patch.object(mod, runner, lambda *a, _c=cell, _s=stub, **k: _s(_c)), \
@@ -856,6 +858,13 @@ def _matrix_exit_code_self_test() -> None:
                 got = call(mod)
             assert got == want, f"{name} exits {got} for a {cell.klass or 'passing'} cell, want {want}"
     shutil.rmtree(tmp, ignore_errors=True)
+    nso = property_no_secret_in_output
+    for statuses, want in (((), 2), ((Status.SKIP,), 2), ((Status.INFRA, Status.NA), 2), ((Status.PASS,), 0),
+                           ((Status.KNOWN,), 0), ((Status.PASS, Status.SKIP), 0), ((Status.PASS, Status.FAIL), 1)):
+        led = Ledger()
+        for st in statuses:
+            led.add("e", "-", "s", "-", st, "x", **({"cause": SkipCause.ENV} if st is Status.SKIP else {}))
+        assert nso.exit_code(led) == want, f"property_no_secret_in_output exits {nso.exit_code(led)} for {[s.value for s in statuses]}, want {want}"
     print("self-test ok: every property matrix CLI exits 1 on a red cell and 2 when it graded none")
 
 
@@ -894,6 +903,7 @@ def _stages_self_test() -> None:
     property_no_silent_null_grants.self_test()
     property_no_silent_null_cdc.self_test()
     property_no_silent_null_load.self_test()
+    cloud_legs.self_test()
     _matrix_exit_code_self_test()
     doc = {
         "preflights": [{"id": "a", "status": "test"}, {"id": "off", "status": "gap"}],
@@ -1867,6 +1877,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         # Its own containers and ports; its CDC cells read the stand's CDC servers (blessed_flow).
         Stage("engine matrix", lambda led: engine_loop(led, ns), frozenset({"the gate's engine containers"}), SERIAL),
     ]
+    table.append(warehouse("cloud legs", lambda led: cloud_legs.verify_cloud_legs(led)))
     if not ns.no_cloud:
         # Its own `bq`-tagged containers; handed this module's bring_up/seed_engine so readiness has one definition.
         table.append(Stage("bigquery golden", lambda led: bigquery.run_bigquery_golden(

@@ -105,6 +105,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_LOAD_TARGET_NOT_RIVETS` | refusal | 5 | the warehouse object exists and this state DB has no record of a successful rivet load: drop or rename it, or load into another table |
 | `RIVET_LOAD_IDENTIFIER_UNSAFE` | usage | 1 | rename the column or table in the source, or alias it in the export's `query:`, to a plain identifier ([A-Za-z_][A-Za-z0-9_]*) |
 | `RIVET_LOAD_KEY_COLUMN_INVALID` | usage | 1 | name only columns the export delivers, in a type and number the target takes, under `pk:` / `cluster_by:` / `partition:` in the export's `load:` block (or add the column to the export's SELECT), as the message names |
+| `RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT` | refusal | 5 | declare the column under `columns:` with a type that keeps its order and every digit (`int64`, `decimal(p,s)`, `timestamp_ns`), or cast it in the export's `query:`, as the message names |
 | `RIVET_LOAD_PRIMARY_KEY_MISSING` | usage | 1 | declare the key under the export's `load:` block, e.g. `pk: [id]` |
 | `RIVET_LOAD_RESERVED_COLUMN` | usage | 1 | rename or exclude the column in the export's query, or load the table with `mode: full` |
 | `RIVET_LOAD_LOOKALIKE_COLUMN` | usage | 1 | rename the column with Cyrillic look-alike letters in the source to Latin letters, as the message names |
