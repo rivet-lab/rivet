@@ -608,9 +608,9 @@ def digest(rs: list[Result]) -> str:
     return hashlib.sha1("\n".join(sorted(r.cell.split("/", 1)[-1] for r in rs)).encode()).hexdigest()[:8]
 
 
-def ledger_message(prop: str, klass: str, rs: list[Result]) -> str:
+def ledger_message(prop: str, tier: str, klass: str, rs: list[Result]) -> str:
     """The one ledger line of a failure class in one property."""
-    return f"{prop}: {klass} over {len(rs)} cells #{digest(rs)}"
+    return f"{prop}[{tier}]: {klass} over {len(rs)} cells #{digest(rs)}"
 
 
 def not_graded_table(by_prop: dict[str, list[Result]]) -> list[str]:
@@ -652,7 +652,7 @@ def record(led: Ledger, tier: str, by_prop: dict[str, list[Result]]) -> None:
             if r.klass and r.klass != NOT_GRADED:
                 reds.setdefault(r.klass, []).append(r)
         for klass, group in reds.items():
-            led.failed("-", "-", "cloud_legs", "-", ledger_message(prop, klass, group), "\n".join(f"{r.cell}: {r.detail}" for r in group))
+            led.failed("-", "-", "cloud_legs", "-", ledger_message(prop, tier, klass, group), "\n".join(f"{r.cell}: {r.detail}" for r in group))
         ng = [r for r in rs if r.klass == NOT_GRADED]
         for reason in sorted({r.detail for r in ng}):
             cells = [r for r in ng if r.detail == reason]
@@ -747,7 +747,7 @@ def main() -> int:
         p, r_n, n = counts(rs)
         print(f"{prop} summary tier={ns.tier} PASS={p} RED={r_n} NOT_GRADED={n}")
         for klass in sorted({r.klass for r in rs if r.klass and r.klass != NOT_GRADED}):
-            entry, in_date = known_red.match(ledger_message(prop, klass, [r for r in rs if r.klass == klass]))
+            entry, in_date = known_red.match(ledger_message(prop, ns.tier, klass, [r for r in rs if r.klass == klass]))
             if entry is None or not in_date:
                 bad += 1
     if ns.table:

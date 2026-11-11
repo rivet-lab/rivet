@@ -418,7 +418,7 @@ open-defects:  ## Every open_defect_ live cell against its line in dev/release_o
 
 .PHONY: property-cloud-legs
 property-cloud-legs:  ## Cloud legs of the property matrices (BigQuery, Snowflake, GCS, S3, Azure): the offline tier replays recorded server answers, the cloud tier runs against the real test project and is NOT_GRADED without credentials. Takes one live slot.
-	cargo test --test offline_suite property_cloud_legs
+	cargo test --test offline_suite property_no_silent_null_cloud_legs
 	$(LIVE) $(PY) -m dev.release_oracle.cloud_legs --tier cloud
 
 .PHONY: property-no-secret-in-output
