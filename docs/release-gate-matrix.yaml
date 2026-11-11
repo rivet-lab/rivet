@@ -198,6 +198,9 @@ preflights:
   - id: property_matrices
     what: "each of the five ADR 0040 properties (no_secret_in_output, no_silent_null, check_equals_run, refusal_names_true_cause, no_debris_after_stop) has its property_<name> matrix on the tree, and no property_* file grades a property the registry does not hold; the registry is dev/release_oracle/properties.py."
     status: test        # verify_property_matrices (dev/release_oracle/properties.py)
+  - id: cloud_legs
+    what: "the four cloud properties graded on the real cloud legs (GCS, S3, Azure, BigQuery, Snowflake) against the test project; without credentials every cell is NOT_GRADED and the stage is a skip, never a pass. The offline tier replays recorded answers in tests/offline/property_no_silent_null_cloud_legs.rs."
+    status: test        # verify_cloud_legs (dev/release_oracle/cloud_legs.py)
   - id: gif_currency
     what: "the instructional GIFs still show commands this binary accepts. They are binary assets, so no test reads them and no diff flags them — a GIF demonstrating a rejected flag is documentation that lies, and re-rendering does not fix it (the tape has to change). Ran in the gate since it was written; had NO ledger row until 2026-08-02, when the guard stopped reading a hand-typed module list and started deriving it."
     status: test        # verify_gif_currency (dev/release_oracle/gifs.py)
