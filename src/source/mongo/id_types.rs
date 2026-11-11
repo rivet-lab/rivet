@@ -278,6 +278,47 @@ mod tests {
     }
 
     #[test]
+    fn every_bracket_is_named_for_the_type_it_holds() {
+        use mongodb::bson::spec::BinarySubtype;
+        use mongodb::bson::{Binary, DateTime, Regex, Timestamp};
+        let cases: Vec<(Bson, &str)> = vec![
+            (Bson::Int32(1), "number (int, long, double or decimal)"),
+            (Bson::Null, "null"),
+            (Bson::String("s".into()), "string"),
+            (Bson::Document(doc! {"k": 1}), "document"),
+            (Bson::Array(vec![Bson::Int32(1)]), "array"),
+            (
+                Bson::Binary(Binary {
+                    subtype: BinarySubtype::Generic,
+                    bytes: vec![1],
+                }),
+                "binData",
+            ),
+            (Bson::ObjectId(ObjectId::new()), "objectId"),
+            (Bson::Boolean(true), "bool"),
+            (Bson::DateTime(DateTime::from_millis(0)), "date"),
+            (
+                Bson::Timestamp(Timestamp {
+                    time: 1,
+                    increment: 1,
+                }),
+                "timestamp",
+            ),
+            (
+                Bson::RegularExpression(Regex {
+                    pattern: "a".into(),
+                    options: String::new(),
+                }),
+                "regex",
+            ),
+            (Bson::MinKey, "other"),
+        ];
+        for (id, name) in cases {
+            assert_eq!(bracket_name(bracket_of(&id)), name, "{id:?}");
+        }
+    }
+
+    #[test]
     fn numeric_types_are_one_bracket() {
         let mut t = IdTypes::default();
         for id in [
