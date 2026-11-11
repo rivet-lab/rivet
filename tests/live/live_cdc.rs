@@ -1334,6 +1334,16 @@ fn a_zero_date_is_null_and_the_run_warns_with_the_count_batch_and_cdc_mysql() {
         "the batch summary carries the fidelity row:\n{batch}"
     );
     assert_cdc_matches_batch(&out, &batch_out);
+    for dir in [&out, &batch_out] {
+        let delivered = read_one_batch(dir);
+        for (col, nulls) in [("d", 2), ("dt", 2), ("ts", 1)] {
+            assert_eq!(
+                delivered.column_by_name(col).unwrap().null_count(),
+                nulls,
+                "column {col}: the delivered file holds the NULL cells the WARN counted"
+            );
+        }
+    }
 }
 
 #[test]
