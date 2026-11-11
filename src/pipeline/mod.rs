@@ -234,29 +234,11 @@ mod tests {
         (msg, false)
     }
 
-    /// Wall-clock ceiling for one hostile megabyte: one pass needs milliseconds, the quadratic one minutes.
-    const HOSTILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
-
-    /// `(cause length, hinted)` of `input` on a watchdog thread, so an overrun fails the test instead of hanging it.
-    fn strip_in_budget(label: &str, input: String) -> (usize, bool) {
-        let (done, result) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let (cause, hinted) = strip_chunked_recovery_hint(&input);
-            let _ = done.send((cause.len(), hinted));
-        });
-        result
-            .recv_timeout(HOSTILE_BUDGET)
-            .unwrap_or_else(|why| panic!("SCAN NOT LINEAR: {label}: {why} in {HOSTILE_BUDGET:?}"))
-    }
-
-    /// One megabyte of each hostile shape of error text is read in one pass: the exact cut, inside the budget.
-    #[test]
-    fn the_hint_stripper_is_linear_on_a_hostile_megabyte() {
-        const MB: usize = 1 << 20;
-        let seps = "; ".repeat(MB / 2);
-        let spaced = "x".repeat(62) + "; ";
-        let spaced = spaced.repeat(MB / 64);
-        let cases = [
+    /// The hostile shapes of error text, about `mb` bytes each, with the `(cause length, hinted)` the stripper must give.
+    fn hint_shapes(mb: usize) -> Vec<(&'static str, String, (usize, bool))> {
+        let seps = "; ".repeat(mb / 2);
+        let spaced = ("x".repeat(62) + "; ").repeat(mb / 64);
+        vec![
             ("a megabyte of `; `", seps.clone(), (seps.len(), false)),
             (
                 "a megabyte of `; ` then a hint",
@@ -271,17 +253,31 @@ mod tests {
             ),
             (
                 "a megabyte of hints",
-                "`rivet ".repeat(MB / 7),
-                (MB / 7 * 7, false),
+                "`rivet ".repeat(mb / 7),
+                (mb / 7 * 7, false),
             ),
             (
                 "a megabyte cause then a hint",
-                "e".repeat(MB) + "; use `rivet run`",
-                (MB, true),
+                "e".repeat(mb) + "; use `rivet run`",
+                (mb, true),
             ),
-        ];
-        for (label, input, want) in cases {
-            assert_eq!(strip_in_budget(label, input), want, "{label}");
+        ]
+    }
+
+    /// Hostile error text is read in one pass: the exact cut at a CPU cost that grows with the input.
+    #[test]
+    fn the_hint_stripper_is_linear_on_a_hostile_megabyte() {
+        use crate::test_budget::{SCALE, SMALL, linear_cost};
+        for ((label, small, want_small), (_, large, want_large)) in hint_shapes(SMALL)
+            .into_iter()
+            .zip(hint_shapes(SMALL * SCALE))
+        {
+            let (got_small, got_large) = linear_cost(label, small, large, |input: &String| {
+                let (cause, hinted) = strip_chunked_recovery_hint(input);
+                (cause.len(), hinted)
+            });
+            assert_eq!(got_small, want_small, "{label}: small");
+            assert_eq!(got_large, want_large, "{label}: large");
         }
     }
 
