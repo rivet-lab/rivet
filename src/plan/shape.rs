@@ -12,6 +12,7 @@ use crate::state::RunShape;
 pub(crate) const NOT_SHAPING: &[&str] = &[
     "export_name",
     "bytes_read",
+    "nulled_cells",
     "parts_landed",
     "source_table",
     "query_template",
