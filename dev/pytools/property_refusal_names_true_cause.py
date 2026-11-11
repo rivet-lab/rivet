@@ -48,7 +48,7 @@ def run_offline(stand: bool) -> list[str]:
     env = dict(os.environ)
     if stand:
         cmd = [sys.executable, "dev/pytools/live_slot.py", "--", *cmd]
-        env.update(RIVET_PM_P4_STAND="1", RIVET_ALLOW_WORKTREE_LIVE="1")
+        env.update(RIVET_PM_P4_STAND="1")
     out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env)
     return verdict_lines(out.stdout)
 
@@ -90,8 +90,7 @@ def live_tests() -> dict[str, list[str]]:
 def run_live_cell(test: str) -> tuple[str, str]:
     """Runs one sabotage test by its full path through live_slot; returns its verdict and evidence."""
     cmd = [sys.executable, "dev/pytools/live_slot.py", "--", "cargo", "test", "--test", "live_suite", test, "--", "--ignored", "--exact"]
-    env = {**os.environ, "RIVET_ALLOW_WORKTREE_LIVE": "1"}
-    out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env)
+    out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     text = out.stdout + out.stderr
     m = re.search(r"test result: \w+\. (\d+) passed; (\d+) failed", text)
     ran = bool(m) and (int(m.group(1)) + int(m.group(2))) > 0

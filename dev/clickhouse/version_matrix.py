@@ -19,7 +19,7 @@ RESULT = re.compile(r"^test (\S+) \.\.\. (ok|FAILED|ignored)", re.M)
 
 def recreate(tag: str) -> str:
     """Recreate the stand's ClickHouse on `tag` and return the version it reports once healthy."""
-    env = {**os.environ, "COMPOSE_PROJECT_NAME": "rivet", "RIVET_ALLOW_WORKTREE_LIVE": "1", "RIVET_CLICKHOUSE_TAG": tag}
+    env = {**os.environ, "COMPOSE_PROJECT_NAME": "rivet", "RIVET_CLICKHOUSE_TAG": tag}
     subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "--renew-anon-volumes", "clickhouse"], cwd=ROOT, env=env, check=True)
     for _ in range(120):
         state = subprocess.run(
