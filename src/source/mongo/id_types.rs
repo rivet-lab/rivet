@@ -143,7 +143,17 @@ fn mixed_refusal(collection: &str, brackets: &BTreeSet<u8>) -> anyhow::Error {
     ))
 }
 
-/// The export's tables whose `load:` block merges by declared key columns.
+/// Whether a `load:` block's `pk` keys a Mongo table's view: `auto` resolves to the source key `_id`, columns key it, `none` does not.
+fn pk_keys_the_view(pk: &crate::config::load::KeyColumns) -> bool {
+    use crate::config::load::KeyColumns;
+    match pk {
+        KeyColumns::Auto => true,
+        KeyColumns::Columns(cols) => !cols.is_empty(),
+        KeyColumns::None => false,
+    }
+}
+
+/// The export's tables whose `load:` block merges the view by key columns, declared or the source's `_id`.
 pub(crate) fn keyed_tables(
     config: &crate::config::Config,
     export: &crate::config::ExportConfig,
@@ -152,8 +162,7 @@ pub(crate) fn keyed_tables(
         .into_iter()
         .filter(|t| {
             crate::plan::load_settings::effective_load(config, export, Some(t))
-                .and_then(|l| l.pk.declared())
-                .is_some_and(|cols| !cols.is_empty())
+                .is_some_and(|l| pk_keys_the_view(&l.pk))
         })
         .collect()
 }
@@ -355,6 +364,49 @@ mod tests {
         admit_change(&mut t, &keyed, Some("c"), None).unwrap();
         admit_change(&mut t, &keyed, Some("c"), Some(&doc! { "x": 1 })).unwrap();
         assert_eq!(t.brackets("c"), vec![0]);
+    }
+
+    /// The tables `keyed_tables` returns for a Mongo CDC export of `orders` and `audit` under the given top-level and export-level `load:` text.
+    fn keyed_with(load: &str, export_load: &str) -> Vec<String> {
+        let yaml = format!(
+            "source:\n  type: mongo\n  url: \"mongodb://u@127.0.0.1:1/app\"\n{load}\
+             exports:\n  - name: o\n    tables: [orders, audit]\n    mode: cdc\n    format: parquet\n    \
+             cdc:\n      checkpoint: ./o.ckpt\n    destination: {{ type: local, path: ./out }}\n{export_load}"
+        );
+        let config = crate::config::Config::from_yaml(&yaml).unwrap();
+        keyed_tables(&config, &config.exports[0])
+    }
+
+    fn load_block(pk: &str) -> String {
+        format!(
+            "load: {{ target: clickhouse, url: \"http://127.0.0.1:1\", database: d, user: u, password_env: P{pk} }}\n"
+        )
+    }
+
+    #[test]
+    fn a_load_keys_a_table_by_default_by_columns_and_not_under_none() {
+        let both = vec!["orders".to_string(), "audit".to_string()];
+        for pk in ["", ", pk: auto", ", pk: [_id]", ", pk: [other]"] {
+            assert_eq!(keyed_with(&load_block(pk), ""), both, "pk{pk}");
+        }
+        for pk in [", pk: none", ", pk: []"] {
+            assert!(keyed_with(&load_block(pk), "").is_empty(), "pk{pk}");
+        }
+        assert!(keyed_with("", "").is_empty(), "no load block");
+    }
+
+    #[test]
+    fn a_per_table_pk_decides_for_its_table_only() {
+        let audit_unkeyed = "    load: { tables: { audit: { pk: none } } }\n";
+        assert_eq!(
+            keyed_with(&load_block(""), audit_unkeyed),
+            vec!["orders".to_string()]
+        );
+        let orders_keyed = "    load: { pk: none, tables: { orders: { pk: auto } } }\n";
+        assert_eq!(
+            keyed_with(&load_block(", pk: none"), orders_keyed),
+            vec!["orders".to_string()]
+        );
     }
 
     #[test]

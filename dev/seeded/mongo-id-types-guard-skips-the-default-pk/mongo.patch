@@ -1,0 +1,12 @@
+diff --git a/src/source/mongo/id_types.rs b/src/source/mongo/id_types.rs
+--- a/src/source/mongo/id_types.rs
++++ b/src/source/mongo/id_types.rs
+@@ -147,7 +147,7 @@
+ fn pk_keys_the_view(pk: &crate::config::load::KeyColumns) -> bool {
+     use crate::config::load::KeyColumns;
+     match pk {
+-        KeyColumns::Auto => true,
++        KeyColumns::Auto => false,
+         KeyColumns::Columns(cols) => !cols.is_empty(),
+         KeyColumns::None => false,
+     }

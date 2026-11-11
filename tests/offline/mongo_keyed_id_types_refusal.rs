@@ -53,3 +53,19 @@ fn a_keyed_mongo_snapshot_over_a_mixed_id_checkpoint_is_refused_by_code() {
         "a uniform checkpoint is not refused:\n{err}"
     );
 }
+
+/// A `load:` that leaves `pk` at its default or spells `auto` keys the table on `_id` and is refused as `pk: [_id]` is; `pk: none` is not.
+#[test]
+fn a_load_keyed_by_the_default_pk_is_refused_by_code_and_none_is_not() {
+    for pk in ["", ", pk: auto", ", pk: [id]"] {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), pk, "[0,2]");
+        let (rc, err) = rivet_run(dir.path());
+        assert_eq!(rc, 5, "pk{pk}: {err}");
+        assert!(err.contains(&format!("[{MIXED}]")), "pk{pk}: {err}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), ", pk: none", "[0,2]");
+    let (_, err) = rivet_run(dir.path());
+    assert!(!err.contains(MIXED), "pk: none is unkeyed:\n{err}");
+}
