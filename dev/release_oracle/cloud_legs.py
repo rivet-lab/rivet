@@ -460,10 +460,11 @@ def cloud_env() -> tuple[str, str, str] | None:
 def live_flow(work: Path, rec: dict | None = None) -> Flow:
     """The real flow: stage Postgres rows to a per-run GCS prefix, load them into a `rivet_tmp_*` dataset, read back, then load into a missing dataset; cleaned before and after."""
     from . import gcp
+    from ..pytools.registry import bq_tmp
 
     project, bucket, location = cloud_env() or ("", "", "")
     tag = f"pm_cl_{int(time.time())}"
-    ds, missing = f"rivet_tmp_{tag}", f"rivet_tmp_{tag}_missing"
+    ds, missing = bq_tmp(tag), bq_tmp(f"{tag}_missing")
     meta = {"tag": tag, "bucket": bucket, "project": project, "location": location, "dataset": ds, "dataset_missing": missing}
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
