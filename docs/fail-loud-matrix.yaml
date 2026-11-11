@@ -104,6 +104,14 @@ scenarios:
     mongo:    { test: every_refusal_is_coded_and_names_the_true_cause }
     oracle:   { test: every_refusal_is_coded_and_names_the_true_cause }
 
+  - id: remote_plaintext_spelling_cannot_hide_the_host
+    what: "the remote-plaintext and cloud-endpoint loopback gates read a URL with the parser the HTTP client uses, so `http:/host`, `http:host`, `ht<TAB>tp://host` and `http://host\\@127.0.0.1` are refused with RIVET_CONFIG_REMOTE_PLAINTEXT (ClickHouse `load.url`, Slack `webhook_url`) or RIVET_CONFIG_DESTINATION_ENDPOINT_UNSAFE (S3/GCS/Azure `endpoint`), and a URL that does not parse is refused with the same plaintext code; the host the client dials is the host named"
+    postgres: { test: a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused }
+    mysql:    { test: a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused }
+    mssql:    { test: a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused }
+    mongo:    { test: a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused }
+    oracle:   { test: a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused }
+
   - id: ca_file_other_ca_is_refused
     what: "`tls.ca_file` names one CA and the server certificate was signed by another: refused under `verify-ca` and `verify-full`, and a certificate signed by the ca_file CA is accepted"
     postgres: { test: postgres_wrong_ca_is_refused }

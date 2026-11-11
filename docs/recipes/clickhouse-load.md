@@ -221,6 +221,9 @@ works the same way: name it in `named_collection:`.
   certificate fails the load before any statement. A remote (non-loopback) `http://`
   URL is refused at config load with `RIVET_CONFIG_REMOTE_PLAINTEXT` (exit 1), because the
   password and every row would cross the network in cleartext; loopback hosts stay allowed.
+  The URL is read the way the HTTP client reads it, so `http:/host`, `http:host` and
+  `http://host\@127.0.0.1` are refused as the remote host they dial, and a URL that does not parse
+  is refused with the same code.
   On a network path you already trust, set `allow_plaintext: true` in the `load:` block.
 
 ## Not supported

@@ -1,13 +1,13 @@
 diff --git a/src/config/url.rs b/src/config/url.rs
-index f8ab1477..afaf7708 100644
+index d916508..6134f6e 100644
 --- a/src/config/url.rs
 +++ b/src/config/url.rs
-@@ -112,7 +112,7 @@ pub(crate) fn require_https_or_loopback(
-         .trim_start()
-         .get(..7)
-         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"));
--    if cleartext && !host_is_loopback(url) {
-+    if cleartext && !host_is_loopback(url) && sink.is_empty() {
-         let host = host_port_span(url);
-         crate::rivet_bail!(
-             crate::error::codes::CONFIG_REMOTE_PLAINTEXT,
+@@ -129,7 +129,7 @@ pub(crate) fn require_https_or_loopback(
+         );
+     };
+     let host = parsed.host_str().unwrap_or_default();
+-    if parsed.scheme() == "http" && !super::is_loopback_host(host) {
++    if parsed.scheme() == "http" && !super::is_loopback_host(host) && sink.is_empty() {
+         let shown = match parsed.port() {
+             Some(port) => format!("{host}:{port}"),
+             None => host.to_string(),
