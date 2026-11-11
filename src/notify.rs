@@ -82,7 +82,7 @@ pub fn maybe_send(config: Option<&NotificationsConfig>, summary: &RunSummary) {
     let url = match (&slack.webhook_url, &slack.webhook_url_env) {
         (Some(u), _) => u.clone(),
         (None, Some(env)) => match std::env::var(env) {
-            Ok(u) => u,
+            Ok(u) => crate::secret::Secret::new(u),
             Err(_) => {
                 log::warn!("slack notification skipped: env var '{}' not set", env);
                 return;
@@ -99,7 +99,7 @@ pub fn maybe_send(config: Option<&NotificationsConfig>, summary: &RunSummary) {
     match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .and_then(|c| c.post(&url).json(&payload).send())
+        .and_then(|c| c.post(url.expose()).json(&payload).send())
     {
         Ok(resp) if resp.status().is_success() => {
             log::info!("slack notification sent for '{}'", summary.export_name);
@@ -456,7 +456,7 @@ mod tests {
         let (url, request) = mock_webhook("200 OK");
         let cfg = NotificationsConfig {
             slack: Some(SlackConfig {
-                webhook_url: Some(url),
+                webhook_url: Some(url.into()),
                 webhook_url_env: None,
                 on: vec![NotifyEvent::Failure],
             }),
@@ -483,7 +483,7 @@ mod tests {
         let (url, request) = mock_webhook("500 Internal Server Error");
         let cfg = NotificationsConfig {
             slack: Some(SlackConfig {
-                webhook_url: Some(url),
+                webhook_url: Some(url.into()),
                 webhook_url_env: None,
                 on: vec![NotifyEvent::Failure],
             }),
@@ -498,7 +498,7 @@ mod tests {
         let (url, request) = mock_webhook("429 Too Many Requests");
         let cfg = NotificationsConfig {
             slack: Some(SlackConfig {
-                webhook_url: Some(url),
+                webhook_url: Some(url.into()),
                 webhook_url_env: None,
                 on: vec![NotifyEvent::Failure],
             }),
@@ -520,7 +520,7 @@ mod tests {
 
         let cfg = NotificationsConfig {
             slack: Some(SlackConfig {
-                webhook_url: Some(url),
+                webhook_url: Some(url.into()),
                 webhook_url_env: None,
                 on: vec![NotifyEvent::Failure],
             }),

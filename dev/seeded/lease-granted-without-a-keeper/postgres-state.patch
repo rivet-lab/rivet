@@ -1,17 +1,17 @@
 diff --git a/src/state/load_lease.rs b/src/state/load_lease.rs
-index d15931b6..e8ae0543 100644
 --- a/src/state/load_lease.rs
 +++ b/src/state/load_lease.rs
-@@ -483,7 +483,7 @@ impl StateStore {
+@@ -557,8 +557,7 @@
              StateRef::Postgres(url) => {
                  let ttl = lease_ttl_s();
                  let host = host_name();
--                let keeper = keeper_for(url, ttl).map_err(|e| keeper_unavailable(key, &e))?;
-+                let keeper = keeper_for(url, ttl).ok();
+-                let keeper =
+-                    keeper_for(url.expose(), ttl).map_err(|e| keeper_unavailable(key, &e))?;
++                let keeper = keeper_for(url.expose(), ttl).ok();
                  let granted = Instant::now();
                  let holder = format!(
                      "{host}:{}:{}",
-@@ -529,14 +529,17 @@ impl StateStore {
+@@ -604,14 +603,17 @@
                  if got.is_none() {
                      return Ok(None);
                  }

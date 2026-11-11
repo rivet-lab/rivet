@@ -135,7 +135,8 @@ pub(crate) fn refuse_override_wire_mismatch(
         return Ok(());
     }
     let url = config.source.resolve_url()?;
-    let mut src = connect_source(config, &url, config.source.tls.as_ref())?;
+    let url = url.expose();
+    let mut src = connect_source(config, url, config.source.tls.as_ref())?;
     for (table, query) in report_units(export, config_dir, params)? {
         let overrides = unit_overrides(export, table.as_deref(), column_overrides);
         source::refuse_override_wire_mismatch(
@@ -258,9 +259,10 @@ pub fn collect_reports(
         on_unresolved,
     } = ctx;
     let url = config.source.resolve_url()?;
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
-    let units = resolved_units(config, export, &url, tls, config_dir, params, on_unresolved)?;
-    let mut src = connect_source(config, &url, tls)?;
+    let units = resolved_units(config, export, url, tls, config_dir, params, on_unresolved)?;
+    let mut src = connect_source(config, url, tls)?;
 
     units
         .into_iter()
@@ -480,17 +482,18 @@ pub fn capture_load_units(
     params: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<Vec<CapturedUnit>> {
     let url = config.source.resolve_url()?;
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
     let units = resolved_units(
         config,
         export,
-        &url,
+        url,
         tls,
         config_dir,
         params,
         OnUnresolvedCapture::Fail,
     )?;
-    let mut src = connect_source(config, &url, tls)?;
+    let mut src = connect_source(config, url, tls)?;
     units
         .into_iter()
         .map(|unit| {

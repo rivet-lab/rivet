@@ -150,7 +150,7 @@ pub(crate) fn project_table_read(
         Some(src) => src.readable_columns(table)?,
         None => crate::source::connect(
             source.source_type,
-            &source.resolve_url()?,
+            source.resolve_url()?.expose(),
             source.tls.as_ref(),
             source.mongo.as_ref(),
         )?
@@ -712,7 +712,7 @@ fn resolve_chunked_strategy(
         Some(src) => introspect_table(src, config.source.source_type, tbl, export),
         None => crate::source::connect(
             config.source.source_type,
-            &url,
+            url.expose(),
             config.source.tls.as_ref(),
             config.source.mongo.as_ref(),
         )
