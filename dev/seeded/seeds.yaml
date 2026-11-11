@@ -5806,3 +5806,22 @@ seeds:
         cells: [nullable_cursor_is_refused_oracle, unrenderable_cursor_is_refused_oracle]
       mongo:
         na: "a MongoDB export has no incremental cursor_column: mode full only"
+
+  - name: cursor-nullability-claimed-without-the-table-catalog
+    class: "a nullable claim is taken from the server's description of an expression, so CAST(id AS BIGINT) AS id over a NOT NULL key (or a PostgreSQL view over one) is refused as a nullable cursor with no workable remedy"
+    history: "2026-11-11 - found live when the cursor admission refused CAST(id AS NUMBER(18)) AS id on Oracle and on SQL Server; the nullable claim is now confirmed against the catalog of the one table the query reads, and a PostgreSQL view column is not claimed"
+    scope: source
+    engines:
+      postgres:
+        patch: cursor-nullability-claimed-without-the-table-catalog/postgres.patch
+        cells: [a_view_over_a_not_null_cursor_delivers_once_postgres]
+      mysql:
+        na: "the MySQL NOT NULL column flag is exact for an expression over NOT NULL columns and for a view, so the claim needs no catalog confirmation"
+      mssql:
+        patch: cursor-nullability-claimed-without-the-table-catalog/mssql.patch
+        cells: [an_expression_over_a_not_null_cursor_delivers_once_mssql]
+      oracle:
+        patch: cursor-nullability-claimed-without-the-table-catalog/oracle.patch
+        cells: [an_expression_over_a_not_null_cursor_delivers_once_oracle]
+      mongo:
+        na: "a MongoDB export has no incremental cursor_column: mode full only"

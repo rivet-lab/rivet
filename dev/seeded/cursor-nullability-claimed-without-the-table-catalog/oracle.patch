@@ -1,0 +1,13 @@
+diff --git a/src/source/oracle/mod.rs b/src/source/oracle/mod.rs
+index 31bcef6f..a35c55b7 100644
+--- a/src/source/oracle/mod.rs
++++ b/src/source/oracle/mod.rs
+@@ -762,7 +762,7 @@ impl Source for OracleSource {
+             .iter()
+             .find(|m| m.name() == column)
+             .map(|m| m.nullable());
+-        if described != Some(true) {
++        if true {
+             return Ok(described);
+         }
+         let Some(parts) = crate::sql::single_relation(query, false).filter(|p| p.len() <= 2) else {
