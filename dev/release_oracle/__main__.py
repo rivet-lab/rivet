@@ -298,6 +298,7 @@ def _gate_kind_self_test() -> None:
             assert gate_kind(parse_args(argv)) == REDUCED_GATE, f"an empty state URL grades SQLite only and still reads as a {kind} run"
             os.environ["RIVET_GATE_STATE_URL"] = "postgresql://state.invalid/rivet"
             assert gate_config(parse_args([*argv, "--state-url", "postgresql://state.invalid/rivet"])) == CANONICAL_CONFIG
+        _switch_is_recorded_knob_check(GRADING_KNOBS)
         _narrowed_run_has_no_tag_self_test(argv_of("release-oracle-full"))
         assert "--island" not in argv_of("release-oracle-full") and "--island" in argv_of("release-oracle-island")
         assert "--with-seeded-recall" in argv_of("release-oracle-full"), "the per-run gate runs the recall"
@@ -356,6 +357,23 @@ def _raising_stage_self_test() -> None:
     print("self-test ok: a stage that raises is one FAIL row naming it; the gate still reports and exits 1")
 
 
+#: Shell switches the gate branches on by value that only add work when set, each with why leaving them unrecorded weakens nothing.
+SWITCHES_THAT_ONLY_ADD_WORK = {
+    "RIVET_ORACLE_DOCKER": "2026-11-10: adds a docker build to the release-path stage; unset is the canonical run",
+}
+
+
+def _switch_is_recorded_knob_check(knobs: frozenset[str]) -> None:
+    """Every RIVET_* variable the gate source compares to a literal is a recorded grading knob or a switch that only adds work."""
+    import re
+
+    switch = re.compile(r'environ\.get\("(RIVET_[A-Z0-9_]+)"[^)]*\)\s*[!=]=\s*"')
+    found = {(m, f.name) for f in HERE.glob("*.py") for m in switch.findall(f.read_text())}
+    assert len({n for n, _ in found}) >= 2, f"the switch scan found {sorted(found)}: the pattern drifted"
+    loose = sorted(f"{n} (branched on in {f})" for n, f in found if n not in knobs and n not in SWITCHES_THAT_ONLY_ADD_WORK)
+    assert not loose, f"a shell switch that changes what the gate runs belongs in GRADING_KNOBS (core.py), where gate_config records it: {loose}"
+
+
 def _tree_identity_self_test() -> None:
     """The evidence ledger every gate run rewrites does not dirty the tree the next run records; an edited source file still does."""
     from . import core
@@ -393,6 +411,44 @@ def _tree_identity_checks(core, evidence) -> None:  # noqa: ANN001
         (root / "docs/evidence/other.yaml").write_text("x: 1\n")
         git("add", "-A")
         assert core.tree_identity(root) == (head, True), "only the ledger's exact path is exempt"
+        git("add", "-A")
+        git("commit", "-q", "-m", "moved")
+        _tree_moved_checks(core, root)
+
+
+def _tree_moved_checks(core, root: Path) -> None:  # noqa: ANN001
+    """A tree that is the same at the report as at the first stage is released; a commit or an edit in between gives TREE-MOVED, rc 1 and a record `release.py` refuses."""
+    import contextlib
+    import io
+    import json as _json
+
+    from ..pytools.release import gate_refusal
+
+    def verdict(start: tuple[str, bool], move: Callable[[], None]) -> tuple[int, str, str, str | None]:
+        led = Ledger(colour=False)
+        led.passed("-", "-", "tree_moved", "-", "the one stage that ran")
+        saved = core.TIMINGS_HISTORY
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            core.TIMINGS_HISTORY = Path(tmp) / "timings.jsonl"
+            try:
+                move()
+                rc = led.report(full=True, gate=core.FULL_GATE, tree=start, config=CANONICAL_CONFIG, reread=lambda: core.tree_identity(root))
+                line = {**_json.loads(core.TIMINGS_HISTORY.read_text().splitlines()[-1]), "binary": start[0][:9]}
+                core.TIMINGS_HISTORY.write_text(_json.dumps(line) + "\n")
+                refusal = gate_refusal(start[0], core.TIMINGS_HISTORY, core.FULL_GATE)
+            finally:
+                core.TIMINGS_HISTORY = saved
+        return rc, out.getvalue(), line["verdict"], refusal
+
+    git = lambda *a: run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *a])  # noqa: E731
+    rc, said, recorded, refusal = verdict(core.tree_identity(root), lambda: None)
+    assert (rc, recorded, refusal) == (0, "RELEASE-READY", None), (rc, recorded, refusal, said)
+    rc, said, recorded, refusal = verdict(core.tree_identity(root), lambda: (root / "src/main.rs").write_text("fn main() { 1; }\n"))
+    assert rc == 1 and recorded == core.TREE_MOVED and "TREE-MOVED" in said and "RELEASE-READY" not in said and refusal, (rc, recorded, said, refusal)
+    git("add", "-A")
+    git("commit", "-q", "-m", "second")
+    rc, said, recorded, refusal = verdict(("a" * 40, False), lambda: None)
+    assert rc == 1 and recorded == core.TREE_MOVED and refusal, "a commit between the first stage and the report is a moved tree"
 
 
 def _verdict_scope_self_test() -> None:
@@ -472,7 +528,7 @@ def _skip_cause_self_test() -> None:
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(out):
             core.TIMINGS_HISTORY = Path(tmp) / "timings.jsonl"
             try:
-                rc = led.report(full=True, gate=gate, tree=(sha, False), config=CANONICAL_CONFIG)
+                rc = led.report(full=True, gate=gate, tree=(sha, False), config=CANONICAL_CONFIG, reread=lambda: (sha, False))
                 line = {**_json.loads(core.TIMINGS_HISTORY.read_text().splitlines()[-1]), "binary": sha[:9]}
                 core.TIMINGS_HISTORY.write_text(_json.dumps(line) + "\n")
                 refusal = gate_refusal(sha, core.TIMINGS_HISTORY, ISLAND_GATE if gate == ISLAND_GATE else core.FULL_GATE)
@@ -764,6 +820,45 @@ def _stage_table_self_test() -> None:
     print(f"self-test ok: the stage table keeps every stage in order, measurement stages run alone; overlapping: {overlapping}")
 
 
+def _matrix_exit_code_self_test() -> None:
+    """Every property matrix CLI exits 1 on a red cell and 2 when it graded none, and a new `property_*.py` entry point must be added to the table here."""
+    import ast
+    import contextlib
+    import io
+    from unittest import mock
+
+    from ..pytools import property_refusal_names_true_cause as refusal
+
+    nsn = property_no_silent_null
+    ok, red, ng = (nsn.Result("c", nsn.DELIVERED), nsn.Result("c", nsn.DELIVERED, nsn.NULLED, "x"), nsn.Result("c", nsn.REFUSED, nsn.NOT_GRADED, "x"))
+    tmp = tempfile.mkdtemp()
+    table = {
+        "property_no_silent_null": (nsn, "run_engine", lambda r: ([r], []), lambda m: m.main()),
+        "property_no_silent_null_cdc": (property_no_silent_null_cdc, "run_engine", lambda r: [r], lambda m: m.main()),
+        "property_no_silent_null_load": (property_no_silent_null_load, "run_all", lambda r: [r], lambda m: m.main()),
+        "property_no_silent_null_grants": (property_no_silent_null_grants, "run_grants", lambda r: [r], lambda m: m.main()),
+        "property_refusal_names_true_cause": (
+            refusal, "run_offline",
+            lambda r: [f"{refusal.MATRIX} cause/X/- {'PASS' if not r.klass else 'RED' if r.klass != nsn.NOT_GRADED else 'NOT_GRADED'} x"],
+            lambda m: m.main(["x", "offline"])),
+    }
+    exempt = {
+        "property_no_debris_after_stop": "a JSON verb tool, it prints no matrix and the Rust test grades the verdict",
+        "property_no_secret_in_output": "exits on its own ledger's red rows, graded by its self-test",
+    }
+    swept = {f.stem for d in (HERE, ROOT / "dev" / "pytools") for f in d.glob("property_*.py")
+             if any(isinstance(n, ast.FunctionDef) and n.name == "main" for n in ast.parse(f.read_text()).body)}
+    assert swept == set(table) | set(exempt), f"a property matrix CLI is not in the exit-code table: {sorted(swept ^ (set(table) | set(exempt)))}"
+    for name, (mod, runner, stub, call) in table.items():
+        for cell, want in ((ok, 0), (red, 1), (ng, 2)):
+            with mock.patch.object(mod, runner, lambda *a, _c=cell, _s=stub, **k: _s(_c)), \
+                    mock.patch.object(sys, "argv", ["x", "--work", tmp]), contextlib.redirect_stdout(io.StringIO()):
+                got = call(mod)
+            assert got == want, f"{name} exits {got} for a {cell.klass or 'passing'} cell, want {want}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("self-test ok: every property matrix CLI exits 1 on a red cell and 2 when it graded none")
+
+
 def _stages_self_test() -> None:
     """Stage recording counts the rows a stage adds; the end-of-run matrix check fails on a stage that never ran or graded nothing; the real matrix resolves to recorded stages."""
     import types
@@ -799,6 +894,7 @@ def _stages_self_test() -> None:
     property_no_silent_null_grants.self_test()
     property_no_silent_null_cdc.self_test()
     property_no_silent_null_load.self_test()
+    _matrix_exit_code_self_test()
     doc = {
         "preflights": [{"id": "a", "status": "test"}, {"id": "off", "status": "gap"}],
         "infra": [{"id": "undriven", "status": "test"}],
@@ -2243,7 +2339,8 @@ def main(argv: list[str] | None = None) -> int:
     refused = apply_run_policy(ns)
     if refused:
         print(f"RIVET_GATE_ENV_UNLISTED: {' '.join(refused)} in the shell. The gate takes its binary from the tree and its bless modes "
-              "from argv, and reads only the RIVET_* names in core.HARNESS_ENV and core.GRADING_KNOBS; unset them and run again.",
+              "from argv, reads only the RIVET_* names in core.HARNESS_ENV and core.GRADING_KNOBS and refuses the NEXTEST_* names in core.NEXTEST_ENV "
+              "(the gate runs nextest with retries 0 on the default profile); unset them and run again.",
               file=sys.stderr)
         return 2
     config = gate_config(ns)

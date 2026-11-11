@@ -64,7 +64,7 @@ struct RawLoadSection {
     /// `xy12345.us-east-1`.
     #[serde(default)]
     account: Option<String>,
-    /// Snowflake: the unencrypted PKCS#8 private key file of the user's key pair.
+    /// Snowflake: the unencrypted PKCS#8 private key file of the user's key pair; a relative path is read beside the config file.
     #[serde(default)]
     private_key_path: Option<String>,
     /// Snowflake: the role the statements run under; the user's default when omitted.
@@ -96,7 +96,7 @@ struct RawLoadSection {
     #[serde(default)]
     named_collection: Option<String>,
     /// ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed
-    /// by a private CA, beside the built-in public roots.
+    /// by a private CA, beside the built-in public roots; a relative path is read beside the config file.
     #[serde(default)]
     ca_file: Option<String>,
     /// After a successful load, delete the staged Parquet under the export prefix.
