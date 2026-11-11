@@ -5656,6 +5656,23 @@ seeds:
       oracle:
         na: "the Oracle source lifts oracledb errors into text read by is_oracle_lost_session, a different arm from the one this seed removes"
 
+  - name: mongo-sharded-cdc-requests-pre-images-below-6-0
+    class: a MongoDB CDC stream asks the server for pre-images whatever its version, and a sharded cluster before 6.0 refuses that option (error 51771), so every run on a sharded 4.4 or 5.0 cluster stops before reading a change
+    history: nightly Mongo matrix 2026-11-08 - the sharded cells failed on 4.4 and 5.0 and were left out of the workflow; reproduced on 4.4.30 and 5.0.33 sharded clusters
+    scope: source
+    engines:
+      postgres:
+        na: "a PostgreSQL stream has no pre-image request whose acceptance depends on the server version"
+      mysql:
+        na: "a MySQL binlog stream has no pre-image request whose acceptance depends on the server version"
+      mssql:
+        na: "a SQL Server capture stream has no pre-image request whose acceptance depends on the server version"
+      oracle:
+        na: "an Oracle LogMiner stream has no pre-image request whose acceptance depends on the server version"
+      mongo:
+        patch: mongo-sharded-cdc-requests-pre-images-below-6-0/mongo.patch
+        cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, "lib:the_pre_image_request_follows_the_server_version"]
+
   - name: state-url-query-password-unmasked
     class: "a PostgreSQL state URL is named with only its `user:password@` part masked, so a password written as a query pair (`?password=`, `?sslpassword=`, any case) is printed by `rivet doctor` and by `rivet state copy --to`"
     history: "hunt-2 F3, 2026-11-08: RED on main 10bcf9bf (doctor `[OK]  State (postgres postgresql://u@h:5433/postgres?password=Qp7ZkStateSecretX9&options=...)`; the `state copy` done note held the same URL twice)"

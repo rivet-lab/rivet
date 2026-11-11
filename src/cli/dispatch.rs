@@ -88,6 +88,7 @@ fn load_report(json: bool, summary_output: Option<String>) -> load::result::Repo
 /// render it as plain text or JSON via the `--json-errors` global flag.
 pub fn dispatch(cli: Cli) -> Result<()> {
     validate_cli(&cli.command)?;
+    log::debug!("rivet {}", cli.command.leaf().path());
     if cli.no_notify {
         crate::notify::silence();
     }
@@ -291,10 +292,8 @@ fn dispatch_schema(what: SchemaKind) -> Result<()> {
             print!("{schema}");
             Ok(())
         }
-        SchemaKind::Cli => {
-            // CLI reference straight from the clap `Cli` derive — the same
-            // source as `--help`, so it cannot drift from the actual commands.
-            print!("{}", clap_markdown::help_markdown::<Cli>());
+        SchemaKind::Cli { json } => {
+            print!("{}", super::roles::schema_cli_text(json));
             Ok(())
         }
         SchemaKind::Errors => {

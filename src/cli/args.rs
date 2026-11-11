@@ -687,7 +687,11 @@ pub enum SchemaKind {
     /// cannot drift from the actual commands.
     ///
     ///     rivet schema cli > docs/reference/cli-reference.md
-    Cli,
+    Cli {
+        /// Print the command role registry as JSON instead: every leaf command, its role and the invariants that apply
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the Markdown error-code reference (every `RIVET_*` code, its kind, exit
     /// code and operator action) to stdout, generated from the code registry.
     ///
