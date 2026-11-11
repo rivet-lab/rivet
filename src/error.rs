@@ -1467,6 +1467,16 @@ pub mod codes {
         "RIVET_PLAN_CHUNK_KEY_NULL",
         "chunk on a NOT NULL column, drop the NULL rows with `WHERE <column> IS NOT NULL` in the query, or use `mode: full`",
     );
+    /// An incremental `cursor_column` that can hold NULL, whose NULL rows the cursor would deliver once and never again.
+    pub const PLAN_CURSOR_NULLABLE: Code = refusal(
+        "RIVET_PLAN_CURSOR_NULLABLE",
+        "make the cursor column NOT NULL, or set `incremental_cursor_mode: coalesce` with a NOT NULL `cursor_fallback_column:` and run `rivet state reset -c <config> --export <name>` once",
+    );
+    /// An incremental `cursor_column` of a type the cursor cannot render, so it could never advance.
+    pub const PLAN_CURSOR_TYPE_UNSUPPORTED: Code = refusal(
+        "RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED",
+        "use an integer, decimal, text, date, timestamp or uuid `cursor_column:`, or use `mode: chunked` or `mode: full`",
+    );
     /// `settle.column` names a column that is not a date or timestamp.
     pub const CONFIG_SETTLE_COLUMN_NOT_TEMPORAL: Code = usage(
         "RIVET_CONFIG_SETTLE_COLUMN_NOT_TEMPORAL",
@@ -2008,6 +2018,8 @@ pub mod codes {
         PLAN_REJECTED,
         PLAN_CHUNK_KEY_SPARSE,
         PLAN_CHUNK_KEY_NULL,
+        PLAN_CURSOR_NULLABLE,
+        PLAN_CURSOR_TYPE_UNSUPPORTED,
         CONFIG_SETTLE_COLUMN_NOT_TEMPORAL,
         CONFIG_SPLIT_PREFIX_UNSTABLE,
         CONFIG_EXPORT_NAME_RESERVED,

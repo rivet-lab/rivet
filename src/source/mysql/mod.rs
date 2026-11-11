@@ -287,6 +287,22 @@ pub(crate) fn type_mappings_on(
         .collect())
 }
 
+/// Whether `column` of `query` may hold NULL: the `NOT NULL` flag the server sets on the described column.
+pub(crate) fn column_nullable_on(
+    conn: &mut mysql::PooledConn,
+    query: &str,
+    column: &str,
+) -> Result<Option<bool>> {
+    let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
+    let result = conn.exec_iter(&wrapped, ())?;
+    let columns = result.columns().as_ref().to_vec();
+    drop(result);
+    Ok(columns.iter().find(|c| c.name_str() == column).map(|c| {
+        !c.flags()
+            .contains(mysql::consts::ColumnFlags::NOT_NULL_FLAG)
+    }))
+}
+
 /// Probe `information_schema` for stats chunked-mode planning needs.
 ///
 /// MySQL analogue of the Postgres chunk-planner probe:
@@ -1072,6 +1088,11 @@ impl super::Source for MysqlSource {
     ) -> Result<Vec<crate::types::TypeMapping>> {
         let mut conn = self.pool.get_conn()?;
         type_mappings_on(&mut conn, query, column_overrides)
+    }
+
+    fn column_nullable(&mut self, query: &str, column: &str) -> Result<Option<bool>> {
+        let mut conn = self.pool.get_conn()?;
+        column_nullable_on(&mut conn, query, column)
     }
 
     /// Governor FOREIGN-pressure proxy: `Innodb_log_waits` (redo-write
