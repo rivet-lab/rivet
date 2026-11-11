@@ -195,10 +195,10 @@ fn lies(doc: &str, compose: &str, stand: &str, nightly: &str) -> Vec<String> {
 #[test]
 fn every_version_claim_is_backed_by_what_the_stand_starts() {
     let l = lies(&read(DOC), &read(COMPOSE), &read(STAND), &read(NIGHTLY));
-    assert!(
-        l.is_empty(),
-        "{DOC} claims more than the stand starts:\n{}",
-        l.join("\n")
+    assert_eq!(
+        l,
+        Vec::<String>::new(),
+        "{DOC} claims more than the stand starts"
     );
 }
 
