@@ -331,6 +331,33 @@ mod tests {
         );
     }
 
+    /// The entry point `build_plan` calls ends a nullable or unrenderable cursor with its code and lets an admitted or unverified one through.
+    #[test]
+    fn the_entry_point_refuses_with_the_code_and_admits_the_rest() {
+        let config = config_of("postgres");
+        let export = config.exports[0].clone();
+        let run = |probe: &mut ProbeSource| {
+            admit_incremental_cursor(Some(probe), &config, &export, "SELECT k FROM t", "k")
+        };
+        let mut nullable = ProbeSource::describing(RivetType::Int64, Some(true));
+        let err = run(&mut nullable).expect_err("a nullable cursor");
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(crate::error::codes::PLAN_CURSOR_NULLABLE.id)
+        );
+        let mut boolean = ProbeSource::describing(RivetType::Bool, Some(false));
+        let err = run(&mut boolean).expect_err("an unrenderable cursor");
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(crate::error::codes::PLAN_CURSOR_TYPE_UNSUPPORTED.id)
+        );
+        let mut fine = ProbeSource::describing(RivetType::Int64, Some(false));
+        run(&mut fine).expect("a NOT NULL integer cursor");
+        let mut unasked = ProbeSource::describing(RivetType::Int64, None);
+        unasked.nullable = Err("entry point cannot ask".to_string());
+        run(&mut unasked).expect("an unverified cursor is not refused");
+    }
+
     /// A source that cannot be asked is warned about with the export, the column and the cause, never refused.
     #[test]
     fn a_source_that_cannot_be_asked_is_unverified_with_the_cause() {
