@@ -166,16 +166,11 @@ fn in_memory_copy(source: &Path) -> Result<rusqlite::Connection> {
     Ok(mem)
 }
 
-/// The SQLite URI that opens exactly the file at `path` read-only: every byte but an unreserved one is percent-encoded.
+/// The SQLite URI that opens exactly the file at `path` read-only: every byte is percent-encoded.
 fn read_only_uri(path: &Path) -> String {
     let mut uri = String::from("file:");
     for b in path.as_os_str().as_encoded_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                uri.push(char::from(*b));
-            }
-            _ => uri.push_str(&format!("%{b:02X}")),
-        }
+        uri.push_str(&format!("%{b:02X}"));
     }
     uri.push_str("?mode=ro");
     uri

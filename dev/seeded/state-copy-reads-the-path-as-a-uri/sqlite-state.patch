@@ -9,12 +9,12 @@
          crate::rivet_bail!(
              crate::error::codes::STATE_COPY_SOURCE_EMPTY,
              "`{}` was opened for the copy and holds no cursor and no run: nothing was copied. \
-@@ -174,7 +174,7 @@
-             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                 uri.push(char::from(*b));
-             }
--            _ => uri.push_str(&format!("%{b:02X}")),
-+            _ => uri.push(char::from(*b)),
-         }
+@@ -170,7 +170,7 @@
+ fn read_only_uri(path: &Path) -> String {
+     let mut uri = String::from("file:");
+     for b in path.as_os_str().as_encoded_bytes() {
+-        uri.push_str(&format!("%{b:02X}"));
++        uri.push(char::from(*b));
      }
      uri.push_str("?mode=ro");
+     uri
