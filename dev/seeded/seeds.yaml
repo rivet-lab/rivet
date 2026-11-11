@@ -5757,7 +5757,7 @@ seeds:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
 
   - name: seek-literal-typed-by-value
-    class: "a boundary literal of a keyset, range, split or incremental seek is typed from the VALUE (a non-ASCII value is a Unicode literal) instead of from the key column, so on a SQL Server varchar key the page is ordered by the column collation and seeked by Unicode rules: rows lost or repeated at a page boundary, exit 0"
+    class: "a boundary literal of a keyset, range, split or incremental seek is typed from the VALUE (a non-ASCII value is a Unicode literal) instead of from the key column, so on a SQL Server varchar key the page is ordered by the column collation and sought by Unicode rules: rows lost or repeated at a page boundary, exit 0"
     history: "found 2026-11-11 (the escape_mssql_literal ponytail note); RED on main 2026-11-11: a varchar key of a, e-acute+quote+z, e-acute-a, e-acute-z, e-acute-a, e-acute-b, z read 4 of 7 rows under parallel, incremental and keyset_incremental (rig oracle: source-only e-acute-a, e-acute-a, e-acute-b)"
     scope: source
     engines:
