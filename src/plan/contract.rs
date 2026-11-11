@@ -8,6 +8,34 @@ use crate::config::{
 };
 use crate::tuning::SourceTuning;
 
+/// Run-wide count, per column, of source cells written as NULL because the target type cannot hold them.
+#[derive(Debug, Default)]
+pub struct NulledCells(std::sync::Mutex<std::collections::BTreeMap<String, u64>>);
+
+impl NulledCells {
+    /// Adds `n` cells to `column`.
+    pub fn add(&self, column: &str, n: u64) {
+        if n > 0 {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(column.to_string())
+                .or_default() += n;
+        }
+    }
+
+    /// The per-column counts, sorted by column name.
+    pub fn snapshot(&self) -> Vec<(String, u64)> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(c, n)| (c.clone(), *n))
+            .collect()
+    }
+}
+
 /// Parameters for chunked extraction, pre-resolved from config and tuning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkedPlan {
@@ -101,6 +129,9 @@ pub struct ResolvedRunPlan {
     /// Run-wide count of parts this run put at the destination, bumped at the one write seam (`commit::write_part_file`); runtime only, like `bytes_read`.
     #[serde(skip, default)]
     pub parts_landed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Run-wide per-column count of source cells written as NULL because the target type cannot hold them; runtime only.
+    #[serde(skip, default)]
+    pub nulled_cells: std::sync::Arc<NulledCells>,
     /// The export's declared source table (`table:`), carried VERBATIM.
     ///
     /// The manifest's source identity is built from this. It used to be derived
@@ -565,6 +596,16 @@ pub fn build_time_window_query(
 mod tests {
     use super::*;
     use crate::config::SourceType;
+
+    #[test]
+    fn nulled_cells_record_a_positive_count_and_ignore_a_zero_one() {
+        let cells = NulledCells::default();
+        cells.add("none", 0);
+        assert!(cells.snapshot().is_empty(), "a zero count leaves no entry");
+        cells.add("d", 1);
+        cells.add("d", 2);
+        assert_eq!(cells.snapshot(), vec![("d".to_string(), 3)]);
+    }
 
     #[test]
     fn snapshot_strategy_contracts() {

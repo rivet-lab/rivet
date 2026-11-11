@@ -1,0 +1,24 @@
+diff --git a/src/source/mysql/arrow_convert.rs b/src/source/mysql/arrow_convert.rs
+--- a/src/source/mysql/arrow_convert.rs
++++ b/src/source/mysql/arrow_convert.rs
+@@ -340,7 +340,7 @@
+             .iter()
+             .filter(|r| match r.as_ref(col_idx) {
+                 Some(Value::Date(y, mo, d, h, mi, s, us)) => {
+-                    datetime_of(*y, *mo, *d, *h, *mi, *s, *us).is_none()
++                    *y == 0 && *mo == 0 && *d == 0
+                 }
+                 _ => false,
+             })
+diff --git a/src/source/cdc/value.rs b/src/source/cdc/value.rs
+--- a/src/source/cdc/value.rs
++++ b/src/source/cdc/value.rs
+@@ -982,7 +982,7 @@
+ 
+     /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
+     pub(crate) fn nulled_a_date(&self, input: &RivetValue, out: &RivetValue) -> bool {
+-        matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
++        matches!(self, MysqlCellFix::TimestampEpoch)
+             && matches!(out, RivetValue::Null)
+             && !matches!(input, RivetValue::Null)
+     }

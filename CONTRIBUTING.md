@@ -81,9 +81,9 @@ With the hooks enabled:
   open file, read with `lsof`). It never fails the merge. `--no-verify` does not
   skip it (git runs `post-merge` and `post-commit` regardless); the bypass is
   `git -c core.hooksPath=/dev/null merge ...`, which skips every hook.
-- **`pre-push`** runs the offline test suite (`cargo test --tests` — lib +
-  integration, benches excluded) before the push leaves your machine — bypass
-  with `git push --no-verify`.
+- **`pre-push`** checks that `Cargo.lock` is in sync (`cargo metadata --locked`), runs
+  `cargo publish --locked --dry-run` on a crate version bump and applies the commit-message
+  rules. It runs no tests: CI `Tests` does — bypass with `git push --no-verify`.
 
 CI still enforces all of them regardless.
 
@@ -153,8 +153,7 @@ no gate or live run is in flight. The registry is the one list of stand endpoint
 The offline integration tests are consolidated into single binaries (`tests/offline_suite.rs`,
 `tests/live_suite.rs`) to keep link time down. **Run them with nextest, not plain `cargo test`** — the
 consolidated binaries run their tests as threads in one process, so without nextest's per-test process
-isolation a crashing or global-state test can take its siblings down with it. The pre-push hook
-(`git config core.hooksPath .githooks`) and CI both use nextest.
+isolation a crashing or global-state test can take its siblings down with it. CI runs them under nextest.
 
 ## Architecture
 

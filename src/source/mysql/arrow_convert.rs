@@ -310,6 +310,57 @@ pub(super) fn mysql_schema_and_arrow_types(
 
 // ─── Row → RecordBatch dispatcher + per-type builders ────────────────────────
 
+/// The calendar date a MySQL date value names, `None` for a zero or partial date.
+fn date_of(y: u16, m: u8, d: u8) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::from_ymd_opt(i32::from(y), u32::from(m), u32::from(d))
+}
+
+/// The instant a MySQL datetime value names, `None` for a zero or partial date.
+fn datetime_of(
+    y: u16,
+    mo: u8,
+    d: u8,
+    h: u8,
+    mi: u8,
+    s: u8,
+    us: u32,
+) -> Option<chrono::NaiveDateTime> {
+    date_of(y, mo, d)
+        .and_then(|d| d.and_hms_micro_opt(u32::from(h), u32::from(mi), u32::from(s), us))
+}
+
+/// The warning for `n` zero or partial date cells of `column` written as NULL.
+pub(crate) fn zero_date_warning(column: &str, n: u64) -> String {
+    format!("column `{column}`: {n} MySQL zero or partial date value(s) written as NULL")
+}
+
+/// Per date or timestamp column, the cells of `rows` that hold a zero or partial date and so become NULL.
+pub(super) fn nulled_dates(
+    schema: &SchemaRef,
+    arrow_types: &[DataType],
+    rows: &[mysql::Row],
+) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    for (col_idx, arrow_type) in arrow_types.iter().enumerate() {
+        if !matches!(arrow_type, DataType::Date32 | DataType::Timestamp(..)) {
+            continue;
+        }
+        let n = rows
+            .iter()
+            .filter(|r| match r.as_ref(col_idx) {
+                Some(Value::Date(y, mo, d, h, mi, s, us)) => {
+                    datetime_of(*y, *mo, *d, *h, *mi, *s, *us).is_none()
+                }
+                _ => false,
+            })
+            .count() as u64;
+        if n > 0 {
+            out.push((schema.field(col_idx).name().clone(), n));
+        }
+    }
+    out
+}
+
 pub(super) fn rows_to_record_batch_typed(
     schema: &SchemaRef,
     arrow_types: &[DataType],
@@ -457,9 +508,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
     }
     fn date32(&self, col: usize, row: usize) -> Option<i32> {
         let d = match self.rows[row].as_ref(col) {
-            Some(Value::Date(y, m, d, _, _, _, _)) => {
-                chrono::NaiveDate::from_ymd_opt(*y as i32, *m as u32, *d as u32)
-            }
+            Some(Value::Date(y, m, d, _, _, _, _)) => date_of(*y, *m, *d),
             Some(Value::Bytes(bv)) => bytes_to_str(bv).and_then(|s| {
                 chrono::NaiveDate::parse_from_str(s.split(' ').next().unwrap_or(s), "%Y-%m-%d").ok()
             }),
@@ -471,8 +520,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
     fn ts_micros(&self, col: usize, row: usize) -> Option<i64> {
         let dt = match self.rows[row].as_ref(col) {
             Some(Value::Date(y, mo, d, h, mi, sx, us)) => {
-                chrono::NaiveDate::from_ymd_opt(*y as i32, *mo as u32, *d as u32)
-                    .and_then(|d| d.and_hms_micro_opt(*h as u32, *mi as u32, *sx as u32, *us))
+                datetime_of(*y, *mo, *d, *h, *mi, *sx, *us)
             }
             Some(Value::Bytes(bv)) => bytes_to_str(bv)
                 .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()),
@@ -1017,9 +1065,7 @@ fn build_array(
             let mut b = Date32Builder::with_capacity(rows.len());
             for row in rows {
                 let d = match row.as_ref(col_idx) {
-                    Some(Value::Date(y, m, d, _, _, _, _)) => {
-                        chrono::NaiveDate::from_ymd_opt(*y as i32, *m as u32, *d as u32)
-                    }
+                    Some(Value::Date(y, m, d, _, _, _, _)) => date_of(*y, *m, *d),
                     Some(Value::Bytes(bv)) => bytes_to_str(bv).and_then(|s| {
                         chrono::NaiveDate::parse_from_str(
                             s.split(' ').next().unwrap_or(s),
@@ -1051,10 +1097,9 @@ fn build_array(
             let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
             for row in rows {
                 let dt = match row.as_ref(col_idx) {
-                    Some(Value::Date(y, mo, d, h, mi, s, us)) => chrono::NaiveDate::from_ymd_opt(
-                        *y as i32, *mo as u32, *d as u32,
-                    )
-                    .and_then(|d| d.and_hms_micro_opt(*h as u32, *mi as u32, *s as u32, *us)),
+                    Some(Value::Date(y, mo, d, h, mi, s, us)) => {
+                        datetime_of(*y, *mo, *d, *h, *mi, *s, *us)
+                    }
                     Some(Value::Bytes(bv)) => bytes_to_str(bv).and_then(|s| {
                         chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()
                     }),
@@ -1471,12 +1516,14 @@ mod roast_mysql_bit_decode_tests {
     use std::time::Duration;
 
     use arrow::array::{Array, Int64Array};
-    use arrow::datatypes::DataType;
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use mysql::consts::ColumnType;
     use mysql::prelude::Queryable;
     use mysql::{Conn, OptsBuilder, Value};
 
-    use super::{mysql_schema_and_arrow_types, rows_to_record_batch_typed};
+    use super::{
+        mysql_schema_and_arrow_types, nulled_dates, rows_to_record_batch_typed, zero_date_warning,
+    };
     use crate::types::ColumnOverrides;
 
     // ── minimal fake MySQL server ─────────────────────────────────────────────
@@ -2456,7 +2503,57 @@ mod roast_mysql_bit_decode_tests {
             let a = build_array(&dt, 0, &rows, false, "c", None)
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
             assert_eq!((a.len(), a.null_count()), (1, 1), "{label}");
+            let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("c", dt.clone(), true)]));
+            let counted = nulled_dates(&schema, std::slice::from_ref(&dt), &rows);
+            let expect: Vec<(String, u64)> = if label.starts_with("zero date") {
+                vec![("c".to_string(), 1)]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(counted, expect, "{label}");
         }
+    }
+
+    /// A zero or partial date is counted per column, and a valid date, text and NULL are not.
+    #[test]
+    fn nulled_dates_counts_zero_and_partial_dates_per_column() {
+        let z = v_date(0, 0, 0, 0, 0, 0, 0);
+        let defs = vec![z.0.clone(), z.0.clone(), v_bytes(b"").0];
+        let row = |a: Cell, b: Cell, c: Option<Cell>| vec![Some(a.1), Some(b.1), c.map(|c| c.1)];
+        let rows = fetch_binary_rows(
+            defs,
+            vec![
+                row(z.clone(), z.clone(), None),
+                row(
+                    v_date(2026, 0, 0, 0, 0, 0, 0),
+                    v_date(2026, 11, 10, 1, 2, 3, 4),
+                    Some(v_bytes(b"x")),
+                ),
+                row(
+                    v_date(2026, 11, 10, 0, 0, 0, 0),
+                    v_date(2026, 0, 5, 0, 0, 0, 0),
+                    None,
+                ),
+            ],
+        );
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Date32, true),
+            Field::new("dt", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+            Field::new("s", DataType::Utf8, true),
+        ]));
+        let types: Vec<DataType> = schema
+            .fields()
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect();
+        assert_eq!(
+            nulled_dates(&schema, &types, &rows),
+            vec![("d".to_string(), 2), ("dt".to_string(), 2)]
+        );
+        assert_eq!(
+            zero_date_warning("d", 2),
+            "column `d`: 2 MySQL zero or partial date value(s) written as NULL"
+        );
     }
 
     /// The temporal half of the grid, graded on the RAW primitive.

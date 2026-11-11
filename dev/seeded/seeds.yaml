@@ -5924,6 +5924,26 @@ seeds:
       mongo:
         cells:
           - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mongo
+  - name: mysql-zero-date-count-misses-a-class
+    class: "a MySQL zero or partial date (`0000-00-00`, `2026-00-00`) written as NULL is counted for the WARN and the summary row only in part: a partial date in batch, or a zero DATE or DATETIME in CDC, is NULL with no count"
+    history: "found 2026-11-10 grading the zero-date sentinels (owner contract: NULL, WARN with a count); RED from this patch: the unit cells see a partial date left uncounted in batch and a zero date left uncounted in CDC; the python oracle (sentinels, property_no_silent_null) grades the wiring"
+    scope: source
+    engines:
+      mysql:
+        patch: mysql-zero-date-count-misses-a-class/mysql.patch
+        cells:
+          - "lib:nulled_dates_counts_zero_and_partial_dates_per_column"
+          - "lib:unparsable_text_and_a_zero_date_stay_null"
+          - "lib:mysql_cell_fixes_convert_the_wire_shapes_the_binlog_delivers"
+      postgres:
+        na: "a MySQL zero date has no counterpart on PostgreSQL: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+      mssql:
+        na: "a MySQL zero date has no counterpart on SQL Server: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+      oracle:
+        na: "a MySQL zero date has no counterpart on Oracle: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+      mongo:
+        na: "a MySQL zero date has no counterpart on MongoDB: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+
   - name: cursor-column-admitted-at-plan
     class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
     history: "2026-11-11 - owner decision 2026-11-10 (axis-6 hunt, P2 and P3): the plan now reads the server's nullability and the delivered type once and refuses with RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED from check, validate, plan, run and apply; fixed in src/plan/cursor_admission.rs::admit_incremental_cursor"

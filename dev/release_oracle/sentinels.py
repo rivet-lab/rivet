@@ -16,6 +16,7 @@ the keyset path. The expected value is the SOURCE row, read by DuckDB — never 
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from . import engines
@@ -32,12 +33,15 @@ class Table:
     risky: bool = False
     prelude: str = ""
     bc_text: bool = False
+    written_null: bool = False
 
 
-def _risky(engine: str, name: str, coltype: str, literal: str, prelude: str = "", bc_text: bool = False) -> Table:
-    """One boundary value and a NULL, in a table of its own so a refusal hides nothing else."""
+def _risky(engine: str, name: str, coltype: str, literal: str, prelude: str = "", bc_text: bool = False,
+           written_null: bool = False) -> Table:
+    """One boundary value and a NULL, in a table of its own so a refusal hides nothing else; `written_null` declares the value is written as NULL with a counted WARN."""
     return Table(name, f"CREATE TABLE {name} (id INT PRIMARY KEY, v {coltype})",
-                 (f"(1, {literal})", "(2, NULL)"), risky=True, prelude=prelude, bc_text=bc_text)
+                 (f"(1, {literal})", "(2, NULL)"), risky=True, prelude=prelude, bc_text=bc_text,
+                 written_null=written_null)
 
 
 PG = [
@@ -100,9 +104,10 @@ MYSQL = [
     _risky("mysql", "rivet_sent_time_838", "TIME", "'838:59:59'", MYSQL_UTF8),
     _risky("mysql", "rivet_sent_time_neg", "TIME", "'-838:59:59'", MYSQL_UTF8),
     _risky("mysql", "rivet_sent_time_25h", "TIME", "'25:00:00'", MYSQL_UTF8),
-    _risky("mysql", "rivet_sent_dt_zero", "DATETIME", "'0000-00-00 00:00:00'", MYSQL_ZERO),
-    _risky("mysql", "rivet_sent_ts_zero", "TIMESTAMP NULL", "'0000-00-00 00:00:00'", MYSQL_ZERO),
-    _risky("mysql", "rivet_sent_date_zero", "DATE", "'0000-00-00'", MYSQL_ZERO),
+    _risky("mysql", "rivet_sent_dt_zero", "DATETIME", "'0000-00-00 00:00:00'", MYSQL_ZERO, written_null=True),
+    _risky("mysql", "rivet_sent_ts_zero", "TIMESTAMP NULL", "'0000-00-00 00:00:00'", MYSQL_ZERO, written_null=True),
+    _risky("mysql", "rivet_sent_date_zero", "DATE", "'0000-00-00'", MYSQL_ZERO, written_null=True),
+    _risky("mysql", "rivet_sent_date_partial", "DATE", "'2026-00-00'", MYSQL_ZERO, written_null=True),
     _risky("mysql", "rivet_sent_year_zero", "YEAR", "0000", MYSQL_ZERO),
 ]
 
@@ -224,11 +229,20 @@ def bc_dates_differ(url: str, table: str, parquet: str) -> list[str]:
 
 
 PANIC_EXIT = 101
+WARNED = re.compile(r"column `([^`]+)`: (\d+) MySQL zero or partial date value\(s\) written as NULL")
+
+
+def warned_counts(output: str) -> dict[str, int]:
+    """The per-column counts the run's own WARN lines state."""
+    out: dict[str, int] = {}
+    for col, n in WARNED.findall(output):
+        out[col] = out.get(col, 0) + int(n)
+    return out
 
 
 def verdict(t: Table, exported_ok: bool, diffs: list[str] | None, oracle_error: str,
-            returncode: int = 1) -> tuple[bool, str]:
-    """(pass, message) for one table × path: exact, or a loud failure only where the value is risky."""
+            returncode: int = 1, lost: dict[str, int] | None = None, warned: dict[str, int] | None = None) -> tuple[bool, str]:
+    """(pass, message) for one table × path: exact, or a loud failure only where the value is risky; a `written_null` table passes only as NULL with the run's WARN counting exactly the source's zero dates."""
     if not exported_ok and returncode == PANIC_EXIT:
         return False, "PANICKED instead of refusing"
     if not exported_ok:
@@ -239,6 +253,10 @@ def verdict(t: Table, exported_ok: bool, diffs: list[str] | None, oracle_error: 
         return False, f"oracle could not read the source to compare: {oracle_error[:160]}"
     if diffs:
         return False, "SUCCEEDED WITH A CHANGED VALUE: " + "; ".join(diffs[:2])
+    if t.written_null:
+        if not lost or lost != (warned or {}):
+            return False, f"written as NULL without the counted WARN: source holds {lost}, the run warned {warned}"
+        return True, f"written as NULL as declared, WARN counted {warned}"
     return True, "round-tripped exactly"
 
 
@@ -262,6 +280,7 @@ def sc_sentinels(led: Ledger, engine: str, tag: str, url: str) -> None:
             p = _export_local(engine, url, t.name, dest, mode)
             diffs: list[str] | None = None
             oracle_error = ""
+            lost: dict[str, int] = {}
             if p.ok:
                 src = _declared_read(dest, ".parquet")
                 if not src:
@@ -271,10 +290,12 @@ def sc_sentinels(led: Ledger, engine: str, tag: str, url: str) -> None:
                         if t.bc_text:
                             diffs = bc_dates_differ(url, t.name, f"read_parquet({src})")
                         else:
-                            _, diffs = compare_rows_to_parquet(engine, url, t.name, f"read_parquet({src})")
+                            _, diffs = compare_rows_to_parquet(
+                                engine, url, t.name, f"read_parquet({src})",
+                                frozenset({"v"}) if t.written_null else frozenset(), lost)
                     except Exception as e:  # noqa: BLE001 — an oracle that cannot read is not a pass
                         oracle_error = str(e)
-            ok, msg = verdict(t, p.ok, diffs, oracle_error, p.returncode)
+            ok, msg = verdict(t, p.ok, diffs, oracle_error, p.returncode, lost, warned_counts(p.out))
             if not p.ok:
                 msg += f" (exit {p.returncode})"
             store = f"{t.name}/{label}"
@@ -296,6 +317,14 @@ def _self_test() -> None:
     assert verdict(ok, True, None, "boom")[0] is False, "an unreadable oracle is not a pass"
     assert verdict(risky, True, [], "")[0] is True, "a risky value that round-trips passes"
     assert verdict(risky, False, None, "", PANIC_EXIT)[0] is False, "a panic is a crash, not a refusal"
+    zero = Table("z", "", (), risky=True, written_null=True)
+    line = "column `v`: 1 MySQL zero or partial date value(s) written as NULL"
+    assert warned_counts(f"WARN {line}\nWARN {line}") == {"v": 2}
+    assert verdict(zero, True, [], "", 0, {"v": 1}, warned_counts(line))[0] is True, "NULL with the counted WARN passes"
+    assert verdict(zero, True, [], "", 0, {"v": 1}, {})[0] is False, "NULL without the WARN is the silent loss"
+    assert verdict(zero, True, [], "", 0, {"v": 2}, {"v": 1})[0] is False, "a WARN counting fewer than the source holds fails"
+    assert verdict(zero, True, [], "", 0, {}, {})[0] is False, "a read that found no zero date proves nothing"
+    assert verdict(zero, True, ["`v` differs"], "", 0, {"v": 1}, {"v": 1})[0] is False, "a changed value still fails"
 
 
 if __name__ == "__main__":

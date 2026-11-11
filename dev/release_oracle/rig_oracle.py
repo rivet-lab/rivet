@@ -454,6 +454,19 @@ def _mysql_selectable(ora, db: str, leaf: str, cols: list[str]) -> set[str]:
     return set(cols) if not cols or reads(cols) else {c for c in cols if reads([c])}
 
 
+ZERO_DATE_SQL = "'^[0-9]{4}-(00-|[0-9]{2}-00)'"
+
+
+def _mysql_zero_dated(ora, db: str, leaf: str, native: dict) -> list[str]:
+    """The date, datetime and timestamp columns of `db.leaf` that hold a zero or partial date, which the DuckDB scanner cannot parse."""
+    temporal = [c for c, n in native.items() if n.startswith(("DATE", "TIMESTAMP"))]
+    if not temporal:
+        return []
+    sums = ", ".join(f"COALESCE(SUM(CAST(`{c}` AS CHAR) REGEXP {ZERO_DATE_SQL}), 0)" for c in temporal)
+    row = ora.rows("SELECT * FROM mysql_query('my', " + _lit(f"SELECT {sums} FROM `{db}`.`{leaf}`") + ")")[0]
+    return [c for c, n in zip(temporal, row) if int(n) > 0]
+
+
 def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     """(source relation, primary key columns, declared type per column in the ledger's spelling) for the spec's engine."""
     from .value_diff import oracle_rows
@@ -543,10 +556,15 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
                 f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA LIKE '%INVISIBLE%'"
             ) + ")"
         )
-        if not wide and not invisible and not partial:
+        zero = _mysql_zero_dated(ora, schema or db, leaf, native)
+        if not wide and not invisible and not partial and not zero:
             return f"my.{schema or db}.{leaf}", key, native
-        # The scanner reads a DECIMAL wider than DuckDB's 38 digits as DOUBLE; MySQL's own text keeps every digit.
-        cols = ", ".join(f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide else f"`{c}`" for c in native)
+        cols = ", ".join(
+            f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide
+            else f"IF(CAST(`{c}` AS CHAR) REGEXP {ZERO_DATE_SQL}, NULL, `{c}`) AS `{c}`" if c in zero
+            else f"`{c}`"
+            for c in native
+        )
         return f"mysql_query('my', {_lit(f'SELECT {cols} FROM `{schema or db}`.`{leaf}`')})", key, native
     if engine == "mssql":
         sch = schema or "dbo"
@@ -640,9 +658,15 @@ def _attach(spec: dict) -> dict:
     return source_attach(engine, url)[0]
 
 
+def duck_type(t: str) -> str:
+    """A DuckDB type as the oracle grades it: a scanner's engine-labelled native text type (`MSSQL_VARCHAR(20)`) is `VARCHAR`, every other type is itself."""
+    m = re.fullmatch(r"[A-Z0-9]+_([A-Z0-9]+)(?:\(\w+\))?", t)
+    return "VARCHAR" if m and TEXT_NATIVE.match(m[1]) else t
+
+
 def _columns(ora, rel: str) -> list[tuple[str, str]]:
     """(name, DuckDB type) of every column of `rel`."""
-    return [(r[0], str(r[1])) for r in ora.rows(f"DESCRIBE SELECT * FROM {rel}")]
+    return [(r[0], duck_type(str(r[1]))) for r in ora.rows(f"DESCRIBE SELECT * FROM {rel}")]
 
 
 def range_window(col: str, ranges: list) -> str:
@@ -2090,6 +2114,17 @@ def _self_test() -> None:
     assert one("VARCHAR", "VARCHAR", "NUMERIC(12,2)") and one("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), "a decimal DuckDB holds is not delivered as text"
     assert not one("DOUBLE[]", "VARCHAR", "VECTOR"), "an Oracle VECTOR is delivered as text"
     assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
+    class Described:
+        """A DuckDB stand-in whose DESCRIBE answers the scanner's engine-labelled type names."""
+
+        def rows(self, sql):
+            return [("k", "MSSQL_VARCHAR(20)"), ("n", "MSSQL_NVARCHAR(8)"), ("t", "TIMESTAMP_NS"), ("d", "DECIMAL(12,2)")]
+
+    described = dict(_columns(Described(), "ms.dbo.t"))
+    assert described == {"k": "VARCHAR", "n": "VARCHAR", "t": "TIMESTAMP_NS", "d": "DECIMAL(12,2)"}, "a native text alias is read as its family"
+    assert not one(described["k"], "VARCHAR", "VARCHAR(20)") and not one(described["n"], "VARCHAR", "NVARCHAR(8)"), "a collated text key delivered as text is sound"
+    assert one(described["k"], "BIGINT", "VARCHAR(20)"), "a labelled text delivered as a number is still a loss"
+    assert one(described["d"], "VARCHAR", "DECIMAL(12,2)"), "a decimal delivered as text is still a finding"
     my_rows = globals()["ledger"]("mysql", "batch")[0]
     assert my_rows.get("TIMESTAMP(6)") is not None and my_rows.get("TIMESTAMP(6)") is my_rows.get("TIMESTAMP(6) NULL"), "a catalog TIMESTAMP(6) finds the row declared with its nullability"
     class Flaky:

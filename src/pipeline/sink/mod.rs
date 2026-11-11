@@ -46,6 +46,7 @@ pub(crate) struct ExportSink {
     pub(in crate::pipeline) bytes_read: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The RUN-wide count of parts at the destination, shared from `plan.parts_landed`.
     pub(in crate::pipeline) parts_landed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    nulled_cells: std::sync::Arc<crate::plan::NulledCells>,
     part_rows: usize,
     /// Cursor column name (with internal columns), set from plan at construction.
     /// When `Some`, `on_batch` extracts the last cursor value inline so we never
@@ -436,6 +437,7 @@ impl ExportSink {
             total_rows: 0,
             bytes_read: std::sync::Arc::clone(&plan.bytes_read),
             parts_landed: std::sync::Arc::clone(&plan.parts_landed),
+            nulled_cells: std::sync::Arc::clone(&plan.nulled_cells),
             part_rows: 0,
             cursor_column: plan.strategy.cursor_extract_column().map(str::to_string),
             cursor_rest: match &plan.strategy {
@@ -889,6 +891,10 @@ impl ExportSink {
 }
 
 impl BatchSink for ExportSink {
+    fn note_nulled(&mut self, column: &str, n: u64) {
+        self.nulled_cells.add(column, n);
+    }
+
     fn on_schema(&mut self, schema: SchemaRef) -> Result<()> {
         // Strip the synthetic column only when it's actually present in the schema —
         // empty-schema fallbacks (zero-row runs) otherwise error on missing field.

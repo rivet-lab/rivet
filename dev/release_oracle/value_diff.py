@@ -206,6 +206,60 @@ def source_select(ora, relation: str) -> str:
     return f"SELECT * {replace_clause}FROM {relation} ORDER BY id"
 
 
+class OracleReadLost(RuntimeError):
+    """The oracle's typed read of the source holds NULL where the source holds a value: the comparison cannot be trusted."""
+
+
+ZERO_DATE_TEXT = re.compile(r"\d{4}-(00-\d\d|\d\d-00)( .*)?")
+
+
+def source_text_select(engine: str, prefix: str, table: str, columns: list[str]) -> str | None:
+    """A query returning `id` and the engine's own text form of each date or timestamp column, or None where the engine has no text pass-through."""
+    schema = prefix.split(".", 1)[1]
+    cols = ", ".join(
+        f"CAST(`{c}` AS CHAR) AS `{c}`" if engine == "mysql" else f'"{c}"::text AS "{c}"' for c in columns
+    )
+    if engine == "mysql":
+        inner, fn, att = f"SELECT `id`, {cols} FROM `{table}`", "mysql_query", "my"
+    elif engine == "postgres":
+        inner, fn, att = f'SELECT "id", {cols} FROM "{schema}"."{table}"', "postgres_query", "pg"
+    else:
+        return None
+    return f"SELECT * FROM {fn}('{att}', '{inner.replace(chr(39), chr(39) * 2)}')"
+
+
+def lost_values(ora, engine: str, prefix: str, table: str, typed: list[dict]) -> dict[str, list[tuple[object, str]]]:
+    """Per date or timestamp column, the (id, text) of every row whose typed read is NULL while the engine's own text form holds a value."""
+    described = ora.db.sql(f"DESCRIBE SELECT * FROM {prefix}.{table}").fetchall()
+    cols = [r[0] for r in described if str(r[1]).startswith(("DATE", "TIMESTAMP"))]
+    sql = source_text_select(engine, prefix, table, cols) if cols else None
+    if sql is None:
+        return {}
+    text = {canon(r["id"]): r for r in fetch(ora, sql)}
+    out: dict[str, list[tuple[object, str]]] = {}
+    for row in typed:
+        for c in cols:
+            t = text.get(canon(row["id"]), {}).get(c)
+            if row.get(c) is None and t is not None:
+                out.setdefault(c, []).append((row["id"], t))
+    return out
+
+
+def graded_losses(lost: dict[str, list[tuple[object, str]]], declared: frozenset) -> dict[str, int]:
+    """The lost values a declared column may hold (zero or partial dates, per column count); anything else is an oracle error."""
+    bad = [
+        f"`{c}` id={k}: {t!r}"
+        for c, vs in lost.items()
+        for k, t in vs
+        if c not in declared or not ZERO_DATE_TEXT.fullmatch(t)
+    ]
+    if bad:
+        raise OracleReadLost(
+            f"the typed read of the source is NULL where the source holds a value ({len(bad)}): {'; '.join(bad[:3])}"
+        )
+    return {c: len(vs) for c, vs in lost.items()}
+
+
 def pg_padded_columns(ora, table: str) -> frozenset:
     """The CHAR(n) columns of a PostgreSQL table attached as `pg`, from its own catalog."""
     inner = (
@@ -493,8 +547,10 @@ def compare_to_bigquery(
         return _rows_against_source(ora, engine, prefix, table, f"bq.{dataset}.{warehouse_table or table}")
 
 
-def compare_rows_to_parquet(engine: str, url: str, table: str, parquet: str) -> tuple[int, list[str]]:
-    """(delivered rows, differences) between the source table and a `read_parquet(...)` relation, every value in canonical form."""
+def compare_rows_to_parquet(
+    engine: str, url: str, table: str, parquet: str, declared_null: frozenset = frozenset(), lost: dict | None = None
+) -> tuple[int, list[str]]:
+    """(delivered rows, differences) between the source table and a `read_parquet(...)` relation, every value in canonical form; a typed source read that is NULL for a value the engine holds as text raises `OracleReadLost` unless the column is in `declared_null` and the text is a zero or partial date, whose per-column count lands in `lost`."""
     from .duck import Oracle
 
     if engine == "oracle":
@@ -507,15 +563,20 @@ def compare_rows_to_parquet(engine: str, url: str, table: str, parquet: str) -> 
         return len(dst), diff_rows(oracle_rows(url, oracle_table_select(url, table)), dst, key="ID")
     attach, prefix = source_attach(engine, url)
     with Oracle(**attach) as ora:
-        return _rows_against_source(ora, engine, prefix, table, f"(SELECT * FROM {parquet})")
+        return _rows_against_source(ora, engine, prefix, table, f"(SELECT * FROM {parquet})", declared_null, lost)
 
 
-def _rows_against_source(ora, engine: str, prefix: str, table: str, dest: str) -> tuple[int, list[str]]:
-    """`diff_rows` of the source table against `dest` in one session; unreadable text is a finding."""
+def _rows_against_source(
+    ora, engine: str, prefix: str, table: str, dest: str, declared_null: frozenset = frozenset(), lost: dict | None = None
+) -> tuple[int, list[str]]:
+    """`diff_rows` of the source table against `dest` in one session; unreadable text is a finding, a typed source NULL over a held value is `OracleReadLost`."""
     bad = invalid_text_columns(ora, dest)
     if bad:
         return 0, [f"STRING column(s) {bad} hold bytes that are not UTF-8 — unreadable as text"]
     src = fetch(ora, source_select(ora, f"{prefix}.{table}"))
+    counted = graded_losses(lost_values(ora, engine, prefix, table, src), declared_null)
+    if lost is not None:
+        lost.update(counted)
     dst = fetch(ora, f"SELECT * FROM {dest} ORDER BY id")
     padded = pg_padded_columns(ora, table) if engine == "postgres" else frozenset()
     bits = mysql_bit_columns(ora, prefix.split(".", 1)[1], table) if engine == "mysql" else frozenset()
