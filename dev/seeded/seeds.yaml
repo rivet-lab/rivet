@@ -5898,6 +5898,42 @@ seeds:
       oracle:
         cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
 
+  - name: cursor-column-admitted-at-plan
+    class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
+    history: "2026-11-11 - owner decision 2026-11-10 (axis-6 hunt, P2 and P3): the plan now reads the server's nullability and the delivered type once and refuses with RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED from check, validate, plan, run and apply; fixed in src/plan/cursor_admission.rs::admit_incremental_cursor"
+    scope: source
+    patch: cursor-column-admitted-at-plan/shared.patch
+    engines:
+      postgres:
+        cells: [nullable_cursor_is_refused_postgres, unrenderable_cursor_is_refused_postgres]
+      mysql:
+        cells: [nullable_cursor_is_refused_mysql, unrenderable_cursor_is_refused_mysql]
+      mssql:
+        cells: [nullable_cursor_is_refused_mssql, unrenderable_cursor_is_refused_mssql]
+      oracle:
+        cells: [nullable_cursor_is_refused_oracle, unrenderable_cursor_is_refused_oracle]
+      mongo:
+        na: "a MongoDB export has no incremental cursor_column: mode full only"
+
+  - name: cursor-nullability-claimed-without-the-table-catalog
+    class: "a nullable claim is taken from the server's description of an expression, so CAST(id AS BIGINT) AS id over a NOT NULL key (or a PostgreSQL view over one) is refused as a nullable cursor with no workable remedy"
+    history: "2026-11-11 - found live when the cursor admission refused CAST(id AS NUMBER(18)) AS id on Oracle and on SQL Server; the nullable claim is now confirmed against the catalog of the one table the query reads, and a PostgreSQL view column is not claimed"
+    scope: source
+    engines:
+      postgres:
+        patch: cursor-nullability-claimed-without-the-table-catalog/postgres.patch
+        cells: [a_view_over_a_not_null_cursor_delivers_once_postgres]
+      mysql:
+        na: "the MySQL NOT NULL column flag is exact for an expression over NOT NULL columns and for a view, so the claim needs no catalog confirmation"
+      mssql:
+        patch: cursor-nullability-claimed-without-the-table-catalog/mssql.patch
+        cells: [an_expression_over_a_not_null_cursor_delivers_once_mssql]
+      oracle:
+        patch: cursor-nullability-claimed-without-the-table-catalog/oracle.patch
+        cells: [an_expression_over_a_not_null_cursor_delivers_once_oracle]
+      mongo:
+        na: "a MongoDB export has no incremental cursor_column: mode full only"
+
   - name: remote-plaintext-every-sink
     class: "the remote-plaintext gate lets an http:// URL on a remote host through, so a ClickHouse load.url, a Slack webhook_url or a BigQuery RIVET_BQ_API_ENDPOINT sends the loader password and every row, the webhook secret or the OAuth bearer token across the network unencrypted"
     history: "bughunt axis 4 (security defaults), 2026-11-10: require_tls_or_loopback guarded the source and state dials only; RED on main 2026-11-11 (rivet check accepted a remote http:// ClickHouse load.url and Slack webhook_url on every source engine)"

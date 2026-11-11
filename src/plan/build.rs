@@ -133,6 +133,18 @@ fn refuse_hidden_read_columns(
     Ok(())
 }
 
+/// A connection to `source`, opened from its resolved URL.
+pub(crate) fn connect_source(
+    source: &crate::config::SourceConfig,
+) -> Result<Box<dyn crate::source::Source>> {
+    crate::source::connect(
+        source.source_type,
+        source.resolve_url()?.expose(),
+        source.tls.as_ref(),
+        source.mongo.as_ref(),
+    )
+}
+
 /// `export` reading only the columns the account may `SELECT`, or `None` when there is nothing to project.
 pub(crate) fn project_table_read(
     probe: Option<&mut (dyn crate::source::Source + '_)>,
@@ -148,13 +160,7 @@ pub(crate) fn project_table_read(
     };
     let readable = match probe {
         Some(src) => src.readable_columns(table)?,
-        None => crate::source::connect(
-            source.source_type,
-            source.resolve_url()?.expose(),
-            source.tls.as_ref(),
-            source.mongo.as_ref(),
-        )?
-        .readable_columns(table)?,
+        None => connect_source(source)?.readable_columns(table)?,
     };
     if let Some(readable) = &readable {
         refuse_hidden_read_columns(table, export, &readable.columns)?;
@@ -275,6 +281,13 @@ pub(crate) fn build_plan_on(
                 }),
                 None => None,
             };
+            super::cursor_admission::admit_incremental_cursor(
+                probe,
+                config,
+                export,
+                &base_query,
+                &primary_column,
+            )?;
             ExtractionStrategy::Incremental(IncrementalCursorPlan {
                 primary_column,
                 fallback_column,
@@ -3398,5 +3411,42 @@ mod tests {
             "{err:#}"
         );
         crate::error::assert_coded(&err, "RIVET_CONFIG_SECRET_UNSET", 1);
+    }
+
+    /// Under `columns_from: grants` a table export is projected onto the readable columns the probe names.
+    #[test]
+    fn a_table_export_is_projected_onto_the_readable_columns() {
+        use crate::plan::test_support::ProbeSource;
+        let mut source = minimal_source_config();
+        source.columns_from = Some(crate::config::ColumnsFrom::Grants);
+        let mut export = minimal_export();
+        export.table = Some("orders".into());
+        export.cursor_column = Some("id".into());
+        let mut probe = ProbeSource::describing(crate::types::RivetType::Int64, None);
+        probe.readable = Some(crate::source::cdc::ReadableColumns {
+            columns: vec!["id".into(), "name".into()],
+            select: "SELECT `id`, `name` FROM `orders`".into(),
+        });
+        let got = project_table_read(Some(&mut probe), &source, &export)
+            .unwrap()
+            .expect("a table export under grants is projected");
+        assert_eq!(
+            got.table_select.as_deref(),
+            Some("SELECT `id`, `name` FROM `orders`")
+        );
+        export.cursor_column = Some("secret".into());
+        let err = project_table_read(Some(&mut probe), &source, &export).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_COLUMNS_UNREADABLE", 1);
+    }
+
+    /// Without `columns_from: grants` a table export is read as written.
+    #[test]
+    fn a_table_export_without_grants_is_not_projected() {
+        use crate::plan::test_support::ProbeSource;
+        let mut export = minimal_export();
+        export.table = Some("orders".into());
+        let mut probe = ProbeSource::describing(crate::types::RivetType::Int64, None);
+        let got = project_table_read(Some(&mut probe), &minimal_source_config(), &export).unwrap();
+        assert!(got.is_none());
     }
 }
