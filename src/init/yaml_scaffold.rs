@@ -1955,6 +1955,44 @@ mod tests {
         let yaml = "    mode: full  # full table scan\n";
         assert_eq!(wrap_comments(yaml), yaml);
     }
+
+    #[test]
+    fn wrap_leaves_a_folded_query_body_and_wraps_the_comment_after_it() {
+        let long = "w ".repeat(70);
+        let body = format!("      SELECT a ,  # {long}\n      FROM t\n");
+        let comment = format!("    # {long}\n");
+        let out = wrap_comments(&format!("    query: >\n{body}{comment}    mode: full\n"));
+        assert!(
+            out.starts_with(&format!("    query: >\n{body}")),
+            "body untouched"
+        );
+        let tail = out.strip_prefix(&format!("    query: >\n{body}")).unwrap();
+        assert!(
+            tail.lines().count() > 2,
+            "the comment after the block wraps: {tail:?}"
+        );
+        assert!(
+            tail.lines()
+                .all(|l| l.chars().count() <= COMMENT_WRAP_WIDTH),
+            "{tail:?}"
+        );
+        let mid = format!("    query: >\n{body}    key: v  # {long}\n");
+        assert!(
+            wrap_comments(&mid)
+                .lines()
+                .skip(3)
+                .all(|l| l.chars().count() <= COMMENT_WRAP_WIDTH),
+            "a line at the block's own indent is wrapped again"
+        );
+    }
+
+    #[test]
+    fn yaml_double_quote_escapes_each_special_character_in_one_fixed_form() {
+        assert_eq!(
+            yaml_double_quote("\u{85}\u{1}\u{7f}\u{2028}\u{2029}\u{FEFF}\u{FFFE}\u{FFFF}"),
+            "\"\\x85\\x01\\x7F\\u2028\\u2029\\uFEFF\\uFFFE\\uFFFF\""
+        );
+    }
     use crate::init::{ColumnInfo, TableInfo};
 
     /// Cost+engine-aware parallelism (REPORT_full_vs_parallel.md): the wide
