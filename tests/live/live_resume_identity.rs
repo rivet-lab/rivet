@@ -57,7 +57,7 @@ const COMPRESSION: Edit = Edit {
 };
 const COLUMNS: Edit = Edit {
     key: "columns",
-    lines: &["columns:", "  time_spent: int64"],
+    lines: &["columns:", "  time_spent: int32"],
 };
 const META_COLUMNS: Edit = Edit {
     key: "meta_columns",
