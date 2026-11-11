@@ -1,0 +1,17 @@
+diff --git a/src/source/mysql/arrow_convert.rs b/src/source/mysql/arrow_convert.rs
+--- a/src/source/mysql/arrow_convert.rs
++++ b/src/source/mysql/arrow_convert.rs
+@@ -274,12 +274,7 @@ pub(super) fn mysql_schema_and_arrow_types(
+         match (build_arrow_field(&mapping), mapping.arrow_type) {
+             (Some(field), Some(dt)) => {
+                 if column_overrides.contains_key(col.name_str().as_ref()) {
+-                    crate::source::refuse_unbuildable_override(
+-                        "mysql",
+-                        col.name_str().as_ref(),
+-                        &mapping.rivet_type,
+-                        build_array(&dt, 0, &[], false, col.name_str().as_ref(), None),
+-                    )?;
++                    let _ = build_array(&dt, 0, &[], false, col.name_str().as_ref(), None);
+                 }
+                 fields.push(field);
+                 arrow_types.push(dt);

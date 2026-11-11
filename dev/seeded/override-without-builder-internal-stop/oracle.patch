@@ -1,0 +1,17 @@
+diff --git a/src/source/oracle/arrow_convert.rs b/src/source/oracle/arrow_convert.rs
+--- a/src/source/oracle/arrow_convert.rs
++++ b/src/source/oracle/arrow_convert.rs
+@@ -220,12 +220,7 @@ fn schema_from_mappings(mappings: Vec<TypeMapping>, overrides: &ColumnOverrides)
+                     .as_ref()
+                     .filter(|_| overrides.contains_key(&mapping.column_name))
+                 {
+-                    crate::source::refuse_unbuildable_override(
+-                        "oracle",
+-                        &mapping.column_name,
+-                        &mapping.rivet_type,
+-                        build_column(&[], 0, &mapping.column_name, dt, None, None),
+-                    )?;
++                    let _ = build_column(&[], 0, &mapping.column_name, dt, None, None);
+                 }
+                 fields.push(f)
+             }

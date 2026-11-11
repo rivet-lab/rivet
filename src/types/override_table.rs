@@ -216,10 +216,29 @@ pub fn refusal_message(
     detected: &RivetType,
     target: &RivetType,
 ) -> String {
+    let remedy = match target {
+        RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone,
+        } => {
+            let us = if timezone.is_some() {
+                "timestamp_tz"
+            } else {
+                "timestamp"
+            };
+            format!("Instead: declare `{us}` (microseconds), or remove the override.")
+        }
+        RivetType::Decimal { precision, .. } if *precision > 38 => {
+            "Instead: its precision is above 38; declare the column's own `decimal(p,s)` with p <= 38 (see \
+             the source column definition), or remove the override."
+                .to_string()
+        }
+        _ => "Remove the override, or CAST the column to the declared type in the export's `query:`."
+            .to_string(),
+    };
     format!(
         "column `{column}` is {native} (read as {}) and `columns:` declares it {} — {engine:?} does \
-         not convert that pair, and writing it as NULL would lose every value. Remove the override, \
-         or CAST the column to the declared type in the export's `query:`.",
+         not convert that pair, and writing it as NULL would lose every value. {remedy}",
         detected.label(),
         target.label(),
     )

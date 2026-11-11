@@ -1,5 +1,5 @@
 diff --git a/src/source/mod.rs b/src/source/mod.rs
-index def6e15e..c1ad4ffd 100644
+index d6248d15..a59679e6 100644
 --- a/src/source/mod.rs
 +++ b/src/source/mod.rs
 @@ -695,7 +695,7 @@ impl BatchSink for FirstBatchProbe {
@@ -10,4 +10,4 @@ index def6e15e..c1ad4ffd 100644
 +        .is_some_and(|c| c.id == crate::error::codes::SOURCE_QUERY_FAILED.id)
  }
  
- /// Returns the run's refusal for a `columns:` override: the table's verdict on the catalog types, then the first row through the run's own converter.
+ /// Turns the internal "no builder" stop of a zero-row build for a `columns:` override into the coded usage refusal naming the cause and the remedy.

@@ -1119,7 +1119,12 @@ fn emit_mssql_batch(
         }
     };
     if !rows.is_empty() {
-        let batch = arrow_convert::mssql_rows_to_record_batch(&schema_ref, rows, max_value_bytes)?;
+        let batch = arrow_convert::mssql_rows_to_record_batch(
+            &schema_ref,
+            rows,
+            max_value_bytes,
+            overrides,
+        )?;
         let bytes = crate::tuning::SourceTuning::batch_memory_bytes(&batch);
         sink.on_batch(&batch)?;
         return Ok(bytes);
