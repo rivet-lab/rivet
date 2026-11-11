@@ -271,6 +271,8 @@ mod live_reconcile_repair;
 mod live_reserved_column;
 #[path = "live/live_resume.rs"]
 mod live_resume;
+#[path = "live/live_resume_identity.rs"]
+mod live_resume_identity;
 #[path = "live/live_retry_and_faults.rs"]
 mod live_retry_and_faults;
 #[path = "live/live_rig_seams.rs"]

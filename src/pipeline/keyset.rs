@@ -1450,6 +1450,7 @@ mod tests {
             mode: "keyset",
             continues_high_water: false,
             resumable: true,
+            shape: Default::default(),
         }
     }
 

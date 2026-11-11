@@ -88,6 +88,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_STATE_LOCK_TIMEOUT` | busy | 2 | the other process still holds it: retry once it ends, or give `--lock-wait` more seconds |
 | `RIVET_STATE_CHUNK_CHECKPOINT_GONE` | refusal | 5 | run the export again: it starts a new chunk run (the parts the lost run wrote stay in the destination, in no manifest) |
 | `RIVET_STATE_CHUNK_PLAN_CHANGED` | refusal | 5 | restore the query and the chunk settings the interrupted run had and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` abandons it and the next run starts over |
+| `RIVET_STATE_RUN_SHAPE_CHANGED` | refusal | 5 | restore the settings the interrupted run was opened with and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` (`rivet state reset` for a keyset run) abandons it and the next run starts over under the new settings |
 | `RIVET_STATE_CHUNK_WINDOWS_BROKEN` | refusal | 5 | `rivet state reset-chunks -c <config> --export <name>` abandons the run; the next run plans the export again and reads every key |
 | `RIVET_STATE_LEASE_KEEPER_UNAVAILABLE` | environment | 2 if its cause is transient, else 1 | free a connection on the state database (rivet holds one per worker plus one for the lease keeper), raise the open-file limit, or lower `--pool`, then run again; nothing ran under the lease |
 | `RIVET_STATE_LEASE_LOST` | busy | 2 | wait for the other `rivet load` or `rivet compact` of that table to end, then run again; nothing was written to the warehouse |

@@ -608,6 +608,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
             FROM export_load_spec_v37;
         DROP TABLE export_load_spec_v37;",
     ),
+    // v39: the byte-shaping identity a run was opened with, keyed by the run, so a resume under an edited config is refused; no row for a run opened before v39.
+    (
+        39,
+        "CREATE TABLE IF NOT EXISTS run_shape (
+             run_id TEXT PRIMARY KEY,
+             shape_json TEXT NOT NULL,
+             recorded_at TEXT NOT NULL
+         );",
+    ),
 ];
 
 /// PostgreSQL-compatible DDL.  Column types differ from SQLite (BIGSERIAL,
@@ -1118,6 +1127,15 @@ const PG_MIGRATIONS: &[(i64, &str)] = &[
         "ALTER TABLE export_load_spec ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
         ALTER TABLE export_load_spec DROP CONSTRAINT IF EXISTS export_load_spec_pkey;
         ALTER TABLE export_load_spec ADD CONSTRAINT export_load_spec_pkey PRIMARY KEY (export_name, unit, source);",
+    ),
+    // v39: see the SQLite ladder.
+    (
+        39,
+        "CREATE TABLE IF NOT EXISTS run_shape (
+             run_id TEXT PRIMARY KEY,
+             shape_json TEXT NOT NULL,
+             recorded_at TEXT NOT NULL
+         );",
     ),
 ];
 
