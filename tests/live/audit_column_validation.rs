@@ -248,8 +248,11 @@ fn audit_scale_zero_override_must_not_silently_truncate() {
 
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
 
-    // Refusing is the correct outcome — it is what scale 2 already does.
     if !run.status.success() {
+        assert_refused(
+            &run,
+            Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+        );
         return;
     }
     // It ran. Then the values must be intact. DuckDB, not the parquet crate

@@ -143,6 +143,8 @@ mod scheduler_contract;
 
 #[path = "offline/cli_flag_coverage_guard.rs"]
 mod cli_flag_coverage_guard;
+#[path = "offline/compatibility_doc_guard.rs"]
+mod compatibility_doc_guard;
 #[path = "offline/compose_image_pins_guard.rs"]
 mod compose_image_pins_guard;
 #[path = "offline/error_code_ratchet.rs"]

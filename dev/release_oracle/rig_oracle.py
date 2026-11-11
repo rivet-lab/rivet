@@ -142,6 +142,29 @@ def type_loss(src: str, dst: str) -> str | None:
     return None
 
 
+def type_family(t: str) -> str:
+    """The kind of value a DuckDB type holds: exact numbers, floats, text, wall-clock or instant timestamps, dates, times; any other type is its own family."""
+    if t in INT_BITS or _decimal(t):
+        return "exact number"
+    if t in ("FLOAT", "DOUBLE"):
+        return "float"
+    if t in ("VARCHAR", "JSON"):
+        return "text"
+    if t == "TIMESTAMP WITH TIME ZONE":
+        return "instant"
+    if t in TS_RANK:
+        return "date" if t == "DATE" else "wall-clock timestamp"
+    return "time" if t.startswith("TIME") else t
+
+
+def unpinned_loss(src: str, dst: str) -> str | None:
+    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text)."""
+    if (why := type_loss(src, dst)) is not None or src == dst:
+        return why
+    fs, fd = type_family(src), type_family(dst)
+    return None if fs == fd else f"a {fs} delivered as a {fd}, and no ledger row pins the column"
+
+
 #: A declared source type that is text in the source itself (not text only because the oracle projected it).
 TEXT_NATIVE = re.compile(r"^(N?VARCHAR2?|N?CHAR|N?TEXT|CITEXT|N?CLOB|(TINY|MEDIUM|LONG)TEXT|STRING|NAME|BPCHAR)\b")
 
@@ -796,8 +819,9 @@ def grade_findings(
     overrides: dict | None = None,
     collapse: frozenset = frozenset(),
     null_class: frozenset = frozenset(),
+    unpinned_strict: bool = True,
 ) -> list[str]:
-    """Every disagreement in the findings `f`, one line each; empty means the run is sound. A column with a ledger row is graded against the row's delivery (a `known_defect` row may deliver its `today_delivery` instead, nothing else); one without is graded as not narrower than its catalog type; a `columns:` override against the type it declares (`None`: not graded here)."""
+    """Every disagreement in the findings `f`, one line each; empty means the run is sound. A column with a ledger row is graded against the row's delivery (a `known_defect` row may deliver its `today_delivery` instead, nothing else); one without is graded as not narrower than its catalog type and, unless `unpinned_strict` is off (a warehouse maps types by its own rules), of the same kind; a `columns:` override against the type it declares (`None`: not graded here)."""
     bad = []
     overrides = overrides or {}
     if f.get("dst_cols"):
@@ -822,7 +846,7 @@ def grade_findings(
         src_t = (catalog_duck(nat) or (st if nat and TEXT_NATIVE.match(nat) else None)) if st == "VARCHAR" else st
         if want is not None and want != dt:
             bad.append(f"TYPE: `{col}` ({nat}): the type ledger delivers {row['delivery']} ({want}), delivered {dt}")
-        elif want is None and src_t and (why := type_loss(src_t, dt)) is not None:
+        elif want is None and src_t and (why := (unpinned_loss if unpinned_strict else type_loss)(src_t, dt)) is not None:
             bad.append(f"TYPE: `{col}` source {src_t} delivered as {dt}: {why}")
     if "src_count" in f:
         if f["src_count"] != f["dst_count"]:
@@ -1821,7 +1845,7 @@ def grade_load(spec: dict) -> dict:
     ledgered = frozenset(c for c, r in ch_of.items() if r.get("clickhouse"))
     null_class = frozenset(c for c, xs in defects.items() if None in xs)
     bad = grade_findings(f, {}, forms, native, engine != "mongo", dict.fromkeys([*(spec.get("overrides") or {}), *ledgered]),
-                         collapse=collapse, null_class=null_class)
+                         collapse=collapse, null_class=null_class, unpinned_strict=False)
     bad += clickhouse_type_findings(ch_of, row_of, wh_types, native, key, created_zone_less(spec)) if target == "clickhouse" else []
     bad += [f"WAREHOUSE: {n}" for n in notes if "still exist" in n]
     out = {"failures": [f"WAREHOUSE {target} `{fq}`: {b}" for b in bad], "notes": notes,
@@ -2034,6 +2058,11 @@ def _self_test() -> None:
     assert one("VARCHAR", "BIGINT", "VARCHAR(10)"), "a text column delivered as a number is a loss"
     assert not one("VARCHAR", "TIMESTAMP", "DATETIME2"), "a temporal the oracle renders as text is the ledger's to grade"
     assert one("TIMESTAMP WITH TIME ZONE", "TIMESTAMP", "TIMESTAMPTZ(3)")
+    for st, to, nat in (("DECIMAL(14,2)", "DOUBLE", "DECIMAL(14,2)"), ("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), ("BOOLEAN", "BIGINT", "BOOL"),
+                        ("TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "DATETIME"), ("UUID", "BLOB", "UUID"), ("INTEGER", "DOUBLE", "INT")):
+        assert one(st, to, nat), f"{st} delivered as {to} with no ledger row is a finding"
+        assert bool(one(st, to, nat, unpinned_strict=False)) == bool(type_loss(st, to)), f"{st} as {to}: the warehouse leg grades by its own mapping"
+    assert not one("DECIMAL(14,2)", "DECIMAL(14,2)", "DECIMAL(14,2)") and not one("INTEGER", "BIGINT", "INT"), "an exact or wider same-kind delivery is not a finding"
     class Flaky:
         """A DuckDB stand-in whose first `fail` calls raise `err`."""
 
