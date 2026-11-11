@@ -182,20 +182,21 @@ pub(crate) fn get_export_diagnostic(
     export: &ExportConfig,
 ) -> Result<ExportDiagnostic> {
     let url = config.source.resolve_url()?;
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
     crate::source::warn_if_tls_disabled(&config.source);
     match config.source.source_type {
-        SourceType::Postgres => postgres::diagnose_export_pg(&url, tls, export),
+        SourceType::Postgres => postgres::diagnose_export_pg(url, tls, export),
         SourceType::Mysql => {
-            mysql::diagnose_export_mysql(&url, tls, export, config.source.columns_from_grants())
+            mysql::diagnose_export_mysql(url, tls, export, config.source.columns_from_grants())
         }
-        SourceType::Mssql => mssql::diagnose_export_mssql(&url, tls, export),
+        SourceType::Mssql => mssql::diagnose_export_mssql(url, tls, export),
         #[cfg(feature = "oracle")]
-        SourceType::Oracle => oracle::diagnose_export_oracle(&url, tls, export),
+        SourceType::Oracle => oracle::diagnose_export_oracle(url, tls, export),
         #[cfg(not(feature = "oracle"))]
         SourceType::Oracle => Err(crate::source::oracle_feature_missing()),
         SourceType::Mongo => {
-            mongo::diagnose_export_mongo(&url, tls, export, config.source.mongo.as_ref())
+            mongo::diagnose_export_mongo(url, tls, export, config.source.mongo.as_ref())
         }
     }
 }
@@ -413,6 +414,8 @@ pub fn check(
     }
 
     let url = config.source.resolve_url()?;
+
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
     // Surface the plaintext-transport warning at preflight time too —
     // operators should hear it from `rivet check` before they wait
@@ -429,17 +432,17 @@ pub fn check(
     let planned = exports_as_planned(&exports, strategies);
     let described: Vec<&ExportConfig> = planned.iter().collect();
     let diagnostics: Vec<ExportDiagnostic> = match config.source.source_type {
-        SourceType::Postgres => postgres::check_postgres(&url, tls, &described)?,
+        SourceType::Postgres => postgres::check_postgres(url, tls, &described)?,
         SourceType::Mysql => {
-            mysql::check_mysql(&url, tls, &described, config.source.columns_from_grants())?
+            mysql::check_mysql(url, tls, &described, config.source.columns_from_grants())?
         }
-        SourceType::Mssql => mssql::check_mssql(&url, tls, &described)?,
+        SourceType::Mssql => mssql::check_mssql(url, tls, &described)?,
         #[cfg(feature = "oracle")]
-        SourceType::Oracle => oracle::check_oracle(&url, tls, &described)?,
+        SourceType::Oracle => oracle::check_oracle(url, tls, &described)?,
         #[cfg(not(feature = "oracle"))]
         SourceType::Oracle => return Err(crate::source::oracle_feature_missing()),
         SourceType::Mongo => {
-            mongo::check_mongo(&url, tls, &described, config.source.mongo.as_ref())?
+            mongo::check_mongo(url, tls, &described, config.source.mongo.as_ref())?
         }
     };
     // #149: measured beats declared — overlay the state store's actuals and

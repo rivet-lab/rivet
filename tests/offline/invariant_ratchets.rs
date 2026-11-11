@@ -4,8 +4,8 @@ use crate::error_code_ratchet::product_sources;
 
 /// 2026-11-10: wildcard match arms under `src/source/` that answer NULL or a default; they go when the I2 compatibility table decides every pair before the read (ADR 0040).
 const WILDCARD_NULL_ARM_CEILING: usize = 59; // ratchet-pin: wildcard-null-arms (review 2027-02-01)
-/// 2026-11-10: credential-named `String` fields in `src/config/`; they go when the I1 `Secret` type holds every credential (ADR 0040).
-const CREDENTIAL_STRING_CEILING: usize = 5; // ratchet-pin: credential-string-fields (review 2027-02-01)
+/// 2026-11-11: credential-named `String` fields in `src/config/`, 0 since the I1 `Secret` type holds every credential (ADR 0040); a new one is a raise.
+const CREDENTIAL_STRING_CEILING: usize = 0; // ratchet-pin: credential-string-fields (review 2027-02-01)
 /// 2026-11-10: text needles of the redaction scanner in `src/redact.rs`; they go as the I1 `Secret` type makes each one redundant (ADR 0040).
 const REDACT_NEEDLE_CEILING: usize = 11; // ratchet-pin: redaction-text-needles (review 2027-02-01)
 /// 2026-11-10: message-text needles in `src/error/retry.rs`, which also decide the exit class of an uncoded error; they go as I4 types each error (ADR 0040).
