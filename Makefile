@@ -426,6 +426,11 @@ property-no-debris-after-stop:  ## Property matrix P5: every engine x shape x ho
 	cargo test --test offline_suite property_no_debris_after_stop
 	$(LIVE) cargo nextest run --test live_suite --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_no_debris_after_stop::/)'
 
+.PHONY: property-check-equals-run
+property-check-equals-run:  ## Property matrix check_equals_run: every pre-run command passes only what run or apply will do. Takes one live slot.
+	cargo nextest run --test live_suite -E 'test(/^property_check_equals_run::/)'
+	$(LIVE) cargo nextest run --test live_suite --all-features --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_check_equals_run::/)'
+
 .PHONY: evidence-record evidence-report
 evidence-record:  ## Record the last nextest run's green live cells (target/nextest/default/junit.xml) in docs/evidence/last-green.yaml. EVIDENCE_BY=local|gate|nightly|ci.
 	$(PY) dev/pytools/evidence.py record --junit target/nextest/default/junit.xml --by $(or $(EVIDENCE_BY),local)
