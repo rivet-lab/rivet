@@ -215,63 +215,94 @@ pub const CLICKHOUSE_HTTPS_URL: &str = "https://localhost:8443";
 pub const DUCKDB_CONTAINER: &str = "rivet-duckdb";
 pub const CLICKHOUSE_CONTAINER: &str = "rivet-clickhouse";
 
-/// Host-side path that is bind-mounted as `/work` inside both `rivet-duckdb`
-/// and `rivet-clickhouse`. Tests write Parquet here from Rust, then read the
-/// same path from inside the container.
-pub fn live_shared_tmp_host() -> std::path::PathBuf {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // LOUD worktree footgun (bug hunt 2026-08-08). `docker compose` bind-mounts
-    // `./tests/.live-tmp` of the checkout it was STARTED from. A git WORKTREE
-    // has a different CARGO_MANIFEST_DIR, so a test run from a worktree writes
-    // Parquet into the worktree's tests/.live-tmp while the containers read the
-    // MAIN checkout's — the DuckDB oracle then sees 0 rows or another run's
-    // stale data and "fails" a correct build. Cost an hour of forensics once;
-    // never again silently. A worktree's `.git` is a FILE ("gitdir: …"), a real
-    // checkout's is a DIR — that is the cheap, reliable tell.
-    let git = root.join(".git");
-    let dir = root.join("tests").join(".live-tmp");
-    // A `tests/.live-tmp` SYMLINKED at the MAIN checkout's own tests/.live-tmp
-    // IS the reconciliation this guard exists to demand, so accept it: that is
-    // the directory the containers bind-mount at /work when the stand was
-    // started from the main checkout. "Is a symlink" alone was not enough — a
-    // link at another worktree's dir, or a dangling one, read as reconciled and
-    // the oracle then saw 0 rows or stale data (hunt H4-6). Measured cost of
-    // refusing every worktree outright: NINE gate cells lost per run, while CI
-    // never sees it because CI is a plain checkout that `mkdir -p`s the dir.
-    let main_live_tmp = main_checkout(&git).map(|m| m.join("tests").join(".live-tmp"));
-    let reconciled = std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink())
-        && matches!(
-            (dir.canonicalize(), main_live_tmp.as_deref().map(std::path::Path::canonicalize)),
-            (Ok(a), Some(Ok(b))) if a == b
-        );
-    if git.is_file() && !reconciled && std::env::var_os("RIVET_ALLOW_WORKTREE_LIVE").is_none() {
-        panic!(
-            "live tests are running from a git WORKTREE ({}), but the duckdb/clickhouse \
-             containers bind-mount tests/.live-tmp of the checkout `docker compose up` was \
-             started from — the paths diverge and the oracle reads the wrong directory. \
-             Run live tests from the main checkout (where you started the stand); or, if you \
-             genuinely started the stand from THIS worktree, set RIVET_ALLOW_WORKTREE_LIVE=1; \
-             or symlink tests/.live-tmp at the main checkout's own tests/.live-tmp ({}; this \
-             one resolves to {}), which makes the two paths the SAME directory and is accepted \
-             without the env var.",
-            root.display(),
-            main_live_tmp
-                .as_deref()
-                .map_or("<unknown>".to_string(), |p| p.display().to_string()),
-            std::fs::read_link(&dir)
-                .map_or("<not a symlink>".to_string(), |p| p.display().to_string()),
-        );
+/// Where the validator containers mount the shared handoff directory.
+const SHARED_MOUNT_DEST: &str = "/work";
+
+/// What `docker container inspect` says about one container's `/work` mount: `None` when the container does not exist.
+pub type WorkMount = Result<Option<String>, String>;
+
+/// The host source of `container`'s `/work` mount, asked of docker.
+fn work_mount_source(container: &str) -> WorkMount {
+    let format = format!(
+        "{{{{range .Mounts}}}}{{{{if eq .Destination \"{SHARED_MOUNT_DEST}\"}}}}{{{{.Source}}}}{{{{end}}}}{{{{end}}}}"
+    );
+    let out = std::process::Command::new("docker")
+        .args(["container", "inspect", "-f", &format, container])
+        .output()
+        .map_err(|e| format!("docker is not runnable: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        return if stderr.contains("No such") {
+            Ok(None)
+        } else {
+            Err(stderr)
+        };
     }
-    std::fs::create_dir_all(&dir).expect("create tests/.live-tmp");
-    dir
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "" => Err(format!(
+            "{container} exists but mounts nothing at {SHARED_MOUNT_DEST}"
+        )),
+        src => Ok(Some(src.to_string())),
+    }
 }
 
-/// The main checkout a worktree's `.git` FILE points at (`gitdir: <main>/.git/worktrees/<name>`).
-fn main_checkout(git_file: &std::path::Path) -> Option<std::path::PathBuf> {
-    let text = std::fs::read_to_string(git_file).ok()?;
-    let gitdir = text.strip_prefix("gitdir:")?.trim();
-    let (main, _) = gitdir.split_once("/.git/worktrees/")?;
-    Some(std::path::PathBuf::from(main))
+/// The one host directory every running validator container mounts at `/work`, or the refusal naming it and the checkout's own `tests/.live-tmp`.
+pub fn resolve_shared_tmp(
+    seen: &[(&str, WorkMount)],
+    checkout: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let mut sources: Vec<(&str, &str)> = vec![];
+    for (name, mount) in seen {
+        match mount {
+            Ok(Some(src)) => sources.push((name, src)),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(format!(
+                    "cannot learn where {name} mounts {SHARED_MOUNT_DEST}: {e} (this checkout's own tests/.live-tmp is {})",
+                    checkout.display()
+                ));
+            }
+        }
+    }
+    let Some(&(first, dir)) = sources.first() else {
+        return Err(format!(
+            "no validator container is running ({}): start the stand, the tests stage into the directory it mounts at {SHARED_MOUNT_DEST} (this checkout's own tests/.live-tmp is {})",
+            seen.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "),
+            checkout.display()
+        ));
+    };
+    if let Some(&(other, other_dir)) = sources.iter().find(|(_, d)| *d != dir) {
+        return Err(format!(
+            "{first} mounts {dir} at {SHARED_MOUNT_DEST} but {other} mounts {other_dir}: the stand was started from two checkouts"
+        ));
+    }
+    let dir = std::path::PathBuf::from(dir);
+    let probe = dir.join(format!(".rivet-write-probe-{}", std::process::id()));
+    if !dir.is_dir()
+        || std::fs::write(&probe, b"")
+            .and_then(|()| std::fs::remove_file(&probe))
+            .is_err()
+    {
+        return Err(format!(
+            "{first} mounts {} at {SHARED_MOUNT_DEST} but this process cannot write there (this checkout's own tests/.live-tmp is {})",
+            dir.display(),
+            checkout.display()
+        ));
+    }
+    Ok(dir)
+}
+
+/// Host directory the running validator containers mount at `/work`: the one place tests stage files the containers read.
+pub fn live_shared_tmp_host() -> std::path::PathBuf {
+    static HOST: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| {
+        let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join(".live-tmp");
+        let seen = [DUCKDB_CONTAINER, CLICKHOUSE_CONTAINER].map(|c| (c, work_mount_source(c)));
+        resolve_shared_tmp(&seen, &checkout).unwrap_or_else(|e| panic!("{e}"))
+    })
+    .clone()
 }
 
 /// In-container view of [`live_shared_tmp_host`]. Used to build paths that

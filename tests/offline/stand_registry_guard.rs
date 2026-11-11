@@ -1,7 +1,7 @@
 //! dev/stand/registry.yaml is the one list of stand names; a hard-coded copy must agree with it or not exist.
 
 #[path = "../common/env.rs"]
-mod env;
+pub(crate) mod env;
 #[path = "../common/registry.rs"]
 mod registry;
 

@@ -754,7 +754,7 @@ def cloud_cell(run: Run, repo: Path, name: str) -> tuple[str, str, list[str]]:
     for attempt in (1, 2):
         skips = run.out / "logs" / f"{name}.skips"
         skips.unlink(missing_ok=True)
-        env = {**os.environ, "RIVET_ALLOW_WORKTREE_LIVE": "1", "RIVET_WAREHOUSE_LIVE": warehouse, "RIVET_SKIP_LOG": str(skips),
+        env = {**os.environ, "RIVET_WAREHOUSE_LIVE": warehouse, "RIVET_SKIP_LOG": str(skips),
                "CARGO_TARGET_DIR": str(repo / "target")}
         argv = ["uv", "run", "--frozen", "python", "-m", "dev.pytools.warehouse_env", "--", cargo_bin(), "nextest", "run", "--no-fail-fast",
                 "--test", "live_suite", "--run-ignored", "only", "-E", f"test(={cell})"]
