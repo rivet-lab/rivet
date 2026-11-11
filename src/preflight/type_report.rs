@@ -542,14 +542,15 @@ pub(crate) fn refuse_inexact_load_keys(
     config_dir: &std::path::Path,
     params: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
-    if !admits_load_keys(config, export) {
-        return Ok(());
+    if admits_load_keys(config, export) {
+        refuse_captured_units(
+            config,
+            export,
+            &capture_load_units(config, export, column_overrides, config_dir, params)?,
+        )
+    } else {
+        Ok(())
     }
-    refuse_captured_units(
-        config,
-        export,
-        &capture_load_units(config, export, column_overrides, config_dir, params)?,
-    )
 }
 
 /// Whether the export loads incrementally, the only mode whose keys are admitted by their landing at check.
