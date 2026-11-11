@@ -1904,6 +1904,7 @@ exports:
             mode: "incremental",
             continues_high_water: true,
             resumable: true,
+            shape: Default::default(),
         };
         state.update_with_column(&key, "7").unwrap();
         if boundary {
@@ -2413,6 +2414,7 @@ exports:
             mode: "keyset",
             continues_high_water: true,
             resumable: true,
+            shape: Default::default(),
         };
         run.update_with_column(&key, "2026-09-01").unwrap();
         let elsewhere = crate::state::ProgressKey {

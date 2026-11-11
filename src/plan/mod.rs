@@ -45,6 +45,7 @@ pub use crate::config::{
 
 pub(crate) mod build;
 mod contract;
+mod shape;
 #[cfg(test)]
 pub(crate) mod test_support;
 

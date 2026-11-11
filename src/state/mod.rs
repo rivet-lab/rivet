@@ -24,6 +24,7 @@ use migrations::{migrate, migrate_pg};
 mod progression;
 mod row;
 mod run_aggregate;
+mod run_shape;
 mod run_status_store;
 mod schema;
 mod shape;
@@ -48,6 +49,7 @@ pub use metrics::MetricRow;
 pub use progression::{Boundary, ExportProgression};
 #[allow(unused_imports)]
 pub use run_aggregate::{RunAggregate, RunAggregateEntry};
+pub use run_shape::RunShape;
 pub use run_status_store::FinishOutcome;
 #[allow(unused_imports)]
 pub use schema::{SchemaChange, SchemaColumn, arrow_schema_to_columns, schema_fingerprint};

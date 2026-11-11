@@ -261,6 +261,10 @@ const INJECTORS: &[(&str, Inj)] = &[
         Inj::Offline(tls_downgrade),
     ),
     ("RIVET_CONFIG_LOAD_BLOCK_INVALID", Inj::Offline(load_block)),
+    (
+        "RIVET_CONFIG_REMOTE_PLAINTEXT",
+        Inj::Offline(remote_plaintext_clickhouse),
+    ),
     ("RIVET_CONFIG_PATH_UNSAFE", Inj::Offline(path_unsafe)),
     ("RIVET_CONFIG_ROW_HASH_INVALID", Inj::Offline(row_hash)),
     (
@@ -314,6 +318,7 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_STATE_LOCK_TIMEOUT", Inj::Stand),
     ("RIVET_STATE_CHUNK_CHECKPOINT_GONE", Inj::Stand),
     ("RIVET_STATE_CHUNK_PLAN_CHANGED", Inj::Stand),
+    ("RIVET_STATE_RUN_SHAPE_CHANGED", Inj::Stand),
     ("RIVET_STATE_CHUNK_WINDOWS_BROKEN", Inj::Stand),
     ("RIVET_STATE_LEASE_KEEPER_UNAVAILABLE", Inj::Stand),
     ("RIVET_STATE_LEASE_LOST", Inj::Stand),
@@ -739,6 +744,27 @@ fn load_block(e: SourceType) -> Probe {
     )
 }
 
+const CH_LOAD: &str =
+    "load:\n  target: clickhouse\n  database: d\n  user: u\n  password_env: CH_PW\n";
+
+fn remote_plaintext_clickhouse(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml += &format!("{CH_LOAD}  url: http://clickhouse.internal:8123\n");
+    p.witness = vec![
+        "cleartext http://".into(),
+        "`clickhouse.internal:8123`".into(),
+    ];
+    p
+}
+
+fn field_slack_plaintext(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml += "notifications:\n  slack:\n    webhook_url: http://hooks.internal/services/T0/B0/X\n    on: [failure]\n";
+    p.witness = vec!["cleartext http://".into(), "`hooks.internal`".into()];
+    p.absent = vec!["services/T0/B0/X"];
+    p
+}
+
 fn path_unsafe(e: SourceType) -> Probe {
     on(
         e,
@@ -948,6 +974,7 @@ const TWINS: &[(&str, TwinProbe)] = &[
     ("RIVET_CONFIG_CSV_COMPRESSION_UNSUPPORTED", twin_csv),
     ("RIVET_CONFIG_TLS_VERIFICATION_DOWNGRADE", twin_tls_verified),
     ("RIVET_CONFIG_LOAD_BLOCK_INVALID", one_export),
+    ("RIVET_CONFIG_REMOTE_PLAINTEXT", twin_remote_https),
     ("RIVET_CONFIG_PATH_UNSAFE", twin_safe_name),
     ("RIVET_CONFIG_ROW_HASH_INVALID", twin_row_hash),
     ("RIVET_CONFIG_COLUMN_OVERRIDE_TABLE_UNKNOWN", one_export),
@@ -960,6 +987,11 @@ const TWINS: &[(&str, TwinProbe)] = &[
 type FieldProbe = fn(SourceType) -> Probe;
 /// Offline causes with a value other than the one in the injector: `(code, label, probe)`.
 const FIELDS: &[(&str, &str, FieldProbe)] = &[
+    (
+        "RIVET_CONFIG_REMOTE_PLAINTEXT",
+        "slack_webhook",
+        field_slack_plaintext,
+    ),
     (
         "RIVET_CONFIG_VALUE_OUT_OF_RANGE",
         "batch_size_0",
@@ -1005,6 +1037,13 @@ fn twin_secret_set(e: SourceType) -> Probe {
 fn twin_incremental(e: SourceType) -> Probe {
     let x = format!("{QUERY}    mode: incremental\n    cursor_column: id\n");
     on(e, "", &export("a", &x), &[])
+}
+
+fn twin_remote_https(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml += &format!("{CH_LOAD}  url: https://clickhouse.internal:8443\n");
+    p.yaml += "notifications:\n  slack:\n    webhook_url: https://hooks.slack.com/services/T0/B0/X\n    on: [failure]\n";
+    p
 }
 
 fn twin_s3_plain(e: SourceType) -> Probe {

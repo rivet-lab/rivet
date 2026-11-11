@@ -306,6 +306,40 @@ fn chunk_plan_changed(engine: SqlEngine) {
     );
 }
 
+/// RIVET_STATE_RUN_SHAPE_CHANGED: an unfinished range-chunk run, and a run under another `compression`.
+fn run_shape_changed(engine: SqlEngine) {
+    let (table, rig, _guard) = interrupted(engine, "sab_run_shape");
+    let lines: Vec<&str> = RANGE_CHECKPOINT
+        .iter()
+        .copied()
+        .chain(["compression: snappy"])
+        .collect();
+    let mut rig = engine.staged(rig, "chunked", &lines);
+    let refused = Refused::by_code("RIVET_STATE_RUN_SHAPE_CHANGED", 5);
+    rig.refuses_twice_and_walks_out(
+        RERUN,
+        &[],
+        refused,
+        vec![
+            Remedy::new(
+                "restore `compression` as run",
+                Then::DeliversTheSource,
+                |r| r.rebuilt(|r| engine.staged(r, "chunked", RANGE_CHECKPOINT)),
+            ),
+            Remedy::new(
+                "abandons it and the next run starts with a full pass",
+                Then::DeliversTheSource,
+                |r| state(r, "reset-chunks", &table),
+            ),
+            Remedy::wrong(
+                "runs `rivet state reset` where the text names `rivet state reset-chunks`",
+                Then::Refuses(refused),
+                |r| state(r, "reset", &table),
+            ),
+        ],
+    );
+}
+
 /// RIVET_STATE_CHUNK_WINDOWS_BROKEN: an unfinished range-chunk run whose stored windows overlap, and a run.
 fn chunk_windows_broken(engine: SqlEngine) {
     let (table, mut rig, _guard) = interrupted(engine, "sab_windows");
@@ -2999,6 +3033,31 @@ fn a_changed_chunk_plan_is_refused_on_resume_and_walked_out_mssql() {
 #[ignore = "live: requires docker compose oracle"]
 fn a_changed_chunk_plan_is_refused_on_resume_and_walked_out_oracle() {
     chunk_plan_changed(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_changed_run_shape_is_refused_on_resume_and_walked_out_postgres() {
+    run_shape_changed(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_changed_run_shape_is_refused_on_resume_and_walked_out_mysql() {
+    run_shape_changed(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_changed_run_shape_is_refused_on_resume_and_walked_out_mssql() {
+    run_shape_changed(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_changed_run_shape_is_refused_on_resume_and_walked_out_oracle() {
+    run_shape_changed(SqlEngine::Oracle);
 }
 
 #[test]

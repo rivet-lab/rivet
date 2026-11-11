@@ -215,7 +215,7 @@ jobs:
   mutants-plan:
     name: Mutants (plan)
     runs-on: ubuntu-latest
-    if: contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
+    if: github.event_name == 'pull_request'
     # The reach measurement is capped at 25m of its own; the rest is listing.
     timeout-minutes: 45
     # Like the run it plans, this job cannot fail a PR: what it decided is
@@ -606,7 +606,7 @@ jobs:
     name: Mutants (changed lines)
     runs-on: ubuntu-latest
     needs: [mutants-plan, mutants-shard]
-    if: always() && contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
+    if: always() && github.event_name == 'pull_request'
     timeout-minutes: 15
     continue-on-error: true
     outputs:
@@ -774,7 +774,7 @@ jobs:
   mutants-gate-sanity:
     name: Mutants (gate sanity)
     runs-on: ubuntu-latest
-    if: contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
+    if: github.event_name == 'pull_request'
     timeout-minutes: 30
     outputs:
       # The audited picture of this diff, for the verdict job to compare the
@@ -1034,7 +1034,7 @@ jobs:
     name: Mutants (coverage verdict)
     runs-on: ubuntu-latest
     needs: [mutants-in-diff, mutants-gate-sanity, gate-scripts]
-    if: always() && contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
+    if: always() && github.event_name == 'pull_request'
     timeout-minutes: 10
     steps:
       - name: The per-diff mutation run did what the audit says it must

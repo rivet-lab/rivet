@@ -155,6 +155,14 @@ scenarios:
     mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint" }
     oracle:   { test: a_changed_chunk_plan_is_refused_on_resume_and_walked_out_oracle }
 
+  - id: refusal_state_run_shape_changed
+    what: "RIVET_STATE_RUN_SHAPE_CHANGED: an unfinished range-chunk run and a run under another `compression`; restoring the setting and `state reset-chunks` deliver, `state reset` leaves the refusal"
+    postgres: { test: a_changed_run_shape_is_refused_on_resume_and_walked_out_postgres }
+    mysql:    { test: a_changed_run_shape_is_refused_on_resume_and_walked_out_mysql }
+    mssql:    { test: a_changed_run_shape_is_refused_on_resume_and_walked_out_mssql }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint" }
+    oracle:   { test: a_changed_run_shape_is_refused_on_resume_and_walked_out_oracle }
+
   - id: refusal_state_chunk_windows_broken
     what: "RIVET_STATE_CHUNK_WINDOWS_BROKEN: an unfinished range-chunk run whose stored windows overlap, and a run; `state reset-chunks` delivers, `state reset` leaves the refusal"
     postgres: { test: broken_chunk_windows_are_refused_on_resume_and_walked_out_postgres }

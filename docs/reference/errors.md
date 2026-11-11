@@ -39,6 +39,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CONFIG_MODE_SETTING_INVALID` | usage | 1 | add the setting the export's mode requires, or remove the setting the mode does not take, as the message names |
 | `RIVET_CONFIG_DESTINATION_AUTH_INVALID` | usage | 1 | configure one complete auth mode for the destination (keys, a credentials file, or `allow_anonymous`) and drop the others |
 | `RIVET_CONFIG_DESTINATION_ENDPOINT_UNSAFE` | usage | 1 | drop `endpoint:` to use the provider default, or point it at a loopback emulator with `allow_anonymous: true` |
+| `RIVET_CONFIG_REMOTE_PLAINTEXT` | usage | 1 | use an `https://` URL, or point it at a loopback host; a ClickHouse `load.url` on a trusted network may opt in with `load.allow_plaintext: true` |
 | `RIVET_CONFIG_VALUE_OUT_OF_RANGE` | usage | 1 | set the value in the range or form the message names, and set only one of two mutually exclusive sizing knobs |
 | `RIVET_CONFIG_CDC_SHAPE_INVALID` | usage | 1 | list each captured table once, in a shape this source and destination take, with at most one baseline per table |
 | `RIVET_CONFIG_CSV_COMPRESSION_UNSUPPORTED` | usage | 1 | use `format: parquet` for compression, or set `compression: none` / `compression_profile: none` |
@@ -88,6 +89,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_STATE_LOCK_TIMEOUT` | busy | 2 | the other process still holds it: retry once it ends, or give `--lock-wait` more seconds |
 | `RIVET_STATE_CHUNK_CHECKPOINT_GONE` | refusal | 5 | run the export again: it starts a new chunk run (the parts the lost run wrote stay in the destination, in no manifest) |
 | `RIVET_STATE_CHUNK_PLAN_CHANGED` | refusal | 5 | restore the query and the chunk settings the interrupted run had and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` abandons it and the next run starts over |
+| `RIVET_STATE_RUN_SHAPE_CHANGED` | refusal | 5 | restore the settings the interrupted run was opened with and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` (`rivet state reset` for a keyset run) abandons it and the next run starts over under the new settings |
 | `RIVET_STATE_CHUNK_WINDOWS_BROKEN` | refusal | 5 | `rivet state reset-chunks -c <config> --export <name>` abandons the run; the next run plans the export again and reads every key |
 | `RIVET_STATE_LEASE_KEEPER_UNAVAILABLE` | environment | 2 if its cause is transient, else 1 | free a connection on the state database (rivet holds one per worker plus one for the lease keeper), raise the open-file limit, or lower `--pool`, then run again; nothing ran under the lease |
 | `RIVET_STATE_LEASE_LOST` | busy | 2 | wait for the other `rivet load` or `rivet compact` of that table to end, then run again; nothing was written to the warehouse |

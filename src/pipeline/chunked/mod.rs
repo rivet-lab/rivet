@@ -614,9 +614,11 @@ pub(crate) fn chunk_plan_hash(plan: &ResolvedRunPlan, cp: &ChunkedPlan) -> Strin
     )
 }
 
-/// Refuse to `action` a stored chunk run planned under `stored_hash` when `plan` is not that plan: the one check `run --resume`, `reconcile` and `repair` share.
+/// Refuse to `action` stored chunk run `run_id` planned under `stored_hash` when `plan` is not that plan or writes other bytes than that run did: the one check `run --resume`, `reconcile` and `repair` share.
 pub(crate) fn refuse_changed_chunk_plan(
+    state: &StateStore,
     plan: &ResolvedRunPlan,
+    run_id: &str,
     cp: &ChunkedPlan,
     stored_hash: &str,
     action: &str,
@@ -632,7 +634,7 @@ pub(crate) fn refuse_changed_chunk_plan(
             plan.export_name
         );
     }
-    Ok(())
+    state.refuse_changed_run_shape(&plan.progress_key(), run_id)
 }
 
 pub(super) fn ensure_chunk_checkpoint_plan(
@@ -660,7 +662,15 @@ pub(super) fn ensure_chunk_checkpoint_plan(
     if resume {
         match crashed {
             Some((rid, stored_hash)) => {
-                refuse_changed_chunk_plan(plan, cp, &stored_hash, "resume", config_path)?;
+                refuse_changed_chunk_plan(
+                    state,
+                    plan,
+                    &rid,
+                    cp,
+                    &stored_hash,
+                    "resume",
+                    config_path,
+                )?;
                 if let Err(why) = stored_windows(&state.list_chunk_tasks_for_run(&rid)?) {
                     crate::rivet_bail!(
                         crate::error::codes::STATE_CHUNK_WINDOWS_BROKEN,

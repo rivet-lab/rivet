@@ -816,6 +816,7 @@ mod tests {
             password_env: "P".into(),
             named_collection: None,
             ca_file: None,
+            allow_plaintext: false,
         };
         assert!(
             super::partition_budget_ok(&store, &plan, &uris).is_ok(),

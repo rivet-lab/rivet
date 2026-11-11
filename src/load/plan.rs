@@ -1627,7 +1627,7 @@ mod tests {
                 "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\nexports:\n  - name: alpha\n    \
                  table: alpha_tbl\n    mode: full\n    format: parquet\n    destination:\n      \
                  type: {dest}\n      bucket: b1\n      prefix: exports/alpha/\nload:\n  target: clickhouse\n  \
-                 url: \"http://ch:8123\"\n  database: d\n  user: u\n  password_env: P\n"
+                 url: \"https://ch:8443\"\n  database: d\n  user: u\n  password_env: P\n"
             ))
             .unwrap();
             let load = cfg.load.clone().unwrap();
@@ -2874,7 +2874,7 @@ load:
         let loads = [
             "{ target: bigquery, project: p, dataset: d, pk: [id], cluster_by: none }",
             "{ target: snowflake, account: a, user: u, private_key_path: /k.p8, storage_integration: i, database: d, schema: s, warehouse: w, pk: [id], cluster_by: none }",
-            "{ target: clickhouse, url: \"http://h:8123\", database: d, user: u, password_env: X, pk: [id] }",
+            "{ target: clickhouse, url: \"https://h:8443\", database: d, user: u, password_env: X, pk: [id] }",
         ];
         let yaml = |load: &str, mode: &str| {
             let cursor = if mode == "incremental" {
@@ -3161,7 +3161,7 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
                 "database": "d", "schema": "s", "storage_integration": "i"
             }),
             "clickhouse" => serde_json::json!({
-                "target": "clickhouse", "url": "http://ch:8123", "database": "d",
+                "target": "clickhouse", "url": "https://ch:8443", "database": "d",
                 "user": "u", "password_env": "P"
             }),
             _ => serde_json::json!({ "target": "bigquery", "project": "p", "dataset": "d" }),

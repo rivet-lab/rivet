@@ -14,6 +14,8 @@ const CEILINGS: &[(&str, usize)] = &[
     ("src/cli/dispatch.rs", 1),
     ("src/config/gcp_secret.rs", 1),
     ("src/config/source.rs", 9),
+    // 2026-11-11 raise 0 to 1: the plaintext gate reads a Secret URL host once (fix/plaintext-refusal-every-sink); shrinks if the gate takes the host from the Secret.
+    ("src/config/url.rs", 1),
     ("src/destination/azure.rs", 2),
     ("src/destination/s3.rs", 3),
     ("src/gcp_auth.rs", 10),
