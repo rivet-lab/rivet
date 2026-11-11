@@ -13,7 +13,7 @@ use crate::args::Args;
 use crate::insert;
 
 pub fn seed_postgres(args: &Args) -> Result<()> {
-    let mut client = Client::connect(&args.pg_url, postgres::NoTls)
+    let mut client = Client::connect(args.pg_url.expose(), postgres::NoTls)
         .context("failed to connect to PostgreSQL")?;
 
     insert::ensure_orders_sparse_pg(&mut client)?;
@@ -148,7 +148,7 @@ fn copy_pg_orders_parallel(args: &Args) -> Result<usize> {
                 continue;
             }
             let end_user = ((worker + 1) * chunk).min(args.users);
-            let url = args.pg_url.clone();
+            let url = args.pg_url.expose().to_string();
             let orders_per_user = args.orders_per_user;
             let batch_size = args.batch_size;
             let err = Arc::clone(&err);
@@ -238,7 +238,7 @@ fn copy_pg_events_parallel(args: &Args) -> Result<usize> {
                 continue;
             }
             let end_user = ((worker + 1) * chunk).min(args.users);
-            let url = args.pg_url.clone();
+            let url = args.pg_url.expose().to_string();
             let events_per_user = args.events_per_user;
             let batch_size = args.batch_size;
             let err = Arc::clone(&err);
@@ -317,7 +317,7 @@ fn copy_pg_page_views_parallel(args: &Args) -> Result<()> {
                 continue;
             }
             let end = ((worker + 1) * chunk).min(args.page_views);
-            let url = args.pg_url.clone();
+            let url = args.pg_url.expose().to_string();
             let users = args.users;
             let batch_size = args.batch_size;
             let err = Arc::clone(&err);

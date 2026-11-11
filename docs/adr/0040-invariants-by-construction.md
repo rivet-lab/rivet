@@ -50,7 +50,7 @@ Until the seams land, the call-site shapes they replace stay as a safety net and
 | Ledger | Sites |
 |---|---|
 | `wildcard-null-arms` | wildcard arms (`_`, `Some(_)`, `Err(_)`, guards dropped) answering NULL, `None`, `Ok(None)` or a default, in every file under `src/source/` |
-| `credential-string-fields` | struct and enum-variant fields in `src/config/` typed `String` / `Option<String>` whose name ends in a credential word (`*_env`, `*_file`, `*_path` and secret-manager names such as `url_secret` are references, not credentials) |
+| `credential-string-fields` | struct and enum-variant fields in `src/config/` typed `String` / `Option<String>` whose name ends in a credential word (`*_env`, `*_file`, `*_path` and secret-manager names such as `url_secret` are references, not credentials) Held empty: no ledger file, any site fails. |
 | `redaction-text-needles` | literals the redaction scanner searches for, compares to or lists in `src/redact.rs` |
 | `retry-text-needles` | literals the retry classifier searches the message for or lists in `src/error/retry.rs` (the text fallback that also decides an uncoded exit class, and the value-conversion detector) |
 

@@ -1,7 +1,7 @@
 //! ADR 0040 D5: the call-site shapes an owner seam replaces may only shrink, each counted by a structural read of `src/`.
 
 use crate::error_code_ratchet::product_sources;
-use crate::site_ledger::{enclosing_fn, hold, number, squash};
+use crate::site_ledger::{enclosing_fn, hold, hold_none, number, squash};
 
 /// The words a config field name ends in when it holds a credential or a URL that can carry one.
 const CREDENTIAL_WORDS: &[&str] = &[
@@ -395,7 +395,7 @@ fn wildcard_null_arms_are_each_listed() {
 
 #[test]
 fn credential_string_fields_are_each_listed() {
-    hold(
+    hold_none(
         "credential-string-fields",
         &credential_strings(),
         "a new credential is read through a reference (`*_env`, `*_file`, `*_secret`) or the I1 `Secret` type, never held as a String (ADR 0040 I1)",

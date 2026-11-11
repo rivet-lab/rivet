@@ -17,6 +17,10 @@ const LAYERS: &[(&str, &str)] = &[
     ("workers", "the bounded executor every pool runs on"),
     ("url_text", "pure readers of the text of a connection URL"),
     ("redact", "the credential redaction chokepoint"),
+    (
+        "secret",
+        "the credential type every formatting prints as REDACTED",
+    ),
     ("tuning", "source tuning profiles and adaptive sizing"),
     ("types", "the internal type system and delivered text forms"),
     (

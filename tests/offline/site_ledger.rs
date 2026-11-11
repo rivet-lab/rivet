@@ -130,6 +130,16 @@ pub(crate) fn hold(ledger: &str, sites: &[String], remedy: &str) {
     );
 }
 
+/// Fails when any site is found: a ledger that must stay empty has no file, and a new site is a raise.
+pub(crate) fn hold_none(ledger: &str, sites: &[String], remedy: &str) {
+    assert!(
+        sites.is_empty(),
+        "{ledger}: {remedy}\n{} site(s) found where none may exist:\n  {}",
+        sites.len(),
+        sites.join("\n  ")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +163,13 @@ mod tests {
             gone.contains("site is gone") && gone.contains("b.rs::g: y"),
             "{gone}"
         );
+    }
+
+    #[test]
+    fn an_empty_ledger_holds_no_site_and_fails_on_one() {
+        hold_none("x", &[], "r");
+        let caught = std::panic::catch_unwind(|| hold_none("x", &ids(&["a.rs: p"]), "r"));
+        assert!(caught.is_err());
     }
 
     #[test]
