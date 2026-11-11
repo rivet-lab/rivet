@@ -122,6 +122,30 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_shape_is_never_recorded_so_the_run_still_adopts_its_first_real_shape() {
+        let s = StateStore::open_in_memory().expect("in-memory state");
+        s.record_run_shape("r1", &RunShape::default()).unwrap();
+        assert_eq!(s.stored_run_shape("r1").unwrap(), None);
+        let (a, b) = (
+            shape(&[("compression", "a")]),
+            shape(&[("compression", "b")]),
+        );
+        assert_eq!(
+            s.run_shape_changes("e", "r1", &RunShape::default())
+                .unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            s.run_shape_changes("e", "r1", &a).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            s.run_shape_changes("e", "r1", &b).unwrap(),
+            vec!["compression"]
+        );
+    }
+
+    #[test]
     fn a_field_only_one_side_records_is_not_compared() {
         let stored = shape(&[("compression", "a"), ("format", "p")]);
         let now = shape(&[("compression", "b"), ("columns", "x")]);
