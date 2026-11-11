@@ -385,3 +385,11 @@ scenarios:
     mssql:    { na: "no consume-retention coupling — the change table is trimmed by the CDC cleanup job on its own schedule; the reader's from-LSN cursor does not pin it" }
     mongo:    { na: "no consume-retention coupling — the oplog is a fixed-size capped collection, overwritten regardless of any resume token" }
     oracle:   { na: "no consume-retention coupling — LogMiner reads redo and archived logs; nothing on the server is pinned for rivet (ADR-0037 OR11), and a purge past the checkpoint fails loud (oracle_cdc_resume_past_log_retention_fails_loudly)" }
+
+  - id: cdc_names_holding_separators
+    what: "a schema, table or column name holding the wire's own separators (`: `, `[`, `]:`, quotes) is delivered under its own name with its own value, never cut at the first separator, dropped, or shifted onto another column"
+    postgres: { test: pg_cdc_a_relation_name_holding_colon_space_is_delivered_not_dropped }
+    mysql:    { na: "row events are binary typed cells with column ordinals; no text line is cut" }
+    mssql:    { na: "change-table rows are typed driver columns addressed by name; no text line is cut" }
+    mongo:    { na: "change events are BSON documents; no text line is cut" }
+    oracle:   { na: "LogMiner rows are decoded through typed column lists, not one text line cut by separators" }

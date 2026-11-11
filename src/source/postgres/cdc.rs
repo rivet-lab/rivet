@@ -31,6 +31,9 @@ use crate::error::Result;
 use crate::source::cdc::tx_buffer::{SpooledTail, TxBuffer, replay};
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position, PriorRun};
+use crate::source::postgres::td_line::{
+    self, split_qualified_ident, split_top_level_commas, utf8_len,
+};
 
 /// Polls a logical slot and yields canonical changes.
 /// Domain type label -> its base type label, as `test_decoding` names both.
@@ -635,9 +638,19 @@ impl PgChangeStream {
         // The schema probe's own statement, prepared only: a table it could not read is refused here.
         for table in configured_tables {
             crate::source::cdc::validate_table_ident(table)?;
-            super::prepare_fresh(client, &format!("SELECT * FROM {table}")).map_err(|e| {
-                table_probe_refusal(table, e.code().map(|c| c.code()), &e.to_string())
-            })?;
+            let probe =
+                super::prepare_fresh(client, &format!("SELECT * FROM {table}")).map_err(|e| {
+                    table_probe_refusal(table, e.code().map(|c| c.code()), &e.to_string())
+                })?;
+            let bits =
+                decoder_rewritten_columns(probe.columns().iter().map(|c| (c.name(), c.type_())));
+            if !bits.is_empty() {
+                crate::rivet_bail!(
+                    crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED,
+                    "{}",
+                    rewritten_type_refusal(table.trim(), &bits)
+                );
+            }
         }
         Ok(())
     }
@@ -1337,10 +1350,7 @@ fn run_nonce() -> String {
 /// rather than left looking graded. What actually separates a marker from data here
 /// is the exact content comparison.
 pub(crate) fn is_barrier_line(line: &str, nonce: &str) -> bool {
-    let Some(rest) = line.strip_prefix("message: ") else {
-        return false;
-    };
-    let Some((head, content)) = rest.split_once(" content:") else {
+    let Some((head, content)) = td_line::message_parts(line) else {
         return false;
     };
     head.contains(&format!("prefix: {BARRIER_PREFIX},")) && content.trim_end() == nonce
@@ -1517,139 +1527,14 @@ impl ChangeStream for PgChangeStream {
     }
 }
 
-/// Undo `quote_ident` on ONE identifier: `"order"` -> `order`, `"a""b"` -> `a"b`,
-/// `plain` -> `plain`.
-///
-/// `test_decoding` prints relation and column names through PostgreSQL's own
-/// `quote_ident`, which quotes anything that is not a lowercase-only, non-reserved
-/// identifier. rivet consumed the result RAW, and every downstream comparison is
-/// byte-exact, so the quotes made the name unmatchable — while `validate_table_ident`
-/// refuses a config string containing `"`, so no spelling of the config could match
-/// either. The routing filter then dropped 100% of that table's events, and because
-/// the commit boundary is recorded BEFORE the filter the slot was acked past them:
-/// terminal loss, `status: success`, zero rows.
-///
-/// It is not an exotic input. `quote_ident` quotes reserved words (`order`, `user`,
-/// `desc`) AND mixed case, so every PascalCase table an ORM generates — `public."User"`,
-/// the Prisma and EF Core default — arrived unmatchable.
-fn unquote_ident(raw: &str) -> String {
-    let t = raw.trim();
-    match t.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
-        // Inside a quoted identifier PostgreSQL doubles an embedded quote.
-        Some(inner) => inner.replace("\"\"", "\""),
-        _ => t.to_string(),
-    }
-}
-
-/// Split `schema.table` where EITHER part may be quoted and a quoted part may itself
-/// contain a dot (`"my.schema".t`). A plain `split_once('.')` cuts inside the quotes and
-/// yields two identifiers that never existed.
-fn split_qualified_ident(qual: &str) -> (String, String) {
-    // Walked by ITERATOR, not by a hand-rolled index. The index version was
-    // correct, and every mutation of its arithmetic either hung the process
-    // (`i += 1` -> `i -= 1` or `*= 1` never advances) or was equivalent — so the
-    // gate could neither kill those mutants nor learn anything from them. An
-    // advance the code does not write is an advance nothing can break.
-    let mut in_quotes = false;
-    let mut escaped = false;
-    let mut split_at = None;
-    for (i, b) in qual.bytes().enumerate() {
-        if escaped {
-            // The second byte of a doubled quote: consumed as content, and it
-            // cannot open or close anything.
-            escaped = false;
-            continue;
-        }
-        match b {
-            b'"' if in_quotes && qual.as_bytes().get(i + 1) == Some(&b'"') => {
-                // A doubled quote inside a quoted identifier is an escaped quote,
-                // not the end of it.
-                escaped = true;
-            }
-            b'"' => in_quotes = !in_quotes,
-            b'.' if !in_quotes => {
-                split_at = Some(i);
-                break;
-            }
-            _ => {}
-        }
-    }
-    match split_at {
-        Some(i) => (unquote_ident(&qual[..i]), unquote_ident(&qual[i + 1..])),
-        None => (String::new(), unquote_ident(qual)),
-    }
-}
-
-/// The relation a `test_decoding` TRUNCATE line names, or `None` if the line is
-/// not a TRUNCATE.
-///
-/// `TRUNCATE` is decoded (PostgreSQL 11+) and rendered as
-/// `table public.t: TRUNCATE: (no-flags)`, but it carries NO rows — so
-/// [`parse_test_decoding`], which builds a change out of the column list, has
-/// nothing to return and dropped the line into its catch-all `None`. Measured
-/// 2026-08-24 on the pg14 stand: 2 inserts then a TRUNCATE left the source table
-/// EMPTY while the run reported `status: success, rows: 2` and wrote both inserts
-/// to the destination. Not one line about it at `RUST_LOG=trace` either — zero
-/// occurrences of the word.
-///
-/// That divergence is permanent. The rows left the source with no DELETE events
-/// to carry them, so no later capture can reconcile the destination back: the
-/// stream is now describing a table state that never existed.
+/// The relations a `test_decoding` TRUNCATE line names; empty if the line is not a TRUNCATE.
 pub(crate) fn truncate_targets(data: &str) -> Vec<(String, String)> {
-    // The op keyword sits AFTER the (possibly multi-relation) name list, so find the
-    // LAST top-level `": "` rather than the first: a quoted identifier may legally
-    // contain `": "` and splitting at the first occurrence cuts a name in half.
-    let Some(rest) = data.strip_prefix("table ") else {
-        return Vec::new();
-    };
-    // Anchor on the OPERATION marker, not on a bare `": "`. The line holds two of
-    // those — one after the name list, one after the keyword
-    // (`table a, b: TRUNCATE: (no-flags)`) — so "the last `": "`" lands after
-    // TRUNCATE and yields an empty match. Caught by re-measuring the fix rather
-    // than by re-reading it.
-    const MARK: &str = ": TRUNCATE:";
-    let Some(sep) = find_outside_quotes(rest, MARK) else {
-        return Vec::new();
-    };
-    let quals = &rest[..sep];
-    // ONE line can name MANY relations — `TRUNCATE a, b` decodes as
-    // `table public.a, public.b: TRUNCATE: (no-flags)`, and every CASCADE that
-    // pulls in referencing tables does the same. Treating that as a single name
-    // made the guard miss the whole statement: MEASURED with `public.tmulti_a`
-    // configured, `TRUNCATE tmulti_a, tmulti_b` left the source EMPTY while the
-    // run reported `status: success, rows: 1`. Found by an adversarial pass over
-    // the first version of this guard.
-    split_top_level_commas(quals)
-        .into_iter()
-        .map(|q| split_qualified_ident(q.trim()))
-        .collect()
-}
-
-/// Split a relation LIST on top-level commas — a comma inside a quoted identifier
-/// (`"odd,name"`) is part of the name, not a separator.
-fn split_top_level_commas(list: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut in_quotes = false;
-    let mut escaped = false;
-    let mut start = 0usize;
-    let b = list.as_bytes();
-    for i in 0..b.len() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match b[i] {
-            b'"' if in_quotes && b.get(i + 1) == Some(&b'"') => escaped = true,
-            b'"' => in_quotes = !in_quotes,
-            b',' if !in_quotes => {
-                out.push(&list[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    out.push(&list[start..]);
-    out
+    td_line::truncate_relations(data).map_or_else(Vec::new, |relations| {
+        split_top_level_commas(relations)
+            .into_iter()
+            .map(|q| split_qualified_ident(q.trim()))
+            .collect()
+    })
 }
 
 /// Refuse a TRUNCATE on a captured table, naming why re-running cannot fix it.
@@ -1756,50 +1641,23 @@ pub(crate) fn truncate_is_ours(schema: &str, table: &str, configured: &[String])
         })
 }
 
-/// Parse one `test_decoding` line into a canonical change, or `None` for the
-/// `BEGIN`/`COMMIT` transaction markers and anything unrecognised. The line shape
-/// is `table <schema>.<table>: <OP>: <columns…>`; pre-images / typed before-after
-/// are deferred.
+/// Parse one `test_decoding` line into a canonical change, or `None` for the `BEGIN`/`COMMIT` markers and anything unrecognised.
 pub(crate) fn parse_test_decoding(
     lsn: &str,
     data: &str,
     domains: &Domains,
 ) -> Result<Option<ChangeEvent>> {
-    let Some((qual, tail)) = data.strip_prefix("table ").and_then(|s| s.split_once(": ")) else {
+    let Some(line) = td_line::tokenize(data) else {
         return Ok(None);
     };
-    let (schema, table) = split_qualified_ident(qual);
-    let op = if tail.starts_with("INSERT") {
-        ChangeOp::Insert
-    } else if tail.starts_with("UPDATE") {
-        ChangeOp::Update
-    } else if tail.starts_with("DELETE") {
-        ChangeOp::Delete
-    } else {
-        return Ok(None);
+    let (schema, table) = split_qualified_ident(line.relations);
+    let op = match line.op {
+        td_line::LineOp::Insert => ChangeOp::Insert,
+        td_line::LineOp::Update => ChangeOp::Update,
+        td_line::LineOp::Delete => ChangeOp::Delete,
     };
-    // After `<OP>: ` comes the `col[type]:value …` list (all columns for
-    // INSERT/UPDATE; the key for DELETE).
-    let body = tail.split_once(": ").map(|(_, c)| c).unwrap_or("");
-    // Finding #42: an UPDATE that changes the PRIMARY KEY renders BOTH
-    // sections — `old-key: <cols> new-tuple: <cols>` — and a naive scan
-    // glues them into one over-long image (the arity guard then bricks the
-    // stream on a perfectly legal operation, permanently, with a misleading
-    // "DDL" diagnosis). Split them: old-key → before, new-tuple → after.
-    // Split at the TOP-LEVEL ` new-tuple: ` — outside any quoted value. Finding
-    // #7: a quote-blind split_once matches the FIRST occurrence, so a text key
-    // whose value literally contains ` new-tuple: ` (e.g. `name[text]:'a new-tuple:
-    // b'`) is cut mid-value, garbling BOTH the before and after images.
-    const SEP: &str = " new-tuple: ";
-    let (old_key_part, new_part) = match body.strip_prefix("old-key: ") {
-        Some(rest) => match find_outside_quotes(rest, SEP) {
-            Some(pos) => (Some(&rest[..pos]), &rest[pos + SEP.len()..]),
-            None => (None, rest),
-        },
-        None => (None, body),
-    };
-    let mut named = parse_columns(new_part, domains);
-    let old_named = old_key_part.map(|p| parse_columns(p, domains));
+    let mut named = map_columns(line.new, domains);
+    let old_named = line.old.map(|o| map_columns(o, domains));
 
     // An UPDATE that leaves an externally-stored TOAST column untouched renders
     // that column as `col[type]:unchanged-toast-datum` in the NEW tuple — the
@@ -1834,8 +1692,21 @@ pub(crate) fn parse_test_decoding(
             )
         })
     };
-    let infinity_poison = undecodable(&named);
-    let before_poison = old_named.as_deref().and_then(undecodable);
+    let rewritten = |cols: &[ParsedColumn]| {
+        let bad: Vec<String> = cols
+            .iter()
+            .filter_map(|c| {
+                c.rewritten_type
+                    .as_ref()
+                    .map(|t| format!("{} ({t})", c.name))
+            })
+            .collect();
+        (!bad.is_empty()).then(|| rewritten_type_refusal(&format!("{schema}.{table}"), &bad))
+    };
+    let infinity_poison = rewritten(&named).or_else(|| undecodable(&named));
+    let before_poison = old_named
+        .as_deref()
+        .and_then(|o| rewritten(o).or_else(|| undecodable(o)));
     let poison = (!unrecovered.is_empty()).then(|| {
         format!(
             "pg cdc: {schema}.{table}: column(s) [{}] arrived as an unchanged-TOAST \
@@ -1994,19 +1865,52 @@ pub(crate) fn row_image_verdict(images: &[(String, OldImage)]) -> crate::source:
     }
 }
 
-/// One parsed `test_decoding` column: name, typed value, and whether the wire
-/// form was the unquoted `unchanged-toast-datum` sentinel. That sentinel is an
-/// externally-stored TOAST value an UPDATE left untouched — the NEW-tuple image
-/// carries only the marker, never the value (see [`recover_unchanged_toast`]).
+/// One parsed `test_decoding` column: name, typed value, and the wire forms that decide whether it may be delivered.
 struct ParsedColumn {
     name: String,
     value: RivetValue,
     toast_unchanged: bool,
-    /// The wire text held a value the target type cannot represent, so `value` is
-    /// a stand-in NULL that must NOT be delivered as data. Recorded here because
-    /// this is the last place the raw rendering exists — one level up the value is
-    /// already `Null` and indistinguishable from a genuine one.
     unrepresentable: bool,
+    rewritten_type: Option<String>,
+}
+
+/// Types whose `test_decoding` text is not the server's text for the value: a bit string prints as `B'110'`, the server's text is `110`.
+const DECODER_REWRITTEN_TYPES: &[&str] = &["bit", "bit varying"];
+
+/// The `name (type)` of each column whose wire type is one the decoder rewrites.
+fn decoder_rewritten_columns<'a>(
+    columns: impl IntoIterator<Item = (&'a str, &'a postgres::types::Type)>,
+) -> Vec<String> {
+    columns
+        .into_iter()
+        .filter_map(|(name, typ)| {
+            let label = match *typ {
+                postgres::types::Type::BIT => "bit",
+                postgres::types::Type::VARBIT => "bit varying",
+                _ => return None,
+            };
+            DECODER_REWRITTEN_TYPES
+                .contains(&label)
+                .then(|| format!("{name} ({label})"))
+        })
+        .collect()
+}
+
+/// The refusal for a captured relation whose columns have a type the decoder rewrites, with its remedy.
+fn rewritten_type_refusal(relation: &str, columns: &[String]) -> String {
+    format!(
+        "pg cdc: {relation}: column(s) [{}] are bit strings, and `test_decoding` prints a bit \
+         string as the literal B'110' where the server's text is 110. Delivering it would write a \
+         value the batch run never writes (batch refuses these columns with \
+         RIVET_TYPE_UNSAFE_MAPPING, and the pgoutput reader refuses them too), so rivet stops \
+         instead, before it writes anything. Change the column to text: ALTER TABLE {relation} \
+         ALTER COLUMN <column> TYPE text USING <column>::text; changes already in the slot keep \
+         the bit type and would refuse again, so drop the export's slot (cdc.slot) on the \
+         source, SELECT pg_drop_replication_slot('<slot>'), and then re-baseline the stream, \
+         which creates the slot again at the current position: {}",
+        columns.join(", "),
+        crate::source::cdc::checkpoint_identity::RECOVER
+    )
 }
 
 /// Every domain's label mapped to its base type's label, on the reader's own session.
@@ -2030,51 +1934,26 @@ fn domain_base<'a>(domains: &'a Domains, mut typ: &'a str) -> &'a str {
     typ
 }
 
-/// Parse a `test_decoding` column list (`name[type]:value name[type]:value …`)
-/// into typed [`RivetValue`]s, in column order. Values are quoted with `''`
-/// escaping or unquoted (numbers / `t`/`f` / `null`).
-fn parse_columns(s: &str, domains: &Domains) -> Vec<ParsedColumn> {
-    let mut out = Vec::new();
-    let mut rest = s.trim_start();
-    while !rest.is_empty() {
-        let Some(lb) = rest.find('[') else { break };
-        let Some(rel) = rest[lb..].find("]:") else {
-            break;
-        };
-        // The column NAME precedes '[' — it is DATA for key-only images
-        // (finding #41): a DELETE's key must map by name, not position.
-        let name = unquote_ident(&rest[..lb]);
-        let typ = &rest[lb + 1..lb + rel];
-        let after_colon = &rest[lb + rel + 2..];
-        let (val, quoted, consumed) = parse_value(after_colon);
-        // The sentinel is ALWAYS unquoted; a genuine text value equal to the
-        // marker arrives quoted (`'unchanged-toast-datum'`), so the quoted flag
-        // disambiguates — no false positive on real data.
-        let toast_unchanged = !quoted && val == "unchanged-toast-datum";
-        // PostgreSQL's `infinity` / `-infinity` sentinels are ordinary, ordered
-        // values on a timestamp or date column — and `chrono` has no instant for
-        // them, so the parser fell through to NULL. That is silent loss of a real
-        // value: every count and checksum fold skips nulls, so the sink's two-ended
-        // check agreed with itself while two of three rows lost their timestamp
-        // (round-9 bughunt, measured). The batch leg PANICKED on the same value; it
-        // now refuses loudly, and this is the CDC half of that parity.
-        // NOT gated on `quoted`, unlike the TOAST sentinel above: `test_decoding`
-        // renders this one WITH quotes (`expires[timestamp with time zone]:'infinity'`,
-        // measured), and on a timestamp or date column no genuine text value can
-        // collide — the TYPE is the disambiguator here, where for TOAST it was the
-        // quoting. Getting that backwards made the first cut of this guard silently
-        // inert; the run still reported `status: success, rows: 2`.
-        let mapped = map_pg_value(domain_base(domains, typ), &val, quoted);
-        let unrepresentable = mapped.is_none() && !toast_unchanged;
-        out.push(ParsedColumn {
-            name,
-            value: mapped.unwrap_or(RivetValue::Null),
-            toast_unchanged,
-            unrepresentable,
-        });
-        rest = after_colon[consumed..].trim_start();
-    }
-    out
+/// Type each tokenized cell: a typed value, the unchanged-TOAST marker, an unrepresentable value, or a refused type.
+fn map_columns(raw: Vec<td_line::RawColumn>, domains: &Domains) -> Vec<ParsedColumn> {
+    raw.into_iter()
+        .map(|c| {
+            let base = domain_base(domains, &c.typ);
+            let toast_unchanged = !c.quoted && c.value == "unchanged-toast-datum";
+            let mapped = map_pg_value(base, &c.value, c.quoted);
+            let unrepresentable = mapped.is_none() && !toast_unchanged;
+            let rewritten_type = DECODER_REWRITTEN_TYPES
+                .contains(&base)
+                .then(|| base.to_string());
+            ParsedColumn {
+                name: c.name,
+                value: mapped.unwrap_or(RivetValue::Null),
+                toast_unchanged,
+                unrepresentable,
+                rewritten_type,
+            }
+        })
+        .collect()
 }
 
 /// Substitute each NEW-tuple `unchanged-toast-datum` column with the real value
@@ -2106,126 +1985,6 @@ fn recover_unchanged_toast(
         }
     }
     unrecovered
-}
-
-/// Parse one value at the start of `s`. Returns `(value, quoted, bytes_consumed)`.
-/// Find `needle` in `haystack` at the TOP LEVEL — outside any single-quoted
-/// value. test_decoding quotes text as `'…'` and doubles an embedded quote
-/// (`''`); the section separator ` new-tuple: ` can appear literally inside such
-/// a value, and a quote-blind `split_once` would cut there (finding #7). Mirrors
-/// [`parse_value`]'s `''`-aware quote scan. `needle` is ASCII (its lead byte
-/// `0x20` can never be a UTF-8 continuation/lead byte), so the byte scan never
-/// false-matches inside a multi-byte column name.
-fn find_outside_quotes(haystack: &str, needle: &str) -> Option<usize> {
-    // TWO quoting worlds, and missing either one is a silent drop.
-    //
-    // `'` opens a string LITERAL — a value. `"` opens a quoted IDENTIFIER — a name.
-    // Both escape by doubling, and each is an ordinary character inside the other.
-    // This tracked only literals, so a legally-quoted identifier containing an
-    // apostrophe flipped it into "inside a literal" with nothing to close it:
-    //
-    //     table public.tord, public."o'brien": TRUNCATE: (no-flags)
-    //
-    // is real `test_decoding` output (measured on a pg16 stand) and the `: TRUNCATE:`
-    // marker was never found, so `truncate_targets` returned empty and the line fell
-    // through to `parse_test_decoding`, which drops it. MEASURED end to end: the
-    // source table held 0 rows after the truncate, and the run reported
-    // `status: success, rows: 2` with both rows still at the destination and no
-    // delete to retract them — the exact silent divergence the TRUNCATE guard was
-    // written to close, walked around by one apostrophe in a NEIGHBOURING relation.
-    //
-    // The same function splits ` new-tuple: ` out of an UPDATE body, where the harm
-    // is worse: the fallback labels the whole `old-key: … new-tuple: …` body as the
-    // after-image, `parse_columns` yields duplicate names, and the sink's by-name
-    // lookup hits the OLD value first — so a column named `"it's"` under REPLICA
-    // IDENTITY FULL records the PRE-image as the current value. MEASURED: source at
-    // 'NEWVAL', parquet at 'OLDVAL', status success. Permanent, because the row is
-    // never touched again.
-    //
-    // `split_top_level_commas` alongside already tracked identifier quotes; this one
-    // did not, and nothing compared them.
-    #[derive(PartialEq)]
-    enum In {
-        Nothing,
-        Literal,
-        Ident,
-    }
-    let (b, nb) = (haystack.as_bytes(), needle.as_bytes());
-    let mut i = 0;
-    let mut state = In::Nothing;
-    while i < b.len() {
-        match state {
-            In::Literal => {
-                if b[i] == b'\'' {
-                    if b.get(i + 1) == Some(&b'\'') {
-                        i += 2; // doubled → an escaped quote INSIDE the literal
-                        continue;
-                    }
-                    state = In::Nothing;
-                }
-                i += 1;
-            }
-            In::Ident => {
-                if b[i] == b'"' {
-                    if b.get(i + 1) == Some(&b'"') {
-                        i += 2; // doubled → an escaped quote INSIDE the identifier
-                        continue;
-                    }
-                    state = In::Nothing;
-                }
-                i += 1;
-            }
-            In::Nothing => {
-                if b[i] == b'\'' {
-                    state = In::Literal;
-                    i += 1;
-                } else if b[i] == b'"' {
-                    state = In::Ident;
-                    i += 1;
-                } else if b[i..].starts_with(nb) {
-                    return Some(i);
-                } else {
-                    i += 1;
-                }
-            }
-        }
-    }
-    None
-}
-
-fn parse_value(s: &str) -> (String, bool, usize) {
-    let b = s.as_bytes();
-    if b.first() != Some(&b'\'') {
-        let end = s.find(' ').unwrap_or(s.len());
-        return (s[..end].to_string(), false, end);
-    }
-    // quoted: copy chars, collapsing `''` → `'`, until the lone closing quote.
-    let mut v = String::new();
-    let mut i = 1;
-    while i < b.len() {
-        if b[i] == b'\'' {
-            if b.get(i + 1) == Some(&b'\'') {
-                v.push('\'');
-                i += 2;
-            } else {
-                return (v, true, i + 1);
-            }
-        } else {
-            let n = utf8_len(b[i]);
-            v.push_str(&s[i..i + n]);
-            i += n;
-        }
-    }
-    (v, true, i)
-}
-
-fn utf8_len(lead: u8) -> usize {
-    match lead {
-        b if b < 0x80 => 1,
-        b if b >> 5 == 0b110 => 2,
-        b if b >> 4 == 0b1110 => 3,
-        _ => 4,
-    }
 }
 
 /// Map a `test_decoding` `(type, value)` to a typed [`RivetValue`]; `None` is a non-NULL value with no faithful reading.
@@ -2824,8 +2583,8 @@ mod tests {
             assert_eq!(map_pg_value(typ, val, false), None, "{typ} {val}");
         }
         assert_eq!(map_pg_value("date", "null", false), Some(RivetValue::Null));
-        let cols = parse_columns(
-            "d[date]:'0044-03-15 BC' n[integer]:unchanged-toast-datum",
+        let cols = map_columns(
+            td_line::columns("d[date]:'0044-03-15 BC' n[integer]:unchanged-toast-datum").0,
             &Domains::new(),
         );
         assert!(cols[0].unrepresentable && cols[0].value == RivetValue::Null);
@@ -2893,7 +2652,7 @@ mod tests {
         // separator.
         let line = "table public.\"o''brien\": TRUNCATE: (no-flags)";
         assert!(
-            super::find_outside_quotes(line, ": TRUNCATE:").is_some(),
+            super::td_line::find_outside_quotes(line, ": TRUNCATE:").is_some(),
             "a doubled quote is an escape, not a terminator — mutating the `i += 2` \
              that skips it desynchronises the scanner and the marker goes unseen, \
              which is how one apostrophe blinded the whole TRUNCATE guard before"
@@ -3476,6 +3235,228 @@ mod tests {
         for inner in ["numeric", "money", "time with time zone", "daterange"] {
             assert!(!array_elem_is_listed(inner), "{inner}");
         }
+    }
+
+    fn td_ident(n: &str) -> String {
+        let bare = n.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+            && n.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if bare {
+            n.to_string()
+        } else {
+            format!("\"{}\"", n.replace('"', "\"\""))
+        }
+    }
+
+    fn td_ident_strategy() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let atoms = vec![
+            "\"",
+            "'",
+            " ",
+            ":",
+            "[",
+            "]",
+            "]:",
+            ": ",
+            ".",
+            ",",
+            "-",
+            "é",
+            "日",
+            "a",
+            "Z",
+            "0",
+            "new-tuple",
+            "old-key: ",
+            "[text]:",
+            "table ",
+            "_",
+        ];
+        prop_oneof![
+            "[a-z_][a-z0-9_]{0,6}",
+            proptest::collection::vec(proptest::sample::select(atoms), 1..9)
+                .prop_map(|v| v.concat()),
+        ]
+    }
+
+    #[derive(Debug, Clone)]
+    enum TdCell {
+        Text(String),
+        Int(i64),
+        Null,
+    }
+
+    fn td_cells_strategy()
+    -> impl proptest::strategy::Strategy<Value = Vec<(String, String, TdCell)>> {
+        use proptest::prelude::*;
+        let cell = prop_oneof![
+            "[^\u{0}]{0,40}".prop_map(TdCell::Text),
+            any::<i64>().prop_map(TdCell::Int),
+            Just(TdCell::Null),
+        ];
+        proptest::collection::vec((td_ident_strategy(), td_ident_strategy(), cell), 1..5)
+    }
+
+    fn td_render(cells: &[(String, String, TdCell)]) -> String {
+        cells
+            .iter()
+            .map(|(name, typ, cell)| match cell {
+                TdCell::Text(v) => format!(
+                    "{}[{}]:'{}'",
+                    td_ident(name),
+                    td_ident(&format!("t_{typ}")),
+                    v.replace('\'', "''")
+                ),
+                TdCell::Int(i) => format!("{}[integer]:{i}", td_ident(name)),
+                TdCell::Null => format!("{}[text]:null", td_ident(name)),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn td_expect(cells: &[(String, String, TdCell)]) -> (Vec<String>, Vec<RivetValue>) {
+        (
+            cells.iter().map(|(n, _, _)| n.clone()).collect(),
+            cells
+                .iter()
+                .map(|(_, _, c)| match c {
+                    TdCell::Text(v) => RivetValue::Bytes(v.clone().into_bytes()),
+                    TdCell::Int(i) => RivetValue::Int(*i),
+                    TdCell::Null => RivetValue::Null,
+                })
+                .collect(),
+        )
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 512, ..Default::default()
+        })]
+
+        #[test]
+        fn a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered(
+            schema in td_ident_strategy(),
+            table in td_ident_strategy(),
+            old in td_cells_strategy(),
+            new in td_cells_strategy(),
+            op in 0usize..3,
+        ) {
+            let rel = format!("{}.{}", td_ident(&schema), td_ident(&table));
+            let line = match op {
+                0 => format!("table {rel}: INSERT: {}", td_render(&new)),
+                1 => format!("table {rel}: DELETE: {}", td_render(&new)),
+                _ => format!(
+                    "table {rel}: UPDATE: old-key: {} new-tuple: {}",
+                    td_render(&old),
+                    td_render(&new)
+                ),
+            };
+            let ev = parse_test_decoding("0/1", &line, &Domains::new())
+                .unwrap()
+                .expect("a rendered line parses to a change");
+            proptest::prop_assert_eq!(&ev.schema, &schema, "{}", line);
+            proptest::prop_assert_eq!(&ev.table, &table, "{}", line);
+            let (names, values) = td_expect(&new);
+            proptest::prop_assert_eq!(ev.image_names.as_deref(), Some(&names[..]), "{}", line);
+            match op {
+                0 => proptest::prop_assert_eq!(ev.after.as_ref(), Some(&values), "{}", line),
+                1 => proptest::prop_assert_eq!(ev.before.as_ref(), Some(&values), "{}", line),
+                _ => {
+                    let (old_names, old_values) = td_expect(&old);
+                    proptest::prop_assert_eq!(ev.after.as_ref(), Some(&values), "{}", line);
+                    proptest::prop_assert_eq!(ev.before.as_ref(), Some(&old_values), "{}", line);
+                    proptest::prop_assert_eq!(
+                        ev.before_names.as_deref(),
+                        Some(&old_names[..]),
+                        "{}",
+                        line
+                    );
+                }
+            }
+        }
+    }
+
+    /// The text of the file above its test modules.
+    fn production_text() -> &'static str {
+        let all = include_str!("cdc.rs");
+        &all[..all.find("\n#[cfg(test)]\nmod tests {").unwrap()]
+    }
+
+    /// Functions that read a VALUE or an LSN, not the shape of a `test_decoding` line.
+    const VALUE_PARSERS: &[&str] = &[
+        "parse_lsn",
+        "parse_pg_array_literal",
+        "parse_pg_time_micros",
+        "parse_pg_time_micros_unbounded",
+        "parse_pg_interval",
+    ];
+
+    /// The functions of `src` that cut text with `split*`, `find` or `rfind`, by name.
+    fn functions_cutting_text(src: &str) -> std::collections::BTreeSet<String> {
+        let cut = [
+            ".split_once(",
+            ".rsplit_once(",
+            ".splitn(",
+            ".rsplitn(",
+            ".split(",
+            ".rsplit(",
+            ".rfind(",
+            ".match_indices(",
+            ".find('",
+            ".find(\"",
+            ".find(&",
+        ];
+        let mut found = std::collections::BTreeSet::new();
+        let mut current = String::new();
+        for line in src.lines() {
+            let t = line.trim_start();
+            let after_vis = t
+                .strip_prefix("pub(crate) ")
+                .or_else(|| t.strip_prefix("pub "))
+                .unwrap_or(t);
+            if let Some(name) = after_vis.strip_prefix("fn ") {
+                current = name
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap()
+                    .to_string();
+            }
+            let code = line.split("//").next().unwrap();
+            if cut.iter().any(|c| code.contains(c)) {
+                found.insert(current.clone());
+            }
+        }
+        found
+    }
+
+    /// No function of the CDC reader other than a value or LSN parser cuts text with a split or a find: the line has one reader, `td_line`.
+    #[test]
+    fn only_value_parsers_cut_text_outside_the_one_line_tokenizer() {
+        let found = functions_cutting_text(production_text());
+        assert!(
+            found.contains("parse_lsn"),
+            "the scan sees the file: {found:?}"
+        );
+        let stray: Vec<&String> = found
+            .iter()
+            .filter(|f| !VALUE_PARSERS.contains(&f.as_str()))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "{stray:?} cut text with split/find in cdc.rs; a test_decoding line is read only by td_line::tokenize"
+        );
+    }
+
+    /// The scan is graded: a function that splits a line is found.
+    #[test]
+    fn the_cut_scan_finds_a_split_in_a_function() {
+        let src = "fn header(d: &str) {\n    let _ = d.split_once(\": \");\n}\nfn quiet(d: &str) {\n    let _ = d.len();\n}\n";
+        let found = functions_cutting_text(src);
+        assert_eq!(
+            found.into_iter().collect::<Vec<_>>(),
+            vec!["header".to_string()]
+        );
     }
 
     proptest::proptest! {
@@ -4210,9 +4191,9 @@ mod tests {
     /// PostgreSQL doubles an embedded quote inside a quoted identifier.
     #[test]
     fn a_doubled_quote_inside_an_identifier_collapses_to_one() {
-        assert_eq!(unquote_ident("\"a\"\"b\""), "a\"b");
-        assert_eq!(unquote_ident("plain"), "plain");
-        assert_eq!(unquote_ident("\"\""), "");
+        assert_eq!(td_line::unquote_ident("\"a\"\"b\""), "a\"b");
+        assert_eq!(td_line::unquote_ident("plain"), "plain");
+        assert_eq!(td_line::unquote_ident("\"\""), "");
     }
 
     /// The COLUMN twin. A key-only DELETE maps its image BY NAME (a positional rescue
@@ -4272,6 +4253,41 @@ mod tests {
                 "qualifier `{input}` split wrongly — a mis-split yields identifiers that \
                  never existed, and the router then drops every event for the table"
             );
+        }
+    }
+
+    /// Only a bit or bit varying wire type is named by the catalog check, each under its own label and column.
+    #[test]
+    fn the_catalog_check_names_exactly_the_bit_typed_columns() {
+        use postgres::types::Type;
+        let cols = [
+            ("id", Type::INT4),
+            ("flags", Type::BIT),
+            ("note", Type::TEXT),
+            ("vb", Type::VARBIT),
+            ("raw", Type::BYTEA),
+        ];
+        let named = decoder_rewritten_columns(cols.iter().map(|(n, t)| (*n, t)));
+        assert_eq!(named, ["flags (bit)", "vb (bit varying)"]);
+        let none = decoder_rewritten_columns(
+            [("id", Type::INT4), ("t", Type::TEXT)]
+                .iter()
+                .map(|(n, t)| (*n, t)),
+        );
+        assert!(none.is_empty(), "{none:?}");
+    }
+
+    /// The bit refusal names the relation, the ALTER, the slot drop and the re-baseline in one message.
+    #[test]
+    fn the_bit_refusal_names_the_alter_the_slot_drop_and_the_rebaseline() {
+        let said = rewritten_type_refusal("public.bits", &["flags (bit)".to_string()]);
+        for part in [
+            "pg cdc: public.bits: column(s) [flags (bit)] are bit strings",
+            "ALTER TABLE public.bits ALTER COLUMN <column> TYPE text USING <column>::text",
+            "SELECT pg_drop_replication_slot('<slot>')",
+            crate::source::cdc::checkpoint_identity::RECOVER,
+        ] {
+            assert!(said.contains(part), "{part} missing from: {said}");
         }
     }
 }

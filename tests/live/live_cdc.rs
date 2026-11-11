@@ -8710,3 +8710,297 @@ fn mysql_cdc_time_outside_one_day_is_refused_like_batch_and_never_checkpointed()
         "a refused flush must not advance the checkpoint past the rows"
     );
 }
+
+/// Delivered CDC cells as text, one `(op, cells)` per change in `cols` order, sorted.
+fn pg_wire_cells(
+    batches: &[arrow::record_batch::RecordBatch],
+    cols: &[&str],
+) -> Vec<(String, Vec<Option<String>>)> {
+    use arrow::array::{Array, StringArray};
+    let text = |b: &arrow::record_batch::RecordBatch, name: &str| {
+        let col = b
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("delivered batch has no column {name:?}"));
+        arrow::compute::cast(col, &arrow::datatypes::DataType::Utf8).unwrap()
+    };
+    let mut rows = Vec::new();
+    for b in batches {
+        let op = text(b, "__op");
+        let op = op.as_any().downcast_ref::<StringArray>().unwrap();
+        let cells: Vec<_> = cols.iter().map(|c| text(b, c)).collect();
+        for i in 0..b.num_rows() {
+            let row = cells
+                .iter()
+                .map(|a| {
+                    let a = a.as_any().downcast_ref::<StringArray>().unwrap();
+                    (!a.is_null(i)).then(|| a.value(i).to_string())
+                })
+                .collect();
+            rows.push((op.value(i).to_string(), row));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+fn pg_wire_row(op: &str, cells: &[Option<&str>]) -> (String, Vec<Option<String>>) {
+    (
+        op.to_string(),
+        cells.iter().map(|c| c.map(str::to_string)).collect(),
+    )
+}
+
+/// A schema whose name holds `: ` delivers its changes: the relation is cut at the operation, not at the first `: `.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+fn pg_cdc_a_relation_name_holding_colon_space_is_delivered_not_dropped() {
+    let cdc_db = CdcDb::new("cdc_wire_rel");
+    let slot = unique_name("rivet_wire_rel_slot").to_lowercase();
+    let _slot = Slot::new(slot.clone());
+    let mut c = cdc_db.connect();
+    c.batch_execute(&format!(
+        "CREATE SCHEMA \"s: x\"; \
+         CREATE TABLE \"s: x\".orders (id int primary key, v text); \
+         ALTER DATABASE {} SET search_path TO \"s: x\", public",
+        cdc_db.name()
+    ))
+    .unwrap();
+    c.execute(
+        "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+        &[&slot],
+    )
+    .unwrap();
+    c.batch_execute(
+        "INSERT INTO \"s: x\".orders VALUES (1,'a'),(2,'b'),(3,'c'); \
+         UPDATE \"s: x\".orders SET v = 'a2' WHERE id = 1; \
+         DELETE FROM \"s: x\".orders WHERE id = 2",
+    )
+    .unwrap();
+    let rig = Rig::pg_cdc("orders", &slot).source_url(cdc_db.url());
+    let got = pg_wire_cells(&rig.run_and_read(), &["id", "v"]);
+    assert_eq!(
+        got,
+        vec![
+            pg_wire_row("delete", &[Some("2"), None]),
+            pg_wire_row("insert", &[Some("1"), Some("a")]),
+            pg_wire_row("insert", &[Some("2"), Some("b")]),
+            pg_wire_row("insert", &[Some("3"), Some("c")]),
+            pg_wire_row("update", &[Some("1"), Some("a2")]),
+        ],
+        "every change of the relation reaches the destination"
+    );
+}
+
+/// Column names holding `[`, `]:` and quotes come back as the names the table has, with their own values.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+fn pg_cdc_column_names_holding_brackets_are_delivered_under_their_own_names() {
+    let cdc_db = CdcDb::new("cdc_wire_col");
+    let slot = unique_name("rivet_wire_col_slot").to_lowercase();
+    let _slot = Slot::new(slot.clone());
+    let mut c = cdc_db.connect();
+    c.batch_execute(
+        "CREATE TABLE public.t (v text, \"k[1\" int primary key, \"a[b]:c\" text, \
+         \"x]: y\" int, \"q\"\"r'\" text)",
+    )
+    .unwrap();
+    c.execute(
+        "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+        &[&slot],
+    )
+    .unwrap();
+    c.batch_execute(
+        "INSERT INTO public.t VALUES ('r',3,'zz',12,'p'),('q',2,'yy',11,'o'); \
+         UPDATE public.t SET \"a[b]:c\" = 's1new' WHERE \"k[1\" = 3; \
+         DELETE FROM public.t WHERE \"k[1\" = 2",
+    )
+    .unwrap();
+    let rig = Rig::pg_cdc("public.t", &slot).source_url(cdc_db.url());
+    let got = pg_wire_cells(&rig.run_and_read(), &["k[1", "a[b]:c", "x]: y", "q\"r'"]);
+    assert_eq!(
+        got,
+        vec![
+            pg_wire_row("delete", &[Some("2"), None, None, None]),
+            pg_wire_row("insert", &[Some("2"), Some("yy"), Some("11"), Some("o")]),
+            pg_wire_row("insert", &[Some("3"), Some("zz"), Some("12"), Some("p")]),
+            pg_wire_row("update", &[Some("3"), Some("s1new"), Some("12"), Some("p")]),
+        ],
+        "each cell sits under the column the source gave it"
+    );
+}
+
+/// A `bit` / `bit varying` column is refused with a code: test_decoding prints `B'110'`, the server's text is `110`.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+fn pg_cdc_a_bit_column_is_refused_not_delivered_as_the_decoders_literal() {
+    let cdc_db = CdcDb::new("cdc_wire_bit");
+    let slot = unique_name("rivet_wire_bit_slot").to_lowercase();
+    let _slot = Slot::new(slot.clone());
+    let mut c = cdc_db.connect();
+    c.batch_execute("CREATE TABLE public.bits (id int primary key, flags bit(3), vb varbit)")
+        .unwrap();
+    c.execute(
+        "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+        &[&slot],
+    )
+    .unwrap();
+    c.batch_execute("INSERT INTO public.bits VALUES (1, B'110', B'10101')")
+        .unwrap();
+    let rig = Rig::pg_cdc("public.bits", &slot).source_url(cdc_db.url());
+    let out = rig.run();
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
+    );
+    let said =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("flags") && said.contains("vb") && said.contains("bit varying"),
+        "the refusal names the columns and the type: {said}"
+    );
+}
+
+/// A bit column stops a snapshot-first export before the snapshot writes a part, a marker, a resume point or a metrics row.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
+fn pg_cdc_a_bit_column_refusal_precedes_the_snapshot_and_leaves_only_a_failure_record() {
+    let cdc_db = CdcDb::new("cdc_wire_bitsnap");
+    let slot = unique_name("rivet_wire_bitsnap_slot").to_lowercase();
+    let _slot = Slot::new(slot.clone());
+    let mut c = cdc_db.connect();
+    c.batch_execute("CREATE TABLE public.bits (id int primary key, flags bit(3))")
+        .unwrap();
+    c.batch_execute("INSERT INTO public.bits VALUES (1, B'110')")
+        .unwrap();
+    let mut rig = Rig::pg_cdc("public.bits", &slot).source_url(cdc_db.url());
+    rig.amend_cdc_line("initial: snapshot");
+    let out = rig.run();
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
+    );
+    assert!(
+        !rig.out_dir().join("snapshot").exists(),
+        "a refused run wrote no snapshot directory"
+    );
+}
+
+/// The bit refusal's remedy, followed as printed from the state that printed it, delivers the rows the refused run held.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical) + the rivet-duckdb oracle"]
+fn pg_cdc_a_bit_column_refusal_remedy_delivers_the_rows_the_refused_run_held() {
+    let cdc_db = CdcDb::new("cdc_wire_bitfix");
+    let slot = unique_name("rivet_wire_bitfix_slot").to_lowercase();
+    let _slot = Slot::new(slot.clone());
+    let mut c = cdc_db.connect();
+    c.batch_execute("CREATE TABLE public.bits (id int primary key, flags bit(3))")
+        .unwrap();
+    c.execute(
+        "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+        &[&slot],
+    )
+    .unwrap();
+    c.batch_execute("INSERT INTO public.bits VALUES (1, B'110')")
+        .unwrap();
+    let mut rig = Rig::pg_cdc("public.bits", &slot).source_url(cdc_db.url());
+    let refusal = |rig: &Rig| {
+        let out = rig.run();
+        assert_refused(
+            &out,
+            Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
+        );
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout)
+    };
+    let said = refusal(&rig);
+    assert!(
+        said.contains("column(s) [flags (bit)] are bit strings")
+            && said.contains(
+                "ALTER TABLE public.bits ALTER COLUMN <column> TYPE text USING <column>::text"
+            )
+            && said.contains(REBASELINE_REMEDY),
+        "the refusal names the column, the ALTER and the re-baseline: {said}"
+    );
+    assert!(
+        said.contains("SELECT pg_drop_replication_slot('<slot>')"),
+        "the refusal names the slot drop the remedy needs: {said}"
+    );
+    c.batch_execute(
+        "ALTER TABLE public.bits ALTER COLUMN flags TYPE text USING flags::text; \
+         INSERT INTO public.bits VALUES (2, '101')",
+    )
+    .unwrap();
+    refusal(&rig);
+    c.execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+        .unwrap();
+    follow_rebaseline_remedy(&mut rig, false);
+    assert_eq!(
+        dir_parquet_id_set(&rig.out_dir().join("snapshot")),
+        [1, 2].into(),
+        "the remedy's baseline holds both rows, the first written while the column was a bit string"
+    );
+}
+
+/// Types whose test_decoding text IS the server's text keep arriving as that text, beside names and values that hold the wire's separators.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+fn pg_cdc_server_text_types_and_separator_values_are_delivered_unchanged() {
+    let cdc_db = CdcDb::new("cdc_wire_text");
+    let slot = unique_name("rivet_wire_text_slot").to_lowercase();
+    let _slot = Slot::new(slot.clone());
+    let mut c = cdc_db.connect();
+    c.batch_execute(
+        "CREATE TYPE mood AS ENUM ('sad','ok'); \
+         CREATE TABLE public.srv (id int primary key, ip inet, net cidr, mac macaddr, \
+         m money, mo mood, pt point, rg int4range, \"Mixed Case\" text, \"o'brien\" text, \
+         t text)",
+    )
+    .unwrap();
+    c.execute(
+        "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+        &[&slot],
+    )
+    .unwrap();
+    c.batch_execute(
+        "INSERT INTO public.srv VALUES \
+         (1, '10.0.0.1/24', '10.1.0.0/16', '08:00:2b:01:02:03', 1234.56, 'ok', '(1,2)', '[1,5)', \
+          'c: d', 'e [f]: g', 'new-tuple: x'), \
+         (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'caf\u{e9}', '\"q\"', 'it''s')",
+    )
+    .unwrap();
+    let cols = [
+        "id",
+        "ip",
+        "net",
+        "mac",
+        "m",
+        "mo",
+        "pt",
+        "rg",
+        "Mixed Case",
+        "o'brien",
+        "t",
+    ];
+    let select = cols
+        .iter()
+        .map(|c| format!("\"{c}\"::text"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut want: Vec<(String, Vec<Option<String>>)> = c
+        .query(&format!("SELECT {select} FROM public.srv"), &[])
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                "insert".to_string(),
+                (0..cols.len()).map(|i| r.get(i)).collect(),
+            )
+        })
+        .collect();
+    want.sort();
+    let rig = Rig::pg_cdc("public.srv", &slot).source_url(cdc_db.url());
+    assert_eq!(
+        pg_wire_cells(&rig.run_and_read(), &cols),
+        want,
+        "each cell is the server's own ::text"
+    );
+}
