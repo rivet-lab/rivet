@@ -43,10 +43,10 @@ pub(super) fn parse_params(raw: &[String]) -> Result<HashMap<String, String>> {
 /// reading env / file so that credentials never have to appear on the command
 /// line (which would leak into shell history, `ps`, and `/proc/<pid>/cmdline`).
 pub(super) fn resolve_init_source(
-    source: Option<String>,
+    source: Option<crate::secret::Secret>,
     source_env: Option<String>,
     source_file: Option<String>,
-) -> Result<(String, crate::init::SourceProvenance)> {
+) -> Result<(crate::secret::Secret, crate::init::SourceProvenance)> {
     use crate::init::SourceProvenance;
     if let Some(url) = source {
         return Ok((url, SourceProvenance::Inline));
@@ -58,7 +58,7 @@ pub(super) fn resolve_init_source(
                 format!("--source-env '{}' is not set in the environment", var),
             )
         })?;
-        return Ok((url, SourceProvenance::Env(var)));
+        return Ok((url.into(), SourceProvenance::Env(var)));
     }
     if let Some(path) = source_file {
         let raw = std::fs::read_to_string(&path).map_err(|e| {
@@ -67,7 +67,7 @@ pub(super) fn resolve_init_source(
                 format!("cannot read --source-file '{}': {}", path, e),
             )
         })?;
-        return Ok((raw.trim().to_string(), SourceProvenance::File(path)));
+        return Ok((raw.trim().into(), SourceProvenance::File(path)));
     }
     // Unreachable: clap ArgGroup enforces `required = true`.
     crate::rivet_bail!(

@@ -304,6 +304,8 @@ pub struct LoadPlan {
     pub rename_warnings: Vec<String>,
     /// Why this table cannot load, found at plan time; the table fails alone, the others still load.
     pub refusal: Option<String>,
+    /// How each column lands against what a load key or order needs of it.
+    pub landings: Vec<crate::preflight::key_admission::ColumnLanding>,
 }
 
 impl LoadPlan {
@@ -312,7 +314,14 @@ impl LoadPlan {
         if let Some(why) = &self.refusal {
             crate::rivet_bail!(crate::error::codes::LOAD_LOOKALIKE_COLUMN, "{why}");
         }
-        self.reserved_column_refusal()
+        self.reserved_column_refusal()?;
+        crate::preflight::key_admission::admit_load_keys(
+            &self.export_name,
+            self.mode,
+            self.cursor_column.as_deref(),
+            &self.pk,
+            &self.landings,
+        )
     }
 
     /// Refuses a source column named like one rivet owns in a delta load's changelog and base tables; `full` builds none.
@@ -665,6 +674,7 @@ fn build_plans_keyed(
         // fields the old JSON mirror happened to declare. `autoload_type` is
         // carried only when it DIVERGES (`collect_report`'s rule), so an absent
         // one means "same as native".
+        let landings = crate::preflight::key_admission::landings(&report.columns);
         let mut specs: Vec<TargetColumnSpec> = report
             .columns
             .into_iter()
@@ -821,6 +831,7 @@ fn build_plans_keyed(
             renames,
             rename_warnings,
             refusal,
+            landings,
         });
     }
     reject_duplicate_target_tables(
@@ -1047,6 +1058,7 @@ pub fn retype_plan(
         mappings,
         &crate::types::policy::TypePolicy::warn_only(),
         Some(target),
+        &spec.finer_than_microsecond_columns(),
     );
     let mut keys = RecordedKeys::new();
     if let Some(pk) = &spec.primary_key {
@@ -1066,6 +1078,7 @@ pub(crate) fn test_plan(mode: LoadMode, gcs_prefix: &str) -> LoadPlan {
         renames: Vec::new(),
         rename_warnings: Vec::new(),
         refusal: None,
+        landings: Vec::new(),
         export_name: "orders".into(),
         unit: None,
         table: "orders".into(),
@@ -1527,6 +1540,7 @@ mod tests {
     /// producer produces rather than a hand-typed subset of it.
     fn row_from_spec(spec: &TargetColumnSpec) -> TypeReportRow {
         TypeReportRow {
+            key_landing: Default::default(),
             column: spec.column_name.clone(),
             source_type: "-".into(),
             rivet_type: "-".into(),
@@ -1828,6 +1842,7 @@ load: {{ target: bigquery, project: p, dataset: d, pk: [id], cluster_by: none }}
             )
         };
         let column = |name: &str| LoadSpecColumn {
+            finer_than_microsecond: false,
             name: name.into(),
             source_type: "int8".into(),
             rivet_type: RivetType::Int64,
@@ -1954,6 +1969,7 @@ load:
                 "planned with no recorded key"
             );
             let column = |name: &str| LoadSpecColumn {
+                finer_than_microsecond: false,
                 name: name.into(),
                 source_type: "int8".into(),
                 rivet_type: RivetType::Int64,
@@ -2610,6 +2626,7 @@ load:
         use crate::types::{RivetType, TypeFidelity};
         let (_dir, path) = orders_on_a_closed_source();
         let col = |name: &str, rivet_type| crate::state::LoadSpecColumn {
+            finer_than_microsecond: false,
             name: name.into(),
             source_type: "native".into(),
             rivet_type,
@@ -2670,6 +2687,7 @@ load:
              target: bigquery\n  project: p\n  dataset: d\n"
         ));
         let col = crate::state::LoadSpecColumn {
+            finer_than_microsecond: false,
             name: "id".into(),
             source_type: "native".into(),
             rivet_type: RivetType::Int64,
@@ -2847,6 +2865,83 @@ load:
             vec!["id".to_string()],
             "the recorded key folds with its column"
         );
+    }
+
+    /// An incremental table whose cursor lands as text, or whose primary key collapses below a microsecond, is refused alone on every load target; the same columns under `full`, and an exact landing, load.
+    #[test]
+    fn a_key_column_landing_inexactly_refuses_its_own_table_on_every_target() {
+        use crate::preflight::key_admission::KeyLanding;
+        let loads = [
+            "{ target: bigquery, project: p, dataset: d, pk: [id], cluster_by: none }",
+            "{ target: snowflake, account: a, user: u, private_key_path: /k.p8, storage_integration: i, database: d, schema: s, warehouse: w, pk: [id], cluster_by: none }",
+            "{ target: clickhouse, url: \"http://h:8123\", database: d, user: u, password_env: X, pk: [id] }",
+        ];
+        let yaml = |load: &str, mode: &str| {
+            let cursor = if mode == "incremental" {
+                "cursor_column: ver,"
+            } else {
+                ""
+            };
+            format!(
+                r#"
+source: {{ type: oracle, url: "oracle://u:p@h:1521/svc" }}
+exports:
+  - {{ name: lands, table: lands, mode: {mode}, {cursor} format: parquet, destination: {{ type: gcs, bucket: b, prefix: l/ }} }}
+  - {{ name: fine, table: fine, mode: {mode}, {cursor} format: parquet, destination: {{ type: gcs, bucket: b, prefix: f/ }} }}
+load: {load}
+"#
+            )
+        };
+        let landing = |name: &str, how: KeyLanding| {
+            let mut c = col(name, TargetStatus::Ok);
+            c.key_landing = how;
+            c
+        };
+        for load in loads {
+            for mode in ["incremental", "full"] {
+                let cfg = crate::config::Config::from_yaml(&yaml(load, mode)).unwrap();
+                let plans = build_plans(
+                    &cfg,
+                    cfg.load.as_ref().unwrap(),
+                    vec![
+                        report(
+                            "lands",
+                            vec![
+                                landing("id", KeyLanding::Exact),
+                                landing("ver", KeyLanding::NumberAsText),
+                            ],
+                        ),
+                        report(
+                            "fine",
+                            vec![
+                                landing("id", KeyLanding::Exact),
+                                landing("ver", KeyLanding::Exact),
+                            ],
+                        ),
+                    ],
+                )
+                .expect("one table's refusal must not abort the others' load");
+                if mode == "full" {
+                    plans[0].refused().expect("full orders by no cursor");
+                } else {
+                    let err = plans[0].refused().unwrap_err();
+                    assert_eq!(
+                        crate::error::error_code(&err),
+                        Some("RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT"),
+                        "{load}: {err:#}"
+                    );
+                    assert!(
+                        format!("{err:#}")
+                            .starts_with("export `lands`: the incremental load orders")
+                            && format!("{err:#}").contains(
+                                "by cursor column `ver`, a `-` in the source that lands as text"
+                            ),
+                        "{err:#}"
+                    );
+                }
+                plans[1].refused().expect("the exact table still loads");
+            }
+        }
     }
 
     #[test]

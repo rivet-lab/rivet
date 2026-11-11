@@ -106,7 +106,7 @@ seams:
   - id: credential-masking
     owner: src/redact.rs::redact_secrets
     reads: "the text of a connection URL or error with its userinfo, keyword/value and query-pair passwords masked"
-    also_in: [src/url_text.rs]
+    also_in: [src/url_text.rs, src/secret.rs]
     bypass:
       - "credential_span ("
       - "\"REDACTED\""

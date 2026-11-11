@@ -26,13 +26,15 @@ const TRUNCATED_TABLES: &str =
 fn confirm_destructive(
     confirmed: bool,
     target: &str,
-    pg_url: &str,
-    mysql_url: &str,
-    mssql_url: &str,
+    pg_url: &rivet::secret::Secret,
+    mysql_url: &rivet::secret::Secret,
+    mssql_url: &rivet::secret::Secret,
 ) -> Result<()> {
     if confirmed {
         return Ok(());
     }
+    let shown = |u: &rivet::secret::Secret| rivet::redact::redact_secrets(u.expose());
+    let (pg_url, mysql_url, mssql_url) = (shown(pg_url), shown(mysql_url), shown(mssql_url));
     let urls = match target {
         "postgres" => format!("\n  postgres: {pg_url}"),
         "mysql" => format!("\n  mysql:    {mysql_url}"),
@@ -134,32 +136,29 @@ mod tests {
 
     #[test]
     fn refuses_destructive_run_without_confirmation() {
-        let err = confirm_destructive(false, "both", PG, MY, MS)
+        let err = confirm_destructive(false, "both", &PG.into(), &MY.into(), &MS.into())
             .unwrap_err()
             .to_string();
         assert!(err.contains("refusing to seed"), "got: {err}");
         assert!(err.contains("TRUNCATE"), "got: {err}");
-        // Must name the tables it will wipe and how to opt in.
         assert!(err.contains("users"), "got: {err}");
         assert!(err.contains(CONFIRM_ENV), "got: {err}");
     }
 
     #[test]
     fn allows_destructive_run_when_confirmed() {
-        assert!(confirm_destructive(true, "both", PG, MY, MS).is_ok());
+        assert!(confirm_destructive(true, "both", &PG.into(), &MY.into(), &MS.into()).is_ok());
     }
 
     #[test]
     fn sqlserver_target_names_only_the_mssql_url() {
-        // A SQL Server run must show the mssql url (and not silently point the
-        // operator at the postgres/mysql fixtures it is not touching).
-        let err = confirm_destructive(false, "sqlserver", PG, MY, MS)
+        let err = confirm_destructive(false, "sqlserver", &PG.into(), &MY.into(), &MS.into())
             .unwrap_err()
             .to_string();
-        assert!(err.contains(MS), "got: {err}");
+        assert!(err.contains("127.0.0.1:1433/rivet"), "got: {err}");
+        assert!(!err.contains("Rivet_Passw0rd!"), "got: {err}");
         assert!(!err.contains("5432"), "got: {err}");
-        // `all` fans out to every engine, so it must list all three.
-        let all = confirm_destructive(false, "all", PG, MY, MS)
+        let all = confirm_destructive(false, "all", &PG.into(), &MY.into(), &MS.into())
             .unwrap_err()
             .to_string();
         assert!(

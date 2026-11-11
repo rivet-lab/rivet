@@ -34,8 +34,10 @@ fn a_crashed_run_from_a_fast_clock_host_is_superseded_by_the_next_run() {
             .unwrap();
         (r.get(0), r.get(1))
     };
-    let st = rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(url.clone()))
-        .unwrap();
+    let st = rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(
+        url.clone().into(),
+    ))
+    .unwrap();
     let ahead = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
     st.begin_run("skewed-crash", &export, &prefix, &ahead)
         .unwrap();

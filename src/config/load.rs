@@ -84,7 +84,7 @@ struct RawLoadSection {
     storage_integration: Option<String>,
     /// ClickHouse: the HTTP endpoint, e.g. `http://localhost:8123`.
     #[serde(default)]
-    url: Option<String>,
+    url: Option<crate::secret::Secret>,
     /// Snowflake / ClickHouse: the user the load authenticates as.
     #[serde(default)]
     user: Option<String>,
@@ -166,48 +166,55 @@ impl TryFrom<RawLoadSection> for LoadSection {
     /// The target's own fields must be present and the other warehouse's absent.
     fn try_from(r: RawLoadSection) -> Result<Self, String> {
         let name = r.target.name();
-        // (field, value, the warehouses it belongs to); `database` is shared.
-        let fields: [(&str, &Option<String>, &[LoadTargetKind]); 11] = [
-            ("project", &r.project, &[LoadTargetKind::Bigquery]),
-            ("dataset", &r.dataset, &[LoadTargetKind::Bigquery]),
-            ("account", &r.account, &[LoadTargetKind::Snowflake]),
+        let fields: [(&str, bool, &[LoadTargetKind]); 11] = [
+            ("project", r.project.is_some(), &[LoadTargetKind::Bigquery]),
+            ("dataset", r.dataset.is_some(), &[LoadTargetKind::Bigquery]),
+            ("account", r.account.is_some(), &[LoadTargetKind::Snowflake]),
             (
                 "private_key_path",
-                &r.private_key_path,
+                r.private_key_path.is_some(),
                 &[LoadTargetKind::Snowflake],
             ),
-            ("warehouse", &r.warehouse, &[LoadTargetKind::Snowflake]),
+            (
+                "warehouse",
+                r.warehouse.is_some(),
+                &[LoadTargetKind::Snowflake],
+            ),
             (
                 "database",
-                &r.database,
+                r.database.is_some(),
                 &[LoadTargetKind::Snowflake, LoadTargetKind::Clickhouse],
             ),
-            ("schema", &r.schema, &[LoadTargetKind::Snowflake]),
+            ("schema", r.schema.is_some(), &[LoadTargetKind::Snowflake]),
             (
                 "storage_integration",
-                &r.storage_integration,
+                r.storage_integration.is_some(),
                 &[LoadTargetKind::Snowflake],
             ),
-            ("url", &r.url, &[LoadTargetKind::Clickhouse]),
+            ("url", r.url.is_some(), &[LoadTargetKind::Clickhouse]),
             (
                 "user",
-                &r.user,
+                r.user.is_some(),
                 &[LoadTargetKind::Snowflake, LoadTargetKind::Clickhouse],
             ),
             (
                 "password_env",
-                &r.password_env,
+                r.password_env.is_some(),
                 &[LoadTargetKind::Clickhouse],
             ),
         ];
-        let optional: [(&str, &Option<String>, &[LoadTargetKind]); 3] = [
-            ("role", &r.role, &[LoadTargetKind::Snowflake]),
+        let optional: [(&str, bool, &[LoadTargetKind]); 3] = [
+            ("role", r.role.is_some(), &[LoadTargetKind::Snowflake]),
             (
                 "named_collection",
-                &r.named_collection,
+                r.named_collection.is_some(),
                 &[LoadTargetKind::Clickhouse],
             ),
-            ("ca_file", &r.ca_file, &[LoadTargetKind::Clickhouse]),
+            (
+                "ca_file",
+                r.ca_file.is_some(),
+                &[LoadTargetKind::Clickhouse],
+            ),
         ];
         if r.allow_plaintext.is_some() && r.target != LoadTargetKind::Clickhouse {
             return Err(format!(
@@ -219,7 +226,7 @@ impl TryFrom<RawLoadSection> for LoadSection {
         let foreign = fields
             .iter()
             .chain(optional.iter())
-            .find(|(_, v, of)| v.is_some() && !of.contains(&r.target));
+            .find(|(_, set, of)| *set && !of.contains(&r.target));
         if let Some((field, _, of)) = foreign {
             let other = of.iter().map(|k| k.name()).collect::<Vec<_>>().join("`/`");
             return Err(format!(
@@ -229,7 +236,7 @@ impl TryFrom<RawLoadSection> for LoadSection {
         }
         let missing = fields
             .iter()
-            .find(|(_, v, of)| v.is_none() && of.contains(&r.target));
+            .find(|(_, set, of)| !*set && of.contains(&r.target));
         if let Some((field, _, _)) = missing {
             return Err(format!("`load:` targets `{name}` but has no `{field}`"));
         }
@@ -265,7 +272,7 @@ impl TryFrom<RawLoadSection> for LoadSection {
                     ));
                 }
                 LoadTarget::Clickhouse {
-                    url: take(&r.url),
+                    url: r.url.clone().unwrap_or_default(),
                     database: take(&r.database),
                     user: take(&r.user),
                     password_env: take(&r.password_env),
@@ -358,7 +365,7 @@ pub enum LoadTarget {
         storage_integration: String,
     },
     Clickhouse {
-        url: String,
+        url: crate::secret::Secret,
         database: String,
         user: String,
         password_env: String,

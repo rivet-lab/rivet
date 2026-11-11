@@ -5,6 +5,7 @@ pub(crate) use postgres::table_from_simple_query;
 pub(crate) mod cdc_health;
 pub(crate) mod cursor_expr;
 mod doctor;
+pub mod key_admission;
 mod mongo;
 mod mssql;
 mod mysql;
@@ -182,20 +183,21 @@ pub(crate) fn get_export_diagnostic(
     export: &ExportConfig,
 ) -> Result<ExportDiagnostic> {
     let url = config.source.resolve_url()?;
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
     crate::source::warn_if_tls_disabled(&config.source);
     match config.source.source_type {
-        SourceType::Postgres => postgres::diagnose_export_pg(&url, tls, export),
+        SourceType::Postgres => postgres::diagnose_export_pg(url, tls, export),
         SourceType::Mysql => {
-            mysql::diagnose_export_mysql(&url, tls, export, config.source.columns_from_grants())
+            mysql::diagnose_export_mysql(url, tls, export, config.source.columns_from_grants())
         }
-        SourceType::Mssql => mssql::diagnose_export_mssql(&url, tls, export),
+        SourceType::Mssql => mssql::diagnose_export_mssql(url, tls, export),
         #[cfg(feature = "oracle")]
-        SourceType::Oracle => oracle::diagnose_export_oracle(&url, tls, export),
+        SourceType::Oracle => oracle::diagnose_export_oracle(url, tls, export),
         #[cfg(not(feature = "oracle"))]
         SourceType::Oracle => Err(crate::source::oracle_feature_missing()),
         SourceType::Mongo => {
-            mongo::diagnose_export_mongo(&url, tls, export, config.source.mongo.as_ref())
+            mongo::diagnose_export_mongo(url, tls, export, config.source.mongo.as_ref())
         }
     }
 }
@@ -413,6 +415,8 @@ pub fn check(
     }
 
     let url = config.source.resolve_url()?;
+
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
     // Surface the plaintext-transport warning at preflight time too —
     // operators should hear it from `rivet check` before they wait
@@ -429,17 +433,17 @@ pub fn check(
     let planned = exports_as_planned(&exports, strategies);
     let described: Vec<&ExportConfig> = planned.iter().collect();
     let diagnostics: Vec<ExportDiagnostic> = match config.source.source_type {
-        SourceType::Postgres => postgres::check_postgres(&url, tls, &described)?,
+        SourceType::Postgres => postgres::check_postgres(url, tls, &described)?,
         SourceType::Mysql => {
-            mysql::check_mysql(&url, tls, &described, config.source.columns_from_grants())?
+            mysql::check_mysql(url, tls, &described, config.source.columns_from_grants())?
         }
-        SourceType::Mssql => mssql::check_mssql(&url, tls, &described)?,
+        SourceType::Mssql => mssql::check_mssql(url, tls, &described)?,
         #[cfg(feature = "oracle")]
-        SourceType::Oracle => oracle::check_oracle(&url, tls, &described)?,
+        SourceType::Oracle => oracle::check_oracle(url, tls, &described)?,
         #[cfg(not(feature = "oracle"))]
         SourceType::Oracle => return Err(crate::source::oracle_feature_missing()),
         SourceType::Mongo => {
-            mongo::check_mongo(&url, tls, &described, config.source.mongo.as_ref())?
+            mongo::check_mongo(url, tls, &described, config.source.mongo.as_ref())?
         }
     };
     // #149: measured beats declared — overlay the state store's actuals and
@@ -525,6 +529,13 @@ pub fn check(
         let column_overrides =
             crate::plan::parse_column_overrides_pub(&export.columns, &export.name)?;
         type_report::refuse_override_wire_mismatch(
+            &config,
+            export,
+            &column_overrides,
+            config_dir,
+            params,
+        )?;
+        type_report::refuse_inexact_load_keys(
             &config,
             export,
             &column_overrides,
@@ -750,6 +761,7 @@ pub fn load_type_reports(
             match state.load_spec(&export.name, unit.as_deref(), &source) {
                 Ok(Some(spec)) if !spec.columns.is_empty() => {
                     let mappings = spec.columns.iter().map(|c| c.to_mapping()).collect();
+                    let finer = spec.finer_than_microsecond_columns();
                     if let Some(pk) = spec.primary_key {
                         keys.insert((export.name.clone(), unit.clone()), pk);
                     }
@@ -759,6 +771,7 @@ pub fn load_type_reports(
                         mappings,
                         &policy,
                         Some(target),
+                        &finer,
                     ));
                 }
                 Ok(_) => failures.push(format!(
@@ -1137,6 +1150,7 @@ mod tests {
     fn failing_table_report(export: &str, table: &str, n: usize) -> type_report::ExportTypeReport {
         let columns = (0..n)
             .map(|i| type_report::TypeReportRow {
+                key_landing: Default::default(),
                 column: format!("c{i}"),
                 source_type: "-".into(),
                 rivet_type: "-".into(),
@@ -1367,6 +1381,7 @@ mod tests {
                 Some("orders"),
                 "",
                 &[crate::state::LoadSpecColumn {
+                    finer_than_microsecond: false,
                     name: "id".into(),
                     source_type: "bigint".into(),
                     rivet_type: crate::types::RivetType::Int64,

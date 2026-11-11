@@ -28,8 +28,8 @@
 //!
 //! What this module does NOT guarantee (documented in [`SECURITY.md`]):
 //! - Third-party driver/library output that bypasses our error wrappers.
-//! - In-memory secrets — `Zeroizing<String>` is used at the source-config
-//!   boundary, but anything copied into a `String` along the way may
+//! - In-memory secrets — every credential slot holds a [`crate::secret::Secret`],
+//!   but anything copied into a `String` along the way may
 //!   linger in process memory until allocator reuse.
 //! - Secrets the operator captured *outside* Rivet (shell history, env
 //!   var dumps, `ps` snapshots) — out of scope.
@@ -840,26 +840,21 @@ mod tests {
         }
     }
 
-    /// Wall-clock ceiling for one hostile megabyte: the scan is one pass and needs milliseconds, a quadratic one needs minutes.
-    const HOSTILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
-
-    /// The keyword/value scan of `input`, run on a watchdog thread so an overrun or a panic fails the test instead of hanging it.
-    fn scan_within_budget(label: &str, input: &str) -> Result<String, String> {
-        use std::sync::mpsc::RecvTimeoutError;
-        let (done, result) = std::sync::mpsc::channel();
-        let owned = input.to_string();
-        std::thread::spawn(move || {
-            let has = has_keyword_password(&owned);
-            let _ = done.send((redact_keyword_passwords(&owned), has));
-        });
-        match result.recv_timeout(HOSTILE_BUDGET) {
-            Ok((out, has)) if has || out == input => Ok(out),
-            Ok(_) => Err(format!("{label}: masked a string with no password pair")),
-            Err(RecvTimeoutError::Timeout) => {
-                Err(format!("{label}: no result within {HOSTILE_BUDGET:?}"))
-            }
-            Err(RecvTimeoutError::Disconnected) => Err(format!("{label}: the scan panicked")),
+    /// The keyword/value scan of `input`; a string with no password pair must come back unchanged.
+    fn keyword_scan(input: &str) -> Result<String, String> {
+        let has = has_keyword_password(input);
+        let out = redact_keyword_passwords(input);
+        if has || out == input {
+            Ok(out)
+        } else {
+            Err("masked a string with no password pair".to_string())
         }
+    }
+
+    /// `keyword_scan` of `input` on a hang-guarded thread.
+    fn scan_within_budget(label: &str, input: &str) -> Result<String, String> {
+        let owned = input.to_string();
+        crate::test_budget::hang_guard(label, move || keyword_scan(&owned))
     }
 
     /// Unterminated quotes, a key at the very end, empty values, multi-byte text after `=`: each returns, and returns this.
@@ -922,57 +917,58 @@ mod tests {
         }
     }
 
-    /// One megabyte of each hostile shape is scanned in one pass: the exact output, inside the budget.
-    #[test]
-    fn the_keyword_scan_is_linear_on_a_hostile_megabyte() {
-        const MB: usize = 1 << 20;
-        let blanks = " ".repeat(MB);
-        let shapes = [
-            ("`;=` repeated", ";=".repeat(MB / 2), ";=".repeat(MB / 2)),
-            ("`=` alone", "=".repeat(MB), "=".repeat(MB)),
+    /// A hostile shape: its label, the input and the output the scan must give.
+    type Shape = (&'static str, (String, String));
+
+    /// The hostile shapes of keyword text, about `mb` bytes each, with the output the scan must give.
+    fn keyword_shapes(mb: usize) -> Vec<(&'static str, String, String)> {
+        let blanks = " ".repeat(mb);
+        vec![
+            ("`;=` repeated", ";=".repeat(mb / 2), ";=".repeat(mb / 2)),
+            ("`=` alone", "=".repeat(mb), "=".repeat(mb)),
             (
                 "`pwd=a ` repeated, no `;`",
-                "pwd=a ".repeat(MB / 6),
-                "pwd=*** ".repeat(MB / 6),
+                "pwd=a ".repeat(mb / 6),
+                "pwd=*** ".repeat(mb / 6),
             ),
             (
                 "`pwd=é ` repeated",
-                "pwd=é ".repeat(MB / 7),
-                "pwd=*** ".repeat(MB / 7),
+                "pwd=é ".repeat(mb / 7),
+                "pwd=*** ".repeat(mb / 7),
             ),
             (
                 "masked pairs repeated",
-                "pwd=*** ".repeat(MB / 8),
-                "pwd=*** ".repeat(MB / 8),
+                "pwd=*** ".repeat(mb / 8),
+                "pwd=*** ".repeat(mb / 8),
             ),
             (
                 "blanks around every `=`",
-                "pwd \t= \t".repeat(MB / 8),
-                "pwd \t= \t*** \t= \t".repeat(MB / 16),
+                "pwd \t= \t".repeat(mb / 8),
+                "pwd \t= \t*** \t= \t".repeat(mb / 16),
             ),
             (
                 "`pwd=;` repeated",
-                "pwd=;".repeat(MB / 5),
+                "pwd=;".repeat(mb / 5),
                 "pwd=***".to_string(),
             ),
             (
                 "`pwd=` then `;x=y` repeated",
-                format!("a;pwd={}", ";x=y".repeat(MB / 4)),
-                format!("a;pwd=***{}", ";x=y".repeat(MB / 4)),
+                format!("a;pwd={}", ";x=y".repeat(mb / 4)),
+                format!("a;pwd=***{}", ";x=y".repeat(mb / 4)),
             ),
             (
                 "`password=` repeated",
-                "password=".repeat(MB / 9),
+                "password=".repeat(mb / 9),
                 "password=***".to_string(),
             ),
             (
                 "a quote that never closes",
-                format!("pwd='{}", "a=b;".repeat(MB / 4)),
+                format!("pwd='{}", "a=b;".repeat(mb / 4)),
                 "pwd=***".to_string(),
             ),
             (
                 "an opening quote in every pair",
-                "pwd='a".repeat(MB / 6),
+                "pwd='a".repeat(mb / 6),
                 "pwd=***".to_string(),
             ),
             (
@@ -982,19 +978,24 @@ mod tests {
             ),
             (
                 "a megabyte keyword",
-                format!("{}=x", "a".repeat(MB)),
-                format!("{}=x", "a".repeat(MB)),
+                format!("{}=x", "a".repeat(mb)),
+                format!("{}=x", "a".repeat(mb)),
             ),
-        ];
-        for (label, input, want) in &shapes {
-            let out = scan_within_budget(label, input)
-                .unwrap_or_else(|why| panic!("KEYWORD SCAN NOT LINEAR: {why}"));
-            assert!(
-                out == *want,
-                "{label}: {} bytes out, {} wanted",
-                out.len(),
-                want.len()
-            );
+        ]
+    }
+
+    /// Eight times the hostile text costs about eight times the CPU, and every shape gets the exact output.
+    #[test]
+    fn the_keyword_scan_is_linear_on_a_hostile_megabyte() {
+        use crate::test_budget::{SCALE, SMALL, linear_cost};
+        for ((label, small, want_small), (_, large, want_large)) in keyword_shapes(SMALL)
+            .into_iter()
+            .zip(keyword_shapes(SMALL * SCALE))
+        {
+            let (got_small, got_large) =
+                linear_cost(label, small, large, |input: &String| keyword_scan(input));
+            assert_eq!(got_small, Ok(want_small), "{label}: small");
+            assert_eq!(got_large, Ok(want_large), "{label}: large");
         }
     }
 
@@ -1064,70 +1065,50 @@ mod tests {
         assert_eq!(redact_url_passwords(s), s);
     }
 
-    /// `scan` of `input` on a watchdog thread, so an overrun fails the test instead of hanging it.
-    fn scan_in_budget(label: &str, input: &str, scan: fn(&str) -> String) -> String {
-        let (done, result) = std::sync::mpsc::channel();
-        let owned = input.to_string();
-        std::thread::spawn(move || {
-            let _ = done.send(scan(&owned));
-        });
-        result
-            .recv_timeout(HOSTILE_BUDGET)
-            .unwrap_or_else(|why| panic!("SCAN NOT LINEAR: {label}: {why} in {HOSTILE_BUDGET:?}"))
+    /// `unit` repeated to about `mb` bytes, as the input and as the output a scan must leave untouched.
+    fn same(unit: &str, mb: usize) -> (String, String) {
+        (unit.repeat(mb / unit.len()), unit.repeat(mb / unit.len()))
     }
 
-    /// One megabyte of each hostile shape of query text is scanned in one pass: the exact output, inside the budget.
-    #[test]
-    fn the_query_scan_is_linear_on_a_hostile_megabyte() {
-        const MB: usize = 1 << 20;
-        let same = |unit: &str| (unit.repeat(MB / unit.len()), unit.repeat(MB / unit.len()));
-        let shapes = [
+    /// The hostile shapes of query text, about `mb` bytes each, as `(label, (input, wanted output))`.
+    fn query_shapes(mb: usize) -> Vec<Shape> {
+        let same = |unit: &str| same(unit, mb);
+        vec![
             ("`?` alone", same("?")),
             ("`&a` repeated, no `=`", same("&a")),
             ("`&a=1` repeated, no secret", same("&a=1")),
             (
                 "a megabyte key",
                 (
-                    format!("?{}=1", "a".repeat(MB)),
-                    format!("?{}=1", "a".repeat(MB)),
+                    format!("?{}=1", "a".repeat(mb)),
+                    format!("?{}=1", "a".repeat(mb)),
                 ),
             ),
             (
                 "a megabyte secret key",
                 (
-                    format!("?{}_token=x", "a".repeat(MB)),
-                    format!("?{}_token=***", "a".repeat(MB)),
+                    format!("?{}_token=x", "a".repeat(mb)),
+                    format!("?{}_token=***", "a".repeat(mb)),
                 ),
             ),
             (
                 "a megabyte secret",
                 (
-                    format!("?token={}", "x".repeat(MB)),
+                    format!("?token={}", "x".repeat(mb)),
                     "?token=***".to_string(),
                 ),
             ),
             (
                 "`?token=x&` repeated",
-                ("?token=x&".repeat(MB / 9), "?token=***&".repeat(MB / 9)),
+                ("?token=x&".repeat(mb / 9), "?token=***&".repeat(mb / 9)),
             ),
-        ];
-        for (label, (input, want)) in &shapes {
-            let out = scan_in_budget(label, input, redact_query_secrets);
-            assert!(
-                out == *want,
-                "{label}: {} bytes out, {} wanted",
-                out.len(),
-                want.len()
-            );
-        }
+        ]
     }
 
-    /// One megabyte of each hostile shape is scanned in one pass: the exact output, inside the budget.
-    #[test]
-    fn the_url_scan_is_linear_on_a_hostile_megabyte() {
-        const MB: usize = 1 << 20;
-        let same = |unit: &str| (unit.repeat(MB / unit.len()), unit.repeat(MB / unit.len()));
-        let shapes = [
+    /// The hostile shapes of URL text, about `mb` bytes each, as `(label, (input, wanted output))`.
+    fn url_shapes(mb: usize) -> Vec<Shape> {
+        let same = |unit: &str| same(unit, mb);
+        vec![
             ("letters alone", same("a")),
             ("scheme characters alone", same("a1+.-")),
             ("`a://` repeated", same("a://")),
@@ -1135,7 +1116,7 @@ mod tests {
             ("`@` alone", same("@")),
             (
                 "`a://b@` repeated, the next `://` its colon",
-                ("a://b@".repeat(MB / 6), "a://REDACTED@".to_string()),
+                ("a://b@".repeat(mb / 6), "a://REDACTED@".to_string()),
             ),
             ("`a://b@ ` repeated, no password", same("a://b@ ")),
             ("`1://b:c@` repeated, no scheme letter", same("1://b:c@")),
@@ -1143,34 +1124,58 @@ mod tests {
             (
                 "`a://` repeated before one userinfo",
                 (
-                    format!("{}u:p@h", "a://".repeat(MB / 4)),
+                    format!("{}u:p@h", "a://".repeat(mb / 4)),
                     "a://REDACTED@h".to_string(),
                 ),
             ),
             (
                 "one URL per word",
                 (
-                    "a://u:p@h ".repeat(MB / 10),
-                    "a://REDACTED@h ".repeat(MB / 10),
+                    "a://u:p@h ".repeat(mb / 10),
+                    "a://REDACTED@h ".repeat(mb / 10),
                 ),
             ),
             (
                 "one URL, a megabyte password",
                 (
-                    format!("a://u:{}@h", "p@:/".repeat(MB / 4)),
+                    format!("a://u:{}@h", "p@:/".repeat(mb / 4)),
                     "a://REDACTED@h".to_string(),
                 ),
             ),
-        ];
-        for (label, (input, want)) in &shapes {
-            let out = scan_in_budget(label, input, redact_url_passwords);
+        ]
+    }
+
+    /// Each shape at `SMALL` and eight times that costs about eight times the CPU through `scan`, and gives the exact output.
+    fn assert_scan_linear(shapes: fn(usize) -> Vec<Shape>, scan: fn(&str) -> String) {
+        use crate::test_budget::{SCALE, SMALL, linear_cost};
+        for ((label, (small, want_small)), (_, (large, want_large))) in
+            shapes(SMALL).into_iter().zip(shapes(SMALL * SCALE))
+        {
+            let (got_small, got_large) =
+                linear_cost(label, small, large, move |input: &String| scan(input));
             assert!(
-                out == *want,
-                "{label}: {} bytes out, {} wanted",
-                out.len(),
-                want.len()
+                got_small == want_small,
+                "{label}: small: {} bytes out",
+                got_small.len()
+            );
+            assert!(
+                got_large == want_large,
+                "{label}: large: {} bytes out",
+                got_large.len()
             );
         }
+    }
+
+    /// Hostile query text is scanned in one pass: the exact output at a CPU cost that grows with the input.
+    #[test]
+    fn the_query_scan_is_linear_on_a_hostile_megabyte() {
+        assert_scan_linear(query_shapes, redact_query_secrets);
+    }
+
+    /// Hostile URL text is scanned in one pass: the exact output at a CPU cost that grows with the input.
+    #[test]
+    fn the_url_scan_is_linear_on_a_hostile_megabyte() {
+        assert_scan_linear(url_shapes, redact_url_passwords);
     }
 
     /// The scan as specified before it became one pass: at each byte a scheme, `://`, then the last `@` before whitespace with a `:` ahead of it.

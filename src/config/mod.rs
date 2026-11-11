@@ -599,15 +599,15 @@ impl Config {
             ..
         }) = self.load.as_ref().map(|l| &l.target)
         {
-            url::require_https_clickhouse_url(url, *allow_plaintext)?;
+            url::require_https_clickhouse_url(url.expose(), *allow_plaintext)?;
         }
         if let Some(url) = self
             .notifications
             .as_ref()
             .and_then(|n| n.slack.as_ref())
-            .and_then(|s| s.webhook_url.as_deref())
+            .and_then(|s| s.webhook_url.as_ref())
         {
-            url::require_https_webhook(url)?;
+            url::require_https_webhook(url.expose())?;
         }
         Ok(())
     }
@@ -926,13 +926,13 @@ impl Config {
 
         if self.source.has_url_fields() {
             let url_count = [
-                &self.source.url,
-                &self.source.url_env,
-                &self.source.url_file,
-                &self.source.url_secret,
+                self.source.url.is_some(),
+                self.source.url_env.is_some(),
+                self.source.url_file.is_some(),
+                self.source.url_secret.is_some(),
             ]
             .iter()
-            .filter(|u| u.is_some())
+            .filter(|set| **set)
             .count();
             if url_count > 1 {
                 crate::config_bail!(

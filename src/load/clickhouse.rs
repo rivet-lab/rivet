@@ -42,7 +42,7 @@ enum Failure {
 
 /// Loads staged Parquet into ClickHouse over its HTTP interface.
 pub struct ClickhouseLoader {
-    url: String,
+    url: crate::secret::Secret,
     database: String,
     user: String,
     password_env: String,
@@ -75,7 +75,7 @@ impl ClickhouseLoader {
         destination: crate::config::DestinationConfig,
     ) -> Self {
         Self {
-            url: url.trim_end_matches('/').to_string(),
+            url: url.trim_end_matches('/').into(),
             database: database.to_string(),
             user: user.to_string(),
             password_env: password_env.to_string(),
@@ -150,7 +150,7 @@ impl ClickhouseLoader {
         if let Some(c) = self.client.get() {
             return Ok(c);
         }
-        crate::config::url::require_https_clickhouse_url(&self.url, self.allow_plaintext)?;
+        crate::config::url::require_https_clickhouse_url(self.url.expose(), self.allow_plaintext)?;
         let c = http_client(self.ca_file.as_deref())?;
         Ok(self.client.get_or_init(|| c))
     }
@@ -158,12 +158,13 @@ impl ClickhouseLoader {
     /// POST `body` with `params`, waiting for the statement to finish and retrying what
     /// `repeat` allows; returns the response text.
     fn post(&self, params: &[(&str, &str)], body: bytes::Bytes, repeat: Repeat) -> Result<String> {
-        let pass = std::env::var(&self.password_env).with_context(|| {
-            format!(
-                "ClickHouse load: `password_env` names `{}`, which is not set",
-                self.password_env
-            )
-        })?;
+        let pass =
+            crate::secret::Secret::new(std::env::var(&self.password_env).with_context(|| {
+                format!(
+                    "ClickHouse load: `password_env` names `{}`, which is not set",
+                    self.password_env
+                )
+            })?);
         let client = self.client()?;
         for attempt in 1..=MAX_ATTEMPTS {
             let (failure, err) = match self.send_once(client, &pass, params, body.clone()) {
@@ -190,13 +191,13 @@ impl ClickhouseLoader {
     fn send_once(
         &self,
         client: &reqwest::blocking::Client,
-        pass: &str,
+        pass: &crate::secret::Secret,
         params: &[(&str, &str)],
         body: bytes::Bytes,
     ) -> std::result::Result<String, (Failure, anyhow::Error)> {
         let resp = client
-            .post(&self.url)
-            .basic_auth(&self.user, Some(pass))
+            .post(self.url.expose())
+            .basic_auth(&self.user, Some(pass.expose()))
             .query(&[("wait_end_of_query", "1")])
             .query(params)
             .body(body)
@@ -207,7 +208,7 @@ impl ClickhouseLoader {
                 } else {
                     Failure::Transport
                 };
-                let url = crate::redact::redact_secrets(&self.url);
+                let url = crate::redact::redact_secrets(self.url.expose());
                 let err = anyhow::Error::new(e);
                 (
                     failure,

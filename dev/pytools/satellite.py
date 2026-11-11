@@ -48,8 +48,9 @@ import urllib.request
 from collections import Counter
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
-PASS, FAIL, NOT_RUN = "PASS", "FAIL", "NOT-RUN"
+PASS, FAIL, NOT_RUN, FLAKY = "PASS", "FAIL", "NOT-RUN", "FLAKY"
 OLD_RELEASE = "0.32.2"
 RELEASES = "https://github.com/rivet-lab/rivet/releases/download"
 ASSET = "rivet-v{v}-x86_64-unknown-linux-gnu-glibc2.28"
@@ -103,7 +104,7 @@ def first_failing_line(text: str) -> str:
 
 @dataclasses.dataclass
 class Check:
-    """One check: its name, PASS | FAIL | NOT-RUN, the first failing line (or the proof line), wall seconds, re-run statuses."""
+    """One check: its name, PASS | FAIL | FLAKY | NOT-RUN, the first failing line (or the proof line), wall seconds, every attempt's status."""
 
     name: str
     status: str
@@ -118,14 +119,14 @@ def blocks(check: Check) -> str | None:
         return None
     if check.name.startswith(HARD):
         return f"{check.status}: {check.line}"
-    if check.name.startswith(SOFT) and check.status == FAIL and len(check.attempts) > 1 and all(a == FAIL for a in check.attempts):
-        return f"FAIL repeated on re-run: {check.line}"
+    if check.name.startswith(SOFT) and (check.status in (FAIL, FLAKY) or FAIL in check.attempts):
+        return f"{check.status}: {check.line}"
     return None
 
 
 def overall(checks: list[Check]) -> str:
-    """FAIL if any check failed, else NOT-RUN if any did not run (or none did), else PASS."""
-    if any(c.status == FAIL for c in checks):
+    """FAIL if any check failed or was flaky, else NOT-RUN if any did not run (or none did), else PASS."""
+    if any(c.status in (FAIL, FLAKY) for c in checks):
         return FAIL
     if not checks or any(c.status != PASS for c in checks):
         return NOT_RUN
@@ -735,13 +736,21 @@ def stand_pg_alive(host: str = "127.0.0.1", port: int = STAND_PG_PORT) -> bool:
         return False
 
 
+def retried(runs: list[tuple[str, str]]) -> tuple[str, str, list[str]]:
+    """The verdict over every attempt: a FAIL in any attempt is kept (FAIL when all failed, else FLAKY) with the first failure's line."""
+    attempts = [status for status, _ in runs]
+    first_fail = next((line for status, line in runs if status == FAIL), None)
+    if first_fail is None:
+        return runs[-1][0], runs[-1][1], attempts
+    return (FAIL if all(a == FAIL for a in attempts) else FLAKY), first_fail, attempts
+
+
 def cloud_cell(run: Run, repo: Path, name: str) -> tuple[str, str, list[str]]:
-    """Run one existing live cell with the warehouse env filled by warehouse_env; re-run once when it fails."""
+    """Run one existing live cell with the warehouse env filled by warehouse_env; re-run once when it fails and keep the failure."""
     warehouse, cell = CLOUD_CELLS[name]
     if not stand_pg_alive():
         return NOT_RUN, f"the stand postgres on 127.0.0.1:{STAND_PG_PORT} does not answer, the cell reads its source from it", []
-    attempts: list[str] = []
-    verdict = (NOT_RUN, "not run")
+    runs: list[tuple[str, str]] = []
     for attempt in (1, 2):
         skips = run.out / "logs" / f"{name}.skips"
         skips.unlink(missing_ok=True)
@@ -750,11 +759,10 @@ def cloud_cell(run: Run, repo: Path, name: str) -> tuple[str, str, list[str]]:
         argv = ["uv", "run", "--frozen", "python", "-m", "dev.pytools.warehouse_env", "--", cargo_bin(), "nextest", "run", "--no-fail-fast",
                 "--test", "live_suite", "--run-ignored", "only", "-E", f"test(={cell})"]
         rc, text = sh(argv, run.log(name), cwd=repo, env=env, timeout=1800)
-        verdict = nextest_verdict(text, skips.read_text() if skips.exists() else "")
-        attempts.append(verdict[0])
-        if verdict[0] != FAIL:
+        runs.append(nextest_verdict(text, skips.read_text() if skips.exists() else ""))
+        if runs[-1][0] != FAIL:
             break
-    return verdict[0], verdict[1], attempts
+    return retried(runs)
 
 
 def run_mac(args: argparse.Namespace) -> int:
@@ -863,9 +871,23 @@ def self_test() -> int:
     assert blocks(Check("pilot-upgrade[postgres]", FAIL, "x", 0)), "a red pilot blocks"
     assert blocks(Check("pilot-lease[mysql]", NOT_RUN, "x", 0)), "an unrun pilot blocks"
     assert blocks(Check("release-notes-assemble", FAIL, "x", 0)), "a false release note blocks"
-    assert blocks(Check("cloud-bigquery", FAIL, "x", 0, [FAIL])) is None, "one red cloud smoke does not block"
+    assert blocks(Check("cloud-bigquery", FAIL, "x", 0, [FAIL])), "one red cloud smoke blocks"
     assert blocks(Check("cloud-bigquery", FAIL, "x", 0, [FAIL, FAIL])), "a repeated red cloud smoke blocks"
-    assert blocks(Check("cloud-bigquery", FAIL, "x", 0, [FAIL, PASS])) is None
+    assert blocks(Check("cloud-bigquery", FLAKY, "x", 0, [FAIL, PASS])), "a cloud smoke that failed once and then passed blocks"
+    assert blocks(Check("cloud-bigquery", NOT_RUN, "x", 0, [NOT_RUN])) is None, "a cloud smoke that did not run is reported"
+    assert overall([Check("a", FLAKY, "x", 0, [FAIL, PASS])]) == FAIL, "a flaky check is not a pass"
+    losing = [(1, "thread 't' panicked at x: BigQuery holds 9 rows, the source 10\n     Summary [ 1.0s] 1 test run: 0 passed, 1 failed"),
+              (0, "     Summary [   1.2s] 1 test run: 1 passed, 5 skipped")]
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sys.modules[__name__], "stand_pg_alive", lambda: True), \
+            mock.patch.object(sys.modules[__name__], "sh", lambda *a, **k: losing.pop(0)):
+        status, line, attempts = cloud_cell(Run("mac", "abc1234", Path(tmp)), Path(tmp), "cloud-bigquery")
+    assert (status, attempts) == (FLAKY, [FAIL, PASS]) and "BigQuery holds 9 rows" in line, (status, line, attempts)
+    assert not losing, "the cell is re-run once after a FAIL"
+    again = [(1, "thread 't' panicked at x: first loss"), (1, "thread 't' panicked at x: second loss")]
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sys.modules[__name__], "stand_pg_alive", lambda: True), \
+            mock.patch.object(sys.modules[__name__], "sh", lambda *a, **k: again.pop(0)):
+        status, line, attempts = cloud_cell(Run("mac", "abc1234", Path(tmp)), Path(tmp), "cloud-bigquery")
+    assert (status, attempts) == (FAIL, [FAIL, FAIL]) and "first loss" in line, "the first failure's line is the evidence"
     assert blocks(Check("offline-suite", FAIL, "x", 0)) is None, "other checks are reported, not blocking"
     assert blocks(Check("pilot-stand", PASS, "ok", 0)) is None
     for engine in ENGINES:

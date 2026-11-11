@@ -124,22 +124,24 @@ fn resolve_vars_value_with_quotes_newlines_braces_passes_through() {
     assert_eq!(got, "v=[a \"quote\" and a\nnewline and a {brace}]");
 }
 
+/// Substituting a long value costs CPU in proportion to the value, so no step rescans the text.
 #[test]
 fn resolve_vars_long_value_terminates_quickly() {
-    // 1 MiB value exercises any accidental O(n²) substitution.
-    let big = "a".repeat(1024 * 1024);
-    let mut params = std::collections::HashMap::new();
-    params.insert("BIG".into(), big);
-
-    let t0 = std::time::Instant::now();
-    let got = resolve_vars("x=${BIG}y", Some(&params)).unwrap();
-    let dur = t0.elapsed();
-    assert_eq!(got.len(), 2 + 1024 * 1024 + 1);
-    assert!(got.starts_with("x=") && got.ends_with('y'));
-    assert!(
-        dur.as_secs() < 5,
-        "expected sub-5s resolution of a 1MiB value, took {dur:?}"
+    use crate::test_budget::{SCALE, SMALL, linear_cost};
+    let params = |bytes: usize| {
+        let mut params = std::collections::HashMap::new();
+        params.insert("BIG".to_string(), "a".repeat(bytes));
+        params
+    };
+    let (small, large) = linear_cost(
+        "resolve_vars",
+        params(SMALL),
+        params(SMALL * SCALE),
+        |params| resolve_vars("x=${BIG}y", Some(params)).unwrap(),
     );
+    assert_eq!(small.len(), 2 + SMALL + 1);
+    assert_eq!(large.len(), 2 + SMALL * SCALE + 1);
+    assert!(large.starts_with("x=") && large.ends_with('y'));
 }
 
 #[test]

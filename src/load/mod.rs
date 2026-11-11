@@ -1259,7 +1259,7 @@ pub fn build_loader(
             allow_plaintext,
         } => Box::new(
             clickhouse::ClickhouseLoader::new(
-                url,
+                url.expose(),
                 database,
                 user,
                 password_env,

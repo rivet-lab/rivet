@@ -15,7 +15,7 @@ use rivet::state::{StateRef, StateStore};
 /// Open a Postgres-backed `StateStore` on `RIVET_TEST_STATE_URL`, or `None` after recording the skip.
 fn pg_store() -> Option<StateStore> {
     let url = crate::common::pg_state_url()?;
-    Some(StateStore::open_at_ref(&StateRef::Postgres(url)).expect("open pg state store"))
+    Some(StateStore::open_at_ref(&StateRef::Postgres(url.into())).expect("open pg state store"))
 }
 
 /// PARITY: the per-table lease refuses a second holder on Postgres exactly as it
@@ -370,6 +370,7 @@ fn pg_load_spec_round_trips() {
         fidelity: TypeFidelity::Exact,
         nullable: false,
         warnings: Vec::new(),
+        finer_than_microsecond: false,
     };
     let pk = vec!["id".to_string()];
     s.record_load_spec(
@@ -507,7 +508,7 @@ fn pg_several_writers_migrating_one_database_at_once_all_succeed() {
                     // `open_at_ref` is the seam the pool's workers use, and it
                     // migrates inside — so this races the real entry point, not a
                     // private helper.
-                    StateStore::open_at_ref(&StateRef::Postgres(url.clone())).map(|_| ())
+                    StateStore::open_at_ref(&StateRef::Postgres(url.clone().into())).map(|_| ())
                 })
             })
             .collect();
@@ -561,7 +562,7 @@ fn pg_a_chunk_run_whose_task_insert_fails_is_not_left_open() {
     let Some(scratch) = ScratchDb::create(&admin_url, &name) else {
         return;
     };
-    let s = StateStore::open_at_ref(&StateRef::Postgres(scratch.url())).unwrap();
+    let s = StateStore::open_at_ref(&StateRef::Postgres(scratch.url().into())).unwrap();
     let mut client = postgres::Client::connect(&scratch.url(), postgres::NoTls).unwrap();
     client
         .batch_execute(

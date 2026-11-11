@@ -10,7 +10,7 @@ use crate::args::Args;
 use crate::insert;
 
 pub fn seed_postgres(args: &Args) -> Result<()> {
-    let mut client = Client::connect(&args.pg_url, postgres::NoTls)
+    let mut client = Client::connect(args.pg_url.expose(), postgres::NoTls)
         .context("failed to connect to PostgreSQL")?;
 
     insert::ensure_orders_sparse_pg(&mut client)?;
@@ -98,7 +98,7 @@ pub fn seed_postgres(args: &Args) -> Result<()> {
 pub fn seed_mysql(args: &Args) -> Result<()> {
     use mysql::prelude::*;
 
-    let pool = mysql::Pool::new(mysql::Opts::from_url(&args.mysql_url)?)?;
+    let pool = mysql::Pool::new(mysql::Opts::from_url(args.mysql_url.expose())?)?;
     let mut conn = pool.get_conn()?;
 
     insert::ensure_orders_sparse_mysql(&mut conn)?;

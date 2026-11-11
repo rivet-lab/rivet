@@ -1,15 +1,7 @@
 //! ADR 0040 D5: the call-site shapes an owner seam replaces may only shrink, each counted by a structural read of `src/`.
 
 use crate::error_code_ratchet::product_sources;
-
-/// 2026-11-10: wildcard match arms under `src/source/` that answer NULL or a default; they go when the I2 compatibility table decides every pair before the read (ADR 0040).
-const WILDCARD_NULL_ARM_CEILING: usize = 59; // ratchet-pin: wildcard-null-arms (review 2027-02-01)
-/// 2026-11-10: credential-named `String` fields in `src/config/`; they go when the I1 `Secret` type holds every credential (ADR 0040).
-const CREDENTIAL_STRING_CEILING: usize = 5; // ratchet-pin: credential-string-fields (review 2027-02-01)
-/// 2026-11-10: text needles of the redaction scanner in `src/redact.rs`; they go as the I1 `Secret` type makes each one redundant (ADR 0040).
-const REDACT_NEEDLE_CEILING: usize = 11; // ratchet-pin: redaction-text-needles (review 2027-02-01)
-/// 2026-11-10: message-text needles in `src/error/retry.rs`, which also decide the exit class of an uncoded error; they go as I4 types each error (ADR 0040).
-const RETRY_NEEDLE_CEILING: usize = 65; // ratchet-pin: retry-text-needles (review 2027-02-01)
+use crate::site_ledger::{enclosing_fn, hold, hold_none, number, squash};
 
 /// The words a config field name ends in when it holds a credential or a URL that can carry one.
 const CREDENTIAL_WORDS: &[&str] = &[
@@ -32,23 +24,6 @@ fn rel(path: &std::path::Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
-}
-
-/// Fails unless `sites` holds exactly `ceiling` entries: more is a new instance, fewer is a win to bank.
-fn hold(name: &str, sites: &[String], ceiling: usize, remedy: &str) {
-    let n = sites.len();
-    assert!(
-        n == ceiling,
-        "{}",
-        if n > ceiling {
-            format!(
-                "{name}: {n}, ceiling {ceiling}: {remedy}\n{}",
-                sites.join("\n")
-            )
-        } else {
-            format!("{name}: {n}, below the ceiling {ceiling}: lower the ceiling to {n} to bank it")
-        }
-    );
 }
 
 /// The offset of the `{` that opens a match body after its scrutinee, `None` when a `;` comes first.
@@ -201,16 +176,26 @@ fn is_null_body(body: &str) -> bool {
 
 /// Every wildcard arm answering NULL or a default in the product code under `src/source/`.
 fn wildcard_null_arms() -> Vec<String> {
-    product_sources("src/source")
-        .into_iter()
-        .flat_map(|(file, code)| {
-            match_arms(&code)
-                .into_iter()
-                .filter(|(_, p, b)| is_wildcard(p) && is_null_body(b))
-                .map(move |(_, p, b)| format!("{}: {p} => {b}", rel(&file)))
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    number(
+        product_sources("src/source")
+            .into_iter()
+            .flat_map(|(file, code)| {
+                match_arms(&code)
+                    .into_iter()
+                    .filter(|(_, p, b)| is_wildcard(p) && is_null_body(b))
+                    .map(|(at, p, b)| {
+                        format!(
+                            "{}::{}: {} => {}",
+                            rel(&file),
+                            enclosing_fn(&code, at),
+                            squash(&p),
+                            squash(&b)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+    )
 }
 
 /// Whether a field named `name` holds a credential: it ends in a credential word, and is not a secret-manager name such as `url_secret`.
@@ -336,53 +321,54 @@ fn named_fields(code: &str) -> Vec<(String, String)> {
 
 /// Every credential-named field typed `String` or `Option<String>` in `src/config/`'s product code.
 fn credential_strings() -> Vec<String> {
-    product_sources("src/config")
-        .into_iter()
-        .flat_map(|(file, code)| {
-            named_fields(&code)
-                .into_iter()
-                .filter(|(n, t)| {
-                    credential_name(n) && matches!(t.as_str(), "String" | "Option<String>")
-                })
-                .map(move |(n, t)| format!("{}: {n}: {t}", rel(&file)))
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    number(
+        product_sources("src/config")
+            .into_iter()
+            .flat_map(|(file, code)| {
+                named_fields(&code)
+                    .into_iter()
+                    .filter(|(n, t)| {
+                        credential_name(n) && matches!(t.as_str(), "String" | "Option<String>")
+                    })
+                    .map(move |(n, t)| format!("{}: {n}: {t}", rel(&file)))
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+    )
 }
 
-/// The text needles in `code`: a blanked literal searched for (`contains("…")`), compared to (`== "…"`), or listed in an all-literal array.
-fn text_needles(code: &str) -> usize {
-    let searched = code
+/// The offset of every text needle in `code`: a blanked literal searched for (`contains("…")`), compared to (`== "…"`), or listed in an all-literal array.
+fn needle_offsets(code: &str) -> Vec<usize> {
+    let mut at: Vec<usize> = code
         .match_indices("\"\"")
         .filter(|(at, _)| {
             let before = code[..*at].trim_end();
             before.ends_with("contains(") || before.ends_with("==")
         })
-        .count();
-    let listed: usize = code
-        .match_indices('[')
-        .filter_map(|(at, _)| {
-            let rest = &code[at + 1..];
-            let end = rest.find([']', '['])?;
-            (rest.as_bytes()[end] == b']').then(|| &rest[..end])
-        })
-        .map(|inner| {
-            let items: Vec<&str> = inner
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !items.is_empty() && items.iter().all(|s| *s == "\"\"") {
-                items.len()
-            } else {
-                0
-            }
-        })
-        .sum();
-    searched + listed
+        .map(|(at, _)| at)
+        .collect();
+    for (open, _) in code.match_indices('[') {
+        let rest = &code[open + 1..];
+        let Some(end) = rest.find([']', '[']) else {
+            continue;
+        };
+        if rest.as_bytes()[end] != b']' {
+            continue;
+        }
+        let items: Vec<&str> = rest[..end]
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !items.is_empty() && items.iter().all(|s| *s == "\"\"") {
+            at.extend(std::iter::repeat_n(open, items.len()));
+        }
+    }
+    at.sort();
+    at
 }
 
-/// The text needles of the product code of the crate-relative `file`, listed one line per needle.
+/// The text needles of the product code of the crate-relative `file`, one id per needle: its function and its number there.
 fn needles_in(file: &str) -> Vec<String> {
     let found = product_sources("src")
         .into_iter()
@@ -390,47 +376,46 @@ fn needles_in(file: &str) -> Vec<String> {
         .unwrap_or_else(|| {
             panic!("{file} is not a product file under src/: the ratchet reads the wrong path")
         });
-    (1..=text_needles(&found.1))
-        .map(|k| format!("{file}: needle {k}"))
-        .collect()
+    number(
+        needle_offsets(&found.1)
+            .into_iter()
+            .map(|at| format!("{file}::{}: needle", enclosing_fn(&found.1, at)))
+            .collect(),
+    )
 }
 
 #[test]
-fn wildcard_null_arms_only_shrink() {
+fn wildcard_null_arms_are_each_listed() {
     hold(
-        "wildcard arms answering NULL or a default under src/source/",
+        "wildcard-null-arms",
         &wildcard_null_arms(),
-        WILDCARD_NULL_ARM_CEILING,
         "a value no arm reads is refused with a code (`rivet_bail!(codes::SOURCE_OVERRIDE_WIRE_MISMATCH, …)`), never written as NULL (ADR 0040 I2)",
     );
 }
 
 #[test]
-fn credential_string_fields_only_shrink() {
-    hold(
-        "credential-named String fields under src/config/",
+fn credential_string_fields_are_each_listed() {
+    hold_none(
+        "credential-string-fields",
         &credential_strings(),
-        CREDENTIAL_STRING_CEILING,
         "a new credential is read through a reference (`*_env`, `*_file`, `*_secret`) or the I1 `Secret` type, never held as a String (ADR 0040 I1)",
     );
 }
 
 #[test]
-fn redaction_needles_only_shrink() {
+fn redaction_needles_are_each_listed() {
     hold(
-        "text needles in src/redact.rs",
+        "redaction-text-needles",
         &needles_in("src/redact.rs"),
-        REDACT_NEEDLE_CEILING,
         "a new secret shape is masked by its type at the sink, not by one more pattern in the text scanner (ADR 0040 D5)",
     );
 }
 
 #[test]
-fn retry_text_needles_only_shrink() {
+fn retry_text_needles_are_each_listed() {
     hold(
-        "message-text needles in src/error/retry.rs",
+        "retry-text-needles",
         &needles_in("src/error/retry.rs"),
-        RETRY_NEEDLE_CEILING,
         "a new retry or exit verdict is decided by the error's type or code before its text, not by one more `msg.contains` (ADR 0040 I4)",
     );
 }
@@ -500,5 +485,5 @@ fn the_needle_reader_counts_searched_compared_and_listed_literals_only() {
                 fn g() -> String { format!(\"\", x) + \"\" }\n\
                 const T: [&str; 2] = [\"\", \"\",];\n\
                 fn h(c: &str) -> bool { c.starts_with(\"\") || [a, \"\"].contains(&c) }";
-    assert_eq!(text_needles(code), 7);
+    assert_eq!(needle_offsets(code).len(), 7);
 }
