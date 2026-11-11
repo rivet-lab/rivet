@@ -671,7 +671,11 @@ Print a Markdown CLI reference (every command + flag) to stdout, generated from 
 
 rivet schema cli > docs/reference/cli-reference.md
 
-**Usage:** `rivet schema cli`
+**Usage:** `rivet schema cli [OPTIONS]`
+
+###### **Options:**
+
+* `--json` — Print the command role registry as JSON instead: every leaf command, its role and the invariants that apply
 
 
 

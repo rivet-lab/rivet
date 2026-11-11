@@ -26,6 +26,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 try:
     from .stand_disk import disk_reason
@@ -42,7 +43,9 @@ DOWN_CLASS = "57"
 WATCH = "stand:"
 TCP_DEADLINE = 6.0
 HTTP_DEADLINE = 15.0
+ORACLE_PANIC_TEXTS = ("oracle error: ", "rig oracle printed no JSON verdict", "oracle verdict ", "the rig oracle's pairs: ")
 PANIC = re.compile(r"live test requires (?:\w+ reachable on |`[^`]+` healthy|the stand at )")
+ORACLE_PANIC = re.compile(r"^[ \t]*(?:" + "|".join(map(re.escape, ORACLE_PANIC_TEXTS)) + r").*", re.M)
 
 
 class Kind(str, Enum):
@@ -89,8 +92,11 @@ def classify(evidence: Iterable[StandVerdict]) -> StandVerdict:
 
 
 def from_text(text: str) -> StandVerdict:
-    """DOWN when a live cell's panic says its stand was not there (`require_alive`), else ALIVE."""
-    return down(text.strip()[:300]) if PANIC.search(text) else ALIVE
+    """DOWN when a live cell's panic says its stand was not there (`require_alive`), UNREADABLE when it is the rig oracle's own crash (a cell that graded nothing), else ALIVE."""
+    if PANIC.search(text):
+        return down(text.strip()[:300])
+    crash = ORACLE_PANIC.search(text)
+    return unreadable(crash.group(0).strip()[:300]) if crash else ALIVE
 
 
 class BringUpError(RuntimeError):
@@ -453,6 +459,15 @@ def self_test() -> None:
     assert from_text("live test requires `rivet-mongo` healthy (got \"starting\").").kind is Kind.DOWN
     assert from_text("live test requires the stand at http://x (refused)").kind is Kind.DOWN
     assert from_text("assertion failed: rows == 3").alive, "a product panic is not the stand"
+    for crash in ("oracle error: dev/release_oracle/rig_oracle.py grade exited exit status: 1 (an oracle bug, never a verdict)",
+                  "rig oracle printed no JSON verdict (EOF while parsing a value):",
+                  "oracle verdict has no `failures` array (the contract is `skip: str` or `failures: [str]`): {}",
+                  "the rig oracle's pairs: boom; got {}"):
+        assert from_text(crash).kind is Kind.UNREADABLE, f"the oracle's own crash graded nothing: {crash}"
+    for verdict in ("rig oracle: COUNT(*): source 10, delivered 6", "Connection reset by peer (os error 104)"):
+        assert from_text(verdict).alive, f"a finding or a product io error is a verdict: {verdict}"
+    verify_rs = (Path(__file__).resolve().parents[2] / "tests" / "common" / "verify.rs").read_text()
+    assert all(text in verify_rs for text in ORACLE_PANIC_TEXTS), "tests/common/verify.rs no longer panics with every text the classifier reads"
 
     ticks = [0.0]
     book = Book(lambda: ticks[0])

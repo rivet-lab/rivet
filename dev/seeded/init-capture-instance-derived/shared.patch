@@ -1,13 +1,13 @@
 diff --git a/src/init/yaml_scaffold.rs b/src/init/yaml_scaffold.rs
-index f81a0e56..df808567 100644
+index 11a4c5c3..493787c2 100644
 --- a/src/init/yaml_scaffold.rs
 +++ b/src/init/yaml_scaffold.rs
-@@ -1254,7 +1254,7 @@ omitting differ per engine — see cdc.md)",
+@@ -1407,7 +1407,7 @@ omitting differ per engine — see cdc.md)",
              slot_name(dest.cdc_name_stem.as_deref(), ident),
              per_cluster_note(dest)
          )),
 -        "mssql" => lines.push(match &info.cdc_capture_instance {
 +        "mssql" => lines.push(match &None::<String> {
              Some(ci) => format!(
-                 "      capture_instance: {ci}  # the instance cdc.change_tables holds for this table; needs SQL Server Agent"
-             ),
+                 "      capture_instance: {}  # the instance cdc.change_tables holds for this table; needs SQL Server Agent",
+                 yaml_quote_if_needed(ci)

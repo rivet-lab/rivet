@@ -17,6 +17,7 @@
 mod args;
 mod dispatch;
 mod params;
+mod roles;
 mod validate;
 
 pub use args::parse_cli;

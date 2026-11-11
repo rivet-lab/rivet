@@ -421,7 +421,7 @@ impl StateStore {
             return None;
         }
         Some(
-            Self::open_at_ref(&crate::state::StateRef::Postgres(url))
+            Self::open_at_ref(&crate::state::StateRef::Postgres(url.into()))
                 .expect("open the Postgres test state"),
         )
     }
@@ -749,7 +749,7 @@ mod tests {
             return crate::test_hook::skip_live("RIVET_TEST_STATE_URL is not a postgres URL");
         }
         // Two connections = two processes on the same shared Postgres state.
-        let pg = crate::state::StateRef::Postgres(url);
+        let pg = crate::state::StateRef::Postgres(url.into());
         let a = StateStore::open_at_ref(&pg).expect("conn A");
         let b = StateStore::open_at_ref(&pg).expect("conn B");
 

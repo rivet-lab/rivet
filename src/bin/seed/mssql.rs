@@ -29,7 +29,7 @@ const MSSQL_CHUNK_ROWS: usize = 200_000;
 
 pub fn seed_mssql(args: &Args) -> Result<()> {
     let rt = Runtime::new().context("mssql: tokio runtime build failed")?;
-    let mut client = rt.block_on(connect(&args.mssql_url))?;
+    let mut client = rt.block_on(connect(args.mssql_url.expose()))?;
 
     rt.block_on(async {
         run(&mut client, SCHEMA_DDL)
@@ -111,7 +111,7 @@ async fn connect(url: &str) -> Result<MssqlClient> {
     let parts = rivet::source::mssql::parse_mssql_url(url)?;
     let (user, pass, host, port, db) = (
         parts.user.as_str(),
-        parts.password.as_str(),
+        parts.password.expose(),
         parts.host.as_str(),
         parts.port,
         parts.database.as_str(),

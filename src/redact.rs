@@ -28,8 +28,8 @@
 //!
 //! What this module does NOT guarantee (documented in [`SECURITY.md`]):
 //! - Third-party driver/library output that bypasses our error wrappers.
-//! - In-memory secrets — `Zeroizing<String>` is used at the source-config
-//!   boundary, but anything copied into a `String` along the way may
+//! - In-memory secrets — every credential slot holds a [`crate::secret::Secret`],
+//!   but anything copied into a `String` along the way may
 //!   linger in process memory until allocator reuse.
 //! - Secrets the operator captured *outside* Rivet (shell history, env
 //!   var dumps, `ps` snapshots) — out of scope.

@@ -20,11 +20,13 @@ Per SQL engine, on the downloaded previous binary and this one:
   no-way-back the copy cannot be written (SQLite: a read-only state directory; Postgres: a role
              without CREATE on the database): this binary stops RIVET_STATE_BACKUP_FAILED, exit 1,
              writes no part; the previous release still opens the state and delivers the delta.
-             Both are SKIP when the previous release writes this binary's state schema: nothing
-             migrates, so there is no copy to leave or restore. Both run again from the pinned
-             release of an older state schema (`RIVET_MIGRATION_CARRIER_BIN`, the Makefile's
-             MIGRATION_CARRIER_TAG), so a real migration and its restore are graded every gate;
-             a carrier that is missing, or that writes this binary's schema, is a FAIL.
+             When the previous release writes this binary's state schema nothing migrates: no-way-back
+             is a SKIP (no copy can be refused) and way-back runs the leg that is left, the previous
+             release running again on the state this binary wrote, with no restore: exit 0, nothing
+             delivered twice. Both run again from the pinned release of an older state schema
+             (`RIVET_MIGRATION_CARRIER_BIN`, the Makefile's MIGRATION_CARRIER_TAG), so a real migration
+             and its restore are graded every gate; a carrier that is missing, or that writes this
+             binary's schema, is a FAIL.
   crash      the previous binary crashes mid keyset run → this binary resumes it: every
              id exactly once, and no part the crashed run left is written again (the crash
              checkpoint is the artifact; a restart from scratch rewrites the same part names).
@@ -67,6 +69,7 @@ import itertools
 import os
 import re
 import shutil
+import sys
 import sqlite3
 import tempfile
 from contextlib import contextmanager
@@ -371,14 +374,25 @@ def _schema_of(binary: Path, e: _Env) -> int | None:
     return _SCHEMAS[binary]
 
 
-def _nothing_migrates(led: Ledger, engine: str, store: str, tag: str, prev: Path, e: _Env, pinned: str) -> bool:
-    """True, with the row recorded, when `prev` writes this binary's state schema: SKIP for the previous release, FAIL for the pinned carrier, which exists to migrate."""
+def _same_schema(prev: Path, e: _Env) -> int | None:
+    """The state schema `prev` and this binary both write, or None when they differ or `prev` writes none."""
     was, now = _schema_of(prev, e), _schema_of(rivet_bin(), e)
-    if was is None or was != now:
+    return now if was is not None and was == now else None
+
+
+def _stale_carrier(led: Ledger, engine: str, store: str, tag: str, pinned: str, now: int) -> None:
+    """The FAIL row of a pinned carrier that writes this binary's own state schema: it exists to migrate."""
+    led.failed(engine, "-", SCEN, store, f"{tag}: the pinned {pinned} writes state schema v{now}, this binary's own: "
+               "nothing migrates; pin a release from before the last migration (MIGRATION_CARRIER_TAG)", "stale carrier")
+
+
+def _nothing_migrates(led: Ledger, engine: str, store: str, tag: str, prev: Path, e: _Env, pinned: str) -> bool:
+    """True, with the row recorded, when `prev` writes this binary's state schema: SKIP for the previous release, FAIL for the pinned carrier."""
+    now = _same_schema(prev, e)
+    if now is None:
         return False
     if pinned:
-        led.failed(engine, "-", SCEN, store, f"{tag}: the pinned {pinned} writes state schema v{now}, this binary's own: "
-                   "nothing migrates; pin a release from before the last migration (MIGRATION_CARRIER_TAG)", "stale carrier")
+        _stale_carrier(led, engine, store, tag, pinned, now)
     else:
         led.skipped(engine, "-", SCEN, store, f"{tag}: the previous release and this binary both write state schema "
                     f"v{now}: nothing migrates, so no copy is left to restore", "same schema", cause=SkipCause.DESIGN)
@@ -396,7 +410,7 @@ def _migration_carrier(led: Ledger) -> Path | None:
 
 
 def _way_back_leg(led: Ledger, prev: Path, root: Path, engine: str, url: str, state_url: str, pinned: str = "") -> None:
-    """The previous release (or the `pinned` carrier) runs twice, this binary once (migrates, leaves the copy), the doc's restore runs as written, the older release runs again from its own cursor: every id delivered, the overlap exactly this binary's delta."""
+    """The previous release (or the `pinned` carrier) runs twice, this binary once (migrates, leaves the copy), the doc's restore runs as written, the older release runs again from its own cursor: every id delivered, the overlap exactly this binary's delta; on one shared state schema nothing migrates, so the older release runs again on this binary's state with no restore and delivers nothing twice."""
     store = "pg-state" if state_url else "sqlite"
     tag = f"upgrade[{engine}/way-back/{store}{f'/from={pinned}' if pinned else ''}]"
     table = _case(engine, f"upg_back_{engine[:2]}_{os.getpid()}_{store.replace('-', '')}{'_p' if pinned else ''}")
@@ -404,26 +418,32 @@ def _way_back_leg(led: Ledger, prev: Path, root: Path, engine: str, url: str, st
         return led.failed(engine, "-", SCEN, store, f"{tag}: seed failed", "seed")
     e = _Env(prev, root, engine, url, table, "incremental", state_url)
     try:
-        if e.init.ok and _nothing_migrates(led, engine, store, tag, prev, e, pinned):
-            return
+        shared = _same_schema(prev, e) if e.init.ok else None
+        if shared is not None and pinned:
+            return _stale_carrier(led, engine, store, tag, pinned, shared)
         r1 = e.rivet(prev, "run", "-c", "c.yaml")
         ok = e.init.ok and r1.ok and _mutate(engine, url, table)
         r2 = e.rivet(prev, "run", "-c", "c.yaml")
         ok = ok and r2.ok and _later_rows(engine, url, table)
         r3 = e.rivet(rivet_bin(), "run", "-c", "c.yaml")
-        copies = _copies(e, state_url)
-        restore = _restore(e, state_url)
+        copies = [] if shared is not None else _copies(e, state_url)
+        restore = None if shared is not None else _restore(e, state_url)
         r4 = e.rivet(prev, "run", "-c", "c.yaml")
         got = _declared(e.dir / "output", "SELECT count(DISTINCT id), count(*) FROM {parts}")
-        want = (ROWS + 300 + LATER_ROWS, ROWS + 350 + 2 * LATER_ROWS)
-        if ok and r3.ok and copies and restore.ok and r4.ok and got and got[0] == want:
-            led.passed(engine, "-", SCEN, store, f"{tag}: this binary migrated the state and left {copies[0]}; the doc's "
-                       f"restore put it back; the previous release ran again (exit 0) from its own cursor — {want[0]} ids "
-                       f"each at least once, the overlap exactly this binary's {LATER_ROWS} rows")
+        want = (ROWS + 300 + LATER_ROWS, ROWS + 350 + (1 if shared is not None else 2) * LATER_ROWS)
+        undone = shared is not None or bool(copies and restore.ok)
+        if ok and r3.ok and undone and r4.ok and got and got[0] == want:
+            how = (f"this binary wrote the same state schema v{shared} and migrated nothing; the previous release ran again "
+                   f"on that state (exit 0), no restore — {want[0]} ids, nothing delivered twice" if shared is not None else
+                   f"this binary migrated the state and left {copies[0]}; the doc's restore put it back; the previous "
+                   f"release ran again (exit 0) from its own cursor — {want[0]} ids each at least once, the overlap "
+                   f"exactly this binary's {LATER_ROWS} rows")
+            led.passed(engine, "-", SCEN, store, f"{tag}: {how}")
         else:
             led.failed(engine, "-", SCEN, store, f"{tag}: prev ok={r1.ok},{r2.ok} this ok={r3.ok} copies={copies} "
-                       f"restore ok={restore.ok} prev again exit={r4.returncode} (ids, rows)={got} want {want}: "
-                       f"{first_error(r4.stderr if restore.ok else restore.stderr + restore.stdout)[:300]}", "way back")
+                       f"restore ok={restore.ok if restore else None} prev again exit={r4.returncode} (ids, rows)={got} "
+                       f"want {want}: {first_error(r4.stderr if restore is None or restore.ok else restore.stderr + restore.stdout)[:300]}",
+                       "way back")
     finally:
         _sql(engine, url, f"DROP TABLE IF EXISTS {table};")
 
@@ -931,7 +951,60 @@ def _self_test() -> None:
     sh, sql = restore_block("sqlite"), restore_block("pg-state")
     assert ".rivet_state.db.v" in sh and "cp -p" in sh, f"the SQLite restore the way-back leg runs:\n{sh}"
     assert "rivet_state_backup_v" in sql and "SET SCHEMA" in sql, f"the PostgreSQL restore the way-back leg runs:\n{sql}"
-    print("self-test ok: the way-back legs run the restore blocks under the doc's SQLite and PostgreSQL headings")
+    _way_back_same_schema_self_test()
+    print("self-test ok: the way-back legs run the restore blocks under the doc's SQLite and PostgreSQL headings; "
+          "on one shared state schema the previous release runs again on this binary's state instead of a SKIP")
+
+
+def _way_back_same_schema_self_test() -> None:
+    """The way-back leg on a shared state schema grades the previous release running again on this binary's state, never a SKIP."""
+    import contextlib
+    import io
+    from unittest import mock
+
+    prev, now, carrier = Path("/fake/prev"), Path("/fake/this"), Path("/fake/carrier")
+    delivered = (ROWS + 300 + LATER_ROWS, ROWS + 350 + LATER_ROWS)
+    migrated = (ROWS + 300 + LATER_ROWS, ROWS + 350 + 2 * LATER_ROWS)
+
+    def leg(schemas: dict, prev_again: int, declared: tuple, pinned: str = "", copies=("v1.bak",)) -> tuple[Ledger, list]:
+        calls: list = []
+
+        class FakeEnv:
+            def __init__(self, *a, **k):
+                self.init, self.dir = Proc([], 0, "", ""), Path(tempfile.gettempdir())
+
+            def rivet(self, binary, *args, **k):
+                calls.append(binary)
+                return Proc([], prev_again if len(calls) == 4 and binary != now else 0, "", "boom")
+
+        led = Ledger(colour=False)
+        with contextlib.ExitStack() as st:
+            for name, value in (("_Env", FakeEnv), ("_seed", lambda *a, **k: True), ("_mutate", lambda *a: True),
+                                ("_later_rows", lambda *a: True), ("_sql", lambda *a: Proc([], 0, "", "")),
+                                ("rivet_bin", lambda: now), ("_schema_of", lambda b, e: schemas[b]),
+                                ("_copies", lambda *a: list(copies)), ("_restore", lambda *a: Proc([], 0, "", "")),
+                                ("_declared", lambda *a: [declared])):
+                st.enter_context(mock.patch.object(sys.modules[__name__], name, value))
+            with contextlib.redirect_stdout(io.StringIO()):
+                _way_back_leg(led, carrier if pinned else prev, Path(tempfile.gettempdir()), "postgres", "", "", pinned)
+        return led, calls
+
+    def verdicts(led: Ledger) -> list[str]:
+        return [c.status.name for c in led.cells]
+
+    same, differ = {prev: 7, now: 7, carrier: 7}, {prev: 6, now: 7, carrier: 6}
+    led, calls = leg(same, 0, delivered)
+    assert verdicts(led) == ["PASS"] and calls == [prev, prev, now, prev], (verdicts(led), calls)
+    led, _ = leg(same, 1, delivered)
+    assert verdicts(led) == ["FAIL"], "the previous release failing on this binary's state must fail the leg"
+    led, _ = leg(same, 0, migrated)
+    assert verdicts(led) == ["FAIL"], "a previous release that re-reads what this binary delivered must fail the leg"
+    led, _ = leg(differ, 0, migrated)
+    assert verdicts(led) == ["PASS"], "two schemas keep the copy-and-restore leg"
+    led, _ = leg(differ, 0, migrated, copies=())
+    assert verdicts(led) == ["FAIL"], "a migration that leaves no copy must fail the leg"
+    led, calls = leg(same, 0, delivered, pinned="v0.30.0")
+    assert verdicts(led) == ["FAIL"] and not calls, "a pinned carrier on this binary's schema is a stale carrier, not a leg"
 
 
 if __name__ == "__main__":
