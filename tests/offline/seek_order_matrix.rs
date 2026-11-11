@@ -28,7 +28,7 @@ fn every_engine_has_key_types_and_is_graded() {
         engines.len() >= 4,
         "SqlEngine variants not read: {engines:?}"
     );
-    let live = read("tests/live/property_order_equals_seek.rs");
+    let live = read("tests/live/seek_order_matrix.rs");
     let key_types = live
         .split("fn key_types")
         .nth(1)
@@ -50,7 +50,7 @@ fn every_engine_has_key_types_and_is_graded() {
 
 #[test]
 fn every_mode_is_graded_and_every_engine_has_a_live_test() {
-    let live = read("tests/live/property_order_equals_seek.rs");
+    let live = read("tests/live/seek_order_matrix.rs");
     let modes = variants(&live, "pub(crate) enum Mode {");
     assert!(modes.len() >= 4, "Mode variants not read: {modes:?}");
     let list = live
@@ -76,6 +76,6 @@ fn every_mode_is_graded_and_every_engine_has_a_live_test() {
 
 #[test]
 fn the_make_target_and_the_live_module_exist() {
-    assert!(read("Makefile").contains("property-order-equals-seek:"));
-    assert!(read("tests/live_suite.rs").contains("mod property_order_equals_seek;"));
+    assert!(read("Makefile").contains("seek-order-matrix:"));
+    assert!(read("tests/live_suite.rs").contains("mod seek_order_matrix;"));
 }

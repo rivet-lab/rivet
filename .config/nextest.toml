@@ -24,7 +24,7 @@ filter = 'test(/^property_no_debris_after_stop::no_debris_and_an_equal_rerun_aft
 slow-timeout = { period = "300s", terminate-after = 24 }
 
 [[profile.default.overrides]]
-filter = 'test(/^property_order_equals_seek::/)'
+filter = 'test(/^seek_order_matrix::/)'
 slow-timeout = { period = "300s", terminate-after = 12 }
 
 [[profile.default.overrides]]
