@@ -128,6 +128,15 @@ fn shared_http() -> Result<reqwest::blocking::Client> {
     Ok(HTTP.get_or_init(|| built).clone())
 }
 
+/// The API endpoint: `override_` when set and not empty, else Google's; a remote `http://` one is refused, since every request carries the OAuth bearer token.
+fn api_endpoint(override_: Option<String>) -> Result<String> {
+    let Some(endpoint) = override_.filter(|s| !s.is_empty()) else {
+        return Ok(DEFAULT_ENDPOINT.to_string());
+    };
+    crate::config::url::require_https_bigquery_endpoint(&endpoint)?;
+    Ok(endpoint)
+}
+
 impl BigQueryApi {
     /// Build a client for `project`, resolving the token source eagerly so a
     /// missing credential is reported before the first job is enqueued.
@@ -140,10 +149,7 @@ impl BigQueryApi {
                 .filter(|s| !s.is_empty()),
             dataset: None,
             dataset_location: std::sync::OnceLock::new(),
-            endpoint: std::env::var("RIVET_BQ_API_ENDPOINT")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+            endpoint: api_endpoint(std::env::var("RIVET_BQ_API_ENDPOINT").ok())?,
             auth: Auth::resolve(&http, credential)?,
             http,
             journal: Default::default(),
@@ -1140,6 +1146,31 @@ pub(crate) fn kind_of_resource(meta: Option<&Value>) -> Result<super::ObjectKind
 
 #[cfg(test)]
 mod tests {
+    /// The API endpoint is Google's by default; a remote `http://` override that would carry the bearer token is refused by code, https and loopback are taken.
+    #[test]
+    fn a_remote_plaintext_api_endpoint_is_refused() {
+        assert_eq!(super::api_endpoint(None).unwrap(), super::DEFAULT_ENDPOINT);
+        assert_eq!(
+            super::api_endpoint(Some(String::new())).unwrap(),
+            super::DEFAULT_ENDPOINT
+        );
+        for ok in [
+            "https://bq.example.com",
+            "http://127.0.0.1:9050",
+            "http://localhost:9050",
+        ] {
+            assert_eq!(super::api_endpoint(Some(ok.into())).unwrap(), ok);
+        }
+        let e = super::api_endpoint(Some("http://bq.internal:9050".into())).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_CONFIG_REMOTE_PLAINTEXT")
+        );
+        let text = format!("{e:#}");
+        assert!(text.contains("`bq.internal:9050`"), "{text}");
+        assert!(text.contains("Unset `RIVET_BQ_API_ENDPOINT`"), "{text}");
+    }
+
     /// A request through the shared client ends at `HTTP_TIMEOUT`: a server that accepts and never answers is not waited on past it, nor given up on before it.
     #[test]
     fn the_shared_client_gives_up_on_a_silent_server_at_the_http_timeout() {

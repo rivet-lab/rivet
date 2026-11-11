@@ -96,6 +96,14 @@ scenarios:
     mongo:    { na: "same engine-agnostic TLS gate; pinned once on Postgres" }
     oracle:   { na: "require_tls_or_loopback is the shared gate; oracle::connect calls it first — pinned once on Postgres" }
 
+  - id: remote_plaintext_sink_refused
+    what: "a remote (non-loopback) plaintext http:// ClickHouse load.url or Slack webhook_url → refused at config load with RIVET_CONFIG_REMOTE_PLAINTEXT (exit 1); a remote http:// RIVET_BQ_API_ENDPOINT stops the BigQuery load with the same code; https and loopback stay allowed"
+    postgres: { test: every_refusal_is_coded_and_names_the_true_cause }
+    mysql:    { test: every_refusal_is_coded_and_names_the_true_cause }
+    mssql:    { test: every_refusal_is_coded_and_names_the_true_cause }
+    mongo:    { test: every_refusal_is_coded_and_names_the_true_cause }
+    oracle:   { test: every_refusal_is_coded_and_names_the_true_cause }
+
   - id: ca_file_other_ca_is_refused
     what: "`tls.ca_file` names one CA and the server certificate was signed by another: refused under `verify-ca` and `verify-full`, and a certificate signed by the ca_file CA is accepted"
     postgres: { test: postgres_wrong_ca_is_refused }
