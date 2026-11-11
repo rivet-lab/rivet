@@ -28,12 +28,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::secret::Secret;
 use anyhow::{Context as _, Result};
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
 use serde_json::{Map, Number, Value, json};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 
 #[cfg(not(test))]
 use super::bq_rest::poll_interval;
@@ -80,7 +80,7 @@ struct Claims {
 }
 
 struct CachedToken {
-    token: Zeroizing<String>,
+    token: Secret,
     refresh_at: u64,
 }
 
@@ -102,8 +102,8 @@ impl std::fmt::Debug for KeyPairSigner {
 
 impl KeyPairSigner {
     /// A signer for `user` of `account` from an unencrypted PEM private key (PKCS#8 or PKCS#1).
-    pub(crate) fn new(account: &Account, user: &str, pem: &Zeroizing<String>) -> Result<Self> {
-        if pem.contains("ENCRYPTED") {
+    pub(crate) fn new(account: &Account, user: &str, pem: &Secret) -> Result<Self> {
+        if pem.expose().contains("ENCRYPTED") {
             return Err(crate::error::coded(
                 codes::LOAD_WAREHOUSE_AUTH_FAILED,
                 "the Snowflake private key is passphrase-protected and rivet reads only an \
@@ -119,9 +119,9 @@ impl KeyPairSigner {
                  key-pair auth takes a 2048-bit RSA key in PKCS#8 form (`BEGIN PRIVATE KEY`)",
             )
         };
-        let key =
-            jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).map_err(|_| unreadable())?;
-        let fingerprint = public_key_fingerprint(pem).ok_or_else(unreadable)?;
+        let key = jsonwebtoken::EncodingKey::from_rsa_pem(pem.expose().as_bytes())
+            .map_err(|_| unreadable())?;
+        let fingerprint = public_key_fingerprint(pem.expose()).ok_or_else(unreadable)?;
         let qualified = format!("{}.{}", account.jwt_name, user.to_ascii_uppercase());
         Ok(Self {
             issuer: format!("{qualified}.{fingerprint}"),
@@ -141,7 +141,7 @@ impl KeyPairSigner {
     }
 
     /// The token to send at `now` (unix seconds): the cached one until it nears its end.
-    pub(crate) fn token(&self, now: u64) -> Result<Zeroizing<String>> {
+    pub(crate) fn token(&self, now: u64) -> Result<Secret> {
         let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = cached.as_ref()
             && now < c.refresh_at
@@ -159,7 +159,7 @@ impl KeyPairSigner {
                 "signing the Snowflake JWT with the private key failed",
             )
         })?;
-        let token = Zeroizing::new(signed);
+        let token = Secret::new(signed);
         *cached = Some(CachedToken {
             token: token.clone(),
             refresh_at: now + JWT_LIFETIME_SECS - JWT_REFRESH_MARGIN_SECS,
@@ -195,20 +195,18 @@ fn unix_now() -> u64 {
 }
 
 /// Read the key file once, into memory that is zeroed on drop.
-pub(crate) fn read_key_file(path: &str) -> Result<Zeroizing<String>> {
-    std::fs::read_to_string(path)
-        .map(Zeroizing::new)
-        .map_err(|e| {
-            crate::error::coded(
-                codes::LOAD_WAREHOUSE_AUTH_FAILED,
-                format!(
-                    "cannot read the Snowflake private key `{}`: {} — set `load.private_key_path` \
+pub(crate) fn read_key_file(path: &str) -> Result<Secret> {
+    std::fs::read_to_string(path).map(Secret::new).map_err(|e| {
+        crate::error::coded(
+            codes::LOAD_WAREHOUSE_AUTH_FAILED,
+            format!(
+                "cannot read the Snowflake private key `{}`: {} — set `load.private_key_path` \
                  (or RIVET_SNOWFLAKE_KEY) to a readable PKCS#8 key file",
-                    path.escape_default(),
-                    e.kind()
-                ),
-            )
-        })
+                path.escape_default(),
+                e.kind()
+            ),
+        )
+    })
 }
 
 // ── the client ───────────────────────────────────────────────────────────────
@@ -407,7 +405,7 @@ impl SnowflakeApi {
             let mut req = self
                 .http
                 .request(method.clone(), url)
-                .header("Authorization", format!("Bearer {}", token.as_str()))
+                .header("Authorization", format!("Bearer {}", token.expose()))
                 .header("X-Snowflake-Authorization-Token-Type", "KEYPAIR_JWT")
                 .header("Accept", "application/json");
             if let Some(b) = body {
@@ -627,9 +625,9 @@ fn typed_cell(kind: &CellKind, cell: &Value) -> Value {
 #[cfg(test)]
 pub(crate) mod stand {
     use super::{Account, Context, KeyPairSigner, SnowflakeApi};
+    use crate::secret::Secret;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::{Arc, Mutex};
-    use zeroize::Zeroizing;
 
     /// One request the stand received.
     #[derive(Debug, Clone)]
@@ -664,7 +662,7 @@ pub(crate) mod stand {
     /// The signer every stand client uses: the throwaway test key, for `MYORG-ACCT` and `RIVET`.
     pub(crate) fn test_signer() -> KeyPairSigner {
         let account = Account::parse("myorg-acct").expect("the test account");
-        let pem = Zeroizing::new(crate::gcp_auth::TEST_RSA_PKCS8_PEM.to_string());
+        let pem = Secret::new(crate::gcp_auth::TEST_RSA_PKCS8_PEM.to_string());
         KeyPairSigner::new(&account, "rivet", &pem).expect("the test key")
     }
 
@@ -844,7 +842,7 @@ mod tests {
         rules.validate_exp = false;
         rules.required_spec_claims.clear();
         let decoded = jsonwebtoken::decode::<Value>(
-            token.as_str(),
+            token.expose(),
             &jsonwebtoken::DecodingKey::from_rsa_pem(public.as_bytes()).unwrap(),
             &rules,
         )
@@ -894,12 +892,12 @@ mod tests {
     fn the_token_is_cached_until_five_minutes_before_it_ends_and_forgotten_on_demand() {
         let signer = test_signer();
         let first = signer.token(T0).unwrap();
-        assert_eq!(signer.token(T0 + 2999).unwrap().as_str(), first.as_str());
+        assert_eq!(signer.token(T0 + 2999).unwrap().expose(), first.expose());
         let renewed = signer.token(T0 + 3000).unwrap();
-        assert_ne!(renewed.as_str(), first.as_str());
+        assert_ne!(renewed.expose(), first.expose());
         signer.forget();
         let after_forget = signer.token(T0 + 3001).unwrap();
-        assert_ne!(after_forget.as_str(), renewed.as_str());
+        assert_ne!(after_forget.expose(), renewed.expose());
         let claims = |t: &str| {
             use base64::Engine as _;
             let payload = t.split('.').nth(1).unwrap();
@@ -908,14 +906,14 @@ mod tests {
                 .unwrap();
             serde_json::from_slice::<Value>(&raw).unwrap()
         };
-        assert_eq!(claims(renewed.as_str())["exp"], json!(T0 + 3000 + 3300));
-        assert_eq!(claims(after_forget.as_str())["iat"], json!(T0 + 3001));
+        assert_eq!(claims(renewed.expose())["exp"], json!(T0 + 3000 + 3300));
+        assert_eq!(claims(after_forget.expose())["iat"], json!(T0 + 3001));
     }
 
     #[test]
     fn a_key_that_cannot_sign_is_refused_with_its_remedy_and_never_echoed() {
         let account = Account::parse("myorg-acct").unwrap();
-        let pem = |text: &str| Zeroizing::new(text.to_string());
+        let pem = |text: &str| Secret::new(text.to_string());
         let e = KeyPairSigner::new(
             &account,
             "rivet",
@@ -945,7 +943,7 @@ mod tests {
         let path = dir.path().join("rsa_key.p8");
         std::fs::write(&path, "KEY BYTES").unwrap();
         assert_eq!(
-            read_key_file(path.to_str().unwrap()).unwrap().as_str(),
+            read_key_file(path.to_str().unwrap()).unwrap().expose(),
             "KEY BYTES"
         );
         let missing = dir.path().join("absent.p8");
@@ -963,9 +961,9 @@ mod tests {
         api.run("SELECT 1").unwrap();
         let token = api.signer.token(unix_now()).unwrap();
         let shown = format!("{api:?} {:?}", api.signer);
-        assert!(!shown.contains(token.as_str()), "{shown}");
+        assert!(!shown.contains(token.expose()), "{shown}");
         assert!(!shown.contains("PRIVATE KEY"), "{shown}");
-        assert!(!shown.contains(&token.as_str()[..40]), "{shown}");
+        assert!(!shown.contains(&token.expose()[..40]), "{shown}");
         assert!(shown.contains("MYORG-ACCT.RIVET"), "{shown}");
     }
 

@@ -3790,6 +3790,56 @@ seeds:
         cells: ["lib:a_relative_path_has_moved_only_when_the_old_place_alone_holds_the_export"]
       oracle:
         cells: ["lib:a_relative_path_has_moved_only_when_the_old_place_alone_holds_the_export"]
+  - name: url-file-follows-the-cwd
+    class: "a relative path the config names (`url_file`, `tls.ca_file`, `load.private_key_path`, `load.ca_file`) is read against the directory rivet is started from while state and destination resolve beside the config, so a run from another directory delivers a different database into the config's destination, exit 0"
+    history: "2026-11-08 - audit H6-F1: `rivet run -c ../proj/rivet.yaml` from a directory holding its own `db.url` delivered 3 rows of the other database into `proj/out`, exit 0, and `run_status` held two successes of one export from two source URLs; fixed by anchoring every relative file field to the config file's directory once at config load (`Config::anchor_files` through `Anchor::file`)"
+    scope: source
+    patch: url-file-follows-the-cwd/shared.patch
+    engines:
+      postgres:
+        cells:
+          - "lib:a_relative_url_file_is_read_beside_the_config"
+          - "lib:every_path_field_is_anchored_beside_the_config"
+          - url_file_follows_the_config_postgres
+      mysql:
+        cells:
+          - "lib:every_path_field_is_anchored_beside_the_config"
+          - url_file_follows_the_config_mysql
+      mssql:
+        cells:
+          - "lib:every_path_field_is_anchored_beside_the_config"
+          - url_file_follows_the_config_mssql
+      mongo:
+        cells: ["lib:a_relative_url_file_is_read_beside_the_config", "lib:every_path_field_is_anchored_beside_the_config"]
+      oracle:
+        cells:
+          - "lib:every_path_field_is_anchored_beside_the_config"
+          - url_file_follows_the_config_oracle
+  - name: url-file-moved-by-the-upgrade
+    class: "the transition guard for a relative config file does not fire, so the upgrade to the config-anchored path silently stops reading the file under the working directory: a run that used to read it now reads another file or none, exit 0 or a message naming the wrong cause"
+    history: "2026-11-08 - audit H6-F1 (precedent #617 and #773): the run from the parent directory exited 1 `RIVET_CONFIG_SECRET_UNSET` with a hint naming the wrong cause while the file existed beside the config; fixed by `Anchor::file`, the one decision every relative file field of `Config::anchor_files` makes before any command opens it"
+    scope: source
+    patch: url-file-moved-by-the-upgrade/shared.patch
+    engines:
+      postgres:
+        cells:
+          - "lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"
+          - url_file_only_the_working_directory_holds_postgres
+          - a_url_file_moved_by_upgrading_the_pinned_release_is_refused_until_the_file_follows
+      mysql:
+        cells:
+          - "lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"
+          - url_file_only_the_working_directory_holds_mysql
+      mssql:
+        cells:
+          - "lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"
+          - url_file_only_the_working_directory_holds_mssql
+      mongo:
+        cells: ["lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"]
+      oracle:
+        cells:
+          - "lib:a_file_only_the_working_directory_holds_is_refused_naming_both_places"
+          - url_file_only_the_working_directory_holds_oracle
   - name: foreign-lease-taken-before-expiry
     class: "a run lease whose holder names another host is judged by a local pid probe, so a run on a live host loses its lease to a run here before the lease expires"
     history: "2026-10-16 - harness: the dead-owner cells damaged `chunk-run:<export>` after the run lease became `chunk-run:<export>@<source hash>`, so on a PostgreSQL state they failed on `changed 0 row(s)` and on SQLite they were skipped; no cell could catch a takeover rule that ignored the host (fixed by deriving the key through `run_lease_key` and keeping a Postgres state in the cell)"

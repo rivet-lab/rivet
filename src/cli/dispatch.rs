@@ -305,7 +305,7 @@ fn dispatch_schema(what: SchemaKind) -> Result<()> {
 
 /// Parsed `rivet cdc` arguments (clap field types).
 struct CdcArgs {
-    source: Option<String>,
+    source: Option<crate::secret::Secret>,
     source_env: Option<String>,
     source_file: Option<String>,
     server_id: u32,
@@ -347,7 +347,7 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
         // The engine's knobs come from the CLI flags for the URL's engine; the CLI
         // has no source config block, so Mongo defaults to relaxed JSON (canonical
         // rides the config-driven `rivet run` path via `source.mongo.json`).
-        engine: match CdcEngine::from_url(&url)? {
+        engine: match CdcEngine::from_url(url.expose())? {
             CdcEngine::Mysql => CdcEngineOpts::Mysql {
                 server_id: a.server_id,
                 // `--table` IS the routing filter on this path; empty means capture
@@ -771,7 +771,7 @@ impl InitSnowflakeFlags {
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_init(
-    source: Option<String>,
+    source: Option<crate::secret::Secret>,
     source_env: Option<String>,
     source_file: Option<String>,
     table: Option<String>,
@@ -788,7 +788,7 @@ fn dispatch_init(
     azure: Option<init::InitAzureTarget>,
     bigquery_project: Option<String>,
     bigquery_dataset: Option<String>,
-    clickhouse_url: Option<String>,
+    clickhouse_url: Option<crate::secret::Secret>,
     clickhouse_database: Option<String>,
     clickhouse_user: String,
     snowflake: InitSnowflakeFlags,
@@ -829,7 +829,7 @@ fn dispatch_init(
     let filter = init::TableFilter { include, exclude };
     let tls_config = resolve_init_tls(tls, tls_ca)?;
     init::init(
-        &source_url,
+        source_url.expose(),
         &provenance,
         table.as_deref(),
         schema.as_deref(),
@@ -1159,10 +1159,10 @@ fn show_runs(config: &str, running_only: bool, last: usize, json: bool) -> Resul
 /// loudly on a typo'd id and no-ops honestly on an already-terminal row —
 /// only a `running` row is ever touched.
 /// `rivet state vacuum`: compact a SQLite state DB and print the size change.
-fn copy_state_cmd(config: &str, to: Option<String>) -> Result<()> {
+fn copy_state_cmd(config: &str, to: Option<crate::secret::Secret>) -> Result<()> {
     require_config_file(config)?;
     let (source, target) = crate::state::copy::endpoints(config, to)?;
-    let report = crate::state::copy::copy_sqlite_to_postgres(&source, &target)?;
+    let report = crate::state::copy::copy_sqlite_to_postgres(&source, target.expose())?;
     for (table, rows) in &report.tables {
         println!("  {table}: {rows} row(s)");
     }

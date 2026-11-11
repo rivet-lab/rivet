@@ -347,27 +347,14 @@ def run_engine(engine: str, work: Path, progress=lambda s: None) -> list[Result]
     return results
 
 
-def record(led: Ledger, engine: str, results: list[Result]) -> None:
-    """Write one engine's results to the ledger: a FAIL row per failure class, or the PASS row with the counts."""
-    groups = nsn.summary(engine, results)
-    bad = {k: v for k, v in groups.items() if k and k != NOT_GRADED and v}
-    if groups[NOT_GRADED]:
-        led.skipped(engine, "-", SCENARIO, "-", f"{SCENARIO}[{engine}]: {len(groups[NOT_GRADED])} of {len(results)} cells not graded: {groups[NOT_GRADED][0].detail[:200]}",
-                    cause=SkipCause.ENV if CDC_STAND.get(engine) else SkipCause.REDUCED, target=CDC_STAND.get(engine) or engine)
-    for klass, rs in bad.items():
-        led.failed(engine, "-", SCENARIO, "-", f"{SCENARIO}[{engine}]: {klass} over {len(nsn.pairs_of(rs))} source->override pairs #{nsn.digest(rs)}",
-                   "\n".join(f"{r.cell}: {r.detail}" for r in sorted(rs, key=lambda r: r.cell)[:60]))
-    if not bad and len(groups[NOT_GRADED]) < len(results):
-        led.passed(engine, "-", SCENARIO, "-", f"{SCENARIO}[{engine}]: {len(results)} cells graded by a second reader")
-
-
 def verify_no_silent_null_cdc(led: Ledger) -> None:
     """Every engine's change stream: snapshot, change and DDL legs, override targets and MySQL row images."""
     work = Path(os.environ.get("RIVET_ORACLE_WORK") or tempfile.gettempdir()) / "no_silent_null_cdc"
     for engine in nsn.axes()["engines"]:
         t0 = time.time()
         results = run_engine(engine, work / engine, led.phase)
-        record(led, engine, results)
+        nsn.record(led, engine, results, scenario=SCENARIO, cause=SkipCause.ENV if CDC_STAND.get(engine) else SkipCause.REDUCED,
+                   target=CDC_STAND.get(engine) or engine)
         led.ok(f"{engine}: {len(results)} cdc cells in {time.time() - t0:.0f}s")
 
 
@@ -429,12 +416,10 @@ def main() -> int:
         for k, g in nsn.summary(name, rs).items():
             print(f"{name:9} {k or 'ok':18} {len(g)}")
     lines = [nsn.verdict_line(r).replace(nsn.SCENARIO, SCENARIO, 1) for r in sorted(results, key=lambda r: r.cell)]
-    red = sum(1 for r in results if r.klass and r.klass != NOT_GRADED)
-    ng = sum(1 for r in results if r.klass == NOT_GRADED)
-    print("\n".join([*lines, f"{SCENARIO} summary PASS={len(results) - red - ng} RED={red} NOT_GRADED={ng}"]))
+    print("\n".join([*lines, nsn.summary_line(results).replace(nsn.SCENARIO, SCENARIO, 1)]))
     if ns.out:
         Path(ns.out).write_text("\n".join(json.dumps(r.__dict__) for r in results))
-    return 0
+    return nsn.exit_code(results)
 
 
 if __name__ == "__main__":

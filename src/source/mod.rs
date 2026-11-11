@@ -641,7 +641,7 @@ pub fn create_source(config: &SourceConfig) -> Result<Box<dyn Source>> {
     warn_if_tls_disabled(config);
     connect(
         config.source_type,
-        &url,
+        url.expose(),
         config.tls.as_ref(),
         config.mongo.as_ref(),
     )
@@ -918,7 +918,10 @@ pub(crate) fn warn_if_tls_disabled(config: &SourceConfig) {
     // a newcomer's laptop. Resolve best-effort — if the URL can't be resolved we
     // fall through and warn (fail-safe). The real CWE-319 signal still fires for
     // any remote host.
-    if config.resolve_url().is_ok_and(|u| host_is_loopback(&u)) {
+    if config
+        .resolve_url()
+        .is_ok_and(|u| host_is_loopback(u.expose()))
+    {
         return;
     }
     static WARNED: std::sync::Once = std::sync::Once::new();

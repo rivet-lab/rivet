@@ -303,7 +303,7 @@ def main() -> int:
     if ns.out:
         Path(ns.out).write_text("\n".join(json.dumps(r.__dict__) for r in results))
     print(f"{len(results)} cells in {time.time() - t0:.0f}s")
-    return 0
+    return nsn.exit_code(results)
 
 
 if __name__ == "__main__":

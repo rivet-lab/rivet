@@ -130,7 +130,7 @@ pub(crate) fn run_capture(
     }
     let mut resolver = match cap.meta {
         Some(src) => CdcSchemaResolver::lent(src),
-        None => match CdcSchemaResolver::connect_as(engine, &url, tls.as_ref()) {
+        None => match CdcSchemaResolver::connect_as(engine, url.expose(), tls.as_ref()) {
             Ok(r) => r,
             Err(e) => return (Vec::new(), Err(e)),
         },

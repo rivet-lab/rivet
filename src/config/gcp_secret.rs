@@ -6,6 +6,8 @@ use std::sync::{Mutex, OnceLock};
 use base64::Engine as _;
 use zeroize::Zeroizing;
 
+use crate::secret::Secret;
+
 use crate::gcp_auth;
 use anyhow::{Context as _, Result};
 
@@ -18,7 +20,7 @@ const ENDPOINT: &str = "https://secretmanager.googleapis.com/v1";
 /// `reference` is `projects/<project>/secrets/<secret>` (the `latest` version) or
 /// `projects/<project>/secrets/<secret>/versions/<n|latest>`. The token comes from the
 /// same ADC credential the BigQuery and GCS legs use (`GOOGLE_APPLICATION_CREDENTIALS`).
-pub(crate) fn gcp_secret(reference: &str) -> Result<Zeroizing<String>> {
+pub(crate) fn gcp_secret(reference: &str) -> Result<Secret> {
     let name = version_name(reference)?;
     let mut cache = cache().lock().expect("secret cache poisoned");
     if let Some(value) = cache.get(&name) {
@@ -36,8 +38,8 @@ pub(crate) fn gcp_secret(reference: &str) -> Result<Zeroizing<String>> {
     Ok(fetched)
 }
 
-fn cache() -> &'static Mutex<HashMap<String, Zeroizing<String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Zeroizing<String>>>> = OnceLock::new();
+fn cache() -> &'static Mutex<HashMap<String, Secret>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Secret>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
@@ -48,7 +50,7 @@ pub(crate) fn prime(reference: &str, value: &str) {
     cache()
         .lock()
         .expect("secret cache poisoned")
-        .insert(name, Zeroizing::new(value.to_string()));
+        .insert(name, Secret::new(value));
 }
 
 /// The full version resource name `reference` names; refuses anything else.
@@ -83,7 +85,7 @@ fn valid_id(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-fn fetch_with_adc(endpoint: &str, name: &str) -> Result<Zeroizing<String>> {
+fn fetch_with_adc(endpoint: &str, name: &str) -> Result<Secret> {
     let Some(creds) = gcp_auth::load_adc_credentials()? else {
         crate::rivet_bail!(
             codes::CONFIG_GCP_SECRET_UNREADABLE,
@@ -100,7 +102,7 @@ fn fetch_with_adc(endpoint: &str, name: &str) -> Result<Zeroizing<String>> {
         &http,
         endpoint,
         name,
-        &token,
+        token.expose(),
         tokens.quota_project_header(project),
     )
 }
@@ -112,7 +114,7 @@ fn fetch(
     name: &str,
     token: &str,
     quota_project: Option<&str>,
-) -> Result<Zeroizing<String>> {
+) -> Result<Secret> {
     let mut req = http
         .get(format!("{endpoint}/{name}:access"))
         .bearer_auth(token);
@@ -152,7 +154,7 @@ fn fetch(
             format!("source: Secret Manager secret '{name}' is not UTF-8 text"),
         )
     })?;
-    Ok(Zeroizing::new(text.to_string()))
+    Ok(Secret::new(text))
 }
 
 #[cfg(test)]
@@ -213,7 +215,7 @@ mod tests {
                 None,
             )
         };
-        assert_eq!(get("ok").unwrap().as_str(), "postgresql://u:p%40ss@h/db\n");
+        assert_eq!(get("ok").unwrap().expose(), "postgresql://u:p%40ss@h/db\n");
         for (n, hint) in [("denied", "secretAccessor"), ("absent", "secret name")] {
             let err = get(n).expect_err(n);
             assert_eq!(

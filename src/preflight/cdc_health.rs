@@ -104,6 +104,7 @@ pub(super) fn collect(
         Ok(u) => u,
         Err(e) => return (vec![probe_failed(&e)], Some(probe_verdict(&e))),
     };
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
     // The engines APPEND to one vec rather than returning their own, so a probe that
     // dies half-way keeps the verdicts it already reached. This used to be
@@ -115,14 +116,12 @@ pub(super) fn collect(
     // grants, not the binlog.
     let mut checks = Vec::new();
     let result = match config.source.source_type {
-        SourceType::Postgres => pg_checks(&url, tls, &cdc, config_dir, &mut checks),
-        SourceType::Mysql => mysql_checks(&url, tls, &cdc, config_dir, &mut checks),
-        SourceType::Mssql => mssql_checks(&url, tls, &cdc, config_dir, &mut checks),
-        // Change streams: probe the replica-set requirement + declare the capture
-        // fidelity tier (6.0+ pre/post-images vs current-state UpdateLookup).
-        SourceType::Mongo => mongo_checks(config, &url, tls, &cdc, config_dir, &mut checks),
+        SourceType::Postgres => pg_checks(url, tls, &cdc, config_dir, &mut checks),
+        SourceType::Mysql => mysql_checks(url, tls, &cdc, config_dir, &mut checks),
+        SourceType::Mssql => mssql_checks(url, tls, &cdc, config_dir, &mut checks),
+        SourceType::Mongo => mongo_checks(config, url, tls, &cdc, config_dir, &mut checks),
         #[cfg(feature = "oracle")]
-        SourceType::Oracle => oracle_checks(&url, tls, &cdc, config_dir, &mut checks),
+        SourceType::Oracle => oracle_checks(url, tls, &cdc, config_dir, &mut checks),
         #[cfg(not(feature = "oracle"))]
         SourceType::Oracle => Err(crate::source::oracle_feature_missing()),
     };
@@ -132,7 +131,7 @@ pub(super) fn collect(
             checks.push(probe_failed(&e));
             probe = Some(probe_verdict(&e));
         }
-        Ok(()) => checks.extend(run_refusals(config, &cdc, &url)),
+        Ok(()) => checks.extend(run_refusals(config, &cdc, url)),
     }
     (checks, probe)
 }
@@ -1106,7 +1105,7 @@ mod tests {
         };
         let run = |c: &Config| {
             let exports: Vec<&ExportConfig> = c.exports.iter().collect();
-            run_refusals(c, &exports, &c.source.resolve_url().unwrap())
+            run_refusals(c, &exports, c.source.resolve_url().unwrap().expose())
         };
         for source in [
             "type: postgres\n  url: postgresql://rivet:rivet@127.0.0.1:1/rivet",

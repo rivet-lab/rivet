@@ -2957,7 +2957,7 @@ mod load_ledger_tests {
         if !url.starts_with("postgres") {
             return crate::test_hook::skip_live("RIVET_TEST_STATE_URL is not a postgres URL");
         }
-        let state = StateStore::open_at_ref(&crate::state::StateRef::Postgres(url)).unwrap();
+        let state = StateStore::open_at_ref(&crate::state::StateRef::Postgres(url.into())).unwrap();
         let table = format!("orders_split_{}", std::process::id());
         mixed_split_generation_refuses_twice(&state, &table);
     }

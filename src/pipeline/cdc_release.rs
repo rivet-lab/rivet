@@ -15,17 +15,17 @@ pub(super) trait SlotServer {
 
 /// The PostgreSQL server of a run's source.
 pub(super) struct PgSlots<'a> {
-    url: String,
+    url: crate::secret::Secret,
     tls: Option<&'a crate::config::TlsConfig>,
 }
 
 impl SlotServer for PgSlots<'_> {
     fn exists(&self, slot: &str) -> Result<bool> {
-        crate::source::postgres::cdc::slot_exists(&self.url, slot, self.tls)
+        crate::source::postgres::cdc::slot_exists(self.url.expose(), slot, self.tls)
     }
 
     fn drop_slot(&self, slot: &str) -> Result<()> {
-        crate::source::postgres::cdc::drop_slot(&self.url, slot, self.tls)
+        crate::source::postgres::cdc::drop_slot(self.url.expose(), slot, self.tls)
     }
 }
 
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn an_unreachable_server_is_an_error_for_both_slot_calls() {
         let server = PgSlots {
-            url: "postgres://u:p@127.0.0.1:1/app".to_string(),
+            url: "postgres://u:p@127.0.0.1:1/app".into(),
             tls: None,
         };
         assert!(server.exists("s_o").is_err());
