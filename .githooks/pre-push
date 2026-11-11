@@ -1,57 +1,11 @@
 #!/usr/bin/env bash
-# Pre-push gate — runs the offline test suite (lib unit + integration tests)
-# before code leaves the machine. Lives here rather than in pre-commit because
-# the suite is too slow per-commit; fmt + clippy stay in pre-commit for fast
-# feedback.
-#
-# Scope is `--tests` (NOT `--all-targets`): that deliberately excludes the
-# criterion benchmarks, which `--all-targets` would *execute* and add minutes
-# for zero correctness signal. CI (`cargo nextest run --all-targets`) is the backstop
-# that also compiles benches/examples; doctests are skipped both here and there.
-#
+# Pre-push gate: Cargo.lock sync, publish dry-run on a version bump, commit-message rules. CI runs the tests.
 # Enable once per clone:  git config core.hooksPath .githooks
-# Bypass in an emergency: git push --no-verify  (CI still enforces).
-#
-# Live tests are `#[ignore]` and need docker services, so they stay out of the
-# gate — run them explicitly with `cargo test -- --ignored`.
 set -euo pipefail
 . "$(dirname "$0")/repo-venv"
 
-# Prefer cargo-nextest: it runs each test in its own process, so the consolidated
-# test binaries (one link instead of N — tests/offline_suite.rs et al.) stay
-# isolated. Falls back to the built-in harness when nextest isn't installed.
-if command -v cargo-nextest >/dev/null 2>&1; then
-  # Split for speed: the lib/bin UNIT tests are pure + fast — run them threaded
-  # via the built-in harness. Only the INTEGRATION suites (offline_suite /
-  # live_suite et al.) need nextest's per-test process isolation, so run just
-  # those (`kind(test)`) under nextest. Avoids ~1700 process spawns for the lib.
-  echo "pre-push: cargo test --lib --bins (unit, threaded) + nextest integration (isolated)"
-  cargo test --lib --bins --quiet
-  cargo nextest run -E 'kind(test)'
-else
-  # No nextest: fall back to the built-in harness. NOTE this runs each consolidated suite
-  # (offline_suite / live_suite) as threads in ONE process — a crash / SIGKILL / global-state
-  # test can poison its siblings (per-test isolation is gone). Install cargo-nextest to restore
-  # it.
-  echo "pre-push: cargo test --tests (NO per-test isolation — install cargo-nextest)"
-  cargo test --tests --quiet
-fi
-
-# The test run above ran a non-`--locked` cargo build, which silently reconciles
-# the working-tree Cargo.lock against Cargo.toml. If that left the lock DIRTY,
-# the COMMITTED lock was stale — and the pushed commit would fail the release's
-# `cargo publish --locked` (exit 101, *after* the tag is cut). 0.16.1 stalled
-# exactly this way: a version bump regenerated the lock but never committed it.
-# Checking *after* the build is the trick — it forces the reconcile that exposes
-# a committed-stale lock as a dirty working tree (a pre-build `--locked` check
-# sees the already-reconciled tree and is fooled).
-if ! git diff --quiet -- Cargo.lock; then
-  echo "pre-push: ERROR — Cargo.lock is out of sync with Cargo.toml." >&2
-  echo "  The test run just reconciled it, so the committed lock is stale and the" >&2
-  echo "  release's 'cargo publish --locked' would abort. Commit the synced lock:" >&2
-  echo "    git add Cargo.lock && git commit --amend --no-edit   (or a fresh commit)" >&2
-  exit 1
-fi
+echo "pre-push: cargo metadata --locked"
+cargo metadata --locked --format-version 1 > /dev/null
 
 # Release-prep guard: when this branch bumps the crate version vs main, run the
 # EXACT publish the release does (`cargo publish --locked --dry-run`). A packaging

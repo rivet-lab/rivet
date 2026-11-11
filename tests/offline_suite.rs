@@ -6,7 +6,7 @@
 //! whole set LINKS ONCE instead of N times (PoC measured 21 files: 42s -> 8s, 5x). The default
 //! harness still collects every `#[test]` from each module.
 //!
-//! Run under cargo-nextest (process per test): the pre-push hook and the CI `Tests` shards both do.
+//! Run under cargo-nextest (process per test): the CI `Tests` shards do.
 
 #[path = "offline/attestation_matrix_guard.rs"]
 mod attestation_matrix_guard;
