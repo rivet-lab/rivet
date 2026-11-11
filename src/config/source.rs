@@ -25,6 +25,7 @@ pub struct SourceConfig {
 
     pub url: Option<String>,
     pub url_env: Option<String>,
+    /// File holding the URL; a relative path is read beside the config file, whatever directory rivet starts from.
     pub url_file: Option<String>,
     /// Google Secret Manager secret holding the URL: `projects/<p>/secrets/<s>[/versions/<n>]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,7 +225,7 @@ pub struct TlsConfig {
     /// Enforcement level. See [`TlsMode`].
     #[serde(default)]
     pub mode: TlsMode,
-    /// PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set.
+    /// PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set; a relative path is read beside the config file.
     pub ca_file: Option<String>,
     /// Accept certificates not chained to a trusted CA. Dangerous — disables
     /// server authentication — and only honored when explicitly `true`.
