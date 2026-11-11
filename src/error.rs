@@ -1644,6 +1644,11 @@ pub mod codes {
         "RIVET_SOURCE_KEYSET_KEY_UNORDERED",
         "remove `page_size`, `resume` and `parallel` so the collection is read in one ordered scan, or fix the `_id` values the message names",
     );
+    /// A MongoDB collection under a keyed load holds `_id` values of more than one BSON type.
+    pub const SOURCE_ID_TYPES_MIXED: Code = refusal(
+        "RIVET_SOURCE_ID_TYPES_MIXED",
+        "load the collection with `mode: full`, or make its `_id` values one BSON type, drop the change-log table, delete the CDC checkpoint and re-run for a fresh snapshot (loading mixed-type `_id` under a keyed load is tracked in #926)",
+    );
 
     /// An option given a value in a form it does not take (`--format`, `--mode`, `--date`, `--param`).
     pub const CLI_VALUE_INVALID: Code = usage(
@@ -2021,6 +2026,7 @@ pub mod codes {
         SOURCE_CDC_SPILL_UNWRITABLE,
         INTERNAL_SOURCE_INVARIANT,
         SOURCE_KEYSET_KEY_UNORDERED,
+        SOURCE_ID_TYPES_MIXED,
         CLI_VALUE_INVALID,
         CLI_RUN_ID_UNKNOWN,
         CLI_PREFLIGHT_FAILED,

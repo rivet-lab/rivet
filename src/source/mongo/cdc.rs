@@ -77,6 +77,10 @@ pub(crate) struct MongoChangeStream {
     hetero_warned: bool,
     /// The collections this export captures, so a DDL event can be told apart from one on another collection.
     configured_tables: Vec<String>,
+    /// The collections a keyed `load:` merges by `_id`; a second `_id` type in one is refused.
+    keyed_tables: Vec<String>,
+    /// The `_id` types delivered per collection, persisted in the checkpoint.
+    id_types: super::id_types::IdTypes,
     /// Orders events that share a clusterTime.
     clock: OrdinalClock,
 }
@@ -479,6 +483,7 @@ impl MongoChangeStream {
         // The export's configured `table:` names. Mongo had no routing
         // cross-check at all — this is what the zero-match warning needs.
         configured_tables: &[String],
+        keyed_tables: &[String],
     ) -> Result<Self> {
         let until_current = mode.is_bounded();
         let session = MongoSession::connect(url, tls)?;
@@ -496,6 +501,11 @@ impl MongoChangeStream {
             .as_ref()
             .map(|pos| OrdinalClock::from_checkpoint(&pos.0))
             .unwrap_or_default();
+        let known = loaded
+            .as_ref()
+            .map(|pos| super::id_types::IdTypes::from_checkpoint(&pos.0))
+            .unwrap_or_default();
+        let id_types = super::id_types::guard_keyed(&session, known, keyed_tables)?;
         let resume = loaded.map(|pos| decode_resume_token(&pos.0)).transpose()?;
         // A checkpoint path with NO persisted position ⇒ a fresh checkpointed
         // run: it must pin its anchor at open (see below).
@@ -635,6 +645,8 @@ impl MongoChangeStream {
             hetero_first: None,
             hetero_warned: false,
             configured_tables: configured_tables.to_vec(),
+            keyed_tables: keyed_tables.to_vec(),
+            id_types,
             clock,
         };
         // Idle-first-run anchor (MongoDB has no server-side anchor — the MySQL
@@ -648,7 +660,7 @@ impl MongoChangeStream {
             && let Some(ckpt) = checkpoint
             && let Some(pos) = this.anchor_position()
         {
-            pos.save(ckpt)?;
+            this.checkpoint_of(&pos).save(ckpt)?;
             // `warn`, not `info`: this branch is reached both on a genuine first run
             // and when a previously-written checkpoint is simply NOT THERE, and rivet
             // cannot tell them apart. An `info` line is invisible at the default
@@ -708,6 +720,7 @@ pub(crate) fn pin_checkpoint_at_current(
         Some(checkpoint),
         false,
         DrainMode::Continuous,
+        &[],
         &[],
     )
     .map(|_| ())
@@ -1012,6 +1025,8 @@ impl ChangeStream for MongoChangeStream {
         let hetero_first = &mut self.hetero_first;
         let hetero_warned = &mut self.hetero_warned;
         let configured_tables = &self.configured_tables;
+        let keyed_tables = &self.keyed_tables;
+        let id_types = &mut self.id_types;
         let clock = &mut self.clock;
         let mut bound_wait: Option<std::time::Instant> = None;
         loop {
@@ -1074,6 +1089,13 @@ impl ChangeStream for MongoChangeStream {
             // (dropDatabase / a collection-stream drop) → a loud terminal error.
             match classify_op(&cse.operation_type) {
                 OpClass::Row => {
+                    if let Some(coll) = cse.ns.as_ref().and_then(|n| n.coll.as_deref())
+                        && keyed_tables.iter().any(|k| k == coll)
+                        && let Some(id) = cse.document_key.as_ref().and_then(|dk| dk.get("_id"))
+                        && let Err(e) = id_types.admit(coll, id)
+                    {
+                        return Some(Err(e));
+                    }
                     // Heterogeneous-`_id` display-collision warning (once per
                     // stream), mirroring the batch full-scan guard: the flat `_id`
                     // column can render distinct BSON types to the same text, so a
@@ -1122,6 +1144,10 @@ impl ChangeStream for MongoChangeStream {
                 }
             }
         }
+    }
+
+    fn checkpoint_of(&self, position: &Position) -> Position {
+        Position::new(self.id_types.stamp_checkpoint(position.json().clone()))
     }
 
     // ack is a no-op: MongoDB retains changes in the oplog independently of

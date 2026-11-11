@@ -156,6 +156,7 @@ pub fn run_loads(args: LoadArgs) -> Result<()> {
                     // CDC: APPEND the change log + rebuild the current-state dedup view.
                     load::plan::LoadMode::Cdc => {
                         let pk = require_pk(plan, "cdc")?;
+                        refuse_mixed_mongo_ids(&cfg, plan, &args.config)?;
                         match load_one_cdc(
                             plan,
                             &run_id,
@@ -669,6 +670,32 @@ pub(super) fn lease_still_held(held: bool, target_fqtn: &str, written: bool) -> 
         false => load::before_write(coded(crate::error::codes::STATE_LEASE_LOST)),
         true => coded(crate::error::codes::LOAD_LEASE_LOST_DURING_WRITE),
     }
+}
+
+/// Refuse a keyed MongoDB CDC table whose checkpoint records more than one `_id` type, before any append.
+fn refuse_mixed_mongo_ids(
+    cfg: &crate::config::Config,
+    plan: &load::plan::LoadPlan,
+    config_path: &str,
+) -> Result<()> {
+    if cfg.source.source_type != crate::config::SourceType::Mongo {
+        return Ok(());
+    }
+    let Some(export) = cfg.exports.iter().find(|e| e.name == plan.export_name) else {
+        return Ok(());
+    };
+    let Some(collection) = plan.unit.as_deref().or(export.table.as_deref()) else {
+        return Ok(());
+    };
+    let dir = std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let checkpoint = export
+        .cdc
+        .as_ref()
+        .and_then(|c| c.checkpoint.as_deref())
+        .map(|raw| crate::source::cdc::resolve_checkpoint(raw, dir));
+    crate::source::mongo::id_types::persisted(checkpoint.as_deref())?.refuse_if_mixed(collection)
 }
 
 /// The resolved dedup key for an append mode (`cdc` / `incremental`); bails with a

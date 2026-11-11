@@ -1473,6 +1473,17 @@ fn run_export_job_inner(
             crate::notify::maybe_send(config.notifications.as_ref(), &summary);
             return (Err(e), summary);
         }
+        if !pending.is_empty()
+            && let Err(e) = super::cdc_job::refuse_mixed_id_types(config, export, cdc_config_dir)
+        {
+            let summary = synthetic_failed_summary(&export.name, &e);
+            let stopped = Err(e);
+            if let Some(first) = first_run {
+                first.release_after(config, state, &stopped);
+            }
+            crate::notify::maybe_send(config.notifications.as_ref(), &summary);
+            return (stopped, summary);
+        }
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
             let _flags = super::run::RenderFlags::set(super::run::multi_export_mode(), Some(true));
             let (harm, _) = super::run::RunHarmBracket::open(&config.source);

@@ -49,6 +49,7 @@ use crate::source::{BatchSink, ExportRequest, Source};
 use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
 
 pub(crate) mod cdc;
+pub(crate) mod id_types;
 
 /// The byte budget at which a document batch flushes. The `document` column is an
 /// Arrow `Utf8` (i32 offsets): a batch accumulating > 2 GiB panics ("byte array
@@ -387,23 +388,9 @@ impl MongoSource {
         self
     }
 
-    /// The min and max `_id` of `collection` by BSON sort order (one index-bound
-    /// `find_one` each), or `None` if the collection is empty. Brackets are
-    /// *contiguous* in BSON sort order, so the endpoints span every bracket
-    /// present — comparing them detects any heterogeneous-`_id` mix. Shared by the
-    /// keyset *refusal* ([`Self::ensure_uniform_id_type`]) and the full-scan
-    /// *warning* ([`Self::warn_if_heterogeneous_id`]).
+    /// The min and max `_id` of `collection` by BSON sort order, or `None` if it is empty.
     fn id_span(&self, collection: &str) -> Result<Option<(Document, Document)>> {
-        let coll = self
-            .session
-            .client()
-            .database(self.session.db())
-            .collection::<Document>(collection);
-        self.session.block_on(async {
-            let lo = coll.find_one(doc! {}).sort(doc! { "_id": 1 }).await?;
-            let hi = coll.find_one(doc! {}).sort(doc! { "_id": -1 }).await?;
-            Ok::<_, anyhow::Error>(lo.zip(hi))
-        })
+        id_types::id_span_on(&self.session, collection)
     }
 
     /// Guard against silent loss on a heterogeneous-`_id` collection. Keyset

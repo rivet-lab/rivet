@@ -381,6 +381,7 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
             CdcEngine::Mongo => CdcEngineOpts::Mongo {
                 canonical: false,
                 configured_tables: a.table.clone(),
+                keyed_tables: Vec::new(),
             },
             // LogMiner selects only the named tables, so `--table` is required in practice.
             CdcEngine::Oracle => CdcEngineOpts::Oracle {

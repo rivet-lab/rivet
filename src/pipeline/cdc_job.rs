@@ -279,6 +279,29 @@ fn file_anchor_of(
     ))
 }
 
+/// Refuse a MongoDB run whose keyed collection already mixes `_id` types, before any snapshot writes.
+pub(super) fn refuse_mixed_id_types(
+    config: &Config,
+    export: &ExportConfig,
+    config_dir: &std::path::Path,
+) -> Result<()> {
+    let keyed = crate::source::mongo::id_types::keyed_tables(config, export);
+    if config.source.source_type != crate::config::SourceType::Mongo || keyed.is_empty() {
+        return Ok(());
+    }
+    let checkpoint = export
+        .cdc
+        .as_ref()
+        .and_then(|c| c.checkpoint.as_deref())
+        .map(|raw| crate::source::cdc::resolve_checkpoint(raw, config_dir));
+    let known = crate::source::mongo::id_types::persisted(checkpoint.as_deref())?;
+    let session = crate::source::mongo::MongoSession::connect(
+        &config.source.resolve_url()?,
+        config.source.tls.as_ref(),
+    )?;
+    crate::source::mongo::id_types::guard_keyed(&session, known, &keyed).map(|_| ())
+}
+
 /// Refuse a run whose recorded checkpoint file is gone; writes nothing.
 pub(super) fn refuse_lost_file_anchor(
     config: &Config,
@@ -787,6 +810,7 @@ fn run_cdc_inner(
                             matches!(m.json, crate::config::MongoJsonMode::Canonical)
                         }),
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        keyed_tables: crate::source::mongo::id_types::keyed_tables(config, export),
                     },
                 },
             },

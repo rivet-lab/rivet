@@ -120,7 +120,7 @@ pub(super) fn collect(
         SourceType::Mssql => mssql_checks(&url, tls, &cdc, config_dir, &mut checks),
         // Change streams: probe the replica-set requirement + declare the capture
         // fidelity tier (6.0+ pre/post-images vs current-state UpdateLookup).
-        SourceType::Mongo => mongo_checks(&url, tls, &cdc, config_dir, &mut checks),
+        SourceType::Mongo => mongo_checks(config, &url, tls, &cdc, config_dir, &mut checks),
         #[cfg(feature = "oracle")]
         SourceType::Oracle => oracle_checks(&url, tls, &cdc, config_dir, &mut checks),
         #[cfg(not(feature = "oracle"))]
@@ -955,6 +955,7 @@ fn mongo_capability_verdicts(
 }
 
 fn mongo_checks(
+    config: &Config,
     url: &str,
     tls: Option<&crate::config::TlsConfig>,
     exports: &[&ExportConfig],
@@ -982,12 +983,26 @@ fn mongo_checks(
                 None,
             )),
             Ok(Some(pos)) => match crate::source::mongo::cdc::decode_resume_token(&pos.0) {
-                Ok(_) => checks.push(check(
-                    name,
-                    true,
-                    Some("resume token readable".into()),
-                    None,
-                )),
+                Ok(_) => {
+                    let seen = crate::source::mongo::id_types::IdTypes::from_checkpoint(&pos.0);
+                    let mixed = crate::source::mongo::id_types::keyed_tables(config, e)
+                        .into_iter()
+                        .find_map(|t| seen.refuse_if_mixed(&t).err());
+                    match mixed {
+                        None => checks.push(check(
+                            name,
+                            true,
+                            Some("resume token readable".into()),
+                            None,
+                        )),
+                        Some(why) => checks.push(check(
+                            name,
+                            false,
+                            Some(format!("{why:#} — the run refuses this export")),
+                            Some(crate::error::codes::SOURCE_ID_TYPES_MIXED.action.into()),
+                        )),
+                    }
+                }
                 Err(why) => checks.push(check(
                     name,
                     false,

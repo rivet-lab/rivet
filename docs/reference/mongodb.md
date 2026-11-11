@@ -468,8 +468,23 @@ ObjectId *and* its hex stored as a string), the flat `_id` column **stringifies
 them to the same text**. A `MERGE ON _id` then matches one source row against
 *both* target rows and silently overwrites one with the other — a real data loss,
 confirmed on a live BigQuery merge. Rivet exports both rows correctly (the export
-never loses data) and **warns** when a full scan or CDC run sees a heterogeneous
-`_id`; the fix is in the merge key, downstream.
+never loses data) and **warns** when a full scan or an unkeyed CDC run sees a
+heterogeneous `_id`; the fix is in the merge key, downstream.
+
+**Under a keyed `load:` rivet stops instead.** A `mode: cdc` export whose `load:`
+declares key columns (`pk: [_id]`) merges on the flat `_id`, so it is refused with
+`RIVET_SOURCE_ID_TYPES_MIXED` (exit 5) when its collection holds more than one BSON
+`_id` type, or when a change of a second type arrives. The message lists the types
+seen. The snapshot is refused before it writes; a stream keeps what it delivered
+before the change that would add the second type. To go on, load the collection with
+`mode: full` (a whole-table pass runs no merge), or make the `_id` values one type,
+drop the change-log table, delete the CDC checkpoint and run again for a fresh
+snapshot. Loading mixed-type `_id` under a keyed load is tracked in #926.
+
+The checkpoint records the `_id` types delivered per collection (key `idt`); a
+checkpoint without it reads as none and gains it with its next save, and
+`rivet load` reads the same record and refuses before it appends. An export with
+no keyed `load:` is unchanged.
 
 The typed value is always in `document._id`. On BigQuery, `JSON_QUERY` preserves
 the type (`1001` and `"1001"` render as *different* JSON text — `1001` vs
@@ -602,6 +617,7 @@ Deliberately **N/A** (not gaps):
   (Int32/Int64/Double/Decimal128) share one bracket, so a mixed-numeric `_id`
   keysets fine, and `parallel` tiles any single ordered type (ObjectId, int,
   string). A full scan (or CDC) over such a collection reads everything, but the
-  flat `_id` *display* column can collide across types — rivet warns, and
+  flat `_id` *display* column can collide across types — rivet warns (a keyed CDC
+  `load:` is refused, see [Merging a heterogeneous-`_id` collection](#heterogeneous-id)), and
   [Consuming in the warehouse](#consuming-in-the-warehouse) shows the type-exact
   merge key.

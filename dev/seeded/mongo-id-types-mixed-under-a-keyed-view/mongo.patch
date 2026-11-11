@@ -1,0 +1,12 @@
+diff --git a/src/source/mongo/id_types.rs b/src/source/mongo/id_types.rs
+--- a/src/source/mongo/id_types.rs
++++ b/src/source/mongo/id_types.rs
+@@ -20,7 +20,7 @@
+ 
+ /// The bracket of one `_id` value.
+ fn bracket_of(id: &Bson) -> u8 {
+-    id_bracket(id).unwrap_or(UNPLACED)
++    id_bracket(id).map(|_| 0).unwrap_or(UNPLACED)
+ }
+ 
+ /// The name of a bracket as the operator knows the BSON type.
