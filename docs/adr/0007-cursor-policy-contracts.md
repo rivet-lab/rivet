@@ -31,7 +31,7 @@
 | **CC7** | Preflight alignment | EXPLAIN and MIN/MAX range probes use the same key expression as execution. | `preflight/cursor_expr::incremental_key_expr` |
 | **CC8** | PA4 unchanged | Cursor snapshot integrity (ADR-0005 PA4) still compares one opaque string in `StateStore` to `cursor_snapshot`; the semantics of that string are mode-dependent but the check is unchanged. | `PlanArtifact::cursor_matches` |
 | **CC9** | Identifier quoting | Both primary and fallback columns, and the synthetic cursor alias, are quoted via `sql::quote_ident` (`"…"` for Postgres, `` `…` `` for MySQL). | `source::query::build_incremental_query` |
-| **CC10** | Cursor value escaping | Cursor values are injected per engine: MySQL binds the value as a `?` parameter (no in-SQL literal); Postgres embeds an `E'…'` literal with backslash-escaped `'` and `\` (`escape_pg_literal`); SQL Server embeds an `N'…'` literal with single quotes doubled (`escape_mssql_literal`). | `source::query::cursor_rhs` |
+| **CC10** | Cursor value escaping | Cursor values are injected per engine: MySQL binds the value as a `?` parameter (no in-SQL literal); Postgres embeds an `E'…'` literal with backslash-escaped `'` and `\` (`escape_pg_literal`); SQL Server embeds a `'…'` literal with single quotes doubled (`escape_mssql_literal`); a non-ASCII text value is `N'…'` read through `ISNULL` against the key itself, so it is compared in the key's own type and collation. | `source::query::cursor_rhs` |
 
 ---
 
@@ -59,7 +59,7 @@ WHERE COALESCE(_rivet.<P>, _rivet.<F>) > '<cursor>'
 ORDER BY COALESCE(_rivet.<P>, _rivet.<F>), _rivet.<P>, _rivet.<F>
 ```
 
-First run omits `WHERE`. `<P>` and `<F>` are `quote_ident`-quoted; the `'<cursor>'` literal shown in both shapes is illustrative — the real right-hand side is engine-specific per CC10 (a `?` bind parameter on MySQL, an `E'…'` literal on Postgres, an `N'…'` literal on SQL Server).
+First run omits `WHERE`. `<P>` and `<F>` are `quote_ident`-quoted; the `'<cursor>'` literal shown in both shapes is illustrative — the real right-hand side is engine-specific per CC10 (a `?` bind parameter on MySQL, an `E'…'` literal on Postgres, a `'…'` literal on SQL Server).
 
 An earlier two-level shape (`SELECT _i.* FROM (ORDER BY ...)` plus an outer projection) was rejected because SQL does not preserve inner ordering through an outer `SELECT`: the last batch could miss the max coalesced value and stored cursor could go backwards.
 

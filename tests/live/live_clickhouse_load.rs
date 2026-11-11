@@ -4408,3 +4408,205 @@ fn a_load_over_https_trusts_a_private_ca_only_through_ca_file() {
         "the rows read back over HTTP equal the source"
     );
 }
+
+const OID_HEX: &str = "65a1b2c3d4e5f60718293a4b";
+const MIXED_IDS: Refused = Refused::by_code("RIVET_SOURCE_ID_TYPES_MIXED", 5);
+
+/// The `v` of every live document in the ClickHouse view of `t`, sorted.
+fn clickhouse_live_values(db: &Db) -> Vec<String> {
+    ch(&format!(
+        "SELECT JSONExtractString(toString(document), 'v') AS v \
+         FROM {}.t WHERE NOT __is_deleted ORDER BY v FORMAT TSV",
+        db.0
+    ))
+    .lines()
+    .map(str::to_string)
+    .collect()
+}
+
+/// The rows every table of `db` holds, as the server counts them.
+fn clickhouse_rows_held(db: &Db) -> String {
+    ch(&format!(
+        "SELECT toString(coalesce(sum(total_rows), 0)) FROM system.tables WHERE database = '{}'",
+        db.0
+    ))
+}
+
+/// `rivet load` of the rig, raw, with the ClickHouse password in its environment.
+fn load_raw(rig: &Rig) -> std::process::Output {
+    rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)])
+}
+
+/// Rewrite the rig's checkpoint file through `edit`.
+fn edit_checkpoint(rig: &Rig, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = rig.checkpoint();
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read checkpoint"))
+            .expect("checkpoint json");
+    edit(&mut v);
+    std::fs::write(&path, serde_json::to_vec(&v).expect("encode")).expect("write checkpoint");
+}
+
+/// A keyed export of ids that differ only by BSON type is refused before the snapshot writes, and the warehouse holds nothing.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write() {
+    use mongodb::bson::{doc, oid::ObjectId};
+    require_mongo_cdc_into_clickhouse();
+    let mdb = unique_name("chmcdc_idtype");
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
+    m.drop_collection("t");
+    m.insert_many(
+        "t",
+        vec![
+            doc! { "_id": 1i32, "v": "snap-int-1" },
+            doc! { "_id": "1", "v": "snap-str-1" },
+            doc! { "_id": ObjectId::parse_str(OID_HEX).expect("object id"), "v": "snap-oid" },
+            doc! { "_id": OID_HEX, "v": "snap-hex" },
+        ],
+    );
+    let db = Db::new("rivet_chtest");
+    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("initial: snapshot");
+
+    let out = rig.run();
+    assert_refused(&out, MIXED_IDS);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    for want in ["number", "objectId", "mode: full", "#926"] {
+        assert!(said.contains(want), "the refusal names `{want}`:\n{said}");
+    }
+    let _ = load_raw(&rig);
+    assert_eq!(clickhouse_rows_held(&db), "0", "nothing reached the view");
+}
+
+/// A keyed stream refuses the event that would add a second `_id` type, keeps what it delivered before, and refuses again on the next run.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type() {
+    use mongodb::bson::{Bson, doc};
+    require_mongo_cdc_into_clickhouse();
+    let mdb = unique_name("chmcdc_idstream");
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
+    m.drop_collection("t");
+    m.insert_many(
+        "t",
+        (1..=3i32)
+            .map(|i| doc! { "_id": i, "v": format!("int-{i}") })
+            .collect(),
+    );
+    let db = Db::new("rivet_chtest");
+    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("initial: snapshot");
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(clickhouse_live_values(&db), m.string_values("t", "v"));
+
+    m.insert_many("t", vec![doc! { "_id": "9", "v": "str-9" }]);
+    m.delete_bson_id("t", Bson::String("9".to_string()));
+    assert_refused(&rig.run(), MIXED_IDS);
+    assert_refused(&rig.run(), MIXED_IDS);
+    let _ = load_raw(&rig);
+    assert_eq!(clickhouse_live_values(&db), m.string_values("t", "v"));
+}
+
+/// The checkpoint records the `_id` types it delivered; one without the record resumes and gains it, and a record of two types stops run and load.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes() {
+    use mongodb::bson::doc;
+    require_mongo_cdc_into_clickhouse();
+    let mdb = unique_name("chmcdc_idckpt");
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
+    m.drop_collection("t");
+    m.insert_many("t", vec![doc! { "_id": 1i32, "v": "int-1" }]);
+    let db = Db::new("rivet_chtest");
+    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("initial: snapshot");
+    rig.run_ok();
+    m.insert_many("t", vec![doc! { "_id": 2i32, "v": "int-2" }]);
+    rig.run_ok();
+    edit_checkpoint(&rig, |v| {
+        assert_eq!(v["idt"], serde_json::json!({ "t": [0] }), "{v}");
+        v.as_object_mut().expect("object").remove("idt");
+    });
+
+    m.insert_many("t", vec![doc! { "_id": 3i32, "v": "int-3" }]);
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(clickhouse_live_values(&db), m.string_values("t", "v"));
+    edit_checkpoint(&rig, |v| {
+        assert_eq!(v["idt"], serde_json::json!({ "t": [0] }), "{v}");
+        v["idt"] = serde_json::json!({ "t": [0, 2] });
+    });
+
+    assert_refused(&rig.run(), MIXED_IDS);
+    let before = clickhouse_rows_held(&db);
+    assert_refused(&load_raw(&rig), MIXED_IDS);
+    assert_eq!(clickhouse_rows_held(&db), before, "no row was appended");
+}
+
+/// An export of one `_id` type keeps its delivered rows and its `__pos` shape with the new record in the checkpoint.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_uniform_objectid_mongo_cdc_export_delivers_what_it_delivered_before() {
+    use mongodb::bson::{doc, oid::ObjectId};
+    require_mongo_cdc_into_clickhouse();
+    let mdb = unique_name("chmcdc_idoid");
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
+    m.drop_collection("t");
+    let id = |h: &str| ObjectId::parse_str(h).expect("object id");
+    m.insert_many(
+        "t",
+        vec![
+            doc! { "_id": id("65a1b2c3d4e5f60718293a01"), "v": "a" },
+            doc! { "_id": id("65a1b2c3d4e5f60718293a02"), "v": "b" },
+        ],
+    );
+    let db = Db::new("rivet_chtest");
+    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("initial: snapshot");
+    rig.run_ok();
+    m.insert_many(
+        "t",
+        vec![doc! { "_id": id("65a1b2c3d4e5f60718293a03"), "v": "c" }],
+    );
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        clickhouse_rows_tsv(&format!(
+            "SELECT _id, JSONExtractString(toString(document), 'v'), arrayStringConcat(JSONExtractKeys(ifNull(__pos, '{{}}')), ',') \
+             FROM {}.t__changes ORDER BY _id FORMAT TSV",
+            db.0
+        )),
+        GOLDEN_UNIFORM_OID_ROWS
+    );
+    assert_eq!(clickhouse_live_values(&db), ["a", "b", "c"]);
+}
+
+/// The golden `(_id, v, __pos keys)` rows main delivered for the uniform ObjectId export above.
+const GOLDEN_UNIFORM_OID_ROWS: &str = "65a1b2c3d4e5f60718293a01\ta\t_data,rt,ct,ord\n65a1b2c3d4e5f60718293a02\tb\t_data,rt,ct,ord\n65a1b2c3d4e5f60718293a03\tc\t_data,rt,ct,ord";
+
+/// An export with no keyed `load:` still delivers every id type and only warns.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn an_unkeyed_mongo_cdc_export_of_mixed_id_types_still_runs_with_a_warning() {
+    use mongodb::bson::doc;
+    require_mongo_cdc_into_clickhouse();
+    let mdb = unique_name("chmcdc_idunkeyed");
+    let m = MongoTest::connect(mongo_rs_port(), &mdb);
+    m.drop_collection("t");
+    m.insert_many(
+        "t",
+        vec![
+            doc! { "_id": 1i32, "v": "int-1" },
+            doc! { "_id": "1", "v": "str-1" },
+        ],
+    );
+    let rig = Rig::mongo_cdc("t")
+        .source_url(&MongoTest::url(mongo_rs_port(), &mdb))
+        .cdc("initial: snapshot")
+        .no_oracle("an unkeyed export keeps the flat _id text, so int 1 and string \"1\" collapse in the grade; the warning is what this cell pins");
+    let said = rig.run_ok_capture();
+    assert!(said.contains("heterogeneous `_id` types"), "{said}");
+    let delivered: usize = read_all_parts(&rig.out_dir().join("snapshot"))
+        .iter()
+        .map(|b| b.num_rows())
+        .sum();
+    assert_eq!(delivered, 2, "both documents are delivered");
+}

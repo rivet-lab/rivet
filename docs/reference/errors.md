@@ -200,6 +200,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_SOURCE_CDC_SPILL_UNWRITABLE` | environment | 2 if its cause is transient, else 1 | free space on the spill directory's filesystem (RIVET_CDC_SPILL_DIR, else beside the checkpoint) and check its write permission, then re-run |
 | `RIVET_INTERNAL_SOURCE_INVARIANT` | internal | 6 | a source reader invariant did not hold — a bug; report it with the message |
 | `RIVET_SOURCE_KEYSET_KEY_UNORDERED` | refusal | 5 | remove `page_size`, `resume` and `parallel` so the collection is read in one ordered scan, or fix the `_id` values the message names |
+| `RIVET_SOURCE_ID_TYPES_MIXED` | refusal | 5 | load the collection with `mode: full`, or make its `_id` values one BSON type, drop the change-log table, delete the CDC checkpoint and re-run for a fresh snapshot (loading mixed-type `_id` under a keyed load is tracked in #926) |
 | `RIVET_CLI_VALUE_INVALID` | usage | 1 | pass the option a value in the form the message names |
 | `RIVET_CLI_RUN_ID_UNKNOWN` | usage | 1 | pass a run id `rivet state runs -c <config>` lists |
 | `RIVET_CLI_PREFLIGHT_FAILED` | usage | 1 | fix each check the output above names, then run the command again |

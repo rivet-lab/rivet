@@ -279,6 +279,35 @@ fn file_anchor_of(
     ))
 }
 
+/// Refuse a MongoDB run whose keyed collection already mixes `_id` types, before any snapshot writes.
+pub(super) fn refuse_mixed_id_types(
+    config: &Config,
+    export: &ExportConfig,
+    config_dir: &std::path::Path,
+) -> Result<()> {
+    let keyed = crate::source::mongo::id_types::keyed_tables(config, export);
+    if config.source.source_type != crate::config::SourceType::Mongo || keyed.is_empty() {
+        return Ok(());
+    }
+    let checkpoint = export
+        .cdc
+        .as_ref()
+        .and_then(|c| c.checkpoint.as_deref())
+        .map(|raw| crate::source::cdc::resolve_checkpoint(raw, config_dir));
+    let known = crate::source::mongo::id_types::persisted(checkpoint.as_deref())?;
+    keyed
+        .iter()
+        .try_for_each(|collection| known.refuse_if_mixed(collection))?;
+    let session = crate::source::mongo::MongoSession::connect(
+        config.source.resolve_url()?.expose(),
+        config.source.tls.as_ref(),
+    )?;
+    crate::source::mongo::id_types::guard_keyed(known, &keyed, |c| {
+        crate::source::mongo::id_types::id_span_on(&session, c)
+    })
+    .map(|_| ())
+}
+
 /// Refuse a run whose recorded checkpoint file is gone; writes nothing.
 pub(super) fn refuse_lost_file_anchor(
     config: &Config,
@@ -793,6 +822,7 @@ fn run_cdc_inner(
                             matches!(m.json, crate::config::MongoJsonMode::Canonical)
                         }),
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        keyed_tables: crate::source::mongo::id_types::keyed_tables(config, export),
                     },
                 },
             },
@@ -1693,5 +1723,75 @@ mod tests {
             format!("{err}").contains("Set `table:` to `dbo.sales`"),
             "{err}"
         );
+    }
+
+    /// A keyed Mongo-or-other `mode: cdc` config in `dir` and its export; the source URL is dead.
+    fn keyed_cdc(
+        dir: &std::path::Path,
+        source_type: &str,
+        url: &str,
+        pk: &str,
+    ) -> (crate::config::Config, ExportConfig) {
+        let yaml = format!(
+            "source:\n  type: {source_type}\n  url: \"{url}\"\nload: {{ target: clickhouse, \
+             url: \"http://127.0.0.1:1\", database: d, user: u, password_env: P, {pk} }}\n\
+             exports:\n  - name: o\n    table: orders\n    mode: cdc\n    format: parquet\n    \
+             cdc:\n      checkpoint: ./o.ckpt\n    destination: {{ type: gcs, bucket: b, prefix: \"p/\" }}\n"
+        );
+        let path = dir.join("rivet.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let mut config = crate::config::Config::load(&path.display().to_string()).unwrap();
+        let export = config.exports.remove(0);
+        (config, export)
+    }
+
+    const DEAD_MONGO: &str = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
+
+    /// Write the checkpoint `./o.ckpt` of `dir` holding `json`.
+    fn write_ckpt(dir: &std::path::Path, json: serde_json::Value) {
+        crate::source::cdc::Position::new(json)
+            .save(&dir.join("o.ckpt"))
+            .unwrap();
+    }
+
+    /// A keyed MongoDB export whose checkpoint already holds two `_id` types is refused by code, before the source is read.
+    #[test]
+    fn a_keyed_mongo_export_with_a_mixed_checkpoint_is_refused_by_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, export) = keyed_cdc(dir.path(), "mongo", DEAD_MONGO, "pk: [_id]");
+        write_ckpt(dir.path(), serde_json::json!({"idt": {"orders": [0, 2]}}));
+        let err = refuse_mixed_id_types(&config, &export, dir.path()).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_ID_TYPES_MIXED", 5);
+    }
+
+    /// A uniform checkpoint is not refused for `_id` types and a keyless export is never asked.
+    #[test]
+    fn a_uniform_or_keyless_mongo_export_is_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, export) = keyed_cdc(dir.path(), "mongo", DEAD_MONGO, "pk: [_id]");
+        write_ckpt(dir.path(), serde_json::json!({"idt": {"orders": [0]}}));
+        let err = refuse_mixed_id_types(&config, &export, dir.path()).unwrap_err();
+        assert_ne!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(crate::error::codes::SOURCE_ID_TYPES_MIXED.id),
+            "{err}"
+        );
+        let (config, export) = keyed_cdc(dir.path(), "mongo", DEAD_MONGO, "pk: []");
+        write_ckpt(dir.path(), serde_json::json!({"idt": {"orders": [0, 2]}}));
+        refuse_mixed_id_types(&config, &export, dir.path()).unwrap();
+    }
+
+    /// A keyed export of another engine is never asked for `_id` types, and never dials a MongoDB.
+    #[test]
+    fn a_keyed_export_of_another_engine_is_not_asked_for_id_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, export) = keyed_cdc(
+            dir.path(),
+            "mysql",
+            "mysql://u:p@127.0.0.1:1/app",
+            "pk: [id]",
+        );
+        write_ckpt(dir.path(), serde_json::json!({"idt": {"orders": [0, 2]}}));
+        refuse_mixed_id_types(&config, &export, dir.path()).unwrap();
     }
 }

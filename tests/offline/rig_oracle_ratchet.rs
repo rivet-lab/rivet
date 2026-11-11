@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 // 32 -> 33 (2026-11-08): the declared-override cells (live_int_to_float_override.rs) read the parquet back themselves, one shared `readback_only` opt-out; closes when the oracle grades a column the config declares a type for.
 // 33 -> 34 (2026-11-11): the datetime2(7) key-admission cell holds rows that differ below a microsecond, which the oracle reads the source at; the view is read back by the second client; closes when the oracle reads datetime2(7) at full scale.
 // 34 -> 35 (2026-11-11): the Oracle TIMESTAMP(9) key-admission cell holds rows that differ below a microsecond and reads the view through the second client; closes when the oracle reads a timestamp_ns column at full scale.
+// 35 -> 36 (2026-11-11): the unkeyed Mongo CDC cell of mixed `_id` types delivers the flat `_id` text the warning documents, so int 1 and string "1" collapse in the oracle's grade; closes when a keyed load of mixed `_id` is typed (#926).
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
@@ -59,7 +60,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 626 -> 628 (2026-11-03): #792 parallel composite keyset cells, same tuple read. Closes with the line above.
 // 628 -> 623 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); five helper calls left.
 // 623 -> 626 (2026-11-06): mid-row cut cells read count + id set back through DuckDB; closed when they move to the rig oracle.
-const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
+// 626 -> 621 (2026-11-11): the mssql varchar keyset cell grades through the rig oracle; five helper calls left.
+const DUCKDB_HELPER_CEILING: usize = 621; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];

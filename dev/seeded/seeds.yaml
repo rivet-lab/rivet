@@ -5756,6 +5756,23 @@ seeds:
       oracle:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
 
+  - name: seek-literal-typed-by-value
+    class: "a boundary literal of a keyset, range, split or incremental seek is typed from the VALUE (a non-ASCII value is a Unicode literal) instead of from the key column, so on a SQL Server varchar key the page is ordered by the column collation and sought by Unicode rules: rows lost or repeated at a page boundary, exit 0"
+    history: "found 2026-11-11 (the escape_mssql_literal ponytail note); RED on main 2026-11-11: a varchar key of a, e-acute+quote+z, e-acute-a, e-acute-z, e-acute-a, e-acute-b, z read 4 of 7 rows under parallel, incremental and keyset_incremental (rig oracle: source-only e-acute-a, e-acute-a, e-acute-b)"
+    scope: source
+    engines:
+      mssql:
+        patch: seek-literal-typed-by-value/mssql.patch
+        cells: [keyset_over_an_mssql_varchar_key_reads_every_key_under_the_default_sql_collation, parallel_keyset_over_an_mssql_varchar_key_reads_every_non_ascii_key_once, incremental_over_an_mssql_varchar_cursor_takes_every_later_non_ascii_key_once, keyset_incremental_over_an_mssql_varchar_key_takes_every_later_non_ascii_key_once, order_equals_seek_mssql, "lib:a_non_ascii_mssql_boundary_takes_the_keys_own_type"]
+      postgres:
+        na: "a PostgreSQL boundary is one E-string literal for every value, untyped, so the server resolves it to the key column type; order_equals_seek_postgres grades it"
+      mysql:
+        na: "a MySQL cursor is a bound parameter and a range or split boundary a quoted literal, both converted to the key column charset and collation by the server; order_equals_seek_mysql grades it"
+      oracle:
+        na: "an Oracle cursor is a bind converted to the key column type and a range boundary a quoted literal, never typed by value; order_equals_seek_oracle grades it"
+      mongo:
+        na: "MongoDB keyset paging is not a SQL path"
+
   - name: pg-test-decoding-header-cut-at-first-separator
     class: "the PostgreSQL CDC reader cuts a `test_decoding` line at the first `: ` instead of at the operation: a schema, table or column name holding `: ` drops every change of the table, the slot advances and the run exits 0 with rows 0"
     history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P1a); RED on main: the relation `s: x.orders` delivers 0 of 2 source rows, rig oracle COUNT(*) source 2 delivered 0"
@@ -5895,3 +5912,23 @@ seeds:
         cells: [an_expression_over_a_not_null_cursor_delivers_once_oracle]
       mongo:
         na: "a MongoDB export has no incremental cursor_column: mode full only"
+
+  - name: mongo-id-types-mixed-under-a-keyed-view
+    class: a MongoDB CDC export whose keyed `load:` block merges on the flat `_id` column is accepted over `_id` values of more than one BSON type, so the current-state view merges distinct documents and a delete of one removes the other
+    history: "H5-F7 (2026-11-10): RED on main c13bc29c on Mongo 4.4, 5.0 and 8.0 into ClickHouse (8 source documents, 4 view rows; a delete of string `1` tombstoned key `1` and removed the live int 1; exit 0 with only a WARN)"
+    scope: source
+    patch: mongo-id-types-mixed-under-a-keyed-view/mongo.patch
+    engines:
+      postgres:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mysql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mssql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      oracle:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mongo:
+        cells:
+          - a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write
+          - a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type
+          - "lib:a_second_type_is_refused_and_not_recorded"

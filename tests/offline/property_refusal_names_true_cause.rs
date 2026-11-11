@@ -431,6 +431,7 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_SOURCE_CDC_SPILL_UNWRITABLE", Inj::Stand),
     ("RIVET_INTERNAL_SOURCE_INVARIANT", Inj::Internal),
     ("RIVET_SOURCE_KEYSET_KEY_UNORDERED", Inj::Stand),
+    ("RIVET_SOURCE_ID_TYPES_MIXED", Inj::Stand),
     ("RIVET_CLI_VALUE_INVALID", Inj::Stand),
     ("RIVET_CLI_RUN_ID_UNKNOWN", Inj::Stand),
     ("RIVET_CLI_PREFLIGHT_FAILED", Inj::Stand),

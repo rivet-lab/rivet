@@ -322,6 +322,7 @@ mod property_no_debris_after_stop;
 #[allow(dead_code)]
 #[path = "live/property_no_debris_after_stop_axes.rs"]
 mod property_no_debris_after_stop_axes;
+
 #[path = "live/quality_live.rs"]
 mod quality_live;
 #[path = "live/roast_metric_validated_ordering.rs"]
@@ -350,6 +351,8 @@ mod sec_state_url_query_password;
 mod sec_terminal_inject;
 #[path = "live/sec_tls_defaults.rs"]
 mod sec_tls_defaults;
+#[path = "live/seek_order_matrix.rs"]
+mod seek_order_matrix;
 
 #[path = "live/oracle_sensitivity.rs"]
 mod oracle_sensitivity;

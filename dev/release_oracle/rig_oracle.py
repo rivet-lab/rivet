@@ -592,6 +592,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     if engine == "mongo":
         from .value_diff import mongo_mixed_id_source
 
+        if not spec["database"]:
+            raise Unreachable(f"the mongodb URL names no database, so the collection `{leaf}` cannot be read")
         mixed = mongo_mixed_id_source(ora, spec["url"], spec["database"], leaf)
         # The scanner infers a schema (flattening nested keys); only `_id` is shared with the document blob.
         return mixed or f'(SELECT "_id" FROM mg.{spec["database"]}.{_qi(leaf)})', ["_id"], native
@@ -641,6 +643,11 @@ def _attach(spec: dict) -> dict:
 def _columns(ora, rel: str) -> list[tuple[str, str]]:
     """(name, DuckDB type) of every column of `rel`."""
     return [(r[0], str(r[1])) for r in ora.rows(f"DESCRIBE SELECT * FROM {rel}")]
+
+
+def range_window(col: str, ranges: list) -> str:
+    """The predicate that keeps rows whose `col` lies in one of the inclusive integer `ranges`, by value whether the source reads the column as a number or as text (an Oracle NUMBER)."""
+    return " OR ".join(f"CAST({_qi(col)} AS DECIMAL(38,9)) BETWEEN {int(lo)} AND {int(hi)}" for lo, hi in ranges)
 
 
 def _is_num(t: str) -> bool:
@@ -1480,9 +1487,7 @@ def grade(spec: dict) -> dict:
                     dst = "(SELECT * EXCLUDE (__mseq) FROM got)"
         rc = spec.get("range_column")
         if spec.get("replay") and rc and rc in {c for c, _ in _columns(ora, "source_rows")}:
-            # A sealed plan owes exactly the source rows inside the chunk ranges it carries (inclusive, as planned).
-            within = " OR ".join(f"{_qi(rc)} BETWEEN {int(lo)} AND {int(hi)}" for lo, hi in spec["ranges"])
-            src = f"(SELECT * FROM {src} WHERE {within})"
+            src = f"(SELECT * FROM {src} WHERE {range_window(rc, spec['ranges'])})"
         elif spec.get("replay") and not cumulative and dst and key:
             # A sealed plan's ranges were computed when it was planned; the source may have moved since. A `--resume` plans the
             # keys the source holds now (src/pipeline/chunked `replan_resumed_run`, keyset `plan_unread_tail`): a plain run's grade.
@@ -2157,6 +2162,7 @@ def _self_test() -> None:
     _ndjson_self_test()
     _stdout_self_test()
     _mongo_mixed_id_self_test()
+    _range_window_self_test()
     _zone_less_self_test()
     _absent_table_self_test()
     _folded_duplicate_self_test()
@@ -2361,6 +2367,24 @@ def _mongo_mixed_id_self_test() -> None:
     with _Mem() as ora:
         ora.db.sql('CREATE TABLE s AS SELECT 1::BIGINT AS "_id"')
         assert 'CAST("_id" AS BIGINT)' in mongo_document_columns(ora, "s", "parts"), "a homogeneous `_id` keeps its typed cast"
+
+
+def _range_window_self_test() -> None:
+    """A sealed plan's chunk ranges select source rows by value for a numeric and a text key, and a mongodb URL without a database is a named skip."""
+    ranges = [[1, 2], [3, 4], [5, 5]]
+    with _Mem() as ora:
+        ora.db.sql("CREATE TABLE num AS SELECT * FROM (VALUES (1::BIGINT), (2), (3), (5), (6)) v(\"ID\")")
+        ora.db.sql("CREATE TABLE txt AS SELECT CAST(\"ID\" AS VARCHAR) AS \"ID\" FROM num")
+        for rel in ("num", "txt"):
+            window = range_window("ID", ranges)
+            assert ora.rows(f"SELECT count(*) FROM (SELECT * FROM {rel} WHERE {window})") == [(4,)], f"{rel}: the ranges keep ids 1,2,3,5"
+            assert _columns(ora, f"(SELECT * FROM {rel} WHERE {window})"), f"{rel}: the windowed relation describes"
+    try:
+        _source(None, {"engine": "mongo", "url": "mongodb://h:1/", "database": "", "table": "c"}, {})
+    except Unreachable as e:
+        assert "no database" in str(e), e
+    else:
+        raise AssertionError("a mongodb URL with no database must be a named skip, never a driver traceback")
 
 
 class _Mem:
