@@ -417,8 +417,8 @@ def gate_ceiling(key: str, matrix: Path = GATE_MATRIX) -> int:
     return row[key]
 
 
-def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceiling: int | None = None, owed_fails: bool = False) -> bool:
-    """One ledger row per verdict: CAUGHT passes, STAND-DOWN is an INFRA row (the run is NOT GRADED), N/A is a counted N/A row held under `na_ceiling`, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), OWED is a DESIGN SKIP row (a FAIL on the island that owes it, `owed_fails`), anything else (MISSED, STALE, BROKEN, NO-CONTROL, ABORTED) fails the gate; True when no row failed."""
+def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, owed_fails: bool = False) -> bool:
+    """One ledger row per verdict: CAUGHT passes, STAND-DOWN is an INFRA row (the run is NOT GRADED), N/A is a counted N/A row held by its own reason, NOT-GRADED-HERE is a SKIP row held under `ceiling` (more is a FAIL), OWED is a DESIGN SKIP row (a FAIL on the island that owes it, `owed_fails`), anything else (MISSED, STALE, BROKEN, NO-CONTROL, ABORTED) fails the gate; True when no row failed."""
     here, owed, nas, green = [], [], 0, True
     for v in out:
         msg = f"seeded {v.row.seed} × {v.row.engine}: {v.status} — {v.detail}"
@@ -450,15 +450,8 @@ def record(led: Ledger, out: list[Verdict], ceiling: int | None = None, na_ceili
         print(f"  {len(here)} row(s) NOT-GRADED-HERE (ceiling {limit}): " + ", ".join(here))
     if owed:
         print(f"  {len(owed)} row(s) OWED to another platform's island: " + ", ".join(owed))
-    na_limit = gate_ceiling("na_ceiling") if na_ceiling is None else na_ceiling
-    if nas > na_limit:
-        led.failed("-", "seeded", "na_rows", "-",
-                   f"seeded recall: {nas} N/A row(s), over the gate matrix's na_ceiling of {na_limit} "
-                   "(docs/release-gate-matrix.yaml seeded_recall): a new `na:` is a cell nobody wrote; "
-                   "give the seed its cell on that engine or raise the ceiling with a dated reason")
-        green = False
-    elif nas:
-        print(f"  {nas} N/A row(s) (ceiling {na_limit})")
+    if nas:
+        print(f"  {nas} N/A row(s), each held by its reason in the manifest")
     return green
 
 
@@ -941,15 +934,30 @@ def self_test() -> int:
         assert led.red and not green and [c.status.name for c in led.cells] == ["PASS", "FAIL", "NA"], (status, led.cells)
     real = parse_manifest(yaml.safe_load(MANIFEST.read_text()))
     assert not unknown_cells(real), unknown_cells(real)
-    na_limit = gate_ceiling("na_ceiling")
-    assert sum(r.na is not None for r in real) == na_limit, (
-        f"the manifest has {sum(r.na is not None for r in real)} `na:` rows and the gate matrix's na_ceiling is {na_limit}: "
-        "they must match; write the cell, or raise the ceiling with a dated reason")
-    for n, red in ((na_limit, False), (na_limit + 1, True)):
-        rows = [Verdict(Row(f"s{i}", "mongo", na="x" * MIN_NA_REASON), NA, "x") for i in range(n)]
-        led = Ledger(colour=False)
-        assert record(led, rows, ceiling=0) is (not red) and led.red is red, (n, na_limit)
-        assert sum(c.status.name == "NA" for c in led.cells) == n, "every N/A row is a ledger row"
+    why = "the code path does not exist on this engine"
+    grown = {"seeds": [*yaml.safe_load(MANIFEST.read_text())["seeds"],
+                       {"name": "zz-new-na-seed", "scope": "source", "engines": {e: {"na": why} for e in SCOPES["source"]}}]}
+    added = [r for r in parse_manifest(grown) if r.seed == "zz-new-na-seed"]
+    assert len(added) == len(SCOPES["source"]) and all(r.na == why for r in added), "a new seed of N/A rows parses with no other file edited"
+    led = Ledger(colour=False)
+    every = [Verdict(r, NA, r.na) for r in parse_manifest(grown) if r.na is not None]
+    assert record(led, every) and not led.red and sum(c.status.name == "NA" for c in led.cells) == len(every), \
+        "a valid N/A row is held by its own reason, not by a hand-summed ceiling"
+    with tempfile.TemporaryDirectory() as d:
+        pd = Path(d)
+        base = {e: {"na": why} for e in SCOPES["source"]}
+        for label, engines, want in (
+                ("an empty reason", {**base, "mongo": {"na": ""}}, "takes a reason"),
+                ("a blank reason", {**base, "mongo": {"na": " " * 40}}, "takes a reason"),
+                ("a missing reason", {**base, "mongo": {"na": None}}, "takes a reason"),
+                ("a reason with a cell beside it", {**base, "mongo": {"na": why, "cells": ["t1"]}}, "takes a reason"),
+                ("an engine the scope does not name", {**base, "oracel": {"na": why}}, "outside the scope ['oracel']")):
+            try:
+                parse_manifest({"seeds": [{"name": "s", "scope": "source", "engines": engines}]}, pd)
+            except ValueError as e:
+                assert want in str(e), (label, str(e))
+            else:
+                raise AssertionError(f"{label} was accepted")
     led = Ledger(colour=False)
     assert not record(led, [Verdict(pg, ABORTED, "stopped")], ceiling=0) and led.red, "ABORTED fails the gate"
     other = "macos" if host_platform() == "linux" else "linux"
