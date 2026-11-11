@@ -640,21 +640,15 @@ fn keyset_over_an_mssql_datetime2_7_key_is_refused_before_any_read() {
     assert_eq!(parts, 0, "nothing is written before the refusal");
 }
 
-/// Keyset over a `varchar` key under SQL Server's default SQL collation: the page is
-/// ordered by the column's non-Unicode sort, so the seek must compare in the same order —
-/// an `N'…'` literal compares by Unicode rules and skips keys (`'a-b' < 'ab'` in varchar,
-/// `N'a-b' > N'ab'` in nvarchar).
-#[test]
-#[ignore = "live: requires docker compose mssql"]
-fn keyset_over_an_mssql_varchar_key_reads_every_key_under_the_default_sql_collation() {
-    let table = unique_name("ks_vc");
-    let keys: Vec<String> = (0..60)
-        .flat_map(|i| [format!("x-{i:02}"), format!("x{i:02}"), format!("x'{i:02}")])
-        .collect();
+/// Keys whose punctuation orders differently under Unicode and under the varchar SQL collation.
+const MSSQL_HOSTILE_KEYS: [&str; 7] = ["a", "é'z", "é-a", "é-z", "éa", "éb", "z"];
+
+/// Create `table` with a `VARCHAR(20)` SQL_Latin1 key holding `keys`.
+fn mssql_varchar_key_table(table: &str, keys: &[String]) {
     let values = keys
         .iter()
         .enumerate()
-        .map(|(i, k)| format!("('{}', {i})", k.replace('\'', "''")))
+        .map(|(i, k)| format!("(N'{}', {i})", k.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ");
     mssql_exec(&format!(
@@ -663,27 +657,93 @@ fn keyset_over_an_mssql_varchar_key_reads_every_key_under_the_default_sql_collat
            PRIMARY KEY, id INT NOT NULL); \
          INSERT INTO dbo.{table} VALUES {values}"
     ));
+}
+
+/// Insert `keys` into the key table made by [`mssql_varchar_key_table`].
+fn mssql_varchar_key_insert(table: &str, keys: &[&str]) {
+    let values = keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| format!("(N'{}', {})", k.replace('\'', "''"), 1000 + i))
+        .collect::<Vec<_>>()
+        .join(", ");
+    mssql_exec(&format!("INSERT INTO dbo.{table} VALUES {values}"));
+}
+
+/// Keyset over a `varchar` key under SQL Server's default SQL collation: the page is
+/// ordered by the column's non-Unicode sort, so the seek must compare in the same order —
+/// an `N'…'` literal compares by Unicode rules and skips keys (`'a-b' < 'ab'` in varchar,
+/// `N'a-b' > N'ab'` in nvarchar). The rig oracle grades every key against the source.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_over_an_mssql_varchar_key_reads_every_key_under_the_default_sql_collation() {
+    let table = unique_name("ks_vc");
+    let keys: Vec<String> = (0..60)
+        .flat_map(|i| [format!("x-{i:02}"), format!("x{i:02}"), format!("x'{i:02}")])
+        .chain(MSSQL_HOSTILE_KEYS.iter().map(|k| k.to_string()))
+        .collect();
+    mssql_varchar_key_table(&table, &keys);
+    let _drop = MssqlTable::adopt(table.clone());
+    for chunk in [7, 2, 3] {
+        let rig = Rig::mssql_batch(&table)
+            .mode("chunked")
+            .export_line("chunk_by_key: k")
+            .export_line(&format!("chunk_size: {chunk}"));
+        rig.run_ok();
+        assert_eq!(total_parquet_rows(&rig.out_dir()), keys.len());
+    }
+}
+
+/// Parallel range keyset over a non-ASCII `varchar` key: the boundary ceilings seek in the key's own order.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn parallel_keyset_over_an_mssql_varchar_key_reads_every_non_ascii_key_once() {
+    let table = unique_name("ks_vcp");
+    let keys: Vec<String> = MSSQL_HOSTILE_KEYS.iter().map(|k| k.to_string()).collect();
+    mssql_varchar_key_table(&table, &keys);
+    let _drop = MssqlTable::adopt(table.clone());
     let rig = Rig::mssql_batch(&table)
-        .duckdb_oracle()
         .mode("chunked")
         .export_line("chunk_by_key: k")
-        .export_line("chunk_size: 7");
-    let out = rig.run_args(&[]);
-    let ok = out.status.success();
-    let ids = if ok {
-        duckdb_distinct_i64_set(rig.oracle_dir(), "id")
-    } else {
-        Default::default()
-    };
-    let rows = if ok {
-        duckdb_parquet_rows(rig.oracle_dir())
-    } else {
-        0
-    };
-    mssql_exec(&format!("DROP TABLE dbo.{table}"));
-    assert!(ok, "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(ids.len(), keys.len(), "every key exported");
-    assert_eq!(rows, keys.len() as i64, "each exactly once");
+        .export_line("parallel: 2")
+        .export_line("chunk_size: 2");
+    rig.run_ok();
+    assert_eq!(total_parquet_rows(&rig.out_dir()), keys.len());
+}
+
+/// Incremental over a non-ASCII `varchar` cursor: the saved boundary seeks in the cursor's own order.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn incremental_over_an_mssql_varchar_cursor_takes_every_later_non_ascii_key_once() {
+    let table = unique_name("inc_vc");
+    mssql_varchar_key_table(&table, &["a".to_string(), "é'z".to_string()]);
+    let _drop = MssqlTable::adopt(table.clone());
+    let rig = Rig::mssql_batch(&table)
+        .mode("incremental")
+        .export_line("cursor_column: k");
+    rig.run_ok();
+    mssql_varchar_key_insert(&table, &["é-a", "é-z", "éa", "éb", "z"]);
+    rig.run_ok();
+    assert_eq!(total_parquet_rows(&rig.out_dir()), 7);
+}
+
+/// Keyset-incremental over a non-ASCII `varchar` key: the anchor seeks in the key's own order.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_incremental_over_an_mssql_varchar_key_takes_every_later_non_ascii_key_once() {
+    let table = unique_name("kinc_vc");
+    mssql_varchar_key_table(&table, &["a".to_string(), "é'z".to_string()]);
+    let _drop = MssqlTable::adopt(table.clone());
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("chunk_size: 2")
+        .export_line("chunk_checkpoint: true")
+        .export_line("keyset_incremental: true");
+    rig.run_ok();
+    mssql_varchar_key_insert(&table, &["é-a", "é-z", "éa", "éb", "z"]);
+    rig.run_ok();
+    assert_eq!(total_parquet_rows(&rig.out_dir()), 7);
 }
 
 /// Parallel keyset over a legacy `DATETIME` key for a login whose language reads dates

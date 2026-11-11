@@ -281,16 +281,17 @@ pub(crate) fn sample_key_boundaries(
     // Incremental (iteration 3): sample percentiles of only the NEW rows,
     // `(floor, ceil]`, as inline per-dialect literals (never a bind param).
     let mut preds: Vec<String> = Vec::new();
+    let of = crate::source::query::KeyOf { base, expr: &k };
     if let Some(lo) = floor {
         preds.push(format!(
             "{k} > {}",
-            crate::source::query::inline_literal(st, lo)
+            crate::source::query::inline_literal(st, lo, of)
         ));
     }
     if let Some(hi) = ceil {
         preds.push(format!(
             "{k} <= {}",
-            crate::source::query::inline_literal(st, hi)
+            crate::source::query::inline_literal(st, hi, of)
         ));
     }
     let where_clause = if preds.is_empty() {
@@ -549,13 +550,16 @@ fn run_keyset_parallel(
         let anchor = progress.cursor()?.last_cursor_value;
         let st = plan.source.source_type;
         let key_q = crate::sql::quote_ident(st, &kp.key_column);
-        // The source answers "is anything past the anchor" in its own collation.
+        let of = crate::source::query::KeyOf {
+            base: &plan.base_query,
+            expr: &key_q,
+        };
         let past_anchor = anchor
             .as_deref()
             .map(|a| {
                 format!(
                     " WHERE {key_q} > {}",
-                    crate::source::query::inline_literal(st, a)
+                    crate::source::query::inline_literal(st, a, of)
                 )
             })
             .unwrap_or_default();
@@ -2028,6 +2032,64 @@ mod tests {
         )
         .unwrap();
         assert!(src.1, "a parallel worker's page reads a lead-bounded range");
+    }
+
+    struct Scripted {
+        total: &'static str,
+        bounds: Vec<&'static str>,
+        sql: Vec<String>,
+    }
+    impl Source for Scripted {
+        fn export(
+            &mut self,
+            _request: &source::ExportRequest<'_>,
+            _sink: &mut dyn source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("sampling reads scalars only")
+        }
+        fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
+            self.sql.push(sql.to_string());
+            if sql.starts_with("SELECT COUNT(*)") {
+                return Ok(Some(self.total.to_string()));
+            }
+            Ok(Some(self.bounds.remove(0).to_string()))
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(vec![])
+        }
+    }
+
+    /// Sampling returns the distinct row-percentile keys in order, fences them by the floor and ceiling, and reads nothing from fewer than two rows.
+    #[test]
+    fn sampled_boundaries_are_the_distinct_percentile_keys_inside_the_fence() {
+        let plan = crate::plan::test_support::test_plan();
+        let mut src = Scripted {
+            total: "40",
+            bounds: vec!["b10", "b20", "b20"],
+            sql: Vec::new(),
+        };
+        let got = sample_key_boundaries(&mut src, &plan, "k", 4, Some("a"), Some("z")).unwrap();
+        assert_eq!(got, vec!["b10".to_string(), "b20".to_string()]);
+        assert_eq!(src.sql.len(), 4, "one count and one read per percentile");
+        for sql in &src.sql {
+            assert!(sql.contains("\"k\" > E'a' AND \"k\" <= E'z'"), "{sql}");
+        }
+        let mut one = Scripted {
+            total: "1",
+            bounds: vec![],
+            sql: Vec::new(),
+        };
+        assert!(
+            sample_key_boundaries(&mut one, &plan, "k", 4, None, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(one.sql.len(), 1, "a single row is counted, never sampled");
+        assert!(!one.sql[0].contains("WHERE"), "{}", one.sql[0]);
     }
 
     /// A composite key's sampled lead bounds become one-value tuples; a single key's stay bare values.
