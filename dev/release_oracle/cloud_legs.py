@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+from contextlib import closing
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -531,14 +532,9 @@ def live_flow(work: Path, rec: dict | None = None) -> Flow:
 
 def _snapshot_state(src: Path, dst: Path) -> None:
     """A consistent copy of the state database, one file."""
-    con = sqlite3.connect(src)
-    try:
+    with closing(sqlite3.connect(src)) as con, closing(sqlite3.connect(dst)) as out:
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        out = sqlite3.connect(dst)
         con.backup(out)
-        out.close()
-    finally:
-        con.close()
 
 
 def _save_recordings(rec: dict, meta: dict, run: core.Proc, check_ok: core.Proc, check_refused: core.Proc, g: tuple, b: tuple, state: Path) -> None:
