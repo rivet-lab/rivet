@@ -3,7 +3,7 @@
 use std::path::Path;
 
 // Ceilings frozen at 2026-11-10 (fix/secret-newtype): each is a connect or request site that sends the credential. A raise names the new site in its PR body.
-// ratchet-pin: secret-expose-sites (review 2027-02-01) count src/ non-test \.expose\(\)
+// ratchet-pin: secret-expose-sites (review 2027-02-01) count src/ \.expose\(\)
 const CEILINGS: &[(&str, usize)] = &[
     ("src/bin/rivet-mcp.rs", 2),
     ("src/bin/seed/copy_pg.rs", 4),
