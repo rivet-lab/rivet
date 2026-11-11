@@ -1256,7 +1256,7 @@ fn lock_wait_times_out(live_rig: impl Fn() -> (String, Rig, Box<dyn std::any::An
     let holder = std::thread::spawn(move || {
         let state = match state_url {
             Some(url) => {
-                rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(url))
+                rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(url.into()))
             }
             None => rivet::state::StateStore::open(&cfg),
         }

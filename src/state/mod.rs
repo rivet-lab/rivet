@@ -172,7 +172,7 @@ pub(super) enum StateConn {
 #[derive(Clone)]
 pub enum StateRef {
     Sqlite(std::path::PathBuf),
-    Postgres(String),
+    Postgres(crate::secret::Secret),
 }
 
 /// An error with its cause appended: `postgres::Error` displays only "db error", the server's message is its source.
@@ -236,14 +236,17 @@ fn holds_state(path: &std::path::Path) -> bool {
         return false;
     }
     Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .and_then(|c| {
-            c.query_row(
-                "SELECT (SELECT COUNT(*) FROM export_state) + (SELECT COUNT(*) FROM run_status)",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-        })
+        .and_then(|c| state_rows(&c))
         .is_ok_and(|n| n > 0)
+}
+
+/// The export cursors plus the runs a SQLite state holds.
+fn state_rows(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM export_state) + (SELECT COUNT(*) FROM run_status)",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
 }
 
 /// Refuse a `sqlite:` target that holds nothing while the file beside the config holds this
@@ -271,8 +274,8 @@ fn refuse_a_state_left_behind(beside: &std::path::Path, target: &std::path::Path
 }
 
 /// The value of `RIVET_STATE_URL`, when it is set.
-pub(crate) fn state_url_var() -> Option<String> {
-    std::env::var("RIVET_STATE_URL").ok()
+pub(crate) fn state_url_var() -> Option<crate::secret::Secret> {
+    std::env::var("RIVET_STATE_URL").ok().map(Into::into)
 }
 
 /// The PostgreSQL URL a `RIVET_STATE_URL` value names, `None` for an empty one (SQLite); any other value is refused, never replaced by SQLite.
@@ -336,11 +339,12 @@ impl StateStore {
     /// `RIVET_STATE_URL` when it is set, else SQLite next to `config_path`.
     pub fn open(config_path: &str) -> Result<Self> {
         if let Some(url) = state_url_var() {
-            if let Some(path) = sqlite_state_path(&url, config_path) {
+            let url = url.expose();
+            if let Some(path) = sqlite_state_path(url, config_path) {
                 refuse_a_state_left_behind(&config_dir_of(config_path).join(STATE_DB_NAME), &path)?;
                 return Self::open_at_path(&path);
             }
-            if let Some(url) = postgres_state_url(&url)? {
+            if let Some(url) = postgres_state_url(url)? {
                 return Self::open_postgres(url);
             }
         }
@@ -349,7 +353,7 @@ impl StateStore {
 
     /// Whether `RIVET_STATE_URL` names a state server, so the state does not live beside the config.
     pub fn names_a_server() -> bool {
-        Self::names_a_server_in(std::env::var("RIVET_STATE_URL").ok().as_deref())
+        Self::names_a_server_in(state_url_var().as_ref().map(crate::secret::Secret::expose))
     }
 
     /// [`StateStore::names_a_server`] over the variable's value: anything set and not a SQLite file.
@@ -359,8 +363,8 @@ impl StateStore {
 
     /// Which state `config_path` uses and that it answers, without creating or migrating it: `postgres <redacted url>` or `sqlite <path>`.
     pub fn probe(config_path: &str) -> Result<String> {
-        if let Ok(url) = std::env::var("RIVET_STATE_URL")
-            && let Some(url) = postgres_state_url(&url)?
+        if let Some(url) = state_url_var()
+            && let Some(url) = postgres_state_url(url.expose())?
         {
             let mut client = connect_pg(url)?;
             client.simple_query("SELECT 1").map_err(|e| {
@@ -427,7 +431,7 @@ impl StateStore {
                     in_tx: Default::default(),
                 })
             }
-            StateRef::Postgres(url) => Self::open_postgres(url),
+            StateRef::Postgres(url) => Self::open_postgres(url.expose()),
         }
     }
 
@@ -484,7 +488,7 @@ impl StateStore {
         migrate_pg(&mut client)?;
         Ok(Self {
             conn: StateConn::Postgres(Box::new(std::cell::RefCell::new(client))),
-            state_ref: StateRef::Postgres(url.to_string()),
+            state_ref: StateRef::Postgres(url.into()),
             in_tx: Default::default(),
         })
     }
@@ -493,9 +497,8 @@ impl StateStore {
     /// directory path for Postgres (not meaningful for connection, only used
     /// by legacy callers — prefer `state_ref()` for new code).
     pub fn state_db_path(config_path: &str) -> std::path::PathBuf {
-        std::env::var("RIVET_STATE_URL")
-            .ok()
-            .and_then(|url| sqlite_state_path(&url, config_path))
+        state_url_var()
+            .and_then(|url| sqlite_state_path(url.expose(), config_path))
             .unwrap_or_else(|| config_dir_of(config_path).join(STATE_DB_NAME))
     }
 

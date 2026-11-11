@@ -38,9 +38,12 @@ impl Rig {
             .map(|l| format!("    {l}\n"))
             .collect();
         let source = if self.source_lines.is_empty() {
-            match &self.url_env {
-                Some(v) => format!("source: {{ type: {}, url_env: {v} }}", self.source_type),
-                None => format!(
+            match (&self.url_env, &self.url_file) {
+                (Some(v), _) => format!("source: {{ type: {}, url_env: {v} }}", self.source_type),
+                (None, Some(f)) => {
+                    format!("source: {{ type: {}, url_file: {f} }}", self.source_type)
+                }
+                (None, None) => format!(
                     "source: {{ type: {}, url: \"{}\" }}",
                     self.source_type, self.source_url
                 ),
@@ -51,12 +54,16 @@ impl Rig {
                 .iter()
                 .map(|l| format!("  {l}\n"))
                 .collect();
-            match &self.url_env {
-                Some(v) => format!(
+            match (&self.url_env, &self.url_file) {
+                (Some(v), _) => format!(
                     "source:\n  type: {}\n  url_env: {v}\n{extra}",
                     self.source_type
                 ),
-                None => format!(
+                (None, Some(f)) => format!(
+                    "source:\n  type: {}\n  url_file: {f}\n{extra}",
+                    self.source_type
+                ),
+                (None, None) => format!(
                     "source:\n  type: {}\n  url: \"{}\"\n{extra}",
                     self.source_type, self.source_url
                 ),

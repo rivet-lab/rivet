@@ -128,6 +128,8 @@ mod live_cli_flags;
 mod live_clickhouse_load;
 #[path = "live/live_config_knob_counts.rs"]
 mod live_config_knob_counts;
+#[path = "live/live_config_paths.rs"]
+mod live_config_paths;
 #[path = "live/live_content_load.rs"]
 mod live_content_load;
 #[path = "live/live_continued_key_load.rs"]

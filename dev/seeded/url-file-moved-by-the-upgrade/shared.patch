@@ -1,0 +1,14 @@
+diff --git a/src/config/anchor.rs b/src/config/anchor.rs
+index be32525..8621cc1 100644
+--- a/src/config/anchor.rs
++++ b/src/config/anchor.rs
+@@ -24,7 +24,8 @@ impl Anchor {
+             .as_ref()
+             .filter(|_| !Path::new(written).is_absolute())
+             .map(|c| destination::normalized(&c.join(written)));
+-        if !Path::new(&anchored).exists()
++        if false
++            && !Path::new(&anchored).exists()
+             && let Some(old) = old.filter(|o| o.exists())
+         {
+             crate::rivet_bail!(

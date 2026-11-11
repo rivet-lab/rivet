@@ -29,7 +29,8 @@ pub(crate) fn bound_to_collection(plan: &ResolvedRunPlan) -> Result<Option<Resol
         return Ok(None);
     };
     let url = plan.source.resolve_url()?;
-    let session = crate::source::mongo::MongoSession::connect(&url, plan.source.tls.as_ref())?;
+    let session =
+        crate::source::mongo::MongoSession::connect(url.expose(), plan.source.tls.as_ref())?;
     Ok(with_incarnation(
         plan,
         session.collection_incarnation(collection)?,

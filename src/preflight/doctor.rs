@@ -385,6 +385,7 @@ fn doctor_failure_error(transient: Option<Transient>) -> anyhow::Error {
 
 fn check_source_auth(config: &Config) -> Result<()> {
     let url = config.source.resolve_url()?;
+    let url = url.expose();
     let tls = config.source.tls.as_ref();
     // `doctor` is meant to surface security misconfigurations *before*
     // the operator runs a real export. Plaintext-source connections are
@@ -396,12 +397,12 @@ fn check_source_auth(config: &Config) -> Result<()> {
     crate::source::warn_if_tls_disabled(&config.source);
     match config.source.source_type {
         SourceType::Postgres => {
-            let mut client = crate::source::postgres::connect_client(&url, tls)?;
+            let mut client = crate::source::postgres::connect_client(url, tls)?;
             client.simple_query("SELECT 1")?;
             Ok(())
         }
         SourceType::Mysql => {
-            let pool = crate::source::mysql::connect_pool(&url, tls)?;
+            let pool = crate::source::mysql::connect_pool(url, tls)?;
             let mut conn = pool.get_conn()?;
             use mysql::prelude::Queryable;
             conn.query_drop("SELECT 1")?;
@@ -410,7 +411,7 @@ fn check_source_auth(config: &Config) -> Result<()> {
         SourceType::Mssql => {
             // `connect_with_tls` runs a connect + `SELECT 1` round-trip itself,
             // so a successful construction is a green health-check.
-            crate::source::mssql::MssqlSource::connect_with_tls(&url, tls)?;
+            crate::source::mssql::MssqlSource::connect_with_tls(url, tls)?;
             Ok(())
         }
         SourceType::Oracle => {
@@ -421,7 +422,7 @@ fn check_source_auth(config: &Config) -> Result<()> {
         SourceType::Mongo => {
             // `connect_with_tls` runs a connect + `ping` round-trip itself, so a
             // successful construction is a green health-check.
-            crate::source::mongo::MongoSource::connect(&url, tls, config.source.mongo.as_ref())?;
+            crate::source::mongo::MongoSource::connect(url, tls, config.source.mongo.as_ref())?;
             Ok(())
         }
     }
@@ -444,7 +445,7 @@ fn note_mssql_harm_permission(config: &Config) {
         return;
     };
     if let Some(false) =
-        crate::source::mssql::sample_view_server_state(&url, config.source.tls.as_ref())
+        crate::source::mssql::sample_view_server_state(url.expose(), config.source.tls.as_ref())
     {
         println!(
             "[note] Source-harm metrics need VIEW SERVER STATE — this SQL Server login lacks it, \
@@ -469,9 +470,10 @@ fn note_oracle_harm_permission(config: &Config) {
     let Ok(url) = config.source.resolve_url() else {
         return;
     };
-    if let Some(false) =
-        crate::source::oracle::OracleSource::sample_harm_views(&url, config.source.tls.as_ref())
-    {
+    if let Some(false) = crate::source::oracle::OracleSource::sample_harm_views(
+        url.expose(),
+        config.source.tls.as_ref(),
+    ) {
         println!(
             "[note] This Oracle user cannot read V$SYSSTAT / V$SYSTEM_EVENT, so source-harm \
              metrics and governor pressure will be absent. Data extraction is unaffected. \

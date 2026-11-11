@@ -60,7 +60,7 @@ fn a_key_only_the_working_directory_holds_is_refused_naming_both_places() {
     let path = config_beside(conf.path(), "./k.json");
     let mut cfg = Config::from_yaml(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let err = cfg
-        .anchor_credential_files(&path, Some(cwd.path().to_path_buf()))
+        .anchor_files(&path, Some(cwd.path().to_path_buf()))
         .unwrap_err();
     crate::error::assert_coded(&err, "RIVET_CONFIG_SECRET_UNSET", 1);
     let shown = format!("{err:#}");

@@ -60,7 +60,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "writeOnly": true
         },
         "url_env": {
           "type": [
@@ -69,6 +70,7 @@
           ]
         },
         "url_file": {
+          "description": "File holding the URL; a relative path is read beside the config file, whatever directory rivet starts from.",
           "type": [
             "string",
             "null"
@@ -106,7 +108,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "writeOnly": true
         },
         "password_env": {
           "type": [
@@ -397,7 +400,7 @@
           "default": "verify-full"
         },
         "ca_file": {
-          "description": "PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set.",
+          "description": "PEM CA certificate for server verification: the only trust anchor, the system store is not consulted when it is set; a relative path is read beside the config file.",
           "type": [
             "string",
             "null"
@@ -1678,7 +1681,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "writeOnly": true
         },
         "webhook_url_env": {
           "type": [
@@ -1736,7 +1740,7 @@
           "default": null
         },
         "private_key_path": {
-          "description": "Snowflake: the unencrypted PKCS#8 private key file of the user's key pair.",
+          "description": "Snowflake: the unencrypted PKCS#8 private key file of the user's key pair; a relative path is read beside the config file.",
           "type": [
             "string",
             "null"
@@ -1789,7 +1793,7 @@
             "string",
             "null"
           ],
-          "default": null
+          "writeOnly": true
         },
         "user": {
           "description": "Snowflake / ClickHouse: the user the load authenticates as.",
@@ -1816,7 +1820,7 @@
           "default": null
         },
         "ca_file": {
-          "description": "ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed\nby a private CA, beside the built-in public roots.",
+          "description": "ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed\nby a private CA, beside the built-in public roots; a relative path is read beside the config file.",
           "type": [
             "string",
             "null"
