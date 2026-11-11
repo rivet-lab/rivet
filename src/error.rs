@@ -794,6 +794,11 @@ pub mod codes {
         "RIVET_CONFIG_DESTINATION_ENDPOINT_UNSAFE",
         "drop `endpoint:` to use the provider default, or point it at a loopback emulator with `allow_anonymous: true`",
     );
+    /// An outbound `http://` URL on a remote host that would carry a credential or rows in cleartext.
+    pub const CONFIG_REMOTE_PLAINTEXT: Code = usage(
+        "RIVET_CONFIG_REMOTE_PLAINTEXT",
+        "use an `https://` URL, or point it at a loopback host; a ClickHouse `load.url` on a trusted network may opt in with `load.allow_plaintext: true`",
+    );
     /// A numeric, size, duration or level value outside what rivet accepts, or two sizing knobs set together.
     pub const CONFIG_VALUE_OUT_OF_RANGE: Code = usage(
         "RIVET_CONFIG_VALUE_OUT_OF_RANGE",
@@ -1888,6 +1893,7 @@ pub mod codes {
         CONFIG_MODE_SETTING_INVALID,
         CONFIG_DESTINATION_AUTH_INVALID,
         CONFIG_DESTINATION_ENDPOINT_UNSAFE,
+        CONFIG_REMOTE_PLAINTEXT,
         CONFIG_VALUE_OUT_OF_RANGE,
         CONFIG_CDC_SHAPE_INVALID,
         CONFIG_CSV_COMPRESSION_UNSUPPORTED,

@@ -5934,6 +5934,31 @@ seeds:
       mongo:
         na: "a MongoDB export has no incremental cursor_column: mode full only"
 
+  - name: remote-plaintext-every-sink
+    class: "the remote-plaintext gate lets an http:// URL on a remote host through, so a ClickHouse load.url, a Slack webhook_url or a BigQuery RIVET_BQ_API_ENDPOINT sends the loader password and every row, the webhook secret or the OAuth bearer token across the network unencrypted"
+    history: "bughunt axis 4 (security defaults), 2026-11-10: require_tls_or_loopback guarded the source and state dials only; RED on main 2026-11-11 (rivet check accepted a remote http:// ClickHouse load.url and Slack webhook_url on every source engine)"
+    scope: source
+    patch: remote-plaintext-every-sink/shared.patch
+    engines:
+      postgres:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mysql:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mssql:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mongo:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      oracle:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      lib:
+        cells:
+          - "lib:a_remote_http_url_is_refused_by_code_naming_the_host_and_the_remedy"
+          - "lib:a_remote_plaintext_clickhouse_url_is_refused_unless_allowed"
+          - "lib:a_remote_plaintext_slack_webhook_is_refused"
+          - "lib:a_remote_plaintext_url_is_refused_when_the_client_is_built"
+          - "lib:a_remote_plaintext_webhook_is_refused_before_any_request"
+          - "lib:a_remote_plaintext_api_endpoint_is_refused"
+
   - name: mongo-id-types-mixed-under-a-keyed-view
     class: a MongoDB CDC export whose keyed `load:` block merges on the flat `_id` column is accepted over `_id` values of more than one BSON type, so the current-state view merges distinct documents and a delete of one removes the other
     history: "H5-F7 (2026-11-10): RED on main c13bc29c on Mongo 4.4, 5.0 and 8.0 into ClickHouse (8 source documents, 4 view rows; a delete of string `1` tombstoned key `1` and removed the live int 1; exit 0 with only a WARN)"
