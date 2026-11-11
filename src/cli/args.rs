@@ -910,6 +910,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_subcommand_is_hidden_from_help() {
+        use clap::CommandFactory;
+        fn hidden(cmd: &clap::Command, path: &str, out: &mut Vec<String>) {
+            for c in cmd.get_subcommands() {
+                let p = format!("{path} {}", c.get_name());
+                if c.is_hide_set() {
+                    out.push(p.clone());
+                }
+                hidden(c, &p, out);
+            }
+        }
+        let mut found = Vec::new();
+        hidden(&Cli::command(), "rivet", &mut found);
+        assert_eq!(
+            found,
+            Vec::<String>::new(),
+            "the no_secret_in_output matrix reads its commands from --help"
+        );
+    }
+
     fn state_reset_chunks_parse_from(
         extra_after_config: &[&str],
     ) -> std::result::Result<(), clap::error::ErrorKind> {

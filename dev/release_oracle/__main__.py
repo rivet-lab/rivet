@@ -69,6 +69,7 @@ from . import (
     property_no_silent_null_load,
     partner_shape,
     perf,
+    property_no_secret_in_output,
     regression,
     release_path,
     scenarios,
@@ -454,7 +455,7 @@ def _verdict_scope_self_test() -> None:
 
 
 def _skip_cause_self_test() -> None:
-    """A full gate grades an unexcused env skip INFRA and its tag is refused; a design skip, a reduced gate and an excused skip are unchanged; the cause is required and survives a flush."""
+    """A tag gate (full or island) grades an unexcused env skip INFRA and its tag is refused; a design skip, a reduced gate and an excused skip are unchanged; the cause is required and survives a flush."""
     import contextlib
     import io
     import json as _json
@@ -473,7 +474,7 @@ def _skip_cause_self_test() -> None:
                 rc = led.report(full=True, gate=gate, tree=(sha, False), config=CANONICAL_CONFIG)
                 line = {**_json.loads(core.TIMINGS_HISTORY.read_text().splitlines()[-1]), "binary": sha[:9]}
                 core.TIMINGS_HISTORY.write_text(_json.dumps(line) + "\n")
-                refusal = gate_refusal(sha, core.TIMINGS_HISTORY)
+                refusal = gate_refusal(sha, core.TIMINGS_HISTORY, ISLAND_GATE if gate == ISLAND_GATE else core.FULL_GATE)
             finally:
                 core.TIMINGS_HISTORY = saved
         return rc, out.getvalue(), line, refusal
@@ -513,7 +514,10 @@ def _skip_cause_self_test() -> None:
     rc, said, line, _ = run_gate(stage_down(), core.REDUCED_GATE)
     assert rc == 0 and line["verdict"] == "RELEASE-READY" and "INFRA" not in said and line["skipped"] == 3, (rc, said, line)
     rc, said, line, refusal = run_gate(stage_down(), ISLAND_GATE)
-    assert rc == 0 and line["verdict"] == "RELEASE-READY" and refusal is not None, "an island run is not a full gate"
+    assert rc == 1 and line["verdict"] == "NOT GRADED" and "INFRA" in said and line["skipped_env"], (rc, said, line)
+    assert refusal is not None and "NOT GRADED" in refusal, "an island run that env-skipped a cell is not green"
+    rc, said, line, refusal = run_gate(design, ISLAND_GATE)
+    assert rc == 0 and line["verdict"] == "RELEASE-READY" and refusal is None, "an island run with design skips only is green"
 
     kept = skip_allow.EXCUSES
     far = (date.today() + timedelta(days=30)).isoformat()
@@ -521,9 +525,13 @@ def _skip_cause_self_test() -> None:
         skip_allow.EXCUSES = (skip_allow.Excuse("verify_failed_run_tail", "*", "-", "self-test fixture", far),)
         rc, _, line, refusal = run_gate(stage_down(), core.FULL_GATE)
         assert rc == 0 and line["verdict"] == "RELEASE-READY" and refusal is None, (rc, line, refusal)
+        rc, _, line, refusal = run_gate(stage_down(), ISLAND_GATE)
+        assert rc == 0 and line["verdict"] == "RELEASE-READY" and refusal is None, "a dated excuse covers an island env skip too"
         skip_allow.EXCUSES = (skip_allow.Excuse("verify_failed_run_tail", "*", "-", "self-test fixture", "2000-01-01"),)
         rc, _, line, refusal = run_gate(stage_down(), core.FULL_GATE)
         assert rc == 1 and line["verdict"] == "NOT GRADED" and refusal is not None, "an expired excuse stops excusing"
+        rc, _, line, refusal = run_gate(stage_down(), ISLAND_GATE)
+        assert rc == 1 and line["verdict"] == "NOT GRADED" and refusal is not None, "an expired excuse stops excusing on the island too"
     finally:
         skip_allow.EXCUSES = kept
 
@@ -551,7 +559,7 @@ def _skip_cause_self_test() -> None:
         except TypeError:
             continue
         raise AssertionError("a SKIP without a cause, or a cause on a non-SKIP, must be refused")
-    print("self-test ok: an unexcused env skip is NOT GRADED in a full gate and its tag is refused; design skips, "
+    print("self-test ok: an unexcused env skip is NOT GRADED in a full gate and in the island, and its tag is refused; design skips, "
           "a reduced gate and a dated excuse are unchanged; the cause is required and survives a flush")
 
 
@@ -1709,6 +1717,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         serial("network faults", lambda led: scenarios.verify_network_faults(led)),
         serial("tls required", lambda led: scenarios.verify_tls_required(led)),
         serial("tls downgrade", lambda led: tls_downgrade.verify_tls_downgrade_refused(led)),
+        serial("no_secret_in_output", lambda led: property_no_secret_in_output.verify_credential_never_reaches_a_sink(led)),
         serial("auth", lambda led: scenarios.verify_auth(led)),
         serial("cdc standby", lambda led: scenarios.verify_cdc_standby(led)),
         serial("coverage matrices", lambda led: scenarios.verify_coverage_matrices(led)),

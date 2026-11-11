@@ -309,6 +309,8 @@ mod live_wave_apply;
 mod preflight_missing_table;
 #[path = "live/preflight_target_fail_note.rs"]
 mod preflight_target_fail_note;
+#[path = "live/property_check_equals_run.rs"]
+mod property_check_equals_run;
 #[path = "live/property_no_debris_after_stop.rs"]
 mod property_no_debris_after_stop;
 #[allow(dead_code)]
