@@ -5805,7 +5805,7 @@ seeds:
       mongo:
         na: "MongoDB has no bit string type and change events are BSON documents"
       oracle:
-        na: "Oracle has no bit string type"
+        na: "Oracle has no bit string type and its change rows are typed LogMiner columns"
 
   - name: init-name-folded-into-query
     class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
