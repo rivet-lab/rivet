@@ -42,7 +42,8 @@ mod memory_throttle_wiring;
 mod one_sanitizer_guard;
 #[path = "offline/property_no_debris_after_stop.rs"]
 mod property_no_debris_after_stop;
-
+#[path = "offline/property_no_silent_null_cloud_legs.rs"]
+mod property_no_silent_null_cloud_legs;
 #[path = "offline/renderer_locality_guard.rs"]
 mod renderer_locality_guard;
 #[path = "offline/seek_order_matrix.rs"]

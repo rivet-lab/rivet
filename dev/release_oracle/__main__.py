@@ -67,6 +67,7 @@ from . import (
     property_no_silent_null_grants,
     property_no_silent_null_cdc,
     property_no_silent_null_load,
+    cloud_legs,
     partner_shape,
     perf,
     properties,
@@ -894,6 +895,7 @@ def _stages_self_test() -> None:
     property_no_silent_null_grants.self_test()
     property_no_silent_null_cdc.self_test()
     property_no_silent_null_load.self_test()
+    cloud_legs.self_test()
     _matrix_exit_code_self_test()
     doc = {
         "preflights": [{"id": "a", "status": "test"}, {"id": "off", "status": "gap"}],
@@ -1867,6 +1869,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         # Its own containers and ports; its CDC cells read the stand's CDC servers (blessed_flow).
         Stage("engine matrix", lambda led: engine_loop(led, ns), frozenset({"the gate's engine containers"}), SERIAL),
     ]
+    table.append(warehouse("cloud legs", lambda led: cloud_legs.verify_cloud_legs(led)))
     if not ns.no_cloud:
         # Its own `bq`-tagged containers; handed this module's bring_up/seed_engine so readiness has one definition.
         table.append(Stage("bigquery golden", lambda led: bigquery.run_bigquery_golden(

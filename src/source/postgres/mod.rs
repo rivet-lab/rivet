@@ -24,6 +24,7 @@ pub(crate) use arrow_convert::pg_interval_to_iso8601;
 pub(crate) mod cdc;
 mod from_parse;
 pub(crate) mod pgoutput;
+pub(crate) mod td_line;
 
 use std::collections::HashMap;
 use std::sync::Arc;
