@@ -65,6 +65,8 @@ mod capture_markers;
 mod cdc_cli_claims_checkpoint;
 #[path = "offline/cdc_cli_surface_guard.rs"]
 mod cdc_cli_surface_guard;
+#[path = "offline/mongo_keyed_id_types_refusal.rs"]
+mod mongo_keyed_id_types_refusal;
 
 #[path = "offline/cdc_evidence_matrix_guard.rs"]
 mod cdc_evidence_matrix_guard;

@@ -5876,3 +5876,23 @@ seeds:
         na: "a MongoDB collection has no declared numeric precision, so init writes no decimal override and no map key from a field name (the mutant lives in the relational decimal override writer)"
       oracle:
         cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+
+  - name: mongo-id-types-mixed-under-a-keyed-view
+    class: a MongoDB CDC export whose keyed `load:` block merges on the flat `_id` column is accepted over `_id` values of more than one BSON type, so the current-state view merges distinct documents and a delete of one removes the other
+    history: "H5-F7 (2026-11-10): RED on main c13bc29c on Mongo 4.4, 5.0 and 8.0 into ClickHouse (8 source documents, 4 view rows; a delete of string `1` tombstoned key `1` and removed the live int 1; exit 0 with only a WARN)"
+    scope: source
+    patch: mongo-id-types-mixed-under-a-keyed-view/mongo.patch
+    engines:
+      postgres:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mysql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mssql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      oracle:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mongo:
+        cells:
+          - a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write
+          - a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type
+          - "lib:a_second_type_is_refused_and_not_recorded"
