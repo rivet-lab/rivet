@@ -758,8 +758,9 @@ impl Source for OracleSource {
     fn column_nullable(&mut self, query: &str, column: &str) -> Result<Option<bool>> {
         let projection = self.projected(query)?;
         let metas = self.describe(&projection.sql)?;
-        let described = metas[..projection.native.len()]
+        let described = metas
             .iter()
+            .take(projection.native.len())
             .find(|m| m.name() == column)
             .map(|m| m.nullable());
         if described != Some(true) {
