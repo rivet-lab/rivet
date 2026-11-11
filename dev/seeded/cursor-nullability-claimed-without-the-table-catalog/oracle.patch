@@ -1,9 +1,9 @@
 diff --git a/src/source/oracle/mod.rs b/src/source/oracle/mod.rs
-index 31bcef6f..a35c55b7 100644
+index 5cefab9e..e1adfa34 100644
 --- a/src/source/oracle/mod.rs
 +++ b/src/source/oracle/mod.rs
-@@ -762,7 +762,7 @@ impl Source for OracleSource {
-             .iter()
+@@ -763,7 +763,7 @@ impl Source for OracleSource {
+             .take(projection.native.len())
              .find(|m| m.name() == column)
              .map(|m| m.nullable());
 -        if described != Some(true) {
