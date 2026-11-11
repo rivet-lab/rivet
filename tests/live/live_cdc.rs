@@ -8777,7 +8777,13 @@ fn pg_cdc_a_relation_name_holding_colon_space_is_delivered_not_dropped() {
     )
     .unwrap();
     let rig = Rig::pg_cdc("orders", &slot).source_url(cdc_db.url());
-    let got = pg_wire_cells(&rig.run_and_read(), &["id", "v"]);
+    let batches = rig.run_and_read();
+    assert_eq!(
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        5,
+        "three inserts, an update and a delete reach the destination"
+    );
+    let got = pg_wire_cells(&batches, &["id", "v"]);
     assert_eq!(
         got,
         vec![
@@ -8816,7 +8822,13 @@ fn pg_cdc_column_names_holding_brackets_are_delivered_under_their_own_names() {
     )
     .unwrap();
     let rig = Rig::pg_cdc("public.t", &slot).source_url(cdc_db.url());
-    let got = pg_wire_cells(&rig.run_and_read(), &["k[1", "a[b]:c", "x]: y", "q\"r'"]);
+    let batches = rig.run_and_read();
+    assert_eq!(
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        4,
+        "two inserts, an update and a delete reach the destination"
+    );
+    let got = pg_wire_cells(&batches, &["k[1", "a[b]:c", "x]: y", "q\"r'"]);
     assert_eq!(
         got,
         vec![
@@ -8998,8 +9010,14 @@ fn pg_cdc_server_text_types_and_separator_values_are_delivered_unchanged() {
         .collect();
     want.sort();
     let rig = Rig::pg_cdc("public.srv", &slot).source_url(cdc_db.url());
+    let batches = rig.run_and_read();
     assert_eq!(
-        pg_wire_cells(&rig.run_and_read(), &cols),
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        want.len(),
+        "every inserted row reaches the destination"
+    );
+    assert_eq!(
+        pg_wire_cells(&batches, &cols),
         want,
         "each cell is the server's own ::text"
     );
