@@ -581,13 +581,13 @@ impl Config {
         for export in &self.exports {
             self.validate_export(export)?;
         }
+        self.validate_outbound_urls_are_not_remote_plaintext()?;
         self.validate_cdc_resource_conflicts()?;
         self.validate_csv_exports_are_not_loaded()?;
         self.validate_load_overrides()?;
         self.validate_layout_has_a_compacting_warehouse()?;
         self.validate_a_default_base_has_a_baseline()?;
         self.validate_cdc_has_a_loadable_target()?;
-        self.validate_outbound_urls_are_not_remote_plaintext()?;
         Ok(())
     }
 
