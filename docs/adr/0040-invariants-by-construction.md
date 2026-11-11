@@ -45,16 +45,16 @@ A defect in one of the five classes is fixed in the owner seam, not at the call 
 
 ### D5 - Text scanners and call-site shapes only shrink
 
-Until the seams land, the call-site shapes they replace stay as a safety net and may only shrink. `tests/offline/invariant_ratchets.rs` counts each by a structural read of the product code (comments, literals' contents and `#[cfg(test)]` items left out) and pins it at its 2026-11-10 value:
+Until the seams land, the call-site shapes they replace stay as a safety net and may only shrink. `tests/offline/invariant_ratchets.rs` counts each by a structural read of the product code (comments, literals' contents and `#[cfg(test)]` items left out) and holds each site as one line of `tests/offline/ledgers/<pin>.txt` (a stable id, a date and the reason it stays):
 
-| Pin | Counts | Value |
-|---|---|---|
-| `wildcard-null-arms` | wildcard arms (`_`, `Some(_)`, `Err(_)`, guards dropped) answering NULL, `None`, `Ok(None)` or a default, in every file under `src/source/` | 59 |
-| `credential-string-fields` | struct and enum-variant fields in `src/config/` typed `String` / `Option<String>` whose name ends in a credential word (`*_env`, `*_file`, `*_path` and secret-manager names such as `url_secret` are references, not credentials) | 5 |
-| `redaction-text-needles` | literals the redaction scanner searches for, compares to or lists in `src/redact.rs` | 11 |
-| `retry-text-needles` | literals the retry classifier searches the message for or lists in `src/error/retry.rs` (the text fallback that also decides an uncoded exit class, and the value-conversion detector) | 65 |
+| Ledger | Sites |
+|---|---|
+| `wildcard-null-arms` | wildcard arms (`_`, `Some(_)`, `Err(_)`, guards dropped) answering NULL, `None`, `Ok(None)` or a default, in every file under `src/source/` |
+| `credential-string-fields` | struct and enum-variant fields in `src/config/` typed `String` / `Option<String>` whose name ends in a credential word (`*_env`, `*_file`, `*_path` and secret-manager names such as `url_secret` are references, not credentials) |
+| `redaction-text-needles` | literals the redaction scanner searches for, compares to or lists in `src/redact.rs` |
+| `retry-text-needles` | literals the retry classifier searches the message for or lists in `src/error/retry.rs` (the text fallback that also decides an uncoded exit class, and the value-conversion detector) |
 
-A count above its pin fails with the sites and the seam to use; a count below it fails until the pin is lowered. `tests/offline/silent_degrade_ratchet.rs` keeps its own hand list of degrade shapes under `src/source/`; the new count is per match arm and catches a shape that list does not spell. The hand ledgers (`docs/*-matrix.yaml`) are not counted here.
+A site with no ledger line fails with its id and the seam to use; a ledger line whose site is gone fails until the line is deleted. No number is kept, so two PRs touching different sites touch different lines. `tests/offline/silent_degrade_ratchet.rs` keeps its own hand list of degrade shapes under `src/source/`; the new count is per match arm and catches a shape that list does not spell. The hand ledgers (`docs/*-matrix.yaml`) are not counted here.
 
 There is no count for I3: the copies of a run decision in check, doctor and plan have no syntactic shape a scanner can read; `check_equals_run` grades them by behaviour.
 
