@@ -70,8 +70,12 @@ INT_BITS = {
     "UINTEGER": (32, False), "UBIGINT": (64, False), "UHUGEINT": (128, False),
 }
 INT_DIGITS = {8: 3, 16: 5, 32: 10, 64: 20, 128: 39}
-#: (native source type, delivered DuckDB type) pairs the scanner's wider reading would misgrade: MySQL YEAR is 1901..2155.
-NATIVE_FITS = {("YEAR", "SMALLINT"), ("BINARY_FLOAT", "FLOAT")}
+#: (native source type, delivered DuckDB type) -> dated reason: a pair the scanner's reading would misgrade, or a documented landing no parity ledger row can carry.
+NATIVE_FITS = {
+    ("YEAR", "SMALLINT"): "2026-11-11: MySQL YEAR is 1901..2155, the scanner reads it wider",
+    ("BINARY_FLOAT", "FLOAT"): "2026-11-11: the Oracle BINARY_FLOAT ledger row delivers Float32, which DuckDB reads as FLOAT",
+    ("VECTOR", "VARCHAR"): "2026-11-11: an Oracle VECTOR is serialised to text on the server (docs/reference/oracle.md); no CDC parity row builds one",
+}
 #: Scanner settings that make the source read faithful (the same values tests/live/live_cdc_type_parity.rs sets in its own session):
 #: PostgreSQL's binary COPY drops char(n) padding; MySQL's scanner reads TINYINT(1) as BOOLEAN and its session zone moves TIMESTAMPs.
 SCANNER_SETTINGS = {
@@ -158,9 +162,11 @@ def type_family(t: str) -> str:
 
 
 def unpinned_loss(src: str, dst: str) -> str | None:
-    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text)."""
+    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text); a decimal past DuckDB's 38 digits is only ever read as exact text (Decimal256, docs/reference/config.md)."""
     if (why := type_loss(src, dst)) is not None or src == dst:
         return why
+    if dst == "VARCHAR" and (d := _decimal(src)) and d[0] > 38:
+        return None
     fs, fd = type_family(src), type_family(dst)
     return None if fs == fd else f"a {fs} delivered as a {fd}, and no ledger row pins the column"
 
@@ -253,6 +259,7 @@ def ledger(engine: str, mode: str) -> tuple[dict, set[str]]:
     rows = [{**r, "render": {**by_delivery.get(r.get("delivery"), {}), **(r.get("render") or {})},
              **{ch_keys[k]: v for k, v in (r.get("clickhouse") or {}).items()}} if isinstance(r, dict) else r for r in rows]
     out = {norm_native(r["native_type"]): r for r in rows if isinstance(r, dict) and r.get("native_type")}
+    out.update({re.sub(r" (NOT )?NULL$", "", k): r for k, r in list(out.items()) if re.search(r" (NOT )?NULL$", k)})
     for n, r in out.items():
         for render in (r.get("render") or {}, r.get("today_render") or {}):
             if render.get("canon") not in (None, *CANONS):
@@ -2074,6 +2081,12 @@ def _self_test() -> None:
         assert one(st, to, nat), f"{st} delivered as {to} with no ledger row is a finding"
         assert bool(one(st, to, nat, unpinned_strict=False)) == bool(type_loss(st, to)), f"{st} as {to}: the warehouse leg grades by its own mapping"
     assert not one("DECIMAL(14,2)", "DECIMAL(14,2)", "DECIMAL(14,2)") and not one("INTEGER", "BIGINT", "INT"), "an exact or wider same-kind delivery is not a finding"
+    assert not one("VARCHAR", "VARCHAR", "NUMERIC(40,20)") and not one("VARCHAR", "VARCHAR", "DECIMAL(65,0)"), "a decimal past 38 digits is read as exact text"
+    assert one("VARCHAR", "VARCHAR", "NUMERIC(12,2)") and one("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), "a decimal DuckDB holds is not delivered as text"
+    assert not one("DOUBLE[]", "VARCHAR", "VECTOR"), "an Oracle VECTOR is delivered as text"
+    assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
+    my_rows = globals()["ledger"]("mysql", "batch")[0]
+    assert my_rows.get("TIMESTAMP(6)") is not None and my_rows.get("TIMESTAMP(6)") is my_rows.get("TIMESTAMP(6) NULL"), "a catalog TIMESTAMP(6) finds the row declared with its nullability"
     class Flaky:
         """A DuckDB stand-in whose first `fail` calls raise `err`."""
 
