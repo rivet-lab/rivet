@@ -46,6 +46,7 @@ pub use crate::config::{
 pub(crate) mod build;
 mod contract;
 pub(crate) mod cursor_admission;
+mod shape;
 #[cfg(test)]
 pub(crate) mod test_support;
 

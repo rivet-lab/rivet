@@ -1005,6 +1005,11 @@ pub mod codes {
         "RIVET_STATE_CHUNK_PLAN_CHANGED",
         "restore the query and the chunk settings the interrupted run had and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` abandons it and the next run starts over",
     );
+    /// A resume, reconcile or repair met a stored run opened with other byte-shaping settings than the config now holds.
+    pub const STATE_RUN_SHAPE_CHANGED: Code = refusal(
+        "RIVET_STATE_RUN_SHAPE_CHANGED",
+        "restore the settings the interrupted run was opened with and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` (`rivet state reset` for a keyset run) abandons it and the next run starts over under the new settings",
+    );
     /// The chunk windows stored for an unfinished run are not one unbroken sequence of keys.
     pub const STATE_CHUNK_WINDOWS_BROKEN: Code = refusal(
         "RIVET_STATE_CHUNK_WINDOWS_BROKEN",
@@ -1932,6 +1937,7 @@ pub mod codes {
         STATE_LOCK_TIMEOUT,
         STATE_CHUNK_CHECKPOINT_GONE,
         STATE_CHUNK_PLAN_CHANGED,
+        STATE_RUN_SHAPE_CHANGED,
         STATE_CHUNK_WINDOWS_BROKEN,
         STATE_LEASE_KEEPER_UNAVAILABLE,
         STATE_LEASE_LOST,
