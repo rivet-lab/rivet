@@ -133,6 +133,18 @@ fn refuse_hidden_read_columns(
     Ok(())
 }
 
+/// A connection to `source`, opened from its resolved URL.
+pub(crate) fn connect_source(
+    source: &crate::config::SourceConfig,
+) -> Result<Box<dyn crate::source::Source>> {
+    crate::source::connect(
+        source.source_type,
+        source.resolve_url()?.expose(),
+        source.tls.as_ref(),
+        source.mongo.as_ref(),
+    )
+}
+
 /// `export` reading only the columns the account may `SELECT`, or `None` when there is nothing to project.
 pub(crate) fn project_table_read(
     probe: Option<&mut (dyn crate::source::Source + '_)>,
@@ -148,13 +160,7 @@ pub(crate) fn project_table_read(
     };
     let readable = match probe {
         Some(src) => src.readable_columns(table)?,
-        None => crate::source::connect(
-            source.source_type,
-            source.resolve_url()?.expose(),
-            source.tls.as_ref(),
-            source.mongo.as_ref(),
-        )?
-        .readable_columns(table)?,
+        None => connect_source(source)?.readable_columns(table)?,
     };
     if let Some(readable) = &readable {
         refuse_hidden_read_columns(table, export, &readable.columns)?;

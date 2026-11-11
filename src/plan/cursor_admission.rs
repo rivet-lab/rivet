@@ -70,23 +70,13 @@ pub(crate) fn admit_incremental_cursor(
     let mut owned: Box<dyn Source>;
     let src: &mut dyn Source = match probe {
         Some(src) => src,
-        None => {
-            let connected = config.source.resolve_url().and_then(|url| {
-                crate::source::connect(
-                    source,
-                    &url,
-                    config.source.tls.as_ref(),
-                    config.source.mongo.as_ref(),
-                )
-            });
-            match connected {
-                Ok(conn) => {
-                    owned = conn;
-                    owned.as_mut()
-                }
-                Err(e) => return unverified(export, column, &e),
+        None => match super::build::connect_source(&config.source) {
+            Ok(conn) => {
+                owned = conn;
+                owned.as_mut()
             }
-        }
+            Err(e) => return unverified(export, column, &e),
+        },
     };
     let overrides = crate::types::overrides_for_unit(
         &parse_column_overrides(&export.columns, &export.name)?,
