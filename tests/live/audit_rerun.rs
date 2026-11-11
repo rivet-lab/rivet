@@ -106,11 +106,10 @@ fn audit_full_rerun_does_not_orphan_parts() {
     let second = rig.run_args_env(&["--export", table.name()], &[("RUST_LOG", "warn")]);
     let second_stderr = String::from_utf8_lossy(&second.stderr);
 
-    // SAFE fix shape #1: the second run refuses (non-zero) to overwrite a
-    // _SUCCESS prefix.
-    if !second.status.success() {
-        return;
-    }
+    assert!(
+        second.status.success(),
+        "a second run into a completed prefix exits 0 (warning, or delivering a manifest that matches the disk); stderr:\n{second_stderr}"
+    );
     // SAFE fix shape #2: the second run loudly warns about the populated prefix.
     if warned_about_existing_prefix(&second_stderr) {
         return;
@@ -165,10 +164,10 @@ fn audit_chunked_rerun_does_not_double() {
     let second = rig.run_args_env(&["--export", table.name()], &[("RUST_LOG", "warn")]);
     let second_stderr = String::from_utf8_lossy(&second.stderr);
 
-    // SAFE fix shape #1: the second run refuses (non-zero) into a _SUCCESS prefix.
-    if !second.status.success() {
-        return;
-    }
+    assert!(
+        second.status.success(),
+        "a second chunked run into a completed prefix exits 0 (warning, or delivering exactly the source rows); stderr:\n{second_stderr}"
+    );
     // SAFE fix shape #2: the second run loudly warns about the populated prefix.
     if warned_about_existing_prefix(&second_stderr) {
         return;

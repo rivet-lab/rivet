@@ -1,0 +1,17 @@
+{
+ "bucket": "rivet_data_test",
+ "check_ok": {
+  "out": "\nExport: pm_cl_1794326703\n  Strategy:     full-scan\n  Mode:         full\n  Row estimate: ~720  (catalog estimate)\n  Row width:    ~85 bytes\n  Access:       full table scan (no index on the read path)\n  Verdict:      ACCEPTABLE\n  Recommended:  tuning.profile: balanced\n  Parallelism:  1 (only chunked mode benefits from parallelism)\n\nVerdicts: EFFICIENT > ACCEPTABLE > DEGRADED > UNSAFE \u2014 advisory only; the run is never blocked.\nLooks good. Next: rivet run -c /tmp/cloud_record/c.yaml --validate   # export, then verify row counts\n",
+  "rc": 0
+ },
+ "check_refused": {
+  "out": "\nExport: pm_cl_1794326703\n  Strategy:     full-scan\n  Mode:         full\n  Row estimate: ~720  (catalog estimate)\n  Row width:    ~85 bytes\n  Access:       full table scan (no index on the read path)\n  Verdict:      ACCEPTABLE\n  Recommended:  tuning.profile: balanced\n  Parallelism:  1 (only chunked mode benefits from parallelism)\n\nVerdicts: EFFICIENT > ACCEPTABLE > DEGRADED > UNSAFE \u2014 advisory only; the run is never blocked.\nLooks good. Next: rivet run -c /tmp/cloud_record/missing.yaml --validate   # export, then verify row counts\n",
+  "rc": 0
+ },
+ "dataset": "rivet_tmp_pm_cl_1794326703",
+ "dataset_missing": "rivet_tmp_pm_cl_1794326703_missing",
+ "location": "US",
+ "project": "rivet-data-tool",
+ "run_out": "\u2713 pm_cl_1794326703  full               3 rows    1 files     3.5 KB      4.3s  \u2026\n\n\u2500\u2500 pm_cl_1794326703 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  run_id:         pm_cl_1794326703_20261110T160510.824_34607\n  status:         success\n  tuning:         profile=balanced (default), batch_size=10,000 (batch_size_memory_mb=32MiB \u2192 effective FETCH in logs)\n  rows:           3\n  files:          1\n  output:         gs://rivet_data_test/pm_cl_1794326703/\n  bytes read:     1.5 KB\n  bytes written:  3.5 KB\n  duration:       4.3s\n  peak RSS:       51 MB (sampled during run)\n  schema:         unchanged\n  verify:         not run \u2014 add `--reconcile` (count vs source) or `rivet validate` (re-read outputs)\n",
+ "tag": "pm_cl_1794326703"
+}

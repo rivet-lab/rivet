@@ -18,6 +18,6 @@ src/source/mysql/cdc.rs::open_on: .ok().flatten()	2026-11-08 counted at the 35 -
 src/source/postgres/arrow_convert.rs::build_pg_list_array: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/postgres/arrow_convert.rs::build_pg_text_array: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/postgres/arrow_convert.rs::side_a: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
-src/source/postgres/cdc.rs::parse_columns: unwrap_or(RivetValue::Null)	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
+src/source/postgres/cdc.rs::map_columns: unwrap_or(RivetValue::Null)	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/postgres/mod.rs::server_context: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/postgres/pgoutput.rs::array_of: map_or(V::Null	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
