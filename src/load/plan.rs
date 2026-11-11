@@ -2874,7 +2874,7 @@ load:
         let loads = [
             "{ target: bigquery, project: p, dataset: d, pk: [id], cluster_by: none }",
             "{ target: snowflake, account: a, user: u, private_key_path: /k.p8, storage_integration: i, database: d, schema: s, warehouse: w, pk: [id], cluster_by: none }",
-            "{ target: clickhouse, url: \"http://h:8123\", database: d, user: u, password_env: X, pk: [id] }",
+            "{ target: clickhouse, url: \"https://h:8443\", database: d, user: u, password_env: X, pk: [id] }",
         ];
         let yaml = |load: &str, mode: &str| {
             let cursor = if mode == "incremental" {
