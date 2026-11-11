@@ -1,6 +1,8 @@
 //! Pure readers of a connection URL: whether it stays on the box and its `sslmode`.
 
 use super::TlsConfig;
+use crate::error::Result;
+use crate::secret::Secret;
 use crate::url_text::host_port_span;
 
 /// Whether every host of a `scheme://[user[:pass]@]host[:port][/db][?…]` URL is loopback; fails closed on any URL it cannot confidently read.
@@ -98,6 +100,67 @@ pub(crate) fn strip_url_query_key(url: &str, key: &str) -> String {
     } else {
         format!("{base}?{}", kept.join("&"))
     }
+}
+
+/// Refuse an `http://` URL on a remote host before any request carries `carries` through it in cleartext.
+pub(crate) fn require_https_or_loopback(
+    url: &str,
+    sink: &str,
+    carries: &str,
+    remedy: &str,
+) -> Result<()> {
+    let cleartext = url
+        .trim_start()
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"));
+    if cleartext && !host_is_loopback(url) {
+        let host = host_port_span(url);
+        crate::rivet_bail!(
+            crate::error::codes::CONFIG_REMOTE_PLAINTEXT,
+            "{sink}: refusing to send {carries} to the remote (non-loopback) host `{host}` over \
+             cleartext http://; they would cross the network unencrypted. {remedy}"
+        );
+    }
+    Ok(())
+}
+
+/// The one place a URL held as a `Secret` is read out for the plaintext gate.
+fn require_https_secret_url(url: &Secret, sink: &str, carries: &str, remedy: &str) -> Result<()> {
+    require_https_or_loopback(url.expose(), sink, carries, remedy)
+}
+
+/// Refuse a remote `http://` ClickHouse `load.url`, which carries the loader password and every row, unless `allow_plaintext`.
+pub(crate) fn require_https_clickhouse_url(url: &Secret, allow_plaintext: bool) -> Result<()> {
+    if allow_plaintext {
+        return Ok(());
+    }
+    require_https_secret_url(
+        url,
+        "ClickHouse load `url`",
+        "the loader password and every loaded row",
+        "Use an `https://` URL (with `load.ca_file:` for a private CA), or set \
+         `load.allow_plaintext: true` if this network path is already trusted.",
+    )
+}
+
+/// Refuse a Slack webhook that is `http://` on a remote host: the URL is the posting secret.
+pub(crate) fn require_https_webhook(url: &Secret) -> Result<()> {
+    require_https_secret_url(
+        url,
+        "Slack notification `webhook_url`",
+        "the webhook secret and the run summary",
+        "Use the `https://` webhook URL Slack gave you.",
+    )
+}
+
+/// Refuse a remote `http://` BigQuery API endpoint override, which carries the OAuth bearer token and every query.
+pub(crate) fn require_https_bigquery_endpoint(url: &str) -> Result<()> {
+    require_https_or_loopback(
+        url,
+        "BigQuery `RIVET_BQ_API_ENDPOINT`",
+        "the OAuth bearer token and every query",
+        "Unset `RIVET_BQ_API_ENDPOINT`, or point it at an `https://` or loopback endpoint.",
+    )
 }
 
 #[cfg(test)]
@@ -268,5 +331,53 @@ mod loopback_tests {
         // No authority at all.
         assert_eq!(host_port_span("mysql://"), "");
         assert_eq!(host_port_span("postgres:///db"), "");
+    }
+}
+
+#[cfg(test)]
+mod plaintext_gate_tests {
+    use super::require_https_or_loopback;
+
+    fn gate(url: &str) -> crate::error::Result<()> {
+        require_https_or_loopback(url, "sink", "secrets", "Use https.")
+    }
+
+    #[test]
+    fn a_remote_http_url_is_refused_by_code_naming_the_host_and_the_remedy() {
+        for url in [
+            "http://ch.example.com:8123",
+            "HTTP://ch.example.com",
+            "  http://10.1.2.3/x",
+            "http://user:pw@ch.example.com:8123/db",
+            "http://127.0.0.1:1,ch.example.com:2",
+        ] {
+            let e = gate(url).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&e),
+                Some("RIVET_CONFIG_REMOTE_PLAINTEXT"),
+                "{url}"
+            );
+            let text = format!("{e:#}");
+            assert!(text.starts_with("sink: refusing to send secrets"), "{text}");
+            assert!(text.ends_with("Use https."), "{text}");
+            assert!(!text.contains("pw"), "{text}");
+        }
+    }
+
+    #[test]
+    fn https_loopback_and_unreadable_urls_pass() {
+        for url in [
+            "https://ch.example.com",
+            "HTTPS://ch.example.com",
+            "http://localhost:8123",
+            "http://127.0.0.1:9",
+            "http://[::1]:9/x",
+            "ch.example.com:8123",
+            "",
+            "ht",
+            "http:/é",
+        ] {
+            gate(url).unwrap_or_else(|e| panic!("{url}: {e:#}"));
+        }
     }
 }

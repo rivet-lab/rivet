@@ -58,6 +58,17 @@ state each load by their own spec and their own `rivet init` key. A row written 
 source and stays the spec of any source of that name until the source records its own; the v38
 migration rebuilds the table, and the copy it leaves behind restores the v37 shape.
 
+## The shape a run was opened with (v39)
+
+A run that checkpoints its progress (range chunks, keyset, parallel keyset) records the byte-shaping
+settings it was opened with in `run_shape`, one digest per setting, and every continuation of the run
+(`run --resume`, the next run over an unfinished one, `reconcile`, `repair`) compares them with the
+config. A setting that differs is refused, `RIVET_STATE_RUN_SHAPE_CHANGED` (exit 5), naming the
+setting and the command that abandons the run. A run opened before v39 has no record: the first
+continuation adopts the config as it is then, with a warning, and every later edit is refused. The
+v39 migration only adds the table; the copy it leaves behind restores v38, and the table is left
+in place by a rollback (the previous release ignores it).
+
 ## An upgrade beside a live run of the older release
 
 A migration changes the schema under every process that has the state open, and the older release
@@ -156,7 +167,7 @@ END $$;
 COMMIT;
 ```
 
-A table the newer release created and the copy does not hold (none between v32 and v38) is left in
+A table the newer release created and the copy does not hold (`run_shape` since v39, none between v32 and v38) is left in
 place; the previous release ignores it. Drop it before upgrading again.
 
 ### What it costs

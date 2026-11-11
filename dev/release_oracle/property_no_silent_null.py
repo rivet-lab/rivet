@@ -961,7 +961,7 @@ def pairs_of(results: list[Result]) -> list[str]:
 
 
 def digest(results: list[Result]) -> str:
-    """A short stable hash of the failing pairs, so a known-red message is the same on every tier and changes when a pair opens or closes."""
+    """A short stable hash of the failing pairs, so a known-red message changes when a pair opens or closes."""
     return hashlib.sha1("\n".join(pairs_of(results)).encode()).hexdigest()[:8]
 
 
@@ -987,9 +987,14 @@ def summary_line(results: list[Result]) -> str:
     return f"{SCENARIO} summary PASS={len(results) - red - ng} RED={red} NOT_GRADED={ng}"
 
 
-def failure_message(engine: str, klass: str, rs: list[Result], scenario: str = SCENARIO) -> str:
-    """The one ledger line of a failure class on one engine: the same on every tier for the same failing pairs."""
-    return f"{scenario}[{engine}]: {klass} over {len(pairs_of(rs))} source->override pairs #{digest(rs)}"
+def label(engine: str, tier: str = "", scenario: str = SCENARIO) -> str:
+    """The name of one axis run in a ledger row: scenario, engine and, when the run has one, its tier."""
+    return f"{scenario}[{engine}]" + (f" {tier}" if tier else "")
+
+
+def failure_message(engine: str, klass: str, rs: list[Result], scenario: str = SCENARIO, tier: str = "") -> str:
+    """The one ledger line of a failure class on one engine at one tier: a tier crosses modes and formats differently, so its pairs and its line differ."""
+    return f"{label(engine, tier, scenario)}: {klass} over {len(pairs_of(rs))} source->override pairs #{digest(rs)}"
 
 
 def exit_code(results: list[Result]) -> int:
@@ -1005,17 +1010,17 @@ def record(led: Ledger, engine: str, results: list[Result], tier: str = "", *, s
     groups = summary(engine, results)
     graded = [r for r in results if r.klass != NOT_GRADED]
     counts = {v: sum(r.verdict == v for r in graded) for v in (DELIVERED, REFUSED, DECLARED)}
-    label = f"{scenario}[{engine}]" + (f" {tier}" if tier else "")
+    name = label(engine, tier, scenario)
     bad = {k: v for k, v in groups.items() if k and k != NOT_GRADED and v}
     if groups[NOT_GRADED] or not results:
         why = groups[NOT_GRADED][0].detail[:200] if results else "the axis returned no cell"
-        led.skipped(engine, "-", scenario, "-", f"{label}: {len(groups[NOT_GRADED])} of {len(results)} cells not graded: {why}",
+        led.skipped(engine, "-", scenario, "-", f"{name}: {len(groups[NOT_GRADED])} of {len(results)} cells not graded: {why}",
                     cause=cause, target=target or STAND.get(engine, engine))
     for klass, rs in bad.items():
-        led.failed(engine, "-", scenario, "-", failure_message(engine, klass, rs, scenario),
+        led.failed(engine, "-", scenario, "-", failure_message(engine, klass, rs, scenario, tier),
                    "\n".join(f"{r.cell}: {r.detail}" for r in sorted(rs, key=lambda r: r.cell)[:60]))
     if not bad and graded:
-        led.passed(engine, "-", scenario, "-", f"{label}: {len(graded)} {what}; " + ", ".join(f"{v} {n}" for v, n in counts.items()))
+        led.passed(engine, "-", scenario, "-", f"{name}: {len(graded)} {what}; " + ", ".join(f"{v} {n}" for v, n in counts.items()))
 
 
 def run_tier(led: Ledger, tier: str) -> None:
@@ -1151,6 +1156,14 @@ def self_test() -> None:
     record(led, "mysql", [Result("mysql/INT->none/full/parquet", DELIVERED)], "smoke")
     record(led, "mysql", b, "smoke")
     assert [c.status.name for c in led.cells] == ["PASS", "FAIL"], [c.status for c in led.cells]
+    only_in_mode = [Result("mysql/INT->float4/chunked/csv", DELIVERED, NULLED)]
+    tiers = Ledger(colour=False)
+    tiers._buf = []
+    record(tiers, "mysql", only_in_mode, "smoke")
+    record(tiers, "mysql", only_in_mode, "full")
+    keys = [ln.strip().removeprefix("✗ ") for ln in tiers._buf if "✗" in ln]
+    assert len(keys) == 2 and keys[0] != keys[1], "the same failing results graded at two tiers are two ledger keys"
+    assert keys[0].startswith("no_silent_null[mysql] smoke: ") and keys[1].startswith("no_silent_null[mysql] full: "), keys
     record(led, "mysql", [Result("mysql/INT->none/full/parquet", DELIVERED), Result("mysql/INT->int8/full/parquet", REFUSED, NOT_GRADED)], "smoke")
     assert [c.status.name for c in led.cells][2:] == ["SKIP", "PASS"], "a not-graded cell is a skip row beside the pass, never a silent pass"
     n0 = len(led.cells)

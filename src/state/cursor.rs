@@ -1,8 +1,8 @@
 use crate::error::Result;
 use crate::types::CursorState;
 
-use super::StateStore;
 use super::row::StateParam;
+use super::{RunShape, StateStore};
 
 /// How many exports one `reset_all` statement names.
 const RESET_BATCH: usize = 100;
@@ -267,6 +267,8 @@ pub struct ProgressKey {
     pub(crate) continues_high_water: bool,
     /// Whether this plan continues an interrupted run of its own mode (`ExtractionStrategy::is_resumable`).
     pub(crate) resumable: bool,
+    /// What shapes the bytes this plan writes; recorded with the run it opens and compared with the run it continues. Empty names nothing.
+    pub(crate) shape: RunShape,
 }
 
 impl ProgressKey {
@@ -283,6 +285,7 @@ impl ProgressKey {
             mode: CHUNKED,
             continues_high_water: false,
             resumable: true,
+            shape: Default::default(),
         }
     }
 
@@ -301,6 +304,7 @@ impl ProgressKey {
             mode: "cdc",
             continues_high_water: false,
             resumable: false,
+            shape: Default::default(),
         }
     }
 }
@@ -805,8 +809,33 @@ impl StateStore {
                     abandon_command(owner, export_name)
                 );
             }
+            self.refuse_changed_run_shape(key, &run)?;
         }
         Ok(())
+    }
+
+    /// Refuse to continue `run` when the byte-shaping settings of `key` are not the ones it was opened with.
+    pub(crate) fn refuse_changed_run_shape(&self, key: &ProgressKey, run: &str) -> Result<()> {
+        let (export_name, owner) = (&key.export_name, key.mode);
+        let changed = self.run_shape_changes(export_name, run, &key.shape)?;
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let names = changed
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        crate::rivet_bail!(
+            crate::error::codes::STATE_RUN_SHAPE_CHANGED,
+            "export '{export_name}': run {run} of mode `{owner}` was opened with other {names} \
+             than this export has now — continuing it would finish one run over parts of two \
+             shapes under one manifest; nothing was read or written.\n  \
+             Hint: restore {names} as run {run} had them and run once to finish it, then change \
+             them; or `{}` abandons it and the next run starts with a full pass under the new \
+             settings.",
+            abandon_command(owner, export_name)
+        );
     }
 
     /// Record `key` as the owner of the anchored run `run_id` on rows written before owners and sources were recorded.
@@ -944,6 +973,7 @@ impl StateStore {
                 key.population.as_str().into(),
             ],
         )?;
+        self.record_run_shape(run_id, &key.shape)?;
         Ok(())
     }
 
@@ -1180,6 +1210,7 @@ mod tests {
             mode: "keyset",
             continues_high_water: true,
             resumable: true,
+            shape: Default::default(),
         }
     }
 
@@ -1345,10 +1376,114 @@ mod tests {
         assert!(s.claim(as_mode("incremental", "pg/db")).is_ok());
     }
 
+    const SHAPE: &str = "RIVET_STATE_RUN_SHAPE_CHANGED";
+
+    /// `mode` under a plan whose byte-shaping settings digest to `fields`.
+    fn shaped(mode: &'static str, fields: &[(&str, &str)]) -> ProgressKey {
+        ProgressKey {
+            shape: RunShape::new(
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ),
+            ..as_mode(mode, "pg/db")
+        }
+    }
+
+    #[test]
+    fn an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with() {
+        type Abandon = fn(&StateStore);
+        let cases: [(&'static str, &str, Abandon); 2] = [
+            (
+                "chunked",
+                "rivet state reset-chunks -c <config> --export orders",
+                |s| {
+                    s.reset_chunk_checkpoint("orders", "pg/db").unwrap();
+                },
+            ),
+            (
+                "keyset",
+                "rivet state reset -c <config> --export orders",
+                |s| s.reset("orders", "pg/db").unwrap(),
+            ),
+        ];
+        for (mode, command, abandon) in cases {
+            let s = store();
+            let opened = shaped(mode, &[("columns", "a"), ("compression", "z")]);
+            match mode {
+                "chunked" => s
+                    .open_chunk_run(&opened, "run_1", "h", 3, &[(1, 10)])
+                    .unwrap(),
+                _ => s.set_resume_run_id(&opened, "run_1").unwrap(),
+            }
+            for cycle in 1..=2 {
+                let said = refusal(
+                    s.claim(shaped(mode, &[("columns", "a"), ("compression", "s")])),
+                    SHAPE,
+                );
+                for want in ["run run_1", "`compression`", command] {
+                    assert!(
+                        said.contains(want),
+                        "{mode} cycle {cycle}: {want} in {said}"
+                    );
+                }
+                assert!(!said.contains("`columns`"), "{said}");
+            }
+            for same in [
+                shaped(mode, &[("columns", "a"), ("compression", "z")]),
+                shaped(mode, &[("compression", "z")]),
+                shaped(mode, &[("meta_columns", "m"), ("compression", "z")]),
+                shaped(mode, &[]),
+            ] {
+                assert!(
+                    s.claim(same).is_ok(),
+                    "{mode}: an unchanged shape continues"
+                );
+            }
+            abandon(&s);
+            assert!(
+                s.claim(shaped(mode, &[("compression", "s")])).is_ok(),
+                "{mode}: an abandoned run pins nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_opened_before_shapes_were_recorded_adopts_the_first_shape_it_meets_then_pins_it() {
+        let s = store();
+        let opened = shaped("chunked", &[("compression", "z")]);
+        s.open_chunk_run(&opened, "run_old", "h", 3, &[(1, 10)])
+            .unwrap();
+        s.exec_for_test("DELETE FROM run_shape");
+        assert!(s.claim(shaped("chunked", &[("compression", "s")])).is_ok());
+        for _ in 0..2 {
+            let said = refusal(s.claim(opened.clone()), SHAPE);
+            assert!(said.contains("`compression`"), "{said}");
+        }
+        assert!(s.claim(shaped("chunked", &[("compression", "s")])).is_ok());
+    }
+
+    #[test]
+    fn a_finished_run_pins_nothing_for_the_next() {
+        let s = store();
+        s.open_chunk_run(
+            &shaped("chunked", &[("compression", "z")]),
+            "run_d",
+            "h",
+            3,
+            &[(1, 10)],
+        )
+        .unwrap();
+        s.finalize_chunk_run_completed("run_d").unwrap();
+        assert!(s.claim(shaped("chunked", &[("compression", "s")])).is_ok());
+    }
+
     /// `mode` with its checkpoint off: the plan that continues no interrupted run.
     fn uncheckpointed(mode: &'static str, scope: &str) -> ProgressKey {
         ProgressKey {
             resumable: false,
+            shape: Default::default(),
             ..as_mode(mode, scope)
         }
     }

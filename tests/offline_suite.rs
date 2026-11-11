@@ -165,6 +165,8 @@ mod known_red_guard;
 mod live_only_purity_gate;
 #[path = "offline/live_service_ports_guard.rs"]
 mod live_service_ports_guard;
+#[path = "offline/live_shared_tmp_resolution.rs"]
+mod live_shared_tmp_resolution;
 #[path = "offline/live_skip_policy_guard.rs"]
 mod live_skip_policy_guard;
 #[path = "offline/load_allow_source_drift.rs"]

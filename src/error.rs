@@ -794,6 +794,11 @@ pub mod codes {
         "RIVET_CONFIG_DESTINATION_ENDPOINT_UNSAFE",
         "drop `endpoint:` to use the provider default, or point it at a loopback emulator with `allow_anonymous: true`",
     );
+    /// An outbound `http://` URL on a remote host that would carry a credential or rows in cleartext.
+    pub const CONFIG_REMOTE_PLAINTEXT: Code = usage(
+        "RIVET_CONFIG_REMOTE_PLAINTEXT",
+        "use an `https://` URL, or point it at a loopback host; a ClickHouse `load.url` on a trusted network may opt in with `load.allow_plaintext: true`",
+    );
     /// A numeric, size, duration or level value outside what rivet accepts, or two sizing knobs set together.
     pub const CONFIG_VALUE_OUT_OF_RANGE: Code = usage(
         "RIVET_CONFIG_VALUE_OUT_OF_RANGE",
@@ -1004,6 +1009,11 @@ pub mod codes {
     pub const STATE_CHUNK_PLAN_CHANGED: Code = refusal(
         "RIVET_STATE_CHUNK_PLAN_CHANGED",
         "restore the query and the chunk settings the interrupted run had and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` abandons it and the next run starts over",
+    );
+    /// A resume, reconcile or repair met a stored run opened with other byte-shaping settings than the config now holds.
+    pub const STATE_RUN_SHAPE_CHANGED: Code = refusal(
+        "RIVET_STATE_RUN_SHAPE_CHANGED",
+        "restore the settings the interrupted run was opened with and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` (`rivet state reset` for a keyset run) abandons it and the next run starts over under the new settings",
     );
     /// The chunk windows stored for an unfinished run are not one unbroken sequence of keys.
     pub const STATE_CHUNK_WINDOWS_BROKEN: Code = refusal(
@@ -1873,6 +1883,7 @@ pub mod codes {
         CONFIG_MODE_SETTING_INVALID,
         CONFIG_DESTINATION_AUTH_INVALID,
         CONFIG_DESTINATION_ENDPOINT_UNSAFE,
+        CONFIG_REMOTE_PLAINTEXT,
         CONFIG_VALUE_OUT_OF_RANGE,
         CONFIG_CDC_SHAPE_INVALID,
         CONFIG_CSV_COMPRESSION_UNSUPPORTED,
@@ -1922,6 +1933,7 @@ pub mod codes {
         STATE_LOCK_TIMEOUT,
         STATE_CHUNK_CHECKPOINT_GONE,
         STATE_CHUNK_PLAN_CHANGED,
+        STATE_RUN_SHAPE_CHANGED,
         STATE_CHUNK_WINDOWS_BROKEN,
         STATE_LEASE_KEEPER_UNAVAILABLE,
         STATE_LEASE_LOST,

@@ -55,7 +55,7 @@
       ['sf_schema', 'Schema', 'PUBLIC', { load: ['snowflake'] }],
       ['sf_int', 'Integration', 'MY_GCS_INT', { load: ['snowflake'] }],
       ['sf_role', 'Role', 'RIVET_ROLE', { load: ['snowflake'] }],
-      ['ch_url', 'ClickHouse URL', 'http://clickhouse:8123', { load: ['clickhouse'] }],
+      ['ch_url', 'ClickHouse URL', 'https://clickhouse:8443', { load: ['clickhouse'] }],
       ['ch_db', 'Database', 'raw', { load: ['clickhouse'] }],
       ['ch_user', 'User', 'loader', { load: ['clickhouse'] }],
     ]],

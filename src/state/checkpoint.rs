@@ -591,6 +591,7 @@ impl StateStore {
                     "DELETE FROM chunk_run WHERE run_id = ?1",
                     &[rid.as_str().into()],
                 )?;
+                self.forget_run_shape(rid)?;
             }
             self.execute(
                 "UPDATE export_state SET resume_run_id = NULL, resume_owner = NULL \
@@ -708,6 +709,7 @@ mod tests {
             mode: "chunked",
             continues_high_water: false,
             resumable: true,
+            shape: Default::default(),
         };
         s.set_resume_run_id(&key, "run_1").unwrap();
         s.execute("DELETE FROM chunk_run WHERE run_id = ?1", &["run_1".into()])
