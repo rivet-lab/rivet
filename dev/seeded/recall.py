@@ -903,6 +903,28 @@ def self_test() -> int:
              "    live test requires Postgres reachable on 127.0.0.1:5433.\n\n"
              "    thread 'live_a::t2' panicked at tests/x.rs:2:2:\n    assertion `left == right` failed\n")
     assert cell_outcomes(stood, {}, ("t1", "t2")) == {"t1": STAND, "t2": "FAIL"}, cell_outcomes(stood, {}, ("t1", "t2"))
+    crashed = ("        FAIL [   0.2s] (1/5) rivet-cli::live_suite live_a::t1\n"
+               "        FAIL [   0.2s] (2/5) rivet-cli::live_suite live_a::t2\n"
+               "        FAIL [   0.2s] (3/5) rivet-cli::live_suite live_a::t3\n"
+               "        FAIL [   0.2s] (4/5) rivet-cli::live_suite live_a::t4\n"
+               "        FAIL [   0.2s] (5/5) rivet-cli::live_suite live_a::t5\n"
+               "  stderr ───\n\n    thread 'live_a::t1' panicked at tests/common/verify.rs:1768:9:\n"
+               "    oracle error: dev/release_oracle/rig_oracle.py grade exited exit status: 1 after 0.4s (an oracle bug, never a verdict)\n"
+               "    stderr:\n    ModuleNotFoundError: No module named 'duckdb'\n\n"
+               "    thread 'live_a::t2' panicked at tests/common/verify.rs:255:13:\n"
+               "    the oracle's grade panicked; rivet's own verdict was: exit Some(0)\n"
+               "    --- rivet stderr (last 40 lines) ---\n    done\n"
+               "    --- oracle panic ---\n    rig oracle printed no JSON verdict (EOF while parsing a value):\n\n"
+               "    thread 'live_a::t3' panicked at tests/common/verify.rs:255:13:\n"
+               "    the oracle's grade panicked; rivet's own verdict was: exit Some(0)\n"
+               "    --- oracle panic ---\n    rig oracle: export 'e' disagrees with its source / rivet's own ledger (rig_oracle.py grade):\n"
+               "      - COUNT(*): source 10, delivered 6\n\n"
+               "    thread 'live_a::t4' panicked at tests/x.rs:2:2:\n    Connection reset by peer (os error 104)\n\n"
+               "    thread 'live_a::t5' panicked at tests/x.rs:3:3:\n    assertion `left == right` failed\n")
+    cells = ("t1", "t2", "t3", "t4", "t5")
+    assert cell_outcomes(crashed, {}, cells) == {"t1": STAND, "t2": STAND, "t3": "FAIL", "t4": "FAIL", "t5": "FAIL"}, \
+        "a red whose panic is the oracle's own crash graded nothing, a disagreement or a product io error is a verdict"
+    assert grade(pg, {"t1": "PASS", "t2": "PASS"}, {"t1": STAND, "t2": STAND}).status == STAND_DOWN, "an oracle crash under a seed is no catch"
     led = Ledger(colour=False)
     assert not record(led, [Verdict(pg, STAND_DOWN, "dead")], ceiling=0) and not led.red and [c.status.name for c in led.cells] == ["INFRA"], \
         "a stand-down row is INFRA: the run is NOT GRADED, not red and not green"

@@ -65,8 +65,9 @@ Every recall appends one line to `recall-runs.jsonl` in the seeded state dir
 `complete` (no `--seeds`, no `--engines`), whether it was `green` (no failed row, the
 NOT-GRADED-HERE ceiling held) and whether the repo tree was `dirty`.
 
-`python3 dev/pytools/release.py` refuses to tag a sha unless that file holds a complete,
-green, clean-tree recall of exactly that sha. When the recall ran on another machine,
+`python3 dev/pytools/release.py` refuses to tag a sha unless the latest line of that file for
+the sha is a complete, green, clean-tree recall of exactly that sha: a later red, narrowed or
+dirty run revokes an earlier green. When the recall ran on another machine,
 copy the file and pass `--recall-record FILE`. A recall of another commit, a narrowed
 one, a red one, one from a dirty tree and a missing record are each refused.
 
