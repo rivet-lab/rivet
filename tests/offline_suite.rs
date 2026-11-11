@@ -46,6 +46,8 @@ mod property_no_debris_after_stop;
 mod property_no_silent_null_cloud_legs;
 #[path = "offline/renderer_locality_guard.rs"]
 mod renderer_locality_guard;
+#[path = "offline/seek_order_matrix.rs"]
+mod seek_order_matrix;
 #[path = "offline/skip_is_not_a_pass_guard.rs"]
 mod skip_is_not_a_pass_guard;
 #[path = "offline/tls_ca_file_sole_anchor.rs"]
@@ -63,6 +65,8 @@ mod capture_markers;
 mod cdc_cli_claims_checkpoint;
 #[path = "offline/cdc_cli_surface_guard.rs"]
 mod cdc_cli_surface_guard;
+#[path = "offline/mongo_keyed_id_types_refusal.rs"]
+mod mongo_keyed_id_types_refusal;
 
 #[path = "offline/cdc_evidence_matrix_guard.rs"]
 mod cdc_evidence_matrix_guard;
@@ -161,6 +165,8 @@ mod known_red_guard;
 mod live_only_purity_gate;
 #[path = "offline/live_service_ports_guard.rs"]
 mod live_service_ports_guard;
+#[path = "offline/live_shared_tmp_resolution.rs"]
+mod live_shared_tmp_resolution;
 #[path = "offline/live_skip_policy_guard.rs"]
 mod live_skip_policy_guard;
 #[path = "offline/load_allow_source_drift.rs"]

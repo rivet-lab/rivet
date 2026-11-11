@@ -842,6 +842,8 @@ pub(crate) enum CdcEngineOpts {
         /// with no routing cross-check of any kind: a typo'd collection ran to
         /// `status: success, rows: 0` in silence.
         configured_tables: Vec<String>,
+        /// The collections a keyed `load:` merges by `_id`.
+        keyed_tables: Vec<String>,
     },
 }
 
@@ -1569,6 +1571,7 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Mongo {
             canonical,
             configured_tables,
+            keyed_tables,
         } => {
             // Validate the checkpoint BEFORE open so a corrupt/truncated one
             // surfaces cleanly, not blanketed by MONGO_CDC_HINT — the same hoist
@@ -1589,6 +1592,7 @@ pub(crate) fn create_change_stream(
                     *canonical,
                     cfg.drain,
                     configured_tables,
+                    keyed_tables,
                 )
                 // The setup hint is a GUESS about the cause, so it must not be
                 // pasted onto an error that already names one. An oversized change
@@ -2666,6 +2670,7 @@ mod engine_identity {
                 CdcEngineOpts::Mongo {
                     canonical: false,
                     configured_tables: t(&["a"]),
+                    keyed_tables: Vec::new(),
                 },
                 SourceType::Mongo,
                 "mongodb+srv://h/d",

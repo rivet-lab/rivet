@@ -406,6 +406,23 @@ impl MongoTest {
 }
 
 impl MongoTest {
+    /// The string `field` of every document of `name`, sorted: the source side of a typed-`_id` read-back.
+    pub fn string_values(&self, name: &str, field: &str) -> Vec<String> {
+        self.rt.block_on(async {
+            let mut cur = self.coll(name).find(doc! {}).await.expect("mongo: find");
+            let mut out = Vec::new();
+            while let Some(d) = cur.try_next().await.expect("mongo: cursor") {
+                if let Some(Bson::String(s)) = d.get(field) {
+                    out.push(s.clone());
+                }
+            }
+            out.sort();
+            out
+        })
+    }
+}
+
+impl MongoTest {
     /// Append `ids` as `{_id, v, pad}` documents — the soak stand's seed, matching
     /// the SQL engines' `(id, v, pad)` shape so one census and one read-back oracle
     /// serve every engine.
