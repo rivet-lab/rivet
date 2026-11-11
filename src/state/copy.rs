@@ -132,8 +132,7 @@ fn in_memory_copy(source: &Path) -> Result<rusqlite::Connection> {
             | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
             | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )?;
-    let uri = format!("file:{}?mode=ro", source.display());
-    mem.execute("ATTACH DATABASE ?1 AS src", [uri])
+    mem.execute("ATTACH DATABASE ?1 AS src", [read_only_uri(source)])
         .map_err(read_failed)?;
     let objects: Vec<(String, String, String)> = {
         let mut stmt = mem
@@ -158,7 +157,26 @@ fn in_memory_copy(source: &Path) -> Result<rusqlite::Connection> {
     }
     mem.execute_batch("DETACH DATABASE src")
         .map_err(read_failed)?;
+    if !super::state_rows(&mem).is_ok_and(|n| n > 0) {
+        crate::rivet_bail!(
+            crate::error::codes::STATE_COPY_SOURCE_EMPTY,
+            "`{}` was opened for the copy and holds no cursor and no run: nothing was copied. \
+             Name the config whose `.rivet_state.db` holds the state, or its \
+             `RIVET_STATE_URL=sqlite:<path>`",
+            source.display()
+        );
+    }
     Ok(mem)
+}
+
+/// The SQLite URI that opens exactly the file at `path` read-only: every byte is percent-encoded.
+fn read_only_uri(path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for b in path.as_os_str().as_encoded_bytes() {
+        uri.push_str(&format!("%{b:02X}"));
+    }
+    uri.push_str("?mode=ro");
+    uri
 }
 
 /// The state tables of a SQLite state, in name order.
@@ -560,6 +578,114 @@ mod tests {
         assert_eq!(
             crate::error::error_code(&err),
             Some("RIVET_STATE_FILE_CORRUPT")
+        );
+    }
+
+    /// A SQLite state at `path` holding `cursors` as export cursors, left open so its `-wal` file stays.
+    fn state_at(path: &Path, cursors: &[(&str, &str)]) -> crate::state::StateStore {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let store = crate::state::StateStore::open_at_path(path).unwrap();
+        for (export, value) in cursors {
+            store.update_legacy(export, value).unwrap();
+        }
+        store
+    }
+
+    /// The export cursors a copy holds, in name order.
+    fn copied_cursors(conn: &rusqlite::Connection) -> Vec<(String, String)> {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT export_name, last_cursor_value FROM export_state ORDER BY export_name",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Every path under `root`, sorted.
+    fn tree(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut todo = vec![root.to_path_buf()];
+        while let Some(dir) = todo.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                out.push(p.strip_prefix(root).unwrap().display().to_string());
+                if p.is_dir() {
+                    todo.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// A source path carrying a URI delimiter or an escape is read as the file it names, and no file is created beside it.
+    #[test]
+    fn a_source_path_with_a_uri_character_is_read_as_the_file_it_names() {
+        let want = vec![
+            ("orders".to_string(), "17".to_string()),
+            ("users".to_string(), "9".to_string()),
+        ];
+        for dir_name in [
+            "plain",
+            "a#b",
+            "a?b",
+            "a%41b",
+            "a%b",
+            "a%zzb",
+            "a?mode=rw#b",
+            "a b&c=d",
+            "caf\u{e9}%2F",
+            "a%23b",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(dir_name).join("state.db");
+            let _source = state_at(&path, &[("orders", "17"), ("users", "9")]);
+            let decoy = state_at(&root.path().join("aAb").join("state.db"), &[("decoy", "1")]);
+            let before = tree(root.path());
+            let copy = in_memory_copy(&path).unwrap_or_else(|e| panic!("{dir_name}: {e:#}"));
+            assert_eq!(copied_cursors(&copy), want, "{dir_name}");
+            assert_eq!(tree(root.path()), before, "{dir_name}: a file was created");
+            drop(decoy);
+        }
+    }
+
+    /// A source that does not exist is a backend failure, and nothing is created in its place.
+    #[test]
+    fn a_missing_source_is_refused_and_not_created() {
+        for dir_name in ["gone", "gone#x", "gone?x"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(dir_name).join("state.db");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let before = tree(root.path());
+            let err = in_memory_copy(&path).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_STATE_BACKEND_FAILED"),
+                "{dir_name}: {err:#}"
+            );
+            assert_eq!(tree(root.path()), before, "{dir_name}: a file was created");
+        }
+    }
+
+    /// An attached source that holds no cursor and no run is refused by code, whatever the guard said before.
+    #[test]
+    fn an_attached_source_with_no_state_is_refused_by_code() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("state.db");
+        let _empty = state_at(&path, &[]);
+        let err = in_memory_copy(&path).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_STATE_COPY_SOURCE_EMPTY"),
+            "{err:#}"
+        );
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("holds no cursor and no run") && said.contains("RIVET_STATE_URL=sqlite:"),
+            "{said}"
         );
     }
 }

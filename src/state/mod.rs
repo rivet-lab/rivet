@@ -234,14 +234,17 @@ fn holds_state(path: &std::path::Path) -> bool {
         return false;
     }
     Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .and_then(|c| {
-            c.query_row(
-                "SELECT (SELECT COUNT(*) FROM export_state) + (SELECT COUNT(*) FROM run_status)",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-        })
+        .and_then(|c| state_rows(&c))
         .is_ok_and(|n| n > 0)
+}
+
+/// The export cursors plus the runs a SQLite state holds.
+fn state_rows(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM export_state) + (SELECT COUNT(*) FROM run_status)",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
 }
 
 /// Refuse a `sqlite:` target that holds nothing while the file beside the config holds this

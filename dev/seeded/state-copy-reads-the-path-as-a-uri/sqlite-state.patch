@@ -1,0 +1,20 @@
+--- a/src/state/copy.rs
++++ b/src/state/copy.rs
+@@ -154,7 +154,7 @@
+     }
+     mem.execute_batch("DETACH DATABASE src")
+         .map_err(read_failed)?;
+-    if !super::state_rows(&mem).is_ok_and(|n| n > 0) {
++    if false {
+         crate::rivet_bail!(
+             crate::error::codes::STATE_COPY_SOURCE_EMPTY,
+             "`{}` was opened for the copy and holds no cursor and no run: nothing was copied. \
+@@ -170,7 +170,7 @@
+ fn read_only_uri(path: &Path) -> String {
+     let mut uri = String::from("file:");
+     for b in path.as_os_str().as_encoded_bytes() {
+-        uri.push_str(&format!("%{b:02X}"));
++        uri.push(char::from(*b));
+     }
+     uri.push_str("?mode=ro");
+     uri

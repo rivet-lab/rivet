@@ -3842,6 +3842,17 @@ seeds:
       mongo:
         cells: ["lib:keeping_date_resolves_the_names_and_leaves_date_for_the_apply"]
 
+  - name: state-copy-reads-the-path-as-a-uri
+    class: "`rivet state copy` splices the SQLite state path into a `file:` URI unescaped, so a path holding `#`, `?` or `%` attaches a different file (an empty one SQLite creates beside the directory, or the file a `%41` decodes to), and a source that holds no state after the attach is copied as empty: 0 rows, exit 0"
+    history: "found 2026-11-10 on 0.32.2: `a#b` copied 0 rows and left a 0-byte file `a`; `a?b` copied 0 rows; `a%41b` stopped RIVET_STATE_BACKEND_FAILED; the guard opened the real file by its plain path, the attach did not"
+    scope: state
+    engines:
+      sqlite-state:
+        patch: state-copy-reads-the-path-as-a-uri/sqlite-state.patch
+        cells: ["lib:a_source_path_with_a_uri_character_is_read_as_the_file_it_names", "lib:a_missing_source_is_refused_and_not_created", "lib:an_attached_source_with_no_state_is_refused_by_code"]
+      postgres-state:
+        na: "`rivet state copy` reads a SQLite file and writes a PostgreSQL state; the path is the SQLite source's, a PostgreSQL state URL is never a `file:` URI"
+
   - name: state-copy-leaves-sequences-behind
     class: "`rivet state copy` writes the rows with their ids and leaves each serial column's sequence at 1, so the first run through the copied PostgreSQL state collides with a copied id and fails"
     history: "0.32.2 item 9, 2026-10-20: the copy writes ids explicitly; seeded so the sequence move cannot be dropped"
@@ -5371,9 +5382,37 @@ seeds:
       postgres:
         na: "PostgreSQL refuses a nanosecond override with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (live check_override_wire cells a_nanosecond_timestamp_override_is_refused_by_the_wire_check_postgres), so no value reaches a nanosecond builder"
       mysql:
-        na: "MySQL has no nanosecond builder: a timestamp_ns override stops the run with RIVET_INTERNAL_TYPE_BUILDER before any value is read, so no value reaches a nanosecond builder"
+        na: "MySQL has no nanosecond builder: a timestamp_ns override is refused at the schema stage with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any value is read (seed override-without-builder-internal-stop), so no value reaches a nanosecond builder"
       mongo:
         na: "a document source has no declared column wire type and no builder takes a nanosecond override"
+  - name: override-without-builder-internal-stop
+    class: "a `columns:` override the source reader cannot build (a nanosecond timestamp on MySQL, a value of another wire type on SQL Server, a decimal past precision 38 on SQL Server or Oracle) stops the run as RIVET_INTERNAL_TYPE_BUILDER exit 6, which the gate reads as a rivet bug, instead of the coded usage refusal RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1"
+    history: "2026-11-08 gate d6581394: the MySQL cell a_first_cdc_run_refused_after_its_anchor_releases_it_mysql graded exit 6 as the expected refusal and the run-integrity invariant failed on RIVET_INTERNAL_; 20 of 160 MySQL and 169 of 272 SQL Server override-by-column runs stopped that way on main"
+    scope: source
+    engines:
+      mysql:
+        patch: override-without-builder-internal-stop/mysql.patch
+        cells:
+          - a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql
+          - a_nanosecond_timestamp_override_is_refused_on_an_empty_source_mysql
+          - a_first_cdc_run_refused_after_its_anchor_releases_it_mysql
+          - "lib:the_mysql_schema_stage_refuses_a_nanosecond_override"
+      mssql:
+        patch: override-without-builder-internal-stop/mssql.patch
+        cells:
+          - a_value_the_declared_type_cannot_read_is_refused_not_an_internal_stop_mssql
+          - "lib:no_override_over_any_wire_value_ends_as_an_internal_stop"
+          - "lib:a_foreign_cell_in_a_native_column_is_an_internal_stop"
+          - "lib:the_mssql_schema_stage_refuses_a_wide_decimal_override"
+      oracle:
+        patch: override-without-builder-internal-stop/oracle.patch
+        cells:
+          - a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle
+          - "lib:the_oracle_schema_stage_refuses_a_wide_decimal_override"
+      postgres:
+        na: "the PostgreSQL converter raises RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH for any builder or target mismatch at its invariant guard, so no override reaches an internal stop (survey: 0 of 272 runs)"
+      mongo:
+        na: "a document source has no declared column wire type and takes no columns override"
   - name: oracle-timestamp-ns-undeclared-truncated
     class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
     history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"
@@ -5649,3 +5688,37 @@ seeds:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
       oracle:
         cells: ["lib:a_percent_encoded_query_key_that_names_a_password_is_masked"]
+
+  - name: init-name-folded-into-query
+    class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
+    history: "audit 2026-11-08 finding H5-F1 (hunt 5, `rivet init` on a PostgreSQL and a MySQL table named with a line break); RED on main 2026-11-10 (`a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names`: the scaffold of table \"nl<LF>      tab\" does not parse back to that relation)"
+    scope: source
+    patch: init-name-folded-into-query/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mysql:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mssql:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+      mongo:
+        na: "a MongoDB export reads its collection through `table:`, never a folded `query:` block, and a name outside the table-shortcut gate is skipped with a reason (a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names covers the relational engines; the mutant lives in the query emitter)"
+      oracle:
+        cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
+
+  - name: init-column-key-unquoted
+    class: "`rivet init` writes a catalog column name as a bare YAML map key in the decimal override: a name such as `#tag` is read as a comment (the override is dropped), `x ` collapses onto `x` and `&a x` loses its anchor, so a numeric column is exported under no override or under its twin's"
+    history: "found 2026-11-10 by a hunt for sites of audit finding H5-F1 (PyYAML: `c:` with `#tag: d` and `x: e` loads as only `x`); RED on main 2026-11-10 (`a_decimal_override_key_is_exactly_the_column_it_names`: no columns override for `#tag`)"
+    scope: source
+    patch: init-column-key-unquoted/shared.patch
+    engines:
+      postgres:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mysql:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mssql:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+      mongo:
+        na: "a MongoDB collection has no declared numeric precision, so init writes no decimal override and no map key from a field name (the mutant lives in the relational decimal override writer)"
+      oracle:
+        cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]

@@ -494,6 +494,27 @@ pub fn dir_parquet_i64(dir: &Path, col: &str) -> Vec<i64> {
     out
 }
 
+/// The exact decimal text of column `col` across every `.parquet` under `dir`, in file and row order, rendered by Arrow at the column's own scale.
+pub fn dir_parquet_decimal_strings(dir: &Path, col: &str) -> Vec<String> {
+    use arrow::array::Array;
+    let mut out = Vec::new();
+    for path in files_with_extension(dir, "parquet") {
+        for batch in reader(&path) {
+            let batch = batch.unwrap();
+            let c = column_ci(&batch, col).unwrap_or_else(|| panic!("column {col} present"));
+            assert!(
+                matches!(c.data_type(), arrow::datatypes::DataType::Decimal128(..)),
+                "{col} decodes as Decimal128, got {:?}",
+                c.data_type()
+            );
+            (0..c.len()).for_each(|i| {
+                out.push(arrow::util::display::array_value_to_string(c, i).unwrap());
+            });
+        }
+    }
+    out
+}
+
 /// `(id, nanoseconds since epoch or None)` of every row of a nanosecond timestamp column, ordered by id.
 pub fn dir_parquet_id_and_nanos(dir: &Path, col: &str) -> Vec<(i64, Option<i64>)> {
     use arrow::array::{Array, AsArray};

@@ -4,15 +4,17 @@ use crate::common::*;
 
 const CODE: &str = "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH";
 
-/// The run and both `check` spellings refuse `rig`'s export by `CODE`, exit 1.
-fn check_and_run_refuse_alike(rig: Rig, name: &str) {
+/// The run and both `check` spellings refuse `rig`'s export by `CODE`, exit 1; returns the run's stderr.
+fn check_and_run_refuse_alike(rig: Rig, name: &str) -> String {
     let want = Refused::by_code(CODE, 1);
-    assert_refused(&rig.run_args(&["--export", name]), want);
+    let run = rig.run_args(&["--export", name]);
+    assert_refused(&run, want);
     assert_refused(&rig.cli(&["check", "--export", name]), want);
     assert_refused(
         &rig.cli(&["check", "--export", name, "--type-report"]),
         want,
     );
+    String::from_utf8_lossy(&run.stderr).into_owned()
 }
 
 #[test]
@@ -122,4 +124,164 @@ fn check_still_accepts_overrides_the_run_accepts_postgres() {
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
+}
+
+#[test]
+#[ignore = "live: mysql"]
+fn a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql() {
+    require_alive(LiveService::Mysql);
+    for (declared, remedy) in [
+        ("timestamp_ns", "declare `timestamp` (microseconds)"),
+        ("timestamp_tz_ns", "declare `timestamp_tz` (microseconds)"),
+    ] {
+        let name = unique_name("ovw_ns_my");
+        let out = tempfile::tempdir().unwrap();
+        let rig = Rig::mysql_batch(&name)
+            .query("SELECT CAST('2024-01-01 00:00:01.123456' AS DATETIME(6)) AS ts")
+            .mode("full")
+            .export_line("columns:")
+            .export_line(&format!("  ts: \"{declared}\""))
+            .dest_path(out.path().to_path_buf());
+        let stderr = check_and_run_refuse_alike(rig, &name);
+        assert!(stderr.contains(remedy), "{declared}: {stderr}");
+        assert!(
+            stderr.contains("mysql: column `ts` is declared timestamp"),
+            "{declared}: {stderr}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: mysql"]
+fn a_nanosecond_timestamp_override_is_refused_on_an_empty_source_mysql() {
+    require_alive(LiveService::Mysql);
+    let name = unique_name("ovw_ns_my_empty");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mysql_batch(&name)
+        .query(
+            "SELECT CAST('2024-01-01 00:00:01' AS DATETIME(6)) AS ts FROM (SELECT 1) t WHERE 1 = 0",
+        )
+        .mode("full")
+        .export_line("columns:")
+        .export_line("  ts: \"timestamp_ns\"")
+        .dest_path(out.path().to_path_buf());
+    check_and_run_refuse_alike(rig, &name);
+}
+
+#[test]
+#[ignore = "live: mssql"]
+fn a_value_the_declared_type_cannot_read_is_refused_not_an_internal_stop_mssql() {
+    require_alive(LiveService::Mssql);
+    for (expr, declared, label) in [
+        ("CAST(1 AS TINYINT)", "bool", "bool"),
+        ("CAST(1 AS INT)", "float8", "float64"),
+        (
+            "CAST('2024-01-01' AS DATE)",
+            "timestamp",
+            "timestamp(microsecond)",
+        ),
+        ("CAST(1.5 AS DECIMAL(10,2))", "int8", "int64"),
+    ] {
+        let name = unique_name("ovw_val_ms");
+        let out = tempfile::tempdir().unwrap();
+        let rig = Rig::mssql_batch(&name)
+            .query(&format!("SELECT {expr} AS c"))
+            .mode("full")
+            .export_line("columns:")
+            .export_line(&format!("  c: \"{declared}\""))
+            .dest_path(out.path().to_path_buf());
+        let stderr = check_and_run_refuse_alike(rig, &name);
+        assert!(
+            stderr.contains(&format!(
+                "column `c` is declared {label} by a `columns:` override"
+            )),
+            "{expr} as {declared}: {stderr}"
+        );
+    }
+}
+
+/// The message every wide-decimal refusal carries after the declared type.
+const WIDE_DECIMAL_REFUSAL: &str = "its precision is above 38; declare the column's own `decimal(p,s)` with p <= 38 (see the source column definition), or remove the override";
+
+/// A wide-decimal refusal names the cause and the rule, and the operator's own `valid` declaration then passes `check` and delivers `delivered` for the one source row.
+fn wide_decimal_refusal_then_valid_declaration_delivers(
+    rig: impl Fn(&str, &str) -> Rig,
+    column: &str,
+    prefix: &str,
+    (wide, valid, delivered): (&str, &str, &str),
+) {
+    let name = unique_name(prefix);
+    let out = tempfile::tempdir().unwrap();
+    let refused = rig(&name, wide).dest_path(out.path().to_path_buf());
+    let stderr = check_and_run_refuse_alike(refused, &name);
+    assert!(stderr.contains(WIDE_DECIMAL_REFUSAL), "{wide}: {stderr}");
+    assert!(!stderr.contains("`text`"), "{stderr}");
+    let name = unique_name(prefix);
+    let out = tempfile::tempdir().unwrap();
+    let applied = rig(&name, valid).dest_path(out.path().to_path_buf());
+    let checked = applied.cli(&["check", "--export", &name]);
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "{column}: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let run = applied.run_args(&["--export", &name]);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "{column}: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        dir_parquet_decimal_strings(out.path(), column),
+        vec![delivered.to_string()],
+        "{wide} -> {valid}"
+    );
+}
+
+/// The wide declarations, the operator's own valid declaration for a source holding 12.50, and the text it must deliver.
+const WIDE_DECIMAL_CASES: [(&str, &str, &str); 2] = [
+    ("decimal(50,2)", "decimal(10,2)", "12.50"),
+    ("decimal(50,40)", "decimal(38,2)", "12.50"),
+];
+
+#[test]
+#[ignore = "live: mssql"]
+fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_mssql() {
+    require_alive(LiveService::Mssql);
+    for case in WIDE_DECIMAL_CASES {
+        wide_decimal_refusal_then_valid_declaration_delivers(
+            |name, declared| {
+                Rig::mssql_batch(name)
+                    .query("SELECT CAST(12.5 AS DECIMAL(10,2)) AS d")
+                    .mode("full")
+                    .export_line("columns:")
+                    .export_line(&format!("  d: \"{declared}\""))
+            },
+            "d",
+            "ovw_dec_ms",
+            case,
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: oracle"]
+fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle() {
+    require_alive(LiveService::Oracle);
+    for case in WIDE_DECIMAL_CASES {
+        wide_decimal_refusal_then_valid_declaration_delivers(
+            |name, declared| {
+                Rig::oracle_batch(name)
+                    .query("SELECT CAST(12.5 AS NUMBER(10,2)) AS d FROM dual")
+                    .mode("full")
+                    .export_line("columns:")
+                    .export_line(&format!("  D: \"{declared}\""))
+            },
+            "D",
+            "ovw_dec_or",
+            case,
+        );
+    }
 }
