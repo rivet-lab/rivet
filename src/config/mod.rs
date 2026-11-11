@@ -599,7 +599,7 @@ impl Config {
             ..
         }) = self.load.as_ref().map(|l| &l.target)
         {
-            url::require_https_clickhouse_url(url.expose(), *allow_plaintext)?;
+            url::require_https_clickhouse_url(url, *allow_plaintext)?;
         }
         if let Some(url) = self
             .notifications
@@ -607,7 +607,7 @@ impl Config {
             .and_then(|n| n.slack.as_ref())
             .and_then(|s| s.webhook_url.as_ref())
         {
-            url::require_https_webhook(url.expose())?;
+            url::require_https_webhook(url)?;
         }
         Ok(())
     }

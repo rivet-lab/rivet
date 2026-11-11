@@ -2,6 +2,7 @@
 
 use super::TlsConfig;
 use crate::error::Result;
+use crate::secret::Secret;
 use crate::url_text::host_port_span;
 
 /// Whether every host of a `scheme://[user[:pass]@]host[:port][/db][?…]` URL is loopback; fails closed on any URL it cannot confidently read.
@@ -123,12 +124,17 @@ pub(crate) fn require_https_or_loopback(
     Ok(())
 }
 
+/// The one place a URL held as a `Secret` is read out for the plaintext gate.
+fn require_https_secret_url(url: &Secret, sink: &str, carries: &str, remedy: &str) -> Result<()> {
+    require_https_or_loopback(url.expose(), sink, carries, remedy)
+}
+
 /// Refuse a remote `http://` ClickHouse `load.url`, which carries the loader password and every row, unless `allow_plaintext`.
-pub(crate) fn require_https_clickhouse_url(url: &str, allow_plaintext: bool) -> Result<()> {
+pub(crate) fn require_https_clickhouse_url(url: &Secret, allow_plaintext: bool) -> Result<()> {
     if allow_plaintext {
         return Ok(());
     }
-    require_https_or_loopback(
+    require_https_secret_url(
         url,
         "ClickHouse load `url`",
         "the loader password and every loaded row",
@@ -138,8 +144,8 @@ pub(crate) fn require_https_clickhouse_url(url: &str, allow_plaintext: bool) -> 
 }
 
 /// Refuse a Slack webhook that is `http://` on a remote host: the URL is the posting secret.
-pub(crate) fn require_https_webhook(url: &str) -> Result<()> {
-    require_https_or_loopback(
+pub(crate) fn require_https_webhook(url: &Secret) -> Result<()> {
+    require_https_secret_url(
         url,
         "Slack notification `webhook_url`",
         "the webhook secret and the run summary",

@@ -94,20 +94,20 @@ pub fn maybe_send(config: Option<&NotificationsConfig>, summary: &RunSummary) {
         }
     };
 
-    if let Err(e) = post_summary(url.expose(), summary) {
+    if let Err(e) = post_summary(&url, summary) {
         log::error!("slack notification not sent: {e:#}");
     }
 }
 
 /// Post the run summary to `url` unless the webhook is refused as remote plaintext; a failed delivery is only logged.
-fn post_summary(url: &str, summary: &RunSummary) -> crate::error::Result<()> {
+fn post_summary(url: &crate::secret::Secret, summary: &RunSummary) -> crate::error::Result<()> {
     crate::config::url::require_https_webhook(url)?;
     let payload = build_slack_payload(summary);
 
     match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .and_then(|c| c.post(url).json(&payload).send())
+        .and_then(|c| c.post(url.expose()).json(&payload).send())
     {
         Ok(resp) if resp.status().is_success() => {
             log::info!("slack notification sent for '{}'", summary.export_name);
@@ -130,8 +130,11 @@ mod tests {
     #[test]
     fn a_remote_plaintext_webhook_is_refused_before_any_request() {
         let summary = stub_summary("failed", None);
-        let e =
-            post_summary("http://hooks.internal/services/T0/B0/SECRETPATH", &summary).unwrap_err();
+        let e = post_summary(
+            &crate::secret::Secret::new("http://hooks.internal/services/T0/B0/SECRETPATH"),
+            &summary,
+        )
+        .unwrap_err();
         assert_eq!(
             crate::error::error_code(&e),
             Some("RIVET_CONFIG_REMOTE_PLAINTEXT")
@@ -147,7 +150,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/services/T0/B0/X", listener.local_addr().unwrap());
         drop(listener);
-        assert!(post_summary(&url, &summary).is_ok());
+        assert!(post_summary(&crate::secret::Secret::new(url), &summary).is_ok());
     }
 
     fn stub_summary(status: &str, schema_changed: Option<bool>) -> RunSummary {

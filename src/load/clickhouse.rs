@@ -150,7 +150,7 @@ impl ClickhouseLoader {
         if let Some(c) = self.client.get() {
             return Ok(c);
         }
-        crate::config::url::require_https_clickhouse_url(self.url.expose(), self.allow_plaintext)?;
+        crate::config::url::require_https_clickhouse_url(&self.url, self.allow_plaintext)?;
         let c = http_client(self.ca_file.as_deref())?;
         Ok(self.client.get_or_init(|| c))
     }
