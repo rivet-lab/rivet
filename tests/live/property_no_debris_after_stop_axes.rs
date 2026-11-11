@@ -83,8 +83,8 @@ impl Kind {
     }
 }
 
-/// The source engines of `SqlEngine`, lower case.
-pub const ENGINES: [&str; 4] = ["mysql", "pg", "mssql", "oracle"];
+/// The source engines of `SourceType`, as cell keys spell them.
+pub const ENGINES: [&str; 5] = ["mysql", "pg", "mssql", "oracle", "mongo"];
 
 /// The part of the product a hook lives in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -172,24 +172,51 @@ impl Shape {
                     "chunk_checkpoint: true",
                 ],
             )),
-            Shape::TimeWindow | Shape::Cdc | Shape::Load | Shape::MongoFull => None,
+            Shape::Load | Shape::MongoFull => Some(("full", &[])),
+            Shape::TimeWindow | Shape::Cdc => None,
         }
     }
 
     /// Why a cell of this shape cannot run here, else `None`.
     pub fn not_built(self) -> Option<&'static str> {
         match self {
-            Shape::Full | Shape::Incremental | Shape::Range | Shape::Keyset => None,
+            Shape::Full
+            | Shape::Incremental
+            | Shape::Range
+            | Shape::Keyset
+            | Shape::Load
+            | Shape::MongoFull => None,
             Shape::TimeWindow => Some("the time_window shape is not built in this matrix"),
             Shape::Cdc => Some(
-                "the CDC runner needs the cdc stand profile and a change stream, not built in this matrix",
+                "the CDC leg has no equal-re-run rule yet: a change log delivered at least once may repeat a change, and which repeat is debris is not decided",
             ),
-            Shape::Load => Some(
-                "the load legs need a warehouse stage listing (BigQuery, Snowflake, ClickHouse), not built in this matrix",
-            ),
-            Shape::MongoFull => {
-                Some("MongoDB is not a SqlEngine, its cells are not built in this matrix")
+        }
+    }
+
+    /// Whether a run of `engine` can take this shape.
+    pub fn fits(self, engine: &str) -> bool {
+        match self {
+            Shape::MongoFull => engine == "mongo",
+            Shape::Full | Shape::Incremental | Shape::TimeWindow | Shape::Range | Shape::Keyset => {
+                engine != "mongo"
             }
+            Shape::Cdc | Shape::Load => true,
+        }
+    }
+
+    /// Why `engine` cannot run a cell of this shape on the stand, else `None`.
+    pub fn off_stand_for(self, engine: &str) -> Option<&'static str> {
+        match self {
+            Shape::Load => (engine == "mongo").then_some(
+                "a MongoDB export is _id plus a JSON document column; the ClickHouse id read of the load cell is not built for it",
+            ),
+            Shape::Full
+            | Shape::Incremental
+            | Shape::TimeWindow
+            | Shape::Range
+            | Shape::Keyset
+            | Shape::Cdc
+            | Shape::MongoFull => None,
         }
     }
 }
@@ -204,8 +231,14 @@ impl Family {
                 Shape::TimeWindow,
                 Shape::Range,
                 Shape::Keyset,
+                Shape::MongoFull,
             ],
-            Family::Single => &[Shape::Full, Shape::Incremental, Shape::TimeWindow],
+            Family::Single => &[
+                Shape::Full,
+                Shape::Incremental,
+                Shape::TimeWindow,
+                Shape::MongoFull,
+            ],
             Family::Chunked => &[Shape::Range],
             Family::Keyset => &[Shape::Keyset],
             Family::Cdc | Family::MysqlCdc => &[Shape::Cdc],
@@ -256,6 +289,53 @@ pub fn family_of(rel: &str) -> Option<Family> {
         .iter()
         .find(|(prefix, _)| rel.starts_with(prefix))
         .map(|(_, f)| *f)
+}
+
+/// A `load: target` of `LoadTarget`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Warehouse {
+    Bigquery,
+    Snowflake,
+    Clickhouse,
+}
+
+impl Warehouse {
+    pub const ALL: [Warehouse; 3] = [
+        Warehouse::Bigquery,
+        Warehouse::Snowflake,
+        Warehouse::Clickhouse,
+    ];
+
+    /// Its `target:` word.
+    pub fn label(self) -> &'static str {
+        match self {
+            Warehouse::Bigquery => "bigquery",
+            Warehouse::Snowflake => "snowflake",
+            Warehouse::Clickhouse => "clickhouse",
+        }
+    }
+
+    /// Why a load into it is not graded on the stand, else `None`.
+    pub fn off_stand(self) -> Option<&'static str> {
+        match self {
+            Warehouse::Bigquery => Some("BigQuery is a cloud warehouse, the stand has none"),
+            Warehouse::Snowflake => Some("Snowflake is a cloud warehouse, the stand has none"),
+            Warehouse::Clickhouse => None,
+        }
+    }
+
+    /// The warehouses a load hook in `file` serves: the one its path names, or all for shared load code.
+    pub fn serving(file: &str) -> Vec<Warehouse> {
+        let named: Vec<Warehouse> = Warehouse::ALL
+            .into_iter()
+            .filter(|w| file.contains(w.label()))
+            .collect();
+        if named.is_empty() {
+            Warehouse::ALL.to_vec()
+        } else {
+            named
+        }
+    }
 }
 
 /// A fault point a product call site names.
@@ -393,10 +473,18 @@ pub enum Stop {
     Fault,
     Term,
     Kill,
+    HostCrash,
+    SourceEvent,
 }
 
 impl Stop {
-    pub const ALL: [Stop; 3] = [Stop::Kill, Stop::Term, Stop::Fault];
+    pub const ALL: [Stop; 5] = [
+        Stop::Kill,
+        Stop::Term,
+        Stop::Fault,
+        Stop::HostCrash,
+        Stop::SourceEvent,
+    ];
 
     /// Its label in a cell key.
     pub fn label(self) -> &'static str {
@@ -404,12 +492,20 @@ impl Stop {
             Stop::Fault => "fault",
             Stop::Term => "sigterm",
             Stop::Kill => "sigkill",
+            Stop::HostCrash => "host_crash",
+            Stop::SourceEvent => "source_event",
         }
     }
 
     /// Why this stop cannot be made at a hook of `kind`, else `None`.
     pub fn impossible_at(self, kind: Kind) -> Option<&'static str> {
         match (self, kind.faults()) {
+            (Stop::HostCrash, _) => Some(
+                "a host crash loses the page cache and unsynced writes; the stand has no VM or fault-injecting filesystem to make one",
+            ),
+            (Stop::SourceEvent, _) => Some(
+                "a source event (failover, slot or log loss) stops a CDC stream; the CDC leg is not built",
+            ),
             (Stop::Fault, false) => Some("the hook only parks the run, it injects no fault"),
             (Stop::Term | Stop::Kill, true) => Some(
                 "the hook only faults: nothing parks the run there for a real signal (option: let maybe_panic_at honour RIVET_TEST_BLOCK_AT)",
@@ -446,7 +542,329 @@ impl Cell {
             .impossible_at(self.hook.kind)
             .map(String::from)
             .or_else(|| self.shape.not_built().map(String::from))
+            .or_else(|| self.shape.off_stand_for(&self.engine).map(String::from))
+            .or_else(|| self.off_stand_load())
     }
+
+    /// Why a load cell's hook serves no warehouse of the stand, else `None`.
+    fn off_stand_load(&self) -> Option<String> {
+        if self.shape != Shape::Load {
+            return None;
+        }
+        let serving = Warehouse::serving(&self.hook.file);
+        if serving.iter().any(|w| w.off_stand().is_none()) {
+            return None;
+        }
+        Some(
+            serving
+                .iter()
+                .filter_map(|w| w.off_stand())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+}
+
+/// The CamelCase variants of `enum_name` in `rel`, one per line of the enum body.
+pub fn enum_variants(root: &Path, rel: &str, enum_name: &str) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(root.join(rel)).expect("read the enum's file");
+    let needle = format!("enum {enum_name} {{");
+    let body = &text[text.find(&needle).expect("enum not found") + needle.len()..];
+    let body = &body[..body.find("\n}").expect("enum end")];
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("//") && !l.starts_with('#') && !l.is_empty())
+        .filter_map(|l| {
+            let id: String = l
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            id.chars()
+                .next()
+                .filter(char::is_ascii_uppercase)
+                .map(|_| id)
+        })
+        .collect()
+}
+
+/// `CamelCase` as `snake_case`.
+pub fn snake(camel: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in camel.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+/// The codes of `docs/reference/errors.md` whose kind is `kind`.
+pub fn codes_of_kind(root: &Path, kind: &str) -> Vec<String> {
+    let text =
+        std::fs::read_to_string(root.join("docs/reference/errors.md")).expect("read errors.md");
+    text.lines()
+        .filter_map(|l| {
+            let cols: Vec<&str> = l.split('|').map(str::trim).collect();
+            (cols.len() > 3 && cols[2] == kind).then(|| cols[1].trim_matches('`').to_string())
+        })
+        .filter(|c| c.starts_with("RIVET_"))
+        .collect()
+}
+
+/// The mutations a source takes between a stop and its re-run that are not a `ChangeOp`.
+pub const SCHEMA_MUTATIONS: [&str; 5] = [
+    "add_column",
+    "drop_recreate",
+    "truncate",
+    "quiet_source",
+    "multi_statement_txn",
+];
+
+/// The ways a re-run meets its state that are not a `StateRef` backend.
+pub const STATE_TOPOLOGIES: [&str; 3] =
+    ["second_state_db", "foreign_state_load", "prior_checkpoint"];
+
+/// The stops every axis below crosses: a fault or a parked SIGKILL at the points a run commits through.
+pub const POINTS: [(&str, Stop); 4] = [
+    ("after_file_write", Stop::Fault),
+    ("before_commit_rename", Stop::Kill),
+    ("after_source_read", Stop::Kill),
+    ("after_chunk_file", Stop::Fault),
+];
+
+/// An axis the base cells hold fixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Axis {
+    Warehouse,
+    Mutation,
+    Refusal,
+    RunEnd,
+    Entry,
+    State,
+    Parallel,
+    Destination,
+}
+
+impl Axis {
+    pub const AT_POINTS: [Axis; 7] = [
+        Axis::Mutation,
+        Axis::Refusal,
+        Axis::RunEnd,
+        Axis::Entry,
+        Axis::State,
+        Axis::Parallel,
+        Axis::Destination,
+    ];
+
+    /// Its label in a variant key.
+    pub fn label(self) -> &'static str {
+        match self {
+            Axis::Warehouse => "warehouse",
+            Axis::Mutation => "mutation",
+            Axis::Refusal => "refusal",
+            Axis::RunEnd => "run_end",
+            Axis::Entry => "entry",
+            Axis::State => "state",
+            Axis::Parallel => "parallel",
+            Axis::Destination => "destination",
+        }
+    }
+
+    /// Its values other than the one the base cells hold, read from the code.
+    pub fn values(self, root: &Path) -> Vec<String> {
+        match self {
+            Axis::Warehouse => Warehouse::ALL
+                .iter()
+                .map(|w| w.label().to_string())
+                .collect(),
+            Axis::Mutation => enum_variants(root, "src/source/cdc/mod.rs", "ChangeOp")
+                .iter()
+                .map(|v| snake(v))
+                .chain(SCHEMA_MUTATIONS.iter().map(|m| m.to_string()))
+                .collect(),
+            Axis::Refusal => codes_of_kind(root, "busy"),
+            Axis::RunEnd => vec!["failure_webhook".into()],
+            Axis::Entry => enum_variants(root, "src/cli/args.rs", "Commands")
+                .iter()
+                .map(|v| snake(v))
+                .filter(|v| v != "run")
+                .collect(),
+            Axis::State => enum_variants(root, "src/state/mod.rs", "StateRef")
+                .iter()
+                .map(|v| snake(v))
+                .filter(|v| v != "sqlite")
+                .chain(STATE_TOPOLOGIES.iter().map(|t| t.to_string()))
+                .collect(),
+            Axis::Parallel => {
+                let schema = std::fs::read_to_string(root.join("schemas/rivet.schema.json"))
+                    .expect("read the config schema");
+                if schema.contains("\"parallel\": {") {
+                    vec!["4".into()]
+                } else {
+                    vec![]
+                }
+            }
+            Axis::Destination => {
+                enum_variants(root, "src/config/destination.rs", "DestinationType")
+                    .iter()
+                    .map(|v| snake(v))
+                    .filter(|v| v != "local")
+                    .collect()
+            }
+        }
+    }
+
+    /// Why `value` of this axis cannot be graded at `cell`, else `None`.
+    pub fn why_not(self, value: &str, cell: &Cell) -> Option<String> {
+        let parked = cell.stop == Stop::Kill;
+        let sql = cell.engine != "mongo";
+        let why = match self {
+            Axis::Warehouse => return None,
+            Axis::Mutation => match value {
+                "quiet_source" | "multi_statement_txn" => {
+                    Some("a CDC-only mutation; the CDC leg is not built")
+                }
+                _ if !sql => Some("the mutation statements are SQL; MongoDB takes none"),
+                _ if !parked => {
+                    Some("a mutation lands while the run is parked; a fault point does not park")
+                }
+                "insert" | "update" | "delete" | "add_column" | "drop_recreate" | "truncate" => {
+                    None
+                }
+                _ => Some("no mutation statement is built for this value"),
+            },
+            Axis::Refusal => match value {
+                "RIVET_STATE_RUN_IN_PROGRESS" if parked => None,
+                "RIVET_STATE_RUN_IN_PROGRESS" => Some(
+                    "a second run beside a live one needs the first parked; a fault point does not park",
+                ),
+                _ => Some("no trigger is built for this busy code in this matrix"),
+            },
+            Axis::RunEnd => match value {
+                "failure_webhook" if cell.stop == Stop::Fault => None,
+                "failure_webhook" => {
+                    Some("a killed process sends no webhook; only a fault ends in one")
+                }
+                _ => Some("no run-end leg is built for this value"),
+            },
+            Axis::Entry => match value {
+                "apply" if !sql => Some(
+                    "the plan/apply leg reconnects through source_url_env, built for the SQL rigs only",
+                ),
+                "apply" if cell.stop == Stop::Fault => None,
+                "apply" => Some(
+                    "the rig spawns only `rivet run` to park and signal; apply is stopped by a fault",
+                ),
+                "state" if parked => None,
+                "state" => Some("state finish-run closes a dead run; a fault point leaves none"),
+                "load" => Some("a load is graded on the warehouse axis"),
+                "cdc" => Some("the CDC leg is not built"),
+                "compact" => Some("compact merges a warehouse change log, it runs no export"),
+                _ => Some("this command runs no export"),
+            },
+            Axis::State => match value {
+                "postgres" => None,
+                "second_state_db" if sql => None,
+                "second_state_db" => {
+                    Some("a second rig over the same MongoDB database is not built")
+                }
+                "foreign_state_load" => {
+                    Some("loading a state written by another config or release is not built")
+                }
+                "prior_checkpoint" => Some(
+                    "a checkpoint from an earlier run is a CDC resume; the CDC leg is not built",
+                ),
+                _ => Some("no state topology is built for this value"),
+            },
+            Axis::Parallel => match cell.shape {
+                Shape::Range | Shape::Keyset => None,
+                _ => Some("parallel fans out range and keyset chunks only"),
+            },
+            Axis::Destination => match value {
+                "stdout" => Some("a stdout destination keeps nothing to grade"),
+                _ if cell.hook.file == "src/destination/local.rs" => Some(
+                    "the hook is in the local destination; a cloud destination never reaches it",
+                ),
+                "s3" | "gcs" | "azure" => None,
+                _ => Some("no puller is built for this destination"),
+            },
+        };
+        why.map(String::from)
+    }
+}
+
+/// A base cell crossed with one value of an axis the base cells hold fixed.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Variant {
+    pub base: Cell,
+    pub axis: Axis,
+    pub value: String,
+    pub why_not: Option<String>,
+}
+
+impl Variant {
+    /// `engine/shape/hook/stop@axis=value`.
+    pub fn key(&self) -> String {
+        format!("{}@{}={}", self.base.key(), self.axis.label(), self.value)
+    }
+
+    /// Why this variant cannot run, else `None`.
+    pub fn not_graded(&self) -> Option<String> {
+        self.why_not.clone().or_else(|| self.base.not_graded())
+    }
+}
+
+/// The load cells of `base` crossed with each other warehouse their hook serves; the base cell runs on ClickHouse.
+pub fn warehouse_variants(base: &[Cell]) -> Vec<Variant> {
+    let mut out = vec![];
+    for cell in base.iter().filter(|c| c.shape == Shape::Load) {
+        let serving = Warehouse::serving(&cell.hook.file);
+        if !serving.contains(&Warehouse::Clickhouse) {
+            continue;
+        }
+        for w in serving {
+            let why_not = match w {
+                Warehouse::Clickhouse => continue,
+                Warehouse::Bigquery | Warehouse::Snowflake => w.off_stand(),
+            };
+            out.push(Variant {
+                base: cell.clone(),
+                axis: Axis::Warehouse,
+                value: w.label().to_string(),
+                why_not: why_not.map(String::from),
+            });
+        }
+    }
+    out
+}
+
+/// The runnable base cells at the [`POINTS`].
+pub fn points(base: &[Cell]) -> Vec<&Cell> {
+    base.iter()
+        .filter(|c| c.not_graded().is_none())
+        .filter(|c| POINTS.contains(&(c.hook.name.as_str(), c.stop)))
+        .collect()
+}
+
+/// Every variant of every axis over the base cells.
+pub fn variants(root: &Path, base: &[Cell]) -> Vec<Variant> {
+    let mut out = warehouse_variants(base);
+    for axis in Axis::AT_POINTS {
+        let values = axis.values(root);
+        for cell in points(base) {
+            for value in &values {
+                out.push(Variant {
+                    base: cell.clone(),
+                    axis,
+                    value: value.clone(),
+                    why_not: axis.why_not(value, cell),
+                });
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Every cell: each hook at each shape that reaches it, on each engine the hook's family allows, at each stop.
@@ -458,7 +876,7 @@ pub fn cells(root: &Path, engines: &[String]) -> Vec<Cell> {
             if family.only_engine().is_some_and(|only| only != engine) {
                 continue;
             }
-            for shape in family.shapes() {
+            for shape in family.shapes().iter().filter(|s| s.fits(engine)) {
                 for stop in Stop::ALL {
                     out.push(Cell {
                         engine: engine.clone(),
@@ -568,4 +986,114 @@ pub fn term_worse_than_kill(term: &Left, kill: &Left) -> Option<String> {
     )
     .or_else(|| more("running run_status row(s)", term.running, kill.running))
     .or_else(|| more("run lease row(s)", term.leases, kill.leases))
+}
+
+/// An accepted RED: the cell keys it covers (`*` matches any run of characters), the finding text it covers, and a dated reason that names what closes it.
+pub struct KnownRed {
+    pub keys: &'static str,
+    pub finding: &'static str,
+    pub reason: &'static str,
+}
+
+/// The accepted REDs of this matrix; a RED no entry covers fails the matrix, and so does an entry no RED meets in a whole run.
+pub const KNOWN_RED: &[KnownRed] = &[
+    KnownRed {
+        keys: "pg/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "pg/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+    KnownRed {
+        keys: "pg/*",
+        finding: "run_end:success_rows_exceed_clean_exits",
+        reason: "2026-11-10: PR-RUN-END NODEBRIS-SUCCESS-ROWS (HS-C4, EP-3), the state holds more success run_status rows than invocations that exited 0; closes when only an exit-0 run is recorded success.",
+    },
+    KnownRed {
+        keys: "mysql/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "mysql/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+    KnownRed {
+        keys: "mysql/*",
+        finding: "run_end:success_rows_exceed_clean_exits",
+        reason: "2026-11-10: PR-RUN-END NODEBRIS-SUCCESS-ROWS (HS-C4, EP-3), the state holds more success run_status rows than invocations that exited 0; closes when only an exit-0 run is recorded success.",
+    },
+    KnownRed {
+        keys: "mssql/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "mssql/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+    KnownRed {
+        keys: "mssql/*",
+        finding: "run_end:success_rows_exceed_clean_exits",
+        reason: "2026-11-10: PR-RUN-END NODEBRIS-SUCCESS-ROWS (HS-C4, EP-3), the state holds more success run_status rows than invocations that exited 0; closes when only an exit-0 run is recorded success.",
+    },
+    KnownRed {
+        keys: "oracle/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "oracle/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+    KnownRed {
+        keys: "oracle/*",
+        finding: "run_end:success_rows_exceed_clean_exits",
+        reason: "2026-11-10: PR-RUN-END NODEBRIS-SUCCESS-ROWS (HS-C4, EP-3), the state holds more success run_status rows than invocations that exited 0; closes when only an exit-0 run is recorded success.",
+    },
+    KnownRed {
+        keys: "mongo/*",
+        finding: "debris:tmp",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-TMP, a SIGKILL or SIGTERM at before_commit_rename leaves the staged .tmp and the re-run does not sweep it; closes when the writer removes its own stale .tmp on the next run.",
+    },
+    KnownRed {
+        keys: "mongo/*",
+        finding: "rows:duplicate",
+        reason: "2026-11-10: PR-DEBRIS NODEBRIS-DUP, a re-run after a fault once a part was committed delivers the committed rows again; closes when the re-run skips or replaces committed parts.",
+    },
+];
+
+/// Whether `key` matches `pattern`, where `*` matches any run of characters.
+pub fn glob(pattern: &str, key: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut rest = key;
+    for (i, part) in parts.iter().enumerate() {
+        if i == 0 {
+            match rest.strip_prefix(part) {
+                Some(r) => rest = r,
+                None => return false,
+            }
+        } else if i == parts.len() - 1 {
+            return rest.ends_with(part);
+        } else {
+            match rest.find(part) {
+                Some(at) => rest = &rest[at + part.len()..],
+                None => return false,
+            }
+        }
+    }
+    rest.is_empty()
+}
+
+/// The entry of [`KNOWN_RED`] that covers a RED of `key` with `evidence`, else `None`.
+pub fn known_red(key: &str, evidence: &str) -> Option<&'static KnownRed> {
+    KNOWN_RED
+        .iter()
+        .find(|k| glob(k.keys, key) && evidence.contains(k.finding))
 }

@@ -53,8 +53,12 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 #: The gate kind whose green verdict may support a tag: `make release-oracle-full`, nothing given up.
 FULL_GATE = "release-oracle-full"
+#: The measured island alone (`make release-oracle-island`): the other record a tag needs.
+ISLAND_GATE = "release-oracle-island"
 #: Every other run that writes a verdict line (the bare `make release-oracle`, a run with an escape).
 REDUCED_GATE = "release-oracle"
+#: The gate kinds a tag rests on: an env skip no `skip_allow` entry excuses is ungraded in each, at the gate and at the tag.
+TAG_GATES = (FULL_GATE, ISLAND_GATE)
 
 
 class Status(str, Enum):
@@ -407,21 +411,21 @@ class Ledger:
         return any(c.status is Status.FAIL for c in self.cells)
 
     def grade(self, cell: Cell, gate: str) -> Cell:
-        """The cell as the verdict reads it: an ENV skip in the full gate is INFRA unless `skip_allow` excuses it today."""
-        if gate != FULL_GATE or cell.cause != SkipCause.ENV:
+        """The cell as the verdict reads it: an ENV skip in a gate a tag rests on is INFRA unless `skip_allow` excuses it today."""
+        if gate not in TAG_GATES or cell.cause != SkipCause.ENV:
             return cell
         from . import skip_allow
         if skip_allow.excused(*cell.skip_id) is not None:
             return cell
         return replace(cell, status=Status.INFRA, cause=None,
-                       detail=f"{cell.detail} [env skip, not excused in skip_allow.py: a full gate does not pass on a stand that was not there]")
+                       detail=f"{cell.detail} [env skip, not excused in skip_allow.py: a tag gate does not pass on a stand that was not there]")
 
     def graded(self, gate: str) -> list[Cell]:
         """Every row as the verdict reads it."""
         return [self.grade(c, gate) for c in self.cells]
 
     def ungraded_count(self, gate: str = REDUCED_GATE) -> int:
-        """How many rows grade nothing: the oracle's own failures and the unexcused env skips of a full gate."""
+        """How many rows grade nothing: the oracle's own failures and the unexcused env skips of a tag gate."""
         return sum(c.status is Status.INFRA for c in self.graded(gate))
 
     def skip_counts(self) -> dict[str, int]:
@@ -726,7 +730,7 @@ HARNESS_ENV: frozenset[str] = frozenset((
     "RIVET_CDC_STATE_URL", "RIVET_CONC_SRC_CONTAINER", "RIVET_CONC_SRC_URL", "RIVET_CONC_STATE_URL",
     "RIVET_FAILURE_MONGO_URL", "RIVET_FIELD_LOCK", "RIVET_FIELD_MYSQL_CONTAINER", "RIVET_FIELD_REPLAY_BIN",
     "RIVET_FLOW_VERDICTS", "RIVET_GATE_SHARED_STATE", "RIVET_GATE_STATE_URL",
-    "RIVET_LEASE_CARRIER_BIN", "RIVET_LIVE_SLOT", "RIVET_LOCK_WAIT", "RIVET_MIGRATION_CARRIER_BIN",
+    "RIVET_LEASE_CARRIER_BIN", "RIVET_LIVE_SLOT", "RIVET_MIGRATION_CARRIER_BIN",
     "RIVET_ORACLE_DOCKER", "RIVET_ORACLE_LATEST_ONLY", "RIVET_ORACLE_LOG", "RIVET_ORACLE_SELFTEST_FLAG",
     "RIVET_ORACLE_VERSIONS", "RIVET_ORACLE_WITHOUT_PREV_RELEASE", "RIVET_ORACLE_WORK",
     "RIVET_NO_DEBRIS_AFTER_STOP_CELLS",
@@ -770,8 +774,7 @@ def run(
     cwd: Path | None = None,
 ) -> Proc:
     """Run `argv` (a LIST — no shell, so no quoting or word-splitting bugs)."""
-    # A busy lease is graded as the immediate refusal it was before `--lock-wait`; a stage that grades the wait sets it.
-    full_env = {"RIVET_LOCK_WAIT": "0", **os.environ, **(env or {})}
+    full_env = {**os.environ, "RIVET_LOCK_WAIT": "0", **(env or {})}
     gated = full_env.get("RIVET_BIN_OVERRIDE", str(rivet_bin())) == str(rivet_bin())
     try:
         p = subprocess.run(

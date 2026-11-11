@@ -26,7 +26,10 @@ Preconditions the script enforces, in order (1-5 unchanged from the bash):
    commit from a clean tree.
 8. The same gate record (or `--island-record FILE`) holds a `release-oracle-island`
    run of exactly HEAD's commit (the measured stages, `make release-oracle-island`)
-   under the same rules as 6.
+   under the same rules as 6, env-skip rule included.
+9. The gate host's logs directory (or `--satellite-record DIR`) holds, for each satellite
+   profile, a `verdict.json` of exactly HEAD's commit (`dev/pytools/satellite.py`) whose
+   `blocking` list is empty.
 
 WHAT THIS SCRIPT DOES **NOT** CHECK (reported, not invented):
 
@@ -55,6 +58,7 @@ Usage mirrors the bash exactly:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -68,10 +72,15 @@ else:  # executed as a plain script: `python3 dev/pytools/release.py`
     import shell  # type: ignore[no-redef]
 
 ROOT = shell.ROOT
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from dev.pytools import satellite  # noqa: E402
+from dev.release_oracle.core import FULL_GATE, ISLAND_GATE, TAG_GATES  # noqa: E402
+
 CARGO_TOML = ROOT / "Cargo.toml"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
-USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE] [--island-record FILE]
+USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE] [--island-record FILE] [--satellite-record DIR]
 
 Options:
   --dry-run     Validate only; do not create or push a tag
@@ -81,6 +90,7 @@ Options:
   --gate-record The gate's verdict lines (default: dev/release-oracle/timings.jsonl)
   --recall-record  The seeded recall's run lines (default: recall-runs.jsonl in the seeded state dir)
   --island-record  The measured island's verdict lines (default: the gate record)
+  --satellite-record  The gate's logs directory holding <sha>/satellite-<profile>/verdict.json (default: $RIVET_GATE_LOGS_DIR or ~/wt/gate-logs)
   --self-test   Check the gate-record precondition on fixtures; tags nothing
   -h, --help    Show this help"""
 
@@ -90,10 +100,8 @@ Options:
 ACTIONS_URL = "https://github.com/rivet-lab/rivet/actions/workflows/release.yml"
 #: Where `make release-oracle-full` appends its verdict line (dev/release_oracle/core.py TIMINGS_HISTORY).
 GATE_RECORD = ROOT / "dev" / "release-oracle" / "timings.jsonl"
-#: The only gate kind whose green verdict supports a tag (dev/release_oracle/core.py FULL_GATE).
-FULL_GATE = "release-oracle-full"
-#: The gate kind of the measured stages alone (`make release-oracle-island`): the other record a tag needs.
-ISLAND_GATE = "release-oracle-island"
+#: The satellite profiles a tag needs a verdict of (`Run(<profile>, ...)` in dev/pytools/satellite.py; the self-test compares).
+SATELLITE_PROFILES = ("linux", "mac")
 #: The configuration a full gate runs under: no bless mode, no tolerance override, both state backends graded.
 CANONICAL_CONFIG: dict = {"bless": [], "knobs": {}, "state": ["postgres", "sqlite"]}
 
@@ -113,6 +121,7 @@ class Args:
     gate_record: str = ""
     recall_record: str = ""
     island_record: str = ""
+    satellite_record: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -162,6 +171,12 @@ def parse_args(argv: list[str]) -> Args:
             if not value:
                 raise _Usage()
             a.island_record = value
+            i += 2
+        elif arg == "--satellite-record":
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+            if not value:
+                raise _Usage()
+            a.satellite_record = value
             i += 2
         elif arg in ("-h", "--help"):
             raise _Usage()
@@ -287,7 +302,7 @@ def gate_refusal(sha: str, record: Path, kind: str = FULL_GATE) -> str | None:
     if last.get("config") != CANONICAL_CONFIG:
         return (f"the latest {kind} run of {sha[:12]} ({last.get('at')}) ran under {last.get('config')!r}, "
                 f"not the canonical configuration {CANONICAL_CONFIG!r}")
-    if kind == FULL_GATE and (why := env_skip_refusal(last.get("skipped_env"))):
+    if kind in TAG_GATES and (why := env_skip_refusal(last.get("skipped_env"))):
         return f"the latest {kind} run of {sha[:12]} ({last.get('at')}) {why}"
     return None
 
@@ -318,8 +333,39 @@ def recall_refusal(sha: str, record: Path | None) -> str | None:
     return run_record.refusal(sha, record or run_record.seeded_dir() / run_record.RUNS_FILE)
 
 
-def tag_refusal(sha: str, gate: Path, recall: Path | None, island: Path | None = None) -> tuple[str, str] | None:
-    """The first record precondition `sha` fails, as (why, hint), in the order gate record, recall record, island record; None when all hold."""
+def satellite_logs() -> Path:
+    """The gate host's logs directory the satellites publish into: `RIVET_GATE_LOGS_DIR` (else `wt/gate-logs`), relative to the home directory."""
+    return Path.home() / os.environ.get("RIVET_GATE_LOGS_DIR", "wt/gate-logs")
+
+
+def satellite_refusal(sha: str, logs: Path) -> str | None:
+    """Why `sha` may not be tagged on the satellites' account: a profile with no `verdict.json` of exactly this commit under `logs`, or whose latest one lists a blocking check or ran no pilot or release-notes check."""
+    found: dict[str, list[dict]] = {}
+    for path in logs.glob("*/satellite-*/verdict.json"):
+        try:
+            body = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(body, dict) and body.get("sha") == sha and body.get("profile") in SATELLITE_PROFILES:
+            found.setdefault(body["profile"], []).append(body)
+    for profile in SATELLITE_PROFILES:
+        if not found.get(profile):
+            return f"no satellite {profile} verdict of {sha[:12]} under {logs}"
+        last = max(found[profile], key=lambda b: str(b.get("started")))
+        at, blocking, checks = last.get("started"), last.get("blocking"), last.get("checks")
+        if not isinstance(blocking, list):
+            return f"the latest satellite {profile} verdict of {sha[:12]} ({at}) lists no `blocking` array"
+        if blocking:
+            return f"the latest satellite {profile} verdict of {sha[:12]} ({at}) blocks the release ({len(blocking)}): {blocking[0]}"
+        names = [c.get("name") for c in checks if isinstance(c, dict)] if isinstance(checks, list) else []
+        if not any(isinstance(n, str) and n.startswith(satellite.HARD) for n in names):
+            return f"the latest satellite {profile} verdict of {sha[:12]} ({at}) ran none of the pilot or release-notes checks"
+    return None
+
+
+def tag_refusal(sha: str, gate: Path, recall: Path | None, island: Path | None = None,
+                satellite_dir: Path | None = None) -> tuple[str, str] | None:
+    """The first record precondition `sha` fails, as (why, hint), in the order gate record, recall record, island record, satellite verdicts; None when all hold."""
     why = gate_refusal(sha, gate)
     if why:
         return why, ("run `make release-oracle-full` on this commit and tag it once the gate says RELEASE-READY; "
@@ -332,6 +378,11 @@ def tag_refusal(sha: str, gate: Path, recall: Path | None, island: Path | None =
     if why:
         return why, ("a tag needs the measured island green on this commit: run `make release-oracle-island`; "
                      "pass --island-record FILE when it ran on another machine")
+    why = satellite_refusal(sha, satellite_dir or satellite_logs())
+    if why:
+        return why, ("a tag needs both satellite verdicts of this commit with nothing blocking: "
+                     "`python3 dev/pytools/satellite.py remote --sha SHA --publish` and `... mac --sha SHA --repo DIR --publish`; "
+                     "pass --satellite-record DIR when they were published to another machine")
     return None
 
 
@@ -375,8 +426,19 @@ def self_test() -> int:
         ([rec(skipped_env="load/mongo/gcs")], "no skipped_env list"),
         ([rec(skipped_env=[["a", "b", 3]])], "no skipped_env list"),
     ]
-    sys.path.insert(0, str(ROOT))
     from dev.release_oracle import skip_allow
+
+    def sat(profile: str = "linux", **kw) -> dict:
+        hard = "pilot-upgrade[postgres]" if profile == "linux" else "release-notes-assemble"
+        return {"profile": profile, "sha": sha, "started": "2026-11-10T08:00:00+00:00", "overall": "PASS", "blocking": [],
+                "checks": [{"name": "checkout", "status": "PASS"}, {"name": hard, "status": "PASS"}], **kw}
+
+    def write_satellites(logs: Path, at: str, profiles: dict | None = None) -> None:
+        for profile, verdicts in ({p: [sat(p)] for p in SATELLITE_PROFILES} if profiles is None else profiles).items():
+            for n, v in enumerate(verdicts):
+                where = logs / at[:8] / f"satellite-{profile}{n or ''}"
+                where.mkdir(parents=True)
+                (where / "verdict.json").write_text(json.dumps(v))
 
     kept = skip_allow.EXCUSES
     skip_allow.EXCUSES = (
@@ -424,6 +486,8 @@ def self_test() -> int:
         ([isl(binary=other[:9])], "graded a binary stamped"),
         ([isl(config={"bless": [], "knobs": {"RIVET_PERF_WALL_TOL": "10"}, "state": ["postgres", "sqlite"]})], "not the canonical configuration"),
         ([rec(gate="release-oracle")], "1 run(s) of other kinds"),
+        ([isl(skipped_env=[["perf", "bigquery", "load"], ["flat_rss", "postgres", "batch"]])], "skipped 2 cell(s) for the environment"),
+        ([isl(skipped_env=None)], "no skipped_env list"),
     ]
     with tempfile.TemporaryDirectory() as d:
         gate, good, bad = Path(d) / "gate.jsonl", Path(d) / "good.jsonl", Path(d) / "bad.jsonl"
@@ -432,23 +496,60 @@ def self_test() -> int:
         bad.write_text(run(complete=False) + "\n")
         island = Path(d) / "island.jsonl"
         island.write_text(rec(gate=ISLAND_GATE) + "\n")
-        assert tag_refusal(sha, gate, good, island) is None
+        sats = Path(d) / "sats"
+        write_satellites(sats, sha)
+        assert tag_refusal(sha, gate, good, island, sats) is None
         gate.write_text(rec() + "\n" + rec(gate=ISLAND_GATE) + "\n")
-        assert tag_refusal(sha, gate, good) is None, "one record file holds both kinds"
+        assert tag_refusal(sha, gate, good, None, sats) is None, "one record file holds both kinds"
         gate.write_text(rec() + "\n")
-        narrowed, ungated = tag_refusal(sha, gate, bad, island), tag_refusal(sha, Path(d) / "none.jsonl", good, island)
+        narrowed, ungated = tag_refusal(sha, gate, bad, island, sats), tag_refusal(sha, Path(d) / "none.jsonl", good, island, sats)
         assert narrowed and "seeded recall" in narrowed[1], "a gate-green sha with a narrowed recall must be refused by the tag path"
         assert ungated and "release-oracle-full" in ungated[1], "a recall-green sha with no gate record must be refused by the tag path"
-        unmeasured = tag_refusal(sha, gate, good)
+        unmeasured = tag_refusal(sha, gate, good, None, sats)
         assert unmeasured and "release-oracle-island" in unmeasured[1], "a gate- and recall-green sha with no island run must be refused by the tag path"
         for i, (lines, want) in enumerate(island_cases):
             path = Path(d) / f"i{i}.jsonl"
             if lines:
                 path.write_text("\n".join(lines) + "\n")
-            got = tag_refusal(sha, gate, good, path)
+            got = tag_refusal(sha, gate, good, path, sats)
             assert got is not None and want in got[0] and "release-oracle-island" in got[1], (i, lines, got)
+        gate.write_text(rec() + "\n" + rec(gate=ISLAND_GATE) + "\n")
+        unwitnessed = tag_refusal(sha, gate, good, None, Path(d) / "no-sats")
+        assert unwitnessed and "satellite linux verdict" in unwitnessed[0] and "--satellite-record" in unwitnessed[1], unwitnessed
+    satellite_cases = [
+        ({}, "no satellite linux verdict"),
+        ({"linux": [sat()]}, "no satellite mac verdict"),
+        ({"mac": [sat("mac")]}, "no satellite linux verdict"),
+        ({"linux": [sat(sha=other)], "mac": [sat("mac")]}, "no satellite linux verdict"),
+        ({"linux": [sat()], "mac": [sat("mac", sha=other)]}, "no satellite mac verdict"),
+        ({"linux": [sat(blocking=["pilot-upgrade[postgres]: FAIL: gap"])], "mac": [sat("mac")]}, "satellite linux verdict"),
+        ({"linux": [sat()], "mac": [sat("mac", blocking=["release-notes-assemble: FAIL: x"])]}, "blocks the release"),
+        ({"linux": [sat(blocking=None)], "mac": [sat("mac")]}, "no `blocking` array"),
+        ({"linux": [sat(blocking="")], "mac": [sat("mac")]}, "no `blocking` array"),
+        ({"linux": [sat(checks=[{"name": "checkout"}])], "mac": [sat("mac")]}, "ran none of the pilot"),
+        ({"linux": [sat(checks=None)], "mac": [sat("mac")]}, "ran none of the pilot"),
+        ({"linux": [sat(), sat(started="2026-11-10T09:00:00+00:00", blocking=["pilot-lease[mysql]: NOT-RUN: x"])], "mac": [sat("mac")]}, "blocks the release"),
+        ({"linux": [sat(blocking=["pilot-lease[mysql]: NOT-RUN: x"]), sat(started="2026-11-10T09:00:00+00:00")], "mac": [sat("mac")]}, None),
+        ({"linux": [sat(started="2026-11-10T09:00:00+00:00", blocking=["pilot-lease[mysql]: NOT-RUN: x"]), sat()], "mac": [sat("mac")]}, "blocks the release"),
+        ({"linux": [sat(started="2026-11-10T09:00:00+00:00"), sat(blocking=["pilot-lease[mysql]: NOT-RUN: x"])], "mac": [sat("mac")]}, None),
+        ({"linux": [sat(profile="mac")], "mac": [sat("mac")]}, "no satellite linux verdict"),
+        ({"linux": [sat()], "mac": [sat("mac")]}, None),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        for i, (profiles, want) in enumerate(satellite_cases):
+            logs = Path(d) / f"s{i}"
+            logs.mkdir()
+            write_satellites(logs, sha, profiles)
+            (logs / "junk" / "satellite-linux").mkdir(parents=True)
+            (logs / "junk" / "satellite-linux" / "verdict.json").write_text("not json")
+            got = satellite_refusal(sha, logs)
+            assert (got is None) if want is None else (got is not None and want in got), (i, profiles, got)
+        assert satellite_refusal(sha, Path(d) / "absent") is not None, "a missing logs directory is a refusal"
+    declared = set(re.findall(r'Run\("(\w+)", args\.sha', Path(satellite.__file__).read_text()))
+    assert declared == set(SATELLITE_PROFILES), f"satellite.py runs profiles {sorted(declared)}, release.py requires {SATELLITE_PROFILES}"
     print(f"self-test ok: release gate record — {len(cases)} cases, only a clean green full-gate run of this commit tags; "
-          f"{len(recall_cases)} recall cases, only a complete green recall of it; {len(island_cases)} island cases")
+          f"{len(recall_cases)} recall cases, only a complete green recall of it; {len(island_cases)} island cases; "
+          f"{len(satellite_cases)} satellite cases, only a blocking-free verdict of each profile for this commit")
     return 0
 
 
@@ -528,7 +629,8 @@ def main_cli(argv: list[str] | None = None) -> int:
     sha = _git("rev-parse", "HEAD").check("git rev-parse HEAD").stdout.strip()
     record = Path(args.gate_record) if args.gate_record else GATE_RECORD
     refused = tag_refusal(sha, record, Path(args.recall_record) if args.recall_record else None,
-                          Path(args.island_record) if args.island_record else None)
+                          Path(args.island_record) if args.island_record else None,
+                          Path(args.satellite_record) if args.satellite_record else None)
     if refused:
         raise shell.Fail(f"error: {refused[0]}", hint=refused[1])
     head = sha[:8]
@@ -551,6 +653,7 @@ def main_cli(argv: list[str] | None = None) -> int:
   gate:    {FULL_GATE} RELEASE-READY ({record})
   recall:  complete green seeded recall of this commit
   island:  {ISLAND_GATE} RELEASE-READY
+  satellites: {", ".join(SATELLITE_PROFILES)} verdicts of this commit, nothing blocking
   message: {message}
   push:    {"yes" if args.push else "no"}
   CI:      .github/workflows/release.yml (on tag push)"""

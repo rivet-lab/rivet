@@ -1,9 +1,9 @@
 diff --git a/src/source/mssql/arrow_convert.rs b/src/source/mssql/arrow_convert.rs
 --- a/src/source/mssql/arrow_convert.rs
 +++ b/src/source/mssql/arrow_convert.rs
-@@ -632,9 +632,10 @@ fn build_array(
+@@ -652,9 +652,10 @@ fn build_array(
              let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
-             for (r, row) in rows.iter().enumerate() {
+             for row in rows {
                  match row.try_get::<NaiveDateTime, _>(idx) {
 -                    Ok(Some(dt)) => b.append_value(crate::types::timestamp_nanos_or_refuse(
 -                        dt, "mssql", column,
@@ -13,5 +13,5 @@ diff --git a/src/source/mssql/arrow_convert.rs b/src/source/mssql/arrow_convert.
 +                        None => b.append_null(),
 +                    },
                      Ok(None) => b.append_null(),
-                     Err(e) => crate::rivet_bail!(
-                         crate::error::codes::INTERNAL_TYPE_BUILDER,
+                     Err(e) => {
+                         return Err(cell_mismatch(
