@@ -1,8 +1,8 @@
 diff --git a/src/pipeline/cdc/sink.rs b/src/pipeline/cdc/sink.rs
-index ec5a360f..e68fc475 100644
+index a9815dfd..f793eef1 100644
 --- a/src/pipeline/cdc/sink.rs
 +++ b/src/pipeline/cdc/sink.rs
-@@ -1046,9 +1046,7 @@ fn flush(
+@@ -1090,9 +1090,7 @@ fn flush(
          // Engine/native-type cell normalisation (e.g. MySQL binlog quirks: BIT
          // bytes, ENUM indexes, epoch-text TIMESTAMPs, NUL-trimmed BINARY) —
          // computed once per column, applied per cell.
@@ -13,7 +13,7 @@ index ec5a360f..e68fc475 100644
          // after-image for insert/update; before-image (the key) for delete.
          // Finding #41: a NAMED key-only image (PG DELETE) maps by COLUMN NAME
          // into the resolved schema — positional mapping put a non-first PK's
-@@ -1058,6 +1056,8 @@ fn flush(
+@@ -1102,6 +1100,8 @@ fn flush(
          // one names-Arc (same TABLE_MAP / same wire session), so resolve this
          // column's image index once and reuse it by pointer identity.
          let memo = image_name_memo(events, &m.column_name);
@@ -23,10 +23,10 @@ index ec5a360f..e68fc475 100644
              r.into_error(&m.column_name, dt, overridden.contains(&m.column_name))
          };
 diff --git a/src/source/cdc/value.rs b/src/source/cdc/value.rs
-index 96202555..6e1e8740 100644
+index de33279e..53ccd515 100644
 --- a/src/source/cdc/value.rs
 +++ b/src/source/cdc/value.rs
-@@ -861,12 +861,6 @@ fn parse_enum_labels(native: &str) -> Vec<String> {
+@@ -977,12 +977,6 @@ fn hex_refusal(n: usize, digits: &str) -> String {
  
  impl MysqlCellFix {
      /// The value the typed column needs for wire value `v`, or why the wire value has no reading.
@@ -36,10 +36,10 @@ index 96202555..6e1e8740 100644
 -            || matches!(dt, DataType::Time64(TimeUnit::Microsecond))
 -    }
 -
-     pub(crate) fn apply(&self, v: &RivetValue) -> Result<RivetValue, FixRefusal> {
-         use RivetValue as V;
-         Ok(match (self, v) {
-@@ -913,13 +907,7 @@ impl MysqlCellFix {
+     /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
+     pub(crate) fn nulled_a_date(&self, input: &RivetValue, out: &RivetValue) -> bool {
+         matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
+@@ -1036,13 +1030,7 @@ impl MysqlCellFix {
              (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(readable(labels)?, *u),
              (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
                  return Err(FixRefusal {
@@ -54,7 +54,7 @@ index 96202555..6e1e8740 100644
                      code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                  });
              }
-@@ -2001,19 +1989,8 @@ mod tests {
+@@ -2437,19 +2425,8 @@ mod tests {
          assert!(
              err.reason
                  .starts_with("mysql: TIME 838:59:59.000000 is outside 00:00..24:00")
@@ -77,10 +77,10 @@ index 96202555..6e1e8740 100644
          assert_eq!(
              t.apply(&V::TimeMicros(1)).unwrap(),
 diff --git a/src/source/mysql/arrow_convert.rs b/src/source/mysql/arrow_convert.rs
-index 245c1fd8..679b2985 100644
+index 5b1cbe25..1546605f 100644
 --- a/src/source/mysql/arrow_convert.rs
 +++ b/src/source/mysql/arrow_convert.rs
-@@ -614,23 +614,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
+@@ -674,23 +674,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
      Ok(us)
  }
  
@@ -108,16 +108,15 @@ index 245c1fd8..679b2985 100644
  fn fmt_micros_as_time(us: i64) -> String {
      let (sign, a) = if us.is_negative() {
 diff --git a/src/source/mysql/mod.rs b/src/source/mysql/mod.rs
-index af636b3e..35fde0af 100644
+index 115de12c..47fd6d0f 100644
 --- a/src/source/mysql/mod.rs
 +++ b/src/source/mysql/mod.rs
-@@ -19,8 +19,8 @@
+@@ -19,7 +19,7 @@
  //!   is exhaustively unit-tested in isolation (no live MySQL needed).
  
  mod arrow_convert;
--pub(crate) use arrow_convert::time_outside_day;
-+pub(crate) use arrow_convert::time_outside_day_refusal;
+-pub(crate) use arrow_convert::{time_outside_day, zero_date_warning};
++pub(crate) use arrow_convert::{time_outside_day_refusal, zero_date_warning};
  pub(crate) mod cdc;
  pub(crate) mod column_grants;
  mod folded_name;
- mod proxy;

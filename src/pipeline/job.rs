@@ -747,6 +747,7 @@ pub(crate) fn synthetic_failed_summary(export_name: &str, err: &anyhow::Error) -
     let journal = crate::journal::RunJournal::new(&run_id, export_name);
     RunSummary {
         bytes_read: 0,
+        nulled_cells: Vec::new(),
         ledger: Default::default(),
         cursor_column: None,
         cursor_low: None,
@@ -1220,6 +1221,10 @@ fn execute_resolved_plan(
     let rss_peak = rss_sampler.stop();
     let rss_after = crate::resource::get_rss_mb();
     summary.bytes_read = plan.bytes_read.load(std::sync::atomic::Ordering::Relaxed);
+    summary.nulled_cells = plan.nulled_cells.snapshot();
+    for (column, n) in &summary.nulled_cells {
+        log::warn!("{}", crate::source::mysql::zero_date_warning(column, *n));
+    }
     summary.duration_ms = start.elapsed().as_millis() as i64;
     summary.peak_rss_mb = rss_peak.max(rss_after).max(rss_before) as i64;
 

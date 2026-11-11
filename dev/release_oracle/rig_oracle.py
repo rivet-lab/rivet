@@ -454,6 +454,19 @@ def _mysql_selectable(ora, db: str, leaf: str, cols: list[str]) -> set[str]:
     return set(cols) if not cols or reads(cols) else {c for c in cols if reads([c])}
 
 
+ZERO_DATE_SQL = "'^[0-9]{4}-(00-|[0-9]{2}-00)'"
+
+
+def _mysql_zero_dated(ora, db: str, leaf: str, native: dict) -> list[str]:
+    """The date, datetime and timestamp columns of `db.leaf` that hold a zero or partial date, which the DuckDB scanner cannot parse."""
+    temporal = [c for c, n in native.items() if n.startswith(("DATE", "TIMESTAMP"))]
+    if not temporal:
+        return []
+    sums = ", ".join(f"COALESCE(SUM(CAST(`{c}` AS CHAR) REGEXP {ZERO_DATE_SQL}), 0)" for c in temporal)
+    row = ora.rows("SELECT * FROM mysql_query('my', " + _lit(f"SELECT {sums} FROM `{db}`.`{leaf}`") + ")")[0]
+    return [c for c, n in zip(temporal, row) if int(n) > 0]
+
+
 def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     """(source relation, primary key columns, declared type per column in the ledger's spelling) for the spec's engine."""
     from .value_diff import oracle_rows
@@ -543,10 +556,15 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
                 f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA LIKE '%INVISIBLE%'"
             ) + ")"
         )
-        if not wide and not invisible and not partial:
+        zero = _mysql_zero_dated(ora, schema or db, leaf, native)
+        if not wide and not invisible and not partial and not zero:
             return f"my.{schema or db}.{leaf}", key, native
-        # The scanner reads a DECIMAL wider than DuckDB's 38 digits as DOUBLE; MySQL's own text keeps every digit.
-        cols = ", ".join(f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide else f"`{c}`" for c in native)
+        cols = ", ".join(
+            f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide
+            else f"IF(CAST(`{c}` AS CHAR) REGEXP {ZERO_DATE_SQL}, NULL, `{c}`) AS `{c}`" if c in zero
+            else f"`{c}`"
+            for c in native
+        )
         return f"mysql_query('my', {_lit(f'SELECT {cols} FROM `{schema or db}`.`{leaf}`')})", key, native
     if engine == "mssql":
         sch = schema or "dbo"
