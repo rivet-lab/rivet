@@ -186,6 +186,8 @@ mod schema_evolution;
 mod seam_bypass_guard;
 #[path = "offline/silent_degrade_ratchet.rs"]
 mod silent_degrade_ratchet;
+#[path = "offline/site_ledger.rs"]
+mod site_ledger;
 #[path = "offline/slot_guard_order_guard.rs"]
 mod slot_guard_order_guard;
 #[path = "offline/sprawl_ratchets.rs"]

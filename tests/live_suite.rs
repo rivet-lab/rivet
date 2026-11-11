@@ -172,6 +172,8 @@ mod live_keyset_key_type;
 mod live_keyset_metrics;
 #[path = "live/live_keyset_parallel.rs"]
 mod live_keyset_parallel;
+#[path = "live/live_load_key_admission.rs"]
+mod live_load_key_admission;
 #[path = "live/live_load_lease_keeper.rs"]
 mod live_load_lease_keeper;
 #[path = "live/live_load_partition_batches.rs"]

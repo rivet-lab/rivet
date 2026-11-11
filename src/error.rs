@@ -1158,6 +1158,11 @@ pub mod codes {
         "RIVET_LOAD_KEY_COLUMN_INVALID",
         "name only columns the export delivers, in a type and number the target takes, under `pk:` / `cluster_by:` / `partition:` in the export's `load:` block (or add the column to the export's SELECT), as the message names",
     );
+    /// A keyed load's pk or order column lands as a type that does not order or tell rows apart as the source does.
+    pub const LOAD_KEY_COLUMN_LANDS_INEXACT: Code = refusal(
+        "RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT",
+        "declare the column under `columns:` with a type that keeps its order and every digit (`int64`, `decimal(p,s)`, `timestamp_ns`), or cast it in the export's `query:`, as the message names",
+    );
     /// An append load (CDC, incremental, continued key) has no primary key for its dedup.
     pub const LOAD_PRIMARY_KEY_MISSING: Code = usage(
         "RIVET_LOAD_PRIMARY_KEY_MISSING",
@@ -1928,6 +1933,7 @@ pub mod codes {
         LOAD_TARGET_NOT_RIVETS,
         LOAD_IDENTIFIER_UNSAFE,
         LOAD_KEY_COLUMN_INVALID,
+        LOAD_KEY_COLUMN_LANDS_INEXACT,
         LOAD_PRIMARY_KEY_MISSING,
         LOAD_RESERVED_COLUMN,
         LOAD_LOOKALIKE_COLUMN,
