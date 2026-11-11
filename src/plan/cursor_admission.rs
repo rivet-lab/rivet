@@ -55,6 +55,13 @@ pub(crate) fn cursor_cause(
         .then_some(CursorCause::Nullable)
 }
 
+/// What the admission learned about a cursor column it did not refuse.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Admission {
+    Admitted,
+    Unverified(String),
+}
+
 /// Refuse the export when its primary cursor column can hold NULL or has a type the cursor cannot render; a source that cannot be asked is warned about, not refused.
 pub(crate) fn admit_incremental_cursor(
     probe: Option<&mut (dyn Source + '_)>,
@@ -63,9 +70,22 @@ pub(crate) fn admit_incremental_cursor(
     query: &str,
     column: &str,
 ) -> Result<()> {
-    let source = config.source.source_type;
-    if source == SourceType::Mongo {
-        return Ok(());
+    if let Admission::Unverified(warning) = admission(probe, config, export, query, column)? {
+        log::warn!("{warning}");
+    }
+    Ok(())
+}
+
+/// The verdict on the primary cursor `column` of `query`: admitted, unverified with the warning to print, or a coded refusal.
+pub(crate) fn admission(
+    probe: Option<&mut (dyn Source + '_)>,
+    config: &Config,
+    export: &ExportConfig,
+    query: &str,
+    column: &str,
+) -> Result<Admission> {
+    if config.source.source_type == SourceType::Mongo {
+        return Ok(Admission::Admitted);
     }
     let mut owned: Box<dyn Source>;
     let src: &mut dyn Source = match probe {
@@ -75,7 +95,7 @@ pub(crate) fn admit_incremental_cursor(
                 owned = conn;
                 owned.as_mut()
             }
-            Err(e) => return unverified(export, column, &e),
+            Err(e) => return Ok(unverified(export, column, &e)),
         },
     };
     let overrides = crate::types::overrides_for_unit(
@@ -84,17 +104,17 @@ pub(crate) fn admit_incremental_cursor(
     );
     let mappings = match src.type_mappings(query, &overrides) {
         Ok(m) => m,
-        Err(e) => return unverified(export, column, &e),
+        Err(e) => return Ok(unverified(export, column, &e)),
     };
     let Some(mapping) = mappings.iter().find(|m| m.column_name == column) else {
-        return Ok(());
+        return Ok(Admission::Admitted);
     };
     let nullable = match src.column_nullable(query, column) {
         Ok(n) => n,
-        Err(e) => return unverified(export, column, &e),
+        Err(e) => return Ok(unverified(export, column, &e)),
     };
     match cursor_cause(mapping, nullable, export.incremental_cursor_mode) {
-        None => Ok(()),
+        None => Ok(Admission::Admitted),
         Some(CursorCause::Nullable) => crate::rivet_bail!(
             crate::error::codes::PLAN_CURSOR_NULLABLE,
             "export '{}': cursor_column '{column}' can hold NULL; the first run delivers the rows \
@@ -115,13 +135,12 @@ pub(crate) fn admit_incremental_cursor(
     }
 }
 
-/// The warning for a cursor column the source could not be asked about.
-fn unverified(export: &ExportConfig, column: &str, cause: &anyhow::Error) -> Result<()> {
-    log::warn!(
+/// The verdict for a cursor column the source could not be asked about.
+fn unverified(export: &ExportConfig, column: &str, cause: &anyhow::Error) -> Admission {
+    Admission::Unverified(format!(
         "export '{}': cursor_column '{column}' was not checked for NULLs or a renderable type: {cause}",
         export.name
-    );
-    Ok(())
+    ))
 }
 
 #[cfg(test)]
@@ -202,5 +221,130 @@ mod tests {
             IncrementalCursorMode::SingleColumn,
         );
         assert_eq!(got, None);
+    }
+
+    use crate::plan::test_support::ProbeSource;
+
+    fn config_of(source_type: &str) -> Config {
+        Config::from_yaml(&format!(
+            "source:\n  type: {source_type}\n  url: \"postgresql://localhost/test\"\nexports:\n\
+             \x20 - name: orders\n    query: SELECT k FROM t\n    mode: incremental\n    cursor_column: k\n\
+             \x20   format: parquet\n    destination: {{ type: local, path: ./out }}\n"
+        ))
+        .unwrap()
+    }
+
+    fn verdict(
+        probe: &mut ProbeSource,
+        config: &Config,
+        mode: IncrementalCursorMode,
+        column: &str,
+    ) -> Result<Admission> {
+        let mut export = config.exports[0].clone();
+        export.incremental_cursor_mode = mode;
+        admission(Some(probe), config, &export, "SELECT k FROM t", column)
+    }
+
+    fn code(r: Result<Admission>) -> Option<&'static str> {
+        r.err()
+            .and_then(|e| crate::error::code_of(&e).map(|c| c.id))
+    }
+
+    /// A nullable cursor read from the source is refused with its code in single-column mode.
+    #[test]
+    fn a_nullable_cursor_is_refused_with_its_code() {
+        let config = config_of("postgres");
+        let mut probe = ProbeSource::describing(RivetType::Int64, Some(true));
+        let got = verdict(
+            &mut probe,
+            &config,
+            IncrementalCursorMode::SingleColumn,
+            "k",
+        );
+        assert_eq!(
+            code(got),
+            Some(crate::error::codes::PLAN_CURSOR_NULLABLE.id)
+        );
+    }
+
+    /// An unrenderable cursor type read from the source is refused with its code.
+    #[test]
+    fn an_unrenderable_cursor_is_refused_with_its_code() {
+        let config = config_of("postgres");
+        let mut probe = ProbeSource::describing(RivetType::Bool, Some(false));
+        let got = verdict(
+            &mut probe,
+            &config,
+            IncrementalCursorMode::SingleColumn,
+            "k",
+        );
+        assert_eq!(
+            code(got),
+            Some(crate::error::codes::PLAN_CURSOR_TYPE_UNSUPPORTED.id)
+        );
+    }
+
+    /// A NOT NULL integer cursor, a nullable one under coalesce and an undescribed one are admitted.
+    #[test]
+    fn the_cursors_the_cursor_can_advance_past_are_admitted() {
+        let config = config_of("postgres");
+        for (nullable, mode) in [
+            (Some(false), IncrementalCursorMode::SingleColumn),
+            (None, IncrementalCursorMode::SingleColumn),
+            (Some(true), IncrementalCursorMode::Coalesce),
+        ] {
+            let mut probe = ProbeSource::describing(RivetType::Int64, nullable);
+            let got = verdict(&mut probe, &config, mode, "k").unwrap();
+            assert_eq!(got, Admission::Admitted, "{nullable:?} {mode:?}");
+        }
+    }
+
+    /// The refusal is decided on the cursor column's own mapping, not on another column of the query.
+    #[test]
+    fn the_verdict_reads_the_cursor_column_not_its_neighbour() {
+        let config = config_of("postgres");
+        let mut other = mapping_of(RivetType::Bool);
+        other.column_name = "other".to_string();
+        let mut probe = ProbeSource::describing(RivetType::Int64, Some(false));
+        probe.mappings = Ok(vec![other, mapping_of(RivetType::Int64)]);
+        let single = IncrementalCursorMode::SingleColumn;
+        assert_eq!(
+            verdict(&mut probe, &config, single, "k").unwrap(),
+            Admission::Admitted
+        );
+        assert_eq!(
+            verdict(&mut probe, &config, single, "absent").unwrap(),
+            Admission::Admitted
+        );
+    }
+
+    /// MongoDB has no incremental `cursor_column`, so nothing is asked of it.
+    #[test]
+    fn a_mongo_source_is_admitted_without_a_question() {
+        let mut config = config_of("postgres");
+        config.source.source_type = SourceType::Mongo;
+        let mut probe = ProbeSource::describing(RivetType::Bool, Some(true));
+        let single = IncrementalCursorMode::SingleColumn;
+        assert_eq!(
+            verdict(&mut probe, &config, single, "k").unwrap(),
+            Admission::Admitted
+        );
+    }
+
+    /// A source that cannot be asked is warned about with the export, the column and the cause, never refused.
+    #[test]
+    fn a_source_that_cannot_be_asked_is_unverified_with_the_cause() {
+        let config = config_of("postgres");
+        let single = IncrementalCursorMode::SingleColumn;
+        let mut probe = ProbeSource::describing(RivetType::Int64, None);
+        probe.mappings = Err("no describe".to_string());
+        let want = Admission::Unverified(
+            "export 'orders': cursor_column 'k' was not checked for NULLs or a renderable type: no describe"
+                .to_string(),
+        );
+        assert_eq!(verdict(&mut probe, &config, single, "k").unwrap(), want);
+        let mut probe = ProbeSource::describing(RivetType::Int64, None);
+        probe.nullable = Err("no describe".to_string());
+        assert_eq!(verdict(&mut probe, &config, single, "k").unwrap(), want);
     }
 }

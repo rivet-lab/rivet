@@ -3412,4 +3412,41 @@ mod tests {
         );
         crate::error::assert_coded(&err, "RIVET_CONFIG_SECRET_UNSET", 1);
     }
+
+    /// Under `columns_from: grants` a table export is projected onto the readable columns the probe names.
+    #[test]
+    fn a_table_export_is_projected_onto_the_readable_columns() {
+        use crate::plan::test_support::ProbeSource;
+        let mut source = minimal_source_config();
+        source.columns_from = Some(crate::config::ColumnsFrom::Grants);
+        let mut export = minimal_export();
+        export.table = Some("orders".into());
+        export.cursor_column = Some("id".into());
+        let mut probe = ProbeSource::describing(crate::types::RivetType::Int64, None);
+        probe.readable = Some(crate::source::cdc::ReadableColumns {
+            columns: vec!["id".into(), "name".into()],
+            select: "SELECT `id`, `name` FROM `orders`".into(),
+        });
+        let got = project_table_read(Some(&mut probe), &source, &export)
+            .unwrap()
+            .expect("a table export under grants is projected");
+        assert_eq!(
+            got.table_select.as_deref(),
+            Some("SELECT `id`, `name` FROM `orders`")
+        );
+        export.cursor_column = Some("secret".into());
+        let err = project_table_read(Some(&mut probe), &source, &export).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_COLUMNS_UNREADABLE", 1);
+    }
+
+    /// Without `columns_from: grants` a table export is read as written.
+    #[test]
+    fn a_table_export_without_grants_is_not_projected() {
+        use crate::plan::test_support::ProbeSource;
+        let mut export = minimal_export();
+        export.table = Some("orders".into());
+        let mut probe = ProbeSource::describing(crate::types::RivetType::Int64, None);
+        let got = project_table_read(Some(&mut probe), &minimal_source_config(), &export).unwrap();
+        assert!(got.is_none());
+    }
 }
