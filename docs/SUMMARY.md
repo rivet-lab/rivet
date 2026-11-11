@@ -140,3 +140,4 @@
 - [ADR-0026 — First-party extension seam](adr/0026-first-party-extension-seam.md)
 - [ADR-0027 — Structured read relation seam](adr/0027-structured-read-relation-seam.md)
 - [ADR-0039 — The scheduler contract](adr/0039-scheduler-contract.md)
+- [ADR-0040 — Invariants by construction](adr/0040-invariants-by-construction.md)

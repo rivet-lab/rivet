@@ -83,6 +83,8 @@ pub struct Rig {
     /// When set, the source declares `url_env: <name>` INSTEAD of an inline
     /// `url:`. See [`Rig::source_url_env`].
     url_env: Option<String>,
+    /// When set, the source declares `url_file: <path>` as written. See [`Rig::source_url_file`].
+    url_file: Option<String>,
     /// Additional exports rendered after the primary one. See [`Rig::also_export`].
     extra_exports: Vec<SecondaryExport>,
     /// Container-visible twin of `dest_override`, set by [`Rig::duckdb_oracle`].
@@ -182,6 +184,7 @@ impl Rig {
             dest_override: None,
             dest_precreate: true,
             url_env: None,
+            url_file: None,
             extra_exports: Vec::new(),
             oracle_container_dir: None,
             config_dir_override: None,
@@ -585,6 +588,12 @@ impl Rig {
     /// shape, which is why `live_plan_apply.rs` had its own config builder.
     pub fn source_url_env(mut self, var: &str) -> Self {
         self.url_env = Some(var.to_string());
+        self
+    }
+
+    /// Declare the source URL through a FILE (`url_file: <path>`), the path as written.
+    pub fn source_url_file(mut self, path: &str) -> Self {
+        self.url_file = Some(path.to_string());
         self
     }
 

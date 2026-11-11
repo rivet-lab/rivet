@@ -1,0 +1,13 @@
+diff --git a/src/source/mongo/cdc.rs b/src/source/mongo/cdc.rs
+index 258d414..59c3199 100644
+--- a/src/source/mongo/cdc.rs
++++ b/src/source/mongo/cdc.rs
+@@ -727,7 +727,7 @@ pub(crate) struct MongoCdcCapability {
+ impl MongoCdcCapability {
+     /// The pre-image request the stream may carry: servers before 6.0 have none and a sharded one refuses the option (51771); an unprobed version keeps the request.
+     pub(crate) fn before_image_request(&self) -> Option<FullDocumentBeforeChangeType> {
+-        (self.major == 0 || self.major >= 6).then_some(FullDocumentBeforeChangeType::WhenAvailable)
++        Some(FullDocumentBeforeChangeType::WhenAvailable)
+     }
+ 
+     /// One-line fidelity declaration for the log / `doctor`.

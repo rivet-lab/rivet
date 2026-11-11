@@ -527,6 +527,10 @@ The change-stream feature set depends on the server version — `doctor` reports
 | **current-state** | 4.4, 5.0 | update carries the current full document (`UpdateLookup`); delete carries `_id` only |
 | **full-image-capable** | 6.0+ | pre-images available on delete/update when `changeStreamPreAndPostImages` is enabled |
 
+rivet asks for pre-images only from 6.0: on 4.4 and 5.0, replica set or sharded cluster, the stream is
+opened without the request (a sharded cluster before 6.0 refuses it with error 51771) and CDC runs in
+the current-state tier.
+
 ---
 
 ## Operational parity

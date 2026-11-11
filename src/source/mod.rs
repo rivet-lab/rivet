@@ -692,6 +692,43 @@ impl BatchSink for FirstBatchProbe {
     }
 }
 
+/// Turns the internal "no builder" stop of a zero-row build for a `columns:` override into the coded usage refusal naming the cause and the remedy.
+pub(crate) fn refuse_unbuildable_override<T>(
+    engine: &str,
+    column: &str,
+    declared: &crate::types::RivetType,
+    zero_row_build: Result<T>,
+) -> Result<()> {
+    use crate::types::{RivetType, TimeUnit};
+    let Err(e) = zero_row_build else {
+        return Ok(());
+    };
+    if crate::error::code_of(&e) != Some(crate::error::codes::INTERNAL_TYPE_BUILDER) {
+        return Ok(());
+    }
+    let remedy = match declared {
+        RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone,
+        } => {
+            let us = if timezone.is_some() {
+                "timestamp_tz"
+            } else {
+                "timestamp"
+            };
+            format!("declare `{us}` (microseconds), or remove the override")
+        }
+        RivetType::Decimal { .. } => "its precision is above 38; declare the column's own `decimal(p,s)` with p <= 38 (see the source column definition), or remove the override".into(),
+        _ => "declare a type the reader supports for this column, or remove the override".into(),
+    };
+    crate::rivet_bail!(
+        crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+        "{engine}: column `{column}` is declared {} by a `columns:` override, a type the {engine} \
+         reader cannot build; {remedy}",
+        declared.label()
+    )
+}
+
 /// Reads the first row of `base_query` through the run's own converter and returns the run's refusal for a `columns:` override it rejects.
 pub(crate) fn refuse_override_wire_mismatch(
     src: &mut dyn Source,
@@ -1228,5 +1265,68 @@ mod override_probe_tests {
     #[test]
     fn the_probe_marker_names_itself() {
         assert_eq!(ProbeDone.to_string(), "first batch built");
+    }
+
+    fn internal_stop() -> Result<()> {
+        crate::rivet_bail!(
+            crate::error::codes::INTERNAL_TYPE_BUILDER,
+            "no builder for Arrow Timestamp(Nanosecond, None)"
+        )
+    }
+
+    /// A nanosecond override with no builder is a coded usage refusal naming the column, the type and the remedy.
+    #[test]
+    fn a_nanosecond_override_without_a_builder_is_refused_with_its_remedy() {
+        use crate::types::{RivetType, TimeUnit};
+        let ns = |timezone: Option<String>| RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone,
+        };
+        let err =
+            refuse_unbuildable_override("mysql", "ts", &ns(None), internal_stop()).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        assert_eq!(
+            err.to_string(),
+            "mysql: column `ts` is declared timestamp(nanosecond) by a `columns:` override, a type the mysql reader cannot build; declare `timestamp` (microseconds), or remove the override"
+        );
+        let err =
+            refuse_unbuildable_override("mysql", "ts", &ns(Some("UTC".into())), internal_stop())
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("declare `timestamp_tz` (microseconds)")
+        );
+    }
+
+    /// A decimal override past precision 38 names the cause and the rule for the operator's own declaration, for every precision and scale a config can hold.
+    #[test]
+    fn a_wide_decimal_override_without_a_builder_names_the_cause_and_the_rule() {
+        for (precision, scale) in [(50u8, 2i8), (50, 40), (50, -2), (39, 0), (76, 76)] {
+            let err = refuse_unbuildable_override(
+                "mssql",
+                "d",
+                &crate::types::RivetType::Decimal { precision, scale },
+                internal_stop(),
+            )
+            .unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "mssql: column `d` is declared decimal({precision},{scale}) by a `columns:` override, a type the mssql reader cannot build; its precision is above 38; declare the column's own `decimal(p,s)` with p <= 38 (see the source column definition), or remove the override"
+                )
+            );
+        }
+    }
+
+    /// A successful build and any other failure pass through the guard untouched.
+    #[test]
+    fn a_built_override_and_other_failures_pass_the_guard() {
+        let rivet = crate::types::RivetType::Int32;
+        refuse_unbuildable_override("mysql", "n", &rivet, Ok(())).unwrap();
+        let other = crate::error::coded(codes::SOURCE_OVERRIDE_WIRE_MISMATCH, "kept");
+        refuse_unbuildable_override::<()>("mysql", "n", &rivet, Err(other)).unwrap();
+        refuse_unbuildable_override::<()>("mysql", "n", &rivet, Err(anyhow::anyhow!("plain")))
+            .unwrap();
     }
 }

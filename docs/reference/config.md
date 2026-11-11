@@ -28,7 +28,7 @@ The most-used options, grouped by section, with the *why* and examples.
 | `type` | `postgres` \| `mysql` \| `mssql` \| `mongo` \| `oracle` | **yes** | — | Database type. `mssql` = SQL Server (URL scheme `sqlserver://`); `mongo` = MongoDB (URL scheme `mongodb://`, see [mongodb.md](mongodb.md)); `oracle` = Oracle Database (URL scheme `oracle://…/SERVICE`, see [oracle.md](oracle.md)). |
 | `url` | string | one of url/url_env/url_file or structured | — | Full connection URL (`postgresql://` / `mysql://` / `sqlserver://` / `mongodb://` / `oracle://`) |
 | `url_env` | string | | — | Env var name containing the URL |
-| `url_file` | string | | — | Path to file containing the URL |
+| `url_file` | string | | — | Path to file containing the URL; a relative path is read beside the config file, whatever directory rivet starts from |
 | `host` | string | for structured | — | Database hostname |
 | `port` | integer | no | `5432` (PG) / `3306` (MySQL) / `1433` (MSSQL) / `27017` (MongoDB) / `1521` (Oracle) | Database port |
 | `user` | string | for structured | — | Database user |
@@ -48,7 +48,7 @@ The most-used options, grouped by section, with the *why* and examples.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `mode` | `disable` \| `require` \| `verify-ca` \| `verify-full` | `verify-full` | Enforcement level (mirrors libpq `sslmode` semantics) |
-| `ca_file` | string | — | PEM CA certificate for private trust stores. It is the only trust anchor on Postgres, MySQL, SQL Server and MongoDB (libpq `sslrootcert` semantics: a certificate the system store trusts but this CA did not sign is refused) |
+| `ca_file` | string | — | PEM CA certificate for private trust stores. It is the only trust anchor on Postgres, MySQL, SQL Server and MongoDB (libpq `sslrootcert` semantics: a certificate the system store trusts but this CA did not sign is refused); a relative path is read beside the config file |
 | `accept_invalid_certs` | boolean | `false` | Dangerous — disables certificate verification. Only honored when explicitly `true`. |
 | `accept_invalid_hostnames` | boolean | `false` | Dangerous — disables hostname (SAN/CN) verification. Only honored when explicitly `true`. |
 
