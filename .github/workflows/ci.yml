@@ -1290,7 +1290,29 @@ jobs:
         run: python3 dev/pytools/lint_tools.py tier pr
 
   test:
-    name: Tests
+    name: Tests (shard ${{ matrix.part }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ["1/3", "2/3", "3/3"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: ./.github/actions/free-disk
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-nextest@0.9.138,uv
+      - name: Offline suite, one hash partition
+        run: cargo nextest run --all-targets --profile pr --partition hash:${{ matrix.part }}
+
+  test-gates:
+    name: Tests (semantic gates)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1300,24 +1322,14 @@ jobs:
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # The release publishes with `cargo publish --locked`; mirror that here on
-      # the clean checkout — BEFORE any `cargo test`/`build` silently reconciles
-      # the working-tree lock — so a Cargo.toml version bump that forgot to commit
-      # the regenerated Cargo.lock fails the PR, not the tag. (0.16.1's crates.io
-      # publish stalled exactly this way: lock still pinned 0.16.0.) `cargo
-      # metadata` resolves without compiling, so this is a couple of seconds.
+        with:
+          shared-key: test
       - name: Cargo.lock is in sync with Cargo.toml (release uses --locked)
         run: cargo metadata --locked --format-version 1 > /dev/null
       - uses: ./.github/actions/free-disk
       - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: uv
-      - run: cargo test --all-targets
-      # The semantic gates below were five jobs that each recompiled the crate to
-      # re-run tests `--all-targets` had just run. They are steps now: the binaries
-      # are built, so each is seconds, and each still fails under its own name.
-      # `!cancelled()` runs every one of them even after an earlier one fails, so a
-      # red run names every broken gate, not just the first.
       - name: Invariant tests (semantic gate)
         if: ${{ !cancelled() }}
         run: cargo test --test invariants --test journal_invariants
@@ -1336,13 +1348,24 @@ jobs:
       - name: Stability tests — sink unit tests (semantic gate)
         if: ${{ !cancelled() }}
         run: cargo test --lib -- pipeline::sink::tests
-      # docs-as-code: docs/reference/{config,cli}-reference.md are GENERATED from the
-      # binary (schemars Config + clap Cli); the committed reference must be current.
       - name: Generated docs are in sync (docs-as-code)
         if: ${{ !cancelled() }}
         run: |
           cargo build --bin rivet
           python3 -m dev.pytools.docgen --check
+
+  tests-verdict:
+    name: Tests
+    needs: [test, test-gates]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard and the semantic gates succeeded
+        env:
+          SHARDS: ${{ needs.test.result }}
+          GATES: ${{ needs.test-gates.result }}
+        run: |
+          [ "$SHARDS" = success ] && [ "$GATES" = success ]
 
   # release-compat REMOVED from PR CI (2026-08-04).
   #

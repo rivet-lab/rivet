@@ -1,7 +1,7 @@
 //! Consolidated LIVE integration suite — ONE test binary instead of 49.
 //!
 //! Every `tests/live_*.rs` suite shared the same `mod common;` and was built as its
-//! own integration-test target, so `cargo test --all-targets` (run on every PR and
+//! own integration-test target, so `cargo nextest run --all-targets` (run on every PR and
 //! by the pre-push hook) linked the `common` harness 49 separate times even though
 //! the tests themselves are `#[ignore]` and only run under docker. That link cost
 //! dominated the offline build.

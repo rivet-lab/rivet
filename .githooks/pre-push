@@ -6,7 +6,7 @@
 #
 # Scope is `--tests` (NOT `--all-targets`): that deliberately excludes the
 # criterion benchmarks, which `--all-targets` would *execute* and add minutes
-# for zero correctness signal. CI (`cargo test --all-targets`) is the backstop
+# for zero correctness signal. CI (`cargo nextest run --all-targets`) is the backstop
 # that also compiles benches/examples; doctests are skipped both here and there.
 #
 # Enable once per clone:  git config core.hooksPath .githooks
