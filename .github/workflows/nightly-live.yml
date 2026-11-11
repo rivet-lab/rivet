@@ -94,7 +94,7 @@ jobs:
           # it every test that writes a shared workdir EACCESes — the first
           # nightly after the cdc-oracle suite landed failed exactly there.
           mkdir -p tests/.live-tmp
-          docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1
+          docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo
           sudo chmod -R 0777 tests/.live-tmp
 
       - name: Wait for services
@@ -133,6 +133,8 @@ jobs:
           echo "Waiting for Oracle..."
           # gvenzl faststart creates the app user on first start; healthcheck.sh is ready once the PDB takes logins.
           for i in $(seq 1 90); do docker compose exec -T oracle healthcheck.sh >/dev/null 2>&1 && break || sleep 2; done
+          echo "Waiting for Mongo..."
+          for i in $(seq 1 30); do docker compose exec -T mongo sh -c "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'" >/dev/null 2>&1 && break || sleep 2; done
           echo "Waiting for CDC services (cdc profile)..."
           for i in $(seq 1 30); do docker compose exec -T postgres-cdc pg_isready -U rivet && break || sleep 2; done
           for i in $(seq 1 30); do docker compose exec -T mysql-cdc mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
@@ -599,7 +601,7 @@ jobs:
       - name: Start services (in the background)
         run: |
           mkdir -p tests/.live-tmp
-          ( docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle mysql-stmt-84-lctn1 > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
+          ( docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle mysql-stmt-84-lctn1 mongo > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: ${{ matrix.leg == 'pre' }}
@@ -672,6 +674,8 @@ jobs:
           for i in $(seq 1 60); do docker compose exec -T mysql-stmt-84-lctn1 mysql -h 127.0.0.1 -uroot -e "select 1" >/dev/null 2>&1 && break || sleep 2; done
           for i in $(seq 1 30); do docker compose exec -T mysql-replica mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
           for i in $(seq 1 90); do docker compose exec -T oracle healthcheck.sh >/dev/null 2>&1 && break || sleep 2; done
+          echo "Waiting for Mongo..."
+          for i in $(seq 1 30); do docker compose exec -T mongo sh -c "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'" >/dev/null 2>&1 && break || sleep 2; done
 
       - name: Seed databases
         run: |

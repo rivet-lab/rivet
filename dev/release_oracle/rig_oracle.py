@@ -70,8 +70,12 @@ INT_BITS = {
     "UINTEGER": (32, False), "UBIGINT": (64, False), "UHUGEINT": (128, False),
 }
 INT_DIGITS = {8: 3, 16: 5, 32: 10, 64: 20, 128: 39}
-#: (native source type, delivered DuckDB type) pairs the scanner's wider reading would misgrade: MySQL YEAR is 1901..2155.
-NATIVE_FITS = {("YEAR", "SMALLINT"), ("BINARY_FLOAT", "FLOAT")}
+#: (native source type, delivered DuckDB type) -> dated reason: a pair the scanner's reading would misgrade, or a documented landing no parity ledger row can carry.
+NATIVE_FITS = {
+    ("YEAR", "SMALLINT"): "2026-11-11: MySQL YEAR is 1901..2155, the scanner reads it wider",
+    ("BINARY_FLOAT", "FLOAT"): "2026-11-11: the Oracle BINARY_FLOAT ledger row delivers Float32, which DuckDB reads as FLOAT",
+    ("VECTOR", "VARCHAR"): "2026-11-11: an Oracle VECTOR is serialised to text on the server (docs/reference/oracle.md); no CDC parity row builds one",
+}
 #: Scanner settings that make the source read faithful (the same values tests/live/live_cdc_type_parity.rs sets in its own session):
 #: PostgreSQL's binary COPY drops char(n) padding; MySQL's scanner reads TINYINT(1) as BOOLEAN and its session zone moves TIMESTAMPs.
 SCANNER_SETTINGS = {
@@ -140,6 +144,31 @@ def type_loss(src: str, dst: str) -> str | None:
     if src.startswith("TIME"):
         return None if dst.startswith("TIME") else "a time of day delivered as a non-time"
     return None
+
+
+def type_family(t: str) -> str:
+    """The kind of value a DuckDB type holds: exact numbers, floats, text, wall-clock or instant timestamps, dates, times; any other type is its own family."""
+    if t in INT_BITS or _decimal(t):
+        return "exact number"
+    if t in ("FLOAT", "DOUBLE"):
+        return "float"
+    if t in ("VARCHAR", "JSON"):
+        return "text"
+    if t == "TIMESTAMP WITH TIME ZONE":
+        return "instant"
+    if t in TS_RANK:
+        return "date" if t == "DATE" else "wall-clock timestamp"
+    return "time" if t.startswith("TIME") else t
+
+
+def unpinned_loss(src: str, dst: str) -> str | None:
+    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text); a decimal past DuckDB's 38 digits is only ever read as exact text (Decimal256, docs/reference/config.md)."""
+    if (why := type_loss(src, dst)) is not None or src == dst:
+        return why
+    if dst == "VARCHAR" and (d := _decimal(src)) and d[0] > 38:
+        return None
+    fs, fd = type_family(src), type_family(dst)
+    return None if fs == fd else f"a {fs} delivered as a {fd}, and no ledger row pins the column"
 
 
 #: A declared source type that is text in the source itself (not text only because the oracle projected it).
@@ -230,6 +259,7 @@ def ledger(engine: str, mode: str) -> tuple[dict, set[str]]:
     rows = [{**r, "render": {**by_delivery.get(r.get("delivery"), {}), **(r.get("render") or {})},
              **{ch_keys[k]: v for k, v in (r.get("clickhouse") or {}).items()}} if isinstance(r, dict) else r for r in rows]
     out = {norm_native(r["native_type"]): r for r in rows if isinstance(r, dict) and r.get("native_type")}
+    out.update({re.sub(r" (NOT )?NULL$", "", k): r for k, r in list(out.items()) if re.search(r" (NOT )?NULL$", k)})
     for n, r in out.items():
         for render in (r.get("render") or {}, r.get("today_render") or {}):
             if render.get("canon") not in (None, *CANONS):
@@ -796,8 +826,9 @@ def grade_findings(
     overrides: dict | None = None,
     collapse: frozenset = frozenset(),
     null_class: frozenset = frozenset(),
+    unpinned_strict: bool = True,
 ) -> list[str]:
-    """Every disagreement in the findings `f`, one line each; empty means the run is sound. A column with a ledger row is graded against the row's delivery (a `known_defect` row may deliver its `today_delivery` instead, nothing else); one without is graded as not narrower than its catalog type; a `columns:` override against the type it declares (`None`: not graded here)."""
+    """Every disagreement in the findings `f`, one line each; empty means the run is sound. A column with a ledger row is graded against the row's delivery (a `known_defect` row may deliver its `today_delivery` instead, nothing else); one without is graded as not narrower than its catalog type and, unless `unpinned_strict` is off (a warehouse maps types by its own rules), of the same kind; a `columns:` override against the type it declares (`None`: not graded here)."""
     bad = []
     overrides = overrides or {}
     if f.get("dst_cols"):
@@ -822,7 +853,7 @@ def grade_findings(
         src_t = (catalog_duck(nat) or (st if nat and TEXT_NATIVE.match(nat) else None)) if st == "VARCHAR" else st
         if want is not None and want != dt:
             bad.append(f"TYPE: `{col}` ({nat}): the type ledger delivers {row['delivery']} ({want}), delivered {dt}")
-        elif want is None and src_t and (why := type_loss(src_t, dt)) is not None:
+        elif want is None and src_t and (why := (unpinned_loss if unpinned_strict else type_loss)(src_t, dt)) is not None:
             bad.append(f"TYPE: `{col}` source {src_t} delivered as {dt}: {why}")
     if "src_count" in f:
         if f["src_count"] != f["dst_count"]:
@@ -1821,7 +1852,7 @@ def grade_load(spec: dict) -> dict:
     ledgered = frozenset(c for c, r in ch_of.items() if r.get("clickhouse"))
     null_class = frozenset(c for c, xs in defects.items() if None in xs)
     bad = grade_findings(f, {}, forms, native, engine != "mongo", dict.fromkeys([*(spec.get("overrides") or {}), *ledgered]),
-                         collapse=collapse, null_class=null_class)
+                         collapse=collapse, null_class=null_class, unpinned_strict=False)
     bad += clickhouse_type_findings(ch_of, row_of, wh_types, native, key, created_zone_less(spec)) if target == "clickhouse" else []
     bad += [f"WAREHOUSE: {n}" for n in notes if "still exist" in n]
     out = {"failures": [f"WAREHOUSE {target} `{fq}`: {b}" for b in bad], "notes": notes,
@@ -2045,6 +2076,17 @@ def _self_test() -> None:
     assert one("VARCHAR", "BIGINT", "VARCHAR(10)"), "a text column delivered as a number is a loss"
     assert not one("VARCHAR", "TIMESTAMP", "DATETIME2"), "a temporal the oracle renders as text is the ledger's to grade"
     assert one("TIMESTAMP WITH TIME ZONE", "TIMESTAMP", "TIMESTAMPTZ(3)")
+    for st, to, nat in (("DECIMAL(14,2)", "DOUBLE", "DECIMAL(14,2)"), ("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), ("BOOLEAN", "BIGINT", "BOOL"),
+                        ("TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "DATETIME"), ("UUID", "BLOB", "UUID"), ("INTEGER", "DOUBLE", "INT")):
+        assert one(st, to, nat), f"{st} delivered as {to} with no ledger row is a finding"
+        assert bool(one(st, to, nat, unpinned_strict=False)) == bool(type_loss(st, to)), f"{st} as {to}: the warehouse leg grades by its own mapping"
+    assert not one("DECIMAL(14,2)", "DECIMAL(14,2)", "DECIMAL(14,2)") and not one("INTEGER", "BIGINT", "INT"), "an exact or wider same-kind delivery is not a finding"
+    assert not one("VARCHAR", "VARCHAR", "NUMERIC(40,20)") and not one("VARCHAR", "VARCHAR", "DECIMAL(65,0)"), "a decimal past 38 digits is read as exact text"
+    assert one("VARCHAR", "VARCHAR", "NUMERIC(12,2)") and one("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), "a decimal DuckDB holds is not delivered as text"
+    assert not one("DOUBLE[]", "VARCHAR", "VECTOR"), "an Oracle VECTOR is delivered as text"
+    assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
+    my_rows = globals()["ledger"]("mysql", "batch")[0]
+    assert my_rows.get("TIMESTAMP(6)") is not None and my_rows.get("TIMESTAMP(6)") is my_rows.get("TIMESTAMP(6) NULL"), "a catalog TIMESTAMP(6) finds the row declared with its nullability"
     class Flaky:
         """A DuckDB stand-in whose first `fail` calls raise `err`."""
 

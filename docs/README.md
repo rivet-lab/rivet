@@ -103,7 +103,7 @@ The five surfaces a serious operator inspects before adopting Rivet. Same five r
 | **Release checklist** — every gate every tag must clear before publish | [release-checklist.md](release-checklist.md) |
 | **Cloud permissions** — least-privilege IAM / RBAC / SAS scopes for each backend | [cloud-permissions.md](cloud-permissions.md) |
 | **Security policy** — what Rivet can access, sensitive artifacts, credential handling, reporting | [../SECURITY.md](https://github.com/rivet-lab/rivet/blob/main/SECURITY.md) |
-| **Compatibility matrix** — PG 12–16, MySQL 5.7 / 8.0, SQL Server 2022, MongoDB 4.4–8.0 actually exercised in CI | [reference/compatibility.md](reference/compatibility.md) |
+| **Compatibility matrix** — per engine version, what runs it: the release gate, the nightly CI, a manual matrix, or nothing | [reference/compatibility.md](reference/compatibility.md) |
 | **Cross-tool benchmark harness** — reproducible PG/MySQL → Parquet vs sling, dlt, duckdb, clickhouse-local, odbc2parquet (defaults + steelman) | [bench/README.md](bench/) |
 
 ## Best Practices

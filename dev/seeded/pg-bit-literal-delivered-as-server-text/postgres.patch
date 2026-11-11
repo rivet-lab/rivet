@@ -1,0 +1,13 @@
+diff --git a/src/source/postgres/cdc.rs b/src/source/postgres/cdc.rs
+index 91ebdd5..17232f7 100644
+--- a/src/source/postgres/cdc.rs
++++ b/src/source/postgres/cdc.rs
+@@ -1875,7 +1875,7 @@ struct ParsedColumn {
+ }
+ 
+ /// Types whose `test_decoding` text is not the server's text for the value: a bit string prints as `B'110'`, the server's text is `110`.
+-const DECODER_REWRITTEN_TYPES: &[&str] = &["bit", "bit varying"];
++const DECODER_REWRITTEN_TYPES: &[&str] = &[];
+ 
+ /// The `name (type)` of each column whose wire type is one the decoder rewrites.
+ fn decoder_rewritten_columns<'a>(

@@ -268,6 +268,7 @@ fn state_reset_during_an_incremental_read_keeps_the_manifest_honest() {
         "the incremental run failed beside a `state reset`"
     );
     if !reset.status.success() {
+        assert_refused(&reset, Refused::by_code("RIVET_STATE_RUN_IN_PROGRESS", 2));
         return;
     }
 

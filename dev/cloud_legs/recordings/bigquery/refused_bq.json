@@ -1,0 +1,55 @@
+{
+ "exchanges": [
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/bigquery/v2/projects/rivet-data-tool/datasets/rivet_tmp_pm_cl_1794326703_missing/tables/pm_cl_1794326703",
+   "reply": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"Not found: Dataset rivet-data-tool:rivet_tmp_pm_cl_1794326703_missing\",\n    \"errors\": [\n      {\n        \"message\": \"Not found: Dataset rivet-data-tool:rivet_tmp_pm_cl_1794326703_missing\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\"\n      }\n    ],\n    \"status\": \"NOT_FOUND\"\n  }\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8"
+   },
+   "request_headers": {},
+   "status": 404
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/bigquery/v2/projects/rivet-data-tool/datasets/rivet_tmp_pm_cl_1794326703_missing/tables/pm_cl_1794326703",
+   "reply": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"Not found: Dataset rivet-data-tool:rivet_tmp_pm_cl_1794326703_missing\",\n    \"errors\": [\n      {\n        \"message\": \"Not found: Dataset rivet-data-tool:rivet_tmp_pm_cl_1794326703_missing\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\"\n      }\n    ],\n    \"status\": \"NOT_FOUND\"\n  }\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8"
+   },
+   "request_headers": {},
+   "status": 404
+  },
+  {
+   "binary": false,
+   "body": "",
+   "method": "GET",
+   "path": "/bigquery/v2/projects/rivet-data-tool/datasets/rivet_tmp_pm_cl_1794326703_missing/tables/pm_cl_1794326703",
+   "reply": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"Not found: Dataset rivet-data-tool:rivet_tmp_pm_cl_1794326703_missing\",\n    \"errors\": [\n      {\n        \"message\": \"Not found: Dataset rivet-data-tool:rivet_tmp_pm_cl_1794326703_missing\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\"\n      }\n    ],\n    \"status\": \"NOT_FOUND\"\n  }\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8"
+   },
+   "request_headers": {},
+   "status": 404
+  },
+  {
+   "binary": false,
+   "body": "{\"configuration\":{\"query\":{\"query\":\"LOAD DATA OVERWRITE `rivet-data-tool.rivet_tmp_pm_cl_1794326703_missing.pm_cl_1794326703` (\\n  `id` INT64,\\n  `n` INT64,\\n  `f` FLOAT64,\\n  `d` NUMERIC,\\n  `s` STRING,\\n  `b` BOOL,\\n  `ts` DATETIME,\\n  `dt` DATE\\n)\\nCLUSTER BY `id`\\nFROM FILES (\\n  format = 'PARQUET',\\n  enable_list_inference = true,\\n  uris = [\\n    'gs://rivet_data_test/pm_cl_1794326703/pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet'\\n  ]\\n);\",\"useLegacySql\":false},\"labels\":{\"managed_by\":\"rivet\",\"rivet_op\":\"load\",\"rivet_run\":\"65fee3eacd5f100008f30\",\"rivet_table\":\"pm_cl_1794326703\"}},\"jobReference\":{\"projectId\":\"rivet-data-tool\",\"jobId\":\"rivet_65fee3ef17c6e_8f30_0\",\"location\":\"US\"}}",
+   "method": "POST",
+   "path": "/bigquery/v2/projects/rivet-data-tool/jobs",
+   "reply": "{\n  \"kind\": \"bigquery#job\",\n  \"etag\": \"iIPHa4UNsx4mSdukyqHUtw==\",\n  \"id\": \"rivet-data-tool:US.rivet_65fee3ef17c6e_8f30_0\",\n  \"selfLink\": \"https://bigquery.googleapis.com/bigquery/v2/projects/rivet-data-tool/jobs/rivet_65fee3ef17c6e_8f30_0?location=US\",\n  \"user_email\": \"<MASKED:email>\",\n  \"configuration\": {\n    \"query\": {\n      \"query\": \"LOAD DATA OVERWRITE `rivet-data-tool.rivet_tmp_pm_cl_1794326703_missing.pm_cl_1794326703` (\\n  `id` INT64,\\n  `n` INT64,\\n  `f` FLOAT64,\\n  `d` NUMERIC,\\n  `s` STRING,\\n  `b` BOOL,\\n  `ts` DATETIME,\\n  `dt` DATE\\n)\\nCLUSTER BY `id`\\nFROM FILES (\\n  format = 'PARQUET',\\n  enable_list_inference = true,\\n  uris = [\\n    'gs://rivet_data_test/pm_cl_1794326703/pm_cl_1794326703_20261110_160510_824_34607_ada3081d28468543.parquet'\\n  ]\\n);\",\n      \"priority\": \"INTERACTIVE\",\n      \"useLegacySql\": false\n    },\n    \"labels\": {\n      \"managed_by\": \"rivet\",\n      \"rivet_table\": \"pm_cl_1794326703\",\n      \"rivet_op\": \"load\",\n      \"rivet_run\": \"65fee3eacd5f100008f30\"\n    },\n    \"jobType\": \"QUERY\"\n  },\n  \"jobReference\": {\n    \"projectId\": \"rivet-data-tool\",\n    \"jobId\": \"rivet_65fee3ef17c6e_8f30_0\",\n    \"location\": \"US\"\n  },\n  \"statistics\": {\n    \"creationTime\": \"1794326723601\",\n    \"startTime\": \"1794326723668\",\n    \"endTime\": \"1794326723668\",\n    \"query\": {}\n  },\n  \"status\": {\n    \"errorResult\": {\n      \"reason\": \"notFound\",\n      \"message\": \"Not found: Dataset rivet-data-tool:rivet_tmp_pm_cl_1794326703_missing was not found in location US\"\n    },\n    \"errors\": [\n      {\n        \"reason\": \"notFound\",\n        \"message\": \"Not found: Dataset rivet-data-tool:rivet_tmp_pm_cl_1794326703_missing was not found in location US\"\n      }\n    ],\n    \"state\": \"DONE\"\n  },\n  \"principal_subject\": \"user:<MASKED:email>\",\n  \"jobCreationReason\": {\n    \"code\": \"REQUESTED\"\n  }\n}\n",
+   "reply_headers": {
+    "content-type": "application/json; charset=UTF-8"
+   },
+   "request_headers": {
+    "content-type": "application/json"
+   },
+   "status": 200
+  }
+ ],
+ "meta": {}
+}

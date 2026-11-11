@@ -54,12 +54,12 @@ filter = 'test(=live_harness_canary::postgres_via_toxiproxy_is_reachable_after_p
 test-group = 'toxiproxy'
 
 [[profile.default.overrides]]
+filter = 'test(=property_check_equals_run::the_live_matrix_agrees)'
+slow-timeout = { period = "900s", terminate-after = 4 }
+
+[[profile.default.overrides]]
 filter = 'test(=property_refusal_names_true_cause::every_refusal_is_coded_and_names_the_true_cause)'
 slow-timeout = { period = "900s", terminate-after = 2 }
-
-[profile.ci]
-retries = 1
-fail-fast = false
 
 [[profile.default.overrides]]
 filter = 'test(/^soak_spill::/)'
