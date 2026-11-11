@@ -878,10 +878,42 @@ impl Source for MssqlSource {
                         e,
                     )
                 })?;
-            Ok(rows
+            let described = rows
                 .iter()
                 .find(|r| r.get::<&str, _>("name") == Some(column))
-                .and_then(|r| r.get::<bool, _>("is_nullable")))
+                .and_then(|r| r.get::<bool, _>("is_nullable"));
+            if described != Some(true) {
+                return Ok(described);
+            }
+            let Some((schema, table)) = parse_mssql_simple_from_table(query) else {
+                return Ok(None);
+            };
+            let catalog = format!(
+                "SELECT c.is_nullable FROM sys.columns c WHERE c.object_id = OBJECT_ID(N'[{}].[{}]') AND c.name = N'{}'",
+                schema.replace(']', "]]").replace('\'', "''"),
+                table.replace(']', "]]").replace('\'', "''"),
+                column.replace('\'', "''")
+            );
+            let row = client
+                .query(catalog.as_str(), &[])
+                .await
+                .map_err(|e| {
+                    crate::error::coded_driver(
+                        crate::error::codes::SOURCE_QUERY_FAILED,
+                        "mssql: column catalog read failed",
+                        e,
+                    )
+                })?
+                .into_row()
+                .await
+                .map_err(|e| {
+                    crate::error::coded_driver(
+                        crate::error::codes::SOURCE_QUERY_FAILED,
+                        "mssql: reading the column catalog failed",
+                        e,
+                    )
+                })?;
+            Ok(row.and_then(|r| r.get::<bool, _>(0)))
         })
     }
 
