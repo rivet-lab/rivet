@@ -66,3 +66,60 @@ pub(crate) fn test_plan() -> ResolvedRunPlan {
         parquet: None,
     }
 }
+
+/// A source that answers the plan's catalog probes from a script and reads no rows.
+pub(crate) struct ProbeSource {
+    pub(crate) mappings: Result<Vec<crate::types::TypeMapping>, String>,
+    pub(crate) nullable: Result<Option<bool>, String>,
+    pub(crate) readable: Option<crate::source::cdc::ReadableColumns>,
+}
+
+impl ProbeSource {
+    /// A probe describing the one column `k` as `rivet_type`, nullable as `nullable`.
+    pub(crate) fn describing(rivet_type: crate::types::RivetType, nullable: Option<bool>) -> Self {
+        Self {
+            mappings: Ok(vec![crate::source::keyset_key::samples::mapping_of(
+                rivet_type,
+            )]),
+            nullable: Ok(nullable),
+            readable: None,
+        }
+    }
+}
+
+impl crate::source::Source for ProbeSource {
+    fn export(
+        &mut self,
+        _request: &crate::source::ExportRequest<'_>,
+        _sink: &mut dyn crate::source::BatchSink,
+    ) -> crate::error::Result<()> {
+        Ok(())
+    }
+
+    fn query_scalar(&mut self, _sql: &str) -> crate::error::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn readable_columns(
+        &mut self,
+        _table: &str,
+    ) -> crate::error::Result<Option<crate::source::cdc::ReadableColumns>> {
+        Ok(self.readable.clone())
+    }
+
+    fn type_mappings(
+        &mut self,
+        _query: &str,
+        _overrides: &crate::types::ColumnOverrides,
+    ) -> crate::error::Result<Vec<crate::types::TypeMapping>> {
+        self.mappings.clone().map_err(|e| anyhow::anyhow!(e))
+    }
+
+    fn column_nullable(
+        &mut self,
+        _query: &str,
+        _column: &str,
+    ) -> crate::error::Result<Option<bool>> {
+        self.nullable.clone().map_err(|e| anyhow::anyhow!(e))
+    }
+}
