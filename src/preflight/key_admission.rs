@@ -401,4 +401,20 @@ mod tests {
             Some(crate::error::codes::LOAD_KEY_COLUMN_LANDS_INEXACT.id)
         );
     }
+    /// Every mapping gets one landing, named by its column and source type, finer only where the source says so.
+    #[test]
+    fn a_mapping_lands_by_its_column_and_the_finer_names_the_source_gave() {
+        let text = mapping("number", RivetType::String);
+        let ts = mapping("datetime2", micros());
+        let all = landings_of_mappings(&[text, ts], &["K".to_string()]);
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            (all[0].column.as_str(), all[0].source_type.as_str()),
+            ("K", "number")
+        );
+        assert_eq!(all[0].landing, KeyLanding::NumberAsText);
+        assert_eq!(all[1].landing, KeyLanding::FinerThanMicrosecond);
+        let none = landings_of_mappings(&[mapping("datetime2", micros())], &[]);
+        assert_eq!(none[0].landing, KeyLanding::Exact);
+    }
 }

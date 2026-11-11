@@ -542,11 +542,31 @@ pub(crate) fn refuse_inexact_load_keys(
     config_dir: &std::path::Path,
     params: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
-    let mode = crate::plan::load_settings::load_mode_of(config, export);
-    if config.load.is_none() || mode != crate::plan::load_settings::LoadMode::Incremental {
+    if !admits_load_keys(config, export) {
         return Ok(());
     }
-    for unit in capture_load_units(config, export, column_overrides, config_dir, params)? {
+    refuse_captured_units(
+        config,
+        export,
+        &capture_load_units(config, export, column_overrides, config_dir, params)?,
+    )
+}
+
+/// Whether the export loads incrementally, the only mode whose keys are admitted by their landing at check.
+fn admits_load_keys(config: &Config, export: &ExportConfig) -> bool {
+    config.load.is_some()
+        && crate::plan::load_settings::load_mode_of(config, export)
+            == crate::plan::load_settings::LoadMode::Incremental
+}
+
+/// Refuses the captured units whose cursor or primary key lands inexactly.
+fn refuse_captured_units(
+    config: &Config,
+    export: &ExportConfig,
+    units: &[CapturedUnit],
+) -> Result<()> {
+    let mode = crate::plan::load_settings::load_mode_of(config, export);
+    for unit in units {
         let Some(load) =
             crate::plan::load_settings::effective_load(config, export, unit.table.as_deref())
         else {
@@ -1678,5 +1698,99 @@ exports:
         };
         let w = col_width(&[row], |r| r.column.len());
         assert_eq!(w, "a_very_long_column_name".len());
+    }
+    fn keyed_cfg(mode: &str, load: bool, pk: &str) -> Config {
+        let load = if load {
+            format!(
+                "load: {{ target: clickhouse, url: \"http://127.0.0.1:1\", database: d, user: u, password_env: P{pk} }}\n"
+            )
+        } else {
+            String::new()
+        };
+        let cursor = if mode == "incremental" {
+            "    cursor_column: VER\n"
+        } else {
+            ""
+        };
+        cfg_from(&format!(
+            "source:\n  type: oracle\n  url: \"oracle://u:p@127.0.0.1:1/x\"\n{load}exports:\n  - name: e\n    table: T\n    mode: {mode}\n{cursor}    format: parquet\n    destination:\n      type: local\n      path: /tmp/x\n"
+        ))
+    }
+
+    fn unit(
+        native: &str,
+        rivet: crate::types::RivetType,
+        pk: Option<&[&str]>,
+        finer: &[&str],
+    ) -> CapturedUnit {
+        let col = |name: &str| {
+            crate::types::TypeMapping::from_source(
+                &crate::types::SourceColumn::simple(name, native, false),
+                rivet.clone(),
+            )
+        };
+        CapturedUnit {
+            table: None,
+            mappings: vec![col("VER"), col("TS")],
+            primary_key: pk.map(|p| p.iter().map(|s| s.to_string()).collect()),
+            finer_than_microsecond: finer.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    const INEXACT: &str = "RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT";
+
+    /// Key admission at check reads only an incremental export that has a load block.
+    #[test]
+    fn key_admission_reads_only_an_incremental_export_with_a_load() {
+        for (mode, load, want) in [
+            ("incremental", true, true),
+            ("incremental", false, false),
+            ("full", true, false),
+            ("full", false, false),
+        ] {
+            let c = keyed_cfg(mode, load, "");
+            assert_eq!(
+                admits_load_keys(&c, &c.exports[0]),
+                want,
+                "{mode} load={load}"
+            );
+        }
+    }
+
+    /// A captured unit whose cursor lands as text is refused by code; a numeric landing is not.
+    #[test]
+    fn a_captured_cursor_that_lands_as_text_is_refused_and_a_number_is_not() {
+        let c = keyed_cfg("incremental", true, "");
+        let text = unit("NUMBER", crate::types::RivetType::String, None, &[]);
+        let err = refuse_captured_units(&c, &c.exports[0], &[text]).unwrap_err();
+        assert_eq!(crate::error::error_code(&err), Some(INEXACT), "{err:#}");
+        let number = unit("NUMBER", crate::types::RivetType::Int64, None, &[]);
+        refuse_captured_units(&c, &c.exports[0], &[number]).unwrap();
+        refuse_captured_units(&c, &c.exports[0], &[]).unwrap();
+    }
+
+    /// A key declared finer than a microsecond is refused whether `pk:` names it, leaves it to the recorded key, or the unit has none; `pk: none` names no key.
+    #[test]
+    fn a_captured_key_finer_than_a_microsecond_is_refused_by_the_key_the_load_uses() {
+        let micros = crate::types::RivetType::Timestamp {
+            unit: crate::types::TimeUnit::Microsecond,
+            timezone: None,
+        };
+        let finer = |pk: Option<&[&str]>| unit("datetime2", micros.clone(), pk, &["TS"]);
+        let refused = |load_pk: &str, u: CapturedUnit| {
+            let c = keyed_cfg("incremental", true, load_pk);
+            refuse_captured_units(&c, &c.exports[0], &[u])
+                .err()
+                .and_then(|e| crate::error::error_code(&e))
+        };
+        assert_eq!(refused(", pk: [TS]", finer(None)), Some(INEXACT));
+        assert_eq!(refused("", finer(Some(&["TS"]))), Some(INEXACT));
+        assert_eq!(
+            refused("", finer(None)),
+            None,
+            "no key recorded, none to collapse"
+        );
+        assert_eq!(refused(", pk: none", finer(Some(&["TS"]))), None);
+        assert_eq!(refused(", pk: [VER]", finer(Some(&["TS"]))), None);
     }
 }

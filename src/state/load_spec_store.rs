@@ -842,4 +842,30 @@ mod tests {
         assert_eq!(key("mysql://h:3306/a", "ra"), (a.clone(), a));
         assert_eq!(key("mssql://h:1433/b", "rb"), (b.clone(), b));
     }
+    /// The columns a spec lists as finer than a microsecond are exactly the flagged ones, in column order.
+    #[test]
+    fn a_spec_lists_only_the_columns_flagged_finer_than_a_microsecond() {
+        let flagged = |name: &str, finer: bool| LoadSpecColumn {
+            finer_than_microsecond: finer,
+            ..col(name, RivetType::Int64)
+        };
+        let spec = LoadSpec {
+            export_name: "e".into(),
+            unit: None,
+            columns: vec![flagged("a", true), flagged("b", false), flagged("c", true)],
+            primary_key: None,
+            run_id: None,
+            origin: String::new(),
+            captured_at: String::new(),
+        };
+        assert_eq!(
+            spec.finer_than_microsecond_columns(),
+            vec!["a".to_string(), "c".to_string()]
+        );
+        let none = LoadSpec {
+            columns: vec![flagged("a", false)],
+            ..spec
+        };
+        assert_eq!(none.finer_than_microsecond_columns(), Vec::<String>::new());
+    }
 }
