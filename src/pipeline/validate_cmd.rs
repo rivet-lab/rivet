@@ -1586,4 +1586,127 @@ mod tests {
         // And the default depth (full) is recorded on the verdict.
         assert_eq!(json["exports"][0]["verification"]["depth_level"], "full");
     }
+
+    /// A bare verdict for `export` at `uri`, recorded or not.
+    fn bare_verdict(export: &str, uri: &str, recorded: bool) -> ExportVerdict {
+        ExportVerdict {
+            name: export.into(),
+            resolved_prefix: "out".into(),
+            verification: ManifestVerification::legacy(),
+            recorded_as: recorded.then(|| (export.to_string(), uri.to_string())),
+        }
+    }
+
+    /// One finished run of `export` at `uri` with `status`, written into the state beside `cfg`.
+    fn record_run(cfg: &Path, export: &str, run_id: &str, uri: &str, status: &str) {
+        let s = crate::state::StateStore::open(cfg.to_str().unwrap()).unwrap();
+        s.begin_run(run_id, export, uri, "2026-01-01T00:00:00Z")
+            .unwrap();
+        s.finish_run(run_id, status, "2026-01-01T00:01:00Z")
+            .unwrap();
+    }
+
+    /// A bare verdict whose export the state records as delivered there becomes a fatal failure that fails the exit gate.
+    #[test]
+    fn a_bare_verdict_of_a_recorded_delivery_becomes_a_fatal_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_cfg(dir.path(), &dir.path().join("out"));
+        record_run(&cfg, "orders", "r1", "file:///data/out", "success");
+        let mut results = vec![bare_verdict("orders", "file:///data/out", true)];
+        settle_recorded_deliveries(cfg.to_str().unwrap(), &mut results).unwrap();
+        let v = &results[0].verification;
+        assert!(v.has_failures() && !v.legacy_run && verdict_fails_exit(v));
+    }
+
+    /// A bare verdict with no recorded success for its export at its prefix stays the legacy pass.
+    #[test]
+    fn a_bare_verdict_without_a_recorded_success_stays_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_cfg(dir.path(), &dir.path().join("out"));
+        record_run(&cfg, "orders", "r1", "file:///data/out", "failed");
+        record_run(&cfg, "users", "r2", "file:///data/out", "success");
+        record_run(&cfg, "orders", "r3", "file:///data/elsewhere", "success");
+        let mut results = vec![bare_verdict("orders", "file:///data/out", true)];
+        settle_recorded_deliveries(cfg.to_str().unwrap(), &mut results).unwrap();
+        let v = &results[0].verification;
+        assert!(v.is_bare_legacy() && !verdict_fails_exit(v));
+    }
+
+    /// With no state file the settle step opens nothing, creates nothing and changes no verdict.
+    #[test]
+    fn settling_without_a_state_file_creates_none_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_cfg(dir.path(), &dir.path().join("out"));
+        let mut results = vec![bare_verdict("orders", "file:///data/out", true)];
+        settle_recorded_deliveries(cfg.to_str().unwrap(), &mut results).unwrap();
+        assert!(results[0].verification.is_bare_legacy());
+        assert!(!dir.path().join(".rivet_state.db").exists());
+    }
+
+    /// An unreadable state is read only for a bare recorded verdict: never for an unrecorded or a decided one, refused by its code for a bare recorded one.
+    #[test]
+    fn an_unreadable_state_is_read_only_for_a_bare_recorded_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_cfg(dir.path(), &dir.path().join("out"));
+        std::fs::write(
+            dir.path().join(".rivet_state.db"),
+            "not a sqlite database ".repeat(60),
+        )
+        .unwrap();
+        let decided = ManifestVerification {
+            manifest_found: true,
+            legacy_run: false,
+            ..ManifestVerification::legacy()
+        };
+        let mut skipped = vec![
+            bare_verdict("orders", "file:///data/out", false),
+            ExportVerdict {
+                verification: decided,
+                ..bare_verdict("orders", "file:///data/out", true)
+            },
+        ];
+        settle_recorded_deliveries(cfg.to_str().unwrap(), &mut skipped).unwrap();
+        let mut read = vec![bare_verdict("orders", "file:///data/out", true)];
+        let err = settle_recorded_deliveries(cfg.to_str().unwrap(), &mut read).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_STATE_FILE_CORRUPT"),
+            "{err:#}"
+        );
+    }
+
+    /// The recorded identity `verify_one_prefix` hands to the settle step: set for a batch export without `--prefix`, absent for CDC and for a pinned prefix.
+    #[test]
+    fn only_a_batch_export_without_a_pinned_prefix_carries_a_recorded_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = write_cfg(dir.path(), &dir.path().join("out"));
+        let cdc = write_single_cdc_cfg(dir.path(), &dir.path().join("cdc-out"));
+        let recorded = |cfg: &Path, prefix: Option<&str>| {
+            let export = Config::load_with_params(cfg.to_str().unwrap(), None)
+                .unwrap()
+                .exports
+                .remove(0);
+            let target = ValidateTarget {
+                prefix_override: prefix.map(str::to_string),
+                ..ValidateTarget::default()
+            };
+            let (mut results, mut hard) = (Vec::new(), Vec::new());
+            verify_one_prefix(
+                export.destination.clone(),
+                export.name.clone(),
+                &export,
+                &target,
+                false,
+                false,
+                &mut results,
+                &mut hard,
+            );
+            assert_eq!(results.len(), 1, "{hard:?}");
+            results.remove(0).recorded_as
+        };
+        let (name, uri) = recorded(&batch, None).expect("a batch export is settled");
+        assert!(name == "orders" && uri.starts_with("file://") && uri.ends_with("/out"));
+        assert!(recorded(&batch, Some("/elsewhere")).is_none());
+        assert!(recorded(&cdc, None).is_none());
+    }
 }

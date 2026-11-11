@@ -1098,6 +1098,29 @@ mod tests {
     };
     use std::path::Path;
 
+    /// Only no manifest, a legacy label and no failure together make the bare absent-manifest verdict.
+    #[test]
+    fn only_no_manifest_a_legacy_label_and_no_failure_is_bare_legacy() {
+        assert!(ManifestVerification::legacy().is_bare_legacy());
+        let not_legacy = ManifestVerification {
+            legacy_run: false,
+            ..ManifestVerification::legacy()
+        };
+        assert!(!not_legacy.is_bare_legacy());
+        let found = ManifestVerification {
+            manifest_found: true,
+            ..ManifestVerification::legacy()
+        };
+        assert!(!found.is_bare_legacy());
+        let failed = ManifestVerification {
+            failures: vec![Failure::ManifestReadError {
+                detail: "denied".into(),
+            }],
+            ..ManifestVerification::legacy()
+        };
+        assert!(!failed.is_bare_legacy());
+    }
+
     fn local_dest(base: &Path) -> LocalDestination {
         LocalDestination::new(&DestinationConfig {
             destination_type: DestinationType::Local,
