@@ -84,6 +84,16 @@ plain `timestamp` is microsecond with full date range. An Oracle
 `TIMESTAMP(7..9)` column is the one case where the declaration is required: undeclared, the run is refused
 (`RIVET_TYPE_UNSAFE_MAPPING`) rather than truncated.
 
+An override the source reader cannot build is refused by code, not run:
+`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) names the column, the declared
+type and the remedy. MySQL has no nanosecond timestamp (DATETIME and TIMESTAMP
+hold microseconds), so `timestamp_ns` / `timestamp_tz_ns` on a MySQL column is
+refused before any row is read, even over an empty result; declare `timestamp`
+/ `timestamp_tz`. A `decimal(p,s)` override past precision 38 is refused the
+same way on SQL Server and Oracle (declare the source column's own `decimal(p,s)` with p <= 38, or remove the override). On SQL
+Server a value whose wire type the declared type cannot read is refused at the
+first batch with the same code.
+
 The override path is safe: a `uid: uuid` declaration tries to parse each
 cell — either 16 raw bytes (BINARY(16) layout) or a 36-char canonical text
 form. **Text that does not parse emits `NULL`, never silent garbage.** Same

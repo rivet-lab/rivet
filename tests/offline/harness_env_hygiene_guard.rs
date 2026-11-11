@@ -182,6 +182,88 @@ fn every_tolerance_the_harness_reads_is_a_recorded_knob() {
     );
 }
 
+/// `HARNESS_ENV` names the product also reads, each with why the shell may hand the value in.
+const PRODUCT_READS_IN_HARNESS_ENV: &[(&str, &str)] = &[
+    (
+        "RIVET_REGENERATE_FIXTURES",
+        "2026-11-10: a mode flag an operator sets on purpose to rewrite the CDC spill fixtures; the gate forces no value",
+    ),
+    (
+        "RIVET_SKIP_LOG",
+        "2026-11-10: the path skips are written to; core.nextest_live sets it per leg and the gate reads it back",
+    ),
+    (
+        "RIVET_SNOWFLAKE_ACCOUNT",
+        "2026-11-10: a Snowflake credential the loader reads by name; the operator's shell is its only source",
+    ),
+    (
+        "RIVET_SNOWFLAKE_KEY",
+        "2026-11-10: a Snowflake credential the loader reads by name; the operator's shell is its only source",
+    ),
+    (
+        "RIVET_SNOWFLAKE_USER",
+        "2026-11-10: a Snowflake credential the loader reads by name; the operator's shell is its only source",
+    ),
+    (
+        "RIVET_TEST_STATE_URL",
+        "2026-11-10: the stand's Postgres state URL; the gate and the live cells hand it to the product on purpose",
+    ),
+];
+
+/// Every `RIVET_*` the product reads: an `env::var` literal, a clap `env = "..."`, or an `ENV_*` const naming one.
+fn product_env_names() -> BTreeSet<String> {
+    let re = regex::Regex::new(
+        r#"\benv::var(?:_os)?\(\s*"(RIVET_[A-Z0-9_]+)"|\benv\s*=\s*"(RIVET_[A-Z0-9_]+)"|\bconst\s+ENV_\w+\s*:\s*&str\s*=\s*"(RIVET_[A-Z0-9_]+)""#,
+    )
+    .unwrap();
+    rust_files(&root().join("src"))
+        .iter()
+        .flat_map(|f| {
+            re.captures_iter(&std::fs::read_to_string(f).unwrap())
+                .filter_map(|c| {
+                    c.iter()
+                        .skip(1)
+                        .flatten()
+                        .next()
+                        .map(|m| m.as_str().to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The shell may not set a name the product reads and the gate means to force: HARNESS_ENV holds none unless it is passed on purpose.
+#[test]
+fn harness_env_holds_no_name_the_product_reads_unless_it_is_passed_on_purpose() {
+    let core = std::fs::read_to_string(root().join("dev/release_oracle/core.py")).unwrap();
+    let plain = gate_allow_list(&core, "HARNESS_ENV");
+    let product = product_env_names();
+    assert!(
+        product.len() > 20,
+        "the scan found only {} product env names; the patterns drifted",
+        product.len()
+    );
+    let passed: BTreeMap<&str, &str> = PRODUCT_READS_IN_HARNESS_ENV.iter().copied().collect();
+    let leaks: Vec<&String> = plain
+        .iter()
+        .filter(|n| product.contains(*n) && !passed.contains_key(n.as_str()))
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "HARNESS_ENV lets the shell set a variable the product reads, so a value the gate forces \
+         (core.run sets RIVET_LOCK_WAIT after os.environ) is overridden: drop it from HARNESS_ENV \
+         or list it with a dated reason in PRODUCT_READS_IN_HARNESS_ENV: {leaks:?}"
+    );
+    let stale: Vec<&&str> = passed
+        .keys()
+        .filter(|k| !(plain.contains(**k) && product.contains(**k)))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "PRODUCT_READS_IN_HARNESS_ENV lists a name that is not in HARNESS_ENV or that the product no longer reads: {stale:?}"
+    );
+}
+
 /// The `fn maybe_*` hook points `src/test_hook.rs` defines.
 fn hook_fns() -> Vec<String> {
     let src = std::fs::read_to_string(root().join("src/test_hook.rs")).unwrap();
