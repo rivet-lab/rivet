@@ -340,7 +340,9 @@ make release-oracle-island        # python -m dev.release_oracle --island
 It runs only the island and appends a `release-oracle-island` line (sha, binary stamp, verdict,
 dirty, canonical config) to `timings.jsonl`. `dev/pytools/release.py` refuses a tag unless the
 latest island line of exactly that sha is `RELEASE-READY`, clean, built from the tree and canonical,
-beside the full-gate and seeded-recall records (`--island-record FILE` when it ran elsewhere).
+beside the full-gate and seeded-recall records (`--island-record FILE` when it ran elsewhere). The island is
+graded like the full gate: a cell skipped for the environment makes it NOT GRADED unless `skip_allow.py` carries a
+dated excuse for it. The tag also needs the satellite verdicts of that sha (`--satellite-record DIR`), with nothing blocking.
 Run it nightly on main. Each matrix `test` row is owed by the run that owns its stage, so neither
 run reports the other's rows as "never ran this gate". Perf and flat RSS record a span per section
 (`perf ...`, `flat rss <engine> ...`) in the timing breakdown.

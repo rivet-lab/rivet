@@ -4140,7 +4140,7 @@ fn require_mongo_shard_into_clickhouse() {
     require_alive(LiveService::FakeGcs);
     require_alive(LiveService::MongoShard);
     ensure_gcs_bucket(BUCKET);
-    let server = MongoTest::connect(MONGO_SHARD_PORT, "admin");
+    let server = MongoTest::connect(mongo_shard_port(), "admin");
     assert!(server.is_mongos(), "the shard stand answers through mongos");
     println!("mongo-server: {} sharded", server.server_version());
 }
@@ -4152,21 +4152,21 @@ fn a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_into_clickhou
     require_mongo_shard_into_clickhouse();
     let mdb = unique_name("chmshard");
     let _drop = MongoDbGuard {
-        port: MONGO_SHARD_PORT,
+        port: mongo_shard_port(),
         db: mdb.clone(),
     };
-    let m = MongoTest::connect(MONGO_SHARD_PORT, &mdb);
+    let m = MongoTest::connect(mongo_shard_port(), &mdb);
     m.shard_collection("t", &SHARD_SPLITS);
     for id in 1..=SHARD_DOCS {
         m.upsert_set("t", id, "v", "seed");
     }
     let db = Db::new("rivet_chtest");
-    let rig = mongo_cdc_into_clickhouse_on(MONGO_SHARD_PORT, &mdb, &db, &unique_name("chmshard"))
+    let rig = mongo_cdc_into_clickhouse_on(mongo_shard_port(), &mdb, &db, &unique_name("chmshard"))
         .cdc("initial: snapshot")
         .cdc("rollover: 2");
     rig.run_ok();
 
-    let mover = ChunkMover::start(MONGO_SHARD_PORT, &mdb, "t", vec![5, 25, 45]);
+    let mover = ChunkMover::start(mongo_shard_port(), &mdb, "t", vec![5, 25, 45]);
     for round in 0..4 {
         m.shard_round("t", round);
     }
@@ -4227,16 +4227,16 @@ fn a_sharded_mongo_run_delivers_every_write_committed_before_it_started() {
     require_mongo_shard_into_clickhouse();
     let mdb = unique_name("chmshard_each");
     let _drop = MongoDbGuard {
-        port: MONGO_SHARD_PORT,
+        port: mongo_shard_port(),
         db: mdb.clone(),
     };
-    let m = MongoTest::connect(MONGO_SHARD_PORT, &mdb);
+    let m = MongoTest::connect(mongo_shard_port(), &mdb);
     m.shard_collection("t", &SHARD_SPLITS);
     for id in 1..=SHARD_DOCS {
         m.upsert_set("t", id, "v", "seed");
     }
     let db = Db::new("rivet_chtest");
-    let rig = mongo_cdc_into_clickhouse_on(MONGO_SHARD_PORT, &mdb, &db, &unique_name("chmshard"))
+    let rig = mongo_cdc_into_clickhouse_on(mongo_shard_port(), &mdb, &db, &unique_name("chmshard"))
         .cdc("initial: snapshot");
     rig.run_ok();
     for round in 0..4 {

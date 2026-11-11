@@ -58,6 +58,8 @@ docker compose --profile shard rm -sf -v mongos mongo-shard-a mongo-shard-b mong
 
 Do not stop it with `docker compose down`: that removes every container of the project.
 
+The cells read the sharded cluster at `RIVET_TEST_MONGO_SHARD_PORT` (default 27991): point it at a second `mongos`, published on another host port with its own `MONGO_VERSION` (4.4 and 5.0 are the versions that matter here), and the same test body runs on that server.
+
 ## Seeds (`seeds/`)
 
 - `common/{postgres,mysql,mssql}.sql` — users **50k**, orders **200k**,

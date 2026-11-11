@@ -19,6 +19,7 @@
 //! binlog adapter's continuous model.
 
 use futures_util::StreamExt;
+use mongodb::action::Action;
 use mongodb::bson::{Document, doc};
 use mongodb::change_stream::ChangeStream as DriverStream;
 use mongodb::change_stream::event::{ChangeStreamEvent, OperationType};
@@ -589,9 +590,9 @@ impl MongoChangeStream {
                     .watch()
                     // Post-image for insert/update (current-state lookup).
                     .full_document(FullDocumentType::UpdateLookup)
-                    // Delete/update PRE-image when the server carries it (6.0+ with
-                    // `changeStreamPreAndPostImages`); silently absent otherwise.
-                    .full_document_before_change(FullDocumentBeforeChangeType::WhenAvailable)
+                    .optional(cap.before_image_request(), |w, v| {
+                        w.full_document_before_change(v)
+                    })
                     // Bound how long the server holds a getMore open for a new change.
                     // Short so a bounded (`until_current`) run detects "drained" quickly
                     // via `next_if_any`; harmless for the daemon (`next` just re-polls).
@@ -737,6 +738,11 @@ pub(crate) struct MongoCdcCapability {
 }
 
 impl MongoCdcCapability {
+    /// The pre-image request the stream may carry: servers before 6.0 have none and a sharded one refuses the option (51771); an unprobed version keeps the request.
+    pub(crate) fn before_image_request(&self) -> Option<FullDocumentBeforeChangeType> {
+        (self.major == 0 || self.major >= 6).then_some(FullDocumentBeforeChangeType::WhenAvailable)
+    }
+
     /// One-line fidelity declaration for the log / `doctor`.
     pub(crate) fn tier(&self) -> &'static str {
         if self.major >= 6 {
@@ -1318,6 +1324,34 @@ mod tests {
             "the two tiers must not render identically, or the declaration carries \
              no information about the server it describes"
         );
+    }
+
+    /// The pre-image request goes out from 6.0 and when the version is unprobed, never below 6.0.
+    #[test]
+    fn the_pre_image_request_follows_the_server_version() {
+        let req = |version: &str, major: u32| {
+            super::MongoCdcCapability {
+                server_version: version.to_string(),
+                major,
+                is_replica_set: true,
+            }
+            .before_image_request()
+        };
+        for (version, major) in [("4.4.30", 4), ("5.0.33", 5)] {
+            assert!(
+                req(version, major).is_none(),
+                "{version} has no pre-image to ask for"
+            );
+        }
+        for (version, major) in [("6.0.0", 6), ("7.0.37", 7), ("8.0.13", 8), ("unknown", 0)] {
+            assert!(
+                matches!(
+                    req(version, major),
+                    Some(mongodb::options::FullDocumentBeforeChangeType::WhenAvailable)
+                ),
+                "{version} keeps the WhenAvailable request"
+            );
+        }
     }
 
     use super::*;
