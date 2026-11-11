@@ -640,9 +640,15 @@ def _attach(spec: dict) -> dict:
     return source_attach(engine, url)[0]
 
 
+def duck_type(t: str) -> str:
+    """A DuckDB type as the oracle grades it: a scanner's engine-labelled native text type (`MSSQL_VARCHAR(20)`) is `VARCHAR`, every other type is itself."""
+    m = re.fullmatch(r"[A-Z0-9]+_([A-Z0-9]+)(?:\(\w+\))?", t)
+    return "VARCHAR" if m and TEXT_NATIVE.match(m[1]) else t
+
+
 def _columns(ora, rel: str) -> list[tuple[str, str]]:
     """(name, DuckDB type) of every column of `rel`."""
-    return [(r[0], str(r[1])) for r in ora.rows(f"DESCRIBE SELECT * FROM {rel}")]
+    return [(r[0], duck_type(str(r[1]))) for r in ora.rows(f"DESCRIBE SELECT * FROM {rel}")]
 
 
 def range_window(col: str, ranges: list) -> str:
@@ -2090,6 +2096,17 @@ def _self_test() -> None:
     assert one("VARCHAR", "VARCHAR", "NUMERIC(12,2)") and one("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), "a decimal DuckDB holds is not delivered as text"
     assert not one("DOUBLE[]", "VARCHAR", "VECTOR"), "an Oracle VECTOR is delivered as text"
     assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
+    class Described:
+        """A DuckDB stand-in whose DESCRIBE answers the scanner's engine-labelled type names."""
+
+        def rows(self, sql):
+            return [("k", "MSSQL_VARCHAR(20)"), ("n", "MSSQL_NVARCHAR(8)"), ("t", "TIMESTAMP_NS"), ("d", "DECIMAL(12,2)")]
+
+    described = dict(_columns(Described(), "ms.dbo.t"))
+    assert described == {"k": "VARCHAR", "n": "VARCHAR", "t": "TIMESTAMP_NS", "d": "DECIMAL(12,2)"}, "a native text alias is read as its family"
+    assert not one(described["k"], "VARCHAR", "VARCHAR(20)") and not one(described["n"], "VARCHAR", "NVARCHAR(8)"), "a collated text key delivered as text is sound"
+    assert one(described["k"], "BIGINT", "VARCHAR(20)"), "a labelled text delivered as a number is still a loss"
+    assert one(described["d"], "VARCHAR", "DECIMAL(12,2)"), "a decimal delivered as text is still a finding"
     my_rows = globals()["ledger"]("mysql", "batch")[0]
     assert my_rows.get("TIMESTAMP(6)") is not None and my_rows.get("TIMESTAMP(6)") is my_rows.get("TIMESTAMP(6) NULL"), "a catalog TIMESTAMP(6) finds the row declared with its nullability"
     class Flaky:
