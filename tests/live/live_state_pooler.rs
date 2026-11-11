@@ -150,7 +150,7 @@ fn a_lease_is_refused_while_held_and_free_the_moment_it_is_dropped() {
         .batch_execute(&format!("CREATE DATABASE {db}"))
         .unwrap();
     let url = format!("postgresql://rivet:rivet@127.0.0.1:5433/{db}");
-    let st = rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(url))
+    let st = rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(url.into()))
         .expect("the scratch state DB");
     let key = unique_name("lease_release");
     let held = st.try_load_lease(&key).unwrap().expect("the first take");

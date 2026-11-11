@@ -386,11 +386,7 @@ class Ledger:
 
     def incident(self, engine: str, version: str, scenario: str, store: str, msg: str, detail: str, target: str) -> bool:
         """When `target` answered earlier in this run it went away mid-run: record INFRA (a stand incident) and return True."""
-        try:
-            from . import stand_health
-        except ImportError:  # pragma: no cover - bare sys.path entry
-            import stand_health  # type: ignore
-        if not (target and stand_health.BOOK.seen_up(target)):
+        if not (target and _stand_health().BOOK.seen_up(target)):
             return False
         self.ungraded(engine, version, scenario, store, f"{msg} [stand incident: {target} answered earlier in this run]", detail or msg)
         return True
@@ -1110,11 +1106,29 @@ def nextest_started(out: str) -> int | None:
 _NEXTEST_PANIC = re.compile(r"^\s*thread '([^']+)'(?: \(\d+\))? panicked at [^\n]*\n[ \t]*([^\n]*)(?:\n[ \t]+- ([^\n]*))?", re.M)
 
 
+_NEXTEST_PANIC_BODY = re.compile(
+    r"^\s*thread '([^']+)'(?: \(\d+\))? panicked at [^\n]*\n((?:(?![ \t]*(?:note: |thread '|--- (?:STDOUT|STDERR): |[A-Z][A-Z +]* +\[)).*\n?)*)", re.M)
+
+
+def _stand_health():
+    """The stand_health module, imported on first use (it imports this one)."""
+    try:
+        from . import stand_health
+    except ImportError:  # pragma: no cover - bare sys.path entry
+        import stand_health  # type: ignore
+    return stand_health
+
+
 def nextest_panics(out: str) -> dict[str, str]:
-    """Each test's first panic as one line: the message's first line, or the rig oracle's first finding (its header names a per-run export)."""
+    """Each test's first panic as one line: the rig oracle's own crash line wherever its message holds it, else the message's first line, or the rig oracle's first finding (its header names a per-run export)."""
     first: dict[str, str] = {}
     for name, head, finding in _NEXTEST_PANIC.findall(out):
         first.setdefault(name, (f"rig oracle: {finding}" if head.startswith("rig oracle: ") and finding else head).strip()[:300])
+    seen: set[str] = set()
+    for name, body in _NEXTEST_PANIC_BODY.findall(out):
+        if name not in seen and (crash := _stand_health().ORACLE_PANIC.search(body)):
+            first[name] = crash.group(0).strip()[:300]
+        seen.add(name)
     return first
 
 
@@ -1147,6 +1161,21 @@ _NEXTEST_PANIC_SAMPLE = (
     "      - COUNT(`id`) (non-null): source 10, delivered 6\n"
     "    thread 'm::plain_fail' (9992744) panicked at tests/live/m.rs:190:5:\n"
     "    a later print of the same test\n"
+    "    thread 'm::oracle_crash' panicked at tests/common/verify.rs:255:13:\n"
+    "    the oracle's grade panicked; rivet's own verdict was: exit Some(0)\n"
+    "    --- oracle panic ---\n"
+    "    oracle error: dev/release_oracle/rig_oracle.py grade exited exit status: 1 (an oracle bug, never a verdict)\n"
+    "    stderr:\n"
+    "\n"
+    "        FAIL [   0.200s] (1/1) rivet-cli::live_suite m::next_test\n"
+    "    thread 'm::wrapped_finding' panicked at tests/common/verify.rs:255:13:\n"
+    "    the oracle's grade panicked; rivet's own verdict was: exit Some(0)\n"
+    "    --- oracle panic ---\n"
+    "    rig oracle: export 'e' disagrees with its source:\n"
+    "      - COUNT(*): source 10, delivered 6\n"
+    "\n"
+    "        FAIL [   0.200s] (1/1) rivet-cli::live_suite m::wrapped_finding\n"
+    "    oracle error: a line after the test's stderr that is not its panic\n"
 )
 
 
@@ -1178,7 +1207,9 @@ def nextest_grading_error() -> str | None:
     if nextest_retries(_NEXTEST_SAMPLE) != ["TRY 1 FAIL", "FLAKY 2/2"]:
         return f"retries read as {nextest_retries(_NEXTEST_SAMPLE)} (a test tried twice is red)"
     panics = nextest_panics(_NEXTEST_PANIC_SAMPLE)
-    want_panics = {"m::plain_fail": "P-00: delivered 6 of 10", "m::oracle_fail": "rig oracle: COUNT(*): source 10, delivered 6"}
+    want_panics = {"m::plain_fail": "P-00: delivered 6 of 10", "m::oracle_fail": "rig oracle: COUNT(*): source 10, delivered 6",
+                   "m::oracle_crash": "oracle error: dev/release_oracle/rig_oracle.py grade exited exit status: 1 (an oracle bug, never a verdict)",
+                   "m::wrapped_finding": "the oracle's grade panicked; rivet's own verdict was: exit Some(0)"}
     if panics != want_panics:
         return f"read the panics {panics}, want {want_panics} (a known red is matched by this line)"
     return None
