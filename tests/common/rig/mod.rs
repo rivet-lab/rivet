@@ -331,6 +331,11 @@ impl Rig {
         self
     }
 
+    /// Replace the export lines in place, keeping the mode, the config dir and the state DB.
+    pub fn set_export_lines(&mut self, lines: &[&str]) {
+        self.extra_lines = lines.iter().map(|l| l.to_string()).collect();
+    }
+
     /// Point the same export (name, config dir and state DB kept) at another table or collection.
     pub fn repoint(mut self, table: &str) -> Self {
         self.tables = vec![table.to_string()];
