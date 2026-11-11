@@ -275,6 +275,13 @@ pub(crate) fn build_plan_on(
                 }),
                 None => None,
             };
+            super::cursor_admission::admit_incremental_cursor(
+                probe,
+                config,
+                export,
+                &base_query,
+                &primary_column,
+            )?;
             ExtractionStrategy::Incremental(IncrementalCursorPlan {
                 primary_column,
                 fallback_column,

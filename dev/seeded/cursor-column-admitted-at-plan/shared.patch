@@ -1,0 +1,13 @@
+diff --git a/src/plan/cursor_admission.rs b/src/plan/cursor_admission.rs
+index 2fb45db2..efa3c6da 100644
+--- a/src/plan/cursor_admission.rs
++++ b/src/plan/cursor_admission.rs
+@@ -103,7 +103,7 @@ pub(crate) fn admit_incremental_cursor(
+         Ok(n) => n,
+         Err(e) => return unverified(export, column, &e),
+     };
+-    match cursor_cause(mapping, nullable, export.incremental_cursor_mode) {
++    match cursor_cause(mapping, nullable, export.incremental_cursor_mode).filter(|_| false) {
+         None => Ok(()),
+         Some(CursorCause::Nullable) => crate::rivet_bail!(
+             crate::error::codes::PLAN_CURSOR_NULLABLE,

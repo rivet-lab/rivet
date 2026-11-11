@@ -5789,3 +5789,20 @@ seeds:
         na: "a MongoDB collection has no declared numeric precision, so init writes no decimal override and no map key from a field name (the mutant lives in the relational decimal override writer)"
       oracle:
         cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+
+  - name: cursor-column-admitted-at-plan
+    class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
+    history: "2026-11-11 - owner decision 2026-11-10 (axis-6 hunt, P2 and P3): the plan now reads the server's nullability and the delivered type once and refuses with RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED from check, validate, plan, run and apply; fixed in src/plan/cursor_admission.rs::admit_incremental_cursor"
+    scope: source
+    patch: cursor-column-admitted-at-plan/shared.patch
+    engines:
+      postgres:
+        cells: [nullable_cursor_is_refused_postgres, unrenderable_cursor_is_refused_postgres]
+      mysql:
+        cells: [nullable_cursor_is_refused_mysql, unrenderable_cursor_is_refused_mysql]
+      mssql:
+        cells: [nullable_cursor_is_refused_mssql, unrenderable_cursor_is_refused_mssql]
+      oracle:
+        cells: [nullable_cursor_is_refused_oracle, unrenderable_cursor_is_refused_oracle]
+      mongo:
+        na: "a MongoDB export has no incremental cursor_column: mode full only"

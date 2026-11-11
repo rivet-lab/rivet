@@ -161,6 +161,8 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_PLAN_REJECTED` | usage | 1 | fix the config so the rule the message names passes; `rivet check` reports the same rules |
 | `RIVET_PLAN_CHUNK_KEY_SPARSE` | usage | 1 | set an explicit `chunk_count:` (or a larger `chunk_size:`), page by `chunk_by_key:`, or use `mode: full` |
 | `RIVET_PLAN_CHUNK_KEY_NULL` | refusal | 5 | chunk on a NOT NULL column, drop the NULL rows with `WHERE <column> IS NOT NULL` in the query, or use `mode: full` |
+| `RIVET_PLAN_CURSOR_NULLABLE` | refusal | 5 | make the cursor column NOT NULL, or set `incremental_cursor_mode: coalesce` with a NOT NULL `cursor_fallback_column:` and run `rivet state reset -c <config> --export <name>` once |
+| `RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED` | refusal | 5 | use an integer, decimal, text, date, timestamp or uuid `cursor_column:`, or use `mode: chunked` or `mode: full` |
 | `RIVET_CONFIG_SETTLE_COLUMN_NOT_TEMPORAL` | usage | 1 | point `settle.column` at a date or timestamp column, or omit it to settle on the cursor |
 | `RIVET_CONFIG_SPLIT_PREFIX_UNSTABLE` | usage | 1 | give the split export a destination without run-varying placeholders (`{export}` and `{table}` are stable) |
 | `RIVET_CONFIG_EXPORT_NAME_RESERVED` | usage | 1 | rename the export: `<name>#<n>` names are reserved for split units |

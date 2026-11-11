@@ -277,6 +277,28 @@ pub(crate) fn type_mappings_on(
         .collect())
 }
 
+/// Whether `column` of `query` may hold NULL: the catalog `NOT NULL` of the base table column the server traces it to; `None` for an expression or a view column.
+pub(crate) fn column_nullable_on(
+    client: &mut Client,
+    query: &str,
+    column: &str,
+) -> Result<Option<bool>> {
+    let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
+    let stmt = prepare_fresh(client, &wrapped)?;
+    let Some(col) = stmt.columns().iter().find(|c| c.name() == column) else {
+        return Ok(None);
+    };
+    let (Some(table), Some(attnum)) = (col.table_oid(), col.column_id()) else {
+        return Ok(None);
+    };
+    let row = client.query_opt(
+        "SELECT a.attnotnull FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
+         WHERE a.attrelid = $1 AND a.attnum = $2 AND c.relkind IN ('r', 'p')",
+        &[&table, &attnum],
+    )?;
+    Ok(row.map(|r| !r.get::<_, bool>(0)))
+}
+
 fn introspect_pg_on(
     client: &mut Client,
     qualified_table: &str,
@@ -693,6 +715,10 @@ impl super::Source for PostgresSource {
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
         type_mappings_on(&mut self.client, query, column_overrides)
+    }
+
+    fn column_nullable(&mut self, query: &str, column: &str) -> Result<Option<bool>> {
+        column_nullable_on(&mut self.client, query, column)
     }
 
     /// Snapshot the source-harm counters from `pg_stat_database` for the current
