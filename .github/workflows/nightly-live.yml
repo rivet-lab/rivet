@@ -275,14 +275,8 @@ jobs:
       fail-fast: false
       matrix:
         mongo_version: ["4.4", "5.0", "6.0", "7.0", "8.0"]
-        include:
-          - mongo_version: "4.4"
-            not_sharded: " and not test(live_clickhouse_load::a_sharded_mongo)"
-          - mongo_version: "5.0"
-            not_sharded: " and not test(live_clickhouse_load::a_sharded_mongo)"
     env:
       MONGO_VERSION: ${{ matrix.mongo_version }}
-      NOT_SHARDED: ${{ matrix.not_sharded }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -318,7 +312,7 @@ jobs:
         # stack does not start (`live+gate-only`; the release gate runs it).
         run: |
           cargo nextest run --release --run-ignored ignored-only --no-fail-fast \
-            -E 'binary(live_suite) and test(mongo) and not (test(the_duckdb_oracle_reaches_sql_server_and_mongodb_too) or test(an_oplog_rolled_past_the_checkpoint) or test(open_defect_))'"$NOT_SHARDED"
+            -E 'binary(live_suite) and test(mongo) and not (test(the_duckdb_oracle_reaches_sql_server_and_mongodb_too) or test(an_oplog_rolled_past_the_checkpoint) or test(open_defect_))'
 
       - name: Dump Mongo logs on failure
         if: failure()

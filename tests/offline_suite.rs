@@ -149,6 +149,8 @@ mod cli_flag_coverage_guard;
 mod compose_image_pins_guard;
 #[path = "offline/error_code_ratchet.rs"]
 mod error_code_ratchet;
+#[path = "offline/invariant_ratchets.rs"]
+mod invariant_ratchets;
 #[path = "offline/known_red_guard.rs"]
 mod known_red_guard;
 #[path = "offline/live_only_purity_gate.rs"]

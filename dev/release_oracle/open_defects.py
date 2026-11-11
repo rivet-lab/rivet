@@ -17,11 +17,12 @@ stand this machine lacks). The first three kinds of surprise exit 1; `not run` i
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
 from . import known_red
-from .core import nextest_outcomes, nextest_panics
+from .core import nextest_outcomes, nextest_panics, nextest_pinned
 
 OPEN = "open_defect_"
 RUN = ["cargo", "nextest", "run", "--test", "live_suite", "--run-ignored", "only", "--no-fail-fast",
@@ -116,7 +117,8 @@ def main(argv: list[str]) -> int:
         with open(argv[0], encoding="utf-8", errors="replace") as f:
             log = f.read()
     else:
-        ran = subprocess.run(RUN, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        ran = subprocess.run(RUN, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                             env=nextest_pinned(dict(os.environ)))
         log = ran.stdout
         if "Starting " not in log:
             print(log[-3000:])
