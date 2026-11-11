@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
 from uuid import UUID
 from zoneinfo import ZoneInfo
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
 import yaml
@@ -378,6 +378,12 @@ def tolerance(src_family: str, target: str, expected: Decimal) -> Decimal:
     return Decimal(0)
 
 
+def _within_slack(src_family: str, target: str, e: Decimal, g: Decimal) -> bool:
+    """Whether g is e within the float slack; a text that reads as a huge or non-finite number is a difference, never a crash."""
+    with localcontext(Context(traps=[])):
+        return abs(g - e) <= tolerance(src_family, target, e)
+
+
 def _target_family(target: str) -> str:
     """The value family a override target delivers."""
     return {"float4": "float4", "float8": "float8", "bool": "bool", "text": "text"}.get(
@@ -463,6 +469,14 @@ def compare_other(engine: str, native: str, exp, target: str, got) -> str:
     return "PRESENCE"
 
 
+def _unhex_text(hexed: str) -> str | None:
+    """The UTF-8 text a CSV hex rendering of a binary column holds; None when it is no hex of text."""
+    try:
+        return bytes.fromhex(hexed).decode("utf-8")
+    except ValueError:
+        return None
+
+
 def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: bool = False, native: str = "") -> str:
     """OK, PRESENCE (not comparable), NULLED or WRONG for one delivered cell against its source literal."""
     exp = parse_lit(engine, src_lit)
@@ -470,6 +484,10 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
         return "OK"
     if got is None or (csv and got == "" and exp != ""):
         return NULLED
+    if target == "binary" and csv and isinstance(got, str) and not isinstance(exp, bytes):
+        got = _unhex_text(got)
+        if got is None:
+            return WRONG
     tf = _target_family(target)
     if isinstance(exp, str) and tf in ("int", "float4", "float8", "decimal", "bool"):
         if _NUM.fullmatch(exp.strip()):
@@ -484,7 +502,7 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
             return "OK" if (g != 0) == (e != 0) else WRONG
         if tf == "bool" and not isinstance(exp, bool):
             return "OK" if (g != 0) == (e != 0) and e in (0, 1) else WRONG
-        return "OK" if abs(g - e) <= tolerance(src_family, target, e) else WRONG
+        return "OK" if _within_slack(src_family, target, e, g) else WRONG
     if exp is ...:
         return "PRESENCE"
     return compare_other(engine, native, exp, target, got)
@@ -698,6 +716,13 @@ def recheck(check, cfg: Path, env: dict, d: Path):
     return check
 
 
+def format_config(d: Path, fmt: str) -> Path:
+    """The config path of one format of a cell, in a directory of its own: the state a run keeps is anchored beside its config and must not carry into the next format."""
+    sub = d / fmt
+    sub.mkdir(parents=True, exist_ok=True)
+    return sub / f"{fmt}.yaml"
+
+
 def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str, target: str, fmts: list[str]) -> list[Result]:
     """Check once, then run each format of one (column, override, mode) cell in its own directory."""
     d = work / f"{col.name}-{target.replace('(', '_').replace(')', '').replace(',', '_')}-{mode}"
@@ -713,7 +738,7 @@ def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str
     out = []
     for fmt in fmts:
         cell = f"{engine}/{col.native}->{target}/{mode}/{fmt}"
-        cfg = d / f"{fmt}.yaml"
+        cfg = format_config(d, fmt)
         cfg.write_text(config(engine, "RIVET_NSN_URL", mode, fmt, col.name, target, str(d / f"out-{fmt}")))
         p = rivet(["run", "-c", str(cfg)], env, d)
         if check.returncode == 0 and p.returncode != 0:
@@ -879,7 +904,7 @@ def run_mongo(work: Path, url: str, tier: str) -> list[Result]:
         check = rivet(["check", "-c", str(c0), "--type-report", "--json"], env, d)
         rs = []
         for fmt in ax["formats"]:
-            cfg = d / f"{fmt}.yaml"
+            cfg = format_config(d, fmt)
             cfg.write_text(config("mongo", "RIVET_NSN_URL", "full", fmt, col, target, str(d / f"o-{fmt}")))
             p = rivet(["run", "-c", str(cfg)], env, d)
             rs.append(grade_mongo(f"mongo/{col}->{target}/full/{fmt}", p, check, d / f"o-{fmt}", fmt, col, target, n))
@@ -1060,6 +1085,8 @@ def self_test() -> None:
     assert compare("mysql", "NULL", "int", "float4", None) == "OK"
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", "", csv=True) == NULLED and compare("mysql", "''", "text", "none", "", csv=True) == "OK"
+    with tempfile.TemporaryDirectory() as fc:
+        assert format_config(Path(fc), "parquet").parent != format_config(Path(fc), "csv").parent, "two formats of a cell share the state a run keeps beside its config"
     assert compare("mysql", "7", "int", "float4", 7.0) == "OK" and compare("mysql", "7", "int", "float4", 7.5) == WRONG
     assert compare("mysql", "16777217", "int", "float4", 16777216.0) == "OK", "float4 rounds at 2^24 and no further"
     assert compare("mysql", "16777217", "int", "float4", 16777000.0) == WRONG
@@ -1087,6 +1114,12 @@ def self_test() -> None:
     assert compare("mssql", "0xAB", "other", "none", b"\xab\0\0", native="BINARY(8)") == "OK" and compare("mysql", "0xDEADBEEF", "other", "none", b"\xde\xad", native="VARBINARY(4)") == WRONG
     assert compare("postgres", "ARRAY[1, NULL, 3]", "other", "none", [1, None, 3], native="INTEGER[]") == "PRESENCE"
     assert compare("oracle", "-0.000000000000000000000000000000000000001", "decimal", "float4", -1.0000002153053333e-39) == "OK", "a float4 subnormal rounds at its own step"
+    assert compare("mysql", "12345.6789", "decimal", "none", "31323334352e36373839") == WRONG, "text read as a number with a 36-million exponent"
+    assert compare("mysql", "12345.6789", "decimal", "binary", "31323334352e36373839", csv=True, native="DECIMAL(18,4)") == "OK", "a binary override writes the hex of the value text to CSV"
+    assert compare("mysql", "'\u00fc\u00f1a'", "text", "binary", "c3bcc3b161", csv=True, native="VARCHAR(20)") == "OK" and compare("mysql", "'a'", "text", "binary", "62", csv=True, native="VARCHAR(20)") == WRONG
+    assert compare("mysql", "'a'", "text", "binary", "zz", csv=True, native="VARCHAR(20)") == WRONG and compare("mysql", "0xAB", "other", "binary", "ab", csv=True, native="VARBINARY(4)") == "OK"
+    assert compare("mysql", "1e2000000", "decimal", "none", "2e2000000") == WRONG and compare("mysql", "1e2000000", "decimal", "none", "1e2000000") == "OK"
+    assert compare("mysql", "1.5", "float", "float8", "NaN") == WRONG and compare("mysql", "1.5", "float", "float8", "Infinity") == WRONG
     assert tolerance("int", "float4", Decimal(2 ** 24)) == Decimal(2) and tolerance("int", "int8", Decimal(5)) == 0
     assert _int_range("TINYINT") == (-128, 127) and _int_range("INT UNSIGNED") == (0, 2 ** 32 - 1) and _int_range("NUMBER(9)") == (-999999999, 999999999)
     assert "-128" in edge_literals("mysql", "TINYINT", "Int8") and "128" not in edge_literals("mysql", "TINYINT", "Int8")
