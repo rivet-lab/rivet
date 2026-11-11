@@ -57,6 +57,8 @@ FULL_GATE = "release-oracle-full"
 ISLAND_GATE = "release-oracle-island"
 #: Every other run that writes a verdict line (the bare `make release-oracle`, a run with an escape).
 REDUCED_GATE = "release-oracle"
+#: The verdict of a run whose tree (HEAD or a tracked file) changed between its first stage and its report.
+TREE_MOVED = "TREE-MOVED"
 #: The gate kinds a tag rests on: an env skip no `skip_allow` entry excuses is ungraded in each, at the gate and at the tag.
 TAG_GATES = (FULL_GATE, ISLAND_GATE)
 
@@ -443,8 +445,8 @@ class Ledger:
         return "NOT RELEASABLE" if self.red else "NOT GRADED" if self.ungraded_count(gate) else "RELEASE-READY"
 
     def report(self, *, full: bool = False, gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None,
-               config: dict | None = None) -> int:
-        """Print the table and the verdict; only a `full` gate run records a timings line (naming `gate`) and may say RELEASE-READY."""
+               config: dict | None = None, reread: Callable[[], tuple[str, bool]] | None = None) -> int:
+        """Print the table and the verdict; only a `full` gate run records a timings line (naming `gate`) and may say RELEASE-READY, and not when the tree `reread` returns is no longer the `tree` the run began on."""
         self.record_evidence()
         print()
         self.phase("Release Oracle result")
@@ -521,7 +523,9 @@ class Ledger:
             for name, minutes in split_minutes(self._splits).items():
                 print(f"  {minutes:6.1f} min  {name}")
             print()
-        verdict = self.verdict(gate)
+        end_tree = (reread or tree_identity)() if full and tree is not None else tree
+        moved = end_tree != tree
+        verdict = TREE_MOVED if moved else self.verdict(gate)
         ungraded = self.ungraded_count(gate)
         if full:
             record_timings(
@@ -537,6 +541,10 @@ class Ledger:
         if ungraded:
             print(self._c("1;35", f"  {ungraded} cell(s) NOT GRADED: the oracle's own read failed (see ⚠ above). "
                                   "Not a product verdict; re-run them."))
+        if moved:
+            print(self._c("1;31", f"  {TREE_MOVED} — the tree was {tree} when the run began and {end_tree} when it ended; the stages "
+                                  "graded more than one tree. Run the gate again on a tree nobody touches."))
+            return 1
         if self.stand_invalid:
             print(self._c("1;35", f"  STAND-INVALID — {self.stand_invalid} during the run; its reds grade the stand, "
                                   "not the product. Restore the stand (disk, state DB, containers) and run the gate again."))
@@ -729,7 +737,7 @@ HARNESS_ENV: frozenset[str] = frozenset((
     "RIVET_ALLOW_WORKTREE_LIVE", "RIVET_BIN_OVERRIDE",
     "RIVET_CDC_STATE_URL", "RIVET_CONC_SRC_CONTAINER", "RIVET_CONC_SRC_URL", "RIVET_CONC_STATE_URL",
     "RIVET_FAILURE_MONGO_URL", "RIVET_FIELD_LOCK", "RIVET_FIELD_MYSQL_CONTAINER", "RIVET_FIELD_REPLAY_BIN",
-    "RIVET_FLOW_VERDICTS", "RIVET_GATE_SHARED_STATE", "RIVET_GATE_STATE_URL",
+    "RIVET_FLOW_VERDICTS", "RIVET_GATE_STATE_URL",
     "RIVET_LEASE_CARRIER_BIN", "RIVET_LIVE_SLOT", "RIVET_MIGRATION_CARRIER_BIN",
     "RIVET_ORACLE_DOCKER", "RIVET_ORACLE_LATEST_ONLY", "RIVET_ORACLE_LOG", "RIVET_ORACLE_SELFTEST_FLAG",
     "RIVET_ORACLE_VERSIONS", "RIVET_ORACLE_WITHOUT_PREV_RELEASE", "RIVET_ORACLE_WORK",
@@ -741,17 +749,24 @@ HARNESS_ENV: frozenset[str] = frozenset((
     "RIVET_SNOWFLAKE_ROLE", "RIVET_SNOWFLAKE_USER",
     "RIVET_SOAK_BYTE_CAP", "RIVET_SOAK_ROLLOVER", "RIVET_SOAK_ROLLOVER_MB", "RIVET_SWEEP_STATE_CONTAINER",
     "RIVET_TEST_BQ_DATASET", "RIVET_TEST_EXCLUSIVE", "RIVET_TEST_GCS_BUCKET", "RIVET_TEST_GCS_HMAC_ID",
-    "RIVET_TEST_GCS_HMAC_SECRET", "RIVET_TEST_MONGO_RS_PORT", "RIVET_TEST_ORACLE_LATIN1_URL",
+    "RIVET_TEST_GCS_HMAC_SECRET", "RIVET_TEST_MONGO_RS_PORT", "RIVET_TEST_MONGO_SHARD_PORT",
+    "RIVET_TEST_ORACLE_LATIN1_URL",
     "RIVET_TEST_STATE_TOXI_URL", "RIVET_TEST_STATE_URL", "RIVET_TINYFS_DIR",
     "RIVET_UPG_KEEP", "RIVET_UPG_ORACLE_CDC_URL",
 ))
-#: RIVET_* variables that move a tolerance or what a stage measures: allowed in the shell, recorded in the gate's configuration, and any one set makes the run no full gate.
+#: RIVET_* variables that move a tolerance, what a stage measures or which state DB it runs on: allowed in the shell, recorded in the gate's configuration, and any one set makes the run no full gate.
 GRADING_KNOBS: frozenset[str] = frozenset((
-    "RIVET_HARM_SLACK", "RIVET_HARM_TOL", "RIVET_PERF_BQ_WALL_TOL", "RIVET_PERF_CPU_TOL", "RIVET_PERF_RSS_TOL",
-    "RIVET_PERF_WALL_TOL", "RIVET_REGRESSION_WALL_TOL", "RIVET_SCALE_CHUNK", "RIVET_SCALE_RSS_TOL",
+    "RIVET_GATE_SHARED_STATE", "RIVET_HARM_SLACK", "RIVET_HARM_TOL", "RIVET_PERF_BQ_WALL_TOL", "RIVET_PERF_CPU_TOL",
+    "RIVET_PERF_RSS_TOL", "RIVET_PERF_WALL_TOL", "RIVET_REGRESSION_WALL_TOL", "RIVET_SCALE_CHUNK", "RIVET_SCALE_RSS_TOL",
 ))
 #: The per-engine URL families (`RIVET_CDC_<ENGINE>_URL`, `RIVET_ORACLE_<ENGINE>_URL`), read by name.
 HARNESS_ENV_FAMILY = re.compile(r"^RIVET_(CDC|ORACLE)_[A-Z0-9]+_URL$")
+#: NEXTEST_* variables that change which tests count, how often one is tried or what its lines say: refused in the shell, stripped from every child, the first two pinned.
+NEXTEST_ENV: frozenset[str] = frozenset((
+    "NEXTEST_FINAL_STATUS_LEVEL", "NEXTEST_FLAKY_RESULT", "NEXTEST_MESSAGE_FORMAT", "NEXTEST_MESSAGE_FORMAT_VERSION",
+    "NEXTEST_NO_TESTS", "NEXTEST_PROFILE", "NEXTEST_RETRIES", "NEXTEST_STATUS_LEVEL", "NEXTEST_USER_CONFIG_FILE",
+))
+NEXTEST_PIN = {"NEXTEST_RETRIES": "0", "NEXTEST_PROFILE": "default"}
 
 
 def is_harness_env(name: str) -> bool:
@@ -760,8 +775,22 @@ def is_harness_env(name: str) -> bool:
 
 
 def unlisted_env() -> list[str]:
-    """Every inherited RIVET_* the harness does not read and every BLESS_*: the gate refuses to start while any is set."""
-    return sorted(k for k in os.environ if (k.startswith("RIVET_") and not is_harness_env(k)) or k.startswith("BLESS_"))
+    """Every inherited RIVET_* the harness does not read, every BLESS_* and every NEXTEST_ENV name: the gate refuses to start while any is set."""
+    return sorted(k for k in os.environ
+                  if (k.startswith("RIVET_") and not is_harness_env(k)) or k.startswith("BLESS_") or k in NEXTEST_ENV)
+
+
+def nextest_pinned(env: dict[str, str]) -> dict[str, str]:
+    """`env` without any NEXTEST_ENV name, then retries 0 on the default profile: what a nextest leg of the gate runs under."""
+    return {**{k: v for k, v in env.items() if k not in NEXTEST_ENV}, **NEXTEST_PIN}
+
+
+_NEXTEST_RETRY = re.compile(r"^\s*(TRY \d+ [A-Z][A-Z +]*[A-Z]|FLAKY[A-Z-]*(?: \d+/\d+)?)\s+\[", re.M)
+
+
+def nextest_retries(out: str) -> list[str]:
+    """Every retry line nextest printed (`TRY n FAIL`, `FLAKY a/b`): a test that failed once and was tried again."""
+    return [m.strip() for m in _NEXTEST_RETRY.findall(out)]
 
 
 def run(
@@ -773,7 +802,7 @@ def run(
     cwd: Path | None = None,
 ) -> Proc:
     """Run `argv` (a LIST — no shell, so no quoting or word-splitting bugs)."""
-    full_env = {**os.environ, "RIVET_LOCK_WAIT": "0", **(env or {})}
+    full_env = nextest_pinned({**os.environ, "RIVET_LOCK_WAIT": "0", **(env or {})})
     gated = full_env.get("RIVET_BIN_OVERRIDE", str(rivet_bin())) == str(rivet_bin())
     try:
         p = subprocess.run(
@@ -785,7 +814,11 @@ def run(
             env=full_env,
             cwd=str(cwd) if cwd else None,
         )
-        return Proc(argv, p.returncode, p.stdout, p.stderr, gated)
+        rc, err = p.returncode, p.stderr
+        retried = nextest_retries(f"{p.stdout}\n{p.stderr}") if "nextest" in argv else []
+        if retried:
+            rc, err = rc or 1, f"{err}\nGATE: nextest retried {len(retried)} test(s), a test that needs a second try is red: {retried[0]}"
+        return Proc(argv, rc, p.stdout, err, gated)
     except subprocess.TimeoutExpired as e:
         # TimeoutExpired carries raw bytes even under `text=True`; decode both streams.
         def _text(v: "bytes | str | None") -> str:
@@ -1056,14 +1089,14 @@ def sqlcmd(container: str) -> tuple[str, ...]:
 # A nextest status line: `<STATUS> [ 1.2s] (3/7) <binary> <test>`. The status is the whole
 # run of capitals before `[`, so `FAIL + LEAK` is read whole: matching `(PASS|LEAK) [`
 # found the `LEAK [` inside it and graded a failed, leaky test green.
-_NEXTEST_LINE = re.compile(r"^\s*([A-Z][A-Z +]*[A-Z])\s+\[[^\]]*\] \([^)]*\) \S+ (\S+)", re.M)
+_NEXTEST_LINE = re.compile(r"^\s*([A-Z][A-Z +\d/-]*[A-Z\d])\s+\[[^\]]*\] \([^)]*\) \S+ (\S+)", re.M)
 
 
 def nextest_outcomes(out: str) -> dict[str, str]:
-    """Each test's final nextest status (`PASS`, `LEAK`, `FAIL`, `FAIL + LEAK`, …); `SLOW` is not final."""
+    """Each test's final nextest status (`PASS`, `LEAK`, `FAIL`, `FAIL + LEAK`, `FLAKY a/b`, …); `SLOW` and `TRY n …` are not final."""
     final: dict[str, str] = {}
     for status, name in _NEXTEST_LINE.findall(out):
-        if status != "SLOW":
+        if status != "SLOW" and not status.startswith("TRY "):
             final[name] = status
     return final
 
@@ -1098,6 +1131,8 @@ _NEXTEST_SAMPLE = (
     " FAIL + LEAK [   0.476s] (3/4) rivet-cli::live_suite m::leaky_fail\n"
     "        FAIL [   0.200s] (4/4) rivet-cli::live_suite m::plain_fail\n"
     "        FAIL [   0.200s] (   5/1038) rivet-cli::live_suite m::padded_fail\n"
+    "     TRY 1 FAIL [   0.200s] (6/7) rivet-cli::live_suite m::flaky\n"
+    "    FLAKY 2/2 [   0.400s] (6/7) rivet-cli::live_suite m::flaky\n"
 )
 
 
@@ -1133,13 +1168,15 @@ def nextest_grading_error() -> str | None:
     if nextest_started("    Starting 1038 tests across 1 binary (11 tests skipped)") != 1038:
         return "the `Starting N tests` count is not read"
     seen = set(nextest_outcomes(_NEXTEST_SAMPLE))
-    every = {"m::slow_then_pass", "m::leaky_pass", "m::leaky_fail", "m::plain_fail", "m::padded_fail"}
+    every = {"m::slow_then_pass", "m::leaky_pass", "m::leaky_fail", "m::plain_fail", "m::padded_fail", "m::flaky"}
     if seen != every:
         return f"read {sorted(seen)}, dropped {sorted(every - seen)} (a dropped FAIL line is a silent pass)"
     passed = nextest_passed(_NEXTEST_SAMPLE)
     want = {"m::slow_then_pass", "m::leaky_pass"}
     if passed != want:
-        return f"graded green {sorted(passed)}, want {sorted(want)} (a FAIL + LEAK must stay red)"
+        return f"graded green {sorted(passed)}, want {sorted(want)} (a FAIL + LEAK and a FLAKY must stay red)"
+    if nextest_retries(_NEXTEST_SAMPLE) != ["TRY 1 FAIL", "FLAKY 2/2"]:
+        return f"retries read as {nextest_retries(_NEXTEST_SAMPLE)} (a test tried twice is red)"
     panics = nextest_panics(_NEXTEST_PANIC_SAMPLE)
     want_panics = {"m::plain_fail": "P-00: delivered 6 of 10", "m::oracle_fail": "rig oracle: COUNT(*): source 10, delivered 6"}
     if panics != want_panics:
@@ -1154,7 +1191,7 @@ def verify_nextest_grading(led: "Ledger") -> None:
         led.failed("-", "harness", "nextest-grading", "-", f"nextest parser misgrades: {why}")
     else:
         led.passed("-", "harness", "nextest-grading", "-",
-                   "nextest parser: FAIL + LEAK is red, LEAK green, SLOW not final", "ok")
+                   "nextest parser: FAIL + LEAK and FLAKY are red, LEAK green, SLOW and TRY not final", "ok")
 
 
 def nextest_filter(tests: Sequence[str]) -> str:

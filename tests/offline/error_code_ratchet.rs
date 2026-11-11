@@ -35,7 +35,7 @@ fn bare_bails(text: &str) -> usize {
 
 /// `text` with comments removed and the contents of string and char literals blanked, so braces and
 /// macro names inside them count for nothing.
-fn code_only(text: &str) -> String {
+pub(crate) fn code_only(text: &str) -> String {
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -116,7 +116,7 @@ fn code_only(text: &str) -> String {
 }
 
 /// `text`'s product code: no comments, blank literals, and no `#[cfg(test)]` item (a `mod`, `fn` or `impl` with a body).
-fn product_code(text: &str) -> String {
+pub(crate) fn product_code(text: &str) -> String {
     let code = code_only(text);
     let mut out = String::new();
     let mut rest = code.as_str();
@@ -177,6 +177,7 @@ fn test_only_paths(file: &std::path::Path, text: &str) -> Vec<std::path::PathBuf
     out
 }
 
+/// Every `.rs` file under `dir`, recursively.
 fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     for e in std::fs::read_dir(dir).expect("read src").flatten() {
         let p = e.path();
@@ -188,13 +189,14 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// The uncoded error sites of `src/`'s product code.
-fn uncoded_sites() -> usize {
+/// Every product file under the crate-relative `dir`, in path order, with its product code; test-only modules are left out.
+pub(crate) fn product_sources(dir: &str) -> Vec<(std::path::PathBuf, String)> {
     let mut files = Vec::new();
     rust_files(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir),
         &mut files,
     );
+    files.sort();
     let texts: Vec<(std::path::PathBuf, String)> = files
         .into_iter()
         .map(|f| {
@@ -207,9 +209,20 @@ fn uncoded_sites() -> usize {
         .flat_map(|(f, t)| test_only_paths(f, &code_only(t)))
         .collect();
     texts
-        .iter()
+        .into_iter()
         .filter(|(f, _)| !test_only.iter().any(|t| f.starts_with(t)))
-        .map(|(_, t)| bare_bails(&product_code(t)))
+        .map(|(f, t)| {
+            let code = product_code(&t);
+            (f, code)
+        })
+        .collect()
+}
+
+/// The uncoded error sites of `src/`'s product code.
+fn uncoded_sites() -> usize {
+    product_sources("src")
+        .iter()
+        .map(|(_, code)| bare_bails(code))
         .sum()
 }
 
