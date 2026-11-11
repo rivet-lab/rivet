@@ -43,8 +43,11 @@ pub(crate) fn run_mongo_parallel(
     })?;
 
     let (ranges, pinned) = {
-        let mut probe =
-            MongoSource::connect(&url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?;
+        let mut probe = MongoSource::connect(
+            url.expose(),
+            plan.source.tls.as_ref(),
+            plan.source.mongo.as_ref(),
+        )?;
         if let Some(incarnation) = plan.collection_incarnation.as_deref() {
             probe.pin_incarnation(collection, incarnation);
         }
@@ -89,7 +92,18 @@ pub(crate) fn run_mongo_parallel(
             let dest = std::sync::Arc::clone(&shared_dest);
             fan.spawn(s, format!("worker {w}"), move || {
                 range_worker_pages(
-                    url, plan, key_plan, kp, stamp, w, lo, hi, pinned, dest, ext, fan_r,
+                    url.expose(),
+                    plan,
+                    key_plan,
+                    kp,
+                    stamp,
+                    w,
+                    lo,
+                    hi,
+                    pinned,
+                    dest,
+                    ext,
+                    fan_r,
                 )
             });
         }

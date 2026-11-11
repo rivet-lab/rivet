@@ -1,3 +1,4 @@
+mod anchored_files;
 mod azure;
 mod codes;
 mod columns_from;
@@ -793,6 +794,7 @@ exports:
     )
     .unwrap();
     let url = cfg.source.resolve_url().unwrap();
+    let url = url.expose();
     assert_eq!(url, "postgresql://test:test@localhost/db");
     unsafe {
         std::env::remove_var("RIVET_TEST_DB_URL");
@@ -1011,6 +1013,7 @@ exports:
     )
     .unwrap();
     let url = cfg.source.resolve_url().unwrap();
+    let url = url.expose();
     assert_eq!(url, "postgresql://admin:s3cret@db.example.com:5433/mydb");
 }
 
@@ -1034,6 +1037,7 @@ exports:
     )
     .unwrap();
     let url = cfg.source.resolve_url().unwrap();
+    let url = url.expose();
     assert_eq!(url, "mysql://root@localhost:3306/app");
 }
 
@@ -1061,6 +1065,7 @@ exports:
     )
     .unwrap();
     let url = cfg.source.resolve_url().unwrap();
+    let url = url.expose();
     assert_eq!(url, "postgresql://rivet:topSecret@localhost:5432/rivet");
     unsafe {
         std::env::remove_var("RIVET_TEST_DBPASS");

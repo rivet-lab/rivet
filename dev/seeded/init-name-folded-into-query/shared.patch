@@ -1,0 +1,20 @@
+diff --git a/src/init/yaml_scaffold.rs b/src/init/yaml_scaffold.rs
+--- a/src/init/yaml_scaffold.rs
++++ b/src/init/yaml_scaffold.rs
+@@ -700,16 +700,6 @@
+ 
+ /// The `query:` lines reading `col_list` from `relation`: a folded block, or one double-quoted scalar when a name holds a character the fold would rewrite.
+ fn export_query_lines(col_list: &str, relation: &str) -> Vec<String> {
+-    if col_list
+-        .chars()
+-        .chain(relation.chars())
+-        .any(is_yaml_special)
+-    {
+-        return vec![format!(
+-            "    query: {}",
+-            yaml_double_quote(&format!("SELECT {col_list} FROM {relation}"))
+-        )];
+-    }
+     vec![
+         "    query: >".to_string(),
+         format!("      SELECT {col_list}"),

@@ -452,7 +452,8 @@ fn reject_unrecoverable_inline_url(artifact: &PlanArtifact) -> Result<()> {
 
     let url_redacted = source
         .url
-        .as_deref()
+        .as_ref()
+        .map(|u| u.expose())
         .is_some_and(|u| u.contains("REDACTED@") || crate::redact::has_keyword_password(u));
     if !url_redacted {
         return Ok(());
@@ -558,7 +559,7 @@ mod tests {
                    user: Option<&str>| {
             let mut a = fresh_artifact();
             let s = &mut a.resolved_plan.source;
-            s.url = url.map(str::to_string);
+            s.url = url.map(Into::into);
             s.url_env = url_env.map(str::to_string);
             s.url_file = None;
             s.password_env = password_env.map(str::to_string);

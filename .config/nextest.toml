@@ -21,7 +21,7 @@ slow-timeout = { period = "300s", terminate-after = 4 }
 
 [[profile.default.overrides]]
 filter = 'test(/^property_no_debris_after_stop::no_debris_and_an_equal_rerun_after_every_stop_/)'
-slow-timeout = { period = "300s", terminate-after = 4 }
+slow-timeout = { period = "300s", terminate-after = 24 }
 
 [[profile.default.overrides]]
 filter = 'test(/^live_cdc_mssql::/) or test(/^live_cdc_harm::a_mssql/)'

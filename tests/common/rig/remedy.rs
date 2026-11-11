@@ -311,6 +311,7 @@ impl Rig {
             dest_override: self.dest_override.clone(),
             dest_precreate: self.dest_precreate,
             url_env: self.url_env.clone(),
+            url_file: self.url_file.clone(),
             extra_exports: self.extra_exports.clone(),
             oracle_container_dir: self.oracle_container_dir.clone(),
             config_dir_override: self.config_dir_override.clone(),

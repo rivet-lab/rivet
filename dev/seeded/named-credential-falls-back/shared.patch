@@ -6,7 +6,7 @@ index 0fabe968..0fe30e79 100644
              Self::from_yaml(&resolved).map_err(|e| e.context(format!("config file '{}'", path)))?;
          config.record_queries_as_written(&contents);
          config.anchor_paths(path, std::env::current_dir().ok())?;
--        config.anchor_credential_files(path, std::env::current_dir().ok())?;
+-        config.anchor_files(path, std::env::current_dir().ok())?;
          Ok(config)
      }
  

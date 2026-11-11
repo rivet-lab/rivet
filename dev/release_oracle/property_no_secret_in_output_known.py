@@ -27,7 +27,39 @@ class KnownLeak:
         return all(f == ANY or v in f for f, v in pairs)
 
 
-KNOWN_LEAKS: tuple[KnownLeak, ...] = ()
+KNOWN_LEAKS: tuple[KnownLeak, ...] = (
+    KnownLeak(
+        reason="2026-11-10 PR-IDENTITY: the S3 operator (src/destination/s3.rs build_operator) leaves reqsign reading the "
+               "ambient AWS_* env and never builds an anonymous signer, so a configured key is signed with the ambient "
+               "session token and allow_anonymous still signs; closes when the S3 builder disables env/config load and "
+               "honours allow_anonymous",
+        expires="2026-12-10",
+        commands=("run", "validate", "doctor"),
+        slots=("dest",),
+        spellings=("s3:access_key_env", "s3:access_key_env+secret_key_env", "s3:allow_anonymous",
+                   "s3:access_key_env+allow_anonymous", "s3:session_token_env+allow_anonymous"),
+        sinks=("request",),
+    ),
+    KnownLeak(
+        reason="2026-11-10 PR-HOSTILE-TEXT (VP-3): an endpoint `http://LAN:P\\@127.0.0.1:Q` passes the loopback check "
+               "while the HTTP client dials LAN:P, which receives the signed S3 request; closes when the endpoint is "
+               "judged by the parsed URL the client dials",
+        expires="2026-12-10",
+        commands=("run", "validate", "doctor"),
+        slots=("dest",),
+        spellings=("s3:access_key_env@backslash-at",),
+        sinks=("request",),
+    ),
+    KnownLeak(
+        reason="2026-11-10 PR-CRED: the Azure SAS token rides the request URI that the OpenDAL error context carries into "
+               "the retry WARN and the error text; closes when destination error text masks the SAS query",
+        expires="2026-12-10",
+        commands=("run", "validate"),
+        slots=("dest",),
+        spellings=("azure:sas_token_env",),
+        sinks=("stderr", "file"),
+    ),
+)
 
 
 def match(cell: dict[str, str], sink_kinds: set[str], today: _dt.date | None = None) -> tuple[list[KnownLeak], bool]:

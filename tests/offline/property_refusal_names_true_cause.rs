@@ -3,8 +3,10 @@
 use rivet::config::SourceType;
 use rivet::error::codes;
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 const RIVET_BIN: &str = env!("CARGO_BIN_EXE_rivet");
 const MATRIX: &str = "refusal_names_true_cause";
@@ -18,8 +20,13 @@ const R_CMD_ORDER: &str = "2026-11-10: plan, load, compact, reconcile and repair
 const R_CMD_ACCEPT: &str = "2026-11-10: validate, metrics and journal exit 0 on a config that run refuses; closes when they refuse with the same code";
 const R_REMEDY_REPORT: &str = "2026-11-10: the remedy names `rivet reconcile --report`, which reconcile does not accept; closes when the remedy names repair's --report or reconcile's --output";
 const R_REMEDY_FORCE: &str = "2026-11-10: the stale-plan remedy names --force without naming `rivet apply`; closes when the message names the apply command";
+const R_STATE_UNREAD: &str = "2026-11-10: validate never opens the state, so over a corrupt state it answers legacy_run with exit 0; closes when validate reads run_status for the prefix (owner Q1 2026-11-01) and refuses a corrupt state as STATE_FILE_CORRUPT";
+const R_COPY_EMPTY: &str = "2026-11-10: state copy reads a corrupt SQLite state as empty and stops RIVET_STATE_COPY_SOURCE_EMPTY; closes when the copy opens the file through the corrupt-state check";
+const R_WORDING_GONE: &str = "2026-11-10: the lost-checkpoint remedy leads with a bare `run the export again` while exit 5 tells a scheduler not to retry; closes when the remedy names the operator's decision first or the exit becomes retryable";
 const R_FIELD_MONGO: &str = "2026-11-10: mongo accepts batch_size 0, an empty or NUL destination path and a 300-char export name with exit 0; closes when each is refused at config load";
-
+const R_READER_CODE: &str = "2026-11-10: metrics and journal repeat a stopped run's words without the code the run printed; closes when the run history records the refusal code beside its text";
+const R_WORD_CLASSIFY: &str = "2026-11-10: a missing MySQL table named after a classifier word is refused as that word's cause (STATEMENT_TIMEOUT for `max_execution_time`); closes when the classifier reads the server's error number, not words that echo the relation name";
+const R_PREFIX_GONE: &str = "2026-11-10: validate answers exit 0 when the prefix of a recorded delivery is removed; closes when validate refuses a recorded delivery whose prefix holds no manifest";
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
 const ACCEPTED_RED: &[(&str, &str)] = &[
     ("cause/RIVET_SOURCE_CONNECT_FAILED/mongo", R_CONNECT),
@@ -83,10 +90,83 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_FIELD_MONGO,
     ),
     ("remedy/RIVET_CLI_REPORT_INVALID", R_REMEDY_REPORT),
+    (
+        "site/src/error.rs/rivet_reconcile_--report",
+        R_REMEDY_REPORT,
+    ),
+    ("wording/RIVET_STATE_CHUNK_CHECKPOINT_GONE", R_WORDING_GONE),
+    ("guard/validate/state_corrupt/*", R_STATE_UNREAD),
+    ("guard/validate_--export_a/state_corrupt/*", R_STATE_UNREAD),
+    ("guard/state_copy_--to_URL/state_corrupt/*", R_COPY_EMPTY),
     ("remedy/RIVET_PLAN_ARTIFACT_STALE", R_REMEDY_FORCE),
     ("source/RIVET_VERIFY_*", R_VERIFY),
     ("source/RIVET_VALUE_TOO_LARGE", R_PREFIX),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/postgres/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/postgres/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/postgres/journal",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mysql/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mysql/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mysql/journal",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mssql/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mssql/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/mssql/journal",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/oracle/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/oracle/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/oracle/journal",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_COLLECTION_NOT_FOUND/mongo/metrics",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_COLLECTION_NOT_FOUND/mongo/metrics_json",
+        R_READER_CODE,
+    ),
+    (
+        "reader/live/RIVET_SOURCE_COLLECTION_NOT_FOUND/mongo/journal",
+        R_READER_CODE,
+    ),
+    ("word/max_execution_time/mysql", R_WORD_CLASSIFY),
+    ("guard/validate/prefix_gone/*", R_PREFIX_GONE),
 ];
+
+/// Cell families only the live mode emits; their ledger entries are not stale in an offline run.
+const STAND_AXES: &[&str] = &["word/", "reader/live/", "guard/validate/prefix_gone/"];
 
 /// Whether a ledger key accepts a RED cell: an exact key, or a `prefix*` pattern.
 fn accepts(key: &str, cell: &str) -> bool {
@@ -373,7 +453,7 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_LOAD_SPLIT_GENERATIONS_MIXED", Inj::Stand),
     ("RIVET_LOAD_SPEC_MISSING", Inj::Stand),
     ("RIVET_MCP_REQUEST_INVALID", Inj::Stand),
-    ("RIVET_PLAN_ARTIFACT_INVALID", Inj::Stand),
+    ("RIVET_PLAN_ARTIFACT_INVALID", Inj::Offline(plan_garbage)),
     ("RIVET_PLAN_CHUNK_KEY_UNUSABLE", Inj::Stand),
     ("RIVET_STATE_BACKEND_FAILED", Inj::Stand),
     ("RIVET_STATE_FILE_CORRUPT", Inj::Offline(state_corrupt)),
@@ -736,6 +816,33 @@ fn state_unwritable(e: SourceType) -> Probe {
     p
 }
 
+fn plan_garbage(_e: SourceType) -> Probe {
+    artifact("not json at all")
+}
+
+/// `rivet apply p.json` over a plan file with the given bytes.
+fn artifact(body: &str) -> Probe {
+    Probe {
+        yaml: String::new(),
+        argv: cmd(&["apply", "p.json"]),
+        env: vec![],
+        files: vec![("p.json", body.to_string())],
+        witness: vec!["p.json".to_string()],
+        absent: vec![],
+    }
+}
+
+/// Plan files `rivet plan` never wrote, each refused as an invalid artifact.
+const ARTIFACTS: &[(&str, &str)] = &[
+    ("empty", ""),
+    ("empty_object", "{}"),
+    ("array", "[]"),
+    ("truncated", "{\"rivet_version\": \"0."),
+    ("yaml", "source:\n  type: postgres\nexports: []\n"),
+    ("null", "null"),
+    ("nul_bytes", "\0\0\0"),
+];
+
 /// A refusal-by-design cause with no registry code: clap's own usage errors.
 const UNCODED: &[(&str, &[&str])] = &[
     ("unknown_flag", &["check", "--no-such-flag-pm-p4"]),
@@ -1057,6 +1164,12 @@ fn offline_axes(
             };
             out.push((format!("cmd/{sub}/{id}/{eng}"), verdict(v)));
         }
+        let mut q = p.clone();
+        q.argv = cmd(&["apply", "CFG"]);
+        out.push((
+            format!("cmd/apply/{id}/{eng}"),
+            verdict(grade(id, doc, &q, &execute(&q))),
+        ));
     }
 }
 
@@ -1087,11 +1200,31 @@ fn verdict(r: Result<String, String>) -> Verdict {
 
 /// Runs the binary in a scratch directory with the probe's config, files and env.
 fn execute(p: &Probe) -> Out {
+    execute_then(p, &[]).0
+}
+
+/// Runs the probe, then each follow-up command in the same directory, config and env.
+fn execute_then(p: &Probe, then: &[Vec<String>]) -> (Out, Vec<Out>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let cfg = dir.path().join("c.yaml");
+    let first = execute_in(dir.path(), p);
+    let rest = then
+        .iter()
+        .map(|argv| {
+            let mut q = p.clone();
+            q.argv = argv.clone();
+            q.files = vec![];
+            execute_in(dir.path(), &q)
+        })
+        .collect();
+    (first, rest)
+}
+
+/// Runs the binary once in `dir` with the probe's config, files and env.
+fn execute_in(dir: &Path, p: &Probe) -> Out {
+    let cfg = dir.join("c.yaml");
     std::fs::write(&cfg, &p.yaml).expect("write config");
     for (name, body) in &p.files {
-        std::fs::write(dir.path().join(name), body).expect("write file");
+        std::fs::write(dir.join(name), body).expect("write file");
     }
     let args: Vec<String> = p
         .argv
@@ -1106,7 +1239,7 @@ fn execute(p: &Probe) -> Out {
         .collect();
     let mut c = Command::new(RIVET_BIN);
     c.args(&args)
-        .current_dir(dir.path())
+        .current_dir(dir)
         .env_remove("RIVET_STATE_URL")
         .env_remove("RIVET_TEST_STATE_URL");
     for (k, v) in &p.env {
@@ -1181,6 +1314,18 @@ fn grade(id: &str, doc: &Doc, p: &Probe, o: &Out) -> Result<String, String> {
         return Err(format!("{why} in \"{}\"", brief(section)));
     }
     Ok(format!("exit={} \"{}\"", o.exit, brief(section)))
+}
+
+/// Grades a run against whatever registry code it printed: documented, in its exit set, naming the witness.
+fn grade_coded(docs: &BTreeMap<String, Doc>, p: &Probe, o: &Out) -> Result<String, String> {
+    let section = error_section(&o.stderr).unwrap_or("");
+    let Some(id) = printed_code(section) else {
+        return grade("RIVET_?", &doc_exit(&[]), p, o);
+    };
+    let Some(doc) = docs.get(id) else {
+        return Err(format!("printed {id}, absent from errors.md"));
+    };
+    grade(id, doc, p, o)
 }
 
 /// The first message-shape fault in a refusal: a Rust Debug repr or an equal `N exceeds N` pair.
@@ -1265,34 +1410,67 @@ fn grade_json(id: &str, o: &Out) -> Result<String, String> {
     }
 }
 
-/// The subcommands clap lists under `rivet --help`, and the ones that take `--config`.
+/// One leaf of `rivet schema cli --json`: its path and whether the refusal invariant applies to its role.
+struct RegistryLeaf {
+    path: String,
+    refusal: bool,
+}
+
+/// Every leaf command with its role's invariants, read from the binary's own registry.
+fn registry() -> Vec<RegistryLeaf> {
+    let o = Command::new(RIVET_BIN)
+        .args(["schema", "cli", "--json"])
+        .output()
+        .expect("spawn rivet");
+    assert!(o.status.success(), "rivet schema cli --json failed");
+    let json: serde_json::Value = serde_json::from_slice(&o.stdout).expect("registry json");
+    json["leaves"]
+        .as_array()
+        .expect("leaves")
+        .iter()
+        .map(|l| RegistryLeaf {
+            path: l["path"].as_str().expect("path").to_string(),
+            refusal: l["invariants"]["refusal_names_true_cause"]
+                .as_bool()
+                .expect("refusal flag"),
+        })
+        .collect()
+}
+
+/// The top-level commands of the registry, and the one-word leaves whose role grades refusals and that take `--config`.
 fn subcommands() -> (Vec<String>, Vec<String>) {
-    let top = help(&[]);
-    let mut subs = vec![];
-    let mut in_block = false;
-    for line in top.lines() {
-        if line.starts_with("Commands:") {
-            in_block = true;
-            continue;
-        }
-        if in_block {
-            if line.trim().is_empty() {
-                break;
-            }
-            if let Some(name) = line.split_whitespace().next()
-                && !name.starts_with('-')
-                && name != "help"
-            {
-                subs.push(name.to_string());
-            }
+    let leaves = registry();
+    let mut subs: Vec<String> = vec![];
+    for l in &leaves {
+        let top = l.path.split(' ').next().unwrap_or_default().to_string();
+        if !subs.contains(&top) {
+            subs.push(top);
         }
     }
-    let with_config = subs
+    let with_config = leaves
         .iter()
-        .filter(|s| help(&[s.as_str()]).contains("--config"))
-        .cloned()
+        .filter(|l| l.refusal && !l.path.contains(' '))
+        .filter(|l| help(&[l.path.as_str()]).contains("--config"))
+        .map(|l| l.path.clone())
         .collect();
     (subs, with_config)
+}
+
+/// A NOT_GRADED row for each leaf whose role grades refusals and that no `cmd/` cell drives.
+fn ungraded_leaves(commands: &[String]) -> Vec<(String, Verdict)> {
+    registry()
+        .into_iter()
+        .filter(|l| l.refusal && !commands.contains(&l.path))
+        .map(|l| {
+            (
+                format!("cmd/{}/-", l.path.replace(' ', "-")),
+                Verdict::NotGraded(format!(
+                    "role says refusals are graded; no cell drives `rivet {}` with a faulty config",
+                    l.path
+                )),
+            )
+        })
+        .collect()
 }
 
 /// The `--help` text of `rivet <args>`, from the binary itself.
@@ -1373,6 +1551,433 @@ fn grade_remedy(doc: &Doc, subs: &[String]) -> Result<String, String> {
     Ok(format!("{} flag(s) named, all parse", flags.len()))
 }
 
+/// Whether a remedy leads with repeating the same command, nothing changed first.
+fn bare_retry(action: &str) -> bool {
+    regex::Regex::new(r"(?i)^(run( it| the export| the load)? again|retry|wait)\b")
+        .expect("re")
+        .is_match(action.trim())
+}
+
+/// Grades a code's remedy against its exit set: a bare retry is retryable, exit 2 names a retry, exit 6 says report.
+fn grade_wording(doc: &Doc) -> Result<String, String> {
+    let a = doc.action.to_lowercase();
+    if bare_retry(&doc.action) && !doc.exits.contains(&2) {
+        return Err(format!(
+            "remedy leads with a bare retry, exit {:?} is not retryable: \"{}\"",
+            doc.exits,
+            brief(&doc.action)
+        ));
+    }
+    let retry_words = ["again", "retry", "wait", "re-run"];
+    if doc.exits == BTreeSet::from([2]) && !retry_words.iter().any(|w| a.contains(w)) {
+        return Err(format!(
+            "exit 2 only, the remedy names no retry: \"{}\"",
+            brief(&doc.action)
+        ));
+    }
+    if doc.exits.contains(&6) && !a.contains("report") {
+        return Err(format!(
+            "exit 6, the remedy does not say report: \"{}\"",
+            brief(&doc.action)
+        ));
+    }
+    Ok(format!("exit {:?}: \"{}\"", doc.exits, brief(&doc.action)))
+}
+
+/// Every `rivet <command> --flag` a non-comment line of src names, keyed by file and command.
+fn raise_sites() -> BTreeMap<String, String> {
+    let re = regex::Regex::new(r"`(rivet [^`]*--[a-z][^`]*)`").expect("re");
+    let mut files = vec![];
+    rs_files(&root().join("src"), &mut files);
+    let mut out = BTreeMap::new();
+    for f in files {
+        let rel = f
+            .strip_prefix(root())
+            .expect("under root")
+            .display()
+            .to_string();
+        for line in std::fs::read_to_string(&f).expect("read").lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for c in re.captures_iter(line) {
+                let words: Vec<&str> = c[1].split_whitespace().collect();
+                out.insert(format!("site/{rel}/{}", words.join("_")), c[1].to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Commands that read a run back after it stopped, and whether each prints the run's error.
+const READERS: &[(&str, &[&str], bool)] = &[
+    ("metrics", &["metrics", "-c", "CFG", "--export", "a"], true),
+    ("metrics_json", &["metrics", "-c", "CFG", "--json"], true),
+    ("journal", &["journal", "-c", "CFG", "--export", "a"], true),
+    ("state_runs", &["state", "runs", "-c", "CFG"], false),
+];
+
+/// The refusal text after `Error: ` and its `[CODE] `, as a reader would repeat it.
+fn refusal_text(stderr: &str) -> Option<&str> {
+    let section = error_section(stderr)?.strip_prefix("Error: ")?;
+    let body = match section.strip_prefix('[') {
+        Some(rest) => rest.split_once("] ").map_or(rest, |(_, b)| b),
+        None => section,
+    };
+    Some(body.lines().next().unwrap_or("").trim())
+}
+
+/// Grades a reader after a stopped run: it exits 0, shows the run failed, and repeats the run's code and words.
+fn grade_reader(run: &Out, carries: bool, o: &Out) -> Result<String, String> {
+    let Some(text) = refusal_text(&run.stderr) else {
+        return Err(format!("the run printed no refusal, exit={}", run.exit));
+    };
+    if o.exit != 0 {
+        return Err(format!(
+            "reader exit {}: \"{}\"",
+            o.exit,
+            brief(o.stderr.trim())
+        ));
+    }
+    let all = format!("{}{}", o.stdout, o.stderr);
+    if !all.contains("failed") {
+        return Err(format!("no failed run in \"{}\"", brief(&all)));
+    }
+    if carries {
+        if let Some(code) = error_section(&run.stderr).and_then(printed_code)
+            && !all.contains(code)
+        {
+            return Err(format!("the run printed {code}, the reader does not"));
+        }
+        let head: String = text.chars().take(48).collect();
+        if !all.contains(&head) {
+            return Err(format!("the reader does not repeat \"{head}\""));
+        }
+    }
+    Ok(format!("failed, \"{}\"", brief(text)))
+}
+
+/// One cell per reader after a run that stopped on the probe's cause.
+fn reader_cells(prefix: &str, p: &Probe, out: &mut Vec<(String, Verdict)>) {
+    let then: Vec<Vec<String>> = READERS.iter().map(|(_, a, _)| cmd(a)).collect();
+    let (run, reads) = execute_then(p, &then);
+    for ((name, _, carries), o) in READERS.iter().zip(&reads) {
+        out.push((
+            format!("{prefix}/{name}"),
+            verdict(grade_reader(&run, *carries, o)),
+        ));
+    }
+}
+
+/// Grades one cause across engines: every engine prints the same code and exits the same.
+fn grade_uniform(runs: &[(&str, String, i32)]) -> Result<String, String> {
+    let shapes: BTreeSet<(&str, i32)> = runs.iter().map(|(_, c, x)| (c.as_str(), *x)).collect();
+    let list = runs
+        .iter()
+        .map(|(e, c, x)| format!("{e}={c}/{x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if shapes.len() == 1 {
+        Ok(list)
+    } else {
+        Err(format!("engines disagree: {list}"))
+    }
+}
+
+/// Commands outside `rivet state` that read the state a guard decides on.
+const STATE_READERS: &[&[&str]] = &[
+    &["validate"],
+    &["validate", "--export", "a"],
+    &["run", "--validate"],
+    &["metrics"],
+    &["journal", "--export", "a"],
+];
+
+const COPY_TARGET: &str = "postgresql://127.0.0.1:1/pm_p4";
+
+/// Every state-reading command line: `STATE_READERS` and each `rivet state` subcommand with its required arguments.
+fn state_commands() -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = STATE_READERS.iter().map(|a| cmd(a)).collect();
+    let top = help(&["state"]);
+    let mut in_block = false;
+    for line in top.lines() {
+        if line.starts_with("Commands:") {
+            in_block = true;
+            continue;
+        }
+        if !in_block || line.trim().is_empty() {
+            in_block = in_block && !line.trim().is_empty();
+            continue;
+        }
+        let Some(sub) = line.split_whitespace().next() else {
+            continue;
+        };
+        if sub == "help" {
+            continue;
+        }
+        let text = help(&["state", sub]);
+        let usage = text.lines().find(|l| l.starts_with("Usage:")).unwrap_or("");
+        let mut argv = cmd(&["state", sub]);
+        if usage.contains("--export <") {
+            argv.extend(cmd(&["--export", "a"]));
+        }
+        if usage.contains("--run-id <") {
+            argv.extend(cmd(&["--run-id", "x"]));
+        }
+        if text.contains("--to <URL>") {
+            argv.extend(cmd(&["--to", COPY_TARGET]));
+        }
+        out.push(argv);
+    }
+    out
+}
+
+/// One cell per state-reading command over a corrupt state file: each refuses as STATE_FILE_CORRUPT.
+fn guard_cells(docs: &BTreeMap<String, Doc>, out: &mut Vec<(String, Verdict)>) {
+    let id = "RIVET_STATE_FILE_CORRUPT";
+    let doc = docs.get(id).expect("corrupt-state code in errors.md");
+    let commands = state_commands();
+    for e in ENGINES {
+        for argv in &commands {
+            let mut p = state_corrupt(e);
+            p.argv = argv.clone();
+            p.argv.extend(cmd(&["-c", "CFG"]));
+            let key = format!(
+                "guard/{}/state_corrupt/{}",
+                argv.join("_").replace(COPY_TARGET, "URL"),
+                engine_name(e)
+            );
+            out.push((key, verdict(grade(id, doc, &p, &execute(&p)))));
+        }
+    }
+}
+
+/// A delivered run whose prefix is then removed: validate must stop as data integrity, not answer clean.
+fn prefix_gone_cell(e: SourceType, out: &mut Vec<(String, Verdict)>) {
+    let key = format!("guard/validate/prefix_gone/{}", engine_name(e));
+    let sel = match e {
+        SourceType::Postgres | SourceType::Mysql | SourceType::Mssql => "SELECT 1 AS x",
+        SourceType::Oracle => "SELECT 1 AS x FROM dual",
+        SourceType::Mongo => {
+            out.push((
+                key,
+                Verdict::NotGraded(
+                    "a delivered mongo run needs a seeded collection the stand registry does not name"
+                        .to_string(),
+                ),
+            ));
+            return;
+        }
+    };
+    let p = stand_run(e, &format!("    query: '{sel}'\n"), &[]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let run = execute_in(dir.path(), &p);
+    if run.exit != 0 {
+        out.push((
+            key,
+            Verdict::NotGraded(format!(
+                "the delivering run did not deliver, exit={} \"{}\"",
+                run.exit,
+                brief(run.stderr.trim())
+            )),
+        ));
+        return;
+    }
+    let _ = std::fs::remove_dir_all(dir.path().join("out"));
+    let mut q = p.clone();
+    q.argv = cmd(&["validate", "-c", "CFG"]);
+    let o = execute_in(dir.path(), &q);
+    let v = if o.exit == 3 && error_section(&o.stderr).and_then(printed_code).is_some() {
+        Ok(format!(
+            "exit=3 \"{}\"",
+            brief(error_section(&o.stderr).unwrap_or(""))
+        ))
+    } else {
+        Err(format!(
+            "prefix of a recorded delivery removed: exit={} \"{}{}\"",
+            o.exit,
+            brief(o.stdout.trim()),
+            brief(o.stderr.trim())
+        ))
+    };
+    out.push((key, verdict(v)));
+}
+
+/// Whether the stand axes run: the live mode sets it under dev/live_slot.
+fn stand_on() -> bool {
+    std::env::var("RIVET_PM_P4_STAND").is_ok_and(|v| v == "1")
+}
+
+/// The stand URL of an engine's batch source: dev/stand/registry.yaml, and tests/common/env.rs for Oracle.
+fn stand_url(e: SourceType) -> String {
+    let text = std::fs::read_to_string(root().join("dev/stand/registry.yaml")).expect("registry");
+    let reg: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).expect("registry yaml");
+    let from = |k: &str| {
+        reg["sources"][k]["url"]
+            .as_str()
+            .expect("stand url")
+            .to_string()
+    };
+    match e {
+        SourceType::Postgres => from("postgres"),
+        SourceType::Mysql => from("mysql"),
+        SourceType::Mssql => from("mssql"),
+        SourceType::Mongo => format!("{}/rivet", from("mongo")),
+        SourceType::Oracle => {
+            let env = std::fs::read_to_string(root().join("tests/common/env.rs")).expect("env.rs");
+            let line = env
+                .lines()
+                .find(|l| l.starts_with("pub const ORACLE_URL: &str = \""))
+                .expect("ORACLE_URL in tests/common/env.rs");
+            line.split('"').nth(1).expect("quoted url").to_string()
+        }
+    }
+}
+
+/// Whether something listens at the URL's host and port: a closed port is the stand down, not a verdict.
+fn listening(url: &str) -> bool {
+    let rest = url.split("://").nth(1).unwrap_or("");
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+    let hp = rest.split(['/', '?']).next().unwrap_or("");
+    hp.to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok())
+}
+
+/// A `rivet run` of export `a` reading a relation named `name` that does not exist on the stand.
+fn stand_missing(e: SourceType, name: &str) -> Probe {
+    let sel = match e {
+        SourceType::Postgres | SourceType::Oracle => {
+            format!("    query: 'SELECT * FROM \"{name}\"'\n")
+        }
+        SourceType::Mysql => format!("    query: 'SELECT * FROM `{name}`'\n"),
+        SourceType::Mssql => format!("    query: 'SELECT * FROM [{name}]'\n"),
+        SourceType::Mongo => format!("    table: \"{name}\"\n"),
+    };
+    stand_run(e, &sel, &[name])
+}
+
+/// A `rivet run` of export `a` on the engine's stand with the given selector lines.
+fn stand_run(e: SourceType, select: &str, witness: &[&str]) -> Probe {
+    Probe {
+        yaml: format!(
+            "source:\n  type: {}\n  url: \"{}\"\nexports:\n{}",
+            engine_name(e),
+            stand_url(e),
+            export("a", select)
+        ),
+        argv: cmd(&["run", "-c", "CFG"]),
+        env: vec![],
+        files: vec![],
+        witness: witness.iter().map(|w| w.to_string()).collect(),
+        absent: vec![],
+    }
+}
+
+/// The code a missing relation is refused with, one arm per engine.
+fn missing_code(e: SourceType) -> &'static str {
+    match e {
+        SourceType::Postgres | SourceType::Mysql | SourceType::Mssql | SourceType::Oracle => {
+            "RIVET_SOURCE_TABLE_NOT_FOUND"
+        }
+        SourceType::Mongo => "RIVET_SOURCE_COLLECTION_NOT_FOUND",
+    }
+}
+
+/// The text classifiers whose needles the word axis names a missing relation after.
+const CLASSIFIERS: &[(&str, &str)] = &[
+    ("src/error/retry.rs", "classify_error"),
+    ("src/pipeline/job.rs", "classify_error_message"),
+    ("src/preflight/doctor.rs", "categorize_source_error"),
+    ("src/preflight/doctor.rs", "categorize_dest_error"),
+];
+
+/// Every `contains("…")` needle in the body of each classifier.
+fn needles() -> BTreeSet<String> {
+    let lit = regex::Regex::new(r#"contains\("([^"]+)"\)"#).expect("re");
+    let mut out = BTreeSet::new();
+    for (file, name) in CLASSIFIERS {
+        let text = std::fs::read_to_string(root().join(file)).expect("classifier source");
+        let start = text
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{file}: no fn {name}"));
+        let body = &text[start..];
+        let end = body.find("\n}\n").expect("fn end");
+        for c in lit.captures_iter(&body[..end]) {
+            out.insert(c[1].to_string());
+        }
+    }
+    out
+}
+
+/// Whether a name passes the `table:` identifier gate (src/config/export.rs).
+fn identifier(name: &str) -> bool {
+    let mut c = name.chars();
+    c.next()
+        .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
+}
+
+/// Whether a needle can be spelled as a quoted relation name on every engine.
+fn portable(needle: &str) -> bool {
+    needle.len() >= 3
+        && needle
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || " _-".contains(c))
+}
+
+/// The stand-only cells of one engine: a classifier word in a missing relation's name keeps its code and exit.
+fn stand_axes(e: SourceType, docs: &BTreeMap<String, Doc>, out: &mut Vec<(String, Verdict)>) {
+    let eng = engine_name(e);
+    if !stand_on() {
+        out.push((
+            format!("word/*/{eng}"),
+            Verdict::NotGraded("reads the live stand; the live mode grades it".to_string()),
+        ));
+        return;
+    }
+    let url = stand_url(e);
+    if !listening(&url) {
+        out.push((
+            format!("word/*/{eng}"),
+            Verdict::NotGraded(format!("the {eng} stand does not listen")),
+        ));
+        return;
+    }
+    let id = missing_code(e);
+    let doc = docs.get(id).expect("missing-relation code in errors.md");
+    prefix_gone_cell(e, out);
+    reader_cells(
+        &format!("reader/live/{id}/{eng}"),
+        &stand_missing(e, "pm_p4_absent"),
+        out,
+    );
+    let mut names = vec!["pm_p4_absent".to_string()];
+    names.extend(needles());
+    for name in names {
+        let key = format!("word/{}/{eng}", name.replace(' ', "_"));
+        if !portable(&name) {
+            out.push((
+                key,
+                Verdict::NotGraded("not a portable quoted relation name".to_string()),
+            ));
+            continue;
+        }
+        if e == SourceType::Mongo && !identifier(&name) {
+            out.push((
+                key,
+                Verdict::NotGraded(
+                    "a MongoDB `table:` takes identifier segments only and has no `query:`; the config refuses this name before the reader".to_string(),
+                ),
+            ));
+            continue;
+        }
+        let p = stand_missing(e, &name);
+        out.push((key, verdict(grade(id, doc, &p, &execute(&p)))));
+    }
+}
+
 enum Verdict {
     Pass(String),
     Red(String),
@@ -1417,6 +2022,7 @@ fn cells() -> Vec<(String, Verdict)> {
         };
         out.push((format!("source/{id}"), v));
     }
+    let mut seen: BTreeMap<&str, Vec<(&str, String, i32)>> = BTreeMap::new();
     for (id, inj) in INJECTORS {
         let Some(doc) = docs.get(*id) else { continue };
         match inj {
@@ -1432,6 +2038,13 @@ fn cells() -> Vec<(String, Verdict)> {
                     }
                     let p = f(e);
                     let o = execute(&p);
+                    let printed = error_section(&o.stderr)
+                        .and_then(printed_code)
+                        .unwrap_or("uncoded")
+                        .to_string();
+                    seen.entry(*id)
+                        .or_default()
+                        .push((engine_name(e), printed, o.exit));
                     let v = verdict(grade(id, doc, &p, &o));
                     out.push((format!("cause/{id}/{}", engine_name(e)), v));
                     offline_axes(id, doc, e, &p, &commands, &mut out);
@@ -1451,12 +2064,15 @@ fn cells() -> Vec<(String, Verdict)> {
             }
             Inj::Internal => {
                 let ev = format!(
-                    "kind {}: an invariant, no operator cause to inject",
+                    "kind {}: an invariant with no operator cause; no test hook raises it (RIVET_TEST_PANIC_AT simulates a crash, not this stop), grading needs a product hook",
                     doc.kind
                 );
                 out.push((format!("cause/{id}/-"), Verdict::NotGraded(ev)));
             }
         }
+    }
+    for (id, runs) in &seen {
+        out.push((format!("uniform/{id}"), verdict(grade_uniform(runs))));
     }
     for (id, label, f) in FIELDS {
         let Some(doc) = docs.get(*id) else { continue };
@@ -1474,7 +2090,38 @@ fn cells() -> Vec<(String, Verdict)> {
     }
     for (id, doc) in &docs {
         out.push((format!("remedy/{id}"), verdict(grade_remedy(doc, &subs))));
+        out.push((format!("wording/{id}"), verdict(grade_wording(doc))));
     }
+    for (key, text) in raise_sites() {
+        let site = Doc {
+            kind: String::new(),
+            exits: BTreeSet::new(),
+            action: text,
+        };
+        out.push((key, verdict(grade_remedy(&site, &subs))));
+    }
+    let invalid = "RIVET_PLAN_ARTIFACT_INVALID";
+    let doc = docs.get(invalid).expect("plan artifact code in errors.md");
+    for (variant, body) in ARTIFACTS {
+        let p = artifact(body);
+        out.push((
+            format!("artifact/{variant}"),
+            verdict(grade(invalid, doc, &p, &execute(&p))),
+        ));
+        let mut q = p.clone();
+        q.argv.insert(1, "--json-errors".to_string());
+        out.push((
+            format!("artifact-json/{variant}"),
+            verdict(grade_json(invalid, &execute(&q))),
+        ));
+    }
+    let mut gone = artifact("");
+    gone.files = vec![];
+    out.push((
+        "artifact/absent".to_string(),
+        verdict(grade_coded(&docs, &gone, &execute(&gone))),
+    ));
+    out.extend(ungraded_leaves(&commands));
     for (name, argv) in UNCODED {
         let p = Probe {
             yaml: String::new(),
@@ -1489,6 +2136,15 @@ fn cells() -> Vec<(String, Verdict)> {
             Err(ev) => Verdict::Red(ev),
         };
         out.push((format!("uncoded/{name}"), v));
+    }
+    guard_cells(&docs, &mut out);
+    for e in ENGINES {
+        reader_cells(
+            &format!("reader/RIVET_SOURCE_CONNECT_FAILED/{}", engine_name(e)),
+            &connect_refused(e),
+            &mut out,
+        );
+        stand_axes(e, &docs, &mut out);
     }
     out
 }
@@ -1524,6 +2180,7 @@ fn every_refusal_is_coded_and_names_the_true_cause() {
     let stale: Vec<&str> = ACCEPTED_RED
         .iter()
         .map(|(k, _)| *k)
+        .filter(|k| stand_on() || !STAND_AXES.iter().any(|a| k.starts_with(a)))
         .filter(|k| !reds.iter().any(|r| accepts(k, r)))
         .collect();
     assert_eq!(
@@ -1654,4 +2311,76 @@ fn the_literal_scan_sees_a_message_prefix_and_a_verify_token() {
         !lits.contains("RIVET_STATE_URL"),
         "an env name is not a code"
     );
+}
+
+#[test]
+fn the_word_axis_reads_every_classifier_needle() {
+    let n = needles();
+    for w in ["deadlock", "connection refused", "does not exist", "403"] {
+        assert!(n.contains(w), "{w}: {n:?}");
+    }
+    assert!(portable("lock wait timeout") && !portable("metadata.google.internal"));
+    assert!(!listening("postgresql://u:p@127.0.0.1:1/db"));
+}
+
+#[test]
+fn the_wording_grader_ties_the_remedy_to_the_exit_set() {
+    let doc = |exits: &[i32], action: &str| Doc {
+        kind: String::new(),
+        exits: exits.iter().copied().collect(),
+        action: action.to_string(),
+    };
+    assert!(grade_wording(&doc(&[2], "run again: the server was busy")).is_ok());
+    assert!(grade_wording(&doc(&[5], "run the export again: it starts over")).is_err());
+    assert!(grade_wording(&doc(&[2], "fix the url")).is_err());
+    assert!(grade_wording(&doc(&[6], "a bug; report it")).is_ok());
+    assert!(grade_wording(&doc(&[6], "fix the config")).is_err());
+    assert!(grade_wording(&doc(&[5], "re-run once with `parallel: 1`")).is_ok());
+}
+
+#[test]
+fn the_reader_grader_wants_the_failure_the_code_and_the_words() {
+    let run = run_out(1, "Error: [RIVET_X_Y] table t is gone\n");
+    let ok = Out {
+        exit: 0,
+        stdout: "a failed [RIVET_X_Y] table t is gone\n".to_string(),
+        stderr: String::new(),
+    };
+    assert!(grade_reader(&run, true, &ok).is_ok());
+    let no_code = Out {
+        exit: 0,
+        stdout: "a failed table t is gone\n".to_string(),
+        stderr: String::new(),
+    };
+    assert!(
+        grade_reader(&run, true, &no_code)
+            .unwrap_err()
+            .contains("RIVET_X_Y")
+    );
+    assert!(grade_reader(&run, false, &no_code).is_ok());
+    let ok_status = Out {
+        exit: 0,
+        stdout: "a success\n".to_string(),
+        stderr: String::new(),
+    };
+    assert!(grade_reader(&run, false, &ok_status).is_err());
+}
+
+#[test]
+fn the_uniform_grader_goes_red_on_a_code_or_exit_split() {
+    let same = [
+        ("postgres", "RIVET_A".to_string(), 1),
+        ("mysql", "RIVET_A".to_string(), 1),
+    ];
+    assert!(grade_uniform(&same).is_ok());
+    let code = [
+        ("postgres", "RIVET_A".to_string(), 1),
+        ("mysql", "RIVET_B".to_string(), 1),
+    ];
+    assert!(grade_uniform(&code).is_err());
+    let exit = [
+        ("postgres", "RIVET_A".to_string(), 1),
+        ("mysql", "RIVET_A".to_string(), 2),
+    ];
+    assert!(grade_uniform(&exit).is_err());
 }

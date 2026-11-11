@@ -154,8 +154,13 @@ link remain after the first run; the built binary must still name the sha.
 
 - [ ] A `pilot-*` check that is not `PASS` blocks the release.
 - [ ] A `release-notes-*` check that is not `PASS` (a false release note) blocks the release.
-- [ ] A `cloud-*` smoke that is `FAIL` blocks only when a re-run repeats it; `verdict.json` lists what blocks.
+- [ ] A `cloud-*` smoke that is `FAIL` in any attempt blocks: it is re-run once, a pass after a failure is `FLAKY` (not a pass) and keeps the first failure's line; `verdict.json` lists what blocks.
 - [ ] Every other check is reported and decided by the release owner.
+
+`dev/pytools/release.py` reads these verdicts at the tag: it refuses unless, for each profile (Linux, Mac), the latest
+`verdict.json` of exactly the tagged sha under the gate host's logs directory (`--satellite-record DIR` when they were
+published to another machine) has an empty `blocking` list and ran a `pilot-*` or `release-notes-*` check. Publish both
+with `--publish`.
 
 ---
 

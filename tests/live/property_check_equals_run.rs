@@ -702,93 +702,105 @@ struct Harness<'a> {
     config: PathBuf,
 }
 
-/// A pre-run command of the CLI tree and the executor it is paired with.
+/// A pre-run invocation and the executor leaf it is paired with.
 struct Pair {
-    pre: &'static str,
-    exec: &'static str,
+    pre: String,
+    exec: String,
 }
 
-/// What the matrix does with one leaf of the CLI tree: grade it as pre-run pairs, or print why it has none.
-enum Role {
-    Pairs(Vec<Pair>),
-    Unpaired(&'static str),
+/// One leaf of `rivet schema cli --json`: its role, its pair and whether `check_equals_run` applies.
+struct RegistryLeaf {
+    path: String,
+    role: String,
+    pairs_with: Option<String>,
+    applies: bool,
 }
 
-/// The role of one leaf command (`state reset-chunks`); an unclassified leaf fails the matrix loudly.
-fn role_of(leaf: &str) -> Role {
-    const STATE: &str = "state reads or edits the state DB, not an export's pre-run; its lifecycle rows need a lease fixture";
-    match leaf {
-        "check" => Role::Pairs(vec![
-            Pair {
-                pre: "check",
-                exec: "run",
-            },
-            Pair {
-                pre: "check-strict",
-                exec: "run",
-            },
-        ]),
-        "doctor" => Role::Pairs(vec![Pair {
-            pre: "doctor",
-            exec: "run",
-        }]),
-        "plan" => Role::Pairs(vec![Pair {
-            pre: "plan",
-            exec: "apply",
-        }]),
-        "init" => Role::Pairs(vec![Pair {
-            pre: "init",
-            exec: "run",
-        }]),
-        "validate" => Role::Unpaired(
-            "validate reads a delivery after a run; it has no run to agree with before one",
-        ),
-        "run" | "apply" => Role::Unpaired("the executor side of a pair, not a pre-run command"),
-        "load" => Role::Unpaired(
-            "load writes a warehouse; its adapter executor is not driven by this matrix",
-        ),
-        "cdc" => Role::Pairs(vec![Pair {
-            pre: "cdc",
-            exec: "run",
-        }]),
-        "compact" | "repair" | "reconcile" => {
-            Role::Unpaired("writes or repairs output; no pre-run to agree with")
-        }
-        "completions" | "metrics" | "journal" | "schema config" | "schema cli"
-        | "schema errors" => Role::Unpaired("reads or prints; no pre-run to agree with"),
-        "state show" | "state reset" | "state accept" | "state files" | "state reset-chunks"
-        | "state chunks" | "state progression" | "state runs" | "state finish-run"
-        | "state copy" | "state vacuum" | "state loads" => Role::Unpaired(STATE),
-        other => panic!(
-            "rivet {other}: a new command; classify it in role_of as a pre-run pair or with a reason"
-        ),
-    }
-}
-
-/// The leaf commands of the CLI tree (no subcommands of their own), from `rivet schema cli`.
-fn cli_leaves() -> Vec<String> {
-    let out = rivet_command(&["schema", "cli"], &[])
+/// Every leaf command with its role, read from the binary's own registry.
+fn role_registry() -> Vec<RegistryLeaf> {
+    let out = rivet_command(&["schema", "cli", "--json"], &[])
         .output()
-        .expect("rivet schema cli");
-    assert!(out.status.success(), "rivet schema cli failed");
-    let all: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.strip_prefix("## `rivet "))
-        .filter_map(|l| l.strip_suffix('`'))
-        .map(str::to_string)
-        .collect();
-    all.iter()
-        .filter(|c| !all.iter().any(|o| o.starts_with(&format!("{c} "))))
-        .cloned()
+        .expect("rivet schema cli --json");
+    assert!(out.status.success(), "rivet schema cli --json failed");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("registry json");
+    json["leaves"]
+        .as_array()
+        .expect("leaves")
+        .iter()
+        .map(|l| RegistryLeaf {
+            path: l["path"].as_str().expect("path").to_string(),
+            role: l["role"].as_str().expect("role").to_string(),
+            pairs_with: l["pairs_with"].as_str().map(str::to_string),
+            applies: l["invariants"]["check_equals_run"]
+                .as_bool()
+                .expect("check_equals_run flag"),
+        })
         .collect()
 }
 
+/// The invocations that drive a pre-run leaf; none means no cell drives it yet.
+fn pre_variants(path: &str) -> &'static [&'static str] {
+    match path {
+        "check" => &["check", "check-strict"],
+        "doctor" => &["doctor"],
+        "plan" => &["plan"],
+        "init" => &["init"],
+        "cdc" => &["cdc"],
+        _ => &[],
+    }
+}
+
+/// Leaves the registry gives no pre-run role that this matrix still drives as a pre-run of `run`.
+const DRIVEN_BEYOND_REGISTRY: &[(&str, &str)] = &[("init", "run"), ("cdc", "run")];
+
 fn pairs() -> Vec<Pair> {
-    cli_leaves()
+    role_registry()
         .iter()
-        .flat_map(|c| match role_of(c) {
-            Role::Pairs(p) => p,
-            Role::Unpaired(_) => vec![],
+        .filter_map(|l| {
+            l.pairs_with
+                .clone()
+                .or_else(|| {
+                    DRIVEN_BEYOND_REGISTRY
+                        .iter()
+                        .find(|(leaf, _)| *leaf == l.path)
+                        .map(|(_, exec)| exec.to_string())
+                })
+                .map(|exec| (l, exec))
+        })
+        .flat_map(|(l, exec)| {
+            pre_variants(&l.path).iter().map(move |pre| Pair {
+                pre: pre.to_string(),
+                exec: exec.clone(),
+            })
+        })
+        .collect()
+}
+
+/// A NOT_GRADED reason for each leaf whose role says `check_equals_run` applies and that no pair drives.
+fn ungraded_leaves() -> Vec<(String, String)> {
+    let leaves = role_registry();
+    let execs: BTreeSet<&str> = leaves
+        .iter()
+        .filter(|l| !pre_variants(&l.path).is_empty())
+        .filter_map(|l| l.pairs_with.as_deref())
+        .collect();
+    leaves
+        .iter()
+        .filter(|l| l.applies)
+        .filter_map(|l| match l.pairs_with {
+            Some(_) if pre_variants(&l.path).is_empty() => Some((
+                l.path.clone(),
+                format!(
+                    "role {}: pre-run leaf with no invocation in pre_variants",
+                    l.role
+                ),
+            )),
+            Some(_) => None,
+            None if execs.contains(l.path.as_str()) => None,
+            None => Some((
+                l.path.clone(),
+                format!("role {}: no graded pre-run pairs with this leaf", l.role),
+            )),
         })
         .collect()
 }
@@ -835,11 +847,11 @@ fn grade_cell(
 ) -> Vec<(String, Outcome, String)> {
     let tmp = tempfile::tempdir().expect("plan dir");
     let plan = tmp.path().join("plan.json");
-    let pairs: Vec<Pair> = pairs().into_iter().filter(|p| drives(h, p.pre)).collect();
+    let pairs: Vec<Pair> = pairs().into_iter().filter(|p| drives(h, &p.pre)).collect();
     let pres: Vec<(&Pair, Verdict)> = pairs
         .iter()
         .map(|p| {
-            let v = match p.pre {
+            let v = match p.pre.as_str() {
                 "init" => guarded(|| (h.init.as_ref().unwrap())()),
                 "cdc" => guarded(|| (h.cdc.as_ref().unwrap())()),
                 pre => {
@@ -853,22 +865,24 @@ fn grade_cell(
         .collect();
     let mut execs: std::collections::BTreeMap<&str, Verdict> = Default::default();
     for p in &pairs {
-        execs.entry(p.exec).or_insert_with(|| match p.exec {
-            "run" => guarded(|| (h.run)()),
-            "apply" => {
-                let target = if plan.is_file() {
-                    plan.clone()
-                } else {
-                    h.config.clone()
-                };
-                guarded(|| (h.apply)(&target))
-            }
-            other => panic!("no executor {other}"),
-        });
+        execs
+            .entry(p.exec.as_str())
+            .or_insert_with(|| match p.exec.as_str() {
+                "run" => guarded(|| (h.run)()),
+                "apply" => {
+                    let target = if plan.is_file() {
+                        plan.clone()
+                    } else {
+                        h.config.clone()
+                    };
+                    guarded(|| (h.apply)(&target))
+                }
+                other => panic!("no executor {other}"),
+            });
     }
     pres.iter()
         .map(|(p, pre)| {
-            let (o, ev) = grade(pre, &execs[p.exec], expect, codes);
+            let (o, ev) = grade(pre, &execs[p.exec.as_str()], expect, codes);
             (format!("{}-{}", p.pre, p.exec), o, ev)
         })
         .collect()
@@ -1180,14 +1194,11 @@ fn run_raw_cells(
 
 #[test]
 fn the_axes_come_from_the_code() {
-    let leaves = cli_leaves();
+    let leaves: Vec<String> = role_registry().into_iter().map(|l| l.path).collect();
     assert!(
         leaves.iter().any(|c| c == "run") && leaves.iter().any(|c| c == "state reset-chunks"),
         "{leaves:?}"
     );
-    for leaf in &leaves {
-        role_of(leaf);
-    }
     let pairs: Vec<String> = pairs()
         .iter()
         .map(|p| format!("{}-{}", p.pre, p.exec))
@@ -2595,15 +2606,13 @@ fn the_live_matrix_agrees() {
     run_missing_config_cells(&mut rows, &codes);
     emit_unprovoked_prior(&mut rows);
     emit_load_rows(&mut rows);
-    for leaf in cli_leaves() {
-        if let Role::Unpaired(why) = role_of(&leaf) {
-            emit(
-                &mut rows,
-                &format!("any/any/any/-/{}", leaf.replace(' ', "-")),
-                Outcome::NotGraded,
-                why,
-            );
-        }
+    for (leaf, why) in ungraded_leaves() {
+        emit(
+            &mut rows,
+            &format!("any/any/any/-/{}", leaf.replace(' ', "-")),
+            Outcome::NotGraded,
+            &why,
+        );
     }
     summary(&rows);
     if let Ok(path) = std::env::var("PM_CHECK_EQUALS_RUN_LOG") {
