@@ -269,9 +269,9 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `bigint unsigned` | `u_int64` → `UInt64` | `UInt64` | integer text | values &gt; i64::MAX | type_roundtrip |
 | `decimal(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | p/s auto-resolved from the wire column definition (override only as fallback) | live matrix |
 | `float` / `double` | `float32` / `float64` | `Float32` / `Float64` | float text | | golden |
-| `date` | `date` | `Date32` | ISO date | | golden |
-| `datetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive | live matrix |
-| `timestamp` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | `SET time_zone = '+00:00'` | live matrix |
+| `date` | `date` | `Date32` | ISO date | a zero or partial date (`0000-00-00`, `2026-00-00`) is written as NULL, the run WARNs per column with the count and the summary has a `fidelity` row | golden |
+| `datetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; same zero-date rule as `date` | live matrix |
+| `timestamp` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | `SET time_zone = '+00:00'`; same zero-date rule as `date` | live matrix |
 | `time` | `time(µs)` | `Time64(µs)` | time text | | partial |
 | `varchar` / `text` | `string` / `text` | `Utf8` | escaped UTF-8 | | live matrix |
 | `json` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | | live matrix |

@@ -1127,6 +1127,24 @@ fn flush(
             ),
             None => None,
         };
+        if let (Some(o), Some(fix)) = (&owned, &fix) {
+            let nulled = events
+                .iter()
+                .zip(o)
+                .filter(|(e, out)| {
+                    match (out, image_cell(e, i, &m.column_name, &schema_names, memo)) {
+                        (Some(out), Some(input)) => fix.nulled_a_date(input, out),
+                        _ => false,
+                    }
+                })
+                .count();
+            if nulled > 0 {
+                log::warn!(
+                    "{}",
+                    crate::source::mysql::zero_date_warning(&m.column_name, nulled as u64)
+                );
+            }
+        }
         let cells: Vec<Option<&RivetValue>> = match &owned {
             Some(o) => o.iter().map(|c| c.as_ref()).collect(),
             None => events

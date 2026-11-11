@@ -12,6 +12,7 @@ pub(crate) fn test_plan() -> ResolvedRunPlan {
         split_window: None,
         bytes_read: Default::default(),
         parts_landed: Default::default(),
+        nulled_cells: Default::default(),
         single_pass_of: None,
         collection_incarnation: None,
         export_name: "orders".into(),

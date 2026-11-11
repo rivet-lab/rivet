@@ -53,6 +53,9 @@ pub(crate) enum RivetValue {
     Array(Vec<RivetValue>),
 }
 
+/// The marker a MySQL zero or partial date decodes to, so the cell fix can count it before writing NULL.
+pub(crate) const ZERO_DATE: &[u8] = b"0000-00-00";
+
 impl RivetValue {
     /// Map a MySQL driver value to `RivetValue` — structurally, no string reparse.
     pub(crate) fn from_mysql(v: &mysql::Value) -> Self {
@@ -66,8 +69,11 @@ impl RivetValue {
             Value::Date(y, mo, d, h, mi, s, us) => {
                 NaiveDate::from_ymd_opt(*y as i32, *mo as u32, *d as u32)
                     .and_then(|date| date.and_hms_micro_opt(*h as u32, *mi as u32, *s as u32, *us))
-                    .map_or(RivetValue::Null, RivetValue::DateTime)
-            } // zero-date → null
+                    .map_or_else(
+                        || RivetValue::Bytes(ZERO_DATE.to_vec()),
+                        RivetValue::DateTime,
+                    )
+            }
             Value::Time(neg, days, h, mi, s, us) => {
                 let micros =
                     ((*days as i64 * 86_400 + *h as i64 * 3_600 + *mi as i64 * 60 + *s as i64)
@@ -848,6 +854,8 @@ pub(crate) enum MysqlCellFix {
     /// BINARY(n): the driver right-trims trailing NULs — pad back to width n
     /// (the batch export carries the full padded value).
     BinaryPad(usize),
+    /// DATE and DATETIME arrive as the zero-date marker when MySQL holds a zero or partial date; written as NULL.
+    ZeroDate,
     /// TIME is a duration up to 838:59:59; one outside a day is refused with the batch's MySQL wording.
     TimeOfDay,
 }
@@ -863,6 +871,9 @@ pub(crate) fn mysql_cell_fix(
     let n = native.to_ascii_lowercase();
     if n.starts_with("timestamp") {
         return Some(MysqlCellFix::TimestampEpoch);
+    }
+    if n == "date" || n.starts_with("datetime") {
+        return Some(MysqlCellFix::ZeroDate);
     }
     if n == "bit(1)" {
         return Some(MysqlCellFix::BitBool);
@@ -972,6 +983,13 @@ impl MysqlCellFix {
             || matches!(dt, DataType::Time64(TimeUnit::Microsecond))
     }
 
+    /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
+    pub(crate) fn nulled_a_date(&self, input: &RivetValue, out: &RivetValue) -> bool {
+        matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
+            && matches!(out, RivetValue::Null)
+            && !matches!(input, RivetValue::Null)
+    }
+
     pub(crate) fn apply(&self, v: &RivetValue) -> Result<RivetValue, FixRefusal> {
         use RivetValue as V;
         Ok(match (self, v) {
@@ -983,6 +1001,7 @@ impl MysqlCellFix {
                     .ok_or("is past the range of a timestamp")?,
                 None => return Err("is not a binlog TIMESTAMP (epoch seconds text)".into()),
             },
+            (MysqlCellFix::ZeroDate, V::Bytes(b)) if b == ZERO_DATE => V::Null,
             (MysqlCellFix::BitBool, V::Bytes(b)) => V::Bool(b.iter().any(|x| *x != 0)),
             (MysqlCellFix::BitBool, V::Int(i)) => V::Bool(*i != 0),
             (MysqlCellFix::BitBool, V::UInt(u)) => V::Bool(*u != 0),
@@ -1714,6 +1733,18 @@ mod tests {
                 .unwrap(),
             V::Null
         );
+        let counted = |native: &str, wire: V| {
+            let f = fix(native);
+            f.nulled_a_date(&wire, &f.apply(&wire).unwrap())
+        };
+        assert!(counted("timestamp", V::Bytes(b"0".to_vec())));
+        assert!(counted("timestamp(6)", V::Bytes(b"0.000000".to_vec())));
+        assert!(counted("date", V::Bytes(ZERO_DATE.to_vec())));
+        assert!(counted("datetime(6)", V::Bytes(ZERO_DATE.to_vec())));
+        assert!(!counted("timestamp", V::Bytes(b"1".to_vec())));
+        assert!(!counted("timestamp", V::Null));
+        assert!(!counted("date", V::Null));
+        assert!(!counted("year", V::Bytes(b"2026".to_vec())));
         assert_eq!(
             fix("timestamp").apply(&V::Bytes(b"1".to_vec())).unwrap(),
             V::DateTime(chrono::DateTime::from_timestamp(1, 0).unwrap().naive_utc()),
@@ -1871,11 +1902,19 @@ mod tests {
             .and_hms_micro_opt(11, 58, 1, 500_000)
             .unwrap();
         assert_eq!(v, RivetValue::DateTime(expected));
-        // zero-date degrades to null, never a bogus epoch.
-        assert_eq!(
-            RivetValue::from_mysql(&mysql::Value::Date(0, 0, 0, 0, 0, 0, 0)),
-            RivetValue::Null
-        );
+        for zero in [
+            mysql::Value::Date(0, 0, 0, 0, 0, 0, 0),
+            mysql::Value::Date(2026, 0, 0, 0, 0, 0, 0),
+        ] {
+            let marker = RivetValue::from_mysql(&zero);
+            assert_eq!(marker, RivetValue::Bytes(ZERO_DATE.to_vec()));
+            for native in ["date", "datetime", "datetime(6)"] {
+                let fix =
+                    mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+                assert_eq!(fix.apply(&marker).unwrap(), RivetValue::Null, "{native}");
+                assert_eq!(fix.apply(&RivetValue::Null).unwrap(), RivetValue::Null);
+            }
+        }
     }
 
     // Finding #4: an integer that fits the declared width builds; a genuine NULL

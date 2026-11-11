@@ -330,6 +330,7 @@ pub(crate) fn build_plan_on(
         export_name: export.name.clone(),
         bytes_read: Default::default(),
         parts_landed: Default::default(),
+        nulled_cells: Default::default(),
         single_pass_of,
         collection_incarnation: None,
         partition_rollover: partition_rollover_of(config, export),

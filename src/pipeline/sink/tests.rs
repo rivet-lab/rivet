@@ -583,12 +583,26 @@ fn a_settle_column_that_is_not_temporal_is_refused_by_code() {
     crate::error::assert_coded(&err, "RIVET_CONFIG_SETTLE_COLUMN_NOT_TEMPORAL", 1);
 }
 
+#[test]
+fn note_nulled_accumulates_per_column_in_the_plan_shared_counter() {
+    let mut sink = minimal_sink();
+    let shared = sink.nulled_cells.clone();
+    sink.note_nulled("b", 2);
+    sink.note_nulled("a", 1);
+    sink.note_nulled("b", 3);
+    assert_eq!(
+        shared.snapshot(),
+        vec![("a".to_string(), 1), ("b".to_string(), 5)]
+    );
+}
+
 // ─── helpers ─────────────────────────────────────────────────
 
 fn minimal_sink() -> ExportSink {
     ExportSink {
         bytes_read: Default::default(),
         parts_landed: Default::default(),
+        nulled_cells: Default::default(),
         writer: None,
         format_type: crate::config::FormatType::Csv,
         compression: crate::config::CompressionType::None,
