@@ -586,6 +586,14 @@ scenarios:
     mongo:    { na: "the refusal is the load's and does not depend on the source engine: the postgres column carries the row" }
     oracle:   { na: "the refusal is the load's and does not depend on the source engine: the postgres column carries the row" }
 
+  - id: refusal_load_key_column_lands_inexact
+    what: "RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT: an incremental load whose cursor lands as text or whose primary-key column lands finer-collapsed; declare the column's type under `columns:` and run the export again"
+    postgres: { na: "the refusal is the load's and does not depend on the source engine: the Oracle row carries it" }
+    mysql:    { na: "the refusal is the load's and does not depend on the source engine: the Oracle row carries it" }
+    mssql:    { na: "the refusal is the load's and does not depend on the source engine: the Oracle row carries it (a SQL Server cell cannot be a walk: the oracle reads datetime2(7) at microseconds and is off there)" }
+    mongo:    { na: "the refusal is the load's and does not depend on the source engine: the Oracle row carries it" }
+    oracle:   { test: an_oracle_number_cursor_is_refused_into_clickhouse }
+
   - id: refusal_load_target_object_conflict
     what: "RIVET_LOAD_TARGET_OBJECT_CONFLICT: the warehouse object at the target name is not what the load writes (a view, another object, a table beside its change log)"
     postgres: { gap: "asserted by its code offline (load::tests::each_whole_table_stop_carries_its_code and siblings); the walk needs a load cell: refuse twice, drop or rename the object, and one wrong remedy" }

@@ -125,6 +125,16 @@ fn capture_open_forensics(
                     );
                     None
                 });
+                summary.open_finer_than_microsecond = src
+                    .finer_than_microsecond_columns(relation)
+                    .unwrap_or_else(|e| {
+                        log::warn!(
+                            "export '{}': could not read the sub-microsecond columns of \
+                             `{relation}`: {e:#}",
+                            plan.export_name
+                        );
+                        Vec::new()
+                    });
             }
             let cols: Vec<crate::state::SchemaColumn> = mappings
                 .iter()
@@ -744,6 +754,7 @@ pub(crate) fn synthetic_failed_summary(export_name: &str, err: &anyhow::Error) -
         cursor_high: None,
         open_mappings: None,
         open_primary_key: None,
+        open_finer_than_microsecond: Vec::new(),
         offending_value: None,
         server_context_json: None,
         key_native_type: None,

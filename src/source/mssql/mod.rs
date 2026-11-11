@@ -578,6 +578,14 @@ impl Source for MssqlSource {
         introspect_mssql_on(self, qualified_table)
     }
 
+    fn finer_than_microsecond_columns(&mut self, table: &str) -> Result<Vec<String>> {
+        let (schema, table) = table.split_once('.').unwrap_or(("dbo", table));
+        Ok(finer_than_microsecond_columns(self, schema, table)?
+            .into_iter()
+            .map(|(column, _)| column)
+            .collect())
+    }
+
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
         // Keyset (seek) pages build a dialect-correct
         // `OFFSET 0 ROWS FETCH NEXT n ROWS ONLY` clause (T-SQL has no `LIMIT`).

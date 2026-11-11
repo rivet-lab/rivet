@@ -179,6 +179,8 @@ pub struct RunSummary {
     pub open_mappings: Option<Vec<crate::types::TypeMapping>>,
     /// The source primary key of the run's table, read at OPEN with the mappings.
     pub open_primary_key: Option<Vec<String>>,
+    /// The columns the source declares finer than a microsecond, read at OPEN with the mappings.
+    pub open_finer_than_microsecond: Vec<String>,
     pub error_message: Option<String>,
     /// v18 failure forensics. `offending_value`: the last key read before an
     /// unadvanceable keyset row (with `cursor_high` this brackets the value that
@@ -391,6 +393,7 @@ impl RunSummary {
             cursor_high: None,
             open_mappings: None,
             open_primary_key: None,
+            open_finer_than_microsecond: Vec::new(),
             journal,
         }
     }
@@ -472,6 +475,7 @@ impl RunSummary {
             cursor_high: None,
             open_mappings: None,
             open_primary_key: None,
+            open_finer_than_microsecond: Vec::new(),
             journal,
         }
     }
