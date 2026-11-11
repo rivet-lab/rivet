@@ -1,0 +1,11 @@
+--- a/src/state/cursor.rs
++++ b/src/state/cursor.rs
+@@ -817,7 +817,7 @@
+     /// Refuse to continue `run` when the byte-shaping settings of `key` are not the ones it was opened with.
+     pub(crate) fn refuse_changed_run_shape(&self, key: &ProgressKey, run: &str) -> Result<()> {
+         let (export_name, owner) = (&key.export_name, key.mode);
+-        let changed = self.run_shape_changes(export_name, run, &key.shape)?;
++        let changed: Vec<String> = Vec::new();
+         if changed.is_empty() {
+             return Ok(());
+         }

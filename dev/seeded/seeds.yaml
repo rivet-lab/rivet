@@ -3875,6 +3875,27 @@ seeds:
       oracle:
         cells: ["lib:reconcile_under_a_changed_chunk_plan_is_refused_by_code"]
 
+  - name: resume-pins-only-the-chunk-plan
+    class: "a crashed checkpointed run is resumed under any edit of `compression`, `columns` or `meta_columns`: the resume check pins only the query and the chunk settings, so one manifest and one `_SUCCESS` cover parts of two shapes, exit 0"
+    history: "found 2026-11-10 by the axis-8 upgrade/resume hunt, RED on 0.32.2 and on main (a PostgreSQL range-chunk run crashed after its first chunk, `compression` edited, `--resume` exit 0 with `_SUCCESS`); fixed by recording the byte-shaping projection of the plan with the run (state v39 `run_shape`) and comparing it on every continuation (`StateStore::refuse_changed_run_shape`)"
+    scope: source
+    patch: resume-pins-only-the-chunk-plan/shared.patch
+    engines:
+      postgres:
+        cells:
+          - crashed_range_chunked_then_compression_edited_postgres
+          - crashed_keyset_then_columns_edited_postgres
+          - a_changed_run_shape_is_refused_on_resume_and_walked_out_postgres
+          - "lib:an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with"
+      mysql:
+        cells: [a_changed_run_shape_is_refused_on_resume_and_walked_out_mysql, "lib:an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with"]
+      mssql:
+        cells: [a_changed_run_shape_is_refused_on_resume_and_walked_out_mssql, "lib:an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with"]
+      mongo:
+        na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes), so it has no range-chunk or keyset checkpoint to resume"
+      oracle:
+        cells: [a_changed_run_shape_is_refused_on_resume_and_walked_out_oracle, "lib:an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with"]
+
   - name: sealed-plan-freezes-the-date
     class: "`rivet plan` resolves `{date}` in the destination into the sealed plan, so an apply after UTC midnight writes under the planning day while the data and the part names are of the apply"
     history: "P-26, found 2026-10-16 (TRIAGE PR-M), on main through 0.31.0: the planner sealed the destination through the today's-date context `rivet run` resolves with; fixed 2026-10-17 by the context that keeps `{date}` for the apply to resolve (ADR-0005 PA1 amendment), with `rivet plan --date` freezing a day on request"

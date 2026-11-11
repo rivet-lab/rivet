@@ -144,7 +144,15 @@ pub(crate) fn latest_chunk_run_under_this_plan(
         return Ok(None);
     };
     if let ExtractionStrategy::Chunked(cp) = &plan.strategy {
-        super::chunked::refuse_changed_chunk_plan(plan, cp, &stored_hash, action, config_path)?;
+        super::chunked::refuse_changed_chunk_plan(
+            state,
+            plan,
+            &run_id,
+            cp,
+            &stored_hash,
+            action,
+            config_path,
+        )?;
     }
     Ok(Some(run_id))
 }
@@ -682,6 +690,41 @@ mod tests {
             crate::error::error_code(&err),
             Some("RIVET_STATE_CHUNK_PLAN_CHANGED"),
             "the plan the latest run had is not refused: {err:#}"
+        );
+    }
+
+    /// The stored run was opened under another byte-shaping setting (`compression`, here): reconcile and repair are refused by `RIVET_STATE_RUN_SHAPE_CHANGED`, and the plan the run had is not.
+    #[test]
+    fn reconcile_under_a_changed_run_shape_is_refused_by_code() {
+        let plan = chunked_plan();
+        let ExtractionStrategy::Chunked(cp) = &plan.strategy else {
+            unreachable!()
+        };
+        let mut was = plan.clone();
+        was.compression = crate::config::CompressionType::Snappy;
+        assert_ne!(was.compression, plan.compression, "the fixture differs");
+        let hash = super::super::chunked::chunk_plan_hash(&plan, cp);
+        let state = StateStore::open_in_memory().unwrap();
+        state
+            .open_chunk_run(&was.progress_key(), "run_1", &hash, 3, &[(1, 10)])
+            .unwrap();
+        let err = reconcile_chunked_inner(&plan, &state, "rivet.yaml").unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_STATE_RUN_SHAPE_CHANGED", 5);
+        let said = format!("{err:#}");
+        assert!(said.contains("`compression`"), "{said}");
+        assert!(
+            said.contains("rivet state reset-chunks -c <config> --export orders"),
+            "{said}"
+        );
+        let state = StateStore::open_in_memory().unwrap();
+        state
+            .open_chunk_run(&plan.progress_key(), "run_2", &hash, 3, &[(1, 10)])
+            .unwrap();
+        let err = reconcile_chunked_inner(&plan, &state, "rivet.yaml").unwrap_err();
+        assert_ne!(
+            crate::error::error_code(&err),
+            Some("RIVET_STATE_RUN_SHAPE_CHANGED"),
+            "the shape the run had is not refused: {err:#}"
         );
     }
 }

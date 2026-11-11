@@ -319,6 +319,7 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_STATE_LOCK_TIMEOUT", Inj::Stand),
     ("RIVET_STATE_CHUNK_CHECKPOINT_GONE", Inj::Stand),
     ("RIVET_STATE_CHUNK_PLAN_CHANGED", Inj::Stand),
+    ("RIVET_STATE_RUN_SHAPE_CHANGED", Inj::Stand),
     ("RIVET_STATE_CHUNK_WINDOWS_BROKEN", Inj::Stand),
     ("RIVET_STATE_LEASE_KEEPER_UNAVAILABLE", Inj::Stand),
     ("RIVET_STATE_LEASE_LOST", Inj::Stand),
