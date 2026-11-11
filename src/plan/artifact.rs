@@ -1037,7 +1037,7 @@ mod tests {
                 strategy_rationale: String::new(),
             },
         );
-        let url = artifact.resolved_plan.source.url.as_deref().unwrap();
+        let url = artifact.resolved_plan.source.url.as_ref().unwrap().expose();
         assert!(
             !url.contains("s3cret"),
             "password must not remain in URL: {url}"

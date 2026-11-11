@@ -150,7 +150,7 @@ pub struct MssqlUrl {
     pub host: String,
     pub port: u16,
     pub user: String,
-    pub password: String,
+    pub password: crate::secret::Secret,
     pub database: String,
 }
 
@@ -170,14 +170,14 @@ pub(crate) fn tiberius_config(
     port: u16,
     database: &str,
     user: &str,
-    password: &str,
+    password: &crate::secret::Secret,
     tls: Option<&TlsConfig>,
 ) -> Config {
     let mut config = Config::new();
     config.host(host);
     config.port(port);
     config.database(database);
-    config.authentication(AuthMethod::sql_server(user, password));
+    config.authentication(AuthMethod::sql_server(user, password.expose()));
     // No per-round-trip bound (0.13 defaults to 30 s): `statement_timeout_s` is the budget.
     config.command_timeout(None);
 
@@ -317,7 +317,7 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
         host,
         port,
         user,
-        password,
+        password: password.into(),
         database,
     })
 }
@@ -1495,7 +1495,8 @@ mod tests {
                 .expect("well-formed encoded url must parse");
         assert_eq!(parsed.user, r"dom\svc", "user must be percent-decoded");
         assert_eq!(
-            parsed.password, "P@ss/w0rd!",
+            parsed.password.expose(),
+            "P@ss/w0rd!",
             "password must be percent-decoded, not passed as literal %-bytes"
         );
         assert_eq!(parsed.host, "db.internal");
@@ -1510,7 +1511,7 @@ mod tests {
                 .expect("a query holding @ parses");
             assert_eq!((parsed.host.as_str(), parsed.port), ("h1", 1433), "{tail}");
             assert_eq!(
-                (parsed.user.as_str(), parsed.password.as_str()),
+                (parsed.user.as_str(), parsed.password.expose()),
                 ("sa", "pw")
             );
         }
@@ -1552,7 +1553,13 @@ mod tests {
                 (Some(o), Some(n)) if !crate::url_text::corpus::at_after_authority(&url) => {
                     assert_eq!(
                         (o.0, o.1, o.2, o.3, o.4),
-                        (n.host, n.port, n.user, n.password, n.database),
+                        (
+                            n.host,
+                            n.port,
+                            n.user,
+                            n.password.expose().to_string(),
+                            n.database
+                        ),
                         "{url}"
                     );
                     same += 1;

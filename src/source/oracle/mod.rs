@@ -112,7 +112,7 @@ const HARM_COUNTERS_SQL: &str = "\
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct OracleUrl {
     pub user: String,
-    pub password: String,
+    pub password: crate::secret::Secret,
     pub host: String,
     pub port: u16,
     pub service: String,
@@ -171,7 +171,7 @@ pub(crate) fn parse_oracle_url(url: &str) -> Result<OracleUrl> {
     };
     Ok(OracleUrl {
         user: decode(user),
-        password: decode(password),
+        password: decode(password).into(),
         host: host.to_string(),
         port,
         service: service.to_string(),
@@ -228,7 +228,7 @@ pub(crate) fn connect(url: &str, tls: Option<&TlsConfig>) -> Result<Connection> 
     // binary links two (ring via reqwest, aws-lc via the driver): pick one.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config = oracledb::Config::default()
-        .set_credentials(&parts.user, &parts.password)
+        .set_credentials(&parts.user, parts.password.expose())
         .set_connect_string(&connect_string(&parts, tls)?)
         .ora()?
         // Re-executing a cached statement over a wide row desyncs the beta driver.
@@ -1194,7 +1194,7 @@ mod tests {
         }
         let ok = parse_oracle_url("oracle://u:Qm4%2FTz8@127.0.0.1:1521/FREEPDB1").unwrap();
         assert_eq!(
-            (ok.password.as_str(), ok.host.as_str()),
+            (ok.password.expose(), ok.host.as_str()),
             ("Qm4/Tz8", "127.0.0.1")
         );
     }
@@ -1315,7 +1315,7 @@ mod error_code_tests {
         crate::error::assert_coded(&err, "RIVET_SOURCE_QUERY_COLUMN_UNREFERENCEABLE", 1);
         let parts = OracleUrl {
             user: "u".into(),
-            password: String::new(),
+            password: crate::secret::Secret::default(),
             host: "h".into(),
             port: 1521,
             service: "s".into(),
