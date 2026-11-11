@@ -1,8 +1,18 @@
 //! The override compatibility table: for one engine, may a `columns:` override retype a column it did not autodetect.
 
 use super::{ColumnOverrides, RivetType, TimeUnit};
-use crate::config::SourceType;
 use crate::error::{Result, codes};
+
+/// The source engine whose override list is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Engine {
+    Postgres,
+    Mysql,
+    Mssql,
+    #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
+    Oracle,
+    Mongo,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -139,12 +149,10 @@ fn oracle_reads(native: &str, src: Kind, tgt: Kind) -> bool {
     allowed.contains(&tgt)
 }
 
-fn decimal_fits(engine: SourceType, tgt: &RivetType) -> bool {
+fn decimal_fits(engine: Engine, tgt: &RivetType) -> bool {
     match (engine, tgt) {
         (_, RivetType::Decimal { scale, .. }) if *scale < 0 => false,
-        (SourceType::Mssql | SourceType::Oracle, RivetType::Decimal { precision, .. }) => {
-            *precision <= 38
-        }
+        (Engine::Mssql | Engine::Oracle, RivetType::Decimal { precision, .. }) => *precision <= 38,
         _ => true,
     }
 }
@@ -159,34 +167,31 @@ fn narrows(src: &RivetType, t: Kind) -> bool {
 }
 
 /// Whether `engine` converts a column it autodetects as `src` (native type `native`) to the overridden `tgt`.
-pub fn override_is_read(
-    engine: SourceType,
+pub(crate) fn override_is_read(
+    engine: Engine,
     native: &str,
     src: &RivetType,
     tgt: &RivetType,
 ) -> bool {
     let (s, t) = (kind_of(src), kind_of(tgt));
-    if src == tgt
-        || s == Unsupported && engine != SourceType::Postgres
-        || s == t && !matches!(s, Dec)
-    {
+    if src == tgt || s == Unsupported && engine != Engine::Postgres || s == t && !matches!(s, Dec) {
         return true;
     }
     if !decimal_fits(engine, tgt) || narrows(src, t) {
         return false;
     }
     match engine {
-        SourceType::Mysql => mysql_reads(native, s, t),
-        SourceType::Postgres => postgres_reads(s, t),
-        SourceType::Mssql => mssql_reads(native, s, t),
-        SourceType::Oracle => oracle_reads(native, s, t),
-        SourceType::Mongo => s == Json && t == Text,
+        Engine::Mysql => mysql_reads(native, s, t),
+        Engine::Postgres => postgres_reads(s, t),
+        Engine::Mssql => mssql_reads(native, s, t),
+        Engine::Oracle => oracle_reads(native, s, t),
+        Engine::Mongo => s == Json && t == Text,
     }
 }
 
 /// The type of `column`: its override when the table reads that pair, a coded refusal when it does not, else the autodetected type.
-pub fn resolve_column(
-    engine: SourceType,
+pub(crate) fn resolve_column(
+    engine: Engine,
     overrides: &ColumnOverrides,
     column: &str,
     native: &str,
@@ -205,7 +210,7 @@ pub fn resolve_column(
 
 /// The refusal text for a pair the table does not read: names the column, both types and the two remedies.
 pub fn refusal_message(
-    engine: SourceType,
+    engine: Engine,
     column: &str,
     native: &str,
     detected: &RivetType,
@@ -224,12 +229,12 @@ pub fn refusal_message(
 mod tests {
     use super::*;
 
-    const ENGINES: [SourceType; 5] = [
-        SourceType::Postgres,
-        SourceType::Mysql,
-        SourceType::Mssql,
-        SourceType::Oracle,
-        SourceType::Mongo,
+    const ENGINES: [Engine; 5] = [
+        Engine::Postgres,
+        Engine::Mysql,
+        Engine::Mssql,
+        Engine::Oracle,
+        Engine::Mongo,
     ];
 
     fn one(column: &str, t: RivetType) -> ColumnOverrides {
@@ -259,7 +264,7 @@ mod tests {
     #[test]
     fn an_unread_pair_is_refused_with_the_wire_code_and_names_column_and_both_types() {
         let err = resolve_column(
-            SourceType::Mongo,
+            Engine::Mongo,
             &one("_id", RivetType::Int64),
             "_id",
             "objectid",
@@ -279,12 +284,11 @@ mod tests {
 
     #[test]
     fn mongo_reads_its_document_as_plain_text_and_refuses_any_other_retype() {
-        let doc =
-            |t: RivetType| override_is_read(SourceType::Mongo, "document", &RivetType::Json, &t);
+        let doc = |t: RivetType| override_is_read(Engine::Mongo, "document", &RivetType::Json, &t);
         assert!(doc(RivetType::String));
         assert!(!doc(RivetType::Int64));
         assert!(!override_is_read(
-            SourceType::Mongo,
+            Engine::Mongo,
             "objectid",
             &RivetType::String,
             &RivetType::Json
@@ -301,14 +305,9 @@ mod tests {
             precision: 18,
             scale: 2,
         };
-        assert!(!override_is_read(SourceType::Mssql, "decimal", &src, &wide));
-        assert!(!override_is_read(SourceType::Oracle, "number", &src, &wide));
-        assert!(override_is_read(
-            SourceType::Postgres,
-            "numeric",
-            &src,
-            &wide
-        ));
+        assert!(!override_is_read(Engine::Mssql, "decimal", &src, &wide));
+        assert!(!override_is_read(Engine::Oracle, "number", &src, &wide));
+        assert!(override_is_read(Engine::Postgres, "numeric", &src, &wide));
     }
 
     fn dec(precision: u8, scale: i8) -> RivetType {
@@ -340,34 +339,24 @@ mod tests {
     #[test]
     fn the_pairs_main_delivered_whole_stay_read() {
         let read = [
+            (Engine::Mysql, "binary", RivetType::Binary, RivetType::Bool),
+            (Engine::Mysql, "decimal", dec(18, 0), RivetType::Int64),
+            (Engine::Mssql, "decimal", dec(18, 4), dec(38, 10)),
             (
-                SourceType::Mysql,
-                "binary",
-                RivetType::Binary,
-                RivetType::Bool,
-            ),
-            (SourceType::Mysql, "decimal", dec(18, 0), RivetType::Int64),
-            (SourceType::Mssql, "decimal", dec(18, 4), dec(38, 10)),
-            (
-                SourceType::Oracle,
+                Engine::Oracle,
                 "NUMBER(9)",
                 RivetType::Int32,
                 RivetType::Int64,
             ),
+            (Engine::Oracle, "NUMBER(18)", RivetType::Int64, dec(38, 10)),
             (
-                SourceType::Oracle,
-                "NUMBER(18)",
-                RivetType::Int64,
-                dec(38, 10),
-            ),
-            (
-                SourceType::Oracle,
+                Engine::Oracle,
                 "NUMBER(38,10)",
                 dec(38, 10),
                 RivetType::String,
             ),
             (
-                SourceType::Postgres,
+                Engine::Postgres,
                 "cidr",
                 RivetType::Unsupported {
                     native_type: "cidr".into(),
@@ -388,13 +377,13 @@ mod tests {
     #[test]
     fn a_wider_bit_or_an_unmapped_postgres_type_is_not_read_as_what_it_is_not() {
         assert!(!override_is_read(
-            SourceType::Mysql,
+            Engine::Mysql,
             "bit",
             &RivetType::Int64,
             &RivetType::Bool
         ));
         assert!(override_is_read(
-            SourceType::Mysql,
+            Engine::Mysql,
             "bit",
             &RivetType::Bool,
             &RivetType::Bool
@@ -404,13 +393,13 @@ mod tests {
             reason: String::new(),
         };
         assert!(!override_is_read(
-            SourceType::Postgres,
+            Engine::Postgres,
             "cidr",
             &cidr,
             &RivetType::Uuid
         ));
         assert!(!override_is_read(
-            SourceType::Mysql,
+            Engine::Mysql,
             "datetime",
             &RivetType::Timestamp {
                 unit: TimeUnit::Microsecond,

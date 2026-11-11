@@ -406,7 +406,7 @@ pub(super) fn rivet_type_for_pg_column(
     numeric_hints: Option<&HashMap<String, (u8, i8)>>,
 ) -> crate::error::Result<RivetType> {
     crate::types::resolve_column(
-        crate::config::SourceType::Postgres,
+        crate::types::override_table::Engine::Postgres,
         column_overrides,
         col.name(),
         col.type_().name(),

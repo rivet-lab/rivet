@@ -266,7 +266,7 @@ pub(super) fn mysql_schema_and_arrow_types(
     for col in columns {
         let native = mysql_native_type_name(col);
         let rivet = crate::types::resolve_column(
-            crate::config::SourceType::Mysql,
+            crate::types::override_table::Engine::Mysql,
             column_overrides,
             col.name_str().as_ref(),
             &native,

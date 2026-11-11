@@ -522,7 +522,7 @@ fn blob_mappings(overrides: &ColumnOverrides) -> Result<Vec<TypeMapping>> {
     .into_iter()
     .map(|(name, native, nullable, detected)| {
         let t = crate::types::override_table::resolve_column(
-            crate::config::SourceType::Mongo,
+            crate::types::override_table::Engine::Mongo,
             overrides,
             name,
             native,
@@ -541,11 +541,10 @@ fn blob_schema(overrides: &ColumnOverrides) -> Result<SchemaRef> {
     let fields = blob_mappings(overrides)?
         .iter()
         .map(|m| {
-            crate::types::build_arrow_field(m).ok_or_else(|| {
-                anyhow::anyhow!("blob column `{}` has no Arrow field", m.column_name)
-            })
+            crate::types::build_arrow_field(m)
+                .expect("blob columns (String/Json) always have an Arrow mapping")
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
     Ok(Arc::new(Schema::new(fields)))
 }
 

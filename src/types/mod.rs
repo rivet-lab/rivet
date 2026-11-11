@@ -50,7 +50,7 @@ pub use fidelity::TypeFidelity;
 // Public surface for contract/integration tests; not referenced from the binary.
 #[allow(unused_imports)]
 pub use mapping::{TypeMapping, build_arrow_field, derive_fidelity, rivet_type_to_arrow};
-pub use override_table::{override_is_read, resolve_column};
+pub(crate) use override_table::resolve_column;
 pub use override_type::{parse_column_overrides, parse_type_str};
 pub(crate) use override_type::{refuse_cursor_case_miss, refuse_override_case_miss};
 pub use policy::plan_columns;

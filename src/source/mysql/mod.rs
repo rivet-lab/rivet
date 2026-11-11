@@ -276,7 +276,7 @@ pub(crate) fn type_mappings_on(
         .map(|col| {
             let native = mysql_native_type_name(col);
             let rivet = crate::types::resolve_column(
-                crate::config::SourceType::Mysql,
+                crate::types::override_table::Engine::Mysql,
                 column_overrides,
                 col.name_str().as_ref(),
                 &native,

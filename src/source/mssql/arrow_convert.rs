@@ -175,7 +175,7 @@ use crate::source::value_within_ceiling;
 /// precision still ride as a declared type, same as PG/MySQL).
 pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> Result<RivetType> {
     resolve_column(
-        crate::config::SourceType::Mssql,
+        crate::types::override_table::Engine::Mssql,
         overrides,
         col.name(),
         &format!("{:?}", col.column_type()).to_lowercase(),

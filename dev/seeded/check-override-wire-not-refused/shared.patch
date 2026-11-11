@@ -1,13 +1,13 @@
 diff --git a/src/source/mod.rs b/src/source/mod.rs
-index d5b76a4e..90e82914 100644
+index def6e15e..c1ad4ffd 100644
 --- a/src/source/mod.rs
 +++ b/src/source/mod.rs
-@@ -594,7 +594,7 @@ pub(crate) fn refuse_override_wire_mismatch(
-         Err(e) => e,
-     };
-     let refused = crate::error::code_of(&err)
--        .is_some_and(|c| c.id == crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id);
-+        .is_some_and(|c| c.id == crate::error::codes::SOURCE_QUERY_FAILED.id);
-     if refused {
-         return Err(err);
-     }
+@@ -695,7 +695,7 @@ impl BatchSink for FirstBatchProbe {
+ /// Whether `err` is the override table's refusal of a `columns:` pair.
+ fn is_wire_mismatch(err: &anyhow::Error) -> bool {
+     crate::error::code_of(err)
+-        .is_some_and(|c| c.id == crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id)
++        .is_some_and(|c| c.id == crate::error::codes::SOURCE_QUERY_FAILED.id)
+ }
+ 
+ /// Returns the run's refusal for a `columns:` override: the table's verdict on the catalog types, then the first row through the run's own converter.

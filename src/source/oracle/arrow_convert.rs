@@ -63,7 +63,7 @@ pub(super) fn oracle_type_to_rivet(
     overrides: &ColumnOverrides,
 ) -> crate::error::Result<RivetType> {
     crate::types::resolve_column(
-        crate::config::SourceType::Oracle,
+        crate::types::override_table::Engine::Oracle,
         overrides,
         meta.name(),
         native,

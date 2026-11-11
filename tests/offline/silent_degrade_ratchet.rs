@@ -3,7 +3,7 @@
 //! count under `src/source/` may only shrink.
 
 /// Occurrences under `src/source/`; 2026-09-30 the CDC builder refuses instead of nulling; 2026-11-08 35 -> 24: the MySQL converter refuses a value no arm reads.
-const CEILING: usize = 24; // ratchet-pin: silent-degrade-shapes (review 2027-02-01)
+const CEILING: usize = 23; // ratchet-pin: silent-degrade-shapes (review 2027-02-01); 2026-11-10 lowered from 24: the override table refuses an unread value instead of a NULL arm
 
 /// The shapes that swap an unreadable value for NULL or nothing.
 const SHAPES: &[&str] = &[
