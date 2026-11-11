@@ -1012,6 +1012,20 @@ fn diagnose_stream_error(e: mongodb::error::Error) -> anyhow::Error {
     anyhow::Error::from(e)
 }
 
+/// Record the first `_id` bracket of the stream and report true when a later event differs and no warning was given yet.
+fn hetero_should_warn(first: &mut Option<Option<u8>>, warned: bool, bracket: Option<u8>) -> bool {
+    if warned {
+        return false;
+    }
+    match *first {
+        None => {
+            *first = Some(bracket);
+            false
+        }
+        Some(seen) => seen != bracket,
+    }
+}
+
 impl ChangeStream for MongoChangeStream {
     fn engine(&self) -> crate::source::cdc::CdcEngine {
         crate::source::cdc::CdcEngine::Mongo
@@ -1105,28 +1119,18 @@ impl ChangeStream for MongoChangeStream {
                     ) {
                         return Some(Err(e));
                     }
-                    // Heterogeneous-`_id` display-collision warning (once per
-                    // stream), mirroring the batch full-scan guard: the flat `_id`
-                    // column can render distinct BSON types to the same text, so a
-                    // downstream merge keyed on `_id` conflates them.
-                    if !*hetero_warned {
-                        let b = cse
-                            .document_key
-                            .as_ref()
-                            .and_then(|dk| dk.get("_id"))
-                            .and_then(super::id_bracket);
-                        match *hetero_first {
-                            None => *hetero_first = Some(b),
-                            Some(first) if first != b => {
-                                log::warn!(
-                                    "mongodb cdc: heterogeneous `_id` types across the \
-                                     change stream: {}",
-                                    super::hetero_id_guidance()
-                                );
-                                *hetero_warned = true;
-                            }
-                            _ => {}
-                        }
+                    let bracket = cse
+                        .document_key
+                        .as_ref()
+                        .and_then(|dk| dk.get("_id"))
+                        .and_then(super::id_bracket);
+                    if hetero_should_warn(hetero_first, *hetero_warned, bracket) {
+                        log::warn!(
+                            "mongodb cdc: heterogeneous `_id` types across the \
+                             change stream: {}",
+                            super::hetero_id_guidance()
+                        );
+                        *hetero_warned = true;
                     }
                     return Some(
                         stamp_event(clock, cse.cluster_time)
@@ -1782,6 +1786,20 @@ mod error_code_tests {
     fn an_unrecognised_resume_token_checkpoint_is_refused_by_code() {
         let err = super::decode_resume_token(&serde_json::json!({ "foo": 1 })).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CHECKPOINT_INVALID", 5);
+    }
+
+    /// The first event fixes the bracket; a different one warns once and never again.
+    #[test]
+    fn a_second_id_bracket_warns_once() {
+        let mut first = None;
+        assert!(!super::hetero_should_warn(&mut first, false, Some(0)));
+        assert_eq!(first, Some(Some(0)));
+        assert!(!super::hetero_should_warn(&mut first, false, Some(0)));
+        assert!(super::hetero_should_warn(&mut first, false, Some(2)));
+        assert!(!super::hetero_should_warn(&mut first, true, Some(2)));
+        let mut unrecorded = None;
+        assert!(!super::hetero_should_warn(&mut unrecorded, true, Some(0)));
+        assert_eq!(unrecorded, None);
     }
 
     /// Anchoring against a server that cannot be reached fails and pins nothing.
