@@ -60,7 +60,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "writeOnly": true
         },
         "url_env": {
           "type": [
@@ -107,7 +108,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "writeOnly": true
         },
         "password_env": {
           "type": [
@@ -1679,7 +1681,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "writeOnly": true
         },
         "webhook_url_env": {
           "type": [
@@ -1790,7 +1793,7 @@
             "string",
             "null"
           ],
-          "default": null
+          "writeOnly": true
         },
         "user": {
           "description": "Snowflake / ClickHouse: the user the load authenticates as.",

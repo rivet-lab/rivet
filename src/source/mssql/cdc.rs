@@ -312,7 +312,7 @@ pub(crate) struct MssqlCdcConfig {
     pub port: u16,
     pub database: String,
     pub user: String,
-    pub password: String,
+    pub password: crate::secret::Secret,
     /// CDC capture instance, e.g. `dbo_orders`. Validated as an identifier
     /// because it is interpolated into the change-function name (which can't be a
     /// bind parameter).

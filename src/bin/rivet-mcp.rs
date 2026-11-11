@@ -40,14 +40,17 @@ struct Args {
 
     /// Postgres connection URL (overrides DATABASE_URL env var).
     #[arg(long, env = "DATABASE_URL", value_name = "URL")]
-    pg_url: Option<String>,
+    pg_url: Option<rivet::secret::Secret>,
 
     /// MySQL connection URL.
     #[arg(long, value_name = "URL")]
-    mysql_url: Option<String>,
+    mysql_url: Option<rivet::secret::Secret>,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    rivet::mcp::run_stdio(args.pg_url.as_deref(), args.mysql_url.as_deref())
+    rivet::mcp::run_stdio(
+        args.pg_url.as_ref().map(rivet::secret::Secret::expose),
+        args.mysql_url.as_ref().map(rivet::secret::Secret::expose),
+    )
 }

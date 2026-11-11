@@ -136,7 +136,7 @@ const PAGES: &[&str] = &[
 // ─── PostgreSQL (legacy INSERT path) ─────────────────────────
 
 pub fn seed_postgres(args: &Args) -> Result<()> {
-    let mut client = postgres::Client::connect(&args.pg_url, postgres::NoTls)
+    let mut client = postgres::Client::connect(args.pg_url.expose(), postgres::NoTls)
         .context("failed to connect to PostgreSQL")?;
 
     ensure_orders_sparse_pg(&mut client)?;
@@ -374,7 +374,7 @@ fn seed_pg_events(client: &mut postgres::Client, args: &Args) -> Result<usize> {
 pub fn seed_mysql(args: &Args) -> Result<()> {
     use mysql::prelude::*;
 
-    let pool = mysql::Pool::new(mysql::Opts::from_url(&args.mysql_url)?)?;
+    let pool = mysql::Pool::new(mysql::Opts::from_url(args.mysql_url.expose())?)?;
     let mut conn = pool.get_conn()?;
 
     ensure_orders_sparse_mysql(&mut conn)?;
@@ -1303,7 +1303,7 @@ pub fn seed_pg_orders_sparse_fill(client: &mut postgres::Client, args: &Args) ->
 }
 
 pub fn seed_pg_sparse_only(args: &Args) -> Result<()> {
-    let mut client = postgres::Client::connect(&args.pg_url, postgres::NoTls)
+    let mut client = postgres::Client::connect(args.pg_url.expose(), postgres::NoTls)
         .context("failed to connect to PostgreSQL")?;
     ensure_orders_sparse_pg(&mut client)?;
     client
@@ -1398,7 +1398,7 @@ pub fn seed_mysql_orders_sparse_fill(conn: &mut mysql::PooledConn, args: &Args) 
 
 pub fn seed_mysql_sparse_only(args: &Args) -> Result<()> {
     use mysql::prelude::*;
-    let pool = mysql::Pool::new(mysql::Opts::from_url(&args.mysql_url)?)?;
+    let pool = mysql::Pool::new(mysql::Opts::from_url(args.mysql_url.expose())?)?;
     let mut conn = pool.get_conn()?;
     ensure_orders_sparse_mysql(&mut conn)?;
     conn.query_drop("TRUNCATE TABLE orders_sparse")?;

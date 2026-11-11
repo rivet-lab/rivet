@@ -12,7 +12,7 @@ pub struct NotificationsConfig {
 #[derive(Debug, Deserialize, JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SlackConfig {
-    pub webhook_url: Option<String>,
+    pub webhook_url: Option<crate::secret::Secret>,
     pub webhook_url_env: Option<String>,
     #[serde(default)]
     pub on: Vec<NotifyEvent>,

@@ -13,20 +13,15 @@ pub type S3Destination = CloudDestination<S3Backend>;
 /// Zero-sized backend marker carrying S3's operator construction.
 pub struct S3Backend;
 
-/// Read a credential from an env var into a `Zeroizing<String>`.
-///
-/// SecOps: the underlying heap buffer is zeroed on drop instead of lingering
-/// in freed memory (visible via core dump, ptrace, or heap reuse). OpenDAL
-/// stores its own copy inside `reqsign`; the `Zeroizing` wrapper only protects
-/// our transient handle.
-fn read_credential_env(env_name: &str, label: &str) -> Result<zeroize::Zeroizing<String>> {
+/// Read a credential from an env var into a [`crate::secret::Secret`].
+fn read_credential_env(env_name: &str, label: &str) -> Result<crate::secret::Secret> {
     let value = std::env::var(env_name).map_err(|_| {
         crate::error::coded(
             crate::error::codes::CONFIG_SECRET_UNSET,
             format!("env var '{}' not set for S3 {}", env_name, label),
         )
     })?;
-    Ok(zeroize::Zeroizing::new(value))
+    Ok(crate::secret::Secret::new(value))
 }
 
 /// Resolve the shared-file profile `profile` and nothing else: refuses by `RIVET_DEST_CREDENTIALS_INVALID` when an ambient `AWS_PROFILE` selects another profile or the profile holds no static keys or web-identity role, and disables the instance-metadata fallback.
@@ -105,15 +100,15 @@ impl CloudBackend for S3Backend {
             } => {
                 if let Some(env_name) = &access_key_env {
                     let key = read_credential_env(env_name, "access key")?;
-                    builder = builder.access_key_id(key.as_str());
+                    builder = builder.access_key_id(key.expose());
                 }
                 if let Some(env_name) = &secret_key_env {
                     let secret = read_credential_env(env_name, "secret key")?;
-                    builder = builder.secret_access_key(secret.as_str());
+                    builder = builder.secret_access_key(secret.expose());
                 }
                 if let Some(env_name) = &session_token_env {
                     let token = read_credential_env(env_name, "session token")?;
-                    builder = builder.session_token(token.as_str());
+                    builder = builder.session_token(token.expose());
                 }
             }
             DestinationCredential::Ambient
@@ -243,7 +238,7 @@ session_token_env: AWS_SESSION_TOKEN
         // SAFETY: test-only; binary is single-threaded in this test context.
         unsafe { std::env::set_var(name, "fake-token-value") };
         let zeroizing = super::read_credential_env(name, "session token").unwrap();
-        assert_eq!(zeroizing.as_str(), "fake-token-value");
+        assert_eq!(zeroizing.expose(), "fake-token-value");
         unsafe { std::env::remove_var(name) };
     }
 }

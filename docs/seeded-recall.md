@@ -83,12 +83,14 @@ one, a red one, one from a dirty tree and a missing record are each refused.
 | `ABORTED` | a control-green cell was stopped by nextest (TIMEOUT, ABORT, SIGKILL) instead of failing; only a failing assertion catches a seed, so a hang-class seed needs a watchdog test that fails | FAIL |
 | `STAND-DOWN` | the cells ran while the stand was down or unreadable (the gate's stand watchdog, or a cell that failed on the stand's own `live test requires ...` panic): neither a catch nor a miss | INFRA (the run is NOT GRADED) |
 | `OWED` | the row declares `platform:` and this host is another one: its cells exist only there. A DESIGN skip row on the per-run gate, a FAIL on the island that owes it | SKIP (DESIGN) |
-| `N/A` | the manifest says why the code path does not exist on this engine | N/A row, counted under `na_ceiling` |
+| `N/A` | the manifest says why the code path does not exist on this engine | N/A row, held by its reason |
 
-Every `N/A` row is written to the ledger with its reason. Their count is held under
-`na_ceiling` in `docs/release-gate-matrix.yaml` (row `seeded_recall`); a new `na:` that
-does not lower another one fails the self-test and the gate until its cell is written or
-the ceiling is raised with a dated reason. A reason is at least 30 characters.
+Every `N/A` row is written to the ledger with its reason and counted in the run's output. There is no
+global ceiling on the count: the row itself is the bound. `parse_manifest` refuses a `na:` whose reason
+is shorter than 30 characters, that carries any other key, or whose engine is not a value of the seed's
+scope (read from the Rust enums, or `postgres-state` / `sqlite-state`). Whether the code path really is
+absent on that engine is the reviewer's reading: the product holds no machine-readable per-engine
+capability table to check it against.
 
 ## Platform-only cells
 

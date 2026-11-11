@@ -491,8 +491,10 @@ fn without_default_port(key: &str) -> String {
 /// The state the rig's runs use, opened by this process.
 fn state_of(rig: &Rig) -> rivet::state::StateStore {
     match rig.state_url(&[]) {
-        Some(url) => rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(url))
-            .expect("fixture: open the Postgres state"),
+        Some(url) => {
+            rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(url.into()))
+                .expect("fixture: open the Postgres state")
+        }
         None => rivet::state::StateStore::open(&rig.config_path().display().to_string())
             .expect("fixture: open the SQLite state"),
     }
@@ -650,10 +652,10 @@ fn reset_beside_a_run_of_one_partition(engine: SqlEngine, state: Option<&str>) {
         let (rig_url, config) = (rig.state_url(&[]), rig.config_path());
         std::thread::spawn(move || {
             let store = match rig_url {
-                Some(url) => {
-                    rivet::state::StateStore::open_at_ref(&rivet::state::StateRef::Postgres(url))
-                        .unwrap()
-                }
+                Some(url) => rivet::state::StateStore::open_at_ref(
+                    &rivet::state::StateRef::Postgres(url.into()),
+                )
+                .unwrap(),
                 None => rivet::state::StateStore::open(&config.display().to_string()).unwrap(),
             };
             let run = store.try_load_lease(&key).unwrap().expect("a live run");

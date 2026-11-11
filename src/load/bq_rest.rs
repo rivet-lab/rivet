@@ -38,9 +38,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::secret::Secret;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use zeroize::Zeroizing;
 
 use crate::config::DestinationCredential;
 use crate::error::retry::MAX_TRANSIENT_RETRIES;
@@ -103,7 +103,7 @@ impl std::fmt::Debug for BigQueryApi {
 enum Auth {
     /// An operator-supplied token (`RIVET_BQ_ACCESS_TOKEN`) — impersonation,
     /// CI, or any credential shape rivet cannot mint itself.
-    Static(Zeroizing<String>),
+    Static(Secret),
     /// ADC credentials — `authorized_user` (refresh_token grant) or a
     /// `service_account` key file (RS256 jwt-bearer grant), both minted in
     /// process through the shared `gcp_auth` seam.
@@ -568,7 +568,7 @@ impl BigQueryApi {
         req: reqwest::blocking::RequestBuilder,
     ) -> Result<reqwest::blocking::RequestBuilder> {
         let token = self.auth.access_token()?;
-        let mut req = req.header("Authorization", format!("Bearer {}", token.as_str()));
+        let mut req = req.header("Authorization", format!("Bearer {}", token.expose()));
         // ADC USER credentials are not billable on their own: a metered JSON
         // API rejects them without a quota project. A SERVICE ACCOUNT is
         // billable on its own and must NOT be sent one — the header would make
@@ -631,11 +631,11 @@ impl Auth {
         if let Some(tok) = static_token.as_deref()
             && static_given
         {
-            return Ok(Auth::Static(Zeroizing::new(tok.to_string())));
+            return Ok(Auth::Static(Secret::new(tok.to_string())));
         }
         let adc = gcp_auth::load_adc_credentials()?;
         match choose_token_source(static_token.as_deref(), adc.is_some()) {
-            TokenSourceKind::Static => Ok(Auth::Static(Zeroizing::new(
+            TokenSourceKind::Static => Ok(Auth::Static(Secret::new(
                 static_token.expect("a Static choice implies a token"),
             ))),
             TokenSourceKind::Adc => {
@@ -678,7 +678,7 @@ impl Auth {
         Ok(Auth::Adc(src))
     }
 
-    fn access_token(&self) -> Result<Zeroizing<String>> {
+    fn access_token(&self) -> Result<Secret> {
         match self {
             Auth::Static(t) => Ok(t.clone()),
             Auth::Adc(src) => src.access_token(),
@@ -723,7 +723,7 @@ pub(crate) const GCLOUD_TOKEN_ARGV: [&str; 3] =
 /// in INFORMATION_SCHEMA.JOBS_BY_PROJECT while the GCS leg wrote as the service
 /// account. A load must act as the identity the operator configured, or its
 /// audit trail is fiction.
-fn mint_token_via_gcloud_cli() -> Result<Zeroizing<String>> {
+fn mint_token_via_gcloud_cli() -> Result<Secret> {
     let out = std::process::Command::new("gcloud")
         .args(GCLOUD_TOKEN_ARGV)
         .output()
@@ -740,7 +740,7 @@ fn mint_token_via_gcloud_cli() -> Result<Zeroizing<String>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let token = Zeroizing::new(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let token = Secret::new(String::from_utf8_lossy(&out.stdout).trim().to_string());
     if token.is_empty() {
         crate::rivet_bail!(
             crate::error::codes::LOAD_WAREHOUSE_AUTH_FAILED,
@@ -1358,7 +1358,7 @@ mod tests {
             dataset_location: std::sync::OnceLock::new(),
             endpoint: "https://e".into(),
             http: reqwest::blocking::Client::new(),
-            auth: Auth::Static(Zeroizing::new("t".into())),
+            auth: Auth::Static(Secret::new("t")),
             journal: Default::default(),
         };
         assert_eq!(
@@ -1694,7 +1694,7 @@ mod tests {
             dataset_location: std::sync::OnceLock::new(),
             endpoint: format!("http://{addr}"),
             http: reqwest::blocking::Client::new(),
-            auth: Auth::Static(Zeroizing::new("t".into())),
+            auth: Auth::Static(Secret::new("t")),
             journal: Default::default(),
         };
         let job_ref = JobRef {
@@ -1762,7 +1762,7 @@ mod tests {
             dataset_location: std::sync::OnceLock::new(),
             endpoint: "https://e".into(),
             http: reqwest::blocking::Client::new(),
-            auth: Auth::Static(Zeroizing::new("t".into())),
+            auth: Auth::Static(Secret::new("t")),
             journal: Default::default(),
         };
         let with_loc = api.query_results_url(&JobRef {
@@ -1794,7 +1794,7 @@ mod tests {
             dataset_location: std::sync::OnceLock::new(),
             endpoint: "https://e".into(),
             http: reqwest::blocking::Client::new(),
-            auth: Auth::Static(Zeroizing::new("t".into())),
+            auth: Auth::Static(Secret::new("t")),
             journal: Default::default(),
         };
         let url = api.job_url(&JobRef {
@@ -1820,7 +1820,7 @@ mod tests {
             dataset_location: std::sync::OnceLock::new(),
             endpoint: DEFAULT_ENDPOINT.into(),
             http: reqwest::blocking::Client::new(),
-            auth: Auth::Static(Zeroizing::new("ya29.SECRET-TOKEN".into())),
+            auth: Auth::Static(Secret::new("ya29.SECRET-TOKEN")),
             journal: Default::default(),
         };
         let rendered = format!("{api:?}");
@@ -2488,9 +2488,9 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod stand {
     use super::{Auth, BigQueryApi};
+    use crate::secret::Secret;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::{Arc, Mutex};
-    use zeroize::Zeroizing;
 
     /// One request the stand received.
     #[derive(Debug, Clone)]
@@ -2558,7 +2558,7 @@ pub(crate) mod stand {
                 dataset_location: std::sync::OnceLock::new(),
                 endpoint: self.endpoint.clone(),
                 http: reqwest::blocking::Client::new(),
-                auth: Auth::Static(Zeroizing::new("stand-token".into())),
+                auth: Auth::Static(Secret::new("stand-token")),
                 journal: Default::default(),
             }
         }

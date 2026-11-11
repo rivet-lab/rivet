@@ -954,7 +954,7 @@ pub(crate) fn max_tx_bytes() -> usize {
 /// sibling of [`crate::source::create_source`]'s `SourceConfig`. The fields here
 /// are engine-agnostic; per-engine knobs live in [`CdcEngineOpts`].
 pub(crate) struct CdcConfig {
-    pub url: String,
+    pub url: crate::secret::Secret,
     /// MySQL checkpoint file (PG resumes via the slot; SQL Server via its LSN;
     /// MongoDB via the resume token).
     pub checkpoint: Option<PathBuf>,
@@ -1416,7 +1416,7 @@ pub(crate) fn create_change_stream(
     cfg: &CdcConfig,
     peek: PeekBound,
 ) -> Result<Box<dyn ChangeStream>> {
-    let url = cfg.url.as_str();
+    let url = cfg.url.expose();
     // A host-less URL is a config/parse error, not a per-engine setup problem —
     // validate BEFORE the engine match so it never gets blanketed by the binlog/
     // slot/CDC grants hint below (dogfood LOW).
@@ -2615,7 +2615,8 @@ mod setup_hint {
 
     #[test]
     fn tiberius_config_dials_the_host_and_port_it_was_given() {
-        let c = crate::source::mssql::tiberius_config("db.example", 14330, "d", "u", "p", None);
+        let c =
+            crate::source::mssql::tiberius_config("db.example", 14330, "d", "u", &"p".into(), None);
         assert_eq!(c.get_addr(), "db.example:14330");
     }
 }

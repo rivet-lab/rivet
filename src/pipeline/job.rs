@@ -3753,7 +3753,7 @@ mod tests {
         let (url, _queries) = answering_server(Answer::Int8(vec![11, 12, 13, 14, 15, 16, 17]));
         let mut source = unreachable_source();
         assert_eq!(harm_snapshot(&source), None);
-        source.url = Some(url);
+        source.url = Some(url.into());
         let counters: Vec<(String, i64)> = [
             ("pg_blks_read", 11),
             ("pg_blks_hit", 12),
