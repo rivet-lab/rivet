@@ -1427,6 +1427,13 @@ def _self_test() -> None:
     print("no_secret_in_output self-test: ok")
 
 
+def exit_code(led: Ledger) -> int:
+    """A matrix CLI's exit: 1 when any cell failed, 2 when no cell was graded (PASS or KNOWN), else 0."""
+    if led.red:
+        return 1
+    return 0 if any(c.status in (Status.PASS, Status.KNOWN) for c in led.cells) else 2
+
+
 def main() -> int:
     """Run the matrix against a binary and print every non-green cell."""
     ap = argparse.ArgumentParser(description=__doc__)
@@ -1455,7 +1462,7 @@ def main() -> int:
         tally[word] += 1
         print(f"no_secret_in_output {c.engine}/{c.scenario}/{c.store} {word} {' '.join(c.detail.split())[:400]}")
     print(f"no_secret_in_output summary PASS={tally['PASS']} RED={tally['RED']} NOT_GRADED={tally['NOT_GRADED']} cells={len(led.cells)}")
-    return 1 if led.red else 0
+    return exit_code(led)
 
 
 if __name__ == "__main__":

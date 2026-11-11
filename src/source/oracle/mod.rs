@@ -725,6 +725,15 @@ impl Source for OracleSource {
         introspect_oracle_on(self, qualified_table)
     }
 
+    fn finer_than_microsecond_columns(&mut self, table: &str) -> Result<Vec<String>> {
+        let (owner, table) = crate::sql::oracle_catalog_preds(table);
+        Ok(declared_wider_columns(self, &owner, &table)?
+            .into_iter()
+            .filter(|(_, wider)| *wider == crate::source::keyset_key::Wider::FinerTimestamp)
+            .map(|(column, _)| column)
+            .collect())
+    }
+
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
         let result = self.export_within_budget(request, sink);
         // The call timeout is per connection: clear it on every exit, not only on success.

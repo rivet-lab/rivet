@@ -481,6 +481,17 @@ Notes:
   `SELECT pg_drop_replication_slot('rivet_slot');`.
 - `wal2json` / `pgoutput` are alternatives to `test_decoding`; `test_decoding` is
   always built in and needs no extension.
+- **`bit` / `bit varying` columns are refused.** `test_decoding` prints a bit string as the
+  literal `B'110'` where the server's text is `110`, so rivet stops with
+  `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` (exit 5) instead of delivering a value the batch run never
+  writes (batch refuses these columns with `RIVET_TYPE_UNSAFE_MAPPING`). A captured table whose
+  catalog holds such a column is refused before the slot, the snapshot or any file is written.
+  Change the column to text (`ALTER TABLE ... ALTER COLUMN ... TYPE text USING ...::text`), drop
+  the export's slot (`SELECT pg_drop_replication_slot('rivet_slot');`: changes already in the
+  slot keep the bit type and would refuse again), then re-baseline; the re-baseline creates the
+  slot again at the current position and its snapshot holds every row.
+- A schema, table or column name that holds `: `, `[` or `]:` is read whole; the line is cut
+  at the operation and at each quoted name's closing quote, never at the first separator.
 
 ### SQL Server — CDC change tables
 

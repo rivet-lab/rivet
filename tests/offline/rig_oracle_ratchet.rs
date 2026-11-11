@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 // 32 -> 31 (2026-11-04): the TF-1 cell closed with fix/mysql-binlog-time-fraction and its opt-out is gone.
 // 31 -> 32 (2026-11-06, #852): the SQL Server in-range nanosecond cell delivers 100 ns ticks the oracle reads at microseconds; closes when the oracle reads datetime2(7) at full scale.
 // 32 -> 33 (2026-11-08): the declared-override cells (live_int_to_float_override.rs) read the parquet back themselves, one shared `readback_only` opt-out; closes when the oracle grades a column the config declares a type for.
+// 33 -> 34 (2026-11-11): the datetime2(7) key-admission cell holds rows that differ below a microsecond, which the oracle reads the source at; the view is read back by the second client; closes when the oracle reads datetime2(7) at full scale.
+// 34 -> 35 (2026-11-11): the Oracle TIMESTAMP(9) key-admission cell holds rows that differ below a microsecond and reads the view through the second client; closes when the oracle reads a timestamp_ns column at full scale.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
@@ -156,6 +158,78 @@ fn uncoded_refusals_the_cells_accept_never_grow() {
         n, UNCODED_REFUSAL_CEILING,
         "refusals accepted with no RIVET_* code (`Refused::uncoded_known_defect(`): {n}, ceiling {UNCODED_REFUSAL_CEILING}. \
          A refusal is expected by code; a coded one lowers the ceiling here."
+    );
+}
+
+/// `(file, test fn, reason)` of every live cell that accepts any non-zero exit as the refusal.
+const BARE_REFUSALS: &[(&str, &str, &str)] = &[(
+    "tests/live/chunking_stand.rs",
+    "run_partial_unique_index_is_not_a_keyset_key",
+    "2026-11-11: the product has no refusal for a partial unique keyset key (AUDIT-RED keyset-partial-unique); closes when the refusal is coded and the cell asserts it",
+)];
+
+/// The enclosing fn of each bare `if !x.status.success() { return; }` in `text`.
+fn bare_nonzero_accepts(text: &str) -> Vec<String> {
+    let bare = regex::Regex::new(
+        r"if\s+!\s*[\w.]+\.status\.success\(\)\s*\{\s*(?://[^\n]*\s*)*return\s*;?\s*\}",
+    )
+    .unwrap();
+    let decl = regex::Regex::new(r"fn\s+(\w+)").unwrap();
+    bare.find_iter(text)
+        .map(|m| {
+            decl.captures_iter(&text[..m.start()])
+                .last()
+                .map(|c| c[1].to_string())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+#[test]
+fn a_live_refusal_is_asserted_by_code_never_by_a_bare_nonzero_exit() {
+    let live: Vec<(String, String)> = sources()
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("tests/live/"))
+        .collect();
+    super::nonvacuity::require_enumerated(
+        live.len(),
+        30,
+        "live test sources scanned",
+        "tests/live moved",
+    );
+    let sample = "fn a_cell() {\n    if !run.status.success() {\n        // refusing is fine\n        return;\n    }\n}";
+    assert_eq!(
+        bare_nonzero_accepts(sample),
+        vec!["a_cell".to_string()],
+        "the bare-exit pattern no longer matches its own sample"
+    );
+    assert!(
+        bare_nonzero_accepts(
+            "fn a_cell() {\n    if !run.status.success() {\n        assert_refused(&run, r);\n        return;\n    }\n}"
+        )
+        .is_empty(),
+        "a refusal asserted by code is not a bare exit"
+    );
+    let mut found: Vec<(String, String)> = live
+        .iter()
+        .flat_map(|(rel, t)| {
+            bare_nonzero_accepts(t)
+                .into_iter()
+                .map(move |f| (rel.clone(), f))
+        })
+        .collect();
+    found.sort();
+    let mut ledger: Vec<(String, String)> = BARE_REFUSALS
+        .iter()
+        .map(|(rel, f, _)| (rel.to_string(), f.to_string()))
+        .collect();
+    ledger.sort();
+    let unlisted: Vec<_> = found.iter().filter(|s| !ledger.contains(s)).collect();
+    let stale: Vec<_> = ledger.iter().filter(|s| !found.contains(s)).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "live cells that accept any non-zero exit as the refusal: unlisted {unlisted:?}, stale ledger entries {stale:?}. \
+         Assert it with `assert_refused(&out, Refused::by_code(\"RIVET_...\", exit))`; a fixed site leaves BARE_REFUSALS."
     );
 }
 

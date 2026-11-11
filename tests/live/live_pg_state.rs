@@ -370,6 +370,7 @@ fn pg_load_spec_round_trips() {
         fidelity: TypeFidelity::Exact,
         nullable: false,
         warnings: Vec::new(),
+        finer_than_microsecond: false,
     };
     let pk = vec!["id".to_string()];
     s.record_load_spec(

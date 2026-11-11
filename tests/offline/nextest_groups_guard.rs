@@ -215,3 +215,35 @@ fn every_exclusive_cell_names_a_live_test() {
         named.difference(&live).collect::<Vec<_>>()
     );
 }
+
+/// Every `retries` setting of the file that is not the literal `retries = 0`.
+fn retrying_lines(toml: &str) -> Vec<String> {
+    toml.lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("retries") && l.replace(' ', "") != "retries=0")
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn no_nextest_profile_retries_a_failed_test() {
+    let root = super::nonvacuity::repo_root();
+    let toml = std::fs::read_to_string(root.join(".config/nextest.toml")).expect("nextest.toml");
+    assert_eq!(
+        retrying_lines(&toml),
+        Vec::<String>::new(),
+        "a retried test reads green after failing once"
+    );
+    assert!(
+        toml.matches("retries = 0").count() >= 2,
+        "the default and pr profiles pin retries = 0"
+    );
+    assert_eq!(
+        retrying_lines(
+            "[profile.ci]\nretries = 1\n[profile.x]\nretries = { backoff = \"fixed\", count = 2 }\n"
+        )
+        .len(),
+        2,
+        "a numeric or table retries is named"
+    );
+}
