@@ -29,6 +29,7 @@ import yaml
 
 from . import cdc, core, engines
 from .core import Ledger, SkipCause
+from .sentinels import warned_counts
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGER = ROOT / "docs" / "type-capability-matrix.yaml"
@@ -176,6 +177,18 @@ def _temporal(engine: str, native: str) -> tuple[str, str]:
 TEMPORAL = re.compile(r"(DATE|TIMESTAMPTZ|TIMESTAMP|DATETIME2|DATETIME|SMALLDATETIME|DATETIMEOFFSET)(\(\d\))?( WITH (LOCAL )?TIME ZONE)?( NULL)?")
 
 
+ZERO_DATE_LIT = re.compile(r"'(0000-00-00|\d{4}-00-\d\d|\d{4}-\d\d-00)( [0-9:.]+)?'")
+
+
+def _zero_dates(engine: str, native: str) -> list[str]:
+    """The zero and partial date literals a MySQL temporal column can hold under an empty sql_mode."""
+    if engine != "mysql":
+        return []
+    if native == "DATE":
+        return ["'0000-00-00'", "'2026-00-00'"]
+    return ["'0000-00-00 00:00:00'", "'2026-00-00 00:00:00'"] if native.startswith("DATETIME") else ["'0000-00-00 00:00:00'"]
+
+
 def _edges_int(engine: str, native: str, delivery: str) -> list[str]:
     """Integer edges inside the column's own range."""
     lo, hi = _int_range(native)
@@ -219,7 +232,7 @@ def _edges_other(engine: str, native: str, delivery: str) -> list[str]:
         lo, hi = _temporal(engine, native)
         cut = 10 if n == "DATE" else None
         kw = "DATE " if engine == "oracle" and n == "DATE" else "TIMESTAMP " if engine == "oracle" else ""
-        return [f"{kw}'{v[:cut]}'" for v in (lo, hi, "1970-01-02 03:04:05")]
+        return [f"{kw}'{v[:cut]}'" for v in (lo, hi, "1970-01-02 03:04:05")] + _zero_dates(engine, n)
     if n in ("JSON", "JSONB"):
         cast = "::" + n.lower() if engine == "postgres" else ""
         return [f"'{{}}'{cast}", f"'null'{cast}"]
@@ -303,7 +316,8 @@ def seed(engine: str, url: str) -> tuple[list[Col], int]:
     for s in ledger_setup(engine):
         engines.sql(engine, url, s)
     for st in stmts:
-        p = engines.sql(engine, url, st + ";")
+        zero = ZERO_DATE_LIT.search(st) if engine == "mysql" and st.startswith("INSERT") else None
+        p = engines.sql(engine, url, ("SET SESSION sql_mode = ''; " if zero else "") + st + ";")
         if not p.ok:
             raise RuntimeError(f"{engine} seed refused `{st[:160]}`: exit {p.returncode}: {p.out.strip()[:300]}")
     return cols, n
@@ -672,14 +686,19 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
         return Result(cell, DELIVERED, COLUMNS, f"delivered {sorted(desc)}, expected {sorted(want)}", fidelity=fidelity)
     if fmt == "parquet" and target != "none" and not type_ok(target, desc.get(key, "?")):
         return Result(cell, DELIVERED, IGNORED, f"declared {target}, delivered {desc.get(key)}", fidelity=fidelity)
-    nulled, wrong = [], []
+    nulled, wrong, zeros = [], [], 0
     for i in range(1, n_rows + 1):
         lit = src_lits[i - 1] if i - 1 < len(src_lits) else "NULL"
         v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native)
-        if v == NULLED:
+        if v == NULLED and engine == "mysql" and ZERO_DATE_LIT.fullmatch(lit.strip()):
+            zeros += 1
+        elif v == NULLED:
             nulled.append(lit)
         elif v == WRONG:
             wrong.append(f"{lit}->{rows[i][key]!r}")
+    warned = warned_counts(p.out).get(key, 0)
+    if zeros and warned != zeros:
+        nulled.append(f"{zeros} zero or partial dates delivered as NULL, the run's WARN counted {warned}")
     if nulled:
         return Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fidelity)
     if wrong and fidelity in ("lossy", "logical_string", "unsupported"):
@@ -1044,6 +1063,9 @@ def self_test() -> None:
     assert {"decimal(18,-2)", "decimal(60,-2)"} <= set(ax["targets"]) and negative_scale_targets("fn parse_decimal_params let scale: u8 =") == []
     assert compare("mysql", "-2147483648", "int", "decimal(18,-2)", Decimal("-2147483600")) == WRONG, "a negative scale rounds away digits"
     assert compare("mysql", "-2147483600", "int", "decimal(18,-2)", Decimal("-2147483600")) == "OK"
+    assert _zero_dates("mysql", "DATE") == ["'0000-00-00'", "'2026-00-00'"] and _zero_dates("postgres", "DATE") == []
+    assert _zero_dates("mysql", "TIMESTAMP(6)") == ["'0000-00-00 00:00:00'"] and len(_zero_dates("mysql", "DATETIME(3)")) == 2
+    assert all(ZERO_DATE_LIT.fullmatch(v) for v in _zero_dates("mysql", "DATETIME")) and not ZERO_DATE_LIT.fullmatch("'2026-11-01 00:00:00'")
     assert parse_lit("mysql", "NULL") is None and parse_lit("oracle", "''") is None and parse_lit("mysql", "''") == ""
     assert parse_lit("mysql", "-5") == Decimal(-5) and parse_lit("mysql", "'a''b'") == "a'b" and parse_lit("postgres", "TRUE") is True
     assert parse_lit("mysql", "UNHEX('00')") == b"\0" and parse_lit("mysql", "JSON_OBJECT('a',1)") is ...

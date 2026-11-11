@@ -19,7 +19,7 @@
 //!   is exhaustively unit-tested in isolation (no live MySQL needed).
 
 mod arrow_convert;
-pub(crate) use arrow_convert::time_outside_day;
+pub(crate) use arrow_convert::{time_outside_day, zero_date_warning};
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
 mod folded_name;
@@ -44,7 +44,7 @@ use crate::tuning::SourceTuning;
 use crate::types::ColumnOverrides;
 
 use arrow_convert::{
-    mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet,
+    mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet, nulled_dates,
     rows_to_record_batch_typed,
 };
 // `bit_bytes_to_u64` is only referenced by the `tests` module below — gate the
@@ -909,6 +909,9 @@ fn mysql_run_export(
             total_rows += row_buf.len();
             let batch =
                 rows_to_record_batch_typed(&schema, &arrow_types, &row_buf, max_value_bytes)?;
+            for (column, n) in nulled_dates(&schema, &arrow_types, &row_buf) {
+                sink.note_nulled(&column, n);
+            }
             let batch_rows = row_buf.len();
             row_buf.clear();
 
@@ -961,6 +964,9 @@ fn mysql_run_export(
     if !row_buf.is_empty() {
         total_rows += row_buf.len();
         let batch = rows_to_record_batch_typed(&schema, &arrow_types, &row_buf, max_value_bytes)?;
+        for (column, n) in nulled_dates(&schema, &arrow_types, &row_buf) {
+            sink.note_nulled(&column, n);
+        }
         sink.on_batch(&batch)?;
     }
 

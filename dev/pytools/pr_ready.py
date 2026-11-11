@@ -397,7 +397,7 @@ def run_logged(cmd: list[str], log: Path, env: dict | None = None) -> int:
 
 
 def offline_suite(out: Path) -> tuple[str, str]:
-    """Lib/bin unit tests (threaded) and the integration suites under nextest, as pre-push runs them."""
+    """Lib/bin unit tests (threaded) and the integration suites under nextest."""
     unit = out / "unit.log"
     rc1 = run_logged([CARGO, "test", "--lib", "--bins"], unit)
     results = re.findall(r"^test result: (\w+)\. (\d+) passed; (\d+) failed", unit.read_text(errors="ignore"), re.M)

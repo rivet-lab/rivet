@@ -231,6 +231,8 @@ pub trait BatchSink {
     /// `_id` column would be type-ambiguous on the round-trip. No-op default:
     /// SQL engines carry their cursor losslessly in the column already.
     fn set_source_cursor(&mut self, _token: String) {}
+    /// Reports `n` cells of `column` the source wrote as NULL because the target type cannot hold them.
+    fn note_nulled(&mut self, _column: &str, _n: u64) {}
 }
 
 /// Read-only inputs for a single export call.
