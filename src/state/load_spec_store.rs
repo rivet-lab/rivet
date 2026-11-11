@@ -16,6 +16,8 @@ pub struct LoadSpecColumn {
     pub nullable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finer_than_microsecond: bool,
 }
 
 impl LoadSpecColumn {
@@ -28,7 +30,14 @@ impl LoadSpecColumn {
             fidelity: m.fidelity,
             nullable: m.nullable,
             warnings: m.warnings.clone(),
+            finer_than_microsecond: false,
         }
+    }
+
+    /// This column, marked as one the source declares finer than a microsecond when `finer` names it.
+    pub fn marked_finer(mut self, finer: &[String]) -> Self {
+        self.finer_than_microsecond = finer.contains(&self.name);
+        self
     }
 
     /// The mapping this column stands for, its Arrow type re-derived from the Rivet type.
@@ -57,6 +66,17 @@ pub struct LoadSpec {
     pub run_id: Option<String>,
     pub origin: String,
     pub captured_at: String,
+}
+
+impl LoadSpec {
+    /// The recorded columns the source declares finer than a microsecond.
+    pub fn finer_than_microsecond_columns(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .filter(|c| c.finer_than_microsecond)
+            .map(|c| c.name.clone())
+            .collect()
+    }
 }
 
 impl StateStore {
@@ -355,6 +375,7 @@ mod tests {
 
     fn col(name: &str, rivet_type: RivetType) -> LoadSpecColumn {
         LoadSpecColumn {
+            finer_than_microsecond: false,
             name: name.into(),
             source_type: "native".into(),
             rivet_type,
@@ -820,5 +841,31 @@ mod tests {
         let b = Some(vec!["b_id".to_string()]);
         assert_eq!(key("mysql://h:3306/a", "ra"), (a.clone(), a));
         assert_eq!(key("mssql://h:1433/b", "rb"), (b.clone(), b));
+    }
+    /// The columns a spec lists as finer than a microsecond are exactly the flagged ones, in column order.
+    #[test]
+    fn a_spec_lists_only_the_columns_flagged_finer_than_a_microsecond() {
+        let flagged = |name: &str, finer: bool| LoadSpecColumn {
+            finer_than_microsecond: finer,
+            ..col(name, RivetType::Int64)
+        };
+        let spec = LoadSpec {
+            export_name: "e".into(),
+            unit: None,
+            columns: vec![flagged("a", true), flagged("b", false), flagged("c", true)],
+            primary_key: None,
+            run_id: None,
+            origin: String::new(),
+            captured_at: String::new(),
+        };
+        assert_eq!(
+            spec.finer_than_microsecond_columns(),
+            vec!["a".to_string(), "c".to_string()]
+        );
+        let none = LoadSpec {
+            columns: vec![flagged("a", false)],
+            ..spec
+        };
+        assert_eq!(none.finer_than_microsecond_columns(), Vec::<String>::new());
     }
 }
