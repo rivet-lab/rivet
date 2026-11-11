@@ -9,6 +9,8 @@ use std::process::Output;
 
 const MATRIX: &str = "check_equals_run";
 
+const NO_FIXTURE: &str = "no fixture:";
+
 const R_WRAP: &str = "2026-11-08: doctor and plan wrap a stop in their own code where run names it; closes when each passes the stop's code through";
 const R_CODES: &str = "2026-11-08: check and run name one stop with two codes; closes when both read the stop from one seam";
 const R_CHECK: &str =
@@ -1097,6 +1099,32 @@ fn accepted(sig: &str) -> bool {
     ACCEPTED_RED.iter().any(|(a, _)| sig.starts_with(a))
 }
 
+/// The engines whose rig cells were not run because their fixture could not be made.
+fn blind_engines(rows: &[String]) -> BTreeSet<String> {
+    rows.iter()
+        .filter_map(|r| {
+            let mut f = r.splitn(4, ' ');
+            let (key, tag, ev) = (f.nth(1)?, f.next()?, f.next()?);
+            (tag == "NOT_GRADED" && ev.starts_with(NO_FIXTURE))
+                .then(|| key.split('/').next().unwrap_or("").to_string())
+        })
+        .collect()
+}
+
+/// The ledger entries no RED cell shows, or the engines that were not run when that cannot be told.
+fn stale_entries(rows: &[String]) -> Result<Vec<&'static str>, BTreeSet<String>> {
+    let blind = blind_engines(rows);
+    if !blind.is_empty() {
+        return Err(blind);
+    }
+    let red = red_signatures(rows);
+    Ok(ACCEPTED_RED
+        .iter()
+        .filter(|(a, _)| !red.iter().any(|s| s.starts_with(a)))
+        .map(|(a, _)| *a)
+        .collect())
+}
+
 /// Fails on a RED signature outside the ledger; with `whole`, also on a ledger entry no RED cell shows.
 fn assert_ledger(rows: &[String], whole: bool) {
     let red = red_signatures(rows);
@@ -1110,16 +1138,17 @@ fn assert_ledger(rows: &[String], whole: bool) {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    if whole {
-        let stale: Vec<_> = ACCEPTED_RED
-            .iter()
-            .filter(|(a, _)| !red.iter().any(|s| s.starts_with(a)))
-            .map(|(a, _)| *a)
-            .collect();
-        assert!(
+    if !whole {
+        return;
+    }
+    match stale_entries(rows) {
+        Ok(stale) => assert!(
             stale.is_empty(),
             "accepted-RED entries no cell shows any more: {stale:?}; shrink ACCEPTED_RED"
-        );
+        ),
+        Err(blind) => eprintln!(
+            "{MATRIX} LEDGER stale-entry check not run: no fixture for {blind:?}, the entries those cells show are neither stale nor proven"
+        ),
     }
 }
 
@@ -1318,6 +1347,27 @@ fn a_ledger_entry_names_a_signature_not_a_cell() {
     assert_eq!(
         signature(line),
         "doctor-run pre[exit=1 code=RIVET_A] run[exit=1 code=RIVET_B]"
+    );
+}
+
+#[test]
+fn a_ledger_entry_is_stale_only_where_its_cells_ran() {
+    let ran = "check_equals_run postgres/full/clean/-/doctor-run PASS pre[exit=0 code=-] run[exit=0 code=-]".to_string();
+    let not_provoked = "check_equals_run postgres/full/override-refused/-/check-run NOT_GRADED pre[exit=0 code=-] run[exit=0 code=-] shape not provoked: both passed".to_string();
+    let unpaired = "check_equals_run any/any/any/-/state-reset-chunks NOT_GRADED state reads or edits the state DB".to_string();
+    let skipped = format!(
+        "check_equals_run mongo/full/unknown-table/- NOT_GRADED {NO_FIXTURE} live test requires Mongo reachable on 127.0.0.1:27017"
+    );
+    let every_entry: Vec<&str> = ACCEPTED_RED.iter().map(|(a, _)| *a).collect();
+    assert_eq!(
+        stale_entries(&[ran.clone(), not_provoked, unpaired]),
+        Ok(every_entry),
+        "a graded run that shows no RED leaves every entry stale"
+    );
+    assert_eq!(
+        stale_entries(&[ran, skipped]),
+        Err(["mongo".to_string()].into()),
+        "an engine whose cells were not run proves nothing"
     );
 }
 
@@ -1588,11 +1638,12 @@ fn run_rig_cell(
         _ => match fixture(e, m) {
             Ok(f) => Some(f),
             Err(why) => {
+                skip_live(&format!("{MATRIX} {key}: {NO_FIXTURE} {why}"));
                 return emit(
                     rows,
                     &key,
                     Outcome::NotGraded,
-                    &format!("no fixture: {why}"),
+                    &format!("{NO_FIXTURE} {why}"),
                 );
             }
         },
