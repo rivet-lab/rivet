@@ -230,7 +230,12 @@ mod tests {
         a.base_query = "SELECT 1".into();
         let mut b = a.clone();
         b.base_query = "SELECT 2".into();
-        assert!(b.run_shape().changed_from(&a.run_shape()).is_empty());
+        assert_eq!(
+            b.run_shape().changed_from(&a.run_shape()),
+            Vec::<&str>::new()
+        );
+        b.query_template = Some("SELECT ${n} + 1".into());
+        assert_eq!(b.run_shape().changed_from(&a.run_shape()), vec!["query"]);
     }
 
     #[test]

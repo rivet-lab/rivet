@@ -132,8 +132,18 @@ mod tests {
     #[test]
     fn an_empty_shape_changes_nothing() {
         let stored = shape(&[("compression", "a")]);
-        assert!(RunShape::default().changed_from(&stored).is_empty());
-        assert!(stored.changed_from(&RunShape::default()).is_empty());
+        assert_eq!(
+            RunShape::default().changed_from(&stored),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            stored.changed_from(&RunShape::default()),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            stored.changed_from(&shape(&[("compression", "b")])),
+            vec!["compression"]
+        );
     }
 
     #[test]
