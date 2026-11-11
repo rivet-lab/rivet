@@ -82,7 +82,10 @@ Run 2 (with cursor): SELECT * FROM (SELECT ... FROM orders) AS _rivet
 The cursor column must be:
 - Present in the SELECT clause
 - Monotonically increasing (new rows always have a larger value)
-- Not NULL for rows you want exported
+- NOT NULL: a `cursor_column` that can hold NULL is refused at plan, `check`, `validate` and `run` with `RIVET_PLAN_CURSOR_NULLABLE` (exit 5), because the cursor delivers the NULL rows once and never again
+- Of a type the cursor can render (integer, decimal, text, date, timestamp, uuid): a boolean, time of day, binary, array or sub-microsecond-unit column is refused with `RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED` (exit 5)
+
+Nullability and type are read from the server's description of the export query. A column the server cannot trace to a table column (an expression, a view column on PostgreSQL, a SQL Server or Oracle query over a join or a subquery) is not claimed NOT NULL or nullable; on SQL Server and Oracle a column is claimed nullable only when the catalog of the one table the query reads says so, and a source that cannot be asked is warned about, not refused.
 
 ## Batch size and tuning
 

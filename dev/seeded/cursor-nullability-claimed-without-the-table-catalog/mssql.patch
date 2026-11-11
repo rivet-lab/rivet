@@ -1,0 +1,13 @@
+diff --git a/src/source/mssql/mod.rs b/src/source/mssql/mod.rs
+index 9bbafa62..5c7306b2 100644
+--- a/src/source/mssql/mod.rs
++++ b/src/source/mssql/mod.rs
+@@ -882,7 +882,7 @@ impl Source for MssqlSource {
+                 .iter()
+                 .find(|r| r.get::<&str, _>("name") == Some(column))
+                 .and_then(|r| r.get::<bool, _>("is_nullable"));
+-            if described != Some(true) {
++            if true {
+                 return Ok(described);
+             }
+             let Some((schema, table)) = parse_mssql_simple_from_table(query) else {
