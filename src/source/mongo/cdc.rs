@@ -78,6 +78,10 @@ pub(crate) struct MongoChangeStream {
     hetero_warned: bool,
     /// The collections this export captures, so a DDL event can be told apart from one on another collection.
     configured_tables: Vec<String>,
+    /// The collections a keyed `load:` merges by `_id`; a second `_id` type in one is refused.
+    keyed_tables: Vec<String>,
+    /// The `_id` types delivered per collection, persisted in the checkpoint.
+    id_types: super::id_types::IdTypes,
     /// Orders events that share a clusterTime.
     clock: OrdinalClock,
 }
@@ -480,6 +484,7 @@ impl MongoChangeStream {
         // The export's configured `table:` names. Mongo had no routing
         // cross-check at all — this is what the zero-match warning needs.
         configured_tables: &[String],
+        keyed_tables: &[String],
     ) -> Result<Self> {
         let until_current = mode.is_bounded();
         let session = MongoSession::connect(url, tls)?;
@@ -497,6 +502,13 @@ impl MongoChangeStream {
             .as_ref()
             .map(|pos| OrdinalClock::from_checkpoint(&pos.0))
             .unwrap_or_default();
+        let known = loaded
+            .as_ref()
+            .map(|pos| super::id_types::IdTypes::from_checkpoint(&pos.0))
+            .unwrap_or_default();
+        let id_types = super::id_types::guard_keyed(known, keyed_tables, |c| {
+            super::id_types::id_span_on(&session, c)
+        })?;
         let resume = loaded.map(|pos| decode_resume_token(&pos.0)).transpose()?;
         // A checkpoint path with NO persisted position ⇒ a fresh checkpointed
         // run: it must pin its anchor at open (see below).
@@ -636,6 +648,8 @@ impl MongoChangeStream {
             hetero_first: None,
             hetero_warned: false,
             configured_tables: configured_tables.to_vec(),
+            keyed_tables: keyed_tables.to_vec(),
+            id_types,
             clock,
         };
         // Idle-first-run anchor (MongoDB has no server-side anchor — the MySQL
@@ -649,7 +663,7 @@ impl MongoChangeStream {
             && let Some(ckpt) = checkpoint
             && let Some(pos) = this.anchor_position()
         {
-            pos.save(ckpt)?;
+            this.checkpoint_of(&pos).save(ckpt)?;
             // `warn`, not `info`: this branch is reached both on a genuine first run
             // and when a previously-written checkpoint is simply NOT THERE, and rivet
             // cannot tell them apart. An `info` line is invisible at the default
@@ -709,6 +723,7 @@ pub(crate) fn pin_checkpoint_at_current(
         Some(checkpoint),
         false,
         DrainMode::Continuous,
+        &[],
         &[],
     )
     .map(|_| ())
@@ -997,6 +1012,20 @@ fn diagnose_stream_error(e: mongodb::error::Error) -> anyhow::Error {
     anyhow::Error::from(e)
 }
 
+/// Record the first `_id` bracket of the stream and report true when a later event differs and no warning was given yet.
+fn hetero_should_warn(first: &mut Option<Option<u8>>, warned: bool, bracket: Option<u8>) -> bool {
+    if warned {
+        return false;
+    }
+    match *first {
+        None => {
+            *first = Some(bracket);
+            false
+        }
+        Some(seen) => seen != bracket,
+    }
+}
+
 impl ChangeStream for MongoChangeStream {
     fn engine(&self) -> crate::source::cdc::CdcEngine {
         crate::source::cdc::CdcEngine::Mongo
@@ -1018,6 +1047,8 @@ impl ChangeStream for MongoChangeStream {
         let hetero_first = &mut self.hetero_first;
         let hetero_warned = &mut self.hetero_warned;
         let configured_tables = &self.configured_tables;
+        let keyed_tables = &self.keyed_tables;
+        let id_types = &mut self.id_types;
         let clock = &mut self.clock;
         let mut bound_wait: Option<std::time::Instant> = None;
         loop {
@@ -1080,28 +1111,26 @@ impl ChangeStream for MongoChangeStream {
             // (dropDatabase / a collection-stream drop) → a loud terminal error.
             match classify_op(&cse.operation_type) {
                 OpClass::Row => {
-                    // Heterogeneous-`_id` display-collision warning (once per
-                    // stream), mirroring the batch full-scan guard: the flat `_id`
-                    // column can render distinct BSON types to the same text, so a
-                    // downstream merge keyed on `_id` conflates them.
-                    if !*hetero_warned {
-                        let b = cse
-                            .document_key
-                            .as_ref()
-                            .and_then(|dk| dk.get("_id"))
-                            .and_then(super::id_bracket);
-                        match *hetero_first {
-                            None => *hetero_first = Some(b),
-                            Some(first) if first != b => {
-                                log::warn!(
-                                    "mongodb cdc: heterogeneous `_id` types across the \
-                                     change stream: {}",
-                                    super::hetero_id_guidance()
-                                );
-                                *hetero_warned = true;
-                            }
-                            _ => {}
-                        }
+                    if let Err(e) = super::id_types::admit_change(
+                        id_types,
+                        keyed_tables,
+                        cse.ns.as_ref().and_then(|n| n.coll.as_deref()),
+                        cse.document_key.as_ref(),
+                    ) {
+                        return Some(Err(e));
+                    }
+                    let bracket = cse
+                        .document_key
+                        .as_ref()
+                        .and_then(|dk| dk.get("_id"))
+                        .and_then(super::id_bracket);
+                    if hetero_should_warn(hetero_first, *hetero_warned, bracket) {
+                        log::warn!(
+                            "mongodb cdc: heterogeneous `_id` types across the \
+                             change stream: {}",
+                            super::hetero_id_guidance()
+                        );
+                        *hetero_warned = true;
                     }
                     return Some(
                         stamp_event(clock, cse.cluster_time)
@@ -1128,6 +1157,10 @@ impl ChangeStream for MongoChangeStream {
                 }
             }
         }
+    }
+
+    fn checkpoint_of(&self, position: &Position) -> Position {
+        Position::new(self.id_types.stamp_checkpoint(position.json().clone()))
     }
 
     // ack is a no-op: MongoDB retains changes in the oplog independently of
@@ -1753,5 +1786,29 @@ mod error_code_tests {
     fn an_unrecognised_resume_token_checkpoint_is_refused_by_code() {
         let err = super::decode_resume_token(&serde_json::json!({ "foo": 1 })).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CHECKPOINT_INVALID", 5);
+    }
+
+    /// The first event fixes the bracket; a different one warns once and never again.
+    #[test]
+    fn a_second_id_bracket_warns_once() {
+        let mut first = None;
+        assert!(!super::hetero_should_warn(&mut first, false, Some(0)));
+        assert_eq!(first, Some(Some(0)));
+        assert!(!super::hetero_should_warn(&mut first, false, Some(0)));
+        assert!(super::hetero_should_warn(&mut first, false, Some(2)));
+        assert!(!super::hetero_should_warn(&mut first, true, Some(2)));
+        let mut unrecorded = None;
+        assert!(!super::hetero_should_warn(&mut unrecorded, true, Some(0)));
+        assert_eq!(unrecorded, None);
+    }
+
+    /// Anchoring against a server that cannot be reached fails and pins nothing.
+    #[test]
+    fn anchoring_an_unreachable_server_fails_and_writes_no_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ckpt = dir.path().join("o.ckpt");
+        let url = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
+        super::pin_checkpoint_at_current(url, None, &ckpt).unwrap_err();
+        assert!(!ckpt.exists());
     }
 }
