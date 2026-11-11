@@ -429,6 +429,11 @@ pub trait Source: Send {
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>>;
 
+    /// Whether `column` of `query` may hold NULL as the server describes the statement; `None` when it does not say.
+    fn column_nullable(&mut self, _query: &str, _column: &str) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
     /// Sample the monotonic FOREIGN-pressure counter for the OPT-2
     /// concurrency governor — write/redo pressure a read-only export cannot
     /// move (PG `checkpoints_req`, MySQL `Innodb_log_waits`, MSSQL `Log

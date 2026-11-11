@@ -1,0 +1,13 @@
+diff --git a/src/source/postgres/mod.rs b/src/source/postgres/mod.rs
+index df0ade84..4fd21232 100644
+--- a/src/source/postgres/mod.rs
++++ b/src/source/postgres/mod.rs
+@@ -293,7 +293,7 @@ pub(crate) fn column_nullable_on(
+     };
+     let row = client.query_opt(
+         "SELECT a.attnotnull FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
+-         WHERE a.attrelid = $1 AND a.attnum = $2 AND c.relkind IN ('r', 'p')",
++         WHERE a.attrelid = $1 AND a.attnum = $2",
+         &[&table, &attnum],
+     )?;
+     Ok(row.map(|r| !r.get::<_, bool>(0)))

@@ -185,6 +185,8 @@ exclude_re = [
     # rest of the loop — the whole live_suite runs through it.
     "replace pg_run_export ->",
     " in pg_run_export",
+    # 2026-11-11: mysql_run_export is the MySQL batch export loop, live-only like pg_run_export; its Ok(0) stub fails the live zero-date cell a_zero_date_is_null_and_the_run_warns_with_the_count_batch_and_cdc_mysql (no WARN, no summary row).
+    "replace mysql_run_export -> Result<usize> with Ok\\(0\\)",
     # run_plan_command (pipeline/plan_cmd.rs) is the whole `rivet plan` command:
     # it builds a StateStore, opens a real source per export, runs preflight and
     # the cost model, and emits artifacts — unkillable OFFLINE. It entered the

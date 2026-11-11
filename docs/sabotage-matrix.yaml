@@ -1178,6 +1178,22 @@ scenarios:
     mongo:    { na: "a document store has no `chunk_column`: a collection is read whole or by `_id` ranges" }
     oracle:   { na: "the refusal is the planner's and does not depend on the source engine: the postgres column carries the row" }
 
+  - id: refusal_plan_cursor_nullable
+    what: "RIVET_PLAN_CURSOR_NULLABLE: an incremental `cursor_column` that can hold NULL without `incremental_cursor_mode: coalesce`, whose NULL-cursor rows are exported once and never again"
+    postgres: { test: nullable_cursor_is_refused_postgres }
+    mysql:    { test: nullable_cursor_is_refused_mysql }
+    mssql:    { test: nullable_cursor_is_refused_mssql }
+    mongo:    { na: "a document store has no incremental `cursor_column`: `mode: full` only" }
+    oracle:   { test: nullable_cursor_is_refused_oracle }
+
+  - id: refusal_plan_cursor_type_unsupported
+    what: "RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED: an incremental `cursor_column` whose landed type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond)"
+    postgres: { test: unrenderable_cursor_is_refused_postgres }
+    mysql:    { test: unrenderable_cursor_is_refused_mysql }
+    mssql:    { test: unrenderable_cursor_is_refused_mssql }
+    mongo:    { na: "a document store has no incremental `cursor_column`: `mode: full` only" }
+    oracle:   { test: unrenderable_cursor_is_refused_oracle }
+
   - id: refusal_source_keyset_key_coarse
     what: "RIVET_SOURCE_KEYSET_KEY_COARSE: a keyset page that ends on the key value it started after (a TIMESTAMP(7..9) key read at microseconds)"
     postgres: { gap: "asserted by its code offline (keyset: a_coarse_key_an_unreadable_key_and_gone_pages_are_refused_by_code); the walk needs a keyset cell on a sub-microsecond key: refuse twice, a cast in a curated query, a unique integer key, and one wrong remedy" }
