@@ -63,7 +63,7 @@ slow-timeout = { period = "900s", terminate-after = 4 }
 
 [[profile.default.overrides]]
 filter = 'test(=property_refusal_names_true_cause::every_refusal_is_coded_and_names_the_true_cause)'
-slow-timeout = { period = "900s", terminate-after = 2 }
+slow-timeout = { period = "300s", terminate-after = 2 }
 
 [[profile.default.overrides]]
 filter = 'test(/^soak_spill::/)'

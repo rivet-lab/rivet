@@ -2067,6 +2067,7 @@ mod token_endpoint_tests {
         }
     }
 
+    /// Writes through opendal's GCS service and the production retry layer on a runtime whose clock is paused, so every backoff in the stack elapses at once.
     fn gcs_write_through_production_layers(
         creds: AdcCredentials,
         stand: &Stand,
@@ -2087,8 +2088,9 @@ mod token_endpoint_tests {
                 .unwrap()
                 .finish()
                 .layer(crate::destination::retry_layer(max_times));
-            let rt = tokio::runtime::Builder::new_multi_thread()
+            let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
+                .start_paused(true)
                 .build()
                 .unwrap();
             rt.block_on(op.write("k", vec![1u8]))
