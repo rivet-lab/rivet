@@ -132,7 +132,7 @@ def added_line_violations(diff: str) -> list[str]:
 def commit_violations(rng: str) -> list[str]:
     """Text violations in every non-merge commit message of `rng`."""
     out = []
-    for sha in git("rev-list", "--no-merges", rng).split():
+    for sha in git("rev-list", "--no-merges", *rng.split()).split():
         out += text_violations(git("log", "-1", "--format=%B", sha), f"commit {sha[:10]}")
     return out
 
@@ -553,6 +553,14 @@ def run_text(args: argparse.Namespace) -> int:
 def self_test() -> int:
     """Each rule goes RED on the violation it exists for and stays green on its near miss."""
     cyr = "\u041f\u0440\u0438\u0432\u0435\u0442"
+    seen: list[tuple[str, ...]] = []
+    real_git = globals()["git"]
+    globals()["git"] = lambda *a, **k: seen.append(a) or ""
+    try:
+        commit_violations("HEAD --not --remotes")
+    finally:
+        globals()["git"] = real_git
+    assert seen == [("rev-list", "--no-merges", "HEAD", "--not", "--remotes")], f"a multi-word range must reach git as separate arguments: {seen}"
     assert text_violations(f"feat: x\n\n{cyr}\n", "m"), "Cyrillic in a message must fail"
     assert text_violations("feat: x\n\nThis fixes #413.\n", "m"), "closing keyword must fail"
     assert text_violations("x\n\nResolved: #9\n", "m"), "closing keyword with a colon must fail"
