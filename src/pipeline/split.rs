@@ -336,7 +336,12 @@ pub(crate) fn completed_units_tile(
             continue;
         };
         match latest.get(&ord) {
-            Some(cur) if cur.finished_at >= m.finished_at => {}
+            Some(cur)
+                if seeded!(
+                    "split-tile-keeps-the-oldest-unit",
+                    true,
+                    cur.finished_at >= m.finished_at
+                ) => {}
             _ => {
                 latest.insert(ord, m);
             }
@@ -487,7 +492,11 @@ fn reconstruct_units_from_manifests(
             bmap.insert(ord, h.clone()); // boundary[ord]
         }
         if let Some(l) = &w.lo
-            && ord > 0
+            && seeded!(
+                "split-reconstruct-underflows-at-unit-zero",
+                ord >= 0,
+                ord > 0
+            )
         {
             bmap.insert(ord - 1, l.clone()); // boundary[ord-1]
         }

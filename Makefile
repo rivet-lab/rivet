@@ -439,7 +439,7 @@ seek-order-matrix:  ## Seek-order matrix (order_equals_seek): every engine x tex
 .PHONY: property-check-equals-run
 property-check-equals-run:  ## Property matrix check_equals_run: every pre-run command passes only what run or apply will do. Takes one live slot.
 	cargo nextest run --test live_suite -E 'test(/^property_check_equals_run::/)'
-	$(LIVE) cargo nextest run --test live_suite --all-features --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_check_equals_run::/)'
+	$(LIVE) cargo nextest run --test live_suite --run-ignored only --no-fail-fast --no-capture -E 'test(/^property_check_equals_run::/)'
 
 .PHONY: evidence-record evidence-report
 evidence-record:  ## Record the last nextest run's green live cells (target/nextest/default/junit.xml) in docs/evidence/last-green.yaml. EVIDENCE_BY=local|gate|nightly|ci.

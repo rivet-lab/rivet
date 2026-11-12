@@ -94,7 +94,11 @@ impl SnowflakeLoader {
                 } else if needs_parse_json(s) {
                     format!("PARSE_JSON({path})")
                 } else if s.target_type == TargetType::Snowflake(SfType::Binary) {
-                    format!("{path}::BINARY")
+                    seeded!(
+                        "snowflake-binary-column-not-cast",
+                        path,
+                        format!("{path}::BINARY")
+                    )
                 } else {
                     path
                 }
@@ -789,7 +793,11 @@ fn build_alter_add_columns_sql(fqtn: &str, specs: &[TargetColumnSpec]) -> String
 
 /// The stage URL: the export prefix closed with one `/`. Snowflake joins a stage URL and a `FILES` entry as text, so a prefix written without the slash named `…/orderspart-0.parquet`.
 fn stage_url(gcs_url: &str) -> String {
-    format!("{}/", gcs_url.trim_end_matches('/'))
+    seeded!(
+        "snowflake-stage-url-left-open",
+        gcs_url.to_string(),
+        format!("{}/", gcs_url.trim_end_matches('/'))
+    )
 }
 
 /// How every stage and `COPY` reads a part, spelled inline: a named format made by `CREATE … IF NOT EXISTS` is whatever object already has that name. Logical types on, so a Parquet timestamp or time is read as one and not as its raw integer; binary kept as bytes.

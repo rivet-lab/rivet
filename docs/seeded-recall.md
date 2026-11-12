@@ -4,10 +4,17 @@ The harness is measured by whether it catches known product-bug classes when the
 come back, on every engine where the code path exists. "The gate found nothing" is
 not that measurement; this is.
 
-Each class is a **source patch** under `dev/seeded/`. The runner applies it to a
-scratch worktree, builds that tree, runs only the cells declared to catch it, and
-records whether they went red. Nothing in the product changes to make this
-possible: there is no environment switch or test hook that turns a defect on.
+Each class is a **source patch** under `dev/seeded/`, or a **switch**. The runner applies a
+patch to a scratch worktree, builds that tree, runs only the cells declared to catch it, and
+records whether they went red.
+
+A seed with `switch: <name>` has no patch: its defect is a `seeded!("<name>", defect, good)`
+site in `src/`. `seeded!` expands to `good` unless the cargo feature `seeded` is on, so a
+build without the feature holds no defect code (`src/seeded.rs`). The runner builds the clean
+tree once with `--features seeded`, runs the cells with `RIVET_SEED` unset (the control), then
+once per switch with `RIVET_SEED=<name>`. A row naming a switch the source lacks, and a source
+switch no row names, are both reported. A seed whose defect changes a signature or a `const`,
+or spans several statements, stays a patch. Never pass `--all-features` in a gate.
 
 ## Running it
 
