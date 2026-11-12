@@ -5933,7 +5933,7 @@ seeds:
         patch: mysql-zero-date-count-misses-a-class/mysql.patch
         cells:
           - "lib:nulled_dates_counts_zero_and_partial_dates_per_column"
-          - "lib:unparsable_text_and_a_zero_date_stay_null"
+          - "lib:unparsable_text_is_refused_by_code_and_a_zero_date_stays_null"
           - "lib:mysql_cell_fixes_convert_the_wire_shapes_the_binlog_delivers"
       postgres:
         na: "a MySQL zero date has no counterpart on PostgreSQL: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
