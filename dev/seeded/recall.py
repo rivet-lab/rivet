@@ -172,12 +172,12 @@ def switch_sites(root: Path = ROOT) -> dict[str, int]:
     return found
 
 
-def switch_problems(rows: list[Row], root: Path = ROOT) -> list[str]:
-    """A row naming a switch the source lacks (it would grade the unseeded build), or a source switch no row names (dead defect code)."""
+def switch_problems(rows: list[Row], root: Path = ROOT, complete: bool = True) -> list[str]:
+    """A row naming a switch the source lacks (it would grade the unseeded build), or, on a complete run, a source switch no row names (dead defect code)."""
     found = switch_sites(root)
     named = {r.switch for r in rows if r.switch}
     return ([f"seed {r.seed}/{r.engine}: switch {r.switch!r} is in no `seeded!` site in src/" for r in rows if r.switch and r.switch not in found]
-            + [f"`seeded!({n!r})` in src/ is named by no manifest row" for n in sorted(set(found) - named)])
+            + ([f"`seeded!({n!r})` in src/ is named by no manifest row" for n in sorted(set(found) - named)] if complete else []))
 
 
 def _fn_names(tree: Path) -> set[str]:
@@ -647,7 +647,7 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: b
             if p.returncode != 0:
                 verdicts[r] = Verdict(r, STALE, stale_message(r.seed, text, p.stdout))
     live = [r for r in rows if r not in verdicts and not r.na and r.platform in (None, host_platform())]
-    for problem in switch_problems(rows, tree):
+    for problem in switch_problems(rows, tree, complete):
         led.bad(problem)
     sw = [r for r in live if r.switch]
     live = [r for r in live if not r.switch]
@@ -835,6 +835,7 @@ def switch_self_test() -> None:
         ghost = Row("ghost", "lib", "p", ("c",), switch="only-in-manifest")
         found = switch_problems([ghost], Path(d))
         assert len(found) == 2 and "only-in-manifest" in found[0] and "only-in-source" in found[1], found
+        assert switch_problems([ghost], Path(d), complete=False) == found[:1]
     os.environ["RIVET_SEED"] = "leak"
     try:
         clean = Cargo(Path("/t"), Path("/b"), None)

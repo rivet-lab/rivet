@@ -443,7 +443,12 @@ impl SharedToken {
         let stop = stopped.as_ref()?;
         let in_force = stop.code.id == crate::error::codes::DEST_CREDENTIALS_INVALID.id
             || now.saturating_duration_since(stop.at) < TRANSIENT_STOP_MEMORY;
-        in_force.then(|| crate::error::coded(stop.code, stop.message.clone()))
+        seeded!(
+            "token-grant-asked-again-by-opendal-retries",
+            false,
+            in_force
+        )
+        .then(|| crate::error::coded(stop.code, stop.message.clone()))
     }
 
     /// Remember `err` when it is a refused grant or an endpoint that kept failing; any other error is not a verdict on the credential.

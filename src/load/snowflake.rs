@@ -243,7 +243,11 @@ impl TargetLoader for SnowflakeLoader {
         // absent here; the residual is SELF-LIMITING (round-9): append_changelog's own
         // BEFORE_/AFTER_ COUNT gates need SELECT, so that role fails the load loudly one
         // statement later, never a silent doomed append.
-        if self.object_kind(&format!("{table}__changes"))? == super::ObjectKind::Absent {
+        if seeded!(
+            "snowflake-change-log-told-by-error-text",
+            false,
+            self.object_kind(&format!("{table}__changes"))? == super::ObjectKind::Absent
+        ) {
             return Ok(false);
         }
         // FAIL-CLOSED (round-8): a drift in the answer's shape must not read as "first cycle" and

@@ -468,7 +468,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: sqlite-writer-starved-by-a-sibling/sqlite-state.patch
+        switch: sqlite-writer-starved-by-a-sibling
         cells: ["lib:a_replan_beside_a_writer_that_never_lets_go_gets_its_turn"]
       postgres-state:
         na: "the turn queue is SQLite's; PostgreSQL row locks queue writers on the server"
@@ -492,7 +492,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: lease-upgrade-window-unguarded/sqlite-state.patch
+        switch: lease-upgrade-window-unguarded
         cells: ["lib:a_holder_of_the_old_lease_name_and_this_release_exclude_each_other"]
       postgres-state:
         na: "a PostgreSQL-state lease is a row keyed by the raw key, unchanged by the rename"
@@ -527,7 +527,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: sqlite-chunk-claim-takes-no-turn/sqlite-state.patch
+        switch: sqlite-chunk-claim-takes-no-turn
         cells: ["lib:a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn"]
       postgres-state:
         na: "the chunk claim on PostgreSQL is `FOR UPDATE SKIP LOCKED`: the server skips a locked row and never queues the claim"
@@ -1370,7 +1370,7 @@ seeds:
     class: "a `destination: stdout` export is handed to a child process, whose stdout the parent reads as its event stream"
     history: "`rivet run --parallel-export-processes > out.csv` exited 0 with 0 bytes and a summary of `rows: 120` (v0.31.0)"
     scope: source
-    patch: stdout-swallowed-by-child-processes/shared.patch
+    switch: stdout-swallowed-by-child-processes
     engines:
       postgres:
         cells: [stdout_survives_child_processes_postgres]
@@ -1642,7 +1642,7 @@ seeds:
     class: a 404 on an object is read as "the object is absent" when the bucket or container itself does not exist
     history: "`rivet validate` on a bucket that does not exist reported `legacy_run` and exited 0 on S3, GCS and Azure (CLI sweep 5, 2026-10-07)"
     scope: destination
-    patch: missing-bucket-read-as-no-manifest/shared.patch
+    switch: missing-bucket-read-as-no-manifest
     engines:
       local:
         na: "the seed edits src/destination/cloud.rs, which only the s3, gcs and azure stores run; a local directory has no bucket to be missing"
@@ -2305,7 +2305,7 @@ seeds:
     class: a state unit of work that reads before it writes opens a deferred SQLite transaction, so a writer that commits in between fails its first write with `database is locked` and no wait
     history: "2026-10-09, #508 - the unit of `apply --pool --split --resume` that extends its plan read the last chunk index, then inserted; its sibling unit committed in between and the run ended exit 1 with `database is locked: Error code 517` (`stand_pool_split_gappy_key_postgres` in CI run 37841398187 and in two local sweeps, `stand_pool_split_resume_grows_mssql` in a third)"
     scope: state
-    patch: unit-of-work-begins-deferred/shared.patch
+    switch: unit-of-work-begins-deferred
     engines:
       sqlite-state:
         cells: ["lib:a_unit_of_work_that_reads_first_writes_beside_another_writer", "lib:a_replan_beside_another_writer_of_the_state_waits_for_it"]
@@ -2503,7 +2503,7 @@ seeds:
     class: "a cdc stream into a warehouse whose base is the default layout names nothing to build the base from, and config load accepts it: the base starts empty and misses every row the stream never touches"
     history: "2026-10-28 - Snowflake's default layout made a baseline a prerequisite of a cdc export; `cdc.backfill:`, `cdc.initial: snapshot` or `load.layout: log_view` are the three ways out"
     scope: target
-    patch: snowflake-cdc-base-without-baseline-accepted/shared.patch
+    switch: snowflake-cdc-base-without-baseline-accepted
     engines:
       bigquery:
         na: "the seed edits src/config/mod.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -2532,7 +2532,7 @@ seeds:
     class: "whether a change log exists is read from the text of a failed SELECT, which `snow` wraps at 80 columns"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; a table name of 21 to 30 characters split `does not exist` over two lines"
     scope: target
-    patch: snowflake-change-log-told-by-error-text/shared.patch
+    switch: snowflake-change-log-told-by-error-text
     engines:
       bigquery:
         na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -2560,7 +2560,7 @@ seeds:
     class: "a Snowflake load that still names a `snow` CLI connection is accepted at config load and fails later, far from the line that caused it"
     history: "2026-10-28 - the SQL API transport replaced the `snow` CLI; a config with only `connection:` must stop at load with the fields that replace it"
     scope: target
-    patch: snowflake-connection-line-ignored-at-config-load/shared.patch
+    switch: snowflake-connection-line-ignored-at-config-load
     engines:
       bigquery:
         na: "the seed edits src/config/mod.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -2925,7 +2925,7 @@ seeds:
     class: "a failed listCollections of a MongoDB collection is read as no listing, so the identity check is skipped and the run reads a collection it could not confirm"
     history: "2026-11-05 - the check treated any listing error as the role not being allowed to list; only the Unauthorized code (13) lifts the check, any other failure stops the run; this seed lifts the check on every error"
     scope: source
-    patch: mongo-listing-failure-fails-open/shared.patch
+    switch: mongo-listing-failure-fails-open
     engines:
       postgres:
         na: "a SQL engine has no collection listing to fail; the listCollections identity check is MongoDB's"
@@ -3053,7 +3053,7 @@ seeds:
     class: "a credential scrubber that cuts at a separator the secret may contain: an `@` inside a keyword/value password reads as the end of a userinfo, and the password's tail lands in persisted state"
     history: "2026-10-15 - found by the keyword-value credential guard when run_status first stored the source key: `password=p@<secret>` left `<secret>;encrypt=true` in the key, through 0.31.0; fixed by masking keyword passwords before the userinfo is cut"
     scope: source
-    patch: source-key-keyword-password-at/shared.patch
+    switch: source-key-keyword-password-at
     engines:
       postgres:
         na: "the `;user=…;password=…` URL form is SQL Server's; the other engines' passwords sit in a userinfo the key already drops"
@@ -3069,7 +3069,7 @@ seeds:
     class: "a connection URL read by its last `@` instead of the `@` inside its authority: an `@` in the query or fragment (`?application_name=svc@corp`) becomes the end of a userinfo, the host after it is the query text, and two hosts share one source state key, lease and resume progress"
     history: "found 2026-10-31 by the roast duplication lens and confirmed by a rivet-verifier probe: `postgresql://h1:5432/a?application_name=svc@corp` and the same with h2 both keyed as `postgres://corp:5432`; closed 2026-11-01 by routing every reader through url_text::authority"
     scope: source
-    patch: url-authority-at-in-query/shared.patch
+    switch: url-authority-at-in-query
     engines:
       postgres:
         cells: [lib:an_at_sign_after_the_authority_does_not_make_two_hosts_one_source, lib:two_hosts_never_share_a_state_key]
@@ -3575,7 +3575,7 @@ seeds:
     class: a resume that shrinks the split partition does not close the ledger rows of the ceased units, which then wedge gc of the shared prefix
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: ceased-split-units-left-running/shared.patch
+    switch: ceased-split-units-left-running
     engines:
       postgres:
         na: "engine-agnostic: the function takes the destination and the state ledger and reads the run-unique manifest copies, never a source or an engine type, so every engine runs the same code (docs/pool-split-matrix.yaml); graded once by the lib cell, and the engines' pool-split cells stayed green under this seed"
@@ -3645,7 +3645,7 @@ seeds:
     class: a stored incremental cursor past the `cursor_high` of the destination's success manifest is continued from, so the rows between are never delivered
     history: "2026-10-15 - `last_cursor_value` edited to N+2 after a run that delivered 1..=N: exit 0 with `COUNT(*): source 43, delivered 41` on PostgreSQL, MySQL and SQL Server, through 0.31.0 (open_defect_a_cursor_moved_forward_delivers_or_refuses_*); fixed by refuse_a_cursor_past_the_manifest at the one claim seam every batch run passes"
     scope: source
-    patch: cursor-past-manifest-continued/shared.patch
+    switch: cursor-past-manifest-continued
     engines:
       postgres:
         cells:
@@ -4131,7 +4131,7 @@ seeds:
     class: "a refusal the GCS token loader raises (RIVET_DEST_CREDENTIALS_INVALID, RIVET_DEST_TOKEN_ENDPOINT_UNAVAILABLE) is wrapped by opendal and read back with no code: the run stops with no code and exit 1 or 2 by opendal's flag, not by the code"
     history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: a 401 from the token endpoint through real opendal Gcs read back code=None; code_of looked only at the anyhow layers, never at the std source chain"
     scope: target
-    patch: token-loader-stop-lost-in-opendal/shared.patch
+    switch: token-loader-stop-lost-in-opendal
     engines:
       bigquery:
         cells:
@@ -4150,7 +4150,7 @@ seeds:
     class: "a grant the token endpoint refused (401) or an endpoint that kept failing is asked again by every backon and RetryLayer retry of the same write: 24 to 144 asks and minutes of backoff for one answer"
     history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: 401 through Gcs plus the RetryLayer asked the token endpoint 24 times in 67 s"
     scope: target
-    patch: token-grant-asked-again-by-opendal-retries/shared.patch
+    switch: token-grant-asked-again-by-opendal-retries
     engines:
       bigquery:
         cells:
@@ -4172,7 +4172,7 @@ seeds:
     class: "an opendal error flagged temporary that carries a refused grant is retried as a blip: the exit is 2 for a refusal that no retry can fix"
     history: "2026-11-06 - verifier probe on PR 863 head 6526f9ab: a 401 through Gcs without the RetryLayer exited 2 because opendal marks every loader error temporary"
     scope: target
-    patch: opendal-temporary-flag-overrides-nested-refusal/shared.patch
+    switch: opendal-temporary-flag-overrides-nested-refusal
     engines:
       bigquery:
         cells:
@@ -4540,7 +4540,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-statement-in-a-transaction-re-read/mysql.patch
+        switch: column-grants-statement-in-a-transaction-re-read
         cells: ["lib:a_statement_marks_a_re_read_only_outside_a_transaction_and_outside_its_frame"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4925,7 +4925,7 @@ seeds:
       oracle:
         na: "the drain is bounded at open by the SCN the miner reads from the database; there is no merged resume token whose position can pass the bound early"
       mongo:
-        patch: mongo-cdc-stops-before-the-open-time-bound/mongo.patch
+        switch: mongo-cdc-stops-before-the-open-time-bound
         cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, "lib:idle_poll_stops_both_directions"]
 
   - name: mongo-cdc-bound-wait-has-no-ceiling
@@ -4942,7 +4942,7 @@ seeds:
       oracle:
         na: "the drain is bounded at open by the SCN the miner reads from the database; there is no wait for a token to catch up"
       mongo:
-        patch: mongo-cdc-bound-wait-has-no-ceiling/mongo.patch
+        switch: mongo-cdc-bound-wait-has-no-ceiling
         cells: ["lib:a_token_that_never_reaches_the_bound_stops_the_drain_at_the_ceiling"]
 
   - name: mongo-cdc-sharded-drain-stops-at-the-bound-tick
@@ -4959,7 +4959,7 @@ seeds:
       oracle:
         na: "the drain is bounded at open by the SCN the miner reads from the database; there is no merged resume token whose tick can tie with another shard's write"
       mongo:
-        patch: mongo-cdc-sharded-drain-stops-at-the-bound-tick/mongo.patch
+        switch: mongo-cdc-sharded-drain-stops-at-the-bound-tick
         cells: ["lib:a_sharded_drain_needs_a_token_past_the_bound_tick"]
 
   - name: clickhouse-load-legacy-mongo-position-reaches-the-insert
@@ -5037,7 +5037,7 @@ seeds:
     class: "`cleanup_source` removes a directory's canonical manifest.json and _SUCCESS on the strength of a read taken before the warehouse jobs ran, so an extract that commits during the jobs loses its markers and the dataset reads as not whole, exit 0"
     history: "found 2026-11-01 by a rivet-verifier probe of cleanup_target_leased (canonical_run_id read once, maybe_cleanup removes unconditionally); RED on main 2026-11-01 (lib cell: r2's canonical manifest.json absent after the load cleaned r1)"
     scope: source
-    patch: cleanup-removes-a-pointer-that-changed-hands/shared.patch
+    switch: cleanup-removes-a-pointer-that-changed-hands
     engines:
       postgres:
         na: "the load driver never reads the source engine: one code path (maybe_cleanup), graded by the lib cells"
@@ -5577,7 +5577,7 @@ seeds:
     class: "`state reset-chunks` does not re-key a run recorded under another spelling of the config's source onto the canonical one before removing, so the chunk run goes while its chunked resume anchor stays and a later full claim is refused RIVET_STATE_INTERRUPTED_RUN_OWNER_MISMATCH"
     history: "verifier finding F1 of #862, 2026-11-07: reset-chunks deleted a respelled run but left its export_state anchor"
     scope: state
-    patch: reset-chunks-respelled-source-kept/shared.patch
+    switch: reset-chunks-respelled-source-kept
     engines:
       postgres-state:
         cells: [pg_state_a_reset_removes_a_respelled_runs_checkpoint_and_its_anchor, "lib:reset_chunks_still_removes_a_run_that_recorded_no_source_and_a_respelled_one"]
@@ -6055,7 +6055,7 @@ seeds:
     class: "the password-keyword check of the redactor cuts a `&str` key at a byte offset, so a URL query key that percent-decodes to a multi-byte character (`?%FFn=`) panics inside the cut, exit 101 on any log line, error message or plan artifact that names the URL"
     history: "CI proptest any_utf8_text_is_redacted_without_a_panic, 2026-11-11 (PR 969, shard 3/3): `byte index 1 is not a char boundary; it is inside U+FFFD of the decoded key`; RED on main ddb356d1 with `?%FFn=x`"
     scope: source
-    patch: redact-key-cut-at-byte-offset/shared.patch
+    switch: redact-key-cut-at-byte-offset
     engines:
       postgres:
         cells:
