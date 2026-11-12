@@ -1284,7 +1284,13 @@ fn owed_after_yield(
 
 /// What stays owed downstream after the sink acked `acked`: nothing once the ack covers the last data-bearing commit yielded.
 fn owed_after_ack(owed_through: Option<u64>, acked: Option<u64>) -> Option<u64> {
-    owed_through.filter(|owed| acked.is_none_or(|a| a < *owed))
+    owed_through.filter(|owed| {
+        seeded!(
+            "ack-past-unwritten",
+            acked.is_none(),
+            acked.is_none_or(|a| a < *owed)
+        )
+    })
 }
 
 /// Wire budget per peek: the sink's ack cadence (the part rollover), clamped to

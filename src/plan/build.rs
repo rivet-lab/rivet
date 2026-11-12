@@ -121,7 +121,11 @@ fn refuse_hidden_read_columns(
         .filter_map(|(setting, column)| column.as_deref().map(|c| (setting, c)))
         .chain(key.map(|c| ("chunk_by_key", c.as_str())));
     for (setting, column) in named {
-        if !readable.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+        if seeded!(
+            "column-grants-hidden-cursor-column-uncoded",
+            false,
+            !readable.iter().any(|c| c.eq_ignore_ascii_case(column))
+        ) {
             crate::rivet_bail!(
                 crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
                 "`{table}`: `{setting}: {column}` names a column `{column}` this account may not SELECT \
@@ -151,11 +155,13 @@ pub(crate) fn project_table_read(
     source: &crate::config::SourceConfig,
     export: &ExportConfig,
 ) -> Result<Option<ExportConfig>> {
-    let Some(table) = export
-        .table
-        .as_ref()
-        .filter(|_| source.columns_from_grants() && export.table_select.is_none())
-    else {
+    let Some(table) = export.table.as_ref().filter(|_| {
+        seeded!(
+            "column-grants-batch-read-unprojected",
+            false,
+            source.columns_from_grants()
+        ) && export.table_select.is_none()
+    }) else {
         return Ok(None);
     };
     let readable = match probe {

@@ -928,7 +928,7 @@ seeds:
     class: an interrupted range-chunk run is looked up by export name alone and resumed by a same-named export of another source
     history: "2026-10-06 - config A crashed after chunk 0, same-named config B of another database ran: exit 0, 'resuming it', 1000 of 5000 rows (v0.31.0)"
     scope: source
-    patch: chunk-run-resumed-by-another-source/shared.patch
+    switch: chunk-run-resumed-by-another-source
     engines:
       postgres:
         cells:
@@ -1013,7 +1013,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: ack-past-unwritten/postgres.patch
+        switch: ack-past-unwritten
         cells:
           - pg_cdc_a_failed_final_part_after_a_mid_window_roll_leaves_the_slot_behind_it
           - "lib:an_ack_discharges_only_what_it_covers"
@@ -1064,7 +1064,7 @@ seeds:
     class: a `query:` whose projection aliases a column to the chunk column's name is probed on the bare table, so the range comes from another column
     history: "P-24 (2026-10-06): `SELECT legacy_id AS id, name FROM customers` with `chunk_column: id` exported 0 of 1000 rows, exit 0, on main and v0.31.0"
     scope: source
-    patch: aliased-projection-read-as-table/shared.patch
+    switch: aliased-projection-read-as-table
     engines:
       postgres:
         cells: [a_query_that_aliases_the_chunk_column_delivers_its_rows_postgres]
@@ -1685,7 +1685,7 @@ seeds:
     class: a preflight command describes a strategy derived from the config instead of the plan the runner builds
     history: "`rivet check` printed `Strategy: chunked(id, size=100000)` and `column: ?` for a `mode: chunked` export the run executed as one unchunked pass (CLI sweep 20, 2026-10-07)"
     scope: source
-    patch: check-describes-the-config-not-the-plan/shared.patch
+    switch: check-describes-the-config-not-the-plan
     engines:
       postgres:
         cells: [check_names_the_strategy_run_uses_for_chunked_with_no_column_postgres]
@@ -1977,7 +1977,7 @@ seeds:
     class: "a CDC run continues from a checkpoint another config still reads, so two streams on one position each skip the changes the other read, exit 0"
     history: "0.32.2, owner decision 2026-10-21 (\"forbid a shared checkpoint\"): a run recorded no owner of its checkpoint; fixed by `checkpoint_identity::claim_checkpoint` and RIVET_SOURCE_CDC_CHECKPOINT_SHARED"
     scope: source
-    patch: cdc-checkpoint-read-by-two-configs/shared.patch
+    switch: cdc-checkpoint-read-by-two-configs
     engines:
       postgres:
         cells: [a_checkpoint_another_config_reads_is_refused_and_walked_out_postgres]
@@ -2101,7 +2101,7 @@ seeds:
     class: an export that continues from a stored cursor keeps it when its destination or its format was edited, so the new location holds only the rows past the cursor
     history: "2026-10-08, sabotage rows edit_destination_path_incremental and edit_format_incremental - a moved `destination.path` held 3 of 43 rows under a success manifest, and a changed `format` left parquet and csv parts in one prefix, exit 0 on main 95bef44a and on v0.31.0"
     scope: source
-    patch: cursor-continued-into-another-destination/shared.patch
+    switch: cursor-continued-into-another-destination
     engines:
       postgres:
         cells: [an_incremental_export_whose_destination_path_is_edited_is_refused_and_walked_out_postgres, an_incremental_export_whose_format_is_edited_is_refused_and_walked_out_postgres, a_cursor_stored_before_destinations_were_recorded_continues_then_refuses_a_moved_destination_postgres]
@@ -2198,7 +2198,7 @@ seeds:
     class: doctor grades a CDC export with its own probes and never asks the prerequisites the run refuses by
     history: "CLI sweep (advice parity) and devbox row 330: `doctor` reported all checks passed for `wal_level=replica` and for a replica with `log_replica_updates = OFF`, which `run` refuses; on main and on v0.31.0"
     scope: source
-    patch: doctor-green-where-the-run-refuses/shared.patch
+    switch: doctor-green-where-the-run-refuses
     engines:
       postgres:
         cells: [doctor_is_not_green_where_the_cdc_run_refuses_wal_level_postgres]
@@ -2255,7 +2255,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: bounded-standby-refused-after-the-baseline/postgres.patch
+        switch: bounded-standby-refused-after-the-baseline
         cells: [a_bounded_cdc_run_refused_on_a_standby_leaves_nothing_and_its_remedy_runs_postgres]
       mysql:
         na: "the refusal that depends on the drain mode is PostgreSQL's (a bounded drain on a hot standby); a MySQL replica is an ordinary binlog source"
@@ -3151,7 +3151,7 @@ seeds:
     class: "a run that died leaves its `run_status` and `export_metrics` rows `running`, and no later run of the export closes them"
     history: "2026-10-14 - open defect (a run whose SQLite state volume filled up left its rows `running`) through 0.31.0; fixed by `begin_run_under_lease`, which stamps them `interrupted`"
     scope: source
-    patch: dead-runs-stay-running/shared.patch
+    switch: dead-runs-stay-running
     engines:
       postgres:
         cells: [a_crashed_runs_rows_are_closed_by_the_next_postgres]
@@ -3183,7 +3183,7 @@ seeds:
     class: a stored incremental cursor the source cannot compare with the cursor column fails every run with the driver's own conversion error (exit 1, no code, no remedy)
     history: 2026-10-14 - open defect of the sabotage matrix (corrupt_cursor_wrong_type) on PostgreSQL and SQL Server through 0.31.0; fixed by RIVET_STATE_CURSOR_INCOMPARABLE at run_single_export
     scope: source
-    patch: cursor-of-another-type-uncoded/shared.patch
+    switch: cursor-of-another-type-uncoded
     engines:
       postgres:
         cells:
@@ -3685,7 +3685,7 @@ seeds:
     class: "a CDC export's run-aggregate entry carries the stream's counts only, so the first run of an `initial: snapshot` export reports `rows: 0, files: 0` to a scheduler while its snapshot legs wrote the whole table"
     history: "2026-10-15 - confirmed live on PostgreSQL through the Airflow provider (`--summary-output` read into XCom): two tables of 1000 + 5000 rows reported `rows: 0, files: 0`, through 0.31.0; fixed by `with_snapshot_legs`, the one fold every entry writer calls"
     scope: source
-    patch: cdc-entry-without-snapshot-legs/shared.patch
+    switch: cdc-entry-without-snapshot-legs
     engines:
       lib:
         cells: ["lib:a_cdc_entry_counts_its_snapshot_legs_and_its_stream", "lib:a_cdc_childs_entry_counts_the_snapshot_legs_it_ran", "lib:a_failed_snapshot_leg_fails_the_cdc_entry_under_its_own_name"]
@@ -4211,7 +4211,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-batch-read-unprojected/mysql.patch
+        switch: column-grants-batch-read-unprojected
         cells: [a_column_grant_account_reads_only_its_columns_in_every_batch_mode_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4245,7 +4245,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-connect-hint-lost/mysql.patch
+        switch: column-grants-connect-hint-lost
         cells: [a_denied_connect_under_the_policy_carries_the_connect_hint_in_every_batch_mode_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4337,7 +4337,7 @@ seeds:
       postgres:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on PostgreSQL at config load (columns_from_grants_is_refused_by_every_command_postgres)"
       mysql:
-        patch: cdc-partial-image-projected/mysql.patch
+        switch: cdc-partial-image-projected
         cells: [a_partial_row_image_is_refused_before_it_is_projected_mysql, "lib:an_image_is_partial_when_it_holds_fewer_values_than_the_table_has_columns"]
       mssql:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on SQL Server at config load (columns_from_grants_is_refused_by_every_command_mssql)"
@@ -4472,7 +4472,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-hidden-cursor-column-uncoded/mysql.patch
+        switch: column-grants-hidden-cursor-column-uncoded
         cells: [a_hidden_cursor_or_chunk_column_is_refused_by_code_before_the_read_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4489,7 +4489,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-revoked-column-uncoded/mysql.patch
+        switch: column-grants-revoked-column-uncoded
         cells: [a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remedy_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4506,7 +4506,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-revoke-between-two-reads-uncoded/mysql.patch
+        switch: column-grants-revoke-between-two-reads-uncoded
         cells: [a_revoke_between_the_stream_open_and_the_schema_read_is_refused_by_code_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4523,7 +4523,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-privilege-statement-reconnects/mysql.patch
+        switch: column-grants-privilege-statement-reconnects
         cells: [privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4608,7 +4608,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: cdc-policy-name-arm-ignores-the-case-fold/mysql.patch
+        switch: cdc-policy-name-arm-ignores-the-case-fold
         cells: ["lib:a_mention_follows_the_fold_of_the_server", "lib:under_the_policy_a_statement_text_is_refused_only_when_it_names_a_captured_table", a_truncate_spelled_with_a_character_the_server_folds_is_refused_under_the_policy_mysql, a_truncate_spelled_with_a_multibyte_character_the_server_folds_is_refused_under_the_policy_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4625,7 +4625,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: cdc-policy-non-ascii-unit-stands-for-any-letter/mysql.patch
+        switch: cdc-policy-non-ascii-unit-stands-for-any-letter
         cells: ["lib:a_non_ascii_unit_stands_only_for_the_letters_the_server_folds", "lib:the_one_pass_search_agrees_with_the_reading_by_sets", a_non_ascii_comment_on_an_uncaptured_table_is_met_as_before_under_the_policy_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4676,7 +4676,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-rename-in-an-executable-comment-missed/mysql.patch
+        switch: column-rename-in-an-executable-comment-missed
         cells: [a_column_renamed_in_an_executable_comment_is_refused_not_silently_dropped_mysql, a_column_renamed_beside_a_comment_in_an_executable_comment_is_refused_mysql, "lib:every_scan_of_a_statement_reads_an_executable_comment_as_the_server_runs_it"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4693,7 +4693,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-snapshot-leg-denial-read-as-a-stale-plan/mysql.patch
+        switch: column-grants-snapshot-leg-denial-read-as-a-stale-plan
         cells: [a_revoke_before_a_later_snapshot_is_read_is_a_grant_change_not_a_stale_plan_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4778,7 +4778,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-moved-between-reads-mixed-in-one-run/mysql.patch
+        switch: column-grants-moved-between-reads-mixed-in-one-run
         cells: [a_grant_while_the_snapshot_is_read_never_mixes_columns_in_one_run_mysql, a_revoke_while_the_last_snapshot_is_read_never_mixes_columns_in_one_run_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4846,7 +4846,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: cdc-sql-mode-not-read/mysql.patch
+        switch: cdc-sql-mode-not-read
         cells: [a_column_renamed_after_a_backslash_literal_under_no_backslash_escapes_is_refused_mysql, a_column_renamed_after_a_backslash_name_under_ansi_quotes_is_refused_mysql, a_truncate_drop_or_statement_write_with_double_quoted_names_is_refused_under_ansi_quotes_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4976,7 +4976,7 @@ seeds:
       oracle:
         na: "an Oracle position is an SCN; no stamp is missing from a part an older rivet wrote"
       mongo:
-        patch: clickhouse-load-legacy-mongo-position-reaches-the-insert/mongo.patch
+        switch: clickhouse-load-legacy-mongo-position-reaches-the-insert
         cells: [a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_remedy_loads_it]
 
   - name: mongo-warehouse-order-by-token
@@ -5062,7 +5062,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: cdc-no-policy-name-compare-ignores-the-fold/mysql.patch
+        switch: cdc-no-policy-name-compare-ignores-the-fold
         cells: [a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql, a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql, a_statement_logged_write_in_another_case_stops_the_stream_on_a_folding_server_mysql, "lib:a_statement_is_read_for_the_table_it_spells_whatever_the_server_folds", "lib:a_server_that_folds_reads_the_spellings_it_resolves_to_the_captured_table", "lib:every_server_fixture_agrees_with_the_reader_without_the_policy"]
       postgres:
         na: "the logical stream carries decoded changes and no statement text the reader lexes (a TRUNCATE is its own message), so this path is never reached"
@@ -5079,7 +5079,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: cdc-drop-database-not-refused/mysql.patch
+        switch: cdc-drop-database-not-refused
         cells: [a_database_dropped_with_a_captured_table_stops_the_stream_mysql, "lib:a_database_dropped_with_a_captured_table_in_it_is_refused_in_the_spelling_the_server_folds", "lib:every_server_fixture_has_no_ascii_statement_that_passes_under_the_policy", "lib:every_server_fixture_agrees_with_the_reader_without_the_policy"]
       postgres:
         na: "the logical stream carries decoded changes and no statement text the reader lexes (a TRUNCATE is its own message), so this path is never reached"
@@ -5096,7 +5096,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: cdc-partition-data-change-not-refused/mysql.patch
+        switch: cdc-partition-data-change-not-refused
         cells: [a_partition_removed_from_a_captured_table_stops_the_stream_mysql, a_partitioned_table_exchanged_with_a_captured_table_stops_the_stream_mysql, "lib:a_partition_of_a_captured_table_that_loses_or_gains_rows_without_a_row_event_is_refused", "lib:every_server_fixture_agrees_with_the_reader_without_the_policy"]
       postgres:
         na: "the logical stream carries decoded changes and no statement text the reader lexes (a TRUNCATE is its own message), so this path is never reached"
@@ -5232,7 +5232,7 @@ seeds:
     class: "a CDC run uploads a table's first part before any manifest names the run, so a load from a foreign state DB with gc_orphans removes that part as an orphan and the next load refuses the run's manifest"
     history: "2026-11-05 - cluster C4 CDC-RUN-START: the open-defect cells live_clickhouse_load::open_defect_a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_{mysql,postgres} were RED on main (LOAD FAILED: declare parts that are no longer under); fixed by the running marker the CDC sink writes before a table's first upload"
     scope: source
-    patch: cdc-run-start-marker/shared.patch
+    switch: cdc-run-start-marker
     engines:
       postgres:
         cells: [a_gc_orphans_load_from_another_state_db_spares_a_cdc_runs_first_part_postgres, "lib:a_cdc_table_marks_itself_running_before_its_first_part_lands", a_failed_cdc_run_leaves_parts_without_a_manifest_and_redelivers_them_alike_postgres]
@@ -5317,7 +5317,7 @@ seeds:
     class: "rivet check reads a columns: override through the run's converter but drops the wire-mismatch refusal, so check exits 0 on a config the run refuses with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"
     history: "audit defect 11, 2026-11-03: check and check --type-report accepted an int4 column declared string on PostgreSQL while run refused it, on all four SQL engines"
     scope: source
-    patch: check-override-wire-not-refused/shared.patch
+    switch: check-override-wire-not-refused
     engines:
       postgres:
         cells: [check_refuses_an_int4_column_declared_string_postgres]
@@ -5710,7 +5710,7 @@ seeds:
     class: "a source connection cut while a row is being read exits 1 with no retry: the driver reports the peer closing inside a packet as a codec error (MySQL) or a connection error whose source is an io error (PostgreSQL), and the retry classifier read neither as a lost connection"
     history: "2026-11-06 - toxiproxy cut at +3 s and +6 s into a 2M-row MySQL export: exit 1, CodecError bytes remaining on stream, retries 0, rows 0; a cut at +1 s between queries retried; RED on main for MySQL and PostgreSQL with a 60 KB-row table"
     scope: source
-    patch: connection-cut-mid-row-not-retried/shared.patch
+    switch: connection-cut-mid-row-not-retried
     engines:
       postgres:
         cells:
@@ -5948,7 +5948,7 @@ seeds:
     class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
     history: "2026-11-11 - owner decision 2026-11-10 (axis-6 hunt, P2 and P3): the plan now reads the server's nullability and the delivered type once and refuses with RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED from check, validate, plan, run and apply; fixed in src/plan/cursor_admission.rs::admit_incremental_cursor"
     scope: source
-    patch: cursor-column-admitted-at-plan/shared.patch
+    switch: cursor-column-admitted-at-plan
     engines:
       postgres:
         cells: [nullable_cursor_is_refused_postgres, unrenderable_cursor_is_refused_postgres]

@@ -1824,7 +1824,11 @@ fn schema_read_error(projecting: bool, table: &str, err: anyhow::Error) -> anyho
 
 /// A schema read refused by the server's privilege check while the run projects: the grants moved since the readable set was read.
 fn grants_moved_mid_resolve(projecting: bool, err: &anyhow::Error) -> bool {
-    projecting && crate::source::mysql::column_grants::denied_by_server(err).is_some()
+    seeded!(
+        "column-grants-revoke-between-two-reads-uncoded",
+        false,
+        projecting
+    ) && crate::source::mysql::column_grants::denied_by_server(err).is_some()
 }
 
 /// The CDC probe could not read a captured table for a reason the server named; nothing was read or written.

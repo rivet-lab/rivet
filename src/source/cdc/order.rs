@@ -375,6 +375,13 @@ pub(crate) fn clickhouse_legacy_refusal(pos: &str) -> Option<&'static str> {
         .filter_map(|arm| Some((arm.legacy?, arm.marker())))
         .find(|(l, marker)| object.contains_key(l.field) && !object.contains_key(*marker))
         .map(|(l, _)| l.refusal)
+        .filter(|_| {
+            seeded!(
+                "clickhouse-load-legacy-mongo-position-reaches-the-insert",
+                false,
+                true
+            )
+        })
 }
 
 /// The ClickHouse change log's version: `(source position << 128) | (__seq + 1)`, the
