@@ -5979,6 +5979,32 @@ seeds:
           - "lib:a_remote_plaintext_webhook_is_refused_before_any_request"
           - "lib:a_remote_plaintext_api_endpoint_is_refused"
 
+  - name: plaintext-gate-decides-by-text
+    class: "the remote-plaintext gate and the cloud-endpoint loopback gate decide by the text of the URL, not by the parser the HTTP client uses: `http:/host`, `http:host`, `ht<TAB>tp://host` and `http://host\\@127.0.0.1` pass as non-http or loopback while the client sends the loader password, the webhook secret, the bearer token or the uploaded rows to `host` in cleartext"
+    history: "rivet-verifier on Linux, 2026-11-11: the four spellings passed require_https_or_loopback on main (#953); RED on main 2026-11-11 (lib cells for each spelling)"
+    scope: source
+    patch: plaintext-gate-decides-by-text/shared.patch
+    engines:
+      postgres:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      mysql:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      mssql:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      mongo:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      oracle:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      lib:
+        cells:
+          - "lib:http_with_a_single_slash_is_refused"
+          - "lib:http_without_slashes_is_refused"
+          - "lib:a_backslash_before_an_at_sign_does_not_hide_the_remote_host"
+          - "lib:a_tab_or_newline_inside_the_scheme_does_not_hide_it"
+          - "lib:the_gate_refuses_exactly_what_the_client_would_send_in_clear"
+          - "lib:a_backslash_or_tab_does_not_make_a_remote_endpoint_loopback"
+          - "lib:a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused"
+
   - name: mongo-id-types-mixed-under-a-keyed-view
     class: a MongoDB CDC export whose keyed `load:` block merges on the flat `_id` column is accepted over `_id` values of more than one BSON type, so the current-state view merges distinct documents and a delete of one removes the other
     history: "H5-F7 (2026-11-10): RED on main c13bc29c on Mongo 4.4, 5.0 and 8.0 into ClickHouse (8 source documents, 4 view rows; a delete of string `1` tombstoned key `1` and removed the live int 1; exit 0 with only a WARN)"

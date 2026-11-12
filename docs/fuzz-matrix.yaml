@@ -67,6 +67,14 @@ scenarios:
     mongo:    { test: sql_query_text }
     oracle:   { test: sql_query_text }
 
+  - id: fuzz_outbound_url_gate
+    what: "the operator-authored ClickHouse `load.url`, Slack `webhook_url`, `RIVET_BQ_API_ENDPOINT` and cloud `endpoint` read by the remote-plaintext and endpoint gates (src/config/url.rs) — engine-agnostic text code; any UTF-8 text is refused or admitted, never a panic"
+    postgres: { na: "no Rivet-owned parser: the URL is parsed by the url crate behind reqwest and the gate cuts no text; any UTF-8 text is refused or admitted, never a panic (proptest the_gate_survives_any_text)" }
+    mysql:    { na: "no Rivet-owned parser: the URL is parsed by the url crate behind reqwest and the gate cuts no text; any UTF-8 text is refused or admitted, never a panic (proptest the_gate_survives_any_text)" }
+    mssql:    { na: "no Rivet-owned parser: the URL is parsed by the url crate behind reqwest and the gate cuts no text; any UTF-8 text is refused or admitted, never a panic (proptest the_gate_survives_any_text)" }
+    mongo:    { na: "no Rivet-owned parser: the URL is parsed by the url crate behind reqwest and the gate cuts no text; any UTF-8 text is refused or admitted, never a panic (proptest the_gate_survives_any_text)" }
+    oracle:   { na: "no Rivet-owned parser: the URL is parsed by the url crate behind reqwest and the gate cuts no text; any UTF-8 text is refused or admitted, never a panic (proptest the_gate_survives_any_text)" }
+
   - id: fuzz_redacted_text
     what: "the log-line and error text read by the secret redactors (src/redact.rs: URL userinfo, keyword/value passwords, secret query parameters) and by the recovery-hint stripper of a failed export's message (src/pipeline/mod.rs strip_chunked_recovery_hint) — engine-agnostic text code every emitted line passes through, quoting drivers, servers and operator input; any UTF-8 text is rewritten or returned in one pass, never a panic (the URL scan re-read a run of letters from each of its bytes through 0.31.0: 256 KiB without whitespace took 18.6 s; the hint stripper re-read the tail from every `; `: 512 KiB took 21 s)"
     postgres: { test: redact_text }

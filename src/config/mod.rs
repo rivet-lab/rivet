@@ -1302,7 +1302,7 @@ impl Config {
             // unparseable) custom endpoint is only accepted when the operator
             // has explicitly opted into anonymous (emulator) mode, where no
             // credentials are sent. Everything else is rejected.
-            let loopback = endpoint_host(endpoint).is_some_and(|host| is_loopback_host(&host));
+            let loopback = url::request_host(endpoint).is_some_and(|host| is_loopback_host(&host));
             if !loopback && !export.destination.allow_anonymous {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_DESTINATION_ENDPOINT_UNSAFE,
@@ -1703,36 +1703,6 @@ fn line_has_unquoted_brace_value(line: &str) -> bool {
         }
     }
     false
-}
-
-/// Extract the lower-cased host from a `scheme://host[:port][/path]` endpoint,
-/// or `None` when it does not look like a URL.
-///
-/// SecOps helper for the cloud-`endpoint` exfiltration guard (V2/V12): the host
-/// decides whether a custom endpoint is a local emulator (loopback) or a remote
-/// redirect target. We reject every non-loopback custom endpoint regardless of
-/// scheme (covering both the exfil and the cleartext-`http` gaps), so only the
-/// host is needed. We hand-parse rather than pull in a URL crate — the inputs
-/// are operator-typed endpoints, not arbitrary URIs. A bracketed IPv6 literal
-/// authority (`http://[::1]:9000`) keeps its address so it compares against the
-/// loopback list.
-fn endpoint_host(endpoint: &str) -> Option<String> {
-    let (scheme, _) = endpoint.split_once("://")?;
-    if scheme.is_empty() {
-        return None;
-    }
-    let authority = crate::url_text::host_port_span(endpoint);
-    let host = if let Some(stripped) = authority.strip_prefix('[') {
-        // Bracketed IPv6 literal: take up to the closing `]`.
-        stripped.split(']').next().unwrap_or("")
-    } else {
-        // host[:port] — strip the port suffix.
-        authority.split(':').next().unwrap_or("")
-    };
-    if host.is_empty() {
-        return None;
-    }
-    Some(host.to_ascii_lowercase())
 }
 
 /// True when `host` names the local machine — the legitimate cloud-emulator
@@ -2521,26 +2491,23 @@ mod sec_config_validation_regression {
     // ── endpoint_host / is_loopback_host helpers ─────────────────────────────
 
     #[test]
-    fn endpoint_host_parses_forms() {
+    fn request_host_parses_forms() {
+        let host = |url: &str| url::request_host(url);
         assert_eq!(
-            endpoint_host("https://attacker.example.com").as_deref(),
+            host("https://attacker.example.com").as_deref(),
             Some("attacker.example.com")
         );
-        // Port and path are stripped from the host.
         assert_eq!(
-            endpoint_host("http://127.0.0.1:10000/devstoreaccount1").as_deref(),
+            host("http://127.0.0.1:10000/devstoreaccount1").as_deref(),
             Some("127.0.0.1")
         );
-        // userinfo head is dropped (host is after the last `@`).
         assert_eq!(
-            endpoint_host("http://user:pass@127.0.0.1:9000").as_deref(),
+            host("http://user:pass@127.0.0.1:9000").as_deref(),
             Some("127.0.0.1")
         );
-        // Bracketed IPv6 literal keeps its address.
-        assert_eq!(endpoint_host("http://[::1]:9000").as_deref(), Some("::1"));
-        // Not a URL → None (treated as a non-loopback custom endpoint upstream).
-        assert_eq!(endpoint_host("not-a-url"), None);
-        assert_eq!(endpoint_host("://nohost"), None);
+        assert_eq!(host("http://[::1]:9000").as_deref(), Some("::1"));
+        assert_eq!(host("not-a-url"), None);
+        assert_eq!(host("://nohost"), None);
     }
 
     #[test]
@@ -2754,6 +2721,27 @@ mod sec_config_validation {
             msg.contains("endpoint") || msg.to_lowercase().contains("http"),
             "rejection must name the endpoint / cleartext problem; got: {msg}"
         );
+    }
+
+    #[test]
+    fn a_backslash_or_tab_does_not_make_a_remote_endpoint_loopback() {
+        for endpoint in [
+            r#""http://evil.com\\@127.0.0.1:9000""#,
+            r#""ht\ttp://evil.com\\@127.0.0.1:9000""#,
+            r#""http://192.168.1.5:80\\@127.0.0.1:9000""#,
+            r#""http://192.168.1.5:pw\\@127.0.0.1:9000""#,
+        ] {
+            let cfg = yaml_with_destination(&format!(
+                "    destination:\n      type: s3\n      bucket: my-bucket\n      region: us-east-1\n\
+                 \x20     endpoint: {endpoint}\n"
+            ));
+            let e = Config::from_yaml(&cfg).expect_err(endpoint);
+            assert_eq!(
+                crate::error::error_code(&e),
+                Some("RIVET_CONFIG_DESTINATION_ENDPOINT_UNSAFE"),
+                "{endpoint}: {e:#}"
+            );
+        }
     }
 
     #[test]

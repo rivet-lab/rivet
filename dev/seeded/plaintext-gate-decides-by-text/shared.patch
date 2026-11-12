@@ -1,0 +1,28 @@
+--- a/src/config/url.rs
++++ b/src/config/url.rs
+@@ -109,9 +109,9 @@
+ 
+ /// The lowercase host a request to `url` dials, IPv6 brackets removed; `None` when the URL does not parse or has no host.
+ pub(crate) fn request_host(url: &str) -> Option<String> {
+-    let parsed = parse_request_url(url)?;
+-    let host = parsed.host_str()?;
+-    Some(host.trim_matches(['[', ']']).to_ascii_lowercase())
++    url.split_once("://")?;
++    let host = host_port_span(url).split(':').next()?;
++    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+ }
+ 
+ /// Refuse an `http://` URL on a remote host, or a URL that does not parse, before any request carries `carries` through it in cleartext.
+@@ -129,7 +129,11 @@
+         );
+     };
+     let host = parsed.host_str().unwrap_or_default();
+-    if parsed.scheme() == "http" && !super::is_loopback_host(host) {
++    let cleartext = url
++        .trim_start()
++        .get(..7)
++        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"));
++    if cleartext && !host_is_loopback(url) {
+         let shown = match parsed.port() {
+             Some(port) => format!("{host}:{port}"),
+             None => host.to_string(),

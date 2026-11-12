@@ -1995,3 +1995,34 @@ fn a_remote_plaintext_slack_webhook_is_refused() {
             .unwrap_or_else(|e| panic!("{ok}: {e:#}"));
     }
 }
+
+/// A spelling only the HTTP client's parser reads as a remote `http://` host is refused for a ClickHouse `load.url` and a Slack `webhook_url`.
+#[test]
+fn a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused() {
+    let slack = |url: &str| {
+        format!("notifications:\n  slack:\n    webhook_url: \"{url}\"\n    on: [failure]\n")
+    };
+    for url in [
+        "http:/ch.example.com:8123",
+        "http:ch.example.com:8123",
+        "http://ch.example.com:8123\\\\@127.0.0.1:8123",
+        "ht\\ttp://ch.example.com:8123",
+    ] {
+        let e = Config::from_yaml(&plaintext_cfg(url, "", "")).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_CONFIG_REMOTE_PLAINTEXT"),
+            "{url}: {e:#}"
+        );
+        assert!(format!("{e:#}").contains("`ch.example.com:8123`"), "{url}");
+        let e = Config::from_yaml(&plaintext_cfg("https://ch.example.com", "", &slack(url)))
+            .unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_CONFIG_REMOTE_PLAINTEXT"),
+            "{url}: {e:#}"
+        );
+        Config::from_yaml(&plaintext_cfg(url, "  allow_plaintext: true\n", ""))
+            .unwrap_or_else(|e| panic!("{url}: the operator's opt-in: {e:#}"));
+    }
+}
