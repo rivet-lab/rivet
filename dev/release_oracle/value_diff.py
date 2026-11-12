@@ -9,6 +9,7 @@ canonical form that two correct renderings of one value share.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import decimal
 import json
@@ -311,10 +312,36 @@ def oracle_rows(url: str, sql: str) -> list[dict]:
     return [dict(zip(names, row)) for row in rows]
 
 
-def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
-    """(column names, rows) of `sql` read by python-oracledb, as `oracle_rows` reads them — the names survive an empty result. A LOB arrives inline as str/bytes (no round trip per LOB); the server's own LOB length tells an empty LOB from a NULL one."""
+@contextlib.contextmanager
+def _oracle_cursor(url: str):
+    """A python-oracledb cursor on `url` (`oracle://user:pass@host:port/service`), session zone UTC, exact Decimals."""
     from urllib.parse import unquote, urlparse
 
+    import oracledb
+
+    oracledb.defaults.fetch_decimals = True
+    u = urlparse(url)
+    with oracledb.connect(
+        user=unquote(u.username or ""), password=unquote(u.password or ""),
+        dsn=f"{u.hostname}:{u.port or 1521}/{u.path.lstrip('/')}",
+    ) as con, con.cursor() as cur:
+        cur.execute("ALTER SESSION SET TIME_ZONE = 'UTC'")
+        cur.arraysize = 5000
+        yield cur
+
+
+def oracle_describe(url: str, sql: str) -> list[tuple[str, bool]]:
+    """`(column name, zoned)` of the SELECT `sql`, parsed and not run; zoned is TIMESTAMP WITH [LOCAL] TIME ZONE, which python-oracledb returns naive."""
+    import oracledb
+
+    with _oracle_cursor(url) as cur:
+        cur.parse(sql)
+        zoned = (oracledb.DB_TYPE_TIMESTAMP_TZ, oracledb.DB_TYPE_TIMESTAMP_LTZ)
+        return [(d[0], d[1] in zoned) for d in cur.description]
+
+
+def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
+    """(column names, rows) of `sql` read by python-oracledb, as `oracle_rows` reads them — the names survive an empty result. A LOB arrives inline as str/bytes (no round trip per LOB); the server's own LOB length tells an empty LOB from a NULL one."""
     import oracledb
 
     inline = {
@@ -327,14 +354,7 @@ def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
         if md.type_code in inline:
             return cursor.var(inline[md.type_code], size=1 << 30, arraysize=cursor.arraysize)
 
-    oracledb.defaults.fetch_decimals = True
-    u = urlparse(url)
-    with oracledb.connect(
-        user=unquote(u.username or ""), password=unquote(u.password or ""),
-        dsn=f"{u.hostname}:{u.port or 1521}/{u.path.lstrip('/')}",
-    ) as con, con.cursor() as cur:
-        cur.execute("ALTER SESSION SET TIME_ZONE = 'UTC'")
-        cur.arraysize = 5000
+    with _oracle_cursor(url) as cur:
         cur.parse(sql)
         names = [d[0] for d in cur.description]
         lobs = {i: d[1] is oracledb.DB_TYPE_BLOB for i, d in enumerate(cur.description) if d[1] in inline}

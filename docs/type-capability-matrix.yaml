@@ -218,11 +218,13 @@ engines:
       - {native_type: "DECIMAL(18,4)", sample: ["12345.6789"], delivery: "Decimal128(18, 4)", clickhouse: {type: "Nullable(Decimal(18, 4))"}}
       - {native_type: "DATETIME(6)", sample: ["'2035-08-07 09:08:07.987654'"], delivery: "Timestamp(µs)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "TIMESTAMP(6) NULL", sample: ["'2035-08-07 09:08:07.987654'"], delivery: "Timestamp(µs, \"UTC\")", render: {duck: "strftime({c}, '%Y-%m-%d %H:%M:%S.%f')"}, clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
+      - {native_type: "TIMESTAMP NULL", sample: ["'2035-08-07 09:08:07'"], delivery: "Timestamp(µs, \"UTC\")", render: {duck: "strftime({c}, '%Y-%m-%d %H:%M:%S.%f')"}, clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}}
       - {native_type: "BINARY(4)", sample: ["UNHEX('00000000')"], delivery: "Binary", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "JSON", sample: ["JSON_OBJECT('tier','gold','n',1)", "'{\"k\": \"v\", \"n\": 42}'"], delivery: "arrow.json", clickhouse: {type: "Nullable(String)"}}
       - {native_type: "BOOLEAN", sample: ["TRUE", "1", "5", "-1"], delivery: "Int8", today_delivery: "Boolean", render: {duck: "CAST(CAST({c} AS TINYINT) AS VARCHAR)"}, known_defect: "TINYINT(1) delivered as Boolean: 5 and -1 arrive as true in batch, CDC and ClickHouse, a silent loss; exact native is Int8 (ADR-0038 CP1, MySQL engine step)", defect_samples: ["5", "-1"], clickhouse: {type: "Nullable(Int8)", today: "Nullable(Bool)"}}
       - {native_type: "BIT(1)", sample: ["b'1'"], delivery: "Boolean", clickhouse: {type: "Nullable(Bool)"}}
       - {native_type: "BIT(8)", sample: ["b'10101010'"], delivery: "Int64", render: {duck: "lpad(hex({c}), 2, '0')"}, clickhouse: {type: "Nullable(Int64)"}}
+      - {native_type: "BIT(64)", sample: ["b'0111111111111111111111111111111111111111111111111111111111111111'"], delivery: "Int64", render: {duck: "lpad(CASE WHEN typeof({c}) = 'BLOB' THEN hex(CAST(CAST({c} AS VARCHAR) AS BLOB)) ELSE COALESCE(hex(TRY_CAST({c} AS UBIGINT)), hex(TRY_CAST({c} AS BIGINT))) END, 16, '0')"}, clickhouse: {type: "Nullable(Int64)"}}
       - {native_type: "TINYINT", sample: ["127"], delivery: "Int16", clickhouse: {type: "Nullable(Int16)"}}
       - {native_type: "DATE", sample: ["'2024-03-15'"], delivery: "Date32", clickhouse: {type: "Nullable(Date32)"}}
       - {native_type: "TIME(6)", sample: ["'14:30:00.123456'"], delivery: "Time64(µs)", clickhouse: {type: "Nullable(Decimal(18, 6))"}}
