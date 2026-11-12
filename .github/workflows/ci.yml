@@ -57,7 +57,7 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main]
+    branches: [master, main, pre-0.34.0]
   # The MERGE QUEUE's own trigger. Without it a queued PR waits forever for
   # checks that never start, so this line must land BEFORE the queue is turned
   # on in the repository settings, never after.
