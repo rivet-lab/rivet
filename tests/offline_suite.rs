@@ -207,6 +207,8 @@ mod trust_artifacts_integration;
 mod type_capability_matrix_guard;
 #[path = "offline/validate_historical.rs"]
 mod validate_historical;
+#[path = "offline/validate_recorded_delivery.rs"]
+mod validate_recorded_delivery;
 #[path = "offline/validate_regression.rs"]
 mod validate_regression;
 #[path = "offline/workflow_stack_guard.rs"]

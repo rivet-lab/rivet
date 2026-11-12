@@ -530,6 +530,30 @@ fn validate_on_an_empty_prefix(rig: Rig, envs: &[(&str, &str)]) {
     );
 }
 
+/// A delivered run whose prefix is then removed: `validate` stops as data integrity by code, naming the export, not `legacy_run`.
+fn validate_on_a_recorded_delivery_that_is_gone(
+    rig: Rig,
+    envs: &[(&str, &str)],
+    remove_prefix: impl FnOnce(),
+) {
+    let run = rig.run_args_env(&[], envs);
+    assert!(
+        run.status.success(),
+        "the delivering run failed\n{}",
+        text(&run)
+    );
+    remove_prefix();
+    let out = rig.cli_env(&["validate"], envs);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(3), "{said}");
+    assert!(
+        said.contains("[RIVET_VERIFY_DELIVERY_ABSENT]")
+            && said.contains("rivet run --export")
+            && !said.contains("legacy_run"),
+        "the verdict names the gone delivery under its verify code and the remedy\n{said}"
+    );
+}
+
 // (b) a failure before the first write
 
 /// A bucket the before-the-first-write store cells export into, one prefix per cell.
@@ -3048,6 +3072,44 @@ fn validate_reads_an_empty_prefix_of_an_existing_bucket_as_legacy_azure() {
     ensure_azure_container(EMPTY_PREFIX_BUCKET);
     let rig = Rig::pg_batch("oc_emptyprefix").dest_azure(EMPTY_PREFIX_BUCKET, &unique_name("p"));
     validate_on_an_empty_prefix(rig, &[("RIVET_TEST_AZURITE_KEY", AZURITE_KEY)]);
+}
+
+#[test]
+#[ignore = "live: requires docker compose minio"]
+fn validate_fails_on_a_recorded_delivery_that_is_gone_s3() {
+    ensure_minio_bucket(EMPTY_PREFIX_BUCKET);
+    let (table, _guard) = id_v_table(SqlEngine::Pg, "oc_deliverygone", 3);
+    let prefix = unique_name("gone");
+    let rig = Rig::pg_batch(&table).dest_s3(EMPTY_PREFIX_BUCKET, &prefix, MINIO_ENDPOINT);
+    validate_on_a_recorded_delivery_that_is_gone(rig, MINIO_ENV, || {
+        minio_delete_prefix(EMPTY_PREFIX_BUCKET, &prefix)
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose fake-gcs"]
+fn validate_fails_on_a_recorded_delivery_that_is_gone_gcs() {
+    ensure_gcs_bucket(EMPTY_PREFIX_BUCKET);
+    let (table, _guard) = id_v_table(SqlEngine::Pg, "oc_deliverygone", 3);
+    let prefix = unique_name("gone");
+    let rig = Rig::pg_batch(&table).dest_gcs(EMPTY_PREFIX_BUCKET, &prefix, FAKE_GCS_ENDPOINT);
+    validate_on_a_recorded_delivery_that_is_gone(rig, &[], || {
+        assert!(fake_gcs_delete_prefix(EMPTY_PREFIX_BUCKET, &prefix) > 0);
+    });
+}
+
+#[test]
+#[ignore = "live: requires docker compose azurite"]
+fn validate_fails_on_a_recorded_delivery_that_is_gone_azure() {
+    ensure_azure_container(EMPTY_PREFIX_BUCKET);
+    let (table, _guard) = id_v_table(SqlEngine::Pg, "oc_deliverygone", 3);
+    let prefix = unique_name("gone");
+    let rig = Rig::pg_batch(&table).dest_azure(EMPTY_PREFIX_BUCKET, &prefix);
+    validate_on_a_recorded_delivery_that_is_gone(
+        rig,
+        &[("RIVET_TEST_AZURITE_KEY", AZURITE_KEY)],
+        || azure_delete_prefix(EMPTY_PREFIX_BUCKET, &prefix),
+    );
 }
 
 #[cfg(feature = "oracle")]

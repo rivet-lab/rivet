@@ -146,8 +146,12 @@ the formal invariants:
   bytes — fingerprint drift means *something else* wrote that prefix.
 - **M5**: with `_SUCCESS` present, every listed part exists at recorded
   size and content fingerprint.
-- **M6**: legacy prefixes (no `manifest.json`) are surfaced as
-  `legacy_run: true`; `rivet validate` returns success without certifying.
+- **M6**: legacy prefixes (no `manifest.json`, no `_SUCCESS`, and no successful
+  run of the export recorded at that destination) are surfaced as
+  `legacy_run: true`; `rivet validate` returns success without certifying. When
+  the state records a successful run of the export at that destination the
+  prefix is not legacy: `rivet validate` exits 3 with
+  `RIVET_VERIFY_DELIVERY_ABSENT`.
   A bucket or container that does not exist is not a legacy prefix: `rivet validate`
   exits 1 with `RIVET_VERIFY_MANIFEST_READ_ERROR` naming it.
 - **M8**: `--resume` against a `_SUCCESS`-marked prefix is refused without

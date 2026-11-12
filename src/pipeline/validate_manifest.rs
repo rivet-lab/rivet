@@ -294,6 +294,8 @@ pub enum Failure {
     ManifestRequiredButAbsent { prefix: String },
     /// A `partition_by` partition the source holds rows for has no manifest at its prefix: every delivered partition, empty days included, carries one, so the partition was never delivered or was removed.
     PartitionNotDelivered { prefix: String, export: String },
+    /// The state records a successful run of `export` at this prefix and the destination holds no manifest and no `_SUCCESS` there: the delivery was removed or the destination moved.
+    RecordedDeliveryAbsent { prefix: String, export: String },
     /// `_SUCCESS` is present and the manifest it was written after is not: rivet writes the marker only once the manifest is in place, so this prefix lost its manifest and its parts cannot be verified.
     ManifestMissingUnderMarker { prefix: String },
     /// The manifest's own run status is not `success` (`failed`, `interrupted`,
@@ -365,6 +367,7 @@ impl Failure {
             Failure::ContentVerificationUnmet { .. } => "RIVET_VERIFY_CONTENT_UNMET",
             Failure::ManifestRequiredButAbsent { .. } => "RIVET_VERIFY_MANIFEST_REQUIRED",
             Failure::PartitionNotDelivered { .. } => "RIVET_VERIFY_PARTITION_NOT_DELIVERED",
+            Failure::RecordedDeliveryAbsent { .. } => "RIVET_VERIFY_DELIVERY_ABSENT",
             Failure::ManifestMissingUnderMarker { .. } => "RIVET_VERIFY_MANIFEST_MISSING",
             Failure::RunNotSuccessful { .. } => "RIVET_VERIFY_RUN_NOT_SUCCESSFUL",
             Failure::ValueCheckNotAvailable { .. } => "RIVET_VERIFY_VALUE_CHECK_NOT_AVAILABLE",
@@ -464,6 +467,15 @@ impl std::fmt::Display for Failure {
                  destination holds none of it — it was never delivered or its directory was \
                  removed. Re-deliver it with `rivet run --export {export}`"
             ),
+            Failure::RecordedDeliveryAbsent { prefix, export } => write!(
+                f,
+                "no manifest at {prefix}: the state records a successful run of `{export}` here and \
+                 the destination holds none of it — the delivery was removed or the destination \
+                 moved. Restore the prefix from a backup, or deliver it again with `rivet run \
+                 --export {export}` (for an incremental or chunked export run `rivet state reset \
+                 --export {export}` first, so the run starts over instead of continuing from its \
+                 stored progress)"
+            ),
             Failure::ManifestMissingUnderMarker { prefix } => write!(
                 f,
                 "`_SUCCESS` is present at {prefix} and manifest.json is not: the marker is written \
@@ -556,6 +568,19 @@ impl ManifestVerification {
             prefix: prefix.to_string(),
             export: export.to_string(),
         });
+    }
+
+    /// Turn the same bare absent-manifest verdict into the fatal `failure` of a delivery the state records.
+    pub fn require_recorded_delivery(&mut self, prefix: &str, export: &str) {
+        self.require_manifest_with(Failure::RecordedDeliveryAbsent {
+            prefix: prefix.to_string(),
+            export: export.to_string(),
+        });
+    }
+
+    /// Whether this is the bare absent-manifest verdict: no manifest, no `_SUCCESS`, no other failure.
+    pub fn is_bare_legacy(&self) -> bool {
+        self.legacy_run && !self.manifest_found && !self.has_failures()
     }
 
     /// Push `failure` for an absent manifest that carries no other failure.
@@ -1072,6 +1097,29 @@ mod tests {
         PartStatus, RunManifest,
     };
     use std::path::Path;
+
+    /// Only no manifest, a legacy label and no failure together make the bare absent-manifest verdict.
+    #[test]
+    fn only_no_manifest_a_legacy_label_and_no_failure_is_bare_legacy() {
+        assert!(ManifestVerification::legacy().is_bare_legacy());
+        let not_legacy = ManifestVerification {
+            legacy_run: false,
+            ..ManifestVerification::legacy()
+        };
+        assert!(!not_legacy.is_bare_legacy());
+        let found = ManifestVerification {
+            manifest_found: true,
+            ..ManifestVerification::legacy()
+        };
+        assert!(!found.is_bare_legacy());
+        let failed = ManifestVerification {
+            failures: vec![Failure::ManifestReadError {
+                detail: "denied".into(),
+            }],
+            ..ManifestVerification::legacy()
+        };
+        assert!(!failed.is_bare_legacy());
+    }
 
     fn local_dest(base: &Path) -> LocalDestination {
         LocalDestination::new(&DestinationConfig {
@@ -2227,6 +2275,50 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_delivery_with_no_manifest_is_a_fatal_failure_naming_export_and_remedy() {
+        let mut v = ManifestVerification::legacy();
+        assert!(v.is_bare_legacy());
+        v.require_recorded_delivery("/data/out", "orders");
+        assert!(!v.legacy_run && !v.passed && !v.is_bare_legacy());
+        assert_eq!(
+            v.failures.as_slice(),
+            [Failure::RecordedDeliveryAbsent {
+                prefix: "/data/out".into(),
+                export: "orders".into(),
+            }]
+        );
+        assert_eq!(
+            v.failures[0].to_string(),
+            "no manifest at /data/out: the state records a successful run of `orders` here and \
+             the destination holds none of it — the delivery was removed or the destination \
+             moved. Restore the prefix from a backup, or deliver it again with `rivet run \
+             --export orders` (for an incremental or chunked export run `rivet state reset \
+             --export orders` first, so the run starts over instead of continuing from its \
+             stored progress)"
+        );
+        assert!(v.has_verified_wrong_failure());
+    }
+
+    #[test]
+    fn a_delivery_the_state_records_is_not_asserted_over_a_found_manifest_or_a_read_error() {
+        let mut found = ManifestVerification {
+            manifest_found: true,
+            legacy_run: false,
+            passed: true,
+            ..ManifestVerification::legacy()
+        };
+        found.require_recorded_delivery("p", "e");
+        assert!(found.passed && found.failures.is_empty());
+        let mut unread = ManifestVerification {
+            legacy_run: false,
+            failures: vec![Failure::ManifestReadError { detail: "x".into() }],
+            ..ManifestVerification::legacy()
+        };
+        unread.require_recorded_delivery("p", "e");
+        assert_eq!(unread.failures.len(), 1);
+    }
+
+    #[test]
     fn a_delivered_partition_and_a_read_error_are_left_alone() {
         let mut found = ManifestVerification {
             manifest_found: true,
@@ -2507,6 +2599,13 @@ mod tests {
                 "RIVET_VERIFY_PARTITION_NOT_DELIVERED",
             ),
             (
+                Failure::RecordedDeliveryAbsent {
+                    prefix: "p".into(),
+                    export: "e".into(),
+                },
+                "RIVET_VERIFY_DELIVERY_ABSENT",
+            ),
+            (
                 Failure::ValueChecksumMismatch {
                     detail: "flip".into(),
                 },
@@ -2596,6 +2695,7 @@ mod tests {
                 Failure::ContentVerificationUnmet { .. } => "ContentVerificationUnmet",
                 Failure::ManifestRequiredButAbsent { .. } => "ManifestRequiredButAbsent",
                 Failure::PartitionNotDelivered { .. } => "PartitionNotDelivered",
+                Failure::RecordedDeliveryAbsent { .. } => "RecordedDeliveryAbsent",
                 Failure::ManifestMissingUnderMarker { .. } => "ManifestMissingUnderMarker",
                 Failure::RunNotSuccessful { .. } => "RunNotSuccessful",
                 Failure::ValueCheckNotAvailable { .. } => "ValueCheckNotAvailable",

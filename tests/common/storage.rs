@@ -669,6 +669,43 @@ pub fn azure_put(container: &str, key: &str, bytes: &[u8]) {
     );
 }
 
+/// Remove every object under `prefix` in a MinIO bucket.
+pub fn minio_delete_prefix(bucket: &str, prefix: &str) {
+    let out = minio_mc(&format!(
+        "mc rm --recursive --force local/{bucket}/{prefix}"
+    ))
+    .output()
+    .expect("spawn mc rm");
+    assert!(
+        out.status.success(),
+        "`mc rm --recursive --force local/{bucket}/{prefix}`: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Remove every blob under `prefix` in an Azurite container.
+pub fn azure_delete_prefix(container: &str, prefix: &str) {
+    let out = Command::new("az")
+        .args([
+            "storage",
+            "blob",
+            "delete-batch",
+            "--source",
+            container,
+            "--pattern",
+            &format!("{prefix}/*"),
+            "--connection-string",
+            AZURITE_CONN_STRING,
+        ])
+        .output()
+        .expect("spawn az storage blob delete-batch");
+    assert!(
+        out.status.success(),
+        "az storage blob delete-batch {container}/{prefix}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Remove `bucket` and everything in it from the local MinIO.
 pub fn remove_minio_bucket(bucket: &str) {
     let out = minio_mc(&format!("mc rb --force local/{bucket}"))
