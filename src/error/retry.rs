@@ -382,7 +382,11 @@ fn carries_coded_stop(e: &opendal::Error) -> bool {
 
 /// opendal's verdict on a store answer: a temporary one is a blip the destination side rides out, any other is final.
 fn classify_opendal(e: &opendal::Error) -> RetryClass {
-    if carries_coded_stop(e) {
+    if seeded!(
+        "opendal-temporary-flag-overrides-nested-refusal",
+        false,
+        carries_coded_stop(e)
+    ) {
         return PERMANENT;
     }
     if e.is_temporary() {

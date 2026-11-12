@@ -63,6 +63,10 @@ const META_COLUMNS: Edit = Edit {
     key: "meta_columns",
     lines: &["meta_columns:", "  exported_at: true"],
 };
+const MAX_FILE_SIZE: Edit = Edit {
+    key: "max_file_size",
+    lines: &["max_file_size: 128KB"],
+};
 
 enum Remedy {
     Revert,
@@ -260,6 +264,12 @@ fn crashed_range_chunked_then_meta_columns_edited_postgres() {
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
+fn crashed_range_chunked_then_max_file_size_edited_postgres() {
+    crashed_then_field_edited(SqlEngine::Pg, RANGE_CHUNKED, MAX_FILE_SIZE, Remedy::Revert);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
 fn crashed_keyset_then_compression_edited_postgres() {
     crashed_then_field_edited(SqlEngine::Pg, KEYSET, COMPRESSION, Remedy::Revert);
 }
@@ -278,6 +288,12 @@ fn crashed_keyset_then_meta_columns_edited_postgres() {
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
+fn crashed_keyset_then_max_file_size_edited_postgres() {
+    crashed_then_field_edited(SqlEngine::Pg, KEYSET, MAX_FILE_SIZE, Remedy::Revert);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
 fn crashed_parallel_keyset_then_compression_edited_postgres() {
     crashed_then_field_edited(SqlEngine::Pg, PARALLEL_KEYSET, COMPRESSION, Remedy::Revert);
 }
@@ -292,6 +308,17 @@ fn crashed_parallel_keyset_then_columns_edited_postgres() {
 #[ignore = "live: requires docker compose postgres"]
 fn crashed_parallel_keyset_then_meta_columns_edited_postgres() {
     crashed_then_field_edited(SqlEngine::Pg, PARALLEL_KEYSET, META_COLUMNS, Remedy::Revert);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn crashed_parallel_keyset_then_max_file_size_edited_postgres() {
+    crashed_then_field_edited(
+        SqlEngine::Pg,
+        PARALLEL_KEYSET,
+        MAX_FILE_SIZE,
+        Remedy::Revert,
+    );
 }
 
 #[test]
@@ -365,6 +392,17 @@ fn crashed_range_chunked_then_meta_columns_edited_mysql() {
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
+fn crashed_range_chunked_then_max_file_size_edited_mysql() {
+    crashed_then_field_edited(
+        SqlEngine::Mysql,
+        RANGE_CHUNKED,
+        MAX_FILE_SIZE,
+        Remedy::Revert,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
 fn crashed_keyset_then_compression_edited_mysql() {
     crashed_then_field_edited(SqlEngine::Mysql, KEYSET, COMPRESSION, Remedy::Revert);
 }
@@ -379,6 +417,12 @@ fn crashed_keyset_then_columns_edited_mysql() {
 #[ignore = "live: requires docker compose mysql"]
 fn crashed_keyset_then_meta_columns_edited_mysql() {
     crashed_then_field_edited(SqlEngine::Mysql, KEYSET, META_COLUMNS, Remedy::Revert);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn crashed_keyset_then_max_file_size_edited_mysql() {
+    crashed_then_field_edited(SqlEngine::Mysql, KEYSET, MAX_FILE_SIZE, Remedy::Revert);
 }
 
 #[test]
@@ -405,6 +449,17 @@ fn crashed_parallel_keyset_then_meta_columns_edited_mysql() {
         SqlEngine::Mysql,
         PARALLEL_KEYSET,
         META_COLUMNS,
+        Remedy::Revert,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn crashed_parallel_keyset_then_max_file_size_edited_mysql() {
+    crashed_then_field_edited(
+        SqlEngine::Mysql,
+        PARALLEL_KEYSET,
+        MAX_FILE_SIZE,
         Remedy::Revert,
     );
 }
@@ -460,6 +515,17 @@ fn crashed_range_chunked_then_meta_columns_edited_mssql() {
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
+fn crashed_range_chunked_then_max_file_size_edited_mssql() {
+    crashed_then_field_edited(
+        SqlEngine::Mssql,
+        RANGE_CHUNKED,
+        MAX_FILE_SIZE,
+        Remedy::Revert,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
 fn crashed_keyset_then_compression_edited_mssql() {
     crashed_then_field_edited(SqlEngine::Mssql, KEYSET, COMPRESSION, Remedy::Revert);
 }
@@ -474,6 +540,12 @@ fn crashed_keyset_then_columns_edited_mssql() {
 #[ignore = "live: requires docker compose mssql"]
 fn crashed_keyset_then_meta_columns_edited_mssql() {
     crashed_then_field_edited(SqlEngine::Mssql, KEYSET, META_COLUMNS, Remedy::Revert);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn crashed_keyset_then_max_file_size_edited_mssql() {
+    crashed_then_field_edited(SqlEngine::Mssql, KEYSET, MAX_FILE_SIZE, Remedy::Revert);
 }
 
 #[test]
@@ -500,6 +572,17 @@ fn crashed_parallel_keyset_then_meta_columns_edited_mssql() {
         SqlEngine::Mssql,
         PARALLEL_KEYSET,
         META_COLUMNS,
+        Remedy::Revert,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn crashed_parallel_keyset_then_max_file_size_edited_mssql() {
+    crashed_then_field_edited(
+        SqlEngine::Mssql,
+        PARALLEL_KEYSET,
+        MAX_FILE_SIZE,
         Remedy::Revert,
     );
 }
@@ -564,6 +647,18 @@ fn crashed_range_chunked_then_meta_columns_edited_oracle() {
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
+fn crashed_range_chunked_then_max_file_size_edited_oracle() {
+    crashed_then_field_edited(
+        SqlEngine::Oracle,
+        RANGE_CHUNKED,
+        MAX_FILE_SIZE,
+        Remedy::Revert,
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
 fn crashed_keyset_then_compression_edited_oracle() {
     crashed_then_field_edited(SqlEngine::Oracle, KEYSET, COMPRESSION, Remedy::Revert);
 }
@@ -580,6 +675,13 @@ fn crashed_keyset_then_columns_edited_oracle() {
 #[ignore = "live: requires docker compose oracle"]
 fn crashed_keyset_then_meta_columns_edited_oracle() {
     crashed_then_field_edited(SqlEngine::Oracle, KEYSET, META_COLUMNS, Remedy::Revert);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn crashed_keyset_then_max_file_size_edited_oracle() {
+    crashed_then_field_edited(SqlEngine::Oracle, KEYSET, MAX_FILE_SIZE, Remedy::Revert);
 }
 
 #[cfg(feature = "oracle")]
@@ -609,6 +711,18 @@ fn crashed_parallel_keyset_then_meta_columns_edited_oracle() {
         SqlEngine::Oracle,
         PARALLEL_KEYSET,
         META_COLUMNS,
+        Remedy::Revert,
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn crashed_parallel_keyset_then_max_file_size_edited_oracle() {
+    crashed_then_field_edited(
+        SqlEngine::Oracle,
+        PARALLEL_KEYSET,
+        MAX_FILE_SIZE,
         Remedy::Revert,
     );
 }

@@ -72,6 +72,7 @@ impl RunSet {
             .declared
             .iter()
             .find(|e| e.destination.destination_type == DestinationType::Stdout)
+            .filter(|_| seeded!("stdout-swallowed-by-child-processes", false, true))
         {
             Some(e) => Err(format!(
                 "destination: stdout: --parallel-export-processes is disabled when an export writes \

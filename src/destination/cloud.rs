@@ -574,7 +574,11 @@ impl<B: CloudBackend> super::Destination for CloudDestination<B> {
                 content_md5: meta.content_md5().map(str::to_string),
             })),
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => {
-                self.require_container()?;
+                seeded!(
+                    "missing-bucket-read-as-no-manifest",
+                    (),
+                    self.require_container()?
+                );
                 Ok(None)
             }
             Err(e) => Err(e.into()),
