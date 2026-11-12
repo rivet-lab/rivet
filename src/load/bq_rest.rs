@@ -1007,7 +1007,13 @@ fn job_failed(job_id: &str, detail: &str, job: &Value) -> anyhow::Error {
     let reason = job
         .pointer("/status/errorResult/reason")
         .and_then(Value::as_str);
-    match reason.filter(|r| TRANSIENT_JOB_REASONS.contains(r)) {
+    match reason.filter(|r| {
+        seeded!(
+            "bigquery-transient-job-error-final",
+            false,
+            TRANSIENT_JOB_REASONS.contains(r)
+        )
+    }) {
         Some(reason) => crate::error::coded(
             crate::error::codes::LOAD_WAREHOUSE_UNAVAILABLE,
             format!("{message} (reason {reason}, which BigQuery documents as retryable)"),

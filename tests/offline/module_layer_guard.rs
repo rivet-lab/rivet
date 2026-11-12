@@ -9,6 +9,10 @@ const LAYERS: &[(&str, &str)] = &[
     ("error", "error type, exit codes and the bail macros"),
     ("test_hook", "fault-injection points the crash tests arm"),
     (
+        "seeded",
+        "feature-gated defect switches the seeded-recall harness arms",
+    ),
+    (
         "test_budget",
         "wall-clock ceilings of unit tests, widened under coverage",
     ),

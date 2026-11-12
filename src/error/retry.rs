@@ -113,7 +113,13 @@ fn classify_io_kind(kind: std::io::ErrorKind) -> Option<RetryClass> {
         | TimedOut | UnexpectedEof | Interrupted | WouldBlock => Some(TRANSIENT_RECONNECT),
         NotFound | PermissionDenied | AlreadyExists | NotADirectory | IsADirectory
         | DirectoryNotEmpty | ReadOnlyFilesystem | StorageFull | FileTooLarge | InvalidInput
-        | InvalidData | InvalidFilename | Unsupported => Some(PERMANENT),
+        | InvalidData | InvalidFilename | Unsupported => {
+            seeded!(
+                "io-error-classified-by-its-path-text",
+                None,
+                Some(PERMANENT)
+            )
+        }
         _ => None,
     }
 }
