@@ -19,7 +19,7 @@ export CLICKHOUSE_PASSWORD=...
 
 rivet init --source-env DATABASE_URL --mode cdc --tls verify-full \
   --gcs-bucket my-bucket \
-  --clickhouse-url http://clickhouse:8123 --clickhouse-database raw --clickhouse-user loader \
+  --clickhouse-url https://clickhouse:8443 --clickhouse-database raw --clickhouse-user loader \
   -o rivet.yaml
 
 rivet run  -c rivet.yaml    # Parquet into GCS
@@ -35,7 +35,7 @@ The generated block:
 ```yaml
 load:
   target: clickhouse
-  url: http://clickhouse:8123
+  url: https://clickhouse:8443
   database: raw
   user: loader
   password_env: CLICKHOUSE_PASSWORD
@@ -218,7 +218,13 @@ works the same way: name it in `named_collection:`.
   rivet. For a server certificate signed by a private CA, set `ca_file:` in the `load:`
   block to a PEM file of its root certificate(s) (an absolute path; a relative one is
   read from the directory rivet runs in); a file that is missing or holds no PEM
-  certificate fails the load before any statement.
+  certificate fails the load before any statement. A remote (non-loopback) `http://`
+  URL is refused at config load with `RIVET_CONFIG_REMOTE_PLAINTEXT` (exit 1), because the
+  password and every row would cross the network in cleartext; loopback hosts stay allowed.
+  The URL is read the way the HTTP client reads it, so `http:/host`, `http:host` and
+  `http://host\@127.0.0.1` are refused as the remote host they dial, and a URL that does not parse
+  is refused with the same code.
+  On a network path you already trust, set `allow_plaintext: true` in the `load:` block.
 
 ## Not supported
 

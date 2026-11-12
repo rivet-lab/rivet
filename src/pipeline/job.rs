@@ -747,6 +747,7 @@ pub(crate) fn synthetic_failed_summary(export_name: &str, err: &anyhow::Error) -
     let journal = crate::journal::RunJournal::new(&run_id, export_name);
     RunSummary {
         bytes_read: 0,
+        nulled_cells: Vec::new(),
         ledger: Default::default(),
         cursor_column: None,
         cursor_low: None,
@@ -1220,6 +1221,10 @@ fn execute_resolved_plan(
     let rss_peak = rss_sampler.stop();
     let rss_after = crate::resource::get_rss_mb();
     summary.bytes_read = plan.bytes_read.load(std::sync::atomic::Ordering::Relaxed);
+    summary.nulled_cells = plan.nulled_cells.snapshot();
+    for (column, n) in &summary.nulled_cells {
+        log::warn!("{}", crate::source::mysql::zero_date_warning(column, *n));
+    }
     summary.duration_ms = start.elapsed().as_millis() as i64;
     summary.peak_rss_mb = rss_peak.max(rss_after).max(rss_before) as i64;
 
@@ -1483,6 +1488,17 @@ fn run_export_job_inner(
             let summary = synthetic_failed_summary(&export.name, &e);
             crate::notify::maybe_send(config.notifications.as_ref(), &summary);
             return (Err(e), summary);
+        }
+        if !pending.is_empty()
+            && let Err(e) = super::cdc_job::refuse_mixed_id_types(config, export, cdc_config_dir)
+        {
+            let summary = synthetic_failed_summary(&export.name, &e);
+            let stopped = Err(e);
+            if let Some(first) = first_run {
+                first.release_after(config, state, &stopped);
+            }
+            crate::notify::maybe_send(config.notifications.as_ref(), &summary);
+            return (stopped, summary);
         }
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
             let _flags = super::run::RenderFlags::set(super::run::multi_export_mode(), Some(true));
@@ -1941,6 +1957,61 @@ mod snapshot_leg_tests {
 #[cfg(test)]
 mod tests {
     use crate::plan::test_support::test_plan;
+
+    /// A `mode: cdc` Mongo config in `dir`, keyed on `_id`, with the given `cdc:` block and a checkpoint of two `_id` types.
+    fn mixed_mongo_run(dir: &std::path::Path, cdc_block: &str) -> Result<()> {
+        let yaml = format!(
+            "source:\n  type: mongo\n  url: \"mongodb://u@127.0.0.1:1/app?serverSelectionTimeoutMS=300\"\n  tls: {{ mode: disable }}\n\
+             load: {{ target: clickhouse, url: \"http://127.0.0.1:1\", database: d, user: u, password_env: P, pk: [_id] }}\n\
+             exports:\n  - name: o\n    table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n{cdc_block}      checkpoint: ./o.ckpt\n    \
+             destination: {{ type: local, path: ./out }}\n"
+        );
+        let path = dir.join("a.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        std::fs::write(
+            dir.join("o.ckpt"),
+            "{\"_data\":\"82\",\"idt\":{\"orders\":[0,2]}}",
+        )
+        .unwrap();
+        let config_path = path.display().to_string();
+        let config = crate::config::Config::load(&config_path).unwrap();
+        let state = crate::state::StateStore::open_in_memory().unwrap();
+        let opts = RunOptions {
+            validate: false,
+            reconcile: false,
+            resume: false,
+            force: false,
+            params: None,
+            parallel_snapshots: false,
+            strict: false,
+        };
+        run_export_job_inner(
+            &config_path,
+            &config,
+            &config.exports[0],
+            &state,
+            dir,
+            &opts,
+        )
+        .0
+    }
+
+    /// A pending baseline snapshot over a mixed `_id` checkpoint is refused by code before any write; a changes-only run is not asked.
+    #[test]
+    fn a_pending_snapshot_over_mixed_id_types_is_refused_and_a_changes_only_run_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = mixed_mongo_run(dir.path(), "      initial: snapshot\n");
+        crate::error::assert_coded(&result.unwrap_err(), "RIVET_SOURCE_ID_TYPES_MIXED", 5);
+        assert!(!dir.path().join("out").exists());
+        let dir = tempfile::tempdir().unwrap();
+        let result = mixed_mongo_run(dir.path(), "");
+        let err = result.unwrap_err();
+        assert_ne!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(crate::error::codes::SOURCE_ID_TYPES_MIXED.id),
+            "{err}"
+        );
+    }
 
     /// A resume that ADOPTS a prior run's id must still close the row the ledger was opened under — both wrappers, through one seam.
     #[test]

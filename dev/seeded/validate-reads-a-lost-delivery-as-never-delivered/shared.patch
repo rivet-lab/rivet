@@ -1,0 +1,16 @@
+diff --git a/src/pipeline/validate_manifest.rs b/src/pipeline/validate_manifest.rs
+index 6e7e62f4..755ec57a 100644
+--- a/src/pipeline/validate_manifest.rs
++++ b/src/pipeline/validate_manifest.rs
+@@ -572,10 +572,7 @@ impl ManifestVerification {
+ 
+     /// Turn the same bare absent-manifest verdict into the fatal `failure` of a delivery the state records.
+     pub fn require_recorded_delivery(&mut self, prefix: &str, export: &str) {
+-        self.require_manifest_with(Failure::RecordedDeliveryAbsent {
+-            prefix: prefix.to_string(),
+-            export: export.to_string(),
+-        });
++        let _ = (prefix, export);
+     }
+ 
+     /// Whether this is the bare absent-manifest verdict: no manifest, no `_SUCCESS`, no other failure.

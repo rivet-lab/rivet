@@ -1,8 +1,7 @@
 //! Consolidated LIVE integration suite — ONE test binary instead of 49.
 //!
 //! Every `tests/live_*.rs` suite shared the same `mod common;` and was built as its
-//! own integration-test target, so `cargo test --all-targets` (run on every PR and
-//! by the pre-push hook) linked the `common` harness 49 separate times even though
+//! own integration-test target, so `cargo nextest run --all-targets` (run on every PR) linked the `common` harness 49 separate times even though
 //! the tests themselves are `#[ignore]` and only run under docker. That link cost
 //! dominated the offline build.
 //!
@@ -140,6 +139,8 @@ mod live_crash_recovery;
 mod live_crash_soak;
 #[path = "live/live_cross_db_parity.rs"]
 mod live_cross_db_parity;
+#[path = "live/live_cursor_admission.rs"]
+mod live_cursor_admission;
 #[path = "live/live_density_probe.rs"]
 mod live_density_probe;
 #[path = "live/live_destination_credential.rs"]
@@ -275,6 +276,8 @@ mod live_reconcile_repair;
 mod live_reserved_column;
 #[path = "live/live_resume.rs"]
 mod live_resume;
+#[path = "live/live_resume_identity.rs"]
+mod live_resume_identity;
 #[path = "live/live_retry_and_faults.rs"]
 mod live_retry_and_faults;
 #[path = "live/live_rig_seams.rs"]

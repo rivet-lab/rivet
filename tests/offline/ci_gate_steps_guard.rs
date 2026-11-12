@@ -1,4 +1,4 @@
-//! The semantic gates are STEPS of the `Tests` job of ci.yml; the service-backed suites are steps of the E2E `pre` leg
+//! The semantic gates are STEPS of the `Tests (semantic gates)` job of ci.yml; the service-backed suites are steps of the E2E `pre` leg
 //! and the censuses steps of the `E2E matrix` verdict job of nightly-live.yml. A step is easy to drop or to point at the
 //! wrong filter in an edit that reads as tidying; this pins each one by its command.
 
@@ -12,49 +12,49 @@ const PRE_LEG: &str = "${{ !cancelled() && matrix.leg == 'pre' }}";
 const GATES: &[(&str, &str, &str, &str, &str)] = &[
     (
         "ci.yml",
-        "test",
+        "test-gates",
         "Invariant tests (semantic gate)",
         "cargo test --test invariants --test journal_invariants",
         ALWAYS,
     ),
     (
         "ci.yml",
-        "test",
+        "test-gates",
         "Recovery tests (semantic gate)",
         "cargo test --test recovery",
         ALWAYS,
     ),
     (
         "ci.yml",
-        "test",
+        "test-gates",
         "Compatibility matrix tests (semantic gate)",
         "cargo test --lib -- plan::validate::tests",
         ALWAYS,
     ),
     (
         "ci.yml",
-        "test",
+        "test-gates",
         "Type mapping contracts (semantic gate)",
         "cargo test --test type_roundtrip contract_",
         ALWAYS,
     ),
     (
         "ci.yml",
-        "test",
+        "test-gates",
         "Stability tests — format & row-group goldens (semantic gate)",
         "cargo test --test format_golden",
         ALWAYS,
     ),
     (
         "ci.yml",
-        "test",
+        "test-gates",
         "Stability tests — sink unit tests (semantic gate)",
         "cargo test --lib -- pipeline::sink::tests",
         ALWAYS,
     ),
     (
         "ci.yml",
-        "test",
+        "test-gates",
         "Generated docs are in sync (docs-as-code)",
         "python3 -m dev.pytools.docgen --check",
         ALWAYS,
@@ -142,15 +142,22 @@ fn every_semantic_gate_is_a_step_with_its_command() {
     }
 }
 
-/// `Some(n)` when `legs` is `pre` once plus every partition `i/n` of ONE n, each once.
-fn partitions_of(legs: &[&str]) -> Option<usize> {
-    let parts: Vec<&str> = legs.iter().copied().filter(|l| *l != "pre").collect();
+/// `Some(n)` when `parts` is every partition `i/n` of ONE n, each once.
+fn every_partition(parts: &[&str]) -> Option<usize> {
     let n = parts.len();
     let mut want: Vec<String> = (1..=n).map(|i| format!("{i}/{n}")).collect();
     let mut got: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
     want.sort();
     got.sort();
-    (n > 0 && legs.len() == n + 1 && got == want).then_some(n)
+    (n > 0 && got == want).then_some(n)
+}
+
+/// `Some(n)` when `legs` is `pre` once plus every partition `i/n` of ONE n, each once.
+fn partitions_of(legs: &[&str]) -> Option<usize> {
+    let parts: Vec<&str> = legs.iter().copied().filter(|l| *l != "pre").collect();
+    (legs.len() == parts.len() + 1)
+        .then(|| every_partition(&parts))
+        .flatten()
 }
 
 /// A leg list short of one partition drops a third of the live suite and stays green.
@@ -214,6 +221,97 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
                 .any(|l| l.trim() == r#"[ "${{ needs.e2e.result }}" = success ]"#),
         "the verdict job must fail unless every leg succeeded"
     );
+}
+
+/// A shard nobody runs, or a `Tests` check that does not wait for every `Tests (...)` job, is a silent cut.
+#[test]
+fn the_tests_check_fails_unless_every_shard_and_the_gates_succeeded() {
+    assert_eq!(every_partition(&["1/3", "2/3", "3/3"]), Some(3));
+    for bad in [
+        &["1/3", "2/3"][..],
+        &["1/3", "1/3", "3/3"],
+        &["1/3", "2/4"],
+        &[],
+    ] {
+        assert_eq!(every_partition(bad), None, "{bad:?}");
+    }
+    let ci = workflow("ci.yml");
+    let parts: Vec<String> = ci["jobs"]["test"]["strategy"]["matrix"]["part"]
+        .as_sequence()
+        .expect("the `test` job has a `part` matrix")
+        .iter()
+        .map(|v| v.as_str().expect("a part is a string").to_string())
+        .collect();
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    assert!(
+        every_partition(&parts).is_some(),
+        "the test shards {parts:?} are not every `i/N` of one N: a partition nobody runs is a silent cut"
+    );
+    let run = steps_of(&ci, "test")
+        .into_iter()
+        .filter_map(|s| s["run"].as_str().map(str::to_string))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for flag in [
+        "cargo nextest run ",
+        "--all-targets ",
+        "--profile pr ",
+        "--partition hash:${{ matrix.part }}",
+    ] {
+        assert!(run.contains(flag), "the test shards lost `{flag}`: {run}");
+    }
+    let jobs = ci["jobs"].as_mapping().expect("ci jobs");
+    let verdict = jobs
+        .iter()
+        .filter(|(_, j)| j["name"].as_str() == Some("Tests"))
+        .map(|(k, _)| k.as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        verdict.len(),
+        1,
+        "exactly one job is named `Tests`: {verdict:?}"
+    );
+    let verdict = &ci["jobs"][verdict[0]];
+    let mut want: Vec<&str> = jobs
+        .iter()
+        .filter(|(_, j)| j["name"].as_str().is_some_and(|n| n.starts_with("Tests (")))
+        .filter_map(|(k, _)| k.as_str())
+        .collect();
+    let mut got: Vec<&str> = verdict["needs"]
+        .as_sequence()
+        .expect("`Tests` needs the test jobs")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    want.sort();
+    got.sort();
+    assert_eq!(
+        got, want,
+        "`Tests` must need exactly every `Tests (...)` job"
+    );
+    assert_eq!(
+        verdict["if"].as_str(),
+        Some("${{ always() }}"),
+        "a job skipped by a failed `needs` counts as passing for a required check"
+    );
+    let steps = verdict["steps"].as_sequence().expect("`Tests` has steps");
+    assert_eq!(steps.len(), 1, "`Tests` is one verdict step");
+    let run = steps[0]["run"].as_str().unwrap_or_default();
+    let env = steps[0]["env"]
+        .as_mapping()
+        .expect("`Tests` reads each result from env");
+    for job in want {
+        let result = format!("${{{{ needs.{job}.result }}}}");
+        let var = env
+            .iter()
+            .find(|(_, v)| v.as_str() == Some(result.as_str()))
+            .and_then(|(k, _)| k.as_str())
+            .unwrap_or_else(|| panic!("`Tests` never reads `{result}`"));
+        assert!(
+            run.contains(&format!("\"${var}\" = success")),
+            "`Tests` does not require `{job}` to be `success`: {run}"
+        );
+    }
 }
 
 /// A nightly job the verdict job does not wait for can go red and leave the run green.

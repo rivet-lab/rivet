@@ -5,7 +5,7 @@ name: PR rules
 
 on:
   pull_request:
-    branches: [master, main]
+    branches: [master, main, pre-0.34.0]
     types: [opened, edited, synchronize, reopened]
   merge_group:
 

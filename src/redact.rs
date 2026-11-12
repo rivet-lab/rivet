@@ -123,7 +123,8 @@ fn is_keyword_byte(b: u8) -> bool {
 /// Whether a keyword names a password: it ends in `password`, `passwd` or `pwd`, in any case.
 fn is_password_keyword(key: &str) -> bool {
     ["password", "passwd", "pwd"].iter().any(|word| {
-        key.len() >= word.len() && key[key.len() - word.len()..].eq_ignore_ascii_case(word)
+        key.len() >= word.len()
+            && key.as_bytes()[key.len() - word.len()..].eq_ignore_ascii_case(word.as_bytes())
     })
 }
 
@@ -1224,12 +1225,32 @@ mod tests {
             proptest::prop_assert_eq!(&redact_url_passwords(&once), &once, "{:?}", text);
         }
 
+        /// A query key of percent escapes (any bytes, so any decoded text) followed by a keyword is read without a panic, and masked exactly when the keyword names a password.
+        #[test]
+        fn a_percent_escaped_prefix_before_a_keyword_is_read_without_a_panic(
+            prefix in "(%[0-9A-Fa-f]{2}){1,3}",
+            keyword in proptest::sample::select(vec!["password", "passwd", "PWD", "n", "pass"]),
+        ) {
+            let text = format!("?{prefix}{keyword}=x");
+            let want = if keyword == "n" || keyword == "pass" { text.clone() } else { format!("?{prefix}{keyword}=***") };
+            proptest::prop_assert_eq!(redact_secrets(&text), want);
+        }
+
         /// Arbitrary UTF-8 passes every redactor without a panic, and unchanged when it holds neither an `@` nor an `=`.
         #[test]
         fn any_utf8_text_is_redacted_without_a_panic(text in "\\PC{0,64}") {
             let out = redact_secrets(&text);
             proptest::prop_assert!(text.contains(['@', '=']) || out == text, "{:?} -> {:?}", text, out);
         }
+    }
+
+    /// A percent-encoded query key that decodes to a multi-byte character is read without a panic.
+    #[test]
+    fn a_query_key_decoding_to_a_multibyte_character_is_read_without_a_panic() {
+        for text in ["?%FFn=x", "a?b=1&%E2%82%ACn=2", "?%D0%BF=1", "&%E6%97%A5=v"] {
+            assert_eq!(redact_secrets(text), text);
+        }
+        assert_eq!(redact_secrets("?%FFpwd=x"), format!("?%FFpwd={MASK}"));
     }
 
     /// A text that ends inside a URL, a query key or a multi-byte character is returned whole.
@@ -1335,6 +1356,24 @@ mod tests {
                 "postgres://h/db?options=-csearch_path%3Dp&application_name=x%20y",
                 "postgres://h/db?options=-csearch_path%3Dp&application_name=x%20y",
             ),
+        ] {
+            assert_eq!(redact_secrets(text), want, "{text:?}");
+        }
+    }
+
+    /// A query key whose percent escapes decode to non-ASCII text is read without a panic, and a password keyword after it is masked.
+    #[test]
+    fn a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic() {
+        for (text, want) in [
+            ("?%FFn=x", "?%FFn=x"),
+            ("&%C3%A9=x", "&%C3%A9=x"),
+            ("?%E2%82%ACpwd=x", "?%E2%82%ACpwd=***"),
+            ("?%C3%B1password=x", "?%C3%B1password=***"),
+            ("?%FFpasswd=x", "?%FFpasswd=***"),
+            ("?%FFa=x", "?%FFa=x"),
+            ("?\u{FFFD}n=x", "?\u{FFFD}n=x"),
+            ("\u{FFFD}n=x", "\u{FFFD}n=x"),
+            ("\u{20AC}pwd=x", "\u{20AC}pwd=***"),
         ] {
             assert_eq!(redact_secrets(text), want, "{text:?}");
         }

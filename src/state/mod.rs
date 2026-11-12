@@ -24,6 +24,7 @@ use migrations::{migrate, migrate_pg};
 mod progression;
 mod row;
 mod run_aggregate;
+mod run_shape;
 mod run_status_store;
 mod schema;
 mod shape;
@@ -48,6 +49,7 @@ pub use metrics::MetricRow;
 pub use progression::{Boundary, ExportProgression};
 #[allow(unused_imports)]
 pub use run_aggregate::{RunAggregate, RunAggregateEntry};
+pub use run_shape::RunShape;
 pub use run_status_store::FinishOutcome;
 #[allow(unused_imports)]
 pub use schema::{SchemaChange, SchemaColumn, arrow_schema_to_columns, schema_fingerprint};
@@ -347,6 +349,14 @@ impl StateStore {
             }
         }
         Self::open_sqlite(config_path)
+    }
+
+    /// [`StateStore::open`] for a reader: a SQLite state that does not exist yet is `None` and is not created.
+    pub fn open_if_present(config_path: &str) -> Result<Option<Self>> {
+        if !Self::names_a_server() && !Self::state_db_path(config_path).exists() {
+            return Ok(None);
+        }
+        Self::open(config_path).map(Some)
     }
 
     /// Whether `RIVET_STATE_URL` names a state server, so the state does not live beside the config.
@@ -731,6 +741,19 @@ mod empty_state_path_guard {
 
 #[cfg(test)]
 mod tests {
+    /// A reader's open creates no SQLite file, returns `None` while none exists, and opens the one that does.
+    #[test]
+    fn open_if_present_creates_nothing_and_opens_what_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("r.yaml");
+        std::fs::write(&cfg, "x: 1\n").unwrap();
+        let cfg = cfg.to_str().unwrap();
+        assert!(StateStore::open_if_present(cfg).unwrap().is_none());
+        assert!(!dir.path().join(".rivet_state.db").exists());
+        StateStore::open(cfg).unwrap();
+        assert!(StateStore::open_if_present(cfg).unwrap().is_some());
+    }
+
     /// Round-10 mutants: the NOTADB `||` in the migrate-lock error split was
     /// un-graded — `&&` reverts corrupt-DB reporting to the phantom
     /// "another process is migrating" message the round-8 fix removed. Both

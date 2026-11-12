@@ -202,6 +202,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `password_env` | `string` |  | ClickHouse: the env var holding that user's password. |
 | `named_collection` | `string` |  | ClickHouse: a server-side named collection holding the bucket's URL and HMAC keys; ClickHouse then reads the Parquet itself instead of rivet sending it. |
 | `ca_file` | `string` |  | ClickHouse: a PEM file of root certificates to trust for an `https://` URL signed by a private CA, beside the built-in public roots; a relative path is read beside the config file. |
+| `allow_plaintext` | `boolean` |  | ClickHouse: allow an `http://` `url` on a remote host, sending the password and every row in cleartext; only for a trusted network. |
 | `cleanup_source` | `boolean` |  | After a successful load, delete the staged Parquet under the export prefix. |
 | `pk` | `auto` \| `none` |  | Dedup key of the incremental/CDC current-state view: `auto` (the source primary key `rivet run` recorded), `none`, or explicit columns; ignored for `full`. |
 | `layout` | `log_view` \| `base_buffer` |  | `log_view` or `base_buffer` — where the current state lives (`log_view` is deprecated). Absent derives it from the target: on Snowflake an incremental or CDC export is base+buffer (`log_view` keeps the changelog and its view); on BigQuery a CDC stream with a `backfill:` is base+buffer, the rest changelog+view. `base_buffer` needs `target: bigquery` or `snowflake` — `rivet compact` merges the buffer into the base, and ClickHouse has none. |

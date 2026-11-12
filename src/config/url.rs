@@ -1,6 +1,8 @@
 //! Pure readers of a connection URL: whether it stays on the box and its `sslmode`.
 
 use super::TlsConfig;
+use crate::error::Result;
+use crate::secret::Secret;
 use crate::url_text::host_port_span;
 
 /// Whether every host of a `scheme://[user[:pass]@]host[:port][/db][?…]` URL is loopback; fails closed on any URL it cannot confidently read.
@@ -98,6 +100,86 @@ pub(crate) fn strip_url_query_key(url: &str, key: &str) -> String {
     } else {
         format!("{base}?{}", kept.join("&"))
     }
+}
+
+/// Parse `url` with the parser the HTTP client uses, so a guard and the request read one scheme and host.
+fn parse_request_url(url: &str) -> Option<reqwest::Url> {
+    reqwest::Url::parse(url).ok()
+}
+
+/// The lowercase host a request to `url` dials, IPv6 brackets removed; `None` when the URL does not parse or has no host.
+pub(crate) fn request_host(url: &str) -> Option<String> {
+    let parsed = parse_request_url(url)?;
+    let host = parsed.host_str()?;
+    Some(host.trim_matches(['[', ']']).to_ascii_lowercase())
+}
+
+/// Refuse an `http://` URL on a remote host, or a URL that does not parse, before any request carries `carries` through it in cleartext.
+pub(crate) fn require_https_or_loopback(
+    url: &str,
+    sink: &str,
+    carries: &str,
+    remedy: &str,
+) -> Result<()> {
+    let Some(parsed) = parse_request_url(url) else {
+        crate::rivet_bail!(
+            crate::error::codes::CONFIG_REMOTE_PLAINTEXT,
+            "{sink}: refusing to send {carries} to a URL that does not parse, so it cannot be \
+             shown to be https:// or loopback. {remedy}"
+        );
+    };
+    let host = parsed.host_str().unwrap_or_default();
+    if parsed.scheme() == "http" && !super::is_loopback_host(host) {
+        let shown = match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+        crate::rivet_bail!(
+            crate::error::codes::CONFIG_REMOTE_PLAINTEXT,
+            "{sink}: refusing to send {carries} to the remote (non-loopback) host `{shown}` over \
+             cleartext http://; they would cross the network unencrypted. {remedy}"
+        );
+    }
+    Ok(())
+}
+
+/// The one place a URL held as a `Secret` is read out for the plaintext gate.
+fn require_https_secret_url(url: &Secret, sink: &str, carries: &str, remedy: &str) -> Result<()> {
+    require_https_or_loopback(url.expose(), sink, carries, remedy)
+}
+
+/// Refuse a remote `http://` ClickHouse `load.url`, which carries the loader password and every row, unless `allow_plaintext`.
+pub(crate) fn require_https_clickhouse_url(url: &Secret, allow_plaintext: bool) -> Result<()> {
+    if allow_plaintext {
+        return Ok(());
+    }
+    require_https_secret_url(
+        url,
+        "ClickHouse load `url`",
+        "the loader password and every loaded row",
+        "Use an `https://` URL (with `load.ca_file:` for a private CA), or set \
+         `load.allow_plaintext: true` if this network path is already trusted.",
+    )
+}
+
+/// Refuse a Slack webhook that is `http://` on a remote host: the URL is the posting secret.
+pub(crate) fn require_https_webhook(url: &Secret) -> Result<()> {
+    require_https_secret_url(
+        url,
+        "Slack notification `webhook_url`",
+        "the webhook secret and the run summary",
+        "Use the `https://` webhook URL Slack gave you.",
+    )
+}
+
+/// Refuse a remote `http://` BigQuery API endpoint override, which carries the OAuth bearer token and every query.
+pub(crate) fn require_https_bigquery_endpoint(url: &str) -> Result<()> {
+    require_https_or_loopback(
+        url,
+        "BigQuery `RIVET_BQ_API_ENDPOINT`",
+        "the OAuth bearer token and every query",
+        "Unset `RIVET_BQ_API_ENDPOINT`, or point it at an `https://` or loopback endpoint.",
+    )
 }
 
 #[cfg(test)]
@@ -268,5 +350,170 @@ mod loopback_tests {
         // No authority at all.
         assert_eq!(host_port_span("mysql://"), "");
         assert_eq!(host_port_span("postgres:///db"), "");
+    }
+}
+
+#[cfg(test)]
+mod plaintext_gate_tests {
+    use super::require_https_or_loopback;
+
+    fn gate(url: &str) -> crate::error::Result<()> {
+        require_https_or_loopback(url, "sink", "secrets", "Use https.")
+    }
+
+    #[test]
+    fn a_remote_http_url_is_refused_by_code_naming_the_host_and_the_remedy() {
+        for url in [
+            "http://ch.example.com:8123",
+            "HTTP://ch.example.com",
+            "  http://10.1.2.3/x",
+            "http://user:pw@ch.example.com:8123/db",
+        ] {
+            let e = gate(url).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&e),
+                Some("RIVET_CONFIG_REMOTE_PLAINTEXT"),
+                "{url}"
+            );
+            let text = format!("{e:#}");
+            assert!(text.starts_with("sink: refusing to send secrets"), "{text}");
+            assert!(text.ends_with("Use https."), "{text}");
+            assert!(!text.contains("pw"), "{text}");
+        }
+    }
+
+    fn refused_as_remote_plaintext(url: &str) {
+        let e = gate(url).expect_err(url);
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_CONFIG_REMOTE_PLAINTEXT"),
+            "{url:?}"
+        );
+        let text = format!("{e:#}");
+        assert!(text.contains("`ch.example.com:8123`"), "{url:?}: {text}");
+        assert!(text.ends_with("Use https."), "{url:?}: {text}");
+    }
+
+    #[test]
+    fn http_with_a_single_slash_is_refused() {
+        refused_as_remote_plaintext("http:/ch.example.com:8123");
+    }
+
+    #[test]
+    fn http_without_slashes_is_refused() {
+        refused_as_remote_plaintext("http:ch.example.com:8123");
+    }
+
+    #[test]
+    fn a_backslash_before_an_at_sign_does_not_hide_the_remote_host() {
+        refused_as_remote_plaintext("http://ch.example.com:8123\\@127.0.0.1:8123");
+    }
+
+    #[test]
+    fn a_tab_or_newline_inside_the_scheme_does_not_hide_it() {
+        refused_as_remote_plaintext("ht\ttp://ch.example.com:8123");
+        refused_as_remote_plaintext("h\nttp://ch.example.com:8123");
+    }
+
+    #[test]
+    fn https_loopback_and_non_http_urls_pass() {
+        for url in [
+            "https://ch.example.com",
+            "HTTPS://ch.example.com",
+            "http://localhost:8123",
+            "http://LOCALHOST:8123",
+            "http://127.0.0.1:9",
+            "http://127.255.0.9:9",
+            "http://[::1]:9/x",
+            "http://u:p@ss@127.0.0.1:8123",
+            "http://127.0.0.1:8123/x@evil.com",
+            "http://127.0.0.1:8123#@evil.com",
+            "ch.example.com:8123",
+            "ftp://ch.example.com",
+            "s3://bucket",
+            "https://127.0.0.1",
+        ] {
+            gate(url).unwrap_or_else(|e| panic!("{url}: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn a_loopback_the_client_normalises_passes() {
+        for url in [
+            "http://127.1:9",
+            "http://0x7f.1:9",
+            "http://%31%32%37.0.0.1:9",
+            "http://127.0.0.1\\@ch.example.com",
+        ] {
+            gate(url).unwrap_or_else(|e| panic!("{url}: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn a_remote_the_client_reads_differently_from_the_text_is_refused_by_its_real_host() {
+        for (url, shown) in [
+            ("HtTp://CH.EXAMPLE.COM:8123", "`ch.example.com:8123`"),
+            ("http://ch.example.com:80", "`ch.example.com`"),
+            ("http://\u{e9}.example:8123", "`xn--9ca.example:8123`"),
+            ("http://[::ffff:127.0.0.1]:9", "`[::ffff:7f00:1]:9`"),
+            ("http://127.0.0.1.evil.com", "`127.0.0.1.evil.com`"),
+            ("http://localhost.evil.com", "`localhost.evil.com`"),
+            ("http://localhost.:9", "`localhost.:9`"),
+            ("http:///ch.example.com", "`ch.example.com`"),
+        ] {
+            let text = format!("{:#}", gate(url).expect_err(url));
+            assert!(text.contains(shown), "{url}: {text}");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_url_is_refused_by_code_without_echoing_it() {
+        for url in [
+            "",
+            "ht",
+            "http://",
+            "http://[::1",
+            "http://a b",
+            "http://u:SECRETWORD@ch.example.com:99999",
+            "http://127.0.0.1:1,ch.example.com:2",
+        ] {
+            let e = gate(url).expect_err(url);
+            assert_eq!(
+                crate::error::error_code(&e),
+                Some("RIVET_CONFIG_REMOTE_PLAINTEXT"),
+                "{url:?}"
+            );
+            let text = format!("{e:#}");
+            assert_eq!(
+                text,
+                "sink: refusing to send secrets to a URL that does not parse, so it cannot be \
+                 shown to be https:// or loopback. Use https.",
+                "{url:?}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_gate_survives_any_text(url in "\\PC{0,64}") {
+            if let Err(e) = gate(&url) {
+                proptest::prop_assert_eq!(
+                    crate::error::error_code(&e),
+                    Some("RIVET_CONFIG_REMOTE_PLAINTEXT")
+                );
+            }
+        }
+
+        #[test]
+        fn the_gate_refuses_exactly_what_the_client_would_send_in_clear(
+            url in "(http|HTTP|ht\t?tp|https)?:?[/\\\\]{0,3}[a-z0-9.:@\\\\%\\[\\]-]{0,24}"
+        ) {
+            let clear_remote = reqwest::Url::parse(&url).ok().is_some_and(|u| {
+                u.scheme() == "http"
+                    && !super::super::is_loopback_host(u.host_str().unwrap_or_default())
+            });
+            let unparseable = reqwest::Url::parse(&url).is_err();
+            proptest::prop_assert_eq!(gate(&url).is_err(), clear_remote || unparseable);
+        }
     }
 }

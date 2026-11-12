@@ -45,11 +45,13 @@ pub use crate::config::{
 
 pub(crate) mod build;
 mod contract;
+pub(crate) mod cursor_admission;
+mod shape;
 #[cfg(test)]
 pub(crate) mod test_support;
 
 pub use build::{build_plan, parse_column_overrides_pub};
 pub use contract::{
-    ChunkedPlan, ExtractionStrategy, IncrementalCursorPlan, KeysetPlan, ResolvedRunPlan,
-    SettlePlan, build_time_window_query,
+    ChunkedPlan, ExtractionStrategy, IncrementalCursorPlan, KeysetPlan, NulledCells,
+    ResolvedRunPlan, SettlePlan, build_time_window_query,
 };

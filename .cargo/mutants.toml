@@ -185,6 +185,8 @@ exclude_re = [
     # rest of the loop — the whole live_suite runs through it.
     "replace pg_run_export ->",
     " in pg_run_export",
+    # 2026-11-11: mysql_run_export is the MySQL batch export loop, live-only like pg_run_export; its Ok(0) stub fails the live zero-date cell a_zero_date_is_null_and_the_run_warns_with_the_count_batch_and_cdc_mysql (no WARN, no summary row).
+    "replace mysql_run_export -> Result<usize> with Ok\\(0\\)",
     # run_plan_command (pipeline/plan_cmd.rs) is the whole `rivet plan` command:
     # it builds a StateStore, opens a real source per export, runs preflight and
     # the cost model, and emits artifacts — unkillable OFFLINE. It entered the
@@ -957,4 +959,9 @@ exclude_re = [
     # - new_request_id (snowflake_rest.rs): the version and variant bits are set with `(n & !mask) | bits`,
     #   so the OR operands never share a bit and `^` yields the same UUID; no input distinguishes them.
     "replace \\| with \\^ in new_request_id$",
+    # 2026-11-11: id_span_on and MongoSource::id_span are two sorted find_one calls on a live collection and a zip, no decision; live cell a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write fails both stubs of id_span_on, and MongoSource::id_span only delegates to it; closes with an offline MongoDB fake.
+    "replace id_span_on -> Result<Option<\\(Document, Document\\)>> with Ok\\(",
+    "replace MongoSource::id_span -> Result<Option<\\(Document, Document\\)>> with Ok\\(",
+    # 2026-11-11: MongoChangeStream::next_change is the live change-stream pump over a server cursor, its keyed-_id decision lives in id_types::admit_change (unit-tested); live cell a_mongo_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source fails the None stub (the stream ends with no event, the view stays at the snapshot); closes with an offline MongoDB fake.
+    "replace <impl ChangeStream for MongoChangeStream>::next_change -> Option<Result<ChangeEvent>> with None$",
 ]

@@ -22,13 +22,14 @@ from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
 from uuid import UUID
 from zoneinfo import ZoneInfo
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
 import yaml
 
 from . import cdc, core, engines
 from .core import Ledger, SkipCause
+from .sentinels import warned_counts
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGER = ROOT / "docs" / "type-capability-matrix.yaml"
@@ -176,6 +177,18 @@ def _temporal(engine: str, native: str) -> tuple[str, str]:
 TEMPORAL = re.compile(r"(DATE|TIMESTAMPTZ|TIMESTAMP|DATETIME2|DATETIME|SMALLDATETIME|DATETIMEOFFSET)(\(\d\))?( WITH (LOCAL )?TIME ZONE)?( NULL)?")
 
 
+ZERO_DATE_LIT = re.compile(r"'(0000-00-00|\d{4}-00-\d\d|\d{4}-\d\d-00)( [0-9:.]+)?'")
+
+
+def _zero_dates(engine: str, native: str) -> list[str]:
+    """The zero and partial date literals a MySQL temporal column can hold under an empty sql_mode."""
+    if engine != "mysql":
+        return []
+    if native == "DATE":
+        return ["'0000-00-00'", "'2026-00-00'"]
+    return ["'0000-00-00 00:00:00'", "'2026-00-00 00:00:00'"] if native.startswith("DATETIME") else ["'0000-00-00 00:00:00'"]
+
+
 def _edges_int(engine: str, native: str, delivery: str) -> list[str]:
     """Integer edges inside the column's own range."""
     lo, hi = _int_range(native)
@@ -219,7 +232,7 @@ def _edges_other(engine: str, native: str, delivery: str) -> list[str]:
         lo, hi = _temporal(engine, native)
         cut = 10 if n == "DATE" else None
         kw = "DATE " if engine == "oracle" and n == "DATE" else "TIMESTAMP " if engine == "oracle" else ""
-        return [f"{kw}'{v[:cut]}'" for v in (lo, hi, "1970-01-02 03:04:05")]
+        return [f"{kw}'{v[:cut]}'" for v in (lo, hi, "1970-01-02 03:04:05")] + _zero_dates(engine, n)
     if n in ("JSON", "JSONB"):
         cast = "::" + n.lower() if engine == "postgres" else ""
         return [f"'{{}}'{cast}", f"'null'{cast}"]
@@ -303,7 +316,8 @@ def seed(engine: str, url: str) -> tuple[list[Col], int]:
     for s in ledger_setup(engine):
         engines.sql(engine, url, s)
     for st in stmts:
-        p = engines.sql(engine, url, st + ";")
+        zero = ZERO_DATE_LIT.search(st) if engine == "mysql" and st.startswith("INSERT") else None
+        p = engines.sql(engine, url, ("SET SESSION sql_mode = ''; " if zero else "") + st + ";")
         if not p.ok:
             raise RuntimeError(f"{engine} seed refused `{st[:160]}`: exit {p.returncode}: {p.out.strip()[:300]}")
     return cols, n
@@ -376,6 +390,12 @@ def tolerance(src_family: str, target: str, expected: Decimal) -> Decimal:
     if "float8" in (src_family, _target_family(target)):
         return max(abs(expected) * Decimal(2) ** -51, Decimal(2) ** -1074)
     return Decimal(0)
+
+
+def _within_slack(src_family: str, target: str, e: Decimal, g: Decimal) -> bool:
+    """Whether g is e within the float slack; a text that reads as a huge or non-finite number is a difference, never a crash."""
+    with localcontext(Context(traps=[])):
+        return abs(g - e) <= tolerance(src_family, target, e)
 
 
 def _target_family(target: str) -> str:
@@ -463,6 +483,14 @@ def compare_other(engine: str, native: str, exp, target: str, got) -> str:
     return "PRESENCE"
 
 
+def _unhex_text(hexed: str) -> str | None:
+    """The UTF-8 text a CSV hex rendering of a binary column holds; None when it is no hex of text."""
+    try:
+        return bytes.fromhex(hexed).decode("utf-8")
+    except ValueError:
+        return None
+
+
 def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: bool = False, native: str = "") -> str:
     """OK, PRESENCE (not comparable), NULLED or WRONG for one delivered cell against its source literal."""
     exp = parse_lit(engine, src_lit)
@@ -470,6 +498,10 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
         return "OK"
     if got is None or (csv and got == "" and exp != ""):
         return NULLED
+    if target == "binary" and csv and isinstance(got, str) and not isinstance(exp, bytes):
+        got = _unhex_text(got)
+        if got is None:
+            return WRONG
     tf = _target_family(target)
     if isinstance(exp, str) and tf in ("int", "float4", "float8", "decimal", "bool"):
         if _NUM.fullmatch(exp.strip()):
@@ -484,7 +516,7 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
             return "OK" if (g != 0) == (e != 0) else WRONG
         if tf == "bool" and not isinstance(exp, bool):
             return "OK" if (g != 0) == (e != 0) and e in (0, 1) else WRONG
-        return "OK" if abs(g - e) <= tolerance(src_family, target, e) else WRONG
+        return "OK" if _within_slack(src_family, target, e, g) else WRONG
     if exp is ...:
         return "PRESENCE"
     return compare_other(engine, native, exp, target, got)
@@ -672,14 +704,19 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
         return Result(cell, DELIVERED, COLUMNS, f"delivered {sorted(desc)}, expected {sorted(want)}", fidelity=fidelity)
     if fmt == "parquet" and target != "none" and not type_ok(target, desc.get(key, "?")):
         return Result(cell, DELIVERED, IGNORED, f"declared {target}, delivered {desc.get(key)}", fidelity=fidelity)
-    nulled, wrong = [], []
+    nulled, wrong, zeros = [], [], 0
     for i in range(1, n_rows + 1):
         lit = src_lits[i - 1] if i - 1 < len(src_lits) else "NULL"
         v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native)
-        if v == NULLED:
+        if v == NULLED and engine == "mysql" and ZERO_DATE_LIT.fullmatch(lit.strip()):
+            zeros += 1
+        elif v == NULLED:
             nulled.append(lit)
         elif v == WRONG:
             wrong.append(f"{lit}->{rows[i][key]!r}")
+    warned = warned_counts(p.out).get(key, 0)
+    if zeros and warned != zeros:
+        nulled.append(f"{zeros} zero or partial dates delivered as NULL, the run's WARN counted {warned}")
     if nulled:
         return Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fidelity)
     if wrong and fidelity in ("lossy", "logical_string", "unsupported"):
@@ -698,6 +735,13 @@ def recheck(check, cfg: Path, env: dict, d: Path):
     return check
 
 
+def format_config(d: Path, fmt: str) -> Path:
+    """The config path of one format of a cell, in a directory of its own: the state a run keeps is anchored beside its config and must not carry into the next format."""
+    sub = d / fmt
+    sub.mkdir(parents=True, exist_ok=True)
+    return sub / f"{fmt}.yaml"
+
+
 def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str, target: str, fmts: list[str]) -> list[Result]:
     """Check once, then run each format of one (column, override, mode) cell in its own directory."""
     d = work / f"{col.name}-{target.replace('(', '_').replace(')', '').replace(',', '_')}-{mode}"
@@ -713,7 +757,7 @@ def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str
     out = []
     for fmt in fmts:
         cell = f"{engine}/{col.native}->{target}/{mode}/{fmt}"
-        cfg = d / f"{fmt}.yaml"
+        cfg = format_config(d, fmt)
         cfg.write_text(config(engine, "RIVET_NSN_URL", mode, fmt, col.name, target, str(d / f"out-{fmt}")))
         p = rivet(["run", "-c", str(cfg)], env, d)
         if check.returncode == 0 and p.returncode != 0:
@@ -879,7 +923,7 @@ def run_mongo(work: Path, url: str, tier: str) -> list[Result]:
         check = rivet(["check", "-c", str(c0), "--type-report", "--json"], env, d)
         rs = []
         for fmt in ax["formats"]:
-            cfg = d / f"{fmt}.yaml"
+            cfg = format_config(d, fmt)
             cfg.write_text(config("mongo", "RIVET_NSN_URL", "full", fmt, col, target, str(d / f"o-{fmt}")))
             p = rivet(["run", "-c", str(cfg)], env, d)
             rs.append(grade_mongo(f"mongo/{col}->{target}/full/{fmt}", p, check, d / f"o-{fmt}", fmt, col, target, n))
@@ -942,7 +986,7 @@ def pairs_of(results: list[Result]) -> list[str]:
 
 
 def digest(results: list[Result]) -> str:
-    """A short stable hash of the failing pairs, so a known-red message is the same on every tier and changes when a pair opens or closes."""
+    """A short stable hash of the failing pairs, so a known-red message changes when a pair opens or closes."""
     return hashlib.sha1("\n".join(pairs_of(results)).encode()).hexdigest()[:8]
 
 
@@ -968,9 +1012,14 @@ def summary_line(results: list[Result]) -> str:
     return f"{SCENARIO} summary PASS={len(results) - red - ng} RED={red} NOT_GRADED={ng}"
 
 
-def failure_message(engine: str, klass: str, rs: list[Result], scenario: str = SCENARIO) -> str:
-    """The one ledger line of a failure class on one engine: the same on every tier for the same failing pairs."""
-    return f"{scenario}[{engine}]: {klass} over {len(pairs_of(rs))} source->override pairs #{digest(rs)}"
+def label(engine: str, tier: str = "", scenario: str = SCENARIO) -> str:
+    """The name of one axis run in a ledger row: scenario, engine and, when the run has one, its tier."""
+    return f"{scenario}[{engine}]" + (f" {tier}" if tier else "")
+
+
+def failure_message(engine: str, klass: str, rs: list[Result], scenario: str = SCENARIO, tier: str = "") -> str:
+    """The one ledger line of a failure class on one engine at one tier: a tier crosses modes and formats differently, so its pairs and its line differ."""
+    return f"{label(engine, tier, scenario)}: {klass} over {len(pairs_of(rs))} source->override pairs #{digest(rs)}"
 
 
 def exit_code(results: list[Result]) -> int:
@@ -986,17 +1035,17 @@ def record(led: Ledger, engine: str, results: list[Result], tier: str = "", *, s
     groups = summary(engine, results)
     graded = [r for r in results if r.klass != NOT_GRADED]
     counts = {v: sum(r.verdict == v for r in graded) for v in (DELIVERED, REFUSED, DECLARED)}
-    label = f"{scenario}[{engine}]" + (f" {tier}" if tier else "")
+    name = label(engine, tier, scenario)
     bad = {k: v for k, v in groups.items() if k and k != NOT_GRADED and v}
     if groups[NOT_GRADED] or not results:
         why = groups[NOT_GRADED][0].detail[:200] if results else "the axis returned no cell"
-        led.skipped(engine, "-", scenario, "-", f"{label}: {len(groups[NOT_GRADED])} of {len(results)} cells not graded: {why}",
+        led.skipped(engine, "-", scenario, "-", f"{name}: {len(groups[NOT_GRADED])} of {len(results)} cells not graded: {why}",
                     cause=cause, target=target or STAND.get(engine, engine))
     for klass, rs in bad.items():
-        led.failed(engine, "-", scenario, "-", failure_message(engine, klass, rs, scenario),
+        led.failed(engine, "-", scenario, "-", failure_message(engine, klass, rs, scenario, tier),
                    "\n".join(f"{r.cell}: {r.detail}" for r in sorted(rs, key=lambda r: r.cell)[:60]))
     if not bad and graded:
-        led.passed(engine, "-", scenario, "-", f"{label}: {len(graded)} {what}; " + ", ".join(f"{v} {n}" for v, n in counts.items()))
+        led.passed(engine, "-", scenario, "-", f"{name}: {len(graded)} {what}; " + ", ".join(f"{v} {n}" for v, n in counts.items()))
 
 
 def run_tier(led: Ledger, tier: str) -> None:
@@ -1039,6 +1088,9 @@ def self_test() -> None:
     assert {"decimal(18,-2)", "decimal(60,-2)"} <= set(ax["targets"]) and negative_scale_targets("fn parse_decimal_params let scale: u8 =") == []
     assert compare("mysql", "-2147483648", "int", "decimal(18,-2)", Decimal("-2147483600")) == WRONG, "a negative scale rounds away digits"
     assert compare("mysql", "-2147483600", "int", "decimal(18,-2)", Decimal("-2147483600")) == "OK"
+    assert _zero_dates("mysql", "DATE") == ["'0000-00-00'", "'2026-00-00'"] and _zero_dates("postgres", "DATE") == []
+    assert _zero_dates("mysql", "TIMESTAMP(6)") == ["'0000-00-00 00:00:00'"] and len(_zero_dates("mysql", "DATETIME(3)")) == 2
+    assert all(ZERO_DATE_LIT.fullmatch(v) for v in _zero_dates("mysql", "DATETIME")) and not ZERO_DATE_LIT.fullmatch("'2026-11-01 00:00:00'")
     assert parse_lit("mysql", "NULL") is None and parse_lit("oracle", "''") is None and parse_lit("mysql", "''") == ""
     assert parse_lit("mysql", "-5") == Decimal(-5) and parse_lit("mysql", "'a''b'") == "a'b" and parse_lit("postgres", "TRUE") is True
     assert parse_lit("mysql", "UNHEX('00')") == b"\0" and parse_lit("mysql", "JSON_OBJECT('a',1)") is ...
@@ -1055,6 +1107,8 @@ def self_test() -> None:
     assert compare("mysql", "NULL", "int", "float4", None) == "OK"
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", "", csv=True) == NULLED and compare("mysql", "''", "text", "none", "", csv=True) == "OK"
+    with tempfile.TemporaryDirectory() as fc:
+        assert format_config(Path(fc), "parquet").parent != format_config(Path(fc), "csv").parent, "two formats of a cell share the state a run keeps beside its config"
     assert compare("mysql", "7", "int", "float4", 7.0) == "OK" and compare("mysql", "7", "int", "float4", 7.5) == WRONG
     assert compare("mysql", "16777217", "int", "float4", 16777216.0) == "OK", "float4 rounds at 2^24 and no further"
     assert compare("mysql", "16777217", "int", "float4", 16777000.0) == WRONG
@@ -1082,6 +1136,12 @@ def self_test() -> None:
     assert compare("mssql", "0xAB", "other", "none", b"\xab\0\0", native="BINARY(8)") == "OK" and compare("mysql", "0xDEADBEEF", "other", "none", b"\xde\xad", native="VARBINARY(4)") == WRONG
     assert compare("postgres", "ARRAY[1, NULL, 3]", "other", "none", [1, None, 3], native="INTEGER[]") == "PRESENCE"
     assert compare("oracle", "-0.000000000000000000000000000000000000001", "decimal", "float4", -1.0000002153053333e-39) == "OK", "a float4 subnormal rounds at its own step"
+    assert compare("mysql", "12345.6789", "decimal", "none", "31323334352e36373839") == WRONG, "text read as a number with a 36-million exponent"
+    assert compare("mysql", "12345.6789", "decimal", "binary", "31323334352e36373839", csv=True, native="DECIMAL(18,4)") == "OK", "a binary override writes the hex of the value text to CSV"
+    assert compare("mysql", "'\u00fc\u00f1a'", "text", "binary", "c3bcc3b161", csv=True, native="VARCHAR(20)") == "OK" and compare("mysql", "'a'", "text", "binary", "62", csv=True, native="VARCHAR(20)") == WRONG
+    assert compare("mysql", "'a'", "text", "binary", "zz", csv=True, native="VARCHAR(20)") == WRONG and compare("mysql", "0xAB", "other", "binary", "ab", csv=True, native="VARBINARY(4)") == "OK"
+    assert compare("mysql", "1e2000000", "decimal", "none", "2e2000000") == WRONG and compare("mysql", "1e2000000", "decimal", "none", "1e2000000") == "OK"
+    assert compare("mysql", "1.5", "float", "float8", "NaN") == WRONG and compare("mysql", "1.5", "float", "float8", "Infinity") == WRONG
     assert tolerance("int", "float4", Decimal(2 ** 24)) == Decimal(2) and tolerance("int", "int8", Decimal(5)) == 0
     assert _int_range("TINYINT") == (-128, 127) and _int_range("INT UNSIGNED") == (0, 2 ** 32 - 1) and _int_range("NUMBER(9)") == (-999999999, 999999999)
     assert "-128" in edge_literals("mysql", "TINYINT", "Int8") and "128" not in edge_literals("mysql", "TINYINT", "Int8")
@@ -1129,6 +1189,14 @@ def self_test() -> None:
     record(led, "mysql", [Result("mysql/INT->none/full/parquet", DELIVERED)], "smoke")
     record(led, "mysql", b, "smoke")
     assert [c.status.name for c in led.cells] == ["PASS", "FAIL"], [c.status for c in led.cells]
+    only_in_mode = [Result("mysql/INT->float4/chunked/csv", DELIVERED, NULLED)]
+    tiers = Ledger(colour=False)
+    tiers._buf = []
+    record(tiers, "mysql", only_in_mode, "smoke")
+    record(tiers, "mysql", only_in_mode, "full")
+    keys = [ln.strip().removeprefix("✗ ") for ln in tiers._buf if "✗" in ln]
+    assert len(keys) == 2 and keys[0] != keys[1], "the same failing results graded at two tiers are two ledger keys"
+    assert keys[0].startswith("no_silent_null[mysql] smoke: ") and keys[1].startswith("no_silent_null[mysql] full: "), keys
     record(led, "mysql", [Result("mysql/INT->none/full/parquet", DELIVERED), Result("mysql/INT->int8/full/parquet", REFUSED, NOT_GRADED)], "smoke")
     assert [c.status.name for c in led.cells][2:] == ["SKIP", "PASS"], "a not-graded cell is a skip row beside the pass, never a silent pass"
     n0 = len(led.cells)

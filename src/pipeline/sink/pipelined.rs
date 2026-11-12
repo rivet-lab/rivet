@@ -62,6 +62,7 @@ enum SinkMsg {
 pub(crate) struct PipelinedSink {
     tx: Option<SyncSender<SinkMsg>>,
     worker: Option<JoinHandle<Result<ExportSink>>>,
+    nulled_cells: std::sync::Arc<crate::plan::NulledCells>,
 }
 
 impl PipelinedSink {
@@ -93,6 +94,7 @@ impl PipelinedSink {
     /// (so the writer trait object never crosses a thread boundary while in
     /// use); `finish` returns the fully-populated sink back to the caller.
     pub fn spawn(plan: &ResolvedRunPlan) -> Result<Self> {
+        let nulled_cells = std::sync::Arc::clone(&plan.nulled_cells);
         let plan = plan.clone();
         let depth = Self::configured_depth().unwrap_or(DEFAULT_CHANNEL_DEPTH);
         let (tx, rx) = sync_channel::<SinkMsg>(depth);
@@ -112,6 +114,7 @@ impl PipelinedSink {
         Ok(Self {
             tx: Some(tx),
             worker: Some(worker),
+            nulled_cells,
         })
     }
 
@@ -119,6 +122,7 @@ impl PipelinedSink {
     /// construction). Same worker loop as `spawn`.
     #[cfg(test)]
     pub(crate) fn spawn_with_sink(sink: ExportSink) -> Self {
+        let nulled_cells = std::sync::Arc::clone(&sink.nulled_cells);
         let (tx, rx) = sync_channel::<SinkMsg>(DEFAULT_CHANNEL_DEPTH);
         let worker = std::thread::Builder::new()
             .name("rivet-encode-test".to_string())
@@ -137,6 +141,7 @@ impl PipelinedSink {
         Self {
             tx: Some(tx),
             worker: Some(worker),
+            nulled_cells,
         }
     }
 
@@ -182,6 +187,10 @@ impl PipelinedSink {
 }
 
 impl BatchSink for PipelinedSink {
+    fn note_nulled(&mut self, column: &str, n: u64) {
+        self.nulled_cells.add(column, n);
+    }
+
     fn on_schema(&mut self, schema: SchemaRef) -> Result<()> {
         self.send(SinkMsg::Schema(schema))
     }

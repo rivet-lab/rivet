@@ -191,6 +191,8 @@ const BASELINE: &[(&str, usize, usize, usize, usize)] = &[
     ("src/init/mysql.rs::density_probe", 0, 0, 1, 1),
     ("src/init/postgres.rs::density_probe", 0, 0, 1, 0),
     ("src/source/postgres/mod.rs::pg_run_export", 1, 0, 1, 2),
+    // 2026-11-11: mysql_run_export entered the in-diff scope with the zero-date count; its Ok(0) stub is live-guarded, its inline decisions are pre-existing; closes when they move to named predicates.
+    ("src/source/mysql/mod.rs::mysql_run_export", 2, 0, 2, 3),
     // ── preflight ────────────────────────────────────────────────────────
     // `check` diagnoses every export against a live source. The `==` in its
     // overlay export-match loop is already a named mutants.toml entry

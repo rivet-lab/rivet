@@ -130,6 +130,20 @@ impl StateStore {
             .next())
     }
 
+    /// Whether a run of `export` finished `success` at the destination `uri`: the same text, with or without a trailing `/`, or a relative local path as a run before 0.32 recorded it.
+    pub fn has_recorded_success(&self, export: &str, uri: &str) -> Result<bool> {
+        let recorded = self.query(
+            "SELECT DISTINCT prefix FROM run_status WHERE export_name = ?1 AND status = 'success'",
+            &[export.into()],
+            |r| r.text(0),
+        )?;
+        let want = uri.trim_end_matches('/');
+        Ok(recorded.iter().any(|p| {
+            let p = p.trim_end_matches('/');
+            p == want || crate::config::destination::anchors(p, want)
+        }))
+    }
+
     /// The destination prefix one run recorded at its start, or `None` when the ledger never saw it.
     pub fn run_prefix_of(&self, run_id: &str) -> Result<Option<String>> {
         let sql = "SELECT prefix FROM run_status WHERE run_id = ?1";

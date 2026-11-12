@@ -155,6 +155,14 @@ scenarios:
     mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint" }
     oracle:   { test: a_changed_chunk_plan_is_refused_on_resume_and_walked_out_oracle }
 
+  - id: refusal_state_run_shape_changed
+    what: "RIVET_STATE_RUN_SHAPE_CHANGED: an unfinished range-chunk run and a run under another `compression`; restoring the setting and `state reset-chunks` deliver, `state reset` leaves the refusal"
+    postgres: { test: a_changed_run_shape_is_refused_on_resume_and_walked_out_postgres }
+    mysql:    { test: a_changed_run_shape_is_refused_on_resume_and_walked_out_mysql }
+    mssql:    { test: a_changed_run_shape_is_refused_on_resume_and_walked_out_mssql }
+    mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes, RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so it has no range-chunk checkpoint" }
+    oracle:   { test: a_changed_run_shape_is_refused_on_resume_and_walked_out_oracle }
+
   - id: refusal_state_chunk_windows_broken
     what: "RIVET_STATE_CHUNK_WINDOWS_BROKEN: an unfinished range-chunk run whose stored windows overlap, and a run; `state reset-chunks` delivers, `state reset` leaves the refusal"
     postgres: { test: broken_chunk_windows_are_refused_on_resume_and_walked_out_postgres }
@@ -250,6 +258,14 @@ scenarios:
     mssql:    { test: validate_sees_a_removed_part_mssql }
     mongo:    { test: validate_sees_a_removed_part_mongo }
     oracle:   { test: validate_sees_a_removed_part_oracle }
+
+  - id: corrupt_prefix_removed
+    what: "the whole prefix of a recorded delivery removed (parts, manifest and `_SUCCESS`): `validate` fails naming RIVET_VERIFY_DELIVERY_ABSENT, the next run delivers"
+    postgres: { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_postgres }
+    mysql:    { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mysql }
+    mssql:    { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mssql }
+    mongo:    { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mongo }
+    oracle:   { test: validate_fails_on_a_removed_prefix_of_a_recorded_delivery_oracle }
 
   - id: corrupt_chunk_task_marked_completed
     what: "an unfinished range-chunk run whose pending task is marked `completed` in chunk_task: the resume delivers the source or refuses"
@@ -1170,6 +1186,22 @@ scenarios:
     mongo:    { na: "a document store has no `chunk_column`: a collection is read whole or by `_id` ranges" }
     oracle:   { na: "the refusal is the planner's and does not depend on the source engine: the postgres column carries the row" }
 
+  - id: refusal_plan_cursor_nullable
+    what: "RIVET_PLAN_CURSOR_NULLABLE: an incremental `cursor_column` that can hold NULL without `incremental_cursor_mode: coalesce`, whose NULL-cursor rows are exported once and never again"
+    postgres: { test: nullable_cursor_is_refused_postgres }
+    mysql:    { test: nullable_cursor_is_refused_mysql }
+    mssql:    { test: nullable_cursor_is_refused_mssql }
+    mongo:    { na: "a document store has no incremental `cursor_column`: `mode: full` only" }
+    oracle:   { test: nullable_cursor_is_refused_oracle }
+
+  - id: refusal_plan_cursor_type_unsupported
+    what: "RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED: an incremental `cursor_column` whose landed type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond)"
+    postgres: { test: unrenderable_cursor_is_refused_postgres }
+    mysql:    { test: unrenderable_cursor_is_refused_mysql }
+    mssql:    { test: unrenderable_cursor_is_refused_mssql }
+    mongo:    { na: "a document store has no incremental `cursor_column`: `mode: full` only" }
+    oracle:   { test: unrenderable_cursor_is_refused_oracle }
+
   - id: refusal_source_keyset_key_coarse
     what: "RIVET_SOURCE_KEYSET_KEY_COARSE: a keyset page that ends on the key value it started after (a TIMESTAMP(7..9) key read at microseconds)"
     postgres: { gap: "asserted by its code offline (keyset: a_coarse_key_an_unreadable_key_and_gone_pages_are_refused_by_code); the walk needs a keyset cell on a sub-microsecond key: refuse twice, a cast in a curated query, a unique integer key, and one wrong remedy" }
@@ -1210,6 +1242,14 @@ scenarios:
     mssql:    { na: "a SQL keyset key is read and compared by its column type; the type-bracketed `$gt` seek is MongoDB's" }
     mongo:    { gap: "asserted by its code offline (mongo: an_unseekable_id_span_and_an_undecodable_cursor_token_are_refused_by_code); the walk needs a collection seeded with two `_id` types under `page_size`: refuse twice, drop `page_size` and `parallel`, normalise `_id`, and one wrong remedy" }
     oracle:   { na: "a SQL keyset key is read and compared by its column type; the type-bracketed `$gt` seek is MongoDB's" }
+
+  - id: refusal_source_id_types_mixed
+    what: "RIVET_SOURCE_ID_TYPES_MIXED: a MongoDB `mode: cdc` export whose `load:` keys the view (key columns, or the default `pk: auto` that resolves to `_id`) and whose collection holds `_id` values of more than one BSON type, at the snapshot, at the stream open, on a change of a second type, or at `rivet load`"
+    postgres: { na: "a SQL key column has one declared type; a MongoDB `_id` can hold any BSON type per document" }
+    mysql:    { na: "a SQL key column has one declared type; a MongoDB `_id` can hold any BSON type per document" }
+    mssql:    { na: "a SQL key column has one declared type; a MongoDB `_id` can hold any BSON type per document" }
+    mongo:    { gap: "asserted by its code and exit class on a live stand (live_clickhouse_load: a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write, a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type, a_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes, and the default-`pk` siblings a_default_pk_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write, a_default_pk_mongo_cdc_stream_refuses_an_event_of_a_second_id_type, a_default_pk_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes); the walk with its remedies needs a rig cell: refuse twice, load with `mode: full`, and one wrong remedy" }
+    oracle:   { na: "a SQL key column has one declared type; a MongoDB `_id` can hold any BSON type per document" }
 
   - id: refusal_init_cdc_name_taken
     what: "RIVET_INIT_CDC_NAME_TAKEN: `rivet init -o` for a CDC table whose checkpoint already exists (the config that wrote it moved aside) or whose checkpoint or destination another config in the directory names; refused twice writing nothing, `-o <other>.yaml` writes a scaffold that runs"

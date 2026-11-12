@@ -1,8 +1,6 @@
-diff --git a/src/plan/contract.rs b/src/plan/contract.rs
-index 75ad9535..f510e561 100644
 --- a/src/plan/contract.rs
 +++ b/src/plan/contract.rs
-@@ -293,9 +293,7 @@ impl ResolvedRunPlan {
+@@ -334,9 +334,7 @@ impl ResolvedRunPlan {
                      .unwrap_or_else(|| self.destination.uri()),
                  format: self.format.label().into(),
              },
@@ -12,4 +10,4 @@ index 75ad9535..f510e561 100644
 +            mode: self.strategy.mode_label(),
              continues_high_water: self.strategy.continues_stored_cursor(),
              resumable: self.strategy.is_resumable(),
-         }
+             shape: self.run_shape(),

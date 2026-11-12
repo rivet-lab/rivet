@@ -266,11 +266,6 @@ def prepare_tree(base: Path) -> tuple[Path, str]:
         base.mkdir(parents=True, exist_ok=True)
         git(ROOT, "worktree", "prune")
         git(ROOT, "worktree", "add", "--quiet", "--detach", str(tree), sha)
-    live = tree / "tests" / ".live-tmp"
-    if not live.is_symlink():
-        main_live = (ROOT / "tests" / ".live-tmp").resolve()
-        main_live.mkdir(parents=True, exist_ok=True)
-        live.symlink_to(main_live)
     # The Rig's oracle runs `uv run` in the tree; parallel first uses race to build one .venv.
     # On this harness's own interpreter: left to discovery, uv picks whatever Python PATH offers.
     venv = sh(["uv", "sync", "--frozen", "-q", "--python", sys.executable], cwd=tree)
@@ -311,6 +306,7 @@ class Cargo:
         env = {k: v for k, v in os.environ.items()
                if k not in ("RIVET_BIN", "RIVET_BIN_OVERRIDE", "RIVET_STATE_URL", "RIVET_TEST_STATE_URL")}
         env["CARGO_TARGET_DIR"] = str(base / "target")
+        env["CARGO_PROFILE_DEV_DEBUG"] = "line-tables-only"
         # The cells run in the scratch tree: a binary the gate names relative to this checkout (`.gate-baseline/...`) is named from here.
         for k, v in list(env.items()):
             if k.endswith("_BIN") and v and not os.path.isabs(v):
@@ -1001,6 +997,7 @@ def self_test() -> int:
     assert {k: cargo.env.get(k) for k in stage} == stage and cargo.again == again, (
         "recall's child env differs from the live-modules stage's", {k: cargo.env.get(k) for k in stage}, stage)
     assert cargo.env["RIVET_GATE_STATE_URL"] == "", "a SQLite-reading cell runs on SQLite, as in the stage"
+    assert cargo.env["CARGO_PROFILE_DEV_DEBUG"] == "line-tables-only", "seed builds keep line tables, not full debuginfo"
     alone = exclusive_tests()
     assert alone, "the live suite marks some test live+exclusive"
     calls: list[tuple[list[str], dict]] = []

@@ -19,7 +19,7 @@
 //!   is exhaustively unit-tested in isolation (no live MySQL needed).
 
 mod arrow_convert;
-pub(crate) use arrow_convert::time_outside_day;
+pub(crate) use arrow_convert::{time_outside_day, zero_date_warning};
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
 mod folded_name;
@@ -44,7 +44,7 @@ use crate::tuning::SourceTuning;
 use crate::types::ColumnOverrides;
 
 use arrow_convert::{
-    mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet,
+    mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet, nulled_dates,
     rows_to_record_batch_typed,
 };
 // `bit_bytes_to_u64` is only referenced by the `tests` module below — gate the
@@ -286,6 +286,22 @@ pub(crate) fn type_mappings_on(
             Ok(crate::types::TypeMapping::from_source(&source, rivet))
         })
         .collect()
+}
+
+/// Whether `column` of `query` may hold NULL: the `NOT NULL` flag the server sets on the described column.
+pub(crate) fn column_nullable_on(
+    conn: &mut mysql::PooledConn,
+    query: &str,
+    column: &str,
+) -> Result<Option<bool>> {
+    let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
+    let result = conn.exec_iter(&wrapped, ())?;
+    let columns = result.columns().as_ref().to_vec();
+    drop(result);
+    Ok(columns.iter().find(|c| c.name_str() == column).map(|c| {
+        !c.flags()
+            .contains(mysql::consts::ColumnFlags::NOT_NULL_FLAG)
+    }))
 }
 
 /// Probe `information_schema` for stats chunked-mode planning needs.
@@ -894,6 +910,9 @@ fn mysql_run_export(
             total_rows += row_buf.len();
             let batch =
                 rows_to_record_batch_typed(&schema, &arrow_types, &row_buf, max_value_bytes)?;
+            for (column, n) in nulled_dates(&schema, &arrow_types, &row_buf) {
+                sink.note_nulled(&column, n);
+            }
             let batch_rows = row_buf.len();
             row_buf.clear();
 
@@ -946,6 +965,9 @@ fn mysql_run_export(
     if !row_buf.is_empty() {
         total_rows += row_buf.len();
         let batch = rows_to_record_batch_typed(&schema, &arrow_types, &row_buf, max_value_bytes)?;
+        for (column, n) in nulled_dates(&schema, &arrow_types, &row_buf) {
+            sink.note_nulled(&column, n);
+        }
         sink.on_batch(&batch)?;
     }
 
@@ -1073,6 +1095,11 @@ impl super::Source for MysqlSource {
     ) -> Result<Vec<crate::types::TypeMapping>> {
         let mut conn = self.pool.get_conn()?;
         type_mappings_on(&mut conn, query, column_overrides)
+    }
+
+    fn column_nullable(&mut self, query: &str, column: &str) -> Result<Option<bool>> {
+        let mut conn = self.pool.get_conn()?;
+        column_nullable_on(&mut conn, query, column)
     }
 
     /// Governor FOREIGN-pressure proxy: `Innodb_log_waits` (redo-write

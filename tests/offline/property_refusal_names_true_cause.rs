@@ -20,13 +20,11 @@ const R_CMD_ORDER: &str = "2026-11-10: plan, load, compact, reconcile and repair
 const R_CMD_ACCEPT: &str = "2026-11-10: validate, metrics and journal exit 0 on a config that run refuses; closes when they refuse with the same code";
 const R_REMEDY_REPORT: &str = "2026-11-10: the remedy names `rivet reconcile --report`, which reconcile does not accept; closes when the remedy names repair's --report or reconcile's --output";
 const R_REMEDY_FORCE: &str = "2026-11-10: the stale-plan remedy names --force without naming `rivet apply`; closes when the message names the apply command";
-const R_STATE_UNREAD: &str = "2026-11-10: validate never opens the state, so over a corrupt state it answers legacy_run with exit 0; closes when validate reads run_status for the prefix (owner Q1 2026-11-01) and refuses a corrupt state as STATE_FILE_CORRUPT";
 const R_COPY_EMPTY: &str = "2026-11-10: state copy reads a corrupt SQLite state as empty and stops RIVET_STATE_COPY_SOURCE_EMPTY; closes when the copy opens the file through the corrupt-state check";
 const R_WORDING_GONE: &str = "2026-11-10: the lost-checkpoint remedy leads with a bare `run the export again` while exit 5 tells a scheduler not to retry; closes when the remedy names the operator's decision first or the exit becomes retryable";
 const R_FIELD_MONGO: &str = "2026-11-10: mongo accepts batch_size 0, an empty or NUL destination path and a 300-char export name with exit 0; closes when each is refused at config load";
 const R_READER_CODE: &str = "2026-11-10: metrics and journal repeat a stopped run's words without the code the run printed; closes when the run history records the refusal code beside its text";
 const R_WORD_CLASSIFY: &str = "2026-11-10: a missing MySQL table named after a classifier word is refused as that word's cause (STATEMENT_TIMEOUT for `max_execution_time`); closes when the classifier reads the server's error number, not words that echo the relation name";
-const R_PREFIX_GONE: &str = "2026-11-10: validate answers exit 0 when the prefix of a recorded delivery is removed; closes when validate refuses a recorded delivery whose prefix holds no manifest";
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
 const ACCEPTED_RED: &[(&str, &str)] = &[
     ("cause/RIVET_SOURCE_CONNECT_FAILED/mongo", R_CONNECT),
@@ -95,8 +93,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_REMEDY_REPORT,
     ),
     ("wording/RIVET_STATE_CHUNK_CHECKPOINT_GONE", R_WORDING_GONE),
-    ("guard/validate/state_corrupt/*", R_STATE_UNREAD),
-    ("guard/validate_--export_a/state_corrupt/*", R_STATE_UNREAD),
     ("guard/state_copy_--to_URL/state_corrupt/*", R_COPY_EMPTY),
     ("remedy/RIVET_PLAN_ARTIFACT_STALE", R_REMEDY_FORCE),
     ("source/RIVET_VERIFY_*", R_VERIFY),
@@ -162,11 +158,10 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_READER_CODE,
     ),
     ("word/max_execution_time/mysql", R_WORD_CLASSIFY),
-    ("guard/validate/prefix_gone/*", R_PREFIX_GONE),
 ];
 
 /// Cell families only the live mode emits; their ledger entries are not stale in an offline run.
-const STAND_AXES: &[&str] = &["word/", "reader/live/", "guard/validate/prefix_gone/"];
+const STAND_AXES: &[&str] = &["word/", "reader/live/"];
 
 /// Whether a ledger key accepts a RED cell: an exact key, or a `prefix*` pattern.
 fn accepts(key: &str, cell: &str) -> bool {
@@ -266,6 +261,10 @@ const INJECTORS: &[(&str, Inj)] = &[
         Inj::Offline(tls_downgrade),
     ),
     ("RIVET_CONFIG_LOAD_BLOCK_INVALID", Inj::Offline(load_block)),
+    (
+        "RIVET_CONFIG_REMOTE_PLAINTEXT",
+        Inj::Offline(remote_plaintext_clickhouse),
+    ),
     ("RIVET_CONFIG_PATH_UNSAFE", Inj::Offline(path_unsafe)),
     ("RIVET_CONFIG_ROW_HASH_INVALID", Inj::Offline(row_hash)),
     (
@@ -319,6 +318,7 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_STATE_LOCK_TIMEOUT", Inj::Stand),
     ("RIVET_STATE_CHUNK_CHECKPOINT_GONE", Inj::Stand),
     ("RIVET_STATE_CHUNK_PLAN_CHANGED", Inj::Stand),
+    ("RIVET_STATE_RUN_SHAPE_CHANGED", Inj::Stand),
     ("RIVET_STATE_CHUNK_WINDOWS_BROKEN", Inj::Stand),
     ("RIVET_STATE_LEASE_KEEPER_UNAVAILABLE", Inj::Stand),
     ("RIVET_STATE_LEASE_LOST", Inj::Stand),
@@ -393,6 +393,8 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_PLAN_REJECTED", Inj::Stand),
     ("RIVET_PLAN_CHUNK_KEY_SPARSE", Inj::Stand),
     ("RIVET_PLAN_CHUNK_KEY_NULL", Inj::Stand),
+    ("RIVET_PLAN_CURSOR_NULLABLE", Inj::Stand),
+    ("RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED", Inj::Stand),
     ("RIVET_CONFIG_SETTLE_COLUMN_NOT_TEMPORAL", Inj::Stand),
     ("RIVET_CONFIG_SPLIT_PREFIX_UNSTABLE", Inj::Stand),
     ("RIVET_CONFIG_EXPORT_NAME_RESERVED", Inj::Stand),
@@ -429,6 +431,7 @@ const INJECTORS: &[(&str, Inj)] = &[
     ("RIVET_SOURCE_CDC_SPILL_UNWRITABLE", Inj::Stand),
     ("RIVET_INTERNAL_SOURCE_INVARIANT", Inj::Internal),
     ("RIVET_SOURCE_KEYSET_KEY_UNORDERED", Inj::Stand),
+    ("RIVET_SOURCE_ID_TYPES_MIXED", Inj::Stand),
     ("RIVET_CLI_VALUE_INVALID", Inj::Stand),
     ("RIVET_CLI_RUN_ID_UNKNOWN", Inj::Stand),
     ("RIVET_CLI_PREFLIGHT_FAILED", Inj::Stand),
@@ -743,6 +746,27 @@ fn load_block(e: SourceType) -> Probe {
     )
 }
 
+const CH_LOAD: &str =
+    "load:\n  target: clickhouse\n  database: d\n  user: u\n  password_env: CH_PW\n";
+
+fn remote_plaintext_clickhouse(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml += &format!("{CH_LOAD}  url: http://clickhouse.internal:8123\n");
+    p.witness = vec![
+        "cleartext http://".into(),
+        "`clickhouse.internal:8123`".into(),
+    ];
+    p
+}
+
+fn field_slack_plaintext(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml += "notifications:\n  slack:\n    webhook_url: http://hooks.internal/services/T0/B0/X\n    on: [failure]\n";
+    p.witness = vec!["cleartext http://".into(), "`hooks.internal`".into()];
+    p.absent = vec!["services/T0/B0/X"];
+    p
+}
+
 fn path_unsafe(e: SourceType) -> Probe {
     on(
         e,
@@ -952,6 +976,7 @@ const TWINS: &[(&str, TwinProbe)] = &[
     ("RIVET_CONFIG_CSV_COMPRESSION_UNSUPPORTED", twin_csv),
     ("RIVET_CONFIG_TLS_VERIFICATION_DOWNGRADE", twin_tls_verified),
     ("RIVET_CONFIG_LOAD_BLOCK_INVALID", one_export),
+    ("RIVET_CONFIG_REMOTE_PLAINTEXT", twin_remote_https),
     ("RIVET_CONFIG_PATH_UNSAFE", twin_safe_name),
     ("RIVET_CONFIG_ROW_HASH_INVALID", twin_row_hash),
     ("RIVET_CONFIG_COLUMN_OVERRIDE_TABLE_UNKNOWN", one_export),
@@ -964,6 +989,11 @@ const TWINS: &[(&str, TwinProbe)] = &[
 type FieldProbe = fn(SourceType) -> Probe;
 /// Offline causes with a value other than the one in the injector: `(code, label, probe)`.
 const FIELDS: &[(&str, &str, FieldProbe)] = &[
+    (
+        "RIVET_CONFIG_REMOTE_PLAINTEXT",
+        "slack_webhook",
+        field_slack_plaintext,
+    ),
     (
         "RIVET_CONFIG_VALUE_OUT_OF_RANGE",
         "batch_size_0",
@@ -1009,6 +1039,13 @@ fn twin_secret_set(e: SourceType) -> Probe {
 fn twin_incremental(e: SourceType) -> Probe {
     let x = format!("{QUERY}    mode: incremental\n    cursor_column: id\n");
     on(e, "", &export("a", &x), &[])
+}
+
+fn twin_remote_https(e: SourceType) -> Probe {
+    let mut p = one_export(e);
+    p.yaml += &format!("{CH_LOAD}  url: https://clickhouse.internal:8443\n");
+    p.yaml += "notifications:\n  slack:\n    webhook_url: https://hooks.slack.com/services/T0/B0/X\n    on: [failure]\n";
+    p
 }
 
 fn twin_s3_plain(e: SourceType) -> Probe {
@@ -1788,11 +1825,9 @@ fn prefix_gone_cell(e: SourceType, out: &mut Vec<(String, Verdict)>) {
     let mut q = p.clone();
     q.argv = cmd(&["validate", "-c", "CFG"]);
     let o = execute_in(dir.path(), &q);
-    let v = if o.exit == 3 && error_section(&o.stderr).and_then(printed_code).is_some() {
-        Ok(format!(
-            "exit=3 \"{}\"",
-            brief(error_section(&o.stderr).unwrap_or(""))
-        ))
+    let verdict_code = "[RIVET_VERIFY_DELIVERY_ABSENT]";
+    let v = if o.exit == 3 && o.stdout.contains(verdict_code) {
+        Ok(format!("exit=3 {verdict_code}"))
     } else {
         Err(format!(
             "prefix of a recorded delivery removed: exit={} \"{}{}\"",

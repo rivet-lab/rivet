@@ -384,6 +384,38 @@ scenarios:
     mongo:    { na: "`validate` reads the destination only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
     oracle:   { na: "`validate` reads the destination only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
 
+  - id: validate_recorded_delivery_gone_local
+    what: "`validate` on a local prefix with no manifest and no `_SUCCESS` where the state records a successful run: exit 3, RIVET_VERIFY_DELIVERY_ABSENT naming the remedy (local)"
+    postgres: { test: a_prefix_of_a_recorded_delivery_that_holds_nothing_exits_3_by_code }
+    mysql:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    mssql:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    mongo:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    oracle:   { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+
+  - id: validate_recorded_delivery_gone_s3
+    what: "`validate` on a bucket prefix emptied after a real run: exit 3, RIVET_VERIFY_DELIVERY_ABSENT (s3)"
+    postgres: { test: validate_fails_on_a_recorded_delivery_that_is_gone_s3 }
+    mysql:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    mssql:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    mongo:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    oracle:   { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+
+  - id: validate_recorded_delivery_gone_gcs
+    what: "`validate` on a bucket prefix emptied after a real run: exit 3, RIVET_VERIFY_DELIVERY_ABSENT (gcs)"
+    postgres: { test: validate_fails_on_a_recorded_delivery_that_is_gone_gcs }
+    mysql:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    mssql:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    mongo:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    oracle:   { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+
+  - id: validate_recorded_delivery_gone_azure
+    what: "`validate` on a bucket prefix emptied after a real run: exit 3, RIVET_VERIFY_DELIVERY_ABSENT (azure)"
+    postgres: { test: validate_fails_on_a_recorded_delivery_that_is_gone_azure }
+    mysql:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    mssql:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    mongo:    { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+    oracle:   { na: "`validate` reads the destination and the state only (MinIO, fake-gcs and Azurite cells under postgres); no source engine is involved" }
+
   - id: cdc_stdout_emits_each_change_once
     what: "RESULTS 16: three `rivet cdc --checkpoint` drains to stdout emit each change once"
     postgres: { test: cdc_to_stdout_emits_each_change_once_postgres }

@@ -794,6 +794,11 @@ pub mod codes {
         "RIVET_CONFIG_DESTINATION_ENDPOINT_UNSAFE",
         "drop `endpoint:` to use the provider default, or point it at a loopback emulator with `allow_anonymous: true`",
     );
+    /// An outbound `http://` URL on a remote host that would carry a credential or rows in cleartext.
+    pub const CONFIG_REMOTE_PLAINTEXT: Code = usage(
+        "RIVET_CONFIG_REMOTE_PLAINTEXT",
+        "use an `https://` URL, or point it at a loopback host; a ClickHouse `load.url` on a trusted network may opt in with `load.allow_plaintext: true`",
+    );
     /// A numeric, size, duration or level value outside what rivet accepts, or two sizing knobs set together.
     pub const CONFIG_VALUE_OUT_OF_RANGE: Code = usage(
         "RIVET_CONFIG_VALUE_OUT_OF_RANGE",
@@ -1004,6 +1009,11 @@ pub mod codes {
     pub const STATE_CHUNK_PLAN_CHANGED: Code = refusal(
         "RIVET_STATE_CHUNK_PLAN_CHANGED",
         "restore the query and the chunk settings the interrupted run had and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` abandons it and the next run starts over",
+    );
+    /// A resume, reconcile or repair met a stored run opened with other byte-shaping settings than the config now holds.
+    pub const STATE_RUN_SHAPE_CHANGED: Code = refusal(
+        "RIVET_STATE_RUN_SHAPE_CHANGED",
+        "restore the settings the interrupted run was opened with and run once to finish it; or `rivet state reset-chunks -c <config> --export <name>` (`rivet state reset` for a keyset run) abandons it and the next run starts over under the new settings",
     );
     /// The chunk windows stored for an unfinished run are not one unbroken sequence of keys.
     pub const STATE_CHUNK_WINDOWS_BROKEN: Code = refusal(
@@ -1457,6 +1467,16 @@ pub mod codes {
         "RIVET_PLAN_CHUNK_KEY_NULL",
         "chunk on a NOT NULL column, drop the NULL rows with `WHERE <column> IS NOT NULL` in the query, or use `mode: full`",
     );
+    /// An incremental `cursor_column` that can hold NULL, whose NULL rows the cursor would deliver once and never again.
+    pub const PLAN_CURSOR_NULLABLE: Code = refusal(
+        "RIVET_PLAN_CURSOR_NULLABLE",
+        "make the cursor column NOT NULL, or set `incremental_cursor_mode: coalesce` with a NOT NULL `cursor_fallback_column:` and run `rivet state reset -c <config> --export <name>` once",
+    );
+    /// An incremental `cursor_column` of a type the cursor cannot render, so it could never advance.
+    pub const PLAN_CURSOR_TYPE_UNSUPPORTED: Code = refusal(
+        "RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED",
+        "use an integer, decimal, text, date, timestamp or uuid `cursor_column:`, or use `mode: chunked` or `mode: full`",
+    );
     /// `settle.column` names a column that is not a date or timestamp.
     pub const CONFIG_SETTLE_COLUMN_NOT_TEMPORAL: Code = usage(
         "RIVET_CONFIG_SETTLE_COLUMN_NOT_TEMPORAL",
@@ -1648,6 +1668,11 @@ pub mod codes {
     pub const SOURCE_KEYSET_KEY_UNORDERED: Code = refusal(
         "RIVET_SOURCE_KEYSET_KEY_UNORDERED",
         "remove `page_size`, `resume` and `parallel` so the collection is read in one ordered scan, or fix the `_id` values the message names",
+    );
+    /// A MongoDB collection under a keyed load holds `_id` values of more than one BSON type.
+    pub const SOURCE_ID_TYPES_MIXED: Code = refusal(
+        "RIVET_SOURCE_ID_TYPES_MIXED",
+        "load the collection with `mode: full`, or make its `_id` values one BSON type, drop the change-log table, delete the CDC checkpoint and re-run for a fresh snapshot (loading mixed-type `_id` under a keyed load is tracked in #926)",
     );
 
     /// An option given a value in a form it does not take (`--format`, `--mode`, `--date`, `--param`).
@@ -1868,6 +1893,7 @@ pub mod codes {
         CONFIG_MODE_SETTING_INVALID,
         CONFIG_DESTINATION_AUTH_INVALID,
         CONFIG_DESTINATION_ENDPOINT_UNSAFE,
+        CONFIG_REMOTE_PLAINTEXT,
         CONFIG_VALUE_OUT_OF_RANGE,
         CONFIG_CDC_SHAPE_INVALID,
         CONFIG_CSV_COMPRESSION_UNSUPPORTED,
@@ -1917,6 +1943,7 @@ pub mod codes {
         STATE_LOCK_TIMEOUT,
         STATE_CHUNK_CHECKPOINT_GONE,
         STATE_CHUNK_PLAN_CHANGED,
+        STATE_RUN_SHAPE_CHANGED,
         STATE_CHUNK_WINDOWS_BROKEN,
         STATE_LEASE_KEEPER_UNAVAILABLE,
         STATE_LEASE_LOST,
@@ -1991,6 +2018,8 @@ pub mod codes {
         PLAN_REJECTED,
         PLAN_CHUNK_KEY_SPARSE,
         PLAN_CHUNK_KEY_NULL,
+        PLAN_CURSOR_NULLABLE,
+        PLAN_CURSOR_TYPE_UNSUPPORTED,
         CONFIG_SETTLE_COLUMN_NOT_TEMPORAL,
         CONFIG_SPLIT_PREFIX_UNSTABLE,
         CONFIG_EXPORT_NAME_RESERVED,
@@ -2027,6 +2056,7 @@ pub mod codes {
         SOURCE_CDC_SPILL_UNWRITABLE,
         INTERNAL_SOURCE_INVARIANT,
         SOURCE_KEYSET_KEY_UNORDERED,
+        SOURCE_ID_TYPES_MIXED,
         CLI_VALUE_INVALID,
         CLI_RUN_ID_UNKNOWN,
         CLI_PREFLIGHT_FAILED,

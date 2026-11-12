@@ -3875,6 +3875,27 @@ seeds:
       oracle:
         cells: ["lib:reconcile_under_a_changed_chunk_plan_is_refused_by_code"]
 
+  - name: resume-pins-only-the-chunk-plan
+    class: "a crashed checkpointed run is resumed under any edit of `compression`, `columns` or `meta_columns`: the resume check pins only the query and the chunk settings, so one manifest and one `_SUCCESS` cover parts of two shapes, exit 0"
+    history: "found 2026-11-10 by the axis-8 upgrade/resume hunt, RED on 0.32.2 and on main (a PostgreSQL range-chunk run crashed after its first chunk, `compression` edited, `--resume` exit 0 with `_SUCCESS`); fixed by recording the byte-shaping projection of the plan with the run (state v39 `run_shape`) and comparing it on every continuation (`StateStore::refuse_changed_run_shape`)"
+    scope: source
+    patch: resume-pins-only-the-chunk-plan/shared.patch
+    engines:
+      postgres:
+        cells:
+          - crashed_range_chunked_then_compression_edited_postgres
+          - crashed_keyset_then_columns_edited_postgres
+          - a_changed_run_shape_is_refused_on_resume_and_walked_out_postgres
+          - "lib:an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with"
+      mysql:
+        cells: [a_changed_run_shape_is_refused_on_resume_and_walked_out_mysql, "lib:an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with"]
+      mssql:
+        cells: [a_changed_run_shape_is_refused_on_resume_and_walked_out_mssql, "lib:an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with"]
+      mongo:
+        na: "a MongoDB export is `mode: full` or `cdc` only (validate_non_sql_source_modes), so it has no range-chunk or keyset checkpoint to resume"
+      oracle:
+        cells: [a_changed_run_shape_is_refused_on_resume_and_walked_out_oracle, "lib:an_interrupted_run_is_continued_only_under_the_shape_it_was_opened_with"]
+
   - name: sealed-plan-freezes-the-date
     class: "`rivet plan` resolves `{date}` in the destination into the sealed plan, so an apply after UTC midnight writes under the planning day while the data and the part names are of the apply"
     history: "P-26, found 2026-10-16 (TRIAGE PR-M), on main through 0.31.0: the planner sealed the destination through the today's-date context `rivet run` resolves with; fixed 2026-10-17 by the context that keeps `{date}` for the apply to resolve (ADR-0005 PA1 amendment), with `rivet plan --date` freezing a day on request"
@@ -5876,3 +5897,199 @@ seeds:
         na: "a MongoDB collection has no declared numeric precision, so init writes no decimal override and no map key from a field name (the mutant lives in the relational decimal override writer)"
       oracle:
         cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]
+
+  - name: validate-reads-a-lost-delivery-as-never-delivered
+    class: "a verifier that reads the absence of its evidence as never delivered: `rivet validate` took a prefix with no manifest and no `_SUCCESS` for a legacy run and exited 0 although the state recorded a successful run of the export at exactly that destination"
+    history: "owner decision Q1 2026-11-01; RED on main 2026-11-11 (`a_prefix_of_a_recorded_delivery_that_holds_nothing_exits_3_by_code`: exit 0 over a recorded delivery whose prefix holds nothing)"
+    scope: source
+    patch: validate-reads-a-lost-delivery-as-never-delivered/shared.patch
+    engines:
+      postgres:
+        cells:
+          - a_prefix_of_a_recorded_delivery_that_holds_nothing_exits_3_by_code
+          - validate_fails_on_a_recorded_delivery_that_is_gone_s3
+          - validate_fails_on_a_recorded_delivery_that_is_gone_gcs
+          - validate_fails_on_a_recorded_delivery_that_is_gone_azure
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_postgres
+          - "lib:a_recorded_delivery_with_no_manifest_is_a_fatal_failure_naming_export_and_remedy"
+      mysql:
+        cells:
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mysql
+      mssql:
+        cells:
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mssql
+      oracle:
+        cells:
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_oracle
+      mongo:
+        cells:
+          - validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mongo
+  - name: mysql-zero-date-count-misses-a-class
+    class: "a MySQL zero or partial date (`0000-00-00`, `2026-00-00`) written as NULL is counted for the WARN and the summary row only in part: a partial date in batch, or a zero DATE or DATETIME in CDC, is NULL with no count"
+    history: "found 2026-11-10 grading the zero-date sentinels (owner contract: NULL, WARN with a count); RED from this patch: the unit cells see a partial date left uncounted in batch and a zero date left uncounted in CDC; the python oracle (sentinels, property_no_silent_null) grades the wiring"
+    scope: source
+    engines:
+      mysql:
+        patch: mysql-zero-date-count-misses-a-class/mysql.patch
+        cells:
+          - "lib:nulled_dates_counts_zero_and_partial_dates_per_column"
+          - "lib:unparsable_text_and_a_zero_date_stay_null"
+          - "lib:mysql_cell_fixes_convert_the_wire_shapes_the_binlog_delivers"
+      postgres:
+        na: "a MySQL zero date has no counterpart on PostgreSQL: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+      mssql:
+        na: "a MySQL zero date has no counterpart on SQL Server: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+      oracle:
+        na: "a MySQL zero date has no counterpart on Oracle: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+      mongo:
+        na: "a MySQL zero date has no counterpart on MongoDB: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+
+  - name: cursor-column-admitted-at-plan
+    class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
+    history: "2026-11-11 - owner decision 2026-11-10 (axis-6 hunt, P2 and P3): the plan now reads the server's nullability and the delivered type once and refuses with RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED from check, validate, plan, run and apply; fixed in src/plan/cursor_admission.rs::admit_incremental_cursor"
+    scope: source
+    patch: cursor-column-admitted-at-plan/shared.patch
+    engines:
+      postgres:
+        cells: [nullable_cursor_is_refused_postgres, unrenderable_cursor_is_refused_postgres]
+      mysql:
+        cells: [nullable_cursor_is_refused_mysql, unrenderable_cursor_is_refused_mysql]
+      mssql:
+        cells: [nullable_cursor_is_refused_mssql, unrenderable_cursor_is_refused_mssql]
+      oracle:
+        cells: [nullable_cursor_is_refused_oracle, unrenderable_cursor_is_refused_oracle]
+      mongo:
+        na: "a MongoDB export has no incremental cursor_column: mode full only"
+
+  - name: cursor-nullability-claimed-without-the-table-catalog
+    class: "a nullable claim is taken from the server's description of an expression, so CAST(id AS BIGINT) AS id over a NOT NULL key (or a PostgreSQL view over one) is refused as a nullable cursor with no workable remedy"
+    history: "2026-11-11 - found live when the cursor admission refused CAST(id AS NUMBER(18)) AS id on Oracle and on SQL Server; the nullable claim is now confirmed against the catalog of the one table the query reads, and a PostgreSQL view column is not claimed"
+    scope: source
+    engines:
+      postgres:
+        patch: cursor-nullability-claimed-without-the-table-catalog/postgres.patch
+        cells: [a_view_over_a_not_null_cursor_delivers_once_postgres]
+      mysql:
+        na: "the MySQL NOT NULL column flag is exact for an expression over NOT NULL columns and for a view, so the claim needs no catalog confirmation"
+      mssql:
+        patch: cursor-nullability-claimed-without-the-table-catalog/mssql.patch
+        cells: [an_expression_over_a_not_null_cursor_delivers_once_mssql]
+      oracle:
+        patch: cursor-nullability-claimed-without-the-table-catalog/oracle.patch
+        cells: [an_expression_over_a_not_null_cursor_delivers_once_oracle]
+      mongo:
+        na: "a MongoDB export has no incremental cursor_column: mode full only"
+
+  - name: remote-plaintext-every-sink
+    class: "the remote-plaintext gate lets an http:// URL on a remote host through, so a ClickHouse load.url, a Slack webhook_url or a BigQuery RIVET_BQ_API_ENDPOINT sends the loader password and every row, the webhook secret or the OAuth bearer token across the network unencrypted"
+    history: "bughunt axis 4 (security defaults), 2026-11-10: require_tls_or_loopback guarded the source and state dials only; RED on main 2026-11-11 (rivet check accepted a remote http:// ClickHouse load.url and Slack webhook_url on every source engine)"
+    scope: source
+    patch: remote-plaintext-every-sink/shared.patch
+    engines:
+      postgres:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mysql:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mssql:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mongo:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      oracle:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      lib:
+        cells:
+          - "lib:a_remote_http_url_is_refused_by_code_naming_the_host_and_the_remedy"
+          - "lib:a_remote_plaintext_clickhouse_url_is_refused_unless_allowed"
+          - "lib:a_remote_plaintext_slack_webhook_is_refused"
+          - "lib:a_remote_plaintext_url_is_refused_when_the_client_is_built"
+          - "lib:a_remote_plaintext_webhook_is_refused_before_any_request"
+          - "lib:a_remote_plaintext_api_endpoint_is_refused"
+
+  - name: plaintext-gate-decides-by-text
+    class: "the remote-plaintext gate and the cloud-endpoint loopback gate decide by the text of the URL, not by the parser the HTTP client uses: `http:/host`, `http:host`, `ht<TAB>tp://host` and `http://host\\@127.0.0.1` pass as non-http or loopback while the client sends the loader password, the webhook secret, the bearer token or the uploaded rows to `host` in cleartext"
+    history: "rivet-verifier on Linux, 2026-11-11: the four spellings passed require_https_or_loopback on main (#953); RED on main 2026-11-11 (lib cells for each spelling)"
+    scope: source
+    patch: plaintext-gate-decides-by-text/shared.patch
+    engines:
+      postgres:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      mysql:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      mssql:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      mongo:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      oracle:
+        na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
+      lib:
+        cells:
+          - "lib:http_with_a_single_slash_is_refused"
+          - "lib:http_without_slashes_is_refused"
+          - "lib:a_backslash_before_an_at_sign_does_not_hide_the_remote_host"
+          - "lib:a_tab_or_newline_inside_the_scheme_does_not_hide_it"
+          - "lib:the_gate_refuses_exactly_what_the_client_would_send_in_clear"
+          - "lib:a_backslash_or_tab_does_not_make_a_remote_endpoint_loopback"
+          - "lib:a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused"
+
+  - name: mongo-id-types-mixed-under-a-keyed-view
+    class: a MongoDB CDC export whose keyed `load:` block merges on the flat `_id` column is accepted over `_id` values of more than one BSON type, so the current-state view merges distinct documents and a delete of one removes the other
+    history: "H5-F7 (2026-11-10): RED on main c13bc29c on Mongo 4.4, 5.0 and 8.0 into ClickHouse (8 source documents, 4 view rows; a delete of string `1` tombstoned key `1` and removed the live int 1; exit 0 with only a WARN)"
+    scope: source
+    patch: mongo-id-types-mixed-under-a-keyed-view/mongo.patch
+    engines:
+      postgres:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mysql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mssql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      oracle:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mongo:
+        cells:
+          - a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write
+          - a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type
+          - "lib:a_second_type_is_refused_and_not_recorded"
+
+  - name: redact-key-cut-at-byte-offset
+    class: "the password-keyword check of the redactor cuts a `&str` key at a byte offset, so a URL query key that percent-decodes to a multi-byte character (`?%FFn=`) panics inside the cut, exit 101 on any log line, error message or plan artifact that names the URL"
+    history: "CI proptest any_utf8_text_is_redacted_without_a_panic, 2026-11-11 (PR 969, shard 3/3): `byte index 1 is not a char boundary; it is inside U+FFFD of the decoded key`; RED on main ddb356d1 with `?%FFn=x`"
+    scope: source
+    patch: redact-key-cut-at-byte-offset/shared.patch
+    engines:
+      postgres:
+        cells:
+          - "lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"
+          - "lib:a_percent_escaped_prefix_before_a_keyword_is_read_without_a_panic"
+      mysql:
+        cells: ["lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"]
+      mssql:
+        cells: ["lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"]
+      mongo:
+        cells: ["lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"]
+      oracle:
+        cells: ["lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"]
+
+  - name: mongo-id-types-guard-skips-the-default-pk
+    class: the `_id` type guard of a MongoDB CDC export runs only for a `load:` that spells its key columns, while a `load:` that leaves `pk` at its default `auto` resolves to the source key `_id` at load, so a collection holding int 1 and string "1" collapses to one view row at exit 0
+    history: "found 2026-11-11 by a verifier reading #939: `keyed_tables` kept a table only when `pk.declared()` was non-empty and `auto` declares nothing; every live cell wrote an explicit `pk: [_id]`; RED on main 2c4ae204 (the guard never ran, the idt record was never written)"
+    scope: source
+    patch: mongo-id-types-guard-skips-the-default-pk/mongo.patch
+    engines:
+      postgres:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mysql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mssql:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      oracle:
+        na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
+      mongo:
+        cells:
+          - a_default_pk_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write
+          - a_default_pk_mongo_cdc_stream_refuses_an_event_of_a_second_id_type
+          - a_default_pk_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes
+          - a_load_keyed_by_the_default_pk_is_refused_by_code_and_none_is_not
+          - "lib:a_load_keys_a_table_by_default_by_columns_and_not_under_none"
+          - "lib:a_per_table_pk_decides_for_its_table_only"
+          - "lib:a_mongo_cdc_load_is_keyed_exactly_where_the_id_type_guards_see_a_key"

@@ -730,7 +730,7 @@ class Proc:
 
 #: RIVET_* variables the gate, the Rust harness or the Makefile's GATE_ENV read from the shell and that change no verdict; graded by harness_env_hygiene_guard.rs.
 HARNESS_ENV: frozenset[str] = frozenset((
-    "RIVET_ALLOW_WORKTREE_LIVE", "RIVET_BIN_OVERRIDE",
+    "RIVET_BIN_OVERRIDE",
     "RIVET_CDC_STATE_URL", "RIVET_CONC_SRC_CONTAINER", "RIVET_CONC_SRC_URL", "RIVET_CONC_STATE_URL",
     "RIVET_FAILURE_MONGO_URL", "RIVET_FIELD_LOCK", "RIVET_FIELD_MYSQL_CONTAINER", "RIVET_FIELD_REPLAY_BIN",
     "RIVET_FLOW_VERDICTS", "RIVET_GATE_STATE_URL",

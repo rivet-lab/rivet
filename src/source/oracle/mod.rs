@@ -764,6 +764,44 @@ impl Source for OracleSource {
         )
     }
 
+    fn column_nullable(&mut self, query: &str, column: &str) -> Result<Option<bool>> {
+        let projection = self.projected(query)?;
+        let metas = self.describe(&projection.sql)?;
+        let described = metas
+            .iter()
+            .take(projection.native.len())
+            .find(|m| m.name() == column)
+            .map(|m| m.nullable());
+        if described != Some(true) {
+            return Ok(described);
+        }
+        let Some(parts) = crate::sql::single_relation(query, false).filter(|p| p.len() <= 2) else {
+            return Ok(None);
+        };
+        let qualified = parts
+            .iter()
+            .map(|p| {
+                if p.quoted {
+                    format!("\"{}\"", p.name)
+                } else {
+                    p.name.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(".");
+        let (owner, table) = crate::sql::oracle_catalog_preds(&qualified);
+        let rows = self.query_rows(&format!(
+            "SELECT nullable FROM all_tab_columns \
+             WHERE owner = {owner} AND table_name = {table} AND column_name = '{}'",
+            column.replace('\'', "''")
+        ))?;
+        Ok(rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.as_deref())
+            .map(|v| v == "Y"))
+    }
+
     /// Source-harm counters over the run window (needs SELECT on V$SYSSTAT /
     /// V$SYSTEM_EVENT, e.g. `SELECT_CATALOG_ROLE`; `None` without it).
     fn harm_counters(&mut self) -> Option<Vec<(String, i64)>> {

@@ -231,6 +231,8 @@ pub trait BatchSink {
     /// `_id` column would be type-ambiguous on the round-trip. No-op default:
     /// SQL engines carry their cursor losslessly in the column already.
     fn set_source_cursor(&mut self, _token: String) {}
+    /// Reports `n` cells of `column` the source wrote as NULL because the target type cannot hold them.
+    fn note_nulled(&mut self, _column: &str, _n: u64) {}
 }
 
 /// Read-only inputs for a single export call.
@@ -426,6 +428,11 @@ pub trait Source: Send {
         query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>>;
+
+    /// Whether `column` of `query` may hold NULL as the server describes the statement; `None` when it does not say.
+    fn column_nullable(&mut self, _query: &str, _column: &str) -> Result<Option<bool>> {
+        Ok(None)
+    }
 
     /// Sample the monotonic FOREIGN-pressure counter for the OPT-2
     /// concurrency governor — write/redo pressure a read-only export cannot

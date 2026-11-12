@@ -245,14 +245,8 @@ fn render_cursor_value(array: &arrow::array::ArrayRef, last_row: usize) -> Optio
             ))
         }
         _ => {
-            // Actionable: an unsupported cursor type silently stalls incremental
-            // advancement (the cursor can't move, so every run re-reads from the
-            // last saved value). Name the consequence AND the fix. Audit finding.
             log::warn!(
-                "incremental cursor: column type {:?} is not supported for cursor \
-                 extraction — the cursor cannot advance, so this export will re-read \
-                 from the last saved value each run. Use an integer or timestamp \
-                 cursor column, or switch this table to `mode: chunked` / `full`.",
+                "incremental cursor: column type {:?} cannot be rendered as a cursor value, so the cursor was not advanced",
                 array.data_type()
             );
             None
@@ -266,6 +260,25 @@ mod tests {
     use arrow::array::*;
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use std::sync::Arc;
+
+    use crate::plan::cursor_admission::cursor_renders;
+    use crate::source::keyset_key::samples;
+
+    /// `cursor_renders` holds for a delivered type exactly when the renderer reads a value of it.
+    #[test]
+    fn cursor_renders_is_the_set_the_renderer_reads() {
+        for rivet_type in samples::rivet_type_samples() {
+            let Some(data_type) = samples::mapping_of(rivet_type.clone()).arrow_type else {
+                continue;
+            };
+            let array = new_null_array(&data_type, 1);
+            assert_eq!(
+                cursor_renders(&data_type),
+                render_cursor_value(&array, 0).is_some(),
+                "{rivet_type:?} lands as {data_type:?}"
+            );
+        }
+    }
 
     /// A composite key cursor is the JSON tuple of the last (or first) row, and absent on a null.
     #[test]

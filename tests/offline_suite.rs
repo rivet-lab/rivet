@@ -6,15 +6,7 @@
 //! whole set LINKS ONCE instead of N times (PoC measured 21 files: 42s -> 8s, 5x). The default
 //! harness still collects every `#[test]` from each module.
 //!
-//! Run these under cargo-nextest (process-per-test) — as the pre-push hook does WHEN nextest is
-//! installed. The PR gate does NOT: `.github/workflows/ci.yml` (job `test:`) runs
-//! `cargo test --all-targets` (only the E2E live sweep runs under nextest there), so in CI this
-//! suite runs threaded and `.config/nextest.toml`'s slow-timeout/retry settings do not apply.
-//! (This line claimed "and CI do" until 2026-09-21; it was never true.) Under the
-//! plain libtest harness (`cargo test --test offline_suite`) every `#[test]` here runs as a THREAD
-//! in one process, so an abort / SIGKILL / `std::process::exit` / corrupted process-global state in
-//! one test takes its siblings down with it. That isolation was free in the old one-binary-per-file
-//! layout; consolidation made it conditional on the runner. See `.config/nextest.toml`.
+//! Run under cargo-nextest (process per test): the CI `Tests` shards do.
 
 #[path = "offline/attestation_matrix_guard.rs"]
 mod attestation_matrix_guard;
@@ -65,6 +57,8 @@ mod capture_markers;
 mod cdc_cli_claims_checkpoint;
 #[path = "offline/cdc_cli_surface_guard.rs"]
 mod cdc_cli_surface_guard;
+#[path = "offline/mongo_keyed_id_types_refusal.rs"]
+mod mongo_keyed_id_types_refusal;
 
 #[path = "offline/cdc_evidence_matrix_guard.rs"]
 mod cdc_evidence_matrix_guard;
@@ -163,6 +157,8 @@ mod known_red_guard;
 mod live_only_purity_gate;
 #[path = "offline/live_service_ports_guard.rs"]
 mod live_service_ports_guard;
+#[path = "offline/live_shared_tmp_resolution.rs"]
+mod live_shared_tmp_resolution;
 #[path = "offline/live_skip_policy_guard.rs"]
 mod live_skip_policy_guard;
 #[path = "offline/load_allow_source_drift.rs"]
@@ -211,6 +207,8 @@ mod trust_artifacts_integration;
 mod type_capability_matrix_guard;
 #[path = "offline/validate_historical.rs"]
 mod validate_historical;
+#[path = "offline/validate_recorded_delivery.rs"]
+mod validate_recorded_delivery;
 #[path = "offline/validate_regression.rs"]
 mod validate_regression;
 #[path = "offline/workflow_stack_guard.rs"]

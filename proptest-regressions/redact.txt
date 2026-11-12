@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc a8ec74e8c865812f826645b573faa03a519ccb0ae226a47d7f90691bb0c632c6 # shrinks to prefix = "a", suffix = "token", secret = "aa0A0a0a", sep = "&"
+cc 8d8a931110afd2781881b5297caf24d4839c8e73ca0cf5a5eb37728f78fc73b4 # shrinks to prefix = "%AA", keyword = "passwd"

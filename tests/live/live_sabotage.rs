@@ -306,6 +306,40 @@ fn chunk_plan_changed(engine: SqlEngine) {
     );
 }
 
+/// RIVET_STATE_RUN_SHAPE_CHANGED: an unfinished range-chunk run, and a run under another `compression`.
+fn run_shape_changed(engine: SqlEngine) {
+    let (table, rig, _guard) = interrupted(engine, "sab_run_shape");
+    let lines: Vec<&str> = RANGE_CHECKPOINT
+        .iter()
+        .copied()
+        .chain(["compression: snappy"])
+        .collect();
+    let mut rig = engine.staged(rig, "chunked", &lines);
+    let refused = Refused::by_code("RIVET_STATE_RUN_SHAPE_CHANGED", 5);
+    rig.refuses_twice_and_walks_out(
+        RERUN,
+        &[],
+        refused,
+        vec![
+            Remedy::new(
+                "restore `compression` as run",
+                Then::DeliversTheSource,
+                |r| r.rebuilt(|r| engine.staged(r, "chunked", RANGE_CHECKPOINT)),
+            ),
+            Remedy::new(
+                "abandons it and the next run starts with a full pass",
+                Then::DeliversTheSource,
+                |r| state(r, "reset-chunks", &table),
+            ),
+            Remedy::wrong(
+                "runs `rivet state reset` where the text names `rivet state reset-chunks`",
+                Then::Refuses(refused),
+                |r| state(r, "reset", &table),
+            ),
+        ],
+    );
+}
+
 /// RIVET_STATE_CHUNK_WINDOWS_BROKEN: an unfinished range-chunk run whose stored windows overlap, and a run.
 fn chunk_windows_broken(engine: SqlEngine) {
     let (table, mut rig, _guard) = interrupted(engine, "sab_windows");
@@ -432,6 +466,7 @@ enum Harm {
     PartTruncated,
     PartReplacedByItsSibling,
     PartRemoved,
+    PrefixRemoved,
 }
 
 /// Damage `rig`'s complete export.
@@ -460,6 +495,13 @@ fn harm(rig: &Rig, how: Harm) {
         Harm::PartTruncated => rig.damage(&part(0), Damage::Truncated),
         Harm::PartReplacedByItsSibling => rig.damage(&part(0), Damage::ReplacedBy(&part(1))),
         Harm::PartRemoved => rig.damage(&part(0), Damage::Removed),
+        Harm::PrefixRemoved => {
+            for gone in rig.manifest_parts() {
+                rig.damage(&gone, Damage::Removed);
+            }
+            rig.damage(&manifest, Damage::Removed);
+            rig.damage(&rig.out_dir().join("_SUCCESS"), Damage::Removed);
+        }
     }
 }
 
@@ -2995,6 +3037,31 @@ fn a_changed_chunk_plan_is_refused_on_resume_and_walked_out_oracle() {
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
+fn a_changed_run_shape_is_refused_on_resume_and_walked_out_postgres() {
+    run_shape_changed(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_changed_run_shape_is_refused_on_resume_and_walked_out_mysql() {
+    run_shape_changed(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_changed_run_shape_is_refused_on_resume_and_walked_out_mssql() {
+    run_shape_changed(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_changed_run_shape_is_refused_on_resume_and_walked_out_oracle() {
+    run_shape_changed(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
 fn broken_chunk_windows_are_refused_on_resume_and_walked_out_postgres() {
     chunk_windows_broken(SqlEngine::Pg);
 }
@@ -3272,6 +3339,53 @@ fn validate_fails_on_a_marker_without_a_manifest_oracle() {
 #[ignore = "live: requires docker compose mongo"]
 fn validate_fails_on_a_marker_without_a_manifest_mongo() {
     validate_sees_mongo(Harm::ManifestRemoved, "RIVET_VERIFY_");
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_postgres() {
+    validate_sees_sql(
+        SqlEngine::Pg,
+        Harm::PrefixRemoved,
+        "RIVET_VERIFY_DELIVERY_ABSENT",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mysql() {
+    validate_sees_sql(
+        SqlEngine::Mysql,
+        Harm::PrefixRemoved,
+        "RIVET_VERIFY_DELIVERY_ABSENT",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mssql() {
+    validate_sees_sql(
+        SqlEngine::Mssql,
+        Harm::PrefixRemoved,
+        "RIVET_VERIFY_DELIVERY_ABSENT",
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_oracle() {
+    validate_sees_sql(
+        SqlEngine::Oracle,
+        Harm::PrefixRemoved,
+        "RIVET_VERIFY_DELIVERY_ABSENT",
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mongo"]
+fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mongo() {
+    validate_sees_mongo(Harm::PrefixRemoved, "RIVET_VERIFY_DELIVERY_ABSENT");
 }
 
 #[test]

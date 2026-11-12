@@ -80,6 +80,8 @@ pub struct RunSummary {
     /// Decoded bytes READ from the source this run (harvested once from the
     /// plan's shared counter by `run_export_job` after the runner returns; v23).
     pub bytes_read: u64,
+    /// Per column, source cells written as NULL because the target type cannot hold them (MySQL zero dates).
+    pub nulled_cells: Vec<(String, u64)>,
     /// Incremented after each successful `dest.write()`. Non-zero means a previous
     /// attempt already committed data — retrying from the same cursor would duplicate rows.
     pub files_committed: usize,
@@ -344,6 +346,7 @@ impl RunSummary {
             files_produced: 0,
             bytes_written: 0,
             bytes_read: 0,
+            nulled_cells: Vec::new(),
             files_committed: 0,
             files_adopted: 0,
             duration_ms: 0,
@@ -429,6 +432,7 @@ impl RunSummary {
             files_produced: 0,
             bytes_written: 0,
             bytes_read: 0,
+            nulled_cells: Vec::new(),
             files_committed: 0,
             files_adopted: 0,
             duration_ms: 0,
@@ -662,6 +666,7 @@ impl RunSummary {
         rows.extend(self.output_row());
         rows.extend(self.position_row());
         rows.extend(self.bytes_read_row());
+        rows.extend(self.fidelity_row());
         rows.extend(self.bytes_row());
         rows.push(("duration", fmt_duration_ms(self.duration_ms)));
         rows.extend(self.peak_rss_row());
@@ -736,6 +741,22 @@ impl RunSummary {
         } else {
             None
         }
+    }
+
+    /// `fidelity` — the cells written as NULL because the target type cannot hold them, per column.
+    fn fidelity_row(&self) -> Option<Row> {
+        if self.nulled_cells.is_empty() {
+            return None;
+        }
+        let cols: Vec<String> = self
+            .nulled_cells
+            .iter()
+            .map(|(c, n)| format!("{c}={}", fmt_thousands(*n as i64)))
+            .collect();
+        Some((
+            "fidelity",
+            format!("zero or partial dates written as NULL: {}", cols.join(", ")),
+        ))
     }
 
     fn bytes_read_row(&self) -> Option<Row> {
@@ -1764,6 +1785,21 @@ mod tests {
         assert!(
             value.contains('⚠') && value.contains("batch_size"),
             "spill over 100 MB carries the tuning hint: {value:?}"
+        );
+    }
+
+    /// The fidelity row appears only when a zero or partial date was written as NULL, with each column and its count.
+    #[test]
+    fn fidelity_row_names_each_nulled_column_with_its_count() {
+        let mut s = RunSummary::stub_for_testing("r", "orders");
+        assert_eq!(s.fidelity_row(), None);
+        s.nulled_cells = vec![("created".to_string(), 1234), ("shipped".to_string(), 2)];
+        assert_eq!(
+            s.fidelity_row(),
+            Some((
+                "fidelity",
+                "zero or partial dates written as NULL: created=1,234, shipped=2".to_string()
+            ))
         );
     }
 

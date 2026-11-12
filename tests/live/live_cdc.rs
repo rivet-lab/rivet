@@ -1276,6 +1276,78 @@ fn cdc_hostile_zero_date_and_nul_string_match_batch() {
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_zero_date_is_null_and_the_run_warns_with_the_count_batch_and_cdc_mysql() {
+    let d = tempfile::tempdir().unwrap();
+    let tbl = unique_name("cdc_zero_warn_my");
+    let mut c = conn();
+    c.query_drop(format!("DROP TABLE IF EXISTS {tbl}")).unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {tbl} (id INT PRIMARY KEY, d DATE, dt DATETIME, ts TIMESTAMP NULL)"
+    ))
+    .unwrap();
+    let _guard = Table(tbl.clone());
+
+    let out = d.path().join("out");
+    let batch_out = d.path().join("batch");
+    let ckpt = d.path().join("cdc.ckpt");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&batch_out).unwrap();
+    run_rivet_ok(&cdc_config(&d, &tbl, &ckpt, &out));
+    c.query_drop("SET SESSION sql_mode=''").unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {tbl} VALUES (1, '0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00'), \
+         (2, '2026-00-00', '2026-00-00 00:00:00', '2024-03-15 12:00:00'), \
+         (3, '2024-03-15', '2024-03-15 12:00:00', '2024-03-15 12:00:00')"
+    ))
+    .unwrap();
+
+    let warns = |o: &std::process::Output| {
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert!(o.status.success(), "rivet run failed:\n{err}");
+        err
+    };
+    let cdc = warns(&run_rivet_with_warn_log(&[
+        "run",
+        "--config",
+        cdc_config(&d, &tbl, &ckpt, &out).to_str().unwrap(),
+    ]));
+    for (col, n) in [("d", 2), ("dt", 2), ("ts", 1)] {
+        let line =
+            format!("column `{col}`: {n} MySQL zero or partial date value(s) written as NULL");
+        assert!(cdc.contains(&line), "cdc run must warn `{line}`:\n{cdc}");
+    }
+    let batch = warns(&run_rivet_with_warn_log(&[
+        "run",
+        "--config",
+        full_config(&d, &tbl, &batch_out).to_str().unwrap(),
+    ]));
+    for (col, n) in [("d", 2), ("dt", 2), ("ts", 1)] {
+        let line =
+            format!("column `{col}`: {n} MySQL zero or partial date value(s) written as NULL");
+        assert!(
+            batch.contains(&line),
+            "batch run must warn `{line}`:\n{batch}"
+        );
+    }
+    assert!(
+        batch.contains("zero or partial dates written as NULL: d=2, dt=2"),
+        "the batch summary carries the fidelity row:\n{batch}"
+    );
+    assert_cdc_matches_batch(&out, &batch_out);
+    for dir in [&out, &batch_out] {
+        let delivered = read_one_batch(dir);
+        for (col, nulls) in [("d", 2), ("dt", 2), ("ts", 1)] {
+            assert_eq!(
+                delivered.column_by_name(col).unwrap().null_count(),
+                nulls,
+                "column {col}: the delivered file holds the NULL cells the WARN counted"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn cdc_qualified_overrides_target_one_table_bare_applies_to_the_rest() {
     use arrow::datatypes::DataType;
     let d = tempfile::tempdir().unwrap();
