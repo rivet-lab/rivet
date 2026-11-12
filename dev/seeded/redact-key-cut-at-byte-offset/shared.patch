@@ -1,0 +1,13 @@
+diff --git a/src/redact.rs b/src/redact.rs
+--- a/src/redact.rs
++++ b/src/redact.rs
+@@ -123,8 +123,7 @@
+ /// Whether a keyword names a password: it ends in `password`, `passwd` or `pwd`, in any case.
+ fn is_password_keyword(key: &str) -> bool {
+     ["password", "passwd", "pwd"].iter().any(|word| {
+-        key.len() >= word.len()
+-            && key.as_bytes()[key.len() - word.len()..].eq_ignore_ascii_case(word.as_bytes())
++        key.len() >= word.len() && key[key.len() - word.len()..].eq_ignore_ascii_case(word)
+     })
+ }
+ 

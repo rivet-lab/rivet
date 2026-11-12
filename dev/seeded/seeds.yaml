@@ -6025,6 +6025,25 @@ seeds:
           - a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type
           - "lib:a_second_type_is_refused_and_not_recorded"
 
+  - name: redact-key-cut-at-byte-offset
+    class: "the password-keyword check of the redactor cuts a `&str` key at a byte offset, so a URL query key that percent-decodes to a multi-byte character (`?%FFn=`) panics inside the cut, exit 101 on any log line, error message or plan artifact that names the URL"
+    history: "CI proptest any_utf8_text_is_redacted_without_a_panic, 2026-11-11 (PR 969, shard 3/3): `byte index 1 is not a char boundary; it is inside U+FFFD of the decoded key`; RED on main ddb356d1 with `?%FFn=x`"
+    scope: source
+    patch: redact-key-cut-at-byte-offset/shared.patch
+    engines:
+      postgres:
+        cells:
+          - "lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"
+          - "lib:a_percent_escaped_prefix_before_a_keyword_is_read_without_a_panic"
+      mysql:
+        cells: ["lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"]
+      mssql:
+        cells: ["lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"]
+      mongo:
+        cells: ["lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"]
+      oracle:
+        cells: ["lib:a_query_key_decoding_to_non_ascii_text_is_read_without_a_panic"]
+
   - name: mongo-id-types-guard-skips-the-default-pk
     class: the `_id` type guard of a MongoDB CDC export runs only for a `load:` that spells its key columns, while a `load:` that leaves `pk` at its default `auto` resolves to the source key `_id` at load, so a collection holding int 1 and string "1" collapses to one view row at exit 0
     history: "found 2026-11-11 by a verifier reading #939: `keyed_tables` kept a table only when `pk.declared()` was non-empty and `auto` declares nothing; every live cell wrote an explicit `pk: [_id]`; RED on main 2c4ae204 (the guard never ran, the idt record was never written)"
