@@ -757,11 +757,11 @@ impl Source for OracleSource {
     ) -> Result<Vec<TypeMapping>> {
         let projection = self.projected(query)?;
         let metas = self.describe(&projection.sql)?;
-        Ok(arrow_convert::oracle_type_mappings(
+        arrow_convert::oracle_type_mappings(
             &metas[..projection.native.len()],
             &projection.native,
             column_overrides,
-        ))
+        )
     }
 
     fn column_nullable(&mut self, query: &str, column: &str) -> Result<Option<bool>> {

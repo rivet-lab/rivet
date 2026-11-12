@@ -500,34 +500,39 @@ impl MongoSource {
     }
 }
 
-/// The two fixed columns of the JSON-blob model. Used by both the export schema
-/// and `type_mappings`, so `check --type-report` and the export agree.
-fn blob_mappings() -> Vec<TypeMapping> {
-    vec![
-        TypeMapping::from_source(
-            &SourceColumn::simple("_id", "objectid", false),
-            RivetType::String,
-        ),
-        TypeMapping::from_source(
-            // Nullable: a CDC DELETE with no pre-image (pre/post-images not
-            // enabled, or < 6.0) carries only `_id`, so `document` is NULL. A
-            // batch export never writes a null here — nullable is a safe superset.
-            &SourceColumn::simple("document", "document", true),
-            RivetType::Json,
-        ),
+/// The two fixed columns of the JSON-blob model, each retyped by its `columns:` override where the override table reads that pair.
+fn blob_mappings(overrides: &ColumnOverrides) -> Result<Vec<TypeMapping>> {
+    [
+        ("_id", "objectid", false, RivetType::String),
+        ("document", "document", true, RivetType::Json),
     ]
+    .into_iter()
+    .map(|(name, native, nullable, detected)| {
+        let t = crate::types::override_table::resolve_column(
+            crate::types::override_table::Engine::Mongo,
+            overrides,
+            name,
+            native,
+            || detected,
+        )?;
+        Ok(TypeMapping::from_source(
+            &SourceColumn::simple(name, native, nullable),
+            t,
+        ))
+    })
+    .collect()
 }
 
-/// Arrow schema for the JSON-blob model (`_id: Utf8`, `document: Utf8 + json`).
-fn blob_schema() -> SchemaRef {
-    let fields = blob_mappings()
+/// Arrow schema for the JSON-blob model (`_id: Utf8`, `document: Utf8 + json`) under `overrides`.
+fn blob_schema(overrides: &ColumnOverrides) -> Result<SchemaRef> {
+    let fields = blob_mappings(overrides)?
         .iter()
         .map(|m| {
             crate::types::build_arrow_field(m)
                 .expect("blob columns (String/Json) always have an Arrow mapping")
         })
         .collect::<Vec<_>>();
-    Arc::new(Schema::new(fields))
+    Ok(Arc::new(Schema::new(fields)))
 }
 
 /// Stringify a document `_id` for the `_id` column. ObjectId → 24-char hex;
@@ -801,7 +806,7 @@ impl Source for MongoSource {
         })?;
         let db = self.session.client().database(self.session.db());
         self.confirm_before_read(coll_name)?;
-        let schema = blob_schema();
+        let schema = blob_schema(request.column_overrides)?;
         sink.on_schema(schema.clone())?;
 
         // `readConcern: snapshot` must ride the collection handle; a plain scan
@@ -948,9 +953,9 @@ impl Source for MongoSource {
     fn type_mappings(
         &mut self,
         _query: &str,
-        _column_overrides: &ColumnOverrides,
+        column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        Ok(blob_mappings())
+        blob_mappings(column_overrides)
     }
 
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {
@@ -1535,7 +1540,7 @@ mod tests {
 
     #[test]
     fn blob_schema_is_two_columns_id_and_document_json() {
-        let schema = blob_schema();
+        let schema = blob_schema(&ColumnOverrides::default()).unwrap();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, vec!["_id", "document"]);
         // The document column carries the Arrow JSON canonical extension type so

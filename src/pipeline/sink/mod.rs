@@ -1020,9 +1020,8 @@ impl BatchSink for ExportSink {
         };
         let dest_batch: &RecordBatch = stripped.as_ref().unwrap_or(batch);
 
-        // OPT-1: fail fast on a single oversized cell, before the batch is split
-        // or encoded (the auto-shrink splitter can't divide one giant value).
         self.check_value_ceiling(dest_batch)?;
+        crate::source::refuse_decimal_overflow(dest_batch)?;
 
         // Count original batches that exceed the memory cap (before any splitting).
         if let Some(limit) = self.max_batch_memory_bytes

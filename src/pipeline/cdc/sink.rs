@@ -1201,6 +1201,7 @@ fn flush(
     } else {
         RecordBatch::try_new(schema.clone(), arrays)?
     };
+    crate::source::refuse_decimal_overflow(&batch)?;
 
     // A partitioned change log (the changelog layout) is loaded by jobs of at most
     // `cap` partitions, and nothing splits a Parquet file at load time — so the part is

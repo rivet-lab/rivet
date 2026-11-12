@@ -61,16 +61,22 @@ pub(super) fn oracle_type_to_rivet(
     meta: &Metadata,
     native: &str,
     overrides: &ColumnOverrides,
-) -> RivetType {
-    crate::types::resolve_or(overrides, meta.name(), || {
-        autodetect(
-            OraKind::of(meta),
-            native,
-            meta.precision(),
-            meta.scale(),
-            &native_label(meta),
-        )
-    })
+) -> crate::error::Result<RivetType> {
+    crate::types::resolve_column(
+        crate::types::override_table::Engine::Oracle,
+        overrides,
+        meta.name(),
+        native,
+        || {
+            autodetect(
+                OraKind::of(meta),
+                native,
+                meta.precision(),
+                meta.scale(),
+                &native_label(meta),
+            )
+        },
+    )
 }
 
 /// The Rivet type of a re-projected column of `kind`, declared as `native`; `label` names it when unmapped.
@@ -133,15 +139,15 @@ pub(super) fn oracle_type_mappings(
     metas: &[Metadata],
     native: &[String],
     overrides: &ColumnOverrides,
-) -> Vec<TypeMapping> {
+) -> Result<Vec<TypeMapping>> {
     metas
         .iter()
         .zip(native)
         .map(|(m, native)| {
-            let rivet = oracle_type_to_rivet(m, native, overrides);
+            let rivet = oracle_type_to_rivet(m, native, overrides)?;
             let source = SourceColumn::simple(m.name(), native.clone(), m.nullable());
             let mapping = TypeMapping::from_source(&source, rivet);
-            if overrides.contains_key(m.name()) {
+            Ok(if overrides.contains_key(m.name()) {
                 mapping
             } else {
                 let kind = OraKind::of(m);
@@ -151,7 +157,7 @@ pub(super) fn oracle_type_mappings(
                     is_bare_number(kind, m.precision(), m.scale()),
                     sub_microsecond(native, m.scale()),
                 )
-            }
+            })
         })
         .collect()
 }
@@ -205,7 +211,7 @@ pub(super) fn oracle_schema(
     native: &[String],
     overrides: &ColumnOverrides,
 ) -> Result<Schema> {
-    schema_from_mappings(oracle_type_mappings(metas, native, overrides), overrides)
+    schema_from_mappings(oracle_type_mappings(metas, native, overrides)?, overrides)
 }
 
 /// The Arrow schema for resolved column mappings; an override with no builder is refused by code, an unmapped column is named.
@@ -381,6 +387,19 @@ fn flagged_empty(row: &Row, flag: Option<usize>) -> Result<bool> {
     }
 }
 
+/// The integer an Oracle NUMBER's text holds, or a coded refusal naming the column when it holds a fraction or overflows `T`.
+fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
+    text.parse::<T>().map_err(|_| {
+        crate::error::coded(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            format!(
+                "column `{column}` holds {text}, which is not an integer of the declared width — rivet \
+                 refuses rather than writing a wrong number. Declare `decimal(p,s)` or a wider integer, or remove the override."
+            ),
+        )
+    })
+}
+
 /// One Arrow column from the fetched rows, typed by `dt`.
 fn build_column(
     rows: &[Row],
@@ -403,21 +422,21 @@ fn build_column(
         DataType::Int16 => {
             let mut b = Int16Builder::with_capacity(rows.len());
             for r in rows {
-                b.append_option(number(r)?.map(|s| s.parse::<i16>()).transpose()?);
+                b.append_option(number(r)?.map(|s| integer::<i16>(name, &s)).transpose()?);
             }
             Arc::new(b.finish())
         }
         DataType::Int32 => {
             let mut b = Int32Builder::with_capacity(rows.len());
             for r in rows {
-                b.append_option(number(r)?.map(|s| s.parse::<i32>()).transpose()?);
+                b.append_option(number(r)?.map(|s| integer::<i32>(name, &s)).transpose()?);
             }
             Arc::new(b.finish())
         }
         DataType::Int64 => {
             let mut b = Int64Builder::with_capacity(rows.len());
             for r in rows {
-                b.append_option(number(r)?.map(|s| s.parse::<i64>()).transpose()?);
+                b.append_option(number(r)?.map(|s| integer::<i64>(name, &s)).transpose()?);
             }
             Arc::new(b.finish())
         }

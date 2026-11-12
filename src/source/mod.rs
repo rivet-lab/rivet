@@ -704,6 +704,12 @@ impl BatchSink for FirstBatchProbe {
     }
 }
 
+/// Whether `err` is the override table's refusal of a `columns:` pair.
+fn is_wire_mismatch(err: &anyhow::Error) -> bool {
+    crate::error::code_of(err)
+        .is_some_and(|c| c.id == crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id)
+}
+
 /// Turns the internal "no builder" stop of a zero-row build for a `columns:` override into the coded usage refusal naming the cause and the remedy.
 pub(crate) fn refuse_unbuildable_override<T>(
     engine: &str,
@@ -741,14 +747,23 @@ pub(crate) fn refuse_unbuildable_override<T>(
     )
 }
 
-/// Reads the first row of `base_query` through the run's own converter and returns the run's refusal for a `columns:` override it rejects.
+/// Returns the run's refusal for a `columns:` override: the table's verdict on the catalog types, then the first row through the run's own converter.
 pub(crate) fn refuse_override_wire_mismatch(
     src: &mut dyn Source,
     source_type: crate::config::SourceType,
     base_query: &str,
     column_overrides: &ColumnOverrides,
 ) -> Result<()> {
-    if column_overrides.is_empty() || source_type == crate::config::SourceType::Mongo {
+    if column_overrides.is_empty() {
+        return Ok(());
+    }
+    if let Err(e) = src.type_mappings(base_query, column_overrides) {
+        if is_wire_mismatch(&e) {
+            return Err(e);
+        }
+        log::debug!("override table probe ended without a verdict: {e:#}");
+    }
+    if source_type == crate::config::SourceType::Mongo {
         return Ok(());
     }
     let probe = query::first_row_probe_sql(source_type, base_query);
@@ -758,9 +773,7 @@ pub(crate) fn refuse_override_wire_mismatch(
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
-    let refused = crate::error::code_of(&err)
-        .is_some_and(|c| c.id == crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id);
-    if refused {
+    if is_wire_mismatch(&err) {
         return Err(err);
     }
     log::debug!("override probe ended without a wire verdict: {err:#}");
@@ -799,6 +812,41 @@ pub(crate) fn value_within_ceiling(
             len as f64 / (1024.0 * 1024.0),
             limit / (1024 * 1024),
         );
+    }
+    Ok(())
+}
+
+/// Refuses a batch whose decimal column holds a value wider than the column's declared precision, naming the column and the decimal.
+pub(crate) fn refuse_decimal_overflow(batch: &RecordBatch) -> Result<()> {
+    use arrow::array::{Decimal128Array, Decimal256Array};
+    use arrow::datatypes::DataType;
+    let schema = batch.schema();
+    for (field, col) in schema.fields().iter().zip(batch.columns()) {
+        let (precision, scale, fits) = match field.data_type() {
+            DataType::Decimal128(p, s) => (
+                *p,
+                *s,
+                col.as_any()
+                    .downcast_ref::<Decimal128Array>()
+                    .map(|a| a.validate_decimal_precision(*p)),
+            ),
+            DataType::Decimal256(p, s) => (
+                *p,
+                *s,
+                col.as_any()
+                    .downcast_ref::<Decimal256Array>()
+                    .map(|a| a.validate_decimal_precision(*p)),
+            ),
+            _ => continue,
+        };
+        if let Some(Err(e)) = fits {
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                "column `{}` holds a value that does not fit decimal({precision},{scale}) ({e}) — rivet \
+                 refuses rather than writing a wrong number. Declare a wider `decimal(p,s)`, or remove the override.",
+                field.name()
+            );
+        }
     }
     Ok(())
 }
@@ -1188,6 +1236,7 @@ mod override_probe_tests {
     #[derive(Default)]
     struct Scripted {
         fail: Option<crate::error::Code>,
+        table_fail: Option<crate::error::Code>,
         seen: Vec<(String, Option<String>)>,
         sink_stopped: Option<bool>,
     }
@@ -1212,7 +1261,10 @@ mod override_probe_tests {
         }
 
         fn type_mappings(&mut self, _q: &str, _o: &ColumnOverrides) -> Result<Vec<TypeMapping>> {
-            Ok(Vec::new())
+            match self.table_fail {
+                Some(code) => Err(anyhow::Error::new(CodedError::new(code, "table"))),
+                None => Ok(Vec::new()),
+            }
         }
     }
 
@@ -1285,6 +1337,34 @@ mod override_probe_tests {
         .unwrap();
         refuse_override_wire_mismatch(&mut src, SourceType::Mongo, "{}", &overrides()).unwrap();
         assert_eq!(src.seen.len(), 0);
+    }
+
+    #[test]
+    fn the_tables_refusal_stops_check_on_every_engine_before_any_row_is_read() {
+        for engine in [SourceType::Postgres, SourceType::Mongo] {
+            let mut src = Scripted {
+                table_fail: Some(codes::SOURCE_OVERRIDE_WIRE_MISMATCH),
+                ..Default::default()
+            };
+            let err = refuse_override_wire_mismatch(&mut src, engine, "SELECT 1", &overrides())
+                .unwrap_err();
+            assert_eq!(
+                crate::error::code_of(&err).map(|c| c.id),
+                Some(codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id)
+            );
+            assert!(src.seen.is_empty());
+        }
+    }
+
+    #[test]
+    fn any_other_failure_of_the_catalog_read_falls_through_to_the_row_probe() {
+        let mut src = Scripted {
+            table_fail: Some(codes::SOURCE_QUERY_FAILED),
+            ..Default::default()
+        };
+        refuse_override_wire_mismatch(&mut src, SourceType::Postgres, "SELECT 1", &overrides())
+            .unwrap();
+        assert_eq!(src.seen.len(), 1);
     }
 
     #[test]

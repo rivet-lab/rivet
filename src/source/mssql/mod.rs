@@ -852,11 +852,7 @@ impl Source for MssqlSource {
                 .unwrap_or_default();
             // Drain so the connection is reusable.
             let _ = stream.into_first_result().await;
-            Ok(arrow_convert::mssql_type_mappings(
-                &columns,
-                &overrides,
-                decimal_hints.as_ref(),
-            ))
+            arrow_convert::mssql_type_mappings(&columns, &overrides, decimal_hints.as_ref())
         })
     }
 

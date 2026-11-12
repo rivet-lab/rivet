@@ -162,7 +162,7 @@ fn cell_type_name(c: &ColumnData<'_>) -> String {
 use crate::error::Result;
 use crate::types::{
     ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
-    build_arrow_field, resolve_or,
+    build_arrow_field, resolve_column,
 };
 
 /// Days from the Arrow/Unix epoch (1970-01-01) used to anchor `Date32`.
@@ -173,59 +173,65 @@ use crate::source::value_within_ceiling;
 /// Map a SQL Server column type to its `RivetType`. An explicit
 /// `exports[].columns:` override wins (lets a `decimal` without resolvable
 /// precision still ride as a declared type, same as PG/MySQL).
-pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> RivetType {
-    resolve_or(overrides, col.name(), || match col.column_type() {
-        ColumnType::Bit | ColumnType::Bitn => RivetType::Bool,
-        // tinyint (0-255, unsigned) widens to i16 losslessly.
-        ColumnType::Int1 | ColumnType::Int2 => RivetType::Int16,
-        ColumnType::Int4 => RivetType::Int32,
-        ColumnType::Int8 | ColumnType::Intn => RivetType::Int64,
-        ColumnType::Float4 => RivetType::Float32,
-        ColumnType::Float8 | ColumnType::Floatn => RivetType::Float64,
-        // money / smallmoney are fixed decimal(19,4) / (10,4).
-        ColumnType::Money => RivetType::Decimal {
-            precision: 19,
-            scale: 4,
+pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> Result<RivetType> {
+    resolve_column(
+        crate::types::override_table::Engine::Mssql,
+        overrides,
+        col.name(),
+        &format!("{:?}", col.column_type()).to_lowercase(),
+        || match col.column_type() {
+            ColumnType::Bit | ColumnType::Bitn => RivetType::Bool,
+            // tinyint (0-255, unsigned) widens to i16 losslessly.
+            ColumnType::Int1 | ColumnType::Int2 => RivetType::Int16,
+            ColumnType::Int4 => RivetType::Int32,
+            ColumnType::Int8 | ColumnType::Intn => RivetType::Int64,
+            ColumnType::Float4 => RivetType::Float32,
+            ColumnType::Float8 | ColumnType::Floatn => RivetType::Float64,
+            // money / smallmoney are fixed decimal(19,4) / (10,4).
+            ColumnType::Money => RivetType::Decimal {
+                precision: 19,
+                scale: 4,
+            },
+            ColumnType::Money4 => RivetType::Decimal {
+                precision: 10,
+                scale: 4,
+            },
+            // Precision/scale beyond this default land via wire metadata in a
+            // follow-up; default keeps integer-valued numerics lossless.
+            ColumnType::Decimaln | ColumnType::Numericn => RivetType::Decimal {
+                precision: 38,
+                scale: 0,
+            },
+            ColumnType::Guid => RivetType::Uuid,
+            ColumnType::NVarchar
+            | ColumnType::NChar
+            | ColumnType::BigVarChar
+            | ColumnType::BigChar
+            | ColumnType::Text
+            | ColumnType::NText => RivetType::String,
+            ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => RivetType::Binary,
+            ColumnType::SSVariant | ColumnType::Udt => RivetType::String,
+            ColumnType::Daten => RivetType::Date,
+            ColumnType::Timen => RivetType::Time {
+                unit: RivetTimeUnit::Microsecond,
+            },
+            ColumnType::Datetime
+            | ColumnType::Datetime4
+            | ColumnType::Datetimen
+            | ColumnType::Datetime2 => RivetType::Timestamp {
+                unit: RivetTimeUnit::Microsecond,
+                timezone: None,
+            },
+            ColumnType::DatetimeOffsetn => RivetType::Timestamp {
+                unit: RivetTimeUnit::Microsecond,
+                timezone: Some("UTC".into()),
+            },
+            other => RivetType::Unsupported {
+                native_type: format!("{other:?}").to_lowercase(),
+                reason: format!("SQL Server column type {other:?} has no Rivet mapping yet"),
+            },
         },
-        ColumnType::Money4 => RivetType::Decimal {
-            precision: 10,
-            scale: 4,
-        },
-        // Precision/scale beyond this default land via wire metadata in a
-        // follow-up; default keeps integer-valued numerics lossless.
-        ColumnType::Decimaln | ColumnType::Numericn => RivetType::Decimal {
-            precision: 38,
-            scale: 0,
-        },
-        ColumnType::Guid => RivetType::Uuid,
-        ColumnType::NVarchar
-        | ColumnType::NChar
-        | ColumnType::BigVarChar
-        | ColumnType::BigChar
-        | ColumnType::Text
-        | ColumnType::NText => RivetType::String,
-        ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => RivetType::Binary,
-        ColumnType::SSVariant | ColumnType::Udt => RivetType::String,
-        ColumnType::Daten => RivetType::Date,
-        ColumnType::Timen => RivetType::Time {
-            unit: RivetTimeUnit::Microsecond,
-        },
-        ColumnType::Datetime
-        | ColumnType::Datetime4
-        | ColumnType::Datetimen
-        | ColumnType::Datetime2 => RivetType::Timestamp {
-            unit: RivetTimeUnit::Microsecond,
-            timezone: None,
-        },
-        ColumnType::DatetimeOffsetn => RivetType::Timestamp {
-            unit: RivetTimeUnit::Microsecond,
-            timezone: Some("UTC".into()),
-        },
-        other => RivetType::Unsupported {
-            native_type: format!("{other:?}").to_lowercase(),
-            reason: format!("SQL Server column type {other:?} has no Rivet mapping yet"),
-        },
-    })
+    )
 }
 
 /// Build the Arrow schema for a result set's columns + the per-column
@@ -258,7 +264,7 @@ pub(super) fn mssql_columns_to_schema(
         // `mssql_type_mappings` probe uses, so a full export and a CDC/`check` probe
         // land the identical decimal type.
         let rivet = resolve_decimal(
-            mssql_type_to_rivet(col, overrides),
+            mssql_type_to_rivet(col, overrides)?,
             col.name(),
             overrides,
             decimal_hints,
@@ -313,7 +319,7 @@ pub(super) fn mssql_type_mappings(
     columns: &[Column],
     overrides: &ColumnOverrides,
     decimal_hints: Option<&HashMap<String, (u8, i8)>>,
-) -> Vec<TypeMapping> {
+) -> Result<Vec<TypeMapping>> {
     columns
         .iter()
         .map(|col| {
@@ -323,7 +329,7 @@ pub(super) fn mssql_type_mappings(
             // probe (CDC resolve, `rivet check`) lands the identical type a batch
             // export does.
             let rivet = resolve_decimal(
-                mssql_type_to_rivet(col, overrides),
+                mssql_type_to_rivet(col, overrides)?,
                 col.name(),
                 overrides,
                 decimal_hints,
@@ -340,7 +346,7 @@ pub(super) fn mssql_type_mappings(
             // finding calls for (Compatible/warn, never Lossy, which would break
             // --strict for every bare datetime2). Value truncation itself is the
             // documented "known gap 4" with a `timestamp_ns` opt-in.
-            if native == "datetime2" {
+            Ok(if native == "datetime2" {
                 mapping.with_warning(
                     "datetime2 → Timestamp(microsecond): a scale-7 column (the bare `datetime2` \
                      default) loses its 100ns sub-microsecond tick. Use a `timestamp_ns` column \
@@ -364,7 +370,7 @@ pub(super) fn mssql_type_mappings(
                 )
             } else {
                 mapping
-            }
+            })
         })
         .collect()
 }
@@ -552,7 +558,7 @@ fn build_array(
                          datetime.)",
                         cell_type_name(other)
                     ),
-                    _ => b.append_null(),
+                    Some(_) | None => b.append_null(),
                 }
             }
             Arc::new(b.finish())

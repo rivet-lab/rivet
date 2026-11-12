@@ -265,9 +265,13 @@ pub(super) fn mysql_schema_and_arrow_types(
 
     for col in columns {
         let native = mysql_native_type_name(col);
-        let rivet = crate::types::resolve_or(column_overrides, col.name_str().as_ref(), || {
-            mysql_type_to_rivet(col)
-        });
+        let rivet = crate::types::resolve_column(
+            crate::types::override_table::Engine::Mysql,
+            column_overrides,
+            col.name_str().as_ref(),
+            &native,
+            || mysql_type_to_rivet(col),
+        )?;
         let source = SourceColumn::simple(col.name_str().to_string(), native.clone(), true);
         let mapping = TypeMapping::from_source(&source, rivet);
 
@@ -385,14 +389,18 @@ pub(super) fn rows_to_record_batch_typed(
                 .is_some_and(|c| matches!(c.column_type(), ColumnType::MYSQL_TYPE_BIT))
         });
         let column = schema.field(col_idx).name();
-        arrays.push(build_array(
-            arrow_type,
-            col_idx,
-            rows,
-            is_bit,
-            column,
-            max_value_bytes,
-        )?);
+        let native_flag = wire_columns.is_some_and(|cols| {
+            cols.get(col_idx).is_some_and(|c| {
+                matches!(c.column_type(), ColumnType::MYSQL_TYPE_BIT)
+                    || (matches!(c.column_type(), ColumnType::MYSQL_TYPE_TINY)
+                        && c.column_length() == 1)
+            })
+        });
+        arrays.push(if matches!(arrow_type, DataType::Boolean) && !native_flag {
+            build_bool_strict(col_idx, rows, column)?
+        } else {
+            build_array(arrow_type, col_idx, rows, is_bit, column, max_value_bytes)?
+        });
     }
     let batch = RecordBatch::try_new(schema.clone(), arrays)?;
     // Form A value-checksum (always-on): source-side pass (A) vs the built batch
@@ -603,7 +611,7 @@ where
 {
     T::try_from(v).map_err(|_| {
         crate::error::coded(
-            crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             format!("value {v} overflows {column_type} column"),
         )
     })
@@ -772,6 +780,46 @@ fn exact_f32(v: i128, column: &str) -> Result<f32> {
     .map(|f| f as f32)
 }
 
+/// A text cell that no parse of `target` accepts: refused by code, never written as NULL.
+fn unparsed<T>(column: &str, target: &str, bv: &[u8]) -> Result<T> {
+    crate::rivet_bail!(
+        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+        "column `{column}` holds {:?}, which is not a valid {target} — rivet refuses rather than \
+         writing NULL. Fix the value, or remove the `columns:` override.",
+        String::from_utf8_lossy(bv)
+    )
+}
+
+/// True for the zero date MySQL stores in place of a missing one.
+fn is_zero_date(bv: &[u8]) -> bool {
+    bv.starts_with(b"0000-00-00")
+}
+
+/// A 0/1 flag column read under a `bool` override: any other value is refused by code.
+fn build_bool_strict(col_idx: usize, rows: &[mysql::Row], column: &str) -> Result<Arc<dyn Array>> {
+    let mut b = BooleanBuilder::with_capacity(rows.len());
+    for row in rows {
+        match row.as_ref(col_idx) {
+            Some(Value::Int(0)) | Some(Value::UInt(0)) => b.append_value(false),
+            Some(Value::Int(1)) | Some(Value::UInt(1)) => b.append_value(true),
+            Some(Value::Bytes(bv)) if bv.as_slice() == b"0" => b.append_value(false),
+            Some(Value::Bytes(bv)) if bv.as_slice() == b"1" => b.append_value(true),
+            Some(Value::Int(v)) => {
+                return unparsed(column, "bool (0 or 1)", v.to_string().as_bytes());
+            }
+            Some(Value::UInt(v)) => {
+                return unparsed(column, "bool (0 or 1)", v.to_string().as_bytes());
+            }
+            Some(Value::Bytes(bv)) => return unparsed(column, "bool (0 or 1)", bv),
+            other => {
+                null_or_refuse(column, &DataType::Boolean, other)?;
+                b.append_null();
+            }
+        }
+    }
+    Ok(Arc::new(b.finish()))
+}
+
 /// The kind of value MySQL sent, for a refusal.
 fn wire_kind(v: &Value) -> &'static str {
     match v {
@@ -842,7 +890,7 @@ fn build_array(
                     // (overflow) rather than nulling like a non-numeric one.
                     Some(Value::Bytes(bv)) => match atoi::atoi::<i128>(bv) {
                         Some(v) => b.append_value(narrow::<i16>(v, "smallint")?),
-                        None => b.append_null(),
+                        None => b.append_value(unparsed(column, "smallint", bv)?),
                     },
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
@@ -860,7 +908,7 @@ fn build_array(
                     Some(Value::UInt(v)) => b.append_value(narrow::<i32>(*v as i128, "int")?),
                     Some(Value::Bytes(bv)) => match atoi::atoi::<i128>(bv) {
                         Some(v) => b.append_value(narrow::<i32>(v, "int")?),
-                        None => b.append_null(),
+                        None => b.append_value(unparsed(column, "int", bv)?),
                     },
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
@@ -876,13 +924,10 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::UInt(v)) => b.append_value(*v),
                     Some(Value::Int(v)) if *v >= 0 => b.append_value(*v as u64),
-                    Some(Value::Bytes(bv)) => {
-                        if let Some(v) = atoi::atoi::<u64>(bv) {
-                            b.append_value(v);
-                        } else {
-                            b.append_null();
-                        }
-                    }
+                    Some(Value::Bytes(bv)) => match atoi::atoi::<u64>(bv) {
+                        Some(v) => b.append_value(v),
+                        None => b.append_value(unparsed(column, "unsigned bigint", bv)?),
+                    },
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
                         b.append_null();
@@ -902,7 +947,7 @@ fn build_array(
                     Some(Value::UInt(v)) => b.append_value(narrow::<i64>(*v as i128, "bigint")?),
                     Some(Value::Bytes(bv)) => match int64_from_bytes(bv, is_bit)? {
                         Some(v) => b.append_value(v),
-                        None => b.append_null(),
+                        None => b.append_value(unparsed(column, "bigint", bv)?),
                     },
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
@@ -924,7 +969,7 @@ fn build_array(
                         .and_then(crate::types::decimal::decimal_text_to_float)
                     {
                         Some(v) => b.append_value(v),
-                        None => b.append_null(),
+                        None => b.append_value(unparsed(column, "float", bv)?),
                     },
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
@@ -946,7 +991,7 @@ fn build_array(
                         .and_then(crate::types::decimal::decimal_text_to_float)
                     {
                         Some(v) => b.append_value(v),
-                        None => b.append_null(),
+                        None => b.append_value(unparsed(column, "float", bv)?),
                     },
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
@@ -1029,7 +1074,7 @@ fn build_array(
                         match bytes_to_str(bv).and_then(|s| uuid::Uuid::parse_str(s.trim()).ok()) {
                             Some(u) => Some(*u.as_bytes()),
                             None => crate::rivet_bail!(
-                                crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+                                crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
                                 "column `{column}` is declared uuid by a `columns:` override but \
                                  holds {:?}, which is not a uuid — rivet refuses rather than \
                                  writing NULL. Fix the value, or remove the override.",
@@ -1066,13 +1111,19 @@ fn build_array(
             for row in rows {
                 let d = match row.as_ref(col_idx) {
                     Some(Value::Date(y, m, d, _, _, _, _)) => date_of(*y, *m, *d),
-                    Some(Value::Bytes(bv)) => bytes_to_str(bv).and_then(|s| {
-                        chrono::NaiveDate::parse_from_str(
-                            s.split(' ').next().unwrap_or(s),
-                            "%Y-%m-%d",
-                        )
-                        .ok()
-                    }),
+                    Some(Value::Bytes(bv)) => {
+                        let parsed = bytes_to_str(bv).and_then(|s| {
+                            chrono::NaiveDate::parse_from_str(
+                                s.split(' ').next().unwrap_or(s),
+                                "%Y-%m-%d",
+                            )
+                            .ok()
+                        });
+                        if parsed.is_none() && !is_zero_date(bv) {
+                            return unparsed(column, "date", bv);
+                        }
+                        parsed
+                    }
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
                         None
@@ -1100,9 +1151,15 @@ fn build_array(
                     Some(Value::Date(y, mo, d, h, mi, s, us)) => {
                         datetime_of(*y, *mo, *d, *h, *mi, *s, *us)
                     }
-                    Some(Value::Bytes(bv)) => bytes_to_str(bv).and_then(|s| {
-                        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()
-                    }),
+                    Some(Value::Bytes(bv)) => {
+                        let parsed = bytes_to_str(bv).and_then(|s| {
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()
+                        });
+                        if parsed.is_none() && !is_zero_date(bv) {
+                            return unparsed(column, "timestamp", bv);
+                        }
+                        parsed
+                    }
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
                         None
@@ -2025,17 +2082,20 @@ mod roast_mysql_bit_decode_tests {
     #[test]
     fn a_uuid_override_refuses_a_value_it_cannot_parse_instead_of_nulling_it() {
         let fsb = DataType::FixedSizeBinary(16);
-        for (label, (def, bytes)) in [("text", v_bytes(b"not-a-uuid")), ("int", v_int(7))] {
+        for (label, code, (def, bytes)) in [
+            (
+                "text",
+                "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
+                v_bytes(b"not-a-uuid"),
+            ),
+            ("int", "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", v_int(7)),
+        ] {
             let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
             let err = build_array(&fsb, 0, &rows, false, "u", None).unwrap_err();
             let coded = err
                 .downcast_ref::<crate::error::CodedError>()
                 .expect("coded");
-            assert_eq!(
-                coded.code(),
-                "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH",
-                "{label}"
-            );
+            assert_eq!(coded.code(), code, "{label}");
             assert!(
                 err.to_string().contains("column `u` is declared uuid"),
                 "{label}: {err}"
@@ -2479,11 +2539,11 @@ mod roast_mysql_bit_decode_tests {
         }
     }
 
-    /// Text that does not parse and a zero date are still NULL, as before the refusal of unread kinds.
+    /// Text that does not parse is refused by code; a zero date is still NULL.
     #[test]
-    fn unparsable_text_and_a_zero_date_stay_null() {
+    fn unparsable_text_is_refused_by_code_and_a_zero_date_stays_null() {
         let ts = DataType::Timestamp(TimeUnit::Microsecond, None);
-        let cases: Vec<(&str, Cell, DataType)> = vec![
+        let refused: Vec<(&str, Cell, DataType)> = vec![
             ("text>i16", v_bytes(b"abc"), DataType::Int16),
             ("text>i32", v_bytes(b"abc"), DataType::Int32),
             ("text>i64", v_bytes(b"abc"), DataType::Int64),
@@ -2491,6 +2551,13 @@ mod roast_mysql_bit_decode_tests {
             ("text>f64", v_bytes(b"abc"), DataType::Float64),
             ("text>date32", v_bytes(b"garbage"), DataType::Date32),
             ("text>timestamp", v_bytes(b"garbage"), ts.clone()),
+        ];
+        for (label, (def, bytes), dt) in refused {
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            let err = build_array(&dt, 0, &rows, false, "c", None).expect_err(label);
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        }
+        let zero: Vec<(&str, Cell, DataType)> = vec![
             (
                 "zero date>date32",
                 v_date(0, 0, 0, 0, 0, 0, 0),
@@ -2498,7 +2565,7 @@ mod roast_mysql_bit_decode_tests {
             ),
             ("zero date>timestamp", v_date(0, 0, 0, 0, 0, 0, 0), ts),
         ];
-        for (label, (def, bytes), dt) in cases {
+        for (label, (def, bytes), dt) in zero {
             let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
             let a = build_array(&dt, 0, &rows, false, "c", None)
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
@@ -2869,11 +2936,11 @@ mod roast_mysql_bit_decode_tests {
 
 #[cfg(test)]
 mod error_code_tests {
-    /// A value past the declared column width is an override mismatch (exit 1).
+    /// A value past the declared column width is refused as unrepresentable (exit 5).
     #[test]
     fn a_value_overflowing_its_declared_width_is_refused_by_code() {
         let err = super::narrow::<i32>(1 << 40, "INT").unwrap_err();
-        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
     }
     /// A refused cell names the kind of value MySQL sent; NULL is not refused.
     #[test]

@@ -271,20 +271,21 @@ pub(crate) fn type_mappings_on(
     let result = conn.exec_iter(&wrapped, ())?;
     let columns = result.columns().as_ref().to_vec();
     drop(result);
-    Ok(columns
+    columns
         .iter()
         .map(|col| {
-            let rivet = crate::types::resolve_or(column_overrides, col.name_str().as_ref(), || {
-                mysql_type_to_rivet(col)
-            });
-            let source = crate::types::SourceColumn::simple(
+            let native = mysql_native_type_name(col);
+            let rivet = crate::types::resolve_column(
+                crate::types::override_table::Engine::Mysql,
+                column_overrides,
                 col.name_str().as_ref(),
-                mysql_native_type_name(col),
-                true,
-            );
-            crate::types::TypeMapping::from_source(&source, rivet)
+                &native,
+                || mysql_type_to_rivet(col),
+            )?;
+            let source = crate::types::SourceColumn::simple(col.name_str().as_ref(), native, true);
+            Ok(crate::types::TypeMapping::from_source(&source, rivet))
         })
-        .collect())
+        .collect()
 }
 
 /// Whether `column` of `query` may hold NULL: the `NOT NULL` flag the server sets on the described column.
