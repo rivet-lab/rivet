@@ -1447,7 +1447,11 @@ fn decimal_override_lines(info: &TableInfo) -> Vec<String> {
                 (Some(p), Some(s)) => {
                     lines.push(format!(
                         "      {}: decimal({p},{s})",
-                        yaml_quote_if_needed(&col.name)
+                        seeded!(
+                            "init-column-key-unquoted",
+                            col.name.clone(),
+                            yaml_quote_if_needed(&col.name)
+                        )
                     ));
                 }
                 _ => {

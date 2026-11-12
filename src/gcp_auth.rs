@@ -618,7 +618,11 @@ fn judge_status(status: reqwest::StatusCode) -> Result<(), GrantFailure> {
     if status.is_success() {
         return Ok(());
     }
-    if token_status_is_transient(status.as_u16()) {
+    if seeded!(
+        "token-endpoint-transient-final",
+        false,
+        token_status_is_transient(status.as_u16())
+    ) {
         return Err(GrantFailure::Transient(anyhow::Error::msg(format!(
             "HTTP {status}"
         ))));

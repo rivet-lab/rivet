@@ -18,6 +18,9 @@
 // the version skew is silent until it isn't.
 pub use arrow;
 
+#[macro_use]
+mod seeded;
+
 // Public — accessed by integration tests in tests/*.rs
 pub mod config;
 pub(crate) mod connect;

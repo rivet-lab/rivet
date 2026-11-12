@@ -387,6 +387,7 @@ const PRODUCT_ENV_SURFACE: &[&str] = &[
     "src/pipeline/single.rs maybe_panic_at \"after_source_read\"",
     "src/pipeline/sink/pipelined.rs env::var \"RIVET_PIPELINE_WRITES\"",
     "src/preflight/cdc_health.rs env::var \"RIVET_TEST_SLOT_WAL_BAR\"",
+    "src/seeded.rs env::var \"RIVET_SEED\"",
     "src/source/cdc/mod.rs env::var \"RIVET_CDC_MAX_TX_BYTES\"",
     "src/source/cdc/mod.rs env::var \"RIVET_CDC_MAX_TX_ROWS\"",
     "src/source/cdc/mod.rs env::var \"RIVET_CDC_SPILL_DIR\"",

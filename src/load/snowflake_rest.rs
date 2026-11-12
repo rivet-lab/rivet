@@ -420,7 +420,11 @@ impl SnowflakeApi {
                         self.signer.forget();
                         continue;
                     }
-                    if is_transient_status(status) {
+                    if seeded!(
+                        "snowflake-retry-read-from-answer-text",
+                        is_transient_status(status) || text.contains("try again"),
+                        is_transient_status(status)
+                    ) {
                         last = transient_reply(status, &text);
                     } else {
                         return Ok(Reply { status, body: text });
