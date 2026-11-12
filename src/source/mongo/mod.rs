@@ -195,7 +195,7 @@ fn list_collection_uuids(session: &MongoSession, collection: &str) -> Result<Opt
     });
     match listed {
         Ok(uuids) => Ok(Some(uuids)),
-        Err(e) if not_allowed(&e) => Ok(None),
+        Err(e) if seeded!("mongo-listing-failure-fails-open", true, not_allowed(&e)) => Ok(None),
         Err(e) => Err(anyhow::Error::new(e).context(format!(
             "listing MongoDB collection `{}.{collection}` failed — the run stops rather than \
              read a collection it cannot confirm is the one it started on; run again once the \

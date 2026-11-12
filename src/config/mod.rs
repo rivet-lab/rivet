@@ -477,6 +477,13 @@ impl Config {
     /// fields that replace it. Read from the raw YAML: the key is no longer a field, and
     /// the generic unknown-field message does not say what to write instead.
     fn check_snowflake_connection(yaml: &str) -> crate::error::Result<()> {
+        if seeded!(
+            "snowflake-connection-line-ignored-at-config-load",
+            !yaml.is_empty(),
+            false
+        ) {
+            return Ok(());
+        }
         let root: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
         let Some(load) = root.get("load") else {
             return Ok(());
@@ -586,7 +593,13 @@ impl Config {
         self.validate_csv_exports_are_not_loaded()?;
         self.validate_load_overrides()?;
         self.validate_layout_has_a_compacting_warehouse()?;
-        self.validate_a_default_base_has_a_baseline()?;
+        seeded!(
+            "snowflake-cdc-base-without-baseline-accepted",
+            {
+                let _ = self.validate_a_default_base_has_a_baseline();
+            },
+            self.validate_a_default_base_has_a_baseline()?
+        );
         self.validate_cdc_has_a_loadable_target()?;
         Ok(())
     }

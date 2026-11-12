@@ -281,6 +281,9 @@ pub(crate) fn stamp_ceased_units(
     let expanded = crate::destination::placeholder::expand_destination(dest_config.clone(), &ctx);
     let prefix = crate::pipeline::finalize::destination_uri_for_manifest(&expanded);
     let now = chrono::Utc::now().to_rfc3339();
+    if seeded!("ceased-split-units-left-running", true, false) {
+        return 0;
+    }
     match state.interrupt_ceased_split_units(giant_name, &prefix, kept, &now) {
         Ok(names) => {
             if !names.is_empty() {
@@ -492,11 +495,7 @@ fn reconstruct_units_from_manifests(
             bmap.insert(ord, h.clone()); // boundary[ord]
         }
         if let Some(l) = &w.lo
-            && seeded!(
-                "split-reconstruct-underflows-at-unit-zero",
-                ord >= 0,
-                ord > 0
-            )
+            && seeded!("split-reconstruct-underflows-at-unit-zero", true, ord > 0)
         {
             bmap.insert(ord - 1, l.clone()); // boundary[ord-1]
         }

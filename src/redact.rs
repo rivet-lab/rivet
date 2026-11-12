@@ -124,7 +124,11 @@ fn is_keyword_byte(b: u8) -> bool {
 fn is_password_keyword(key: &str) -> bool {
     ["password", "passwd", "pwd"].iter().any(|word| {
         key.len() >= word.len()
-            && key.as_bytes()[key.len() - word.len()..].eq_ignore_ascii_case(word.as_bytes())
+            && seeded!(
+                "redact-key-cut-at-byte-offset",
+                key[key.len() - word.len()..].eq_ignore_ascii_case(word),
+                key.as_bytes()[key.len() - word.len()..].eq_ignore_ascii_case(word.as_bytes())
+            )
     })
 }
 
