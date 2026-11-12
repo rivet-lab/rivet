@@ -109,7 +109,11 @@ fn named<'a>(
     img: Option<&'a Vec<RivetValue>>,
 ) -> Option<(&'a [String], &'a [RivetValue])> {
     let (n, v) = (names?, img?);
-    (n.len() == v.len()).then_some((n, v))
+    seeded!(
+        "absent-old-cell-read-as-moved-key",
+        Some((n, v)),
+        (n.len() == v.len()).then_some((n, v))
+    )
 }
 
 /// An event's pre-image with its names: `before_names` when the engine gave its own, else `image_names`.

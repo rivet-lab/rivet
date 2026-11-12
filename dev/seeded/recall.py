@@ -89,6 +89,7 @@ class Row:
     cells: tuple[str, ...] = ()
     na: str | None = None
     platform: str | None = None
+    switch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,13 +133,16 @@ def parse_manifest(doc: dict, patch_dir: Path = HERE) -> list[Row]:
                 continue
             patch, cells = e.get("patch", s.get("patch")), e.get("cells")
             platform = e.get("platform", s.get("platform"))
+            switch = e.get("switch", s.get("switch"))
             if platform is not None and platform not in PLATFORMS:
                 raise ValueError(f"seed {name}/{eng}: platform must be one of {list(PLATFORMS)}")
-            if not patch or not isinstance(cells, list):
-                raise ValueError(f"seed {name}/{eng}: needs a patch and a `cells:` list, or `na:`")
-            if not (patch_dir / patch).is_file():
+            if switch and patch:
+                raise ValueError(f"seed {name}/{eng}: a `switch:` row has no `patch:` — one source for the defect")
+            if not (patch or switch) or not isinstance(cells, list):
+                raise ValueError(f"seed {name}/{eng}: needs a patch (or a `switch:`) and a `cells:` list, or `na:`")
+            if patch and not (patch_dir / patch).is_file():
                 raise ValueError(f"seed {name}/{eng}: patch {patch} does not exist under {patch_dir}")
-            rows.append(Row(name, eng, patch, tuple(str(c) for c in cells), platform=platform))
+            rows.append(Row(name, eng, patch, tuple(str(c) for c in cells), platform=platform, switch=switch))
     if not rows:
         raise ValueError("the manifest declares no seeds")
     return rows
@@ -154,6 +158,26 @@ def unknown_cells(rows: list[Row], root: Path = ROOT) -> list[tuple[Row, str]]:
             if name not in names:
                 out.append((r, c))
     return out
+
+
+SWITCH_SITE = re.compile(r'\bseeded!\(\s*"([^"]+)"')
+
+
+def switch_sites(root: Path = ROOT) -> dict[str, int]:
+    """Each `seeded!("<name>", ..)` switch in src/ and how many sites carry it."""
+    found: dict[str, int] = {}
+    for f in sorted((root / "src").rglob("*.rs")):
+        for name in SWITCH_SITE.findall(f.read_text()):
+            found[name] = found.get(name, 0) + 1
+    return found
+
+
+def switch_problems(rows: list[Row], root: Path = ROOT) -> list[str]:
+    """A row naming a switch the source lacks (it would grade the unseeded build), or a source switch no row names (dead defect code)."""
+    found = switch_sites(root)
+    named = {r.switch for r in rows if r.switch}
+    return ([f"seed {r.seed}/{r.engine}: switch {r.switch!r} is in no `seeded!` site in src/" for r in rows if r.switch and r.switch not in found]
+            + [f"`seeded!({n!r})` in src/ is named by no manifest row" for n in sorted(set(found) - named)])
 
 
 def _fn_names(tree: Path) -> set[str]:
@@ -301,10 +325,11 @@ SCRATCH_STATE_VARS = ("RIVET_CDC_STATE_URL", "RIVET_CONC_STATE_URL")
 class Cargo:
     """Builds and runs nextest in the scratch tree with its own target dir and the tree's own rivet binary."""
 
-    def __init__(self, tree: Path, base: Path, state_url: str | None) -> None:
+    def __init__(self, tree: Path, base: Path, state_url: str | None, features: tuple[str, ...] = ()) -> None:
         self.tree, self.base = tree, base
+        self.feature_args = ["--features", ",".join(features)] if features else []
         env = {k: v for k, v in os.environ.items()
-               if k not in ("RIVET_BIN", "RIVET_BIN_OVERRIDE", "RIVET_STATE_URL", "RIVET_TEST_STATE_URL")}
+               if k not in ("RIVET_BIN", "RIVET_BIN_OVERRIDE", "RIVET_STATE_URL", "RIVET_TEST_STATE_URL", "RIVET_SEED")}
         env["CARGO_TARGET_DIR"] = str(base / "target")
         env["CARGO_PROFILE_DEV_DEBUG"] = "line-tables-only"
         # The cells run in the scratch tree: a binary the gate names relative to this checkout (`.gate-baseline/...`) is named from here.
@@ -346,7 +371,7 @@ class Cargo:
     def build(self, cells, log: Path) -> subprocess.CompletedProcess:
         """Compile the test binaries (and the rivet binary they drive)."""
         p = sh(["cargo", "nextest", "run", "--no-run", "--manifest-path", str(self.tree / "Cargo.toml"),
-                *self.binaries(cells)], cwd=self.tree, env=self.env)
+                *self.feature_args, *self.binaries(cells)], cwd=self.tree, env=self.env)
         log.write_text(p.stdout)
         return p
 
@@ -371,7 +396,7 @@ class Cargo:
         skip_log = log.with_suffix(".skips")
         skip_log.write_text("")
         p = sh(["cargo", "nextest", "run", "--manifest-path", str(self.tree / "Cargo.toml"),
-                *self.binaries(cells), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
+                *self.feature_args, *self.binaries(cells), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
                 "-E", nextest_filter([c.removeprefix(LIB) for c in cells])],
                cwd=self.tree, env={**self.env, **extra, "RIVET_SKIP_LOG": str(skip_log)})
         log.write_text(p.stdout)
@@ -384,7 +409,7 @@ class Cargo:
             again_log = log.with_suffix(".again.skips")
             again_log.write_text("")
             q = sh(["cargo", "nextest", "run", "--manifest-path", str(self.tree / "Cargo.toml"),
-                    *self.binaries(owed), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
+                    *self.feature_args, *self.binaries(owed), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
                     "-E", nextest_filter([c.removeprefix(LIB) for c in owed])],
                    cwd=self.tree, env={**self.env, **extra, **self.again[1], "RIVET_SKIP_LOG": str(again_log)})
             log.with_suffix(".again.log").write_text(q.stdout)
@@ -565,6 +590,39 @@ def grade_seeds(led: Ledger, live: list[Row], control: dict[str, str], control_s
     return verdicts
 
 
+def grade_switches(led: Ledger, live: list[Row], control_skips: dict[str, str], cargo: Cargo, logs: Path,
+                   book: stand_health.Book | None = None) -> dict[Row, Verdict]:
+    """Grade each switched seed on ONE `seeded` build of the clean tree: its own control with RIVET_SEED unset, then its cells with RIVET_SEED=<switch>."""
+    book = book or stand_health.BOOK
+    cells = sorted({c for r in live for c in r.cells})
+    led.phase(f"SWITCHED BUILD — one `seeded` build, {len({r.switch for r in live})} switch(es), {len(cells)} cell(s)")
+    b = cargo.build(cells, logs / "switched.build.log")
+    if b.returncode != 0:
+        led.bad(f"the `seeded` build does not build (see {logs / 'switched.build.log'})")
+        return {r: grade(r, {}, None) for r in live}
+    since = book.mark()
+    control = cargo.run(cells, logs / "switched.control.log")
+    control_stand = stand_health.judge("", since)
+    skips = {**control_skips, **cargo.skipped}
+    for c, v in control.items():
+        (led.ok if v == "PASS" else led.bad)(f"switched control {c}: {v}")
+    out: dict[Row, Verdict] = {}
+    for switch in sorted({r.switch for r in live}):
+        group = [r for r in live if r.switch == switch]
+        mine = sorted({c for r in group for c in r.cells if control.get(c) == "PASS"})
+        led.phase(f"SWITCH {switch} — {', '.join(r.engine for r in group)} ({len(mine)} control-green cell(s))")
+        since = book.mark()
+        cargo.env["RIVET_SEED"] = switch
+        try:
+            seeded = cargo.run(mine, logs / f"switch__{switch}.log") if mine else {}
+        finally:
+            cargo.env.pop("RIVET_SEED", None)
+        stand = stand_health.classify([control_stand, book.judge("", since)])
+        for r in group:
+            out[r] = grade(r, control, seeded, skips, stand)
+    return out
+
+
 def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: bool = False) -> list[Verdict]:
     """Grade every row (a row of another platform is OWED, a FAIL under `owed_fails`): STALE check, one CONTROL run on the unpatched tree, then one build+run per patch; appends the run to the record."""
     t0 = time.perf_counter()
@@ -589,6 +647,12 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: b
             if p.returncode != 0:
                 verdicts[r] = Verdict(r, STALE, stale_message(r.seed, text, p.stdout))
     live = [r for r in rows if r not in verdicts and not r.na and r.platform in (None, host_platform())]
+    for problem in switch_problems(rows, tree):
+        led.bad(problem)
+    sw = [r for r in live if r.switch]
+    live = [r for r in live if not r.switch]
+    if sw:
+        verdicts.update(grade_switches(led, sw, {}, Cargo(tree, base / "sw", state_url, ("seeded",)), logs))
     workers = [cargo] + [Cargo(prepare_tree(base / f"w{k}")[0], base / f"w{k}", state_url)
                          for k in range(1, min(POOL, len({r.patch for r in live})))]
     control_cells = sorted({c for r in live for c in r.cells})
@@ -757,6 +821,30 @@ def pool_self_test() -> None:
     assert {v.status for v in drive(1, control_stand=stand_health.down("control died"))[2].values() if v.status != BROKEN} == {STAND_DOWN}, "a control that ran on a dead stand grades no patch"
     for k in (1, POOL):
         assert drive(k, fail="p5.patch")[2] is None, "an apply failure must stop the run, with every tree restored"
+
+
+def switch_self_test() -> None:
+    """The switch seam: a row and a source site must name each other, a stray RIVET_SEED never reaches a clean build, no gate flag turns the feature on."""
+    import tempfile
+    rows = parse_manifest(yaml.safe_load(MANIFEST.read_text()))
+    assert any(r.switch for r in rows), "no row declares a switch"
+    assert switch_problems(rows) == [], switch_problems(rows)
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "src").mkdir()
+        (Path(d) / "src" / "a.rs").write_text('fn f() { seeded!("only-in-source", 1, 2); }\n')
+        ghost = Row("ghost", "lib", "p", ("c",), switch="only-in-manifest")
+        found = switch_problems([ghost], Path(d))
+        assert len(found) == 2 and "only-in-manifest" in found[0] and "only-in-source" in found[1], found
+    os.environ["RIVET_SEED"] = "leak"
+    try:
+        clean = Cargo(Path("/t"), Path("/b"), None)
+        switched = Cargo(Path("/t"), Path("/b"), None, ("seeded",))
+    finally:
+        os.environ.pop("RIVET_SEED")
+    assert "RIVET_SEED" not in clean.env and "RIVET_SEED" not in switched.env
+    assert clean.feature_args == [] and switched.feature_args == ["--features", "seeded"]
+    flagged = [str(f) for f in [ROOT / "Makefile", *(ROOT / ".github").rglob("*.yml")] if "--all-features" in f.read_text()]
+    assert not flagged, f"--all-features turns the `seeded` feature on: {flagged}"
 
 
 def self_test() -> int:
@@ -1027,6 +1115,7 @@ def self_test() -> int:
         run_record.append_run(rec, sha="a" * 40, complete=True, green=True, dirty=False)
         assert run_record.refusal("a" * 40, rec) is None and run_record.refusal("b" * 40, rec) is not None, "a written run must be the one the tag rule reads"
     pool_self_test()
+    switch_self_test()
     print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, build pool, stale and build checks, run record")
     return 0
 

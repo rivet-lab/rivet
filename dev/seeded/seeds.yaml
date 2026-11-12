@@ -327,7 +327,7 @@ seeds:
           - pg_cdc_a_declared_key_absent_from_the_old_key_does_not_split
           - an_update_of_a_replica_identity_index_reaches_the_base_as_one_update_postgres
       mysql:
-        patch: absent-old-cell-read-as-moved-key/lib.patch
+        switch: absent-old-cell-read-as-moved-key
         cells: ["lib:a_key_moves_only_when_a_key_column_differs_between_full_images"]
       mssql:
         na: rivet reads fn_cdc_get_all_changes with N'all', which returns only an UPDATE's new row (op 4; map_op drops op 3), so an UPDATE reaches split_move with no old image and key_moves never reads one. A primary-key UPDATE arrives as the change table's own delete + insert (measured 2026-10-03 on a clustered key and on a nonclustered key over a heap)
@@ -2009,7 +2009,7 @@ seeds:
     class: "an `io::Error` (a missing directory, a read-only file) is retried as transient because a path in its message contains a network word (`dns`, `reset`), so a permanent stop exits 2"
     history: "0.32.2, 2026-10-20: #639's mutation shard baseline failed `an_unwritable_aggregate_path_is_refused_by_code` with exit 2 for 1 because its temp dir was named `.tmprDnsA7`; RED on main c1cf6a92 with a directory named `dns`"
     scope: source
-    patch: io-error-classified-by-its-path-text/shared.patch
+    switch: io-error-classified-by-its-path-text
     engines:
       postgres:
         cells: ["lib:an_unwritable_path_named_like_a_network_failure_is_not_transient"]
@@ -2546,7 +2546,7 @@ seeds:
     class: "whether a Snowflake request is sent again is read from the words of the answer, not from its HTTP status"
     history: "2026-10-28 - the SQL API transport replaced the `snow` CLI; the retry verdict is the typed status (429, 5xx), and a 422 whose message says `try again` is the warehouse's refusal"
     scope: target
-    patch: snowflake-retry-read-from-answer-text/shared.patch
+    switch: snowflake-retry-read-from-answer-text
     engines:
       bigquery:
         na: "the seed edits src/load/snowflake_rest.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -2602,7 +2602,7 @@ seeds:
     class: "a binary column goes through the COPY transform as VARIANT and the load fails on its type"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; `expecting BINARY but got VARIANT` on 0.24.2 and on main"
     scope: target
-    patch: snowflake-binary-column-not-cast/shared.patch
+    switch: snowflake-binary-column-not-cast
     engines:
       bigquery:
         na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -2616,7 +2616,7 @@ seeds:
     class: "the stage URL is the destination prefix as written, so without a trailing slash every FILES entry names a file that does not exist"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; `Remote file ... was not found` on 0.24.2 and on main"
     scope: target
-    patch: snowflake-stage-url-left-open/shared.patch
+    switch: snowflake-stage-url-left-open
     engines:
       bigquery:
         na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -3537,7 +3537,7 @@ seeds:
     class: the repair that mints a missing split `_SUCCESS` keeps the first unit manifest seen per ordinal instead of the latest Success
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: split-tile-keeps-the-oldest-unit/shared.patch
+    switch: split-tile-keeps-the-oldest-unit
     engines:
       postgres:
         na: "engine-agnostic: the function takes the destination and the state ledger and reads the run-unique manifest copies, never a source or an engine type, so every engine runs the same code (docs/pool-split-matrix.yaml); graded once by the lib cell, and the engines' pool-split cells stayed green under this seed"
@@ -3556,7 +3556,7 @@ seeds:
     class: a resume's reconstruction reads the lower bound of unit 0 as a boundary below unit 0
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: split-reconstruct-underflows-at-unit-zero/shared.patch
+    switch: split-reconstruct-underflows-at-unit-zero
     engines:
       postgres:
         na: "engine-agnostic: the function takes the destination and the state ledger and reads the run-unique manifest copies, never a source or an engine type, so every engine runs the same code (docs/pool-split-matrix.yaml); graded once by the lib cell, and the engines' pool-split cells stayed green under this seed"
@@ -4097,7 +4097,7 @@ seeds:
     class: "a BigQuery job that ends with a documented retryable errorResult.reason (backendError, internalError, jobBackendError, jobInternalError, rateLimitExceeded, jobRateLimitExceeded) is coded RIVET_LOAD_WAREHOUSE_REJECTED, exit 1, so a scheduler fails the task for good"
     history: "2026-10-28 - issue #707, pilot incident: a CDC compact MERGE under airflow-provider-rivet failed with 'Error encountered during execution. Retrying may solve the problem.' and the task failed final"
     scope: target
-    patch: bigquery-transient-job-error-final/shared.patch
+    switch: bigquery-transient-job-error-final
     engines:
       bigquery:
         cells:
@@ -4112,7 +4112,7 @@ seeds:
     class: "an HTTP 5xx, 429 or 408 from Google's OAuth token endpoint is coded RIVET_DEST_CREDENTIALS_INVALID, exit 1, with no retry, so a scheduler fails the task for good on a blip of the endpoint"
     history: "2026-11-06 - observed live on 0.32.2: a BigQuery load stopped 'ADC token request failed (HTTP 500 Internal Server Error)', exit 1; the next load with the same credential succeeded"
     scope: target
-    patch: token-endpoint-transient-final/shared.patch
+    switch: token-endpoint-transient-final
     engines:
       bigquery:
         cells:
@@ -5249,7 +5249,7 @@ seeds:
     class: "a CDC run that fails before any part reached the store rewrites its running marker as a Failed manifest over no parts instead of removing it, so the prefix holds a manifest of a run that wrote nothing"
     history: "2026-11-05 - cluster C4 CDC-RUN-START: the failed-run leg of the running marker; the marker is removed when no part of the table reached the store and rewritten Failed only over the parts that did"
     scope: source
-    patch: cdc-run-close-marker/shared.patch
+    switch: cdc-run-close-marker
     engines:
       postgres:
         cells: ["lib:a_cdc_run_that_fails_before_its_first_part_removes_its_running_marker"]
@@ -5885,7 +5885,7 @@ seeds:
     class: "`rivet init` writes a catalog column name as a bare YAML map key in the decimal override: a name such as `#tag` is read as a comment (the override is dropped), `x ` collapses onto `x` and `&a x` loses its anchor, so a numeric column is exported under no override or under its twin's"
     history: "found 2026-11-10 by a hunt for sites of audit finding H5-F1 (PyYAML: `c:` with `#tag: d` and `x: e` loads as only `x`); RED on main 2026-11-10 (`a_decimal_override_key_is_exactly_the_column_it_names`: no columns override for `#tag`)"
     scope: source
-    patch: init-column-key-unquoted/shared.patch
+    switch: init-column-key-unquoted
     engines:
       postgres:
         cells: ["lib:a_decimal_override_key_is_exactly_the_column_it_names"]

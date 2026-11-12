@@ -336,7 +336,12 @@ pub(crate) fn completed_units_tile(
             continue;
         };
         match latest.get(&ord) {
-            Some(cur) if cur.finished_at >= m.finished_at => {}
+            Some(cur)
+                if seeded!(
+                    "split-tile-keeps-the-oldest-unit",
+                    true,
+                    cur.finished_at >= m.finished_at
+                ) => {}
             _ => {
                 latest.insert(ord, m);
             }
@@ -487,7 +492,11 @@ fn reconstruct_units_from_manifests(
             bmap.insert(ord, h.clone()); // boundary[ord]
         }
         if let Some(l) = &w.lo
-            && ord > 0
+            && seeded!(
+                "split-reconstruct-underflows-at-unit-zero",
+                ord >= 0,
+                ord > 0
+            )
         {
             bmap.insert(ord - 1, l.clone()); // boundary[ord-1]
         }
@@ -1174,6 +1183,47 @@ mod tests {
             completed_units_tile(&dest, "orders"),
             "the NEWER #0 tiles whichever copy the listing returns first"
         );
+    }
+
+    /// The newer copy of every ordinal wins whatever order the destination lists them in.
+    #[test]
+    fn the_newer_copy_wins_for_every_ordinal_under_any_listing_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = crate::config::DestinationConfig {
+            destination_type: crate::config::DestinationType::Local,
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let n = 12;
+        let write = |run: String, ord: usize, hi: Option<String>, fin: &str| {
+            let mut m = unit_manifest(
+                &run,
+                &format!("orders#{ord}"),
+                crate::manifest::ManifestStatus::Success,
+            );
+            m.finished_at = fin.into();
+            m.split_window = Some(crate::manifest::SplitWindow {
+                key_column: "id".into(),
+                lo: (ord > 0).then(|| format!("k{ord:02}")),
+                hi,
+            });
+            std::fs::write(
+                dir.path().join(format!("manifest-{run}.json")),
+                serde_json::to_vec(&m).unwrap(),
+            )
+            .unwrap();
+        };
+        for ord in 0..n {
+            let right = (ord + 1 < n).then(|| format!("k{:02}", ord + 1));
+            write(format!("n{ord}"), ord, right, "2026-08-21T00:05:00Z");
+            write(
+                format!("o{ord}"),
+                ord,
+                Some(format!("z{ord:02}")),
+                "2026-08-21T00:00:00Z",
+            );
+        }
+        assert!(completed_units_tile(&dest, "orders"));
     }
 
     fn write_family_unit(
