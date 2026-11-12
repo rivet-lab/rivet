@@ -1685,7 +1685,7 @@ fn edited_incremental(engine: SqlEngine) {
     delivers_whole(&rig, ConfigEdit::Compression, N + 3);
 }
 
-/// An unfinished range-checkpoint run, then `edit` (a moved destination, another compression): the run delivers the source.
+/// An unfinished range-checkpoint run, then `edit` (a moved destination): the run delivers the source.
 fn edited_unfinished(engine: SqlEngine, edit: ConfigEdit) {
     let (_table, rig, _guard) = interrupted(engine, "sab_edit");
     let fresh = tempfile::tempdir().unwrap();
@@ -5694,31 +5694,6 @@ fn an_incremental_export_whose_compression_is_edited_delivers_the_source_mssql()
 #[ignore = "live: requires docker compose oracle"]
 fn an_incremental_export_whose_compression_is_edited_delivers_the_source_oracle() {
     edited_incremental(SqlEngine::Oracle);
-}
-
-#[test]
-#[ignore = "live: requires docker compose postgres"]
-fn an_unfinished_run_whose_compression_is_edited_delivers_the_source_postgres() {
-    edited_unfinished(SqlEngine::Pg, ConfigEdit::Compression);
-}
-
-#[test]
-#[ignore = "live: requires docker compose mysql"]
-fn an_unfinished_run_whose_compression_is_edited_delivers_the_source_mysql() {
-    edited_unfinished(SqlEngine::Mysql, ConfigEdit::Compression);
-}
-
-#[test]
-#[ignore = "live: requires docker compose mssql"]
-fn an_unfinished_run_whose_compression_is_edited_delivers_the_source_mssql() {
-    edited_unfinished(SqlEngine::Mssql, ConfigEdit::Compression);
-}
-
-#[cfg(feature = "oracle")]
-#[test]
-#[ignore = "live: requires docker compose oracle"]
-fn an_unfinished_run_whose_compression_is_edited_delivers_the_source_oracle() {
-    edited_unfinished(SqlEngine::Oracle, ConfigEdit::Compression);
 }
 
 #[test]

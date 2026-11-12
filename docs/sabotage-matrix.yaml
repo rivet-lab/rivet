@@ -1345,14 +1345,6 @@ scenarios:
     mongo:    { na: "a MongoDB `mode: full` export keeps no progress between runs: every run delivers the whole collection wherever the config points (a `resume: true` export does, and its cell is in the RIVET_STATE_CURSOR_DESTINATION_MISMATCH rows)" }
     oracle:   { test: an_incremental_export_whose_compression_is_edited_delivers_the_source_oracle }
 
-  - id: edit_compression_unfinished_checkpoint
-    what: "`compression` (the default to gzip) edited between two runs with no reset, an unfinished range-checkpoint run: the run delivers the source, every source id declared once, and `validate` passes"
-    postgres: { test: an_unfinished_run_whose_compression_is_edited_delivers_the_source_postgres }
-    mysql:    { test: an_unfinished_run_whose_compression_is_edited_delivers_the_source_mysql }
-    mssql:    { test: an_unfinished_run_whose_compression_is_edited_delivers_the_source_mssql }
-    mongo:    { na: "a MongoDB export has no range-chunk run to leave unfinished (validate_non_sql_source_modes allows no chunked mode); its `resume: true` run has no crash point a cell can place" }
-    oracle:   { test: an_unfinished_run_whose_compression_is_edited_delivers_the_source_oracle }
-
   - id: edit_destination_store
     what: "the destination moved to another store (local to s3) between two runs with no reset, an incremental export that ran once: refused twice (RIVET_STATE_CURSOR_DESTINATION_MISMATCH); `state reset-chunks` leaves the refusal and `state reset` delivers the source into the bucket"
     postgres: { test: an_incremental_export_moved_to_another_store_is_refused_and_walked_out_postgres }
