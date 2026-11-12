@@ -30,7 +30,7 @@ def root_sql(sql: str) -> core.Proc:
     c = core.container_for_port(int(re.search(r":(\d+)/", CDC_URL).group(1)))
     if c is None:
         return core.Proc(["docker"], 125, "", f"no running container publishes {CDC_URL}")
-    return core.docker_exec(c, *nsn_mysql_root(), stdin=sql)
+    return core.docker_exec(c, *nsn_mysql_root(), stdin=nsn.mysql_text(sql))
 
 
 def nsn_mysql_root() -> list[str]:
@@ -273,6 +273,15 @@ def self_test() -> None:
     split = nsn.Result("c", nsn.REFUSED, nsn.SPLIT, "check exit 0, run exit 5 [RIVET_SOURCE_CDC_UNDECODABLE]", "RIVET_SOURCE_CDC_UNDECODABLE")
     assert log_refusal(split).klass == "" and log_refusal(split).verdict == nsn.REFUSED
     assert log_refusal(nsn.Result("c", nsn.REFUSED, nsn.UNCODED, "x")).klass == nsn.UNCODED, "an uncoded stop after a grant change stays red"
+    sent: list[str] = []
+    real = core.container_for_port, core.docker_exec
+    core.container_for_port, core.docker_exec = lambda port: "c", lambda c, *a, stdin="": sent.append(stdin) or nsn._proc(0)
+    try:
+        root_sql("INSERT INTO t VALUES ('0000-00-00');")
+        root_sql("SELECT 1;")
+    finally:
+        core.container_for_port, core.docker_exec = real
+    assert [s.startswith(nsn.MYSQL_LAX) for s in sent] == [True, False], "the root account's seed rows run under an empty sql_mode too"
     print("no_silent_null_grants self-test ok: grant sets partition the columns; NULL, hidden-present, leg-shape and missing-row each fire")
 
 
