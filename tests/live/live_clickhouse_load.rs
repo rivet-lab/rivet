@@ -3487,6 +3487,19 @@ fn mongo_cdc_into_clickhouse(mdb: &str, db: &Db) -> Rig {
     mongo_cdc_into_clickhouse_at(mdb, db, &unique_name("chmcdc"))
 }
 
+/// The `load:` spelling that keys a Mongo table by `_id` explicitly.
+const PK_EXPLICIT: &str = ", pk: [_id]";
+/// The `load:` spelling that leaves `pk` at its default, `auto`.
+const PK_DEFAULT: &str = "";
+
+/// A Mongo CDC export of collection `t` in `mdb` loaded into `db` with `pk_clause` as the load block's `pk`.
+fn mongo_cdc_into_clickhouse_keyed(mdb: &str, db: &Db, pk_clause: &str) -> Rig {
+    Rig::mongo_cdc("t")
+        .source_url(&MongoTest::url(mongo_rs_port(), mdb))
+        .dest_gcs(BUCKET, &unique_name("chmcdc"), FAKE_GCS_ENDPOINT)
+        .top_line(&load_line(CLICKHOUSE_HTTP_URL, db, "").replace(", pk: [id]", pk_clause))
+}
+
 /// A run killed once the first event it read is acked, so the rest of its transaction waits for the next run.
 fn kill_after_the_first_ack(rig: &Rig) {
     let killed = rig.run_with_env("RIVET_TEST_PANIC_AT", "cdc_after_ack");
@@ -4451,6 +4464,18 @@ fn edit_checkpoint(rig: &Rig, edit: impl FnOnce(&mut serde_json::Value)) {
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
 fn a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write() {
+    mixed_id_snapshot_is_refused_before_any_write(PK_EXPLICIT);
+}
+
+/// A load that leaves `pk` at its default keys the view on `_id` too: a snapshot of ids that differ only by BSON type is refused before it writes.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_default_pk_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write() {
+    mixed_id_snapshot_is_refused_before_any_write(PK_DEFAULT);
+}
+
+/// The body of the cell above for a `load:` block spelling its `pk` as `pk_clause`.
+fn mixed_id_snapshot_is_refused_before_any_write(pk_clause: &str) {
     use mongodb::bson::{doc, oid::ObjectId};
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_idtype");
@@ -4466,7 +4491,7 @@ fn a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write() {
         ],
     );
     let db = Db::new("rivet_chtest");
-    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("initial: snapshot");
+    let rig = mongo_cdc_into_clickhouse_keyed(&mdb, &db, pk_clause).cdc("initial: snapshot");
 
     let out = rig.run();
     assert_refused(&out, MIXED_IDS);
@@ -4482,6 +4507,18 @@ fn a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write() {
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
 fn a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type() {
+    mixed_id_stream_refuses_a_second_type(PK_EXPLICIT);
+}
+
+/// A load that leaves `pk` at its default refuses the event that would add a second `_id` type, as an explicit `pk: [_id]` does.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_default_pk_mongo_cdc_stream_refuses_an_event_of_a_second_id_type() {
+    mixed_id_stream_refuses_a_second_type(PK_DEFAULT);
+}
+
+/// The body of the cell above for a `load:` block spelling its `pk` as `pk_clause`.
+fn mixed_id_stream_refuses_a_second_type(pk_clause: &str) {
     use mongodb::bson::{Bson, doc};
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_idstream");
@@ -4494,7 +4531,7 @@ fn a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type() {
             .collect(),
     );
     let db = Db::new("rivet_chtest");
-    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("initial: snapshot");
+    let rig = mongo_cdc_into_clickhouse_keyed(&mdb, &db, pk_clause).cdc("initial: snapshot");
     rig.run_ok();
     load(&rig);
     assert_eq!(clickhouse_live_values(&db), m.string_values("t", "v"));
@@ -4511,6 +4548,18 @@ fn a_keyed_mongo_cdc_stream_refuses_an_event_of_a_second_id_type() {
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
 fn a_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes() {
+    mixed_id_checkpoint_records_types(PK_EXPLICIT);
+}
+
+/// A load that leaves `pk` at its default records the `_id` types in the checkpoint too, and a record of two types stops run and load.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs"]
+fn a_default_pk_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes() {
+    mixed_id_checkpoint_records_types(PK_DEFAULT);
+}
+
+/// The body of the cell above for a `load:` block spelling its `pk` as `pk_clause`.
+fn mixed_id_checkpoint_records_types(pk_clause: &str) {
     use mongodb::bson::doc;
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_idckpt");
@@ -4518,7 +4567,7 @@ fn a_mongo_cdc_checkpoint_records_id_types_and_an_old_one_still_resumes() {
     m.drop_collection("t");
     m.insert_many("t", vec![doc! { "_id": 1i32, "v": "int-1" }]);
     let db = Db::new("rivet_chtest");
-    let rig = mongo_cdc_into_clickhouse(&mdb, &db).cdc("initial: snapshot");
+    let rig = mongo_cdc_into_clickhouse_keyed(&mdb, &db, pk_clause).cdc("initial: snapshot");
     rig.run_ok();
     m.insert_many("t", vec![doc! { "_id": 2i32, "v": "int-2" }]);
     rig.run_ok();

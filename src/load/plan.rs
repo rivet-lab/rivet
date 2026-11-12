@@ -2620,6 +2620,51 @@ load:
         ))
     }
 
+    /// A Mongo CDC table loads keyed exactly when the `_id` guards consider it keyed, for every spelling of `pk`.
+    #[test]
+    fn a_mongo_cdc_load_is_keyed_exactly_where_the_id_type_guards_see_a_key() {
+        use crate::types::{RivetType, TypeFidelity};
+        for (pk, keyed) in [
+            ("", true),
+            (", pk: auto", true),
+            (", pk: [_id]", true),
+            (", pk: none", false),
+        ] {
+            let (_dir, path) = cfg_file(&format!(
+                "source:\n  type: mongo\n  url: \"mongodb://u@127.0.0.1:1/app\"\n\
+                 exports:\n  - name: orders\n    table: orders\n    mode: cdc\n    format: parquet\n    \
+                 cdc:\n      checkpoint: ./o.ckpt\n    destination: {{ type: gcs, bucket: b, prefix: p/ }}\n\
+                 load: {{ target: clickhouse, url: \"http://127.0.0.1:1\", database: d, user: u, password_env: P{pk} }}\n"
+            ));
+            let col = |name: &str| crate::state::LoadSpecColumn {
+                finer_than_microsecond: false,
+                name: name.into(),
+                source_type: "native".into(),
+                rivet_type: RivetType::String,
+                fidelity: TypeFidelity::Exact,
+                nullable: false,
+                warnings: Vec::new(),
+            };
+            crate::state::StateStore::open(&path)
+                .unwrap()
+                .record_load_spec(
+                    "orders",
+                    None,
+                    "",
+                    &[col("_id"), col("document")],
+                    Some(&["_id".to_string()]),
+                    "run_1",
+                )
+                .unwrap();
+            let plans = plan_loads(&path, &Selection::default()).unwrap();
+            let cfg = crate::config::Config::load(&path).unwrap();
+            let guarded =
+                crate::source::mongo::id_types::keyed_tables(&cfg, &cfg.exports[0]).len() == 1;
+            assert_eq!(!plans[0].pk.is_empty(), keyed, "plan pk{pk}");
+            assert_eq!(guarded, keyed, "guard pk{pk}");
+        }
+    }
+
     /// The load plans from the state DB a run recorded and never dials the source.
     #[test]
     fn plan_loads_types_columns_from_the_state_db_with_the_source_unreachable() {

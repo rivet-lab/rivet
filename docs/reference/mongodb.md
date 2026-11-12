@@ -472,7 +472,8 @@ never loses data) and **warns** when a full scan or an unkeyed CDC run sees a
 heterogeneous `_id`; the fix is in the merge key, downstream.
 
 **Under a keyed `load:` rivet stops instead.** A `mode: cdc` export whose `load:`
-declares key columns (`pk: [_id]`) merges on the flat `_id`, so it is refused with
+keys the view, by key columns (`pk: [_id]`) or by leaving `pk` at its default `auto`
+(which resolves to `_id`), merges on the flat `_id`, so it is refused with
 `RIVET_SOURCE_ID_TYPES_MIXED` (exit 5) when its collection holds more than one BSON
 `_id` type, or when a change of a second type arrives. The message lists the types
 seen. The snapshot is refused before it writes; a stream keeps what it delivered
@@ -484,7 +485,7 @@ snapshot. Loading mixed-type `_id` under a keyed load is tracked in #926.
 The checkpoint records the `_id` types delivered per collection (key `idt`); a
 checkpoint without it reads as none and gains it with its next save, and
 `rivet load` reads the same record and refuses before it appends. An export with
-no keyed `load:` is unchanged.
+no `load:` block, or with `pk: none`, is unchanged.
 
 The typed value is always in `document._id`. On BigQuery, `JSON_QUERY` preserves
 the type (`1001` and `"1001"` render as *different* JSON text — `1001` vs
