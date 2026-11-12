@@ -39,7 +39,7 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 16 -> 2 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
 
 /// The horizon every `_open` entry expires at; moves only here and in the ledger together.
-const EXPIRES: &str = "2026-11-15"; // pinned: the ledger's `_EXPIRES`, moved only together with it
+const EXPIRES: &str = "2026-11-22";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
