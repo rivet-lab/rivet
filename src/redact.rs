@@ -123,7 +123,8 @@ fn is_keyword_byte(b: u8) -> bool {
 /// Whether a keyword names a password: it ends in `password`, `passwd` or `pwd`, in any case.
 fn is_password_keyword(key: &str) -> bool {
     ["password", "passwd", "pwd"].iter().any(|word| {
-        key.len() >= word.len() && key[key.len() - word.len()..].eq_ignore_ascii_case(word)
+        key.len() >= word.len()
+            && key.as_bytes()[key.len() - word.len()..].eq_ignore_ascii_case(word.as_bytes())
     })
 }
 
@@ -1230,6 +1231,15 @@ mod tests {
             let out = redact_secrets(&text);
             proptest::prop_assert!(text.contains(['@', '=']) || out == text, "{:?} -> {:?}", text, out);
         }
+    }
+
+    /// A percent-encoded query key that decodes to a multi-byte character is read without a panic.
+    #[test]
+    fn a_query_key_decoding_to_a_multibyte_character_is_read_without_a_panic() {
+        for text in ["?%FFn=x", "a?b=1&%E2%82%ACn=2", "?%D0%BF=1", "&%E6%97%A5=v"] {
+            assert_eq!(redact_secrets(text), text);
+        }
+        assert_eq!(redact_secrets("?%FFpwd=x"), format!("?%FFpwd={MASK}"));
     }
 
     /// A text that ends inside a URL, a query key or a multi-byte character is returned whole.

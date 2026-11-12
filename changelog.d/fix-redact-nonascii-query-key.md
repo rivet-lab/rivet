@@ -1,0 +1,1 @@
+- **Redacting text that held a percent-encoded URL query key could panic.** A key such as `?%FFn=` decodes to a multi-byte character, and the password-keyword check sliced it by byte. **Now** the check compares bytes, so any text is redacted without a panic. **What to do:** nothing.
