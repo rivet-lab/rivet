@@ -82,6 +82,10 @@ GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-re
         "2026-11-02: #755 control: a pinned --prefix verified that one directory on 0.32.2 as well; it guards the run-set validate from widening it; closes when the baseline moves past 0.32.2",
     "check_still_accepts_overrides_the_run_accepts_postgres":
         "2026-11-04: #805 control: an override the run accepts passes check on 0.32.2 as well; it guards the new wire-mismatch refusal from widening onto it; the check_refuses_ cells are the ones that fail there; closes when the baseline moves past 0.32.2",
+    "an_oracle_integer_cursor_is_admitted_into_clickhouse":
+        "2026-11-12: #938 control: an Oracle integer cursor the load admits was admitted on 0.32.2 as well; it guards the admission from refusing the neighbours of the refused NUMBER cursor, whose an_oracle_number_cursor_is_refused_ cell fails there; closes when the baseline moves past 0.32.2",
+    "an_oracle_text_cursor_is_admitted_into_clickhouse":
+        "2026-11-12: #938 control: an Oracle text cursor the load admits was admitted on 0.32.2 as well; it guards the admission from refusing the neighbours of the refused NUMBER cursor, whose an_oracle_number_cursor_is_refused_ cell fails there; closes when the baseline moves past 0.32.2",
 }  # ratchet-pin: end
 #: Fix commit (short sha) → pattern of the only cells it is the fix for, with its reason. Shrink-only.
 FIX_SCOPE: dict[str, tuple[str, str]] = {
