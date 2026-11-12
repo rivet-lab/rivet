@@ -532,6 +532,7 @@ def render_summary(title: str, classes: list[dict], verdicts: dict[str, dict], i
     shared = tok["total"]["cost_usd"] - sum(x["cost_usd"] for x in tok.get("lenses", {}).values())
     out += [f"- lens {n}: ${x['cost_usd']:.2f} (architect ${x.get('lens_usd', 0):.2f}, sweeps ${x.get('sweep_usd', 0):.2f}, {x['runs']} runs)" for n, x in tok.get("lenses", {}).items()]
     out += [f"- shared (verify, unattributed): ${max(shared, 0):.2f}", "", usage_line(tok.get("usage")), ""]
+    out += [f"Models: {', '.join(f'{k}={v}' for k, v in tok['models'].items())}; other steps use the agent's own model.", ""] if tok.get("models") else []
     out += ["## Accepted (verifier: holds)", ""] + (["none"] if not acc else [])
     for c in acc:
         conf = f" (confirmed-by: {', '.join(c['confirmed_by'])})" if c["confirmed_by"] else ""
@@ -662,7 +663,7 @@ def round_records(out: Path, lenses: list[str] | None = None, rev: str | None = 
                          "fingerprint": fingerprint(c["seam"], files), "files": files, "status": class_status(c, verdicts),
                          "class_lenses": c.get("lenses") or lenses, "confirmed_by": c.get("confirmed_by", []),
                          "sites": {"swept": len(c["sites"]), "violated": c.get("violated", 0), "proven": c.get("proven_violated", 0)},
-                         "cost": {"round_usd": total, "lenses": per_lens}, "pr": None})
+                         "cost": {"round_usd": total, "lenses": per_lens}, "models": tok.get("models") or {}, "pr": None})
     return out_rows
 
 
@@ -700,6 +701,24 @@ def close_in_history(out: Path, cid: str, pr: int) -> int:
     return hit
 
 
+def parse_models(pairs: list[str]) -> dict[str, str]:
+    """--model STEP=MODEL pairs as {step: model}; a step outside lens, sweep and verify is refused."""
+    got = {}
+    for pair in pairs:
+        step, sep, model = pair.partition("=")
+        if not sep or step not in ("lens", "sweep", "verify") or not model.strip():
+            raise HuntError(f"--model takes STEP=MODEL with STEP one of lens, sweep, verify, got {pair!r}")
+        got[step] = model.strip()
+    return got
+
+
+def hunter(name: str, row: dict) -> str:
+    """A lens name tagged with the hunter model of its round, when the round set one."""
+    m = (row.get("models") or {})
+    tag = m.get("lens") or m.get("sweep")
+    return f"{name} [{tag}]" if tag else name
+
+
 def history_report(rows: list[dict]) -> list[str]:
     """--history: yield per lens, repeated holes, lenses that find the same classes, trend per round."""
     if not rows:
@@ -713,13 +732,13 @@ def history_report(rows: list[dict]) -> list[str]:
     for k in order:
         first = rounds[k][0]
         for x, usd in first["cost"]["lenses"].items():
-            row = lens.setdefault(x, {"rounds": 0, "usd": 0.0, "accepted": 0})
+            row = lens.setdefault(hunter(x, first), {"rounds": 0, "usd": 0.0, "accepted": 0})
             row["rounds"] += 1
             row["usd"] += usd
         for r in rounds[k]:
             if r["status"] == "accepted":
                 for x in r["class_lenses"]:
-                    lens.setdefault(x, {"rounds": 0, "usd": 0.0, "accepted": 0})["accepted"] += 1
+                    lens.setdefault(hunter(x, r), {"rounds": 0, "usd": 0.0, "accepted": 0})["accepted"] += 1
     for x, v in sorted(lens.items(), key=lambda kv: -(kv[1]["accepted"] / kv[1]["usd"] if kv[1]["usd"] else 0)):
         rate = f"{v['accepted'] / v['usd']:.2f}" if v["usd"] else "-"
         out.append(f"- {x}: {v['accepted']} accepted / ${v['usd']:.2f} = {rate} per $ ({v['rounds']} rounds)")
@@ -754,7 +773,7 @@ def history_report(rows: list[dict]) -> list[str]:
         count = lambda s: sum(r["status"] == s for r in rs)
         usd = rs[0]["cost"]["round_usd"]
         acc = count("accepted")
-        out.append(f"- {rs[0]['date']} {str(rs[0]['rev'])[:8]} {', '.join(rs[0]['lenses'])}: ${usd:.2f}, {acc} accepted, {count('refuted')} refuted, "
+        out.append(f"- {rs[0]['date']} {str(rs[0]['rev'])[:8]} {hunter(', '.join(rs[0]['lenses']), rs[0])}: ${usd:.2f}, {acc} accepted, {count('refuted')} refuted, "
                    f"{count('refuted-premise')} refuted-premise, {count('one-off')} one-off, {count('not-verified')} not-verified, {count('clean')} clean, "
                    f"{acc / usd if usd else 0:.2f} accepted per $")
     return out
@@ -766,6 +785,7 @@ class Hunt:
     def __init__(self, a: argparse.Namespace, root: Path = ROOT, gate_cmd: str = GATE_WAIT, rules_path: Path = seams.RULES):
         """Resolve the lenses, paths and plan inputs from the parsed arguments and the auto state."""
         self.a, self.root, self.gate_cmd, self.rules_path = a, root, gate_cmd, rules_path
+        self.models = parse_models(a.model)
         self.state = load_state(root)
         if a.auto:
             start = self.state["last_lens"] + 1
@@ -911,7 +931,8 @@ class Hunt:
         lines += [f"plan: merge pure python -> {self.path('classes.md')}, {self.path('classes.json')}",
                   f"plan: verify agent=rivet-verifier cwd={self.wt} budget=${cap['verify']:.2f} verify-top={self.a.verify_top} (every class with a proven violated site) out={self.path('verdicts.md')}",
                   f"plan: report -> {self.path('summary.md')}, {self.path('tokens.json')} (with /usage before and after when readable)",
-                  f"plan: total budget ${self.a.budget_usd:.2f} across {len(self.lenses)} lens(es)"]
+                  f"plan: total budget ${self.a.budget_usd:.2f} across {len(self.lenses)} lens(es)",
+                  f"plan: models {', '.join(f'{k}={v}' for k, v in self.models.items()) or 'the agents own'}"]
         return lines
 
     def ensure_worktree(self) -> None:
@@ -980,7 +1001,7 @@ class Hunt:
         sid = resume or str(uuid.uuid4())
         cmd = [exe, "-p", "--agent", agent, "--output-format", "json", "--max-budget-usd", f"{max(budget, 0.01):.2f}",
                "--permission-mode", PERMISSION_MODE, "--permission-prompts", "none", "--settings", str(self.settings()),
-               "--add-dir", str(self.out)] + (["--resume", sid] if resume else ["--session-id", sid])
+               "--add-dir", str(self.out)] + (["--resume", sid] if resume else ["--session-id", sid]) + (["--model", self.models[step]] if step in self.models else [])
         t0 = time.monotonic()
         try:
             p = subprocess.run(cmd, cwd=self.wt, input=prompt, capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
@@ -1193,6 +1214,7 @@ class Hunt:
         tok = tokens(records, self.load_timing(), self.lens_of())
         before = self.path("usage-before.json")
         tok["usage"] = {"before": json.loads(before.read_text()) if before.is_file() else None, "after": self.read_usage()}
+        tok["models"] = self.models
         if tok["usage"]["before"] is None and tok["usage"]["after"] is None:
             tok["usage"] = None
         if not tok["usage"] or tok["usage"]["after"] is None:
@@ -1303,6 +1325,7 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--claims-from", type=Path, help="an architect report (KEY CLAIM lines) or a JSON list of claims, instead of the lens runs")
     ap.add_argument("--out", type=Path, help="default target/hunt/<UTC date>-<lens names>")
     ap.add_argument("--parallel", type=int, default=3)
+    ap.add_argument("--model", action="append", default=[], metavar="STEP=MODEL", help="model for a step (lens, sweep, verify) instead of the agent's own; repeatable")
     ap.add_argument("--budget-usd", type=float, default=30.0, help="the total across every lens and claude run (default 30)")
     ap.add_argument("--verify-top", "--top", dest="verify_top", type=int, default=8, help="most classes the verifier gets (default 8)")
     ap.add_argument("--since", help="map only files changed since REV")
@@ -1520,6 +1543,15 @@ def self_test() -> int:
             assert any("lens agent=rivet-architect" in x and "budget=$1.50" in x for x in plan), plan
             assert any("sweep agent=rivet-sweeper" in x and "A lock is keyed" in x and "lock keys" in x for x in plan), plan
             assert any("one per KEY CLAIM" in x for x in plan) and any("verify agent=rivet-verifier" in x and "verify-top=8" in x for x in plan), plan
+            assert "plan: models sweep=fable, lens=fable" in single("dry", "--model", "sweep=fable", "--model", "lens=fable").plan()
+            assert parse_models(["verify=opus"]) == {"verify": "opus"} and hunter("cdc", {"models": {"lens": "fable"}}) == "cdc [fable]" and hunter("cdc", {}) == "cdc"
+            for bad in (["merge=fable"], ["lens"], ["sweep= "]):
+                try:
+                    parse_models(bad)
+                except HuntError:
+                    pass
+                else:
+                    raise AssertionError(f"--model {bad} was accepted")
             assert not calls() and not wt.exists() and not (t / "dry").exists()
             try:
                 hunt("--lens", "x", "--rules", "No such rule", "--out", str(t / "x")).predicates()
@@ -1575,10 +1607,13 @@ def self_test() -> int:
 
             os.environ["HUNT_FAKE_MODE"] = "no-usage"
             n, mapped[:] = len(calls()), []
-            two = hunt("--lenses", "state-config-cli,runners", "--out", str(t / "two"))
+            two = hunt("--lenses", "state-config-cli,runners", "--out", str(t / "two"), "--model", "lens=fable", "--model", "sweep=fable")
             assert two.out.name == "two" and hunt("--lenses", "state-config-cli,runners").out.name.endswith("-state-config-cli-runners")
             assert two.run() == 0 and len(mapped) == 1, mapped
             c2 = calls()[n:]
+            model = lambda x: x["argv"][x["argv"].index("--model") + 1] if "--model" in x["argv"] else None
+            assert {(x["agent"], model(x)) for x in c2 if x["agent"] != "rivet-sweeper" or "--resume" not in x["argv"]} <= {("rivet-architect", "fable"), ("rivet-sweeper", "fable"), ("rivet-verifier", None)}, c2
+            assert json.loads((t / "two" / "tokens.json").read_text())["models"] == {"lens": "fable", "sweep": "fable"}
             assert sorted(x["head"][:22] for x in c2 if x["agent"] == "rivet-architect") == ["Lens runners: runners:", "Lens state-config-cli:"], c2
             data = json.loads((t / "two" / "classes.json").read_text())
             lk = next(x for x in data["classes"] if x["seam"] == "lock keys")
