@@ -1,13 +1,16 @@
 """Deterministic bug hunt: architect lenses, one sweeper per predicate, a pure merge, one verifier pass.
 
     python -m dev.pytools.hunt --lens NAME|TEXT [--lenses a,b,c] [--rules TITLE ...] [--claims-from FILE] [--out DIR]
-                               [--parallel 3] [--budget-usd N] [--verify-top K] [--dry-run] [--resume] [--only STEP]
+                               [--parallel 3] [--budget-usd N] [--cap STEP=USD] [--model STEP=MODEL] [--verify-top K]
+                               [--verify-unproven U] [--verify-batch B] [--dry-run] [--resume] [--only STEP]
     python -m dev.pytools.hunt --auto [--auto-lenses 2] [--dry-run] [--resume]
     python -m dev.pytools.hunt --close CLASS_ID --pr N [--out DIR]
     python -m dev.pytools.hunt --list-lenses | --self-test
 
 Steps: setup (gate wait, read-only worktree of origin/main), map, lens, sweep, merge, verify, report.
 A step is skipped when its output file exists; a step that runs drops the outputs of every later step.
+A class is one (seam, predicate) pair. Architect candidates marked `CLAIM KIND: design` are listed as design candidates,
+not swept. A run that ends with error_max_budget_usd stops its step; --resume continues after a raised cap.
 A preset lens (--list-lenses) brings its default rules; free text brings none. --lenses runs several lenses over one
 map, one merge, one verify. --auto takes the next lenses in rotation plus the rules whose seams changed since the last
 auto round (target/hunt/state.json), minus closed classes. --close records a class as fixed by a PR.
@@ -30,6 +33,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -79,6 +83,10 @@ LENS_CAP_SHARE = 0.4
 REASK_SHARE = 0.25
 SWEEP_FLOOR_USD = 1.0
 CLAIMS_PER_LENS = 5
+CAP_STEPS = ("lens", "sweep", "verify")
+MODEL_FACTORS = (("fable", 2.0), ("opus", 1.5), ("sonnet", 1.0), ("haiku", 0.5))
+BUDGET_ERROR = "error_max_budget_usd"
+DESIGN = "design"
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 PERMISSION_MODE = "dontAsk"
 ALLOW = [
@@ -105,6 +113,10 @@ USAGE_HINT = "hunt: usage could not be read non-interactively; run /usage in Cla
 
 class HuntError(Exception):
     """A hunt step that cannot go on."""
+
+
+class BudgetStop(HuntError):
+    """A run not launched because an earlier run of its step hit its budget cap."""
 
 
 @dataclass
@@ -180,6 +192,32 @@ def extract_claims(text: str) -> list[str]:
         if claim and claim not in out:
             out.append(claim)
     return out
+
+
+def parse_candidates(text: str) -> list[dict]:
+    """The candidates of an architect report with a KEY CLAIM: title, strength, claim and kind (bug unless `CLAIM KIND: design`)."""
+    out = []
+    for part in re.split(r"^##\s+", text, flags=re.M)[1:]:
+        head, _, body = part.partition("\n")
+        claims = extract_claims(body)
+        if not claims:
+            continue
+        strength = re.search(r"Strength\W*?[:\-–—]\s*\**\s*([A-Za-z][A-Za-z ]*?)\s*(?=[.(*\n,;]|$)", body)
+        kind = re.search(r"CLAIM KIND\W*?[:\-–—]\s*\**\s*(bug|design)\b", body, re.I)
+        title = re.sub(r"^(candidate\s*)?\d+\s*[.:)\-–—]*\s*", "", head.strip().strip("*# "), flags=re.I).strip()
+        out.append({"title": title, "strength": strength.group(1) if strength else "-", "claim": claims[0], "kind": kind.group(1).lower() if kind else "bug"})
+    return out
+
+
+def model_factor(model: str | None) -> float:
+    """The per-run cap multiplier of a model family named in MODEL (fable > opus > sonnet > haiku); 1.0 for the agent's own model."""
+    m = (model or "").lower()
+    return next((f for k, f in MODEL_FACTORS if k in m), 1.0)
+
+
+def norm_pred(text: str) -> str:
+    """A predicate compared without case, punctuation or spacing."""
+    return re.sub(r"[^a-z0-9]+", " ", seams.norm(text)).strip()
 
 
 def claim_files(claim: str) -> list[str]:
@@ -365,14 +403,21 @@ def site_rank(s: dict) -> tuple:
     return (s["verdict"] == "violated", s["proven"], s["verdict"] == "holds")
 
 
+def coverage_text(cov: dict) -> str:
+    """`swept N of M sites`, M `?` when the map did not say."""
+    return f"swept {cov.get('swept', 0)} of {cov['mapped'] if cov.get('mapped', -1) >= 0 else '?'} sites"
+
+
 def merge(blocks: list[dict], bound: set[str] | frozenset = frozenset(), closed: list[dict] = ()) -> list[dict]:
-    """Classes by seam: sites deduped by file:line (strongest wins), premises, lenses that confirm, ONE-OFFs, closed classes, ranked."""
-    by: dict[str, dict] = {}
-    cited: list[tuple[str, set[str]]] = []
+    """Classes by (seam, predicate): sites deduped by file:line (strongest wins), coverage, premises, lenses of distinct sweeps that confirm, ONE-OFFs, closed, ranked."""
+    by: dict[tuple[str, str], dict] = {}
+    cited: list[tuple[str, set[str], object]] = []
     for b in blocks:
-        c = by.setdefault(b["seam"], {"seam": b["seam"], "predicates": [], "summaries": [], "sites": {}, "lenses": [], "claim_lenses": [], "held": 0, "refuted_premise": []})
-        if b["predicate"] not in c["predicates"]:
-            c["predicates"].append(b["predicate"])
+        src = b.get("sweep", b["predicate"])
+        c = by.setdefault((b["seam"], norm_pred(b["predicate"])), {"seam": b["seam"], "predicate": b["predicate"], "predicates": [b["predicate"]], "summaries": [], "sites": {},
+                                                                     "lenses": [], "claim_lenses": [], "held": 0, "refuted_premise": [], "coverage": {"swept": 0, "mapped": -1}})
+        cov = b.get("coverage") or {"swept": len({(s["file"], s["line"]) for s in b["sites"]}), "mapped": -1}
+        c["coverage"] = {"swept": max(c["coverage"]["swept"], cov["swept"]), "mapped": max(c["coverage"]["mapped"], cov["mapped"])}
         lenses = list(b.get("lenses") or [])
         c["lenses"] += [x for x in lenses if x not in c["lenses"]]
         prem = b.get("premise") or {}
@@ -381,8 +426,8 @@ def merge(blocks: list[dict], bound: set[str] | frozenset = frozenset(), closed:
             continue
         c["held"] += 1
         if b.get("origin") == "claim":
-            c["claim_lenses"] += [x for x in lenses if x not in c["claim_lenses"]]
-            cited += [(x, set(b.get("cited") or [])) for x in lenses]
+            c["claim_lenses"] += [(x, src) for x in lenses if (x, src) not in c["claim_lenses"]]
+            cited += [(x, set(b.get("cited") or []), src) for x in lenses]
         c["summaries"].append(b["summary"])
         for s in b["sites"]:
             key = f"{s['file']}:{s['line']}"
@@ -399,48 +444,59 @@ def merge(blocks: list[dict], bound: set[str] | frozenset = frozenset(), closed:
         table = len(engines) >= 2
         sev = max((severity(s["file"]) for s in bad), default=0)
         one_off = bool(bad) and ((len(bad) < 2 or not table) if is_bound else len(bad) == 1)
-        confirmed = sorted(set(c["claim_lenses"]) | {x for x, files in cited if files & bad_files})
-        confirmed = confirmed if len(confirmed) >= 2 else []
+        pairs = set(c["claim_lenses"]) | {(x, src) for x, files, src in cited if files & bad_files}
+        lens_set, sweep_set = {x for x, _ in pairs}, {src for _, src in pairs}
+        confirmed = sorted(lens_set) if len(lens_set) >= 2 and len(sweep_set) >= 2 else []
         shut = next((x for x in closed if x["seam"] == c["seam"] and bad_files and bad_files <= set(x.get("files", []))), None)
+        cov = c["coverage"]
         if not c["held"]:
             status = REFUTED_PREMISE
         elif shut:
             status = f"closed (PR #{shut['pr']})"
         elif not bad:
-            status = "clean"
+            status = "partial" if cov["mapped"] > 0 and cov["swept"] < cov["mapped"] else "clean"
         elif one_off:
             status = "ONE-OFF (needs per-engine table)" if is_bound and not table else "ONE-OFF"
         else:
             status = "class"
         live = c["held"] and not shut
-        score = len(bad) * sev * (1 + proven) * max(1, len(confirmed)) if live else 0
-        out.append({**{k: v for k, v in c.items() if k != "held"}, "sites": sites, "violated": len(bad), "proven_violated": proven, "engines": engines,
-                    "engine_bound": is_bound, "per_engine_table": table, "severity": sev, "score": score, "one_off": one_off and live,
+        score = len(bad) * sev * (1 + proven) * max(1, min(len(lens_set), len(sweep_set)) if confirmed else 1) if live else 0
+        title = f"{c['seam']}: {c['predicate'][:90]}"
+        out.append({**{k: v for k, v in c.items() if k not in ("held", "claim_lenses")}, "title": title, "sites": sites, "violated": len(bad), "proven_violated": proven,
+                    "engines": engines, "engine_bound": is_bound, "per_engine_table": table, "severity": sev, "score": score, "one_off": one_off and live,
                     "confirmed_by": confirmed, "status": status, "files": sorted(bad_files)})
-    out.sort(key=lambda c: (-c["score"], c["seam"]))
+    out.sort(key=lambda c: (-c["score"], c["seam"], norm_pred(c["predicate"])))
     for i, c in enumerate(out, 1):
         c["id"] = f"C{i}"
     return out
 
 
+def live_class(c: dict) -> bool:
+    """A class with a violated site whose premise held and that no PR closed."""
+    return c["violated"] >= 1 and c["status"] != REFUTED_PREMISE and not c["status"].startswith("closed")
+
+
 def verifiable(c: dict) -> bool:
-    """A class the verifier may get: a proven violated site, premise held, not closed."""
-    return c["proven_violated"] >= 1 and c["status"] != REFUTED_PREMISE and not c["status"].startswith("closed")
+    """A class the verifier may get on its proven sites: a proven violated site, premise held, not closed."""
+    return c["proven_violated"] >= 1 and live_class(c)
 
 
-def verify_set(classes: list[dict], k: int) -> list[dict]:
-    """The classes the verifier gets: every verifiable class, best score first, at most k."""
-    return [c for c in classes if verifiable(c)][:k]
+def unproven(c: dict) -> bool:
+    """A live class whose violated sites are all unproven."""
+    return live_class(c) and c["proven_violated"] == 0
 
 
-def unverified(classes: list[dict], k: int) -> list[tuple[dict, str]]:
+def verify_set(classes: list[dict], k: int, u: int = 0) -> list[dict]:
+    """The classes the verifier gets: the k best-scored with a proven violated site, then the u unproven ones with the most violated sites."""
+    rest = sorted((c for c in classes if unproven(c)), key=lambda c: (-c["violated"], c["id"]))
+    return [c for c in classes if verifiable(c)][:k] + rest[:max(u, 0)]
+
+
+def unverified(classes: list[dict], k: int, u: int = 0) -> list[tuple[dict, str]]:
     """Violated classes the verifier does not get, each with why."""
-    chosen = {c["id"] for c in verify_set(classes, k)}
-    out = []
-    for c in classes:
-        if c["violated"] and c["id"] not in chosen and c["status"] != REFUTED_PREMISE and not c["status"].startswith("closed"):
-            out.append((c, f"below --verify-top {k}" if verifiable(c) else "no proven violated site"))
-    return out
+    chosen = {c["id"] for c in verify_set(classes, k, u)}
+    return [(c, f"below --verify-top {k}" if verifiable(c) else f"no proven violated site; below --verify-unproven {u}")
+            for c in classes if live_class(c) and c["id"] not in chosen]
 
 
 def strongest(c: dict) -> list[dict]:
@@ -456,15 +512,17 @@ def site_table(sites: list[dict]) -> list[str]:
     return rows
 
 
-def render_classes(classes: list[dict]) -> str:
-    """classes.md: one section per class, ranked."""
-    out = ["# Classes", "", "| id | seam | status | violated | proven | severity | engines | engine-bound | confirmed-by | score |", "|---|---|---|---|---|---|---|---|---|---|"]
-    out += [f"| {c['id']} | {c['seam']} | {c['status']} | {c['violated']} | {c['proven_violated']} | {c['severity']} | {', '.join(c['engines']) or '-'} | "
-            f"{'yes' if c['engine_bound'] else 'no'} | {', '.join(c['confirmed_by']) or '-'} | {c['score']} |" for c in classes]
+def render_classes(classes: list[dict], designs: list[dict] = ()) -> str:
+    """classes.md: one section per class, ranked, then the design candidates."""
+    out = ["# Classes", "", "| id | seam | predicate | status | violated | proven | coverage | severity | engines | engine-bound | confirmed-by | score |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    out += [f"| {c['id']} | {c['seam']} | {c['predicate'][:60].replace('|', '/')} | {c['status']} | {c['violated']} | {c['proven_violated']} | {coverage_text(c['coverage'])} | "
+            f"{c['severity']} | {', '.join(c['engines']) or '-'} | {'yes' if c['engine_bound'] else 'no'} | {', '.join(c['confirmed_by']) or '-'} | {c['score']} |" for c in classes]
     for c in classes:
-        out += ["", f"## {c['id']} {c['seam']} ({c['status']})", "", *[f"- predicate: {p}" for p in c["predicates"]]]
+        out += ["", f"## {c['id']} {c['title']} ({c['status']}, {coverage_text(c['coverage'])})", "", *[f"- predicate: {p}" for p in c["predicates"]]]
         out += [f"- premise refuted for: {r['predicate']}: {r['evidence']}" for r in c["refuted_premise"]]
         out += ["", *site_table(c["sites"])]
+    out += ["", "# Design candidates (not swept)", ""] + [f"- {d['id']} lens {d['lens']}: {d['title']} ({d['strength']}): {d['claim']}" for d in designs] + (["none"] if not designs else [])
     return "\n".join(out) + "\n"
 
 
@@ -522,12 +580,14 @@ def usage_line(usage: dict | None) -> str:
     return f"Usage before: {show(usage.get('before'))}. After: {show(usage.get('after'))}."
 
 
-def render_summary(title: str, classes: list[dict], verdicts: dict[str, dict], invalid: list[str], tok: dict, k: int, no_sites: list[dict]) -> str:
-    """summary.md: costs, accepted, refuted, refuted premises, unverified, ONE-OFFs, closed, unmapped predicates, clean seams, invalid sweeps."""
+def render_summary(title: str, classes: list[dict], verdicts: dict[str, dict], invalid: list[str], tok: dict, k: int, no_sites: list[dict],
+                   u: int = 0, designs: list[dict] = ()) -> str:
+    """summary.md: costs, accepted, refuted, refuted premises, unverified, ONE-OFFs, closed, design candidates, unmapped predicates, partial and clean predicates, invalid sweeps."""
     acc = [c for c in classes if verdicts.get(c["id"], {}).get("holds") is True]
     ref = [c for c in classes if c["id"] in verdicts and verdicts[c["id"]].get("holds") is not True]
     prem = [c for c in classes if c["refuted_premise"]]
-    rest = unverified(classes, k)
+    rest = unverified(classes, k, u)
+    cov = lambda c: coverage_text(c["coverage"])
     out = [f"# Hunt: {title}", "", f"Cost ${tok['total']['cost_usd']:.2f}, {tok['total']['runs']} claude runs, wall {tok['total']['wall_s']:.0f}s (tokens.json).", ""]
     shared = tok["total"]["cost_usd"] - sum(x["cost_usd"] for x in tok.get("lenses", {}).values())
     out += [f"- lens {n}: ${x['cost_usd']:.2f} (architect ${x.get('lens_usd', 0):.2f}, sweeps ${x.get('sweep_usd', 0):.2f}, {x['runs']} runs)" for n, x in tok.get("lenses", {}).items()]
@@ -536,23 +596,27 @@ def render_summary(title: str, classes: list[dict], verdicts: dict[str, dict], i
     out += ["## Accepted (verifier: holds)", ""] + (["none"] if not acc else [])
     for c in acc:
         conf = f" (confirmed-by: {', '.join(c['confirmed_by'])})" if c["confirmed_by"] else ""
-        out += [f"### {c['id']} {c['seam']}{conf}", "", f"- status: {c['status']}", *[f"- predicate: {p}" for p in c["predicates"]],
-                f"- verifier: {verdicts[c['id']].get('evidence', '')}", "", *site_table(c["sites"]), ""]
-    out += ["", "## Refuted (verifier)", ""] + [f"- {c['id']} {c['seam']} ({c['status']}): {verdicts[c['id']].get('evidence', 'no verdict')}" for c in ref] + (["none"] if not ref else [])
+        out += [f"### {c['id']} {c['title']}{conf}", "", f"- status: {c['status']}; {cov(c)}{'; verified as UNPROVEN' if unproven(c) else ''}",
+                *[f"- predicate: {p}" for p in c["predicates"]], f"- verifier: {verdicts[c['id']].get('evidence', '')}", "", *site_table(c["sites"]), ""]
+    out += ["", "## Refuted (verifier)", ""] + [f"- {c['id']} {c['title']} ({c['status']}, {cov(c)}): {verdicts[c['id']].get('evidence', 'no verdict')}" for c in ref] + (["none"] if not ref else [])
     out += ["", f"## {REFUTED_PREMISE} (sweeper: the rule's premise does not hold on this tree; no verifier run)", ""]
-    out += [f"- {c['id']} {c['seam']} ({c['status']}): {r['predicate']}: {r['evidence']}" for c in prem for r in c["refuted_premise"]] + (["none"] if not prem else [])
-    out += ["", "## Not verified", ""] + [f"- {c['id']} {c['seam']} ({c['status']}): {why}; {c['violated']} violated, {c['proven_violated']} proven, score {c['score']}" for c, why in rest]
+    out += [f"- {c['id']} {c['title']} ({c['status']}): {r['predicate']}: {r['evidence']}" for c in prem for r in c["refuted_premise"]] + (["none"] if not prem else [])
+    out += ["", "## Not verified", ""] + [f"- {c['id']} {c['title']} ({c['status']}): {why}; {c['violated']} violated, {c['proven_violated']} proven, {cov(c)}, score {c['score']}" for c, why in rest]
     out += ["none"] if not rest else []
     one = [c for c in classes if c["one_off"]]
-    out += ["", "## ONE-OFF", ""] + [f"- {c['id']} {c['seam']}: {c['status']}; {c['violated']} violated; engines {', '.join(c['engines']) or '-'}; "
+    out += ["", "## ONE-OFF", ""] + [f"- {c['id']} {c['title']}: {c['status']}; {c['violated']} violated; {cov(c)}; engines {', '.join(c['engines']) or '-'}; "
                                       f"verifier {'holds' if verdicts.get(c['id'], {}).get('holds') is True else 'refuted' if c['id'] in verdicts else 'not run'}" for c in one]
     out += ["none"] if not one else []
     shut = [c for c in classes if c["status"].startswith("closed")]
-    out += ["", "## Closed earlier (target/hunt/state.json)", ""] + [f"- {c['id']} {c['seam']}: {c['status']}; files {', '.join(c['files'])}" for c in shut] + (["none"] if not shut else [])
+    out += ["", "## Closed earlier (target/hunt/state.json)", ""] + [f"- {c['id']} {c['title']}: {c['status']}; files {', '.join(c['files'])}" for c in shut] + (["none"] if not shut else [])
+    out += ["", f"## Design candidates (architect deepenings, CLAIM KIND design; not swept as bug predicates) ({len(designs)})", ""]
+    out += [f"- {d['id']} lens {d['lens']}: {d['title']} ({d['strength']}): {d['claim']}" for d in designs] + (["none"] if not designs else [])
     out += ["", f"## No sites: claim not mapped to a seam ({len(no_sites)}, not swept)", ""] + [f"- P{p['n']} {p['origin']} ({', '.join(p['lenses']) or '-'}): {p['text']}" for p in no_sites]
     out += ["none"] if not no_sites else []
+    part = [c for c in classes if c["status"] == "partial"]
+    out += ["", "## Partial (no violated site, but the sweep did not cover every mapped site; not clean)", ""] + [f"- {c['title']} ({cov(c)})" for c in part] + (["none"] if not part else [])
     clean = [c for c in classes if c["status"] == "clean"]
-    out += ["", "## Clean (no violated site)", ""] + [f"- {c['seam']} ({len(c['sites'])} sites)" for c in clean] + (["none"] if not clean else [])
+    out += ["", "## Clean (no violated site, every mapped site swept)", ""] + [f"- {c['title']} ({cov(c)})" for c in clean] + (["none"] if not clean else [])
     out += ["", "## Invalid sweeps (no gradable JSON block after one re-ask)", ""] + [f"- {i}" for i in invalid] + (["none"] if not invalid else [])
     return "\n".join(out) + "\n"
 
@@ -621,7 +685,7 @@ def history_key(r: dict) -> tuple:
 
 
 def class_status(c: dict, verdicts: dict[str, dict]) -> str:
-    """One word for a class in history: accepted, refuted, refuted-premise, closed, one-off, not-verified or clean."""
+    """One word for a class in history: accepted, refuted, refuted-premise, closed, one-off, not-verified, partial or clean."""
     if c["status"] == REFUTED_PREMISE:
         return "refuted-premise"
     if c["status"].startswith("closed"):
@@ -629,15 +693,16 @@ def class_status(c: dict, verdicts: dict[str, dict]) -> str:
     if c["id"] in verdicts:
         return "accepted" if verdicts[c["id"]].get("holds") is True else "refuted"
     if not c.get("violated"):
-        return "clean"
+        return "partial" if c["status"] == "partial" else "clean"
     return "one-off" if c.get("one_off") or c["status"].startswith("ONE-OFF") else "not-verified"
 
 
 def round_records(out: Path, lenses: list[str] | None = None, rev: str | None = None, date: str | None = None) -> list[dict]:
-    """One history record per class of a finished hunt OUT, from classes.json, verdicts.md, tokens.json and the map."""
+    """One history record per class and per design candidate of a finished hunt OUT, from classes.json, verdicts.md, tokens.json and the map."""
     if not (out / "classes.json").is_file():
         raise HuntError(f"{out} has no classes.json; the round did not reach its merge")
-    classes = json.loads((out / "classes.json").read_text())["classes"]
+    data = json.loads((out / "classes.json").read_text())
+    classes = data["classes"]
     obj, err = json_block((out / "verdicts.md").read_text()) if (out / "verdicts.md").is_file() else (None, "none")
     rows = obj.get("verdicts", []) if isinstance(obj, dict) and not err else []
     verdicts = {r["class"]: r for r in rows if isinstance(r, dict) and isinstance(r.get("class"), str)}
@@ -660,9 +725,16 @@ def round_records(out: Path, lenses: list[str] | None = None, rev: str | None = 
     for c in classes:
         files = c.get("files") or sorted({s["file"] for s in c["sites"] if s["verdict"] == "violated"})
         out_rows.append({"date": date, "rev": rev, "out": str(out), "round": out.name, "lenses": lenses, "class": c["id"], "seam": c["seam"],
+                         "predicate": c.get("predicate") or (c.get("predicates") or [""])[0],
                          "fingerprint": fingerprint(c["seam"], files), "files": files, "status": class_status(c, verdicts),
                          "class_lenses": c.get("lenses") or lenses, "confirmed_by": c.get("confirmed_by", []),
-                         "sites": {"swept": len(c["sites"]), "violated": c.get("violated", 0), "proven": c.get("proven_violated", 0)},
+                         "sites": {"swept": len(c["sites"]), "violated": c.get("violated", 0), "proven": c.get("proven_violated", 0),
+                                   "mapped": (c.get("coverage") or {}).get("mapped", -1)},
+                         "cost": {"round_usd": total, "lenses": per_lens}, "models": tok.get("models") or {}, "pr": None})
+    for d in data.get(DESIGN) or []:
+        out_rows.append({"date": date, "rev": rev, "out": str(out), "round": out.name, "lenses": lenses, "class": d["id"], "seam": DESIGN, "predicate": d["claim"],
+                         "title": d["title"], "strength": d["strength"], "fingerprint": fingerprint(DESIGN, [d["lens"], d["title"]]), "files": claim_files(d["claim"]),
+                         "status": DESIGN, "class_lenses": [d["lens"]], "confirmed_by": [], "sites": {"swept": 0, "violated": 0, "proven": 0},
                          "cost": {"round_usd": total, "lenses": per_lens}, "models": tok.get("models") or {}, "pr": None})
     return out_rows
 
@@ -712,11 +784,47 @@ def parse_models(pairs: list[str]) -> dict[str, str]:
     return got
 
 
+def parse_caps(pairs: list[str]) -> dict[str, float]:
+    """--cap STEP=USD pairs as {step: usd}; a step outside lens, sweep and verify or a non-positive amount is refused."""
+    got = {}
+    for pair in pairs:
+        step, sep, usd = pair.partition("=")
+        try:
+            value = float(usd)
+        except ValueError:
+            value = 0.0
+        if not sep or step not in CAP_STEPS or value <= 0:
+            raise HuntError(f"--cap takes STEP=USD with STEP one of {', '.join(CAP_STEPS)} and USD above 0, got {pair!r}")
+        got[step] = round(value, 2)
+    return got
+
+
 def hunter(name: str, row: dict) -> str:
     """A lens name tagged with the hunter model of its round, when the round set one."""
     m = (row.get("models") or {})
     tag = m.get("lens") or m.get("sweep")
     return f"{name} [{tag}]" if tag else name
+
+
+def overlap(a: set[str], b: set[str]) -> float:
+    """Jaccard of two file sets, 1.0 when one holds the other."""
+    if not a or not b:
+        return 0.0
+    return 1.0 if a <= b or b <= a else len(a & b) / len(a | b)
+
+
+def likely_repeats(holes: list[dict], order: list[str]) -> list[str]:
+    """Later class records with the same seam and predicate as an earlier round's and overlapping files (Jaccard >= 0.5 or contained), not the same fingerprint."""
+    out = []
+    for r in holes:
+        if not r.get("predicate"):
+            continue
+        earlier = [e for e in holes if e.get("predicate") and order.index(e["out"]) < order.index(r["out"]) and e["seam"] == r["seam"]
+                   and norm_pred(e["predicate"]) == norm_pred(r["predicate"]) and e["fingerprint"] != r["fingerprint"] and overlap(set(e["files"]), set(r["files"])) >= 0.5]
+        if earlier:
+            e = earlier[-1]
+            out.append(f"- {r['seam']}: {r['round']} {r['class']} likely repeat of {e['round']} {e['class']} (same predicate, files overlap {overlap(set(e['files']), set(r['files'])):.2f})")
+    return out
 
 
 def history_report(rows: list[dict]) -> list[str]:
@@ -742,7 +850,7 @@ def history_report(rows: list[dict]) -> list[str]:
     for x, v in sorted(lens.items(), key=lambda kv: -(kv[1]["accepted"] / kv[1]["usd"] if kv[1]["usd"] else 0)):
         rate = f"{v['accepted'] / v['usd']:.2f}" if v["usd"] else "-"
         out.append(f"- {x}: {v['accepted']} accepted / ${v['usd']:.2f} = {rate} per $ ({v['rounds']} rounds)")
-    out += ["", "Repeated holes (same fingerprint in more than one round, or back after a closed PR):"]
+    out += ["", "Repeated holes (same fingerprint in more than one round, likely repeats by seam, predicate and files, or back after a closed PR):"]
     holes = [r for r in rows if r["sites"]["violated"]]
     by_fp: dict[str, list[dict]] = {}
     for r in holes:
@@ -752,6 +860,7 @@ def history_report(rows: list[dict]) -> list[str]:
         seen = sorted({r["out"] for r in rs}, key=order.index)
         if len(seen) > 1:
             rep.append(f"- {rs[0]['seam']} [{fp}] in {len(seen)} rounds: {', '.join(Path(s).name for s in seen)}; statuses {', '.join(r['status'] for r in rs)}")
+    rep += likely_repeats(holes, order)
     for c in (r for r in rows if r.get("pr")):
         later = [r for r in holes if order.index(r["out"]) > order.index(c["out"]) and r["seam"] == c["seam"] and set(r["files"]) & set(c["files"])]
         rep += [f"- {r['seam']} back after PR #{c['pr']} ({c['round']} {c['class']} -> {r['round']} {r['class']}): {', '.join(sorted(set(r['files']) & set(c['files'])))}" for r in later]
@@ -775,7 +884,7 @@ def history_report(rows: list[dict]) -> list[str]:
         acc = count("accepted")
         out.append(f"- {rs[0]['date']} {str(rs[0]['rev'])[:8]} {hunter(', '.join(rs[0]['lenses']), rs[0])}: ${usd:.2f}, {acc} accepted, {count('refuted')} refuted, "
                    f"{count('refuted-premise')} refuted-premise, {count('one-off')} one-off, {count('not-verified')} not-verified, {count('clean')} clean, "
-                   f"{acc / usd if usd else 0:.2f} accepted per $")
+                   f"{count('partial')} partial, {count(DESIGN)} design, {acc / usd if usd else 0:.2f} accepted per $")
     return out
 
 
@@ -786,6 +895,7 @@ class Hunt:
         """Resolve the lenses, paths and plan inputs from the parsed arguments and the auto state."""
         self.a, self.root, self.gate_cmd, self.rules_path = a, root, gate_cmd, rules_path
         self.models = parse_models(a.model)
+        self.caps_set = parse_caps(a.cap)
         self.state = load_state(root)
         if a.auto:
             start = self.state["last_lens"] + 1
@@ -794,16 +904,26 @@ class Hunt:
         else:
             specs = [x for x in (a.lenses or "").split(",") if x.strip()] + ([a.lens] if a.lens else [])
         self.lenses = [resolve_lens(x) for x in dict.fromkeys(s.strip() for s in specs)]
+        taken: set[str] = set()
+        for x in self.lenses:
+            name, n = x.name, 1
+            while slug(name, 60) in taken:
+                n += 1
+                name = f"{x.name}-{n}"
+            x.name = name
+            taken.add(slug(name, 60))
         self.slug = "-".join(slug(x.name, 30) for x in self.lenses)[:80].strip("-") or "hunt"
         self.out = (a.out or root / "target" / "hunt" / f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%d}-{self.slug}").resolve()
         common = subprocess.run([GIT, "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=root, capture_output=True, text=True)
         main = Path(common.stdout.strip()).parent if common.returncode == 0 and common.stdout.strip() else root
-        self.wt = main / ".claude" / "worktrees" / f"hunt-{self.slug}"
+        self.wt = main / ".claude" / "worktrees" / f"hunt-{slug(self.out.name, 60)}-{hashlib.sha256(str(self.out).encode()).hexdigest()[:8]}"
         self.explicit = [t.strip() for r in a.rules for t in r.split(";") if t.strip()]
         self.made_wt = False
         self.rev: str | None = None
         self.auto_plan: dict | None = None
         self.timing: dict[str, float] = {}
+        self.stopped: dict[str, dict] = {}
+        self.lock = threading.Lock()
 
     def path(self, *parts: str) -> Path:
         """A path under OUT."""
@@ -847,14 +967,29 @@ class Hunt:
         if self.a.claims_from:
             text = self.a.claims_from.read_text()
             owner = self.lenses[0].name if self.lenses else "claims-from"
-            got = [str(c) for c in json.loads(text)] if self.a.claims_from.suffix == ".json" else extract_claims(text)
+            design = {k["claim"] for k in parse_candidates(text) if k["kind"] == DESIGN} if self.a.claims_from.suffix != ".json" else set()
+            got = [str(c) for c in json.loads(text)] if self.a.claims_from.suffix == ".json" else [c for c in extract_claims(text) if c not in design]
             return [(owner, c) for c in got]
         out = []
         for x in self.lenses:
             if not self.candidates(x).is_file():
                 return None
-            out += [(x.name, c) for c in extract_claims(self.candidates(x).read_text())]
+            text = self.candidates(x).read_text()
+            design = {k["claim"] for k in parse_candidates(text) if k["kind"] == DESIGN}
+            out += [(x.name, c) for c in extract_claims(text) if c not in design]
         return out
+
+    def designs(self) -> list[dict]:
+        """The architect candidates marked `CLAIM KIND: design`, numbered D1.., each with its lens; not swept."""
+        got = []
+        if self.a.claims_from:
+            reports = [] if self.a.claims_from.suffix == ".json" else [(self.lenses[0].name if self.lenses else "claims-from", self.a.claims_from)]
+        else:
+            reports = [(x.name, self.candidates(x)) for x in self.lenses]
+        for lens, path in reports:
+            if path.is_file():
+                got += [{"lens": lens, **k} for k in parse_candidates(path.read_text()) if k["kind"] == DESIGN]
+        return [{"id": f"D{i}", **d} for i, d in enumerate(got, 1)]
 
     def entries(self) -> list[dict] | None:
         """The seam map, once the map step has written it."""
@@ -872,12 +1007,19 @@ class Hunt:
         return out
 
     def budgets(self, sweeps: int) -> dict[str, float]:
-        """Per-run caps from the total --budget-usd: each lens a share (all lenses at most 40%), verify a share, the rest split over the sweeps."""
+        """Per-run caps from the total --budget-usd: each lens a share (all lenses at most 40%), the verify share split by batch, the rest split over the sweeps."""
         b = self.a.budget_usd
         n = 0 if self.a.claims_from else len(self.lenses)
         lens_total = min(b * LENS_SHARE * n, b * LENS_CAP_SHARE)
         each = (b - lens_total - b * VERIFY_SHARE) / max(sweeps, 1)
-        return {"lens": round(lens_total / max(n, 1), 2), "sweep": round(each, 2), "reask": round(each * REASK_SHARE, 2), "verify": round(b * VERIFY_SHARE, 2)}
+        batch = min(1.0, max(1, self.a.verify_batch) / max(1, self.a.verify_top + self.a.verify_unproven))
+        return {"lens": round(lens_total / max(n, 1), 2), "sweep": round(each, 2), "reask": round(each * REASK_SHARE, 2), "verify": round(b * VERIFY_SHARE * batch, 2)}
+
+    def caps(self, sweeps: int) -> dict[str, float]:
+        """The effective per-run caps: the budget shares times the model multiplier of --model, or the --cap of the step."""
+        base = self.budgets(sweeps)
+        got = {s: self.caps_set.get(s, round(base[s] * model_factor(self.models.get(s)), 2)) for s in CAP_STEPS}
+        return {**got, "reask": round(got["sweep"] * REASK_SHARE, 2)}
 
     def rule_cap(self) -> int:
         """How many changed rules an auto round can sweep at SWEEP_FLOOR_USD each beside the lenses' expected claims."""
@@ -892,6 +1034,9 @@ class Hunt:
         if since:
             entries = seams.write_map(tree, map_dir, since, False)
             plan["rules"], plan["dropped"], plan["closed_sites"] = changed_rules(entries, self.state["closed"], self.rule_cap())
+        else:
+            first = list({seams.norm(t): t for x in self.lenses for t in x.titles}.values())
+            plan["rules"], plan["dropped"], plan["first"] = first[:self.rule_cap()], first[self.rule_cap():], True
         return plan
 
     def plan(self) -> list[str]:
@@ -906,7 +1051,7 @@ class Hunt:
                 self.auto_plan["estimate"] = True
         preds = self.predicates()
         pending = self.claims() is None
-        cap = self.budgets(len(preds) + (3 * len(self.lenses) if pending else 0))
+        cap = self.caps(len(preds) + (3 * len(self.lenses) if pending else 0))
         lines = [f"plan: out {self.out}", f"plan: setup wait for the release gate once, then worktree {self.wt} (detached origin/main, read-only), removed at the end",
                  f"plan: map python -m dev.pytools.seams -> {self.path('map', 'seams.md')} (one map for every lens)"]
         if self.a.auto:
@@ -914,7 +1059,9 @@ class Hunt:
             where = "this checkout (dry-run estimate; the round recomputes on origin/main)" if ap.get("estimate") else f"origin/main {ap.get('rev')}"
             lines.append(f"plan: auto lenses {', '.join(ap['lenses'])} (rotation index {', '.join(map(str, ap['lens_index']))} of {len(LENS_ORDER)}); state {state_path(self.root)}")
             if not ap["since"]:
-                lines.append("plan: auto no last_rev yet: no changed-seam rules this round")
+                lines.append(f"plan: auto first round (no last_rev yet): sweeping the lenses' default rules, {len(ap['rules'])} kept (cap {self.rule_cap()}), "
+                             f"{len(ap['dropped'])} dropped by the budget; later rounds sweep the rules whose seams changed since this round")
+                lines += [f"plan: auto dropped rule {t!r}" for t in ap["dropped"]]
             else:
                 lines.append(f"plan: auto rules whose seams changed since {ap['since'][:12]} on {where}: {len(ap['rules'])} kept (cap {self.rule_cap()}), "
                              f"{len(ap['dropped'])} dropped by the budget, {ap['closed_sites']} changed sites skipped as closed")
@@ -929,10 +1076,14 @@ class Hunt:
         if pending:
             lines.append(f"plan: sweep agent=rivet-sweeper one per KEY CLAIM of each lens (known after the lenses; the sweep budget is split again then, ~${cap['sweep']:.2f} each for 3 claims per lens)")
         lines += [f"plan: merge pure python -> {self.path('classes.md')}, {self.path('classes.json')}",
-                  f"plan: verify agent=rivet-verifier cwd={self.wt} budget=${cap['verify']:.2f} verify-top={self.a.verify_top} (every class with a proven violated site) out={self.path('verdicts.md')}",
+                  f"plan: verify agent=rivet-verifier cwd={self.wt} budget=${cap['verify']:.2f} per batch of {self.a.verify_batch} classes, --parallel {self.a.parallel} at once; "
+                  f"verify-top={self.a.verify_top} (proven) + verify-unproven={self.a.verify_unproven} (all sites unproven, most violated first) out={self.path('verdicts.md')}",
                   f"plan: report -> {self.path('summary.md')}, {self.path('tokens.json')} (with /usage before and after when readable)",
                   f"plan: total budget ${self.a.budget_usd:.2f} across {len(self.lenses)} lens(es)",
-                  f"plan: models {', '.join(f'{k}={v}' for k, v in self.models.items()) or 'the agents own'}"]
+                  f"plan: models {', '.join(f'{k}={v}' for k, v in self.models.items()) or 'the agents own'}",
+                  f"plan: caps per run lens=${cap['lens']:.2f} sweep=${cap['sweep']:.2f} (re-ask ${cap['reask']:.2f}) verify=${cap['verify']:.2f} per batch; "
+                  f"model multipliers {', '.join(f'{s} x{model_factor(self.models.get(s)):g}' for s in CAP_STEPS)}; "
+                  f"--cap {', '.join(f'{k}=${v:.2f}' for k, v in self.caps_set.items()) or 'none'}; a run that ends with {BUDGET_ERROR} stops its step"]
         return lines
 
     def ensure_worktree(self) -> None:
@@ -993,7 +1144,9 @@ class Hunt:
         return got
 
     def claude(self, step: str, name: str, agent: str, prompt: str, budget: float, resume: str | None = None) -> dict:
-        """One `claude -p` run with cwd in the worktree; its record (rc, result JSON, wall time) lands in OUT/runs/NAME.json."""
+        """One `claude -p` run with cwd in the worktree; its record (rc, result JSON, cost, wall time) lands in OUT/runs/NAME.json; none once its step hit a cap."""
+        if step in self.stopped:
+            raise BudgetStop(f"{name} not launched: {self.stopped[step]['name']} hit its budget cap")
         self.ensure_worktree()
         exe = shutil.which("claude")
         if not exe:
@@ -1012,13 +1165,28 @@ class Hunt:
             result = json.loads(stdout)
         except (json.JSONDecodeError, TypeError):
             result = None
-        rec = {"name": name, "step": step, "agent": agent, "rc": rc, "wall_s": round(time.monotonic() - t0, 1), "budget_usd": round(budget, 2),
+        u = usage_of(result)
+        rec = {"name": name, "step": step, "agent": agent, "rc": rc, "wall_s": round(time.monotonic() - t0, 1), "budget_usd": round(budget, 2), "cost_usd": u["cost_usd"],
                "session_id": (result or {}).get("session_id") or sid, "cmd": cmd, "result": result, "stderr_tail": (stderr or "")[-500:]}
         self.path("runs").mkdir(parents=True, exist_ok=True)
         self.path("runs", f"{name}.json").write_text(json.dumps(rec, indent=1))
-        u = usage_of(result)
-        print(f"hunt: {name} agent={agent} rc={rc} ${u['cost_usd']:.2f} {rec['wall_s']:.0f}s", flush=True)
+        if isinstance(result, dict) and result.get("subtype") == BUDGET_ERROR:
+            with self.lock:
+                self.stopped.setdefault(step, rec)
+        print(f"hunt: {name} agent={agent} rc={rc} ${u['cost_usd']:.2f} {rec['wall_s']:.0f}s{' ' + BUDGET_ERROR if step in self.stopped and self.stopped[step] is rec else ''}", flush=True)
         return rec
+
+    def check_budget(self, step: str) -> None:
+        """Fail the step with the spent amount and the remedy when one of its runs ended with error_max_budget_usd."""
+        rec = self.stopped.get(step)
+        if not rec:
+            return
+        runs = [json.loads(f.read_text()) for f in sorted(self.path("runs").glob("*.json"))] if self.path("runs").is_dir() else []
+        spent = sum(usage_of(r.get("result"))["cost_usd"] for r in runs if r.get("step") == step)
+        model = self.models.get(step) or "the agent's own model"
+        raise HuntError(f"{step} stopped: run {rec['name']} ended with {BUDGET_ERROR} at ${rec['cost_usd']:.2f} (cap ${rec['budget_usd']:.2f}, model {model}); "
+                        f"the {step} step spent ${spent:.2f} and launched no further run. Remedy: raise the cap (--cap {step}=USD or a larger --budget-usd) "
+                        f"or change the model (--model {step}=MODEL), then rerun with --resume")
 
     @staticmethod
     def text_of(rec: dict) -> str:
@@ -1036,6 +1204,8 @@ class Hunt:
         errs = [err] if err else check(obj)
         if not errs:
             return text, obj, []
+        if step in self.stopped:
+            return "", None, [f"{step} stopped by {BUDGET_ERROR}; no re-ask"]
         again = (f"Your reply could not be graded: {'; '.join(errs)[:800]}. Reply again in English with the whole result and end with ONE fenced "
                  "```json block of the shape you were given, with nothing after it.")
         rec2 = self.claude(step, f"{name}-reask", agent, again, reask_budget, resume=rec["session_id"])
@@ -1063,8 +1233,11 @@ class Hunt:
                 f"The seam map of this tree is {self.path('map', 'seams.md')} (every site in seams.json beside it)."
                 + (("\nFocus seams of this lens:\n" + "\n".join(focus)) if focus else "")
                 + (("\nRows with a missing engine:\n" + "\n".join(drift)) if drift else "")
-                + "\n\nRun the review through this ONE lens and reply with the report itself, in Markdown. "
-                "End every candidate with one line `KEY CLAIM: <one factual sentence in English with file:line>`.")
+                + "\n\nRun the review through this ONE lens and reply with the report itself, in Markdown, one `## ` section per candidate. "
+                "Give every candidate a `**Strength:** Strong|Worth exploring|Speculative` line and end it with one line "
+                "`KEY CLAIM: <one factual sentence in English with file:line>` followed by one line `CLAIM KIND: bug` when the claim names code that is "
+                "wrong today and a sweeper can grade it site by site (a rule violated at a site: a lost error, a missing guard, a wrong key), or "
+                "`CLAIM KIND: design` when it names a structure worth deepening and no site is wrong today. Design claims are listed for the owner, not swept.")
 
     def step_lens(self) -> bool:
         """One architect run per lens, at most --parallel at once; each report becomes candidates/<lens>.md."""
@@ -1075,13 +1248,16 @@ class Hunt:
             return False
         self.path("candidates").mkdir(parents=True, exist_ok=True)
         self.ensure_worktree()
-        cap = self.budgets(1)["lens"]
+        cap = self.caps(1)["lens"]
 
         def one(x: Lens) -> str | None:
             """Run one lens; the error text when it produced nothing."""
             out = self.candidates(x)
             name = f"lens-{slug(x.name, 60)}"
-            rec = self.claude("lens", name, "rivet-architect", self.lens_prompt(x, out), cap)
+            try:
+                rec = self.claude("lens", name, "rivet-architect", self.lens_prompt(x, out), cap)
+            except BudgetStop as e:
+                return str(e)
             text = self.text_of(rec)
             if not text:
                 return f"lens {x.name} failed (rc {rec['rc']}); see {self.path('runs', name + '.json')}"
@@ -1091,6 +1267,7 @@ class Hunt:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, self.a.parallel)) as pool:
             failed = [e for e in pool.map(one, todo) if e]
+        self.check_budget("lens")
         if failed:
             raise HuntError(f"{len(failed)} lens run(s) failed; --resume retries them: {failed[0]}")
         return True
@@ -1119,12 +1296,15 @@ class Hunt:
             return False
         self.path("sweep").mkdir(parents=True, exist_ok=True)
         self.ensure_worktree()
-        cap = self.budgets(len(live))
+        cap = self.caps(len(live))
 
         def one(p: Predicate) -> str | None:
             """Run one sweep; the error text when it produced nothing."""
             out = self.path("sweep", f"{p.n:02d}.md")
-            text, _, errs = self.ask("sweep", f"sweep-{p.n:02d}", "rivet-sweeper", self.sweep_prompt(p, out), cap["sweep"], cap["reask"], validate_sweep)
+            try:
+                text, _, errs = self.ask("sweep", f"sweep-{p.n:02d}", "rivet-sweeper", self.sweep_prompt(p, out), cap["sweep"], cap["reask"], validate_sweep)
+            except BudgetStop as e:
+                return str(e)
             if not text:
                 return f"sweep {p.n:02d}: {'; '.join(errs)}"
             out.write_text(text)
@@ -1133,13 +1313,16 @@ class Hunt:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, self.a.parallel)) as pool:
             failed = [e for e in pool.map(one, todo) if e]
+        self.check_budget("sweep")
         if failed:
             raise HuntError(f"{len(failed)} sweep run(s) failed; --resume retries them: {failed[0]}")
         return True
 
     def sweeps(self) -> tuple[list[dict], list[str]]:
-        """The valid sweep blocks, each with its predicate's origin, lenses and cited files, and the names of the invalid sweep files."""
+        """The valid sweep blocks, each with its predicate's origin, lenses, cited files and coverage of the mapped sites, and the names of the invalid sweep files."""
         preds = {p.n: p for p in self.predicates()}
+        raw = self.entries()
+        entries = raw or []
         blocks, invalid = [], []
         for f in sorted(self.path("sweep").glob("[0-9][0-9].md")) if self.path("sweep").is_dir() else []:
             obj, err = json_block(f.read_text())
@@ -1147,7 +1330,10 @@ class Hunt:
                 invalid.append(f.name)
                 continue
             p = preds.get(int(f.stem))
-            blocks.append({**obj, "origin": p.origin if p else "claim", "lenses": p.lenses if p else [], "cited": p.cited if p else []})
+            on_map = {(site_path(s), s.get("line")) for e in entries if p and e["name"] in p.seams for s in e.get("sites", [])}
+            covered = len({(s["file"], s["line"]) for s in obj["sites"]} & on_map)
+            blocks.append({**obj, "origin": p.origin if p else "claim", "lenses": p.lenses if p else [], "cited": p.cited if p else [], "sweep": int(f.stem),
+                           "coverage": {"swept": covered, "mapped": len(on_map) if raw is not None else -1}})
         return blocks, invalid
 
     def step_merge(self) -> bool:
@@ -1159,18 +1345,33 @@ class Hunt:
         bound = {e["name"] for e in entries if e["engine_bound"]}
         classes = merge(blocks, bound, self.state["closed"])
         no_sites = [{"n": p.n, "origin": p.origin, "text": p.text, "lenses": p.lenses} for p in self.predicates() if p.mapped == 0]
-        self.path("classes.json").write_text(json.dumps({"classes": classes, "invalid_sweeps": invalid, "no_sites": no_sites}, indent=1))
-        self.path("classes.md").write_text(render_classes(classes))
+        designs = self.designs()
+        self.path("classes.json").write_text(json.dumps({"classes": classes, "invalid_sweeps": invalid, "no_sites": no_sites, DESIGN: designs}, indent=1))
+        self.path("classes.md").write_text(render_classes(classes, designs))
         print(f"hunt: merge {len(blocks)} sweeps -> {len(classes)} classes, {sum(c['one_off'] for c in classes)} ONE-OFF, "
-              f"{sum(c['status'] == REFUTED_PREMISE for c in classes)} {REFUTED_PREMISE}, {len(invalid)} invalid, {len(no_sites)} no sites", flush=True)
+              f"{sum(c['status'] == REFUTED_PREMISE for c in classes)} {REFUTED_PREMISE}, {sum(c['status'] == 'partial' for c in classes)} partial, "
+              f"{len(invalid)} invalid, {len(no_sites)} no sites, {len(designs)} design candidates", flush=True)
         return True
 
     def top(self) -> list[dict]:
-        """The classes the verifier gets: every class with a proven violated site, best score first, at most --verify-top."""
-        return verify_set(json.loads(self.path("classes.json").read_text())["classes"], self.a.verify_top)
+        """The classes the verifier gets: the --verify-top best with a proven violated site, then the --verify-unproven ones with the most violated sites."""
+        return verify_set(json.loads(self.path("classes.json").read_text())["classes"], self.a.verify_top, self.a.verify_unproven)
+
+    def verify_prompt(self, batch: list[dict], out: Path) -> str:
+        """The brief of one verifier run over a batch of classes; an unproven class is marked so."""
+        ids = [c["id"] for c in batch]
+        parts = []
+        for c in batch:
+            mark = (f" UNPROVEN: the sweeper proved none of its {c['violated']} violated sites; open them yourself before you grade it." if unproven(c) else "")
+            parts += [f"Class {c['id']} (seam {c['seam']}): the predicate is VIOLATED at these sites.{mark}", *[f"- predicate: {p}" for p in c["predicates"]], *site_table(strongest(c)), ""]
+        return ("Try to REFUTE each class below on its two sites (the strongest and one other): open each site, check the line against "
+                "the current code, and re-run any command its evidence names when it is read-only. Uncertain means refuted.\n\n" + "\n".join(parts) + "\n"
+                + WORKTREE_NOTE.format(wt=self.wt, out=out) + "\n\n" + ENGLISH + "\n\nEnd your reply with ONE fenced ```json block, nothing after it: "
+                '{"verdicts": [{"class": "C1", "holds": true, "evidence": "what you opened or ran, quoted"}]} with one row per class '
+                f"({', '.join(ids)}); holds true means the violation is confirmed.")
 
     def step_verify(self) -> bool:
-        """One verifier run over the chosen classes; verdicts.md ends with the parsed verdict block."""
+        """Verifier runs over batches of --verify-batch classes, at most --parallel at once; verdicts.md joins every batch and ends with one verdict block."""
         out = self.path("verdicts.md")
         if out.is_file():
             return False
@@ -1178,21 +1379,44 @@ class Hunt:
         if not top:
             out.write_text('No class to verify.\n\n```json\n{"verdicts": []}\n```\n')
             return True
-        ids = [c["id"] for c in top]
-        parts = []
-        for c in top:
-            parts += [f"Class {c['id']} (seam {c['seam']}): the predicate is VIOLATED at these sites.", *[f"- predicate: {p}" for p in c["predicates"]], *site_table(strongest(c)), ""]
-        prompt = ("Try to REFUTE each class below on its two sites (the strongest and one other): open each site, check the line against "
-                  "the current code, and re-run any command its evidence names when it is read-only. Uncertain means refuted.\n\n" + "\n".join(parts) + "\n"
-                  + WORKTREE_NOTE.format(wt=self.wt, out=out) + "\n\n" + ENGLISH + "\n\nEnd your reply with ONE fenced ```json block, nothing after it: "
-                  '{"verdicts": [{"class": "C1", "holds": true, "evidence": "what you opened or ran, quoted"}]} with one row per class '
-                  f"({', '.join(ids)}); holds true means the violation is confirmed.")
-        cap = self.budgets(1)
-        text, obj, errs = self.ask("verify", "verify", "rivet-verifier", prompt, cap["verify"], cap["verify"] * REASK_SHARE, lambda o: validate_verdicts(o, ids))
-        if not text:
-            raise HuntError(f"the verify run failed: {'; '.join(errs)}")
-        out.write_text(text)
-        print(f"hunt: verify {len(ids)} classes{'' if not errs else ' INVALID: ' + '; '.join(errs)[:120]} -> {out}", flush=True)
+        size = max(1, self.a.verify_batch)
+        batches = [top[i:i + size] for i in range(0, len(top), size)]
+        self.path("verify").mkdir(parents=True, exist_ok=True)
+        cap = self.caps(1)
+
+        def one(job: tuple[int, list[dict]]) -> str | None:
+            """Run one verifier batch; the error text when it produced nothing."""
+            i, batch = job
+            dest = self.path("verify", f"{i:02d}.md")
+            if dest.is_file():
+                return None
+            ids = [c["id"] for c in batch]
+            try:
+                text, _, errs = self.ask("verify", f"verify-{i:02d}", "rivet-verifier", self.verify_prompt(batch, dest), cap["verify"], cap["verify"] * REASK_SHARE,
+                                         lambda o: validate_verdicts(o, ids))
+            except BudgetStop as e:
+                return str(e)
+            if not text:
+                return f"verify batch {i:02d}: {'; '.join(errs)}"
+            dest.write_text(text)
+            print(f"hunt: verify batch {i:02d} {len(ids)} classes{'' if not errs else ' INVALID: ' + '; '.join(errs)[:120]} -> {dest}", flush=True)
+            return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, self.a.parallel)) as pool:
+            failed = [e for e in pool.map(one, enumerate(batches, 1)) if e]
+        self.check_budget("verify")
+        if failed:
+            raise HuntError(f"{len(failed)} verify run(s) failed; --resume retries them: {failed[0]}")
+        rows, texts = [], []
+        for i, batch in enumerate(batches, 1):
+            text = self.path("verify", f"{i:02d}.md").read_text()
+            obj, err = json_block(text)
+            ids = {c["id"] for c in batch}
+            got = obj.get("verdicts", []) if isinstance(obj, dict) and not err else []
+            rows += [r for r in got if isinstance(r, dict) and r.get("class") in ids and isinstance(r.get("holds"), bool)]
+            texts.append(f"## Batch {i:02d}: {', '.join(sorted(ids, key=lambda x: int(x[1:])))}\n\n{text.strip()}\n")
+        out.write_text("\n".join(texts) + "\n## All batches\n\n```json\n" + json.dumps({"verdicts": rows}, indent=1) + "\n```\n")
+        print(f"hunt: verify {len(top)} classes in {len(batches)} batches -> {out}", flush=True)
         return True
 
     def verdicts(self) -> dict[str, dict]:
@@ -1222,7 +1446,8 @@ class Hunt:
         self.path("tokens.json").write_text(json.dumps(tok, indent=1))
         data = json.loads(self.path("classes.json").read_text())
         title = ", ".join(x.name for x in self.lenses) + (" (auto)" if self.a.auto else "")
-        self.path("summary.md").write_text(render_summary(title, data["classes"], self.verdicts(), data["invalid_sweeps"], tok, self.a.verify_top, data.get("no_sites", [])))
+        self.path("summary.md").write_text(render_summary(title, data["classes"], self.verdicts(), data["invalid_sweeps"], tok, self.a.verify_top, data.get("no_sites", []),
+                                                          self.a.verify_unproven, data.get(DESIGN, [])))
         acc = sum(v.get("holds") is True for v in self.verdicts().values())
         print(f"hunt: report {acc} accepted, {len(data['classes'])} classes, ${tok['total']['cost_usd']:.2f} -> {self.path('summary.md')}", flush=True)
         return True
@@ -1240,6 +1465,8 @@ class Hunt:
             shutil.rmtree(self.path("candidates"), ignore_errors=True)
         if "sweep" in later and step in ("map", "lens"):
             shutil.rmtree(self.path("sweep"), ignore_errors=True)
+        if "verify" in later:
+            shutil.rmtree(self.path("verify"), ignore_errors=True)
         for s in later:
             for f in drop.get(s, []):
                 self.path(f).unlink(missing_ok=True)
@@ -1327,7 +1554,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--parallel", type=int, default=3)
     ap.add_argument("--model", action="append", default=[], metavar="STEP=MODEL", help="model for a step (lens, sweep, verify) instead of the agent's own; repeatable")
     ap.add_argument("--budget-usd", type=float, default=30.0, help="the total across every lens and claude run (default 30)")
-    ap.add_argument("--verify-top", "--top", dest="verify_top", type=int, default=8, help="most classes the verifier gets (default 8)")
+    ap.add_argument("--cap", action="append", default=[], metavar="STEP=USD", help="per-run cap for a step (lens, sweep, verify) instead of its budget share; repeatable")
+    ap.add_argument("--verify-top", "--top", dest="verify_top", type=int, default=8, help="most classes with a proven violated site the verifier gets (default 8)")
+    ap.add_argument("--verify-unproven", type=int, default=3, help="most classes with only unproven violated sites the verifier gets, most sites first (default 3)")
+    ap.add_argument("--verify-batch", type=int, default=3, help="classes per verifier run; batches run --parallel at once (default 3)")
     ap.add_argument("--since", help="map only files changed since REV")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--resume", action="store_true", help="continue in an existing OUT; done steps are skipped by their files")
@@ -1361,11 +1591,15 @@ def site(file, line, engine, verdict, proven):
 if os.environ.get("HUNT_FAKE_MODE") == "fail-lens" and agent == "rivet-architect":
     print("boom", file=sys.stderr)
     sys.exit(1)
+if os.environ.get("HUNT_FAKE_MODE") == "budget-sweep" and agent == "rivet-sweeper":
+    print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "session_id": sid, "total_cost_usd": 0.6, "usage": {}}))
+    sys.exit(1)
 held = {"holds": True, "evidence": "Cargo.toml:1 quoted"}
 if agent == "rivet-architect":
     lens = re.match(r"Lens (\S+):", prompt).group(1)
-    text = ("# Lens\n\n## A\nKEY CLAIM: the lock key in src/state/lock.rs:1 omits the export name (" + lens + ").\n\n## B\n**KEY CLAIM:** BADJSON src/other.py:5 swallows a typed error.\n"
-            "\n## C\nKEY CLAIM: nothing maps here, docs only.\n")
+    text = ("# Lens\n\n## Candidate 1 - A\n**Strength:** Strong.\nKEY CLAIM: the lock key in src/state/lock.rs:1 omits the export name (" + lens + ").\nCLAIM KIND: bug\n\n"
+            "## B\n**KEY CLAIM:** BADJSON src/other.py:5 swallows a typed error.\n\n## C\nKEY CLAIM: nothing maps here, docs only.\n\n"
+            "## Candidate 4 - Deepen the lock module\n**Strength:** Worth exploring (one module).\nKEY CLAIM: src/state/lock.rs:1 could own the key format (" + lens + ").\n**CLAIM KIND:** design\n")
 elif agent == "rivet-sweeper":
     if resume:
         pred, seam = "BADJSON src/other.py:5 swallows a typed error.", "error text matching"
@@ -1421,34 +1655,66 @@ def self_test() -> int:
     s = lambda f, n, e, v, p: {"file": f, "line": n, "engine": e, "verdict": v, "evidence": f"{f}:{n}", "proven": p}
     blk = lambda pred, seam, sites, **kw: {"predicate": pred, "seam": seam, "summary": "", "premise": held, "sites": sites, **kw}
     blocks = [
-        blk("p1", "lock keys", [s("src/a.rs", 1, "sqlite", "holds", False), s("src/a.rs", 2, "postgres", "violated", False)]),
-        blk("p2", "lock keys", [s("src/a.rs", 1, "sqlite", "violated", True), s("src/a.rs", 2, "postgres", "violated", True)]),
+        blk("p2.", "lock keys", [s("src/a.rs", 1, "sqlite", "holds", False), s("src/a.rs", 2, "postgres", "violated", False)]),
+        blk("P2", "lock keys", [s("src/a.rs", 1, "sqlite", "violated", True), s("src/a.rs", 2, "postgres", "violated", True)]),
+        blk("journal", "lock keys", [s("src/j.rs", n, "n/a", "violated", False) for n in (1, 2, 3)]),
+        blk("fallback", "state keys", [s("src/k.rs", n, "n/a", "violated", False) for n in (1, 2, 3, 4)]),
         blk("p3", "env reads", [s("dev/x.py", 4, "mysql", "violated", True), s("dev/x.py", 9, "postgres", "holds", True)]),
         blk("p4", "retries", [s("src/r.rs", 4, "n/a", "violated", True), s("src/r.rs", 8, "", "violated", False)]),
-        blk("p5", "clean", [s("src/c.rs", 1, "pg", "holds", True)]),
+        blk("p5", "clean", [s("src/c.rs", 1, "pg", "holds", True)], coverage={"swept": 1, "mapped": 3}),
+        blk("p11", "clean", [s("src/c.rs", 1, "pg", "holds", True)], coverage={"swept": 1, "mapped": 1}),
         blk("p6", "state backends (functions)", [s("src/st.rs", 1, "sqlite", "violated", True), s("src/st.rs", 2, "sqlite", "violated", True)]),
         blk("p7", "panic", [s("src/p.rs", 1, "n/a", "violated", True)], premise={"holds": False, "evidence": "Cargo.toml:240 no panic"}),
         blk("p8", "closed seam", [s("src/z.rs", 1, "n/a", "violated", True), s("src/z.rs", 2, "n/a", "violated", True)]),
     ]
     merged = merge(blocks, {"state backends (functions)"}, [{"seam": "closed seam", "files": ["src/z.rs"], "pr": 7}])
-    got = {c["seam"]: c for c in merged}
-    lk = got["lock keys"]
-    assert lk["predicates"] == ["p1", "p2"] and [x["line"] for x in lk["sites"]] == [1, 2] and lk["violated"] == 2 and lk["proven_violated"] == 2, lk
+    got = {norm_pred(c["predicate"]): c for c in merged}
+    lk = got["p2"]
+    assert len(merged) == 10 and [c["predicate"] for c in merged if c["seam"] == "lock keys"] == ["p2.", "journal"], [(c["seam"], c["predicate"]) for c in merged]
+    assert lk["predicates"] == ["p2."] and lk["title"] == "lock keys: p2." and got["journal"]["title"] == "lock keys: journal", lk
+    assert [x["line"] for x in lk["sites"]] == [1, 2] and lk["violated"] == 2 and lk["proven_violated"] == 2, lk
     assert lk["status"] == "class" and not lk["one_off"] and lk["engines"] == ["postgres", "sqlite"] and lk["score"] == 2 * 3 * 3 and lk["id"] == "C1"
-    assert got["env reads"]["status"] == "ONE-OFF" and got["env reads"]["one_off"], got["env reads"]
-    assert got["retries"]["status"] == "class" and not got["retries"]["one_off"] and not got["retries"]["engine_bound"], got["retries"]
-    assert got["state backends (functions)"]["status"] == "ONE-OFF (needs per-engine table)" and got["state backends (functions)"]["engine_bound"], got["state backends (functions)"]
-    assert got["clean"]["status"] == "clean" and not got["clean"]["one_off"] and got["clean"]["score"] == 0
-    assert got["panic"]["status"] == REFUTED_PREMISE and got["panic"]["score"] == 0 and got["panic"]["refuted_premise"][0]["evidence"] == "Cargo.toml:240 no panic"
-    assert got["closed seam"]["status"] == "closed (PR #7)" and got["closed seam"]["score"] == 0
+    assert got["journal"]["status"] == "class" and got["journal"]["proven_violated"] == 0 and got["journal"]["files"] == ["src/j.rs"], got["journal"]
+    assert got["p3"]["status"] == "ONE-OFF" and got["p3"]["one_off"], got["p3"]
+    assert got["p4"]["status"] == "class" and not got["p4"]["one_off"] and not got["p4"]["engine_bound"], got["p4"]
+    assert got["p6"]["status"] == "ONE-OFF (needs per-engine table)" and got["p6"]["engine_bound"], got["p6"]
+    assert got["p11"]["status"] == "clean" and not got["p11"]["one_off"] and got["p11"]["score"] == 0 and coverage_text(got["p11"]["coverage"]) == "swept 1 of 1 sites"
+    assert got["p5"]["status"] == "partial" and got["p5"]["score"] == 0 and coverage_text(got["p5"]["coverage"]) == "swept 1 of 3 sites", got["p5"]
+    assert coverage_text(lk["coverage"]) == "swept 2 of ? sites" and coverage_text(got["journal"]["coverage"]) == "swept 3 of ? sites"
+    assert got["p7"]["status"] == REFUTED_PREMISE and got["p7"]["score"] == 0 and got["p7"]["refuted_premise"][0]["evidence"] == "Cargo.toml:240 no panic"
+    assert got["p8"]["status"] == "closed (PR #7)" and got["p8"]["score"] == 0
     vs = [c["seam"] for c in verify_set(merged, 8)]
     assert vs == ["lock keys", "state backends (functions)", "retries", "env reads"], vs
-    assert [(c["seam"], why) for c, why in unverified(merged, 2)] == [("retries", "below --verify-top 2"), ("env reads", "below --verify-top 2")]
+    assert [c["predicate"] for c in verify_set([{**c, "id": f"C{90 - i}"} for i, c in enumerate(merged)], 0, 2)] == ["fallback", "journal"]
+    assert [c["predicate"] for c in verify_set(merged, 8, 1)][4:] == ["fallback"] and [c["predicate"] for c in verify_set(merged, 2, 3)] == ["p2.", "p6", "fallback", "journal"]
+    assert [(c["predicate"], why) for c, why in unverified(merged, 2, 1)] == [("p4", "below --verify-top 2"), ("journal", "no proven violated site; below --verify-unproven 1"),
+                                                                             ("p3", "below --verify-top 2")], unverified(merged, 2, 1)
+    zero = {"total": {"cost_usd": 0.0, "runs": 0, "wall_s": 0.0}}
+    summ = render_summary("t", merged, {}, [], zero, 1, [], 0, [{"id": "D1", "lens": "cdc", "title": "Deepen", "strength": "Strong", "claim": "x src/a.rs:1"}])
+    part, clean = summ.split("## Partial")[1].split("## Clean")
+    assert "- clean: p5 (swept 1 of 3 sites)" in part and "p5" not in clean and "- clean: p11 (swept 1 of 1 sites)" in clean, summ
+    assert "## Design candidates" in summ and "- D1 lens cdc: Deepen (Strong): x src/a.rs:1" in summ and "C4 state keys: fallback" in summ, summ
     two = merge([blk("c1", "lock keys", [s("src/a.rs", 1, "n/a", "violated", True)], origin="claim", lenses=["cdc"], cited=["src/a.rs"]),
                  blk("c2", "other", [s("src/b.rs", 1, "n/a", "violated", True)], origin="claim", lenses=["runners"], cited=["src/a.rs"]),
                  blk("c3", "lock keys", [s("src/a.rs", 2, "n/a", "violated", True)], origin="claim", lenses=["hot-spots"], cited=[])])
-    assert two[0]["seam"] == "lock keys" and two[0]["confirmed_by"] == ["cdc", "hot-spots", "runners"] and two[0]["score"] == 2 * 3 * 3 * 3 and two[1]["confirmed_by"] == [], two
+    assert [(c["predicate"], c["confirmed_by"], c["score"]) for c in two] == [("c3", ["cdc", "hot-spots", "runners"], 1 * 3 * 2 * 3), ("c1", ["cdc", "runners"], 1 * 3 * 2 * 2),
+                                                                              ("c2", [], 1 * 3 * 2)], two
+    one_sweep = merge([blk("c4", "x", [s("src/q.rs", 1, "n/a", "violated", True)], origin="claim", lenses=["cdc", "runners"], cited=["src/q.rs"], sweep=4)])
+    assert one_sweep[0]["confirmed_by"] == [] and one_sweep[0]["score"] == 1 * 3 * 2, one_sweep
     assert [x["line"] for x in strongest(lk)] == [1, 2]
+    cands = parse_candidates("# R\n\n## Candidate 1 \u2014 Lock key\n**Strength:** Strong.\nKEY CLAIM: a src/a.rs:1.\nCLAIM KIND: bug\n\n## 2. Deepen state\n"
+                             "**Strength:** Worth exploring (maybe).\n**KEY CLAIM:** b src/b.rs:2.\n**CLAIM KIND:** design\n\n## 3. Old\nKEY CLAIM: c.\n\n## Summary\n| x |\n")
+    assert cands == [{"title": "Lock key", "strength": "Strong", "claim": "a src/a.rs:1.", "kind": "bug"}, {"title": "Deepen state", "strength": "Worth exploring", "claim": "b src/b.rs:2.", "kind": "design"},
+                     {"title": "Old", "strength": "-", "claim": "c.", "kind": "bug"}], cands
+    assert model_factor("claude-fable-5-1") > model_factor("opus") > model_factor("claude-sonnet-4-5") > model_factor("haiku") and model_factor(None) == 1.0
+    assert parse_caps(["sweep=2.5", "verify=1"]) == {"sweep": 2.5, "verify": 1.0}
+    for bad in (["merge=1"], ["sweep=x"], ["lens=0"], ["lens"]):
+        try:
+            parse_caps(bad)
+        except HuntError:
+            pass
+        else:
+            raise AssertionError(f"--cap {bad} was accepted")
     assert changed_rules([{"name": "a", "rules": ["R1"], "sites": [{"path": "x.rs", "changed": True}, {"path": "y.rs", "changed": True}]},
                           {"name": "b", "rules": ["R2"], "sites": [{"path": "z.rs", "changed": True}]}], [{"seam": "a", "files": ["x.rs", "y.rs"]}], 5) == (["R2"], [], 2)
     recs = [{"step": "sweep", "name": "sweep-01", "result": {"total_cost_usd": 0.5, "usage": {"input_tokens": 10, "output_tokens": 2}}}, {"step": "lens", "name": "lens-a", "result": None, "rc": 1},
@@ -1459,20 +1725,25 @@ def self_test() -> int:
     assert fingerprint("s", ["b.rs", "a.rs", "a.rs"]) == fingerprint("s", ["a.rs", "b.rs"]) != fingerprint("t", ["a.rs", "b.rs"])
     assert [class_status({"id": "C1", "status": x, "violated": v, "one_off": o}, {"C1": {"holds": h}} if h is not None else {}) for x, v, o, h in
             (("class", 2, False, True), ("class", 2, False, False), (REFUTED_PREMISE, 2, False, None), ("closed (PR #1)", 1, False, None), ("ONE-OFF", 1, True, None),
-             ("class", 3, False, None), ("clean", 0, False, None))] == ["accepted", "refuted", "refuted-premise", "closed", "one-off", "not-verified", "clean"]
-    hrow = lambda out, date, cid, seam, files, status, ls, cost, pr=None: {"date": date, "rev": "r" + out, "out": out, "round": out, "lenses": ls, "class": cid, "seam": seam,
+             ("class", 3, False, None), ("clean", 0, False, None), ("partial", 0, False, None))] == ["accepted", "refuted", "refuted-premise", "closed", "one-off", "not-verified", "clean", "partial"]
+    hrow = lambda out, date, cid, seam, files, status, ls, cost, pr=None, pred="p": {"date": date, "rev": "r" + out, "out": out, "round": out, "lenses": ls, "class": cid, "seam": seam, "predicate": pred,
                                                                          "fingerprint": fingerprint(seam, files), "files": files, "status": status, "class_lenses": ls,
                                                                          "sites": {"swept": 2, "violated": len(files), "proven": len(files)}, "cost": {"round_usd": sum(cost.values()), "lenses": cost}, "pr": pr}
     hist = [hrow("r1", "2026-01-01", "C1", "lock keys", ["src/a.rs"], "accepted", ["cdc", "runners"], {"cdc": 2.0, "runners": 2.0}, 9),
             hrow("r1", "2026-01-01", "C2", "env", [], "clean", ["cdc"], {"cdc": 2.0, "runners": 2.0}),
-            hrow("r2", "2026-01-02", "C1", "lock keys", ["src/a.rs", "src/b.rs"], "refuted", ["harness"], {"harness": 1.0}),
+            hrow("r2", "2026-01-02", "C1", "lock keys", ["src/a.rs", "src/b.rs"], "refuted", ["harness"], {"harness": 1.0}, pred="P."),
             hrow("r3", "2026-01-03", "C4", "retries", ["src/r.rs"], "accepted", ["harness"], {"harness": 1.0}),
             hrow("r4", "2026-01-04", "C1", "retries", ["src/r.rs"], "not-verified", ["cdc"], {"cdc": 3.0})]
     rep = "\n".join(history_report(hist))
     assert "- harness: 1 accepted / $2.00 = 0.50 per $ (2 rounds)" in rep and "- cdc: 1 accepted / $5.00 = 0.20 per $ (2 rounds)" in rep, rep
     assert "- retries [" in rep and "in 2 rounds: r3, r4" in rep and "- lock keys back after PR #9 (r1 C1 -> r2 C1): src/a.rs" in rep, rep
     assert "- cdc + harness: 1 shared classes" in rep and "- cdc + runners: 1 shared classes" in rep, rep
-    assert "- 2026-01-01 rr1 cdc, runners: $4.00, 1 accepted, 0 refuted, 0 refuted-premise, 0 one-off, 0 not-verified, 1 clean, 0.25 accepted per $" in rep, rep
+    assert "- 2026-01-01 rr1 cdc, runners: $4.00, 1 accepted, 0 refuted, 0 refuted-premise, 0 one-off, 0 not-verified, 1 clean, 0 partial, 0 design, 0.25 accepted per $" in rep, rep
+    assert "- lock keys: r2 C1 likely repeat of r1 C1 (same predicate, files overlap 1.00)" in rep and "r4 C1 likely repeat" not in rep, rep
+    order = ["r1", "r2"]
+    assert likely_repeats([hist[0], {**hist[2], "predicate": "another rule"}], order) == [] and likely_repeats([hist[0], {**hist[2], "files": ["src/b.rs", "src/c.rs"]}], order) == []
+    assert likely_repeats([{**hist[0], "files": ["src/a.rs", "src/b.rs", "src/c.rs"]}, {**hist[2], "files": ["src/a.rs", "src/b.rs", "src/d.rs"]}], order) == [
+        "- lock keys: r2 C1 likely repeat of r1 C1 (same predicate, files overlap 0.50)"] and history_report([{k: v for k, v in hist[0].items() if k != "predicate"}])
 
     with tempfile.TemporaryDirectory() as tmp:
         t = Path(tmp)
@@ -1544,6 +1815,10 @@ def self_test() -> int:
             assert any("sweep agent=rivet-sweeper" in x and "A lock is keyed" in x and "lock keys" in x for x in plan), plan
             assert any("one per KEY CLAIM" in x for x in plan) and any("verify agent=rivet-verifier" in x and "verify-top=8" in x for x in plan), plan
             assert "plan: models sweep=fable, lens=fable" in single("dry", "--model", "sweep=fable", "--model", "lens=fable").plan()
+            plain, fab = single("dry").caps(3), single("dry", "--model", "sweep=fable", "--model", "lens=haiku", "--cap", "verify=2.5")
+            assert abs(fab.caps(3)["sweep"] - 2 * plain["sweep"]) < 0.02 and abs(fab.caps(3)["lens"] - plain["lens"] / 2) < 0.02 and fab.caps(3)["verify"] == 2.5, (plain, fab.caps(3))
+            capline = next(x for x in fab.plan() if x.startswith("plan: caps per run"))
+            assert f"lens=${fab.caps(3)['lens']:.2f}" in capline and "verify=$2.50 per batch" in capline and "sweep x2" in capline and "lens x0.5" in capline and "--cap verify=$2.50" in capline, capline
             assert parse_models(["verify=opus"]) == {"verify": "opus"} and hunter("cdc", {"models": {"lens": "fable"}}) == "cdc [fable]" and hunter("cdc", {}) == "cdc"
             for bad in (["merge=fable"], ["lens"], ["sweep= "]):
                 try:
@@ -1560,6 +1835,10 @@ def self_test() -> int:
             else:
                 raise AssertionError("an unknown rule title was planned")
 
+            wt = single("full").wt
+            assert wt != single("dry").wt and wt != hunt("--lens", "Lock keys", "--rules", title, "--out", str(t / "elsewhere" / "full")).wt
+            dup = hunt("--lenses", "Lock keys!,lock keys", "--out", str(t / "dup"))
+            assert [x.name for x in dup.lenses] == ["lock-keys", "lock-keys-2"] and len({dup.path("candidates", f"{x.name}.md") for x in dup.lenses}) == 2
             assert single("full").run() == 0
             c = calls()
             agents = [x["agent"] for x in c]
@@ -1567,6 +1846,7 @@ def self_test() -> int:
             assert {x["cwd"] for x in c} == {str(wt)} and all(x["ro"] and x["english"] for x in c), c
             assert all(x["premise"] for x in c if x["agent"] == "rivet-sweeper" and not x["resume"]), "a sweep brief asks for no premise"
             assert not any("nothing maps here" in x["head"] for x in c), "a predicate with no sites was swept"
+            assert not any("could own the key format" in x["head"] for x in c), "a design candidate was swept as a bug predicate"
             for flag in ("-p", "--output-format", "--max-budget-usd", "--permission-mode", "--settings", "--add-dir"):
                 assert all(flag in x["argv"] for x in c), flag
             assert all(x["argv"][x["argv"].index("--permission-mode") + 1] == PERMISSION_MODE for x in c)
@@ -1578,25 +1858,33 @@ def self_test() -> int:
             assert mapped == [(wt, None)], mapped
             out = t / "full"
             data = json.loads((out / "classes.json").read_text())
-            by = {x["seam"]: x for x in data["classes"]}
-            assert data["invalid_sweeps"] == [] and by["lock keys"]["status"] == "class" and len(by["lock keys"]["sites"]) == 3, by
-            assert by["lock keys"]["predicates"] == [title, "the lock key in src/state/lock.rs:1 omits the export name (lock-keys)."]
+            assert [(x["id"], x["seam"], x["status"]) for x in data["classes"]] == [("C1", "lock keys", "class"), ("C2", "error text matching", "ONE-OFF"), ("C3", "lock keys", "ONE-OFF"),
+                                                                                    ("C4", "empty-source branches", REFUTED_PREMISE)], data["classes"]
+            by = {x["seam"]: x for x in data["classes"][::-1]}
+            assert data["invalid_sweeps"] == [] and len(by["lock keys"]["sites"]) == 3 and by["lock keys"]["title"] == f"lock keys: {title}", by
+            assert by["lock keys"]["predicates"] == [title] and data["classes"][2]["predicates"] == ["the lock key in src/state/lock.rs:1 omits the export name (lock-keys)."]
+            assert by["lock keys"]["coverage"] == {"swept": 2, "mapped": 2} and data["classes"][2]["coverage"] == {"swept": 2, "mapped": 2}, data["classes"]
+            assert [(d["id"], d["lens"], d["strength"]) for d in data["design"]] == [("D1", "lock-keys", "Worth exploring")], data["design"]
+            assert all(json.loads(f.read_text())["cost_usd"] == 0.25 for f in out.glob("runs/*.json")) and len(list(out.glob("runs/*.json"))) == 7
             assert by["error text matching"]["status"] == "ONE-OFF" and not by["error text matching"]["engine_bound"], by["error text matching"]
             assert by["empty-source branches"]["status"] == REFUTED_PREMISE, by["empty-source branches"]
             assert [p["text"] for p in data["no_sites"]] == ["nothing maps here, docs only."], data["no_sites"]
-            assert sorted(s for _, s in c[-1]["verify"]) == ["error text matching", "lock keys"], c[-1]["verify"]
+            assert c[-1]["verify"] == [["C1", "lock keys"], ["C2", "error text matching"], ["C3", "lock keys"]], c[-1]["verify"]
             tok = json.loads((out / "tokens.json").read_text())
             assert tok["total"]["runs"] == len(c) == 7 and tok["total"]["cost_usd"] == 1.75 and tok["total"]["cache_read_input_tokens"] == 7000, tok["total"]
             assert tok["steps"]["sweep"]["runs"] == 5 and tok["steps"]["verify"]["runs"] == 1
             assert tok["usage"]["before"]["percent"]["Current week (all models)"] == 52.0 and tok["usage"]["after"]["percent"], tok["usage"]
             summary = (out / "summary.md").read_text()
-            assert "### C1 lock keys" in summary and "error text matching: ONE-OFF" in summary and "$1.75" in summary, summary
+            assert f"### C1 lock keys: {title}" in summary and "error text matching: BADJSON" in summary and "$1.75" in summary and "swept 2 of 2 sites" in summary, summary
+            assert "## Design candidates (architect deepenings, CLAIM KIND design; not swept as bug predicates) (1)" in summary and "- D1 lens lock-keys: Deepen the lock module" in summary, summary
             assert "Cargo.toml:9 has no such profile" in summary and "## No sites: claim not mapped to a seam (1, not swept)" in summary and "Usage before: Current week (all models) 52%" in summary, summary
 
             hist = read_history()
-            assert [(r["class"], r["seam"], r["status"]) for r in hist] == [("C1", "lock keys", "accepted"), ("C2", "error text matching", "refuted"), ("C3", "empty-source branches", "refuted-premise")], hist
-            assert hist[0]["out"] == str(out.resolve()) and hist[0]["lenses"] == ["lock-keys"] and hist[0]["rev"] and hist[0]["sites"] == {"swept": 3, "violated": 2, "proven": 2}, hist[0]
-            assert hist[0]["cost"] == {"round_usd": 1.75, "lenses": {"lock-keys": 1.0, "--rules": 0.5}} and hist[0]["class_lenses"] == ["--rules", "lock-keys"] and hist[0]["fingerprint"] == fingerprint("lock keys", ["src/state/lock.rs"]) and hist[0]["pr"] is None, hist[0]
+            assert [(r["class"], r["seam"], r["status"]) for r in hist] == [("C1", "lock keys", "accepted"), ("C2", "error text matching", "refuted"), ("C3", "lock keys", "refuted"),
+                                                                            ("C4", "empty-source branches", "refuted-premise"), ("D1", "design", "design")], hist
+            assert hist[0]["predicate"] == title and hist[4]["files"] == ["src/state/lock.rs"] and hist[4]["fingerprint"] == fingerprint("design", ["lock-keys", "Deepen the lock module"]), hist[4]
+            assert hist[0]["out"] == str(out.resolve()) and hist[0]["lenses"] == ["lock-keys"] and hist[0]["rev"] and hist[0]["sites"] == {"swept": 3, "violated": 2, "proven": 1, "mapped": 2}, hist[0]
+            assert hist[0]["cost"] == {"round_usd": 1.75, "lenses": {"lock-keys": 1.0, "--rules": 0.5}} and hist[0]["class_lenses"] == ["--rules"] and hist[0]["fingerprint"] == fingerprint("lock keys", ["src/state/lock.rs"]) and hist[0]["pr"] is None, hist[0]
             n = len(calls())
             assert single("full").run() == 2
             assert single("full", "--resume").run() == 0 and len(calls()) == n and not wt.exists(), "a resume of a finished hunt ran something"
@@ -1618,6 +1906,14 @@ def self_test() -> int:
             data = json.loads((t / "two" / "classes.json").read_text())
             lk = next(x for x in data["classes"] if x["seam"] == "lock keys")
             assert lk["id"] == "C1" and lk["confirmed_by"] == ["runners", "state-config-cli"], lk
+            bad = next(x for x in data["classes"] if x["seam"] == "error text matching")
+            assert bad["confirmed_by"] == [] and len(bad["lenses"]) == 2, bad
+            ver = [x for x in c2 if x["agent"] == "rivet-verifier"]
+            assert len(ver) == 2 and all(0 < len(x["verify"]) <= 3 for x in ver) and len({cid for x in ver for cid, _ in x["verify"]}) == sum(len(x["verify"]) for x in ver) == 4, ver
+            assert sorted(f.name for f in (t / "two" / "verify").iterdir()) == ["01.md", "02.md"] and "## All batches" in (t / "two" / "verdicts.md").read_text()
+            sw = next(x for x in c2 if x["agent"] == "rivet-sweeper" and not x["resume"])
+            live = len([x for x in two.predicates() if x.mapped != 0])
+            assert sw["argv"][sw["argv"].index("--max-budget-usd") + 1] == f"{two.caps(live)['sweep']:.2f}" and two.caps(live)["sweep"] > two.budgets(live)["sweep"] * 1.9, sw["argv"]
             tok = json.loads((t / "two" / "tokens.json").read_text())
             assert tok["usage"] is None and set(tok["lenses"]) == {"runners", "state-config-cli"}, tok
             summary = (t / "two" / "summary.md").read_text()
@@ -1628,11 +1924,15 @@ def self_test() -> int:
             auto = lambda *extra: hunt("--auto", "--budget-usd", "30", *extra)
             assert auto().lenses[0].name == LENS_ORDER[0] and auto().out.name.endswith(f"-{LENS_ORDER[0]}-{LENS_ORDER[1]}")
             first = auto()
+            defaults = list({seams.norm(x): x for n in LENS_ORDER[:2] for x in resolve_lens(n).titles}.values())
+            assert defaults and any("auto first round (no last_rev yet)" in x and f"{len(defaults)} kept" in x for x in first.plan()), first.plan()
             assert first.run() == 0
             st = load_state(repo)
             head = git("rev-parse", "HEAD").stdout.strip()
             assert st["last_lens"] == 1 and st["last_rev"] == head and st["last_out"] == str(first.out), st
-            assert json.loads(first.path("plan.json").read_text())["rules"] == []
+            fp = json.loads(first.path("plan.json").read_text())
+            assert fp["rules"] == defaults[:first.rule_cap()] and fp["first"] and fp["since"] is None, fp
+            assert any(x["head"].startswith(f"Predicate 1: {defaults[0]}") for x in calls()), "the first auto round swept no default rule"
             (repo / "src" / "state" / "lock.rs").write_text("fn lock_key() -> String { lock_name(export) }\n")
             git("commit", "-qam", "change lock")
             second = auto()
@@ -1662,16 +1962,29 @@ def self_test() -> int:
             shutil.copytree(t / "full", old)
             (old / "tokens.json").write_text(json.dumps({"total": {"cost_usd": 4.0}}))
             (old / "summary.md").write_text("# Hunt: state, locks and leases\n")
-            assert backfill(old) == 0 and backfill(old) == 0 and len(read_history()) == size + 3
+            assert backfill(old) == 0 and backfill(old) == 0 and len(read_history()) == size + 5
             back = [r for r in read_history() if r["out"] == str(old.resolve())]
             assert {r["date"] for r in back} == {"2026-01-01"} and back[0]["lenses"] == ["state, locks and leases"] and back[0]["cost"]["lenses"] == {"state, locks and leases": 4.0}, back[0]
             assert back[0]["rev"] == "x", back[0]
             rep = "\n".join(history_report(read_history()))
             assert "lock keys [" in rep and "back after PR #812" not in rep and "Trend per round:" in rep, rep
 
+            os.environ["HUNT_FAKE_MODE"] = "budget-sweep"
+            n = len(calls())
+            assert single("cap", "--parallel", "1").run() == 1
+            stop = calls()[n:]
+            assert [x["agent"] for x in stop] == ["rivet-architect", "rivet-sweeper"], [x["agent"] for x in stop]
+            err = noise.getvalue().rsplit("hunt: FAILED:", 1)[1]
+            assert "sweep stopped" in err and BUDGET_ERROR in err and "$0.60" in err and "--cap sweep=USD" in err and "--model sweep=MODEL" in err and "--resume" in err, err
+            assert not (t / "cap" / "classes.json").exists() and json.loads(next((t / "cap" / "runs").glob("sweep-*.json")).read_text())["cost_usd"] == 0.6
+            os.environ.pop("HUNT_FAKE_MODE")
+            assert single("cap", "--parallel", "1", "--resume").run() == 0 and (t / "cap" / "summary.md").is_file()
+            assert [x["agent"] for x in calls()[n + 2:]].count("rivet-architect") == 0, "a resume after a budget stop reran the lens"
+
             os.environ["HUNT_FAKE_MODE"] = "fail-lens"
             mapped[:] = []
             h = single("fail")
+            wt = h.wt
             assert h.run() == 1 and not list((t / "fail").glob("candidates/*.md")), "a failed lens left a report"
             assert not wt.exists(), "a failed hunt left its worktree"
             assert str(wt) not in git("worktree", "list").stdout and mapped[-1] == (wt, None)

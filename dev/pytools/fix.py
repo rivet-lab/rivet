@@ -347,8 +347,8 @@ class Fix:
             return f"{cid}: already closed by PR {self.closed()[cid]} (target/hunt/state.json)"
         if str(c["status"]).startswith("closed"):
             return f"{cid}: {c['status']}"
-        if c["status"] == "clean":
-            return f"{cid}: clean, no violated site"
+        if c["status"] in ("clean", "partial"):
+            return f"{cid}: {c['status']}, no violated site"
         if c.get("one_off"):
             return None if cid in self.force else f"{cid}: {c['status']}; pass --force-class {cid} to fix a ONE-OFF anyway"
         v = self.verdicts.get(cid)
@@ -389,8 +389,10 @@ class Fix:
         return [rules[t] for t in sorted(titles)]
 
     def cslug(self, cid: str) -> str:
-        """The class slug: branch fix/<slug>, worktree .claude/worktrees/fix-<slug>."""
-        return slug(self.classes[cid]["seam"])
+        """The class slug: branch fix/<slug>, worktree .claude/worktrees/fix-<slug>; the class id joins it when another class shares the seam."""
+        seam = self.classes[cid]["seam"]
+        shared = sum(c["seam"] == seam for c in self.classes.values()) > 1
+        return f"{slug(seam)}-{cid.lower()}" if shared else slug(seam)
 
     def paths(self, cid: str) -> dict[str, Path | str]:
         """Branch, worktree, handoff dir and scratch of one class."""
@@ -919,7 +921,8 @@ def fixture_hunt(d: Path) -> None:
                cls("C6", "clean seam", [s("src/c.rs", 1, "pg", "holds")], "clean"),
                cls("C7", "env reads", [s("src/e.rs", 1, "pg", "violated")]),
                cls("C8", "spill", [s("src/f.rs", 1, "pg", "violated")]),
-               cls("C9", "unverified", [s("src/u.rs", 1, "pg", "violated")])]
+               cls("C9", "unverified", [s("src/u.rs", 1, "pg", "violated")]),
+               cls("C10", "panics", [s("src/p.rs", 2, "pg", "holds")], "partial")]
     d.mkdir(parents=True)
     (d / "classes.json").write_text(json.dumps({"classes": classes, "invalid_sweeps": []}))
     v = [{"class": c, "holds": c != "C2", "evidence": "opened"} for c in ("C1", "C2", "C4", "C5", "C7", "C8")]
@@ -991,7 +994,7 @@ def self_test() -> int:
         quiet.enter_context(contextlib.redirect_stdout(noise))
         quiet.enter_context(contextlib.redirect_stderr(noise))
         try:
-            for ids, want in (("C2", "refuted by the hunt verifier"), ("C3", "--force-class C3"), ("C6", "clean"), ("C9", "not verified"), ("C42", "not in")):
+            for ids, want in (("C2", "refuted by the hunt verifier"), ("C3", "--force-class C3"), ("C6", "clean"), ("C9", "not verified"), ("C10", "partial"), ("C42", "not in")):
                 try:
                     fix("x", ids)
                 except FixError as e:
@@ -1003,6 +1006,7 @@ def self_test() -> int:
             plan = f.plan()
             assert any(x == "plan: SEQUENTIAL C1 -> C4 (they share src/b.rs)" for x in plan), plan
             assert any("plan: C1 " in x and "role=rivet-deepener" in x for x in plan) and any("plan: C5 " in x and "role=rivet-bug-fixer" in x for x in plan), plan
+            assert f.cslug("C2") == "panics-c2" and f.cslug("C10") == "panics-c10" and f.paths("C2")["wt"] != f.paths("C10")["wt"], (f.cslug("C2"), f.cslug("C10"))
             assert any("plan: C1 branch=fix/lock-keys" in x for x in plan) and any("rules=['A lock is keyed by exactly what it protects']" in x for x in plan), plan
             assert any("$20.00 per class, $60.00 total" in x for x in plan), plan
             assert "per-engine table before calling anything a one-off" in f.ctx("C1") and "read it at" in fix("x", "C3", "--force-class", "C3").ctx("C3")
