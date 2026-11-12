@@ -505,23 +505,40 @@ fn harm(rig: &Rig, how: Harm) {
     }
 }
 
-/// `validate` fails on the damaged export every time and names `finding`; the next run delivers the source and `validate` passes.
-fn validate_sees(rig: Rig, how: Harm, finding: &str) {
+impl Harm {
+    /// The one `RIVET_VERIFY_*` code `validate` names for this damage.
+    fn finding(self) -> &'static str {
+        match self {
+            Harm::ManifestTruncated | Harm::ManifestNotJson | Harm::ManifestDropsAPart => {
+                "RIVET_VERIFY_MANIFEST_INCONSISTENT"
+            }
+            Harm::ManifestNamesAGhostPart | Harm::PartRemoved => "RIVET_VERIFY_PART_MISSING",
+            Harm::ManifestRemoved => "RIVET_VERIFY_MANIFEST_MISSING",
+            Harm::PartTruncated | Harm::PartReplacedByItsSibling => {
+                "RIVET_VERIFY_PART_SIZE_MISMATCH"
+            }
+            Harm::PrefixRemoved => "RIVET_VERIFY_DELIVERY_ABSENT",
+        }
+    }
+}
+
+/// `validate` fails on the damaged export every time and names the code of `how`; the next run delivers the source and `validate` passes.
+fn validate_sees(rig: Rig, how: Harm) {
     harm(&rig, how);
-    rig.validate_fails(finding);
+    rig.validate_fails(how.finding());
     rig.run_ok();
     ok(rig.cli(&["validate"]));
 }
 
-fn validate_sees_sql(engine: SqlEngine, how: Harm, finding: &str) {
+fn validate_sees_sql(engine: SqlEngine, how: Harm) {
     let (rig, _guard) = complete(engine, "sab_validate");
-    validate_sees(rig, how, finding);
+    validate_sees(rig, how);
 }
 
-fn validate_sees_mongo(how: Harm, finding: &str) {
+fn validate_sees_mongo(how: Harm) {
     let (rig, _guard) = mongo_rig("sab_validate");
     rig.run_ok();
-    validate_sees(rig, how, finding);
+    validate_sees(rig, how);
 }
 
 fn state_schema_newer_mongo() {
@@ -3144,248 +3161,181 @@ fn a_newer_state_schema_is_refused_and_walked_out_oracle() {
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_sees_a_truncated_manifest_postgres() {
-    validate_sees_sql(
-        SqlEngine::Pg,
-        Harm::ManifestTruncated,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_sql(SqlEngine::Pg, Harm::ManifestTruncated);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_sees_a_truncated_manifest_mysql() {
-    validate_sees_sql(
-        SqlEngine::Mysql,
-        Harm::ManifestTruncated,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_sql(SqlEngine::Mysql, Harm::ManifestTruncated);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_sees_a_truncated_manifest_mssql() {
-    validate_sees_sql(
-        SqlEngine::Mssql,
-        Harm::ManifestTruncated,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_sql(SqlEngine::Mssql, Harm::ManifestTruncated);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn validate_sees_a_truncated_manifest_mongo() {
-    validate_sees_mongo(
-        Harm::ManifestTruncated,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_mongo(Harm::ManifestTruncated);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_sees_a_truncated_manifest_oracle() {
-    validate_sees_sql(
-        SqlEngine::Oracle,
-        Harm::ManifestTruncated,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_sql(SqlEngine::Oracle, Harm::ManifestTruncated);
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_sees_a_manifest_that_is_not_json_postgres() {
-    validate_sees_sql(
-        SqlEngine::Pg,
-        Harm::ManifestNotJson,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_sql(SqlEngine::Pg, Harm::ManifestNotJson);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_sees_a_manifest_that_is_not_json_mysql() {
-    validate_sees_sql(
-        SqlEngine::Mysql,
-        Harm::ManifestNotJson,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_sql(SqlEngine::Mysql, Harm::ManifestNotJson);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_sees_a_manifest_that_is_not_json_mssql() {
-    validate_sees_sql(
-        SqlEngine::Mssql,
-        Harm::ManifestNotJson,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_sql(SqlEngine::Mssql, Harm::ManifestNotJson);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn validate_sees_a_manifest_that_is_not_json_mongo() {
-    validate_sees_mongo(Harm::ManifestNotJson, "RIVET_VERIFY_MANIFEST_INCONSISTENT");
+    validate_sees_mongo(Harm::ManifestNotJson);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_sees_a_manifest_that_is_not_json_oracle() {
-    validate_sees_sql(
-        SqlEngine::Oracle,
-        Harm::ManifestNotJson,
-        "RIVET_VERIFY_MANIFEST_INCONSISTENT",
-    );
+    validate_sees_sql(SqlEngine::Oracle, Harm::ManifestNotJson);
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_sees_a_manifest_that_drops_a_part_postgres() {
-    validate_sees_sql(SqlEngine::Pg, Harm::ManifestDropsAPart, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Pg, Harm::ManifestDropsAPart);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_sees_a_manifest_that_drops_a_part_mysql() {
-    validate_sees_sql(SqlEngine::Mysql, Harm::ManifestDropsAPart, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Mysql, Harm::ManifestDropsAPart);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_sees_a_manifest_that_drops_a_part_mssql() {
-    validate_sees_sql(SqlEngine::Mssql, Harm::ManifestDropsAPart, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Mssql, Harm::ManifestDropsAPart);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_sees_a_manifest_that_drops_a_part_oracle() {
-    validate_sees_sql(SqlEngine::Oracle, Harm::ManifestDropsAPart, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Oracle, Harm::ManifestDropsAPart);
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_sees_a_manifest_naming_a_part_that_is_not_there_postgres() {
-    validate_sees_sql(
-        SqlEngine::Pg,
-        Harm::ManifestNamesAGhostPart,
-        "RIVET_VERIFY_",
-    );
+    validate_sees_sql(SqlEngine::Pg, Harm::ManifestNamesAGhostPart);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_sees_a_manifest_naming_a_part_that_is_not_there_mysql() {
-    validate_sees_sql(
-        SqlEngine::Mysql,
-        Harm::ManifestNamesAGhostPart,
-        "RIVET_VERIFY_",
-    );
+    validate_sees_sql(SqlEngine::Mysql, Harm::ManifestNamesAGhostPart);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_sees_a_manifest_naming_a_part_that_is_not_there_mssql() {
-    validate_sees_sql(
-        SqlEngine::Mssql,
-        Harm::ManifestNamesAGhostPart,
-        "RIVET_VERIFY_",
-    );
+    validate_sees_sql(SqlEngine::Mssql, Harm::ManifestNamesAGhostPart);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn validate_sees_a_manifest_naming_a_part_that_is_not_there_mongo() {
-    validate_sees_mongo(Harm::ManifestNamesAGhostPart, "RIVET_VERIFY_");
+    validate_sees_mongo(Harm::ManifestNamesAGhostPart);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_sees_a_manifest_naming_a_part_that_is_not_there_oracle() {
-    validate_sees_sql(
-        SqlEngine::Oracle,
-        Harm::ManifestNamesAGhostPart,
-        "RIVET_VERIFY_",
-    );
+    validate_sees_sql(SqlEngine::Oracle, Harm::ManifestNamesAGhostPart);
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_fails_on_a_marker_without_a_manifest_postgres() {
-    validate_sees_sql(SqlEngine::Pg, Harm::ManifestRemoved, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Pg, Harm::ManifestRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_fails_on_a_marker_without_a_manifest_mysql() {
-    validate_sees_sql(SqlEngine::Mysql, Harm::ManifestRemoved, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Mysql, Harm::ManifestRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_fails_on_a_marker_without_a_manifest_mssql() {
-    validate_sees_sql(SqlEngine::Mssql, Harm::ManifestRemoved, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Mssql, Harm::ManifestRemoved);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_fails_on_a_marker_without_a_manifest_oracle() {
-    validate_sees_sql(SqlEngine::Oracle, Harm::ManifestRemoved, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Oracle, Harm::ManifestRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn validate_fails_on_a_marker_without_a_manifest_mongo() {
-    validate_sees_mongo(Harm::ManifestRemoved, "RIVET_VERIFY_");
+    validate_sees_mongo(Harm::ManifestRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_postgres() {
-    validate_sees_sql(
-        SqlEngine::Pg,
-        Harm::PrefixRemoved,
-        "RIVET_VERIFY_DELIVERY_ABSENT",
-    );
+    validate_sees_sql(SqlEngine::Pg, Harm::PrefixRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mysql() {
-    validate_sees_sql(
-        SqlEngine::Mysql,
-        Harm::PrefixRemoved,
-        "RIVET_VERIFY_DELIVERY_ABSENT",
-    );
+    validate_sees_sql(SqlEngine::Mysql, Harm::PrefixRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mssql() {
-    validate_sees_sql(
-        SqlEngine::Mssql,
-        Harm::PrefixRemoved,
-        "RIVET_VERIFY_DELIVERY_ABSENT",
-    );
+    validate_sees_sql(SqlEngine::Mssql, Harm::PrefixRemoved);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_oracle() {
-    validate_sees_sql(
-        SqlEngine::Oracle,
-        Harm::PrefixRemoved,
-        "RIVET_VERIFY_DELIVERY_ABSENT",
-    );
+    validate_sees_sql(SqlEngine::Oracle, Harm::PrefixRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn validate_fails_on_a_removed_prefix_of_a_recorded_delivery_mongo() {
-    validate_sees_mongo(Harm::PrefixRemoved, "RIVET_VERIFY_DELIVERY_ABSENT");
+    validate_sees_mongo(Harm::PrefixRemoved);
 }
 
 #[test]
@@ -3416,120 +3366,88 @@ fn a_run_restores_a_removed_success_marker_oracle() {
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_sees_a_truncated_part_postgres() {
-    validate_sees_sql(
-        SqlEngine::Pg,
-        Harm::PartTruncated,
-        "RIVET_VERIFY_PART_SIZE_MISMATCH",
-    );
+    validate_sees_sql(SqlEngine::Pg, Harm::PartTruncated);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_sees_a_truncated_part_mysql() {
-    validate_sees_sql(
-        SqlEngine::Mysql,
-        Harm::PartTruncated,
-        "RIVET_VERIFY_PART_SIZE_MISMATCH",
-    );
+    validate_sees_sql(SqlEngine::Mysql, Harm::PartTruncated);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_sees_a_truncated_part_mssql() {
-    validate_sees_sql(
-        SqlEngine::Mssql,
-        Harm::PartTruncated,
-        "RIVET_VERIFY_PART_SIZE_MISMATCH",
-    );
+    validate_sees_sql(SqlEngine::Mssql, Harm::PartTruncated);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn validate_sees_a_truncated_part_mongo() {
-    validate_sees_mongo(Harm::PartTruncated, "RIVET_VERIFY_PART_SIZE_MISMATCH");
+    validate_sees_mongo(Harm::PartTruncated);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_sees_a_truncated_part_oracle() {
-    validate_sees_sql(
-        SqlEngine::Oracle,
-        Harm::PartTruncated,
-        "RIVET_VERIFY_PART_SIZE_MISMATCH",
-    );
+    validate_sees_sql(SqlEngine::Oracle, Harm::PartTruncated);
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_sees_a_part_replaced_by_its_sibling_postgres() {
-    validate_sees_sql(
-        SqlEngine::Pg,
-        Harm::PartReplacedByItsSibling,
-        "RIVET_VERIFY_",
-    );
+    validate_sees_sql(SqlEngine::Pg, Harm::PartReplacedByItsSibling);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_sees_a_part_replaced_by_its_sibling_mysql() {
-    validate_sees_sql(
-        SqlEngine::Mysql,
-        Harm::PartReplacedByItsSibling,
-        "RIVET_VERIFY_",
-    );
+    validate_sees_sql(SqlEngine::Mysql, Harm::PartReplacedByItsSibling);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_sees_a_part_replaced_by_its_sibling_mssql() {
-    validate_sees_sql(
-        SqlEngine::Mssql,
-        Harm::PartReplacedByItsSibling,
-        "RIVET_VERIFY_",
-    );
+    validate_sees_sql(SqlEngine::Mssql, Harm::PartReplacedByItsSibling);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_sees_a_part_replaced_by_its_sibling_oracle() {
-    validate_sees_sql(
-        SqlEngine::Oracle,
-        Harm::PartReplacedByItsSibling,
-        "RIVET_VERIFY_",
-    );
+    validate_sees_sql(SqlEngine::Oracle, Harm::PartReplacedByItsSibling);
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn validate_sees_a_removed_part_postgres() {
-    validate_sees_sql(SqlEngine::Pg, Harm::PartRemoved, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Pg, Harm::PartRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn validate_sees_a_removed_part_mysql() {
-    validate_sees_sql(SqlEngine::Mysql, Harm::PartRemoved, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Mysql, Harm::PartRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn validate_sees_a_removed_part_mssql() {
-    validate_sees_sql(SqlEngine::Mssql, Harm::PartRemoved, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Mssql, Harm::PartRemoved);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mongo"]
 fn validate_sees_a_removed_part_mongo() {
-    validate_sees_mongo(Harm::PartRemoved, "RIVET_VERIFY_");
+    validate_sees_mongo(Harm::PartRemoved);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn validate_sees_a_removed_part_oracle() {
-    validate_sees_sql(SqlEngine::Oracle, Harm::PartRemoved, "RIVET_VERIFY_");
+    validate_sees_sql(SqlEngine::Oracle, Harm::PartRemoved);
 }
 
 #[test]

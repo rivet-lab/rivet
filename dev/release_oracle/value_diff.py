@@ -197,13 +197,20 @@ def invalid_text_columns(ora, relation: str) -> list[str]:
     return bad
 
 
-def source_select(ora, relation: str) -> str:
-    """`SELECT *` over `relation`, with INTERVAL columns read as text (DuckDB's Python conversion folds months into days)."""
+def source_select(ora, relation: str, dates: list[tuple[str, str]] = ()) -> str:
+    """`SELECT *` over `relation`, INTERVAL columns read as text (DuckDB's Python conversion folds months into days) and `dates` read from the staged engine text through TRY_CAST, so a date the scanner cannot hold is NULL, never an error."""
     described = ora.db.sql(f"DESCRIBE {relation}").fetchall()
     intervals = [row[0] for row in described if str(row[1]).startswith("INTERVAL")]
     replace = ", ".join(f"CAST({c} AS VARCHAR) AS {c}" for c in intervals)
     replace_clause = f"REPLACE ({replace}) " if replace else ""
-    return f"SELECT * {replace_clause}FROM {relation} ORDER BY id"
+    if not dates:
+        return f"SELECT * {replace_clause}FROM {relation} ORDER BY id"
+    skipped = ", ".join(f'"{c}"' for c, _ in dates)
+    casts = ", ".join(f'TRY_CAST(d."{c}" AS {t}) AS "{c}"' for c, t in dates)
+    return (
+        f"SELECT s.*, {casts} FROM (SELECT * EXCLUDE ({skipped}) {replace_clause}FROM {relation}) s "
+        f"LEFT JOIN {SOURCE_DATE_TEXT} d ON s.id = d.id ORDER BY s.id"
+    )
 
 
 class OracleReadLost(RuntimeError):
@@ -211,6 +218,7 @@ class OracleReadLost(RuntimeError):
 
 
 ZERO_DATE_TEXT = re.compile(r"\d{4}-(00-\d\d|\d\d-00)( .*)?")
+SOURCE_DATE_TEXT = "source_date_text"
 
 
 def source_text_select(engine: str, prefix: str, table: str, columns: list[str]) -> str | None:
@@ -228,17 +236,25 @@ def source_text_select(engine: str, prefix: str, table: str, columns: list[str])
     return f"SELECT * FROM {fn}('{att}', '{inner.replace(chr(39), chr(39) * 2)}')"
 
 
-def lost_values(ora, engine: str, prefix: str, table: str, typed: list[dict]) -> dict[str, list[tuple[object, str]]]:
-    """Per date or timestamp column, the (id, text) of every row whose typed read is NULL while the engine's own text form holds a value."""
+def stage_date_text(ora, engine: str, prefix: str, table: str) -> list[tuple[str, str]]:
+    """Read the engine's own text of each date or timestamp column once into a temp table; the (name, DuckDB type) of the columns staged, none where the engine has no text pass-through."""
     described = ora.db.sql(f"DESCRIBE SELECT * FROM {prefix}.{table}").fetchall()
-    cols = [r[0] for r in described if str(r[1]).startswith(("DATE", "TIMESTAMP"))]
-    sql = source_text_select(engine, prefix, table, cols) if cols else None
+    dates = [(r[0], str(r[1])) for r in described if str(r[1]).startswith(("DATE", "TIMESTAMP"))]
+    sql = source_text_select(engine, prefix, table, [c for c, _ in dates]) if dates else None
     if sql is None:
+        return []
+    ora.db.sql(f"CREATE OR REPLACE TEMP TABLE {SOURCE_DATE_TEXT} AS {sql}")
+    return dates
+
+
+def lost_values(ora, dates: list[tuple[str, str]], typed: list[dict]) -> dict[str, list[tuple[object, str]]]:
+    """Per staged date or timestamp column, the (id, text) of every row whose typed read is NULL while the engine's own text form holds a value."""
+    if not dates:
         return {}
-    text = {canon(r["id"]): r for r in fetch(ora, sql)}
+    text = {canon(r["id"]): r for r in fetch(ora, f"SELECT * FROM {SOURCE_DATE_TEXT}")}
     out: dict[str, list[tuple[object, str]]] = {}
     for row in typed:
-        for c in cols:
+        for c, _ in dates:
             t = text.get(canon(row["id"]), {}).get(c)
             if row.get(c) is None and t is not None:
                 out.setdefault(c, []).append((row["id"], t))
@@ -573,8 +589,9 @@ def _rows_against_source(
     bad = invalid_text_columns(ora, dest)
     if bad:
         return 0, [f"STRING column(s) {bad} hold bytes that are not UTF-8 — unreadable as text"]
-    src = fetch(ora, source_select(ora, f"{prefix}.{table}"))
-    counted = graded_losses(lost_values(ora, engine, prefix, table, src), declared_null)
+    dates = stage_date_text(ora, engine, prefix, table)
+    src = fetch(ora, source_select(ora, f"{prefix}.{table}", dates if engine == "mysql" else []))
+    counted = graded_losses(lost_values(ora, dates, src), declared_null)
     if lost is not None:
         lost.update(counted)
     dst = fetch(ora, f"SELECT * FROM {dest} ORDER BY id")
@@ -638,6 +655,25 @@ def _self_test() -> None:
     assert success_part_names({"status": "success", "parts": parts}) == ["a.parquet"]
     for st in ("failed", "interrupted", "running", "Failed"):
         assert success_part_names({"status": st, "parts": parts}) == [], f"a {st} manifest delivers nothing"
+    from .duck import Oracle
+
+    with Oracle() as ora:
+        ora.db.sql("CREATE TEMP TABLE s (id INTEGER, v DATE)")
+        ora.db.sql("INSERT INTO s VALUES (1, DATE '1999-09-09'), (2, DATE '1999-09-09'), (3, DATE '1999-09-09'), (4, DATE '1999-09-09')")
+        ora.db.sql(f"CREATE TEMP TABLE {SOURCE_DATE_TEXT} (id INTEGER, v VARCHAR)")
+        ora.db.sql(f"INSERT INTO {SOURCE_DATE_TEXT} VALUES (1, '2026-01-02'), (2, '2026-00-00'), (3, '0000-00-00'), (4, NULL)")
+        dates = [("v", "DATE")]
+        rows = fetch(ora, source_select(ora, "s", dates))
+        assert [r["v"] for r in rows] == [dt.date(2026, 1, 2), None, None, None], "a calendar date is read, a non-calendar one is NULL"
+        lost = lost_values(ora, dates, rows)
+        assert lost == {"v": [(2, "2026-00-00"), (3, "0000-00-00")]}, "every non-calendar text is a lost value, a source NULL is not"
+        assert graded_losses(lost, frozenset({"v"})) == {"v": 2}, "a declared column counts every zero or partial date"
+        try:
+            graded_losses(lost, frozenset())
+        except OracleReadLost:
+            pass
+        else:
+            raise AssertionError("an undeclared column holding a non-calendar date is an oracle error")
     print("value_diff self-test ok")
 
 

@@ -34,6 +34,7 @@ fn env_rs_endpoints_are_the_registry_endpoints() {
         ("mysql_cdc", env::MYSQL_CDC_URL),
         ("mssql", env::MSSQL_URL),
         ("mssql_cdc", env::MSSQL_CDC_URL),
+        ("oracle", env::ORACLE_URL),
         ("mongo", env::MONGO_URL),
         ("mongo_rs", env::MONGO_RS_URL),
         ("mongo_shard", env::MONGO_SHARD_URL),

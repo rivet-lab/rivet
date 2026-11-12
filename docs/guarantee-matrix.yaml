@@ -366,11 +366,11 @@ guarantees:
       - file: README.md
         sentence: "Every part is in a manifest with its row count and MD5."
     held_by:
-      postgres: { test: validate_sees_a_truncated_part_postgres, asserts: "rig.validate_fails(finding);" }
-      mysql: { test: validate_sees_a_truncated_part_mysql, asserts: "rig.validate_fails(finding);" }
-      mssql: { test: validate_sees_a_truncated_part_mssql, asserts: "rig.validate_fails(finding);" }
-      mongo: { test: validate_sees_a_truncated_part_mongo, asserts: "rig.validate_fails(finding);" }
-      oracle: { test: validate_sees_a_truncated_part_oracle, asserts: "rig.validate_fails(finding);" }
+      postgres: { test: validate_sees_a_truncated_part_postgres, asserts: "rig.validate_fails(how.finding());" }
+      mysql: { test: validate_sees_a_truncated_part_mysql, asserts: "rig.validate_fails(how.finding());" }
+      mssql: { test: validate_sees_a_truncated_part_mssql, asserts: "rig.validate_fails(how.finding());" }
+      mongo: { test: validate_sees_a_truncated_part_mongo, asserts: "rig.validate_fails(how.finding());" }
+      oracle: { test: validate_sees_a_truncated_part_oracle, asserts: "rig.validate_fails(how.finding());" }
     contradicted_by:
       matrix_gap:
         - "docs/attestation-matrix.yaml#a local destination reports no md5, and those parts are size-only"
@@ -380,11 +380,11 @@ guarantees:
       - file: docs/reference/cli.md
         sentence: "Exits non-zero when the manifest references a part that is missing or whose size does not match"
     held_by:
-      postgres: { test: validate_sees_a_truncated_part_postgres, asserts: "rig.validate_fails(finding);" }
-      mysql: { test: validate_sees_a_truncated_part_mysql, asserts: "rig.validate_fails(finding);" }
-      mssql: { test: validate_sees_a_truncated_part_mssql, asserts: "rig.validate_fails(finding);" }
-      mongo: { test: validate_sees_a_truncated_part_mongo, asserts: "rig.validate_fails(finding);" }
-      oracle: { test: validate_sees_a_truncated_part_oracle, asserts: "rig.validate_fails(finding);" }
+      postgres: { test: validate_sees_a_truncated_part_postgres, asserts: "rig.validate_fails(how.finding());" }
+      mysql: { test: validate_sees_a_truncated_part_mysql, asserts: "rig.validate_fails(how.finding());" }
+      mssql: { test: validate_sees_a_truncated_part_mssql, asserts: "rig.validate_fails(how.finding());" }
+      mongo: { test: validate_sees_a_truncated_part_mongo, asserts: "rig.validate_fails(how.finding());" }
+      oracle: { test: validate_sees_a_truncated_part_oracle, asserts: "rig.validate_fails(how.finding());" }
 
   - id: validate_never_queries_the_source
     stated:
