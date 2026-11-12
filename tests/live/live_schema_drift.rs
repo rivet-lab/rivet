@@ -499,8 +499,8 @@ fn drift_failed_run_holds_the_cursor(label: &str, mode: &str, strategy: &[&str])
         .duckdb_oracle();
     if strategy.contains(&"keyset_incremental: true") {
         rig = rig.a_failed_run_may_leave(
-            &[Leftover::ResumePoint],
-            "keyset_incremental checkpoints each page: the failed run keeps its page cursor and resume_run_id as the anchor run 3 adopts (the hazard of that anchor is TRIAGE P-06)",
+            &[Leftover::ChunkCheckpoint, Leftover::ResumePoint],
+            "keyset_incremental checkpoints each page: the failed run keeps its page cursor, resume_run_id and the run_shape it was opened with as the anchor run 3 adopts (the hazard of that anchor is TRIAGE P-06)",
         );
     }
 
