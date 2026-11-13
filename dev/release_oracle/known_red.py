@@ -22,9 +22,17 @@ class KnownRed:
     match: str
     reason: str
     expires: str  # YYYY-MM-DD
+    alt: tuple[str, ...] = ()
+
+    def keys(self) -> tuple[str, ...]:
+        """Every whole failure message this one defect may print."""
+        return (self.match, *self.alt)
 
 
 _EXPIRES = "2026-11-22"
+GATE, ISLAND, OFFLINE = "gate", "island", "offline"
+_ISLAND_TIER = re.compile(r"\] full: ")
+_OFFLINE_TIER = re.compile(r"\[offline\]: ")
 _DATED = re.compile(r"\b20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _ORACLE_CDC_LOAD = (
     "Oracle CDC does not load yet (ADR-0037; the Oracle GA work). The previous release's `rivet init --mode cdc` writes no `load:` block, and this cell still drives the previous release through `load`, which refuses. `upgrade[oracle/cdc-load/init=this]` grades what the scaffold does promise (the baseline Parquet equals the source). The cycle stays unsupported until Oracle CDC loads. Pinned 2026-11-01 to the whole refusal line; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it"
@@ -56,24 +64,25 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null[mssql] smoke: INTEGRITY_BLIND over 1 source->override pairs #8f3cccc4",
              "2026-11-10: batch leg, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
-    KnownRed("no_silent_null[mysql] smoke: SILENT_NULL over 131 source->override pairs #b7658548",
-             "2026-11-10: batch leg, PR-NULL: a non-NULL value is delivered as NULL at exit 0 (MySQL text, binary, bit or decimal under a date, timestamp, int or float override, the `_ => append_null()` arms of src/source/mysql/arrow_convert.rs); open, closes when the pair is refused by code; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
+    KnownRed("no_silent_null[mysql] smoke: SILENT_NULL over 138 source->override pairs #adb258f5",
+             "2026-11-10: batch leg, PR-NULL: a non-NULL value is delivered as NULL at exit 0 (MySQL text, binary, bit or decimal under a date, timestamp, int or float override, the `_ => append_null()` arms of src/source/mysql/arrow_convert.rs); open, closes when the pair is refused by code; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: #982 added TIMESTAMP NULL and BIT(64) rows to docs/type-capability-matrix.yaml, product unchanged",
              _EXPIRES),
-    KnownRed("no_silent_null[mysql] smoke: WRONG_VALUE over 30 source->override pairs #cd9510b5",
-             "2026-11-11: batch leg, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
+    KnownRed("no_silent_null[mysql] smoke: WRONG_VALUE over 32 source->override pairs #46cf0a11",
+             "2026-11-11: batch leg, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: #982 added TIMESTAMP NULL and BIT(64) rows to docs/type-capability-matrix.yaml, product unchanged",
              _EXPIRES),
-    KnownRed("no_silent_null[mysql] smoke: CHECK_RUN_SPLIT over 130 source->override pairs #c16dfaad",
-             "2026-11-11: batch leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
+    KnownRed("no_silent_null[mysql] smoke: CHECK_RUN_SPLIT over 136 source->override pairs #00dda04f",
+             "2026-11-11: batch leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: #982 added TIMESTAMP NULL and BIT(64) rows to docs/type-capability-matrix.yaml, product unchanged",
              _EXPIRES),
-    KnownRed("no_silent_null[mysql] smoke: INTEGRITY_BLIND over 157 source->override pairs #0cda6775",
-             "2026-11-11: batch leg, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
+    KnownRed("no_silent_null[mysql] smoke: INTEGRITY_BLIND over 166 source->override pairs #debe0fb4",
+             "2026-11-11: batch leg, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: #982 added TIMESTAMP NULL and BIT(64) rows to docs/type-capability-matrix.yaml, product unchanged",
              _EXPIRES),
     KnownRed("no_silent_null[oracle] smoke: WRONG_VALUE over 12 source->override pairs #9194cbc1",
              "2026-11-10: batch leg, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
-    KnownRed("no_silent_null[oracle] smoke: CHECK_RUN_SPLIT over 210 source->override pairs #6f1eea1f",
-             "2026-11-11: batch leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_QUERY_FAILED, RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH) because check reads neither the values nor the format; open, closes when check refuses the same pair; the DATE and TIMESTAMP(9) to date pairs flap between check refusing (no red) and check exit 0, so the count may read 2 lower and the digest shift; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
-             _EXPIRES),
+    KnownRed("no_silent_null[oracle] smoke: CHECK_RUN_SPLIT over 208 source->override pairs #701850bf",
+             "2026-11-11: batch leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_QUERY_FAILED, RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH) because check reads neither the values nor the format; open, closes when check refuses the same pair; the DATE and TIMESTAMP(9) to date pairs flap between check refusing (no red) and check exit 0, so the count may read 2 lower and the digest shift; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: the gate e92cafe4 read the 208 line, both readings are accepted until check refuses the pair",
+             _EXPIRES,
+             alt=("no_silent_null[oracle] smoke: CHECK_RUN_SPLIT over 210 source->override pairs #6f1eea1f",)),
     KnownRed("no_silent_null[oracle] smoke: UNCODED_STOP over 9 source->override pairs #2e8a05bb",
              "2026-11-11: batch leg, PR-CAUSE: run stops with exit 1 and no code on `invalid digit found in string`, `number too large to fit in target type` or `number too small to fit in target type` (Oracle NUMBER parsed under an override); open, closes when the pair is refused by a coded cause at check; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
@@ -140,14 +149,14 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null_cdc[mssql]: CHECK_RUN_SPLIT over 147 source->override pairs #54bf440c",
              "2026-11-10: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, RIVET_SOURCE_CDC_PREREQUISITE, RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
-    KnownRed("no_silent_null_cdc[mysql]: SILENT_NULL over 19 source->override pairs #58ecc262",
-             "2026-11-12: CDC leg, PR-NULL (#913): a non-NULL value is delivered as NULL at exit 0; 11 pairs are MySQL text or decimal under a date, timestamp, int or float override (the `_ => append_null()` arms of src/source/mysql/arrow_convert.rs), 8 pairs are a zero or partial date written as NULL with a counted WARN (#951, owner decision) that the CDC grader does not read yet; open, closes when the pair is refused by code and the CDC grader accepts a NULL the WARN counts exactly; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
+    KnownRed("no_silent_null_cdc[mysql]: SILENT_NULL over 22 source->override pairs #439b77a8",
+             "2026-11-12: CDC leg, PR-NULL (#913): a non-NULL value is delivered as NULL at exit 0; 11 pairs are MySQL text or decimal under a date, timestamp, int or float override (the `_ => append_null()` arms of src/source/mysql/arrow_convert.rs), 8 pairs are a zero or partial date written as NULL with a counted WARN (#951, owner decision) that the CDC grader does not read yet; open, closes when the pair is refused by code and the CDC grader accepts a NULL the WARN counts exactly; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: #982 added TIMESTAMP NULL and BIT(64) rows to docs/type-capability-matrix.yaml, product unchanged",
              _EXPIRES),
     KnownRed("no_silent_null_cdc[mysql]: WRONG_VALUE over 4 source->override pairs #f1cdc3b8",
              "2026-11-10: CDC leg, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
-    KnownRed("no_silent_null_cdc[mysql]: CHECK_RUN_SPLIT over 142 source->override pairs #cdb005d0",
-             "2026-11-10: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_SOURCE_CDC_PREREQUISITE, RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
+    KnownRed("no_silent_null_cdc[mysql]: CHECK_RUN_SPLIT over 136 source->override pairs #ab1e0db3",
+             "2026-11-10: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_SOURCE_CDC_PREREQUISITE, RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: #982 added TIMESTAMP NULL and BIT(64) rows to docs/type-capability-matrix.yaml, product unchanged",
              _EXPIRES),
     KnownRed("no_silent_null_cdc[oracle]: WRONG_VALUE over 1 source->override pairs #63a430dd",
              "2026-11-10: CDC leg, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
@@ -167,8 +176,8 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null_load[mssql]: CHECK_RUN_SPLIT over 5 source->override pairs #078f0729",
              "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE, RIVET_LOAD_WAREHOUSE_REJECTED, RIVET_SOURCE_VALUE_UNREPRESENTABLE) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
-    KnownRed("no_silent_null_load[mysql]: SILENT_NULL over 1 source->override pairs #07216739",
-             "2026-11-12: ClickHouse load leg, PR-NULL (#913): a MySQL TIMESTAMP(6) holding 0000-00-00 00:00:00 is read back NULL from ClickHouse with a counted WARN (#951, owner decision) that the load grader does not read yet; open, closes when the load grader accepts a NULL the WARN counts exactly; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
+    KnownRed("no_silent_null_load[mysql]: SILENT_NULL over 2 source->override pairs #9c4b2a5e",
+             "2026-11-12: ClickHouse load leg, PR-NULL (#913): a MySQL TIMESTAMP(6) holding 0000-00-00 00:00:00 is read back NULL from ClickHouse with a counted WARN (#951, owner decision) that the load grader does not read yet; open, closes when the load grader accepts a NULL the WARN counts exactly; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: #982 added TIMESTAMP NULL and BIT(64) rows to docs/type-capability-matrix.yaml, product unchanged",
              _EXPIRES),
     KnownRed("no_silent_null_load[mysql]: CHECK_RUN_SPLIT over 5 source->override pairs #a1d9f398",
              "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE, RIVET_LOAD_WAREHOUSE_REJECTED) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
@@ -180,8 +189,9 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_TYPE_UNSAFE_MAPPING, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE, RIVET_LOAD_WAREHOUSE_REJECTED) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
     KnownRed("check_equals_run_cloud[offline]: CHECK_RUN_SPLIT over 1 cells #3aec5ed8",
-             "2026-11-10: BigQuery load leg, PR-PRECHECK: check exits 0 and load refuses by code (RIVET_LOAD_WAREHOUSE_REJECTED, dataset not found) because check never contacts the warehouse; open, closes when check probes the target dataset or the matrix accepts the split; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
-             _EXPIRES),
+             "2026-11-10: BigQuery load leg, PR-PRECHECK: check exits 0 and load refuses by code (RIVET_LOAD_WAREHOUSE_REJECTED, dataset not found) because check never contacts the warehouse; open, closes when check probes the target dataset or the matrix accepts the split; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: the gate grades the cloud tier and reads the same line there, the offline CLI test the offline one",
+             _EXPIRES,
+             alt=("check_equals_run_cloud[cloud]: CHECK_RUN_SPLIT over 1 cells #3aec5ed8",)),
     KnownRed("no_secret_in_output_cloud[offline]: SECRET_LEAK over 1 cells #6e8be2c9",
              "2026-11-10: BigQuery load leg, PR-CAUSE: a server that echoes the Authorization header in its 401 body gets it printed verbatim in stderr and --summary-output because the warehouse error text is not masked; open, closes when load masks server error text; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
@@ -189,6 +199,18 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              "2026-11-10: grants-CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_VALUE_UNREPRESENTABLE) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
 )
+
+
+def lane_of(key: str) -> str:
+    """The run that grades a failure message: the weekly island for the full tier, the offline CLI test for the offline tier, else the per-run gate."""
+    if _ISLAND_TIER.search(key):
+        return ISLAND
+    return OFFLINE if _OFFLINE_TIER.search(key) else GATE
+
+
+def owed_by(k: KnownRed, lane: str) -> bool:
+    """Whether a full run of `lane` must see this entry fire: one of its messages is graded by that lane."""
+    return any(lane_of(key) == lane for key in k.keys())
 
 
 def unframed(msg: str) -> str:
@@ -201,7 +223,7 @@ def match(msg: str, today: _dt.date | None = None) -> tuple[KnownRed | None, boo
     """The entry `msg` matches and whether it is still in date."""
     today = today or _dt.date.today()
     for k in KNOWN_RED:
-        if k.match in (msg, unframed(msg)):
+        if msg in k.keys() or unframed(msg) in k.keys():
             return k, today <= _dt.date.fromisoformat(k.expires)
     return None, False
 
