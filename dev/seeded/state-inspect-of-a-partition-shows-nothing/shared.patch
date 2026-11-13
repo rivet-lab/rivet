@@ -1,9 +1,10 @@
 diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+index 19eaed5e..de1affef 100644
 --- a/src/pipeline/cli.rs
 +++ b/src/pipeline/cli.rs
-@@ -53,11 +53,10 @@
+@@ -38,11 +38,10 @@ fn owner_of(config: &Config, name: &str) -> Option<Owner> {
  
- /// Whether the stored `name` belongs to the declared export `export`: it is `export` itself, or one of its partition children.
+ /// Whether the stored `name` belongs to the declared export `export`.
  fn belongs_to(config: &Config, name: &str, export: &str) -> bool {
 -    name == export
 -        || match owner_of(config, name) {

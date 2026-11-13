@@ -1,11 +1,11 @@
 diff --git a/src/pipeline/split.rs b/src/pipeline/split.rs
-index 48ee469b..f54b14da 100644
+index b52a632c..35aed101 100644
 --- a/src/pipeline/split.rs
 +++ b/src/pipeline/split.rs
-@@ -172,6 +172,9 @@ pub(crate) fn probe_and_synthesize(
-     // MongoDB has no inline SQL range literal, so a range-split unit would panic at plan
-     // build (inline_literal is unreachable for Mongo). Leave a Mongo giant whole — fail
-     // fast BEFORE the boundary probe, never crash. Every SQL engine range-splits normally.
+@@ -85,6 +85,9 @@ pub(crate) fn probe_and_synthesize(
+     config_dir: &Path,
+     n: usize,
+ ) -> Result<Option<Vec<ExportConfig>>> {
 +    if true {
 +        return Ok(None);
 +    }

@@ -1,7 +1,8 @@
 diff --git a/src/pipeline/plan_cmd.rs b/src/pipeline/plan_cmd.rs
+index c1a1b568..9ec61c45 100644
 --- a/src/pipeline/plan_cmd.rs
 +++ b/src/pipeline/plan_cmd.rs
-@@ -375,16 +375,14 @@
+@@ -302,14 +302,12 @@ fn build_plan_artifact(
          }
      }
  
@@ -12,8 +13,6 @@ diff --git a/src/pipeline/plan_cmd.rs b/src/pipeline/plan_cmd.rs
 +    let (computed, plan_diagnostics, hints) = match preflight::get_export_diagnostic(config, export)
 +    {
          Ok(mut diag) => {
-             // #149: measured beats declared — same overlay `check` applies, so
-             // the two surfaces quote the same figure with the same label.
              crate::preflight::overlay_measured_rows(
                  &mut diag,
 -                &planned,
@@ -21,7 +20,7 @@ diff --git a/src/pipeline/plan_cmd.rs b/src/pipeline/plan_cmd.rs
                  config.source.source_type,
                  state,
              );
-@@ -432,7 +430,27 @@
+@@ -344,7 +342,25 @@ fn build_plan_artifact(
              };
              (computed, plan_diagnostics, hints)
          }
@@ -39,8 +38,6 @@ diff --git a/src/pipeline/plan_cmd.rs b/src/pipeline/plan_cmd.rs
 +                verdict: "unknown (preflight failed)".into(),
 +                warnings,
 +                recommended_profile: "balanced".into(),
-+                // No diagnostic to explain from — be honest rather than fabricate
-+                // a rationale from config alone (no row estimate / index facts).
 +                strategy_rationale: "Strategy rationale unavailable — preflight diagnostics could \
 +                     not be collected for this export."
 +                    .into(),

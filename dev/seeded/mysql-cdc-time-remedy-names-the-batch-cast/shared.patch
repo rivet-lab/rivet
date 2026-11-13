@@ -1,29 +1,21 @@
 diff --git a/src/pipeline/cdc/sink.rs b/src/pipeline/cdc/sink.rs
-index a9815dfd..f793eef1 100644
+index f0ec07f7..1704218b 100644
 --- a/src/pipeline/cdc/sink.rs
 +++ b/src/pipeline/cdc/sink.rs
-@@ -1090,9 +1090,7 @@ fn flush(
-         // Engine/native-type cell normalisation (e.g. MySQL binlog quirks: BIT
-         // bytes, ENUM indexes, epoch-text TIMESTAMPs, NUL-trimmed BINARY) —
-         // computed once per column, applied per cell.
--        // The planned type, as `ensure_schema` declared it (after the three meta columns).
+@@ -755,9 +755,9 @@ fn flush(
+     let mut arrays: Vec<ArrayRef> = vec![ops, poss, seqs];
+     let schema_names: Vec<&str> = columns.iter().map(|m| m.column_name.as_str()).collect();
+     for (i, m) in columns.iter().enumerate() {
 -        let dt = schema.field(arrays.len()).data_type();
 -        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| f.applies_to(dt));
 +        let fix = value::mysql_cell_fix(engine, &m.source_native_type);
-         // after-image for insert/update; before-image (the key) for delete.
-         // Finding #41: a NAMED key-only image (PG DELETE) maps by COLUMN NAME
-         // into the resolved schema — positional mapping put a non-first PK's
-@@ -1102,6 +1100,8 @@ fn flush(
-         // one names-Arc (same TABLE_MAP / same wire session), so resolve this
-         // column's image index once and reuse it by pointer identity.
          let memo = image_name_memo(events, &m.column_name);
-+        // The planned type, as `ensure_schema` declared it (after the three meta columns).
 +        let dt = schema.field(arrays.len()).data_type();
          let refuse = |r: value::CellRefusal| {
              r.into_error(&m.column_name, dt, overridden.contains(&m.column_name))
          };
 diff --git a/src/source/cdc/value.rs b/src/source/cdc/value.rs
-index de33279e..53ccd515 100644
+index a8662aa0..2b8fb293 100644
 --- a/src/source/cdc/value.rs
 +++ b/src/source/cdc/value.rs
 @@ -977,12 +977,6 @@ fn hex_refusal(n: usize, digits: &str) -> String {
@@ -54,7 +46,7 @@ index de33279e..53ccd515 100644
                      code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                  });
              }
-@@ -2437,19 +2425,8 @@ mod tests {
+@@ -2442,19 +2430,8 @@ mod tests {
          assert!(
              err.reason
                  .starts_with("mysql: TIME 838:59:59.000000 is outside 00:00..24:00")
@@ -77,10 +69,10 @@ index de33279e..53ccd515 100644
          assert_eq!(
              t.apply(&V::TimeMicros(1)).unwrap(),
 diff --git a/src/source/mysql/arrow_convert.rs b/src/source/mysql/arrow_convert.rs
-index 5b1cbe25..1546605f 100644
+index c84aa7e3..32b2892d 100644
 --- a/src/source/mysql/arrow_convert.rs
 +++ b/src/source/mysql/arrow_convert.rs
-@@ -674,23 +674,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
+@@ -682,23 +682,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
      Ok(us)
  }
  
@@ -108,7 +100,7 @@ index 5b1cbe25..1546605f 100644
  fn fmt_micros_as_time(us: i64) -> String {
      let (sign, a) = if us.is_negative() {
 diff --git a/src/source/mysql/mod.rs b/src/source/mysql/mod.rs
-index 115de12c..47fd6d0f 100644
+index 3a332402..86cdf73e 100644
 --- a/src/source/mysql/mod.rs
 +++ b/src/source/mysql/mod.rs
 @@ -19,7 +19,7 @@
