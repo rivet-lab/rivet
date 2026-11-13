@@ -541,6 +541,9 @@
   fixed). The release pushes the formula as a GitHub App with a one-hour token instead of a personal
   token, and a failed push now fails the release job instead of being skipped.
 - **The seeded-defect recall ran only on the stand machines, so a harness break showed up days later.** **Now** a nightly workflow runs it on GitHub in four shards and publishes one table per night. **What to do:** nothing.
+- **The pre-release gate had no nightly run on GitHub.** Its parts ran only by hand on the devbox. **Now** a nightly gate grades the property matrices, open defects, oracle scenarios and previous-release compatibility in separate jobs and prints one table per night; the docker stand steps are one composite action shared with the nightly recall. **What to do:** nothing.
+- **A closed loopback stub left its acceptor thread blocked on Linux.** One thread leaked per stub and a hosted runner ran out of threads in the secret-in-output matrix. **Now** the stub shuts the socket down before closing it, so the acceptor ends. **What to do:** nothing.
+- **The release oracle could not start on a hosted CI runner.** The start floor was the devbox one (150 GiB free). **Now** `--hosted` sets it to 40 GiB; the full gate keeps 150 GiB, the island 60 GiB, and the mid-run watchdog floor is unchanged. **What to do:** nothing.
 
 ## 0.32.2 — 2026-10-22
 
