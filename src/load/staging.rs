@@ -505,8 +505,13 @@ pub(super) fn maybe_cleanup(cleanup: Option<(&GcsStore, &Cleanup)>) -> bool {
 
 /// Remove the plain keys, and each canonical pointer only when it still names a cleaned run at the moment of its delete.
 fn remove_cleanup(store: &GcsStore, cleanup: &Cleanup) -> anyhow::Result<()> {
-    let names_cleaned_run =
-        |dir: &str| canonical_run_id(store, dir).is_some_and(|id| cleanup.runs.contains(&id));
+    let names_cleaned_run = |dir: &str| {
+        seeded!(
+            "cleanup-removes-a-pointer-that-changed-hands",
+            true,
+            canonical_run_id(store, dir).is_some_and(|id| cleanup.runs.contains(&id))
+        )
+    };
     for dir in &cleanup.canonical_dirs {
         if names_cleaned_run(dir) {
             store.remove(&join_key(dir, crate::manifest::SUCCESS_FILENAME))?;

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from . import cloud_legs, core, engines
+from . import cloud_legs, core
 from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
 from .property_no_silent_null import DELIVERED, EMPTY, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
@@ -143,9 +143,9 @@ def run_engine(engine: str, work: Path) -> list[Result]:
     try:
         stmts, n = nsn.seed_sql(engine, cols, TABLE)
         for s in nsn.ledger_setup(engine):
-            engines.sql(engine, url, s)
+            nsn.sql(engine, url, s)
         for st in stmts:
-            p = engines.sql(engine, url, st + ";")
+            p = nsn.sql(engine, url, st + ";")
             if not p.ok:
                 raise RuntimeError(f"{engine} seed refused `{st[:160]}`: {p.out.strip()[:300]}")
         ensure_bucket()
@@ -156,7 +156,7 @@ def run_engine(engine: str, work: Path) -> list[Result]:
     except (RuntimeError, OSError, urllib.error.URLError) as e:
         return [Result(f"{engine}/*/load-clickhouse", REFUSED, NOT_GRADED, f"the stand could not serve the load leg: {e}"[:300])]
     finally:
-        engines.sql(engine, url, f"DROP TABLE IF EXISTS {TABLE};")
+        nsn.sql(engine, url, f"DROP TABLE IF EXISTS {TABLE};")
         try:
             ch(f"DROP DATABASE IF EXISTS {db}")
         except (OSError, urllib.error.URLError):

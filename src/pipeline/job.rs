@@ -1128,7 +1128,11 @@ fn execute_resolved_plan(
     let claim = lease.and_then(|lease| {
         let progress = state.claim(plan.progress_key())?;
         let recovered = chunked::recover_checkpoint_run(plan, &progress, tail.force)?;
-        refuse_a_cursor_past_the_manifest(recovered.as_ref().unwrap_or(plan), &progress)?;
+        seeded!(
+            "cursor-past-manifest-continued",
+            (),
+            refuse_a_cursor_past_the_manifest(recovered.as_ref().unwrap_or(plan), &progress)?
+        );
         Ok((progress, lease, recovered))
     });
     let (progress, _run_lease, recovered) = match claim {

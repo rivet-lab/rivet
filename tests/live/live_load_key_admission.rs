@@ -32,7 +32,7 @@ fn oracle_number_cursor_is_refused(kind: WarehouseKind) {
     };
     let (table, _guard) = e.create(
         "kadm",
-        "id NUMBER(10) PRIMARY KEY, ver NUMBER, v VARCHAR2(10)",
+        "id NUMBER(10) PRIMARY KEY, ver NUMBER NOT NULL, v VARCHAR2(10)",
     );
     w.adopt(&table);
     e.exec(&format!(
@@ -107,7 +107,7 @@ fn oracle_neighbour_cursor_is_admitted(
     };
     let (table, _guard) = e.create(
         "kadmn",
-        &format!("id NUMBER(10) PRIMARY KEY, ver {ddl}, v VARCHAR2(10)"),
+        &format!("id NUMBER(10) PRIMARY KEY, ver {ddl} NOT NULL, v VARCHAR2(10)"),
     );
     w.adopt(&table);
     e.exec(&format!(

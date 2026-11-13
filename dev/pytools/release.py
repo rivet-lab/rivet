@@ -31,6 +31,10 @@ Preconditions the script enforces, in order (1-5 unchanged from the bash):
    profile, a `verdict.json` of exactly HEAD's commit (`dev/pytools/satellite.py`) whose
    `blocking` list is empty.
 
+10. `--graded-sha A` reads 6-9 for the earlier commit A instead of HEAD, and requires HEAD to descend
+   from A, differ only under the harness paths, and build a release binary (`--binary`) whose SHA-256
+   equals the `binary_sha256` the latest full-gate and island runs of A recorded.
+
 WHAT THIS SCRIPT DOES **NOT** CHECK (reported, not invented):
 
 * The `cargo chef prepare` strict-TOML parse that broke 0.16.0's Docker images
@@ -60,6 +64,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,12 +80,12 @@ ROOT = shell.ROOT
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from dev.pytools import satellite  # noqa: E402
-from dev.release_oracle.core import FULL_GATE, ISLAND_GATE, TAG_GATES  # noqa: E402
+from dev.release_oracle.core import FULL_GATE, ISLAND_GATE, TAG_GATES, file_sha256, rivet_bin  # noqa: E402
 
 CARGO_TOML = ROOT / "Cargo.toml"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
-USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE] [--island-record FILE] [--satellite-record DIR]
+USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE] [--island-record FILE] [--satellite-record DIR] [--graded-sha SHA] [--binary FILE]
 
 Options:
   --dry-run     Validate only; do not create or push a tag
@@ -91,6 +96,8 @@ Options:
   --recall-record  The seeded recall's run lines (default: recall-runs.jsonl in the seeded state dir)
   --island-record  The measured island's verdict lines (default: the gate record)
   --satellite-record  The gate's logs directory holding <sha>/satellite-<profile>/verdict.json (default: $RIVET_GATE_LOGS_DIR or ~/wt/gate-logs)
+  --graded-sha  Tag HEAD on the account of the gates of this earlier commit: HEAD must descend from it, differ from it only under harness paths, and build the byte-identical release binary
+  --binary      The release binary built from HEAD for --graded-sha (default: target/release/rivet under $CARGO_TARGET_DIR); build it with RIVET_GIT_SHA set to the graded binary's stamp
   --self-test   Check the gate-record precondition on fixtures; tags nothing
   -h, --help    Show this help"""
 
@@ -104,6 +111,9 @@ GATE_RECORD = ROOT / "dev" / "release-oracle" / "timings.jsonl"
 SATELLITE_PROFILES = ("linux", "mac")
 #: The configuration a full gate runs under: no bless mode, no tolerance override, both state backends graded.
 CANONICAL_CONFIG: dict = {"bless": [], "knobs": {}, "state": ["postgres", "sqlite"]}
+#: Path prefixes and files whose change cannot alter what ships beside the binary: harness, ledgers, tests, docs, changelog fragments.
+HARNESS_PREFIXES = ("dev/", "docs/", "tests/", "changelog.d/", ".githooks/")
+HARNESS_FILES = ("CHANGELOG.md", ".cargo/mutants.toml")
 
 
 class _Usage(Exception):
@@ -122,6 +132,8 @@ class Args:
     recall_record: str = ""
     island_record: str = ""
     satellite_record: str = ""
+    graded_sha: str = ""
+    binary: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -177,6 +189,18 @@ def parse_args(argv: list[str]) -> Args:
             if not value:
                 raise _Usage()
             a.satellite_record = value
+            i += 2
+        elif arg == "--graded-sha":
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+            if not value:
+                raise _Usage()
+            a.graded_sha = value
+            i += 2
+        elif arg == "--binary":
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+            if not value:
+                raise _Usage()
+            a.binary = value
             i += 2
         elif arg in ("-h", "--help"):
             raise _Usage()
@@ -272,12 +296,10 @@ def binary_is_tree(stamp: object, sha: str) -> bool:
     return isinstance(stamp, str) and stamp != "" and sha.startswith(stamp)
 
 
-def gate_refusal(sha: str, record: Path, kind: str = FULL_GATE) -> str | None:
-    """Why `sha` may not be tagged by the `kind` runs in `record`, or None when the latest such run is RELEASE-READY on a clean tree with a binary built from `sha`, under the canonical configuration."""
-    if not record.is_file():
-        return f"no gate record at {record}"
+def gate_runs(sha: str, record: Path, kind: str) -> tuple[list[dict], int]:
+    """The `kind` runs of exactly `sha` in `record`, oldest first, and the count of its runs of other kinds."""
     runs, other = [], 0
-    for line in record.read_text().splitlines():
+    for line in record.read_text().splitlines() if record.is_file() else []:
         try:
             rec = json.loads(line)
         except ValueError:
@@ -288,6 +310,14 @@ def gate_refusal(sha: str, record: Path, kind: str = FULL_GATE) -> str | None:
             runs.append(rec)
         else:
             other += 1
+    return runs, other
+
+
+def gate_refusal(sha: str, record: Path, kind: str = FULL_GATE) -> str | None:
+    """Why `sha` may not be tagged by the `kind` runs in `record`, or None when the latest such run is RELEASE-READY on a clean tree with a binary built from `sha`, under the canonical configuration."""
+    if not record.is_file():
+        return f"no gate record at {record}"
+    runs, other = gate_runs(sha, record, kind)
     if not runs:
         also = f" ({other} run(s) of other kinds, which cannot support a tag)" if other else ""
         return f"no {kind} run of {sha[:12]} in {record}{also}"
@@ -317,6 +347,39 @@ def env_skip_refusal(ids: object) -> str | None:
 
     open_ = ["/".join(i) for i in ids if skip_allow.excused(*i) is None]
     return f"skipped {len(open_)} cell(s) for the environment with no excuse in skip_allow.py: {', '.join(open_)}" if open_ else None
+
+
+def outside_harness(paths: list[str]) -> list[str]:
+    """The paths that are not harness, ledger, test, docs or changelog paths."""
+    return [p for p in paths if not (p in HARNESS_FILES or p.startswith(HARNESS_PREFIXES))]
+
+
+def changed_between(graded: str, head: str, root: Path = ROOT) -> list[str] | None:
+    """Every path `graded..head` adds, changes, deletes or renames (both ends), or None when `graded` is not an ancestor of `head`."""
+    git = lambda *a: subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True)  # noqa: E731
+    if git("merge-base", "--is-ancestor", graded, head).returncode != 0:
+        return None
+    out = git("diff", "--name-only", "--no-renames", "-z", graded, head)
+    return [p for p in out.stdout.split("\0") if p] if out.returncode == 0 else None
+
+
+def reuse_refusal(graded: str, head: str, changed: list[str] | None, built: str, gate: Path, island: Path) -> str | None:
+    """Why `head` may not be tagged on the gates of the earlier commit `graded`: not its descendant, a diff outside the harness paths, or a built binary whose SHA-256 is not the one the latest full-gate and island runs of `graded` recorded."""
+    if changed is None:
+        return f"{graded[:12]} is not an ancestor of {head[:12]}"
+    if outside := outside_harness(changed):
+        return f"{graded[:12]}..{head[:12]} touches {len(outside)} path(s) outside the harness paths: {', '.join(outside[:5])}"
+    for kind, record in ((FULL_GATE, gate), (ISLAND_GATE, island)):
+        runs, _ = gate_runs(graded, record, kind)
+        if not runs:
+            return f"no {kind} run of {graded[:12]} to take a binary SHA-256 from"
+        recorded = runs[-1].get("binary_sha256")
+        if not (isinstance(recorded, str) and re.fullmatch(r"[0-9a-f]{64}", recorded)):
+            return f"the latest {kind} run of {graded[:12]} recorded no binary SHA-256, so its binary cannot be compared: run the gate again"
+        if recorded != built:
+            return (f"the latest {kind} run of {graded[:12]} graded a binary with SHA-256 {recorded[:12]}, "
+                    f"the one built from {head[:12]} is {built[:12] or 'missing'}")
+    return None
 
 
 def island_refusal(sha: str, record: Path) -> str | None:
@@ -384,6 +447,119 @@ def tag_refusal(sha: str, gate: Path, recall: Path | None, island: Path | None =
                      "`python3 dev/pytools/satellite.py remote --sha SHA --publish` and `... mac --sha SHA --repo DIR --publish`; "
                      "pass --satellite-record DIR when they were published to another machine")
     return None
+
+
+def graded_refusal(sha: str, graded: str, changed: list[str] | None, built: str, gate: Path, recall: Path | None,
+                   island: Path | None = None, satellite_dir: Path | None = None) -> tuple[str, str] | None:
+    """`tag_refusal` of the records of `graded`, after `reuse_refusal` when `graded` is not `sha` itself."""
+    if graded != sha and (why := reuse_refusal(graded, sha, changed, built, gate, island or gate)):
+        return why, ("tagging a descendant of the graded commit needs a harness-only diff and the byte-identical release binary; "
+                     "otherwise run `make release-oracle-full` on this commit")
+    return tag_refusal(graded, gate, recall, island, satellite_dir)
+
+
+def reuse_self_test(sha: str, rec, run, write_satellites) -> int:  # noqa: ANN001
+    """The reuse of a graded commit's gates on a real scratch repository and on fixture records: each guard refuses its own mutant."""
+    import tempfile
+    from unittest import mock
+
+    other = "b" * 40
+    digest, differing = "c" * 64, "d" * 64
+    with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {}, clear=False):
+        for key in [k for k in os.environ if k.startswith("GIT_")]:
+            del os.environ[key]
+        root = Path(d) / "repo"
+        git = lambda *a: subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, text=True, check=True).stdout.strip()  # noqa: E731
+        for rel in ("src/main.rs", "tests/t.rs", "docs/d.md", "dev/x.py", "Cargo.toml", ".github/workflows/release.yml", "CHANGELOG.md"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("1\n")
+        git("init", "-q", "-b", "main")
+        git("add", "-A")
+        git("commit", "-q", "-m", "A")
+        a = git("rev-parse", "HEAD")
+
+        def commit(*edits: str, move: tuple[str, str] | None = None) -> str:
+            git("checkout", "-q", "-B", "work", a)
+            for rel in edits:
+                (root / rel).write_text("2\n")
+            if move:
+                (root / move[1]).parent.mkdir(parents=True, exist_ok=True)
+                git("mv", *move)
+            git("add", "-A")
+            git("commit", "-q", "-m", "B")
+            return git("rev-parse", "HEAD")
+
+        harness = commit("tests/t.rs", "docs/d.md", "dev/x.py", "CHANGELOG.md")
+        assert sorted(changed_between(a, harness, root) or []) == ["CHANGELOG.md", "dev/x.py", "docs/d.md", "tests/t.rs"]
+        assert outside_harness(changed_between(a, harness, root) or []) == []
+        assert changed_between(a, a, root) == []
+        for edits, move, bad in (
+            (("src/main.rs",), None, "src/main.rs"), (("Cargo.toml",), None, "Cargo.toml"),
+            ((".github/workflows/release.yml",), None, ".github/workflows/release.yml"),
+            (("tests/t.rs",), ("src/main.rs", "tests/main.rs"), "src/main.rs"),
+            ((), ("tests/t.rs", "src/t.rs"), "src/t.rs"),
+        ):
+            head = commit(*edits, move=move)
+            assert bad in outside_harness(changed_between(a, head, root) or []), (edits, move, changed_between(a, head, root))
+        git("checkout", "-q", "-B", "side", a)
+        (root / "docs/d.md").write_text("3\n")
+        git("commit", "-q", "-am", "side")
+        git("checkout", "-q", "-B", "work2", a)
+        git("commit", "-q", "--allow-empty", "-m", "C")
+        assert changed_between(git("rev-parse", "side"), git("rev-parse", "work2"), root) is None, "a commit that is not an ancestor is never graded"
+
+    def records(path: Path, full: dict | None = {}, island: dict | None = {}, extra: tuple[str, ...] = ()) -> Path:  # noqa: B006
+        """A gate record of `sha`: the full-gate and island lines (None leaves one out) with `digest` unless overridden."""
+        lines = [] if full is None else [rec(sha=sha, **{"binary_sha256": digest, **full})]
+        lines += [] if island is None else [rec(sha=sha, gate=ISLAND_GATE, **{"binary_sha256": digest, **island})]
+        path.write_text("\n".join([*lines, *extra]) + "\n")
+        return path
+
+    ok_paths = ["tests/t.rs", "docs/d.md"]
+    cases = [
+        ({}, {}, ok_paths, digest, None),
+        ({}, {}, [*ok_paths, "src/main.rs"], digest, "outside the harness paths: src/main.rs"),
+        ({}, {}, [*ok_paths, "Cargo.lock"], digest, "outside the harness paths: Cargo.lock"),
+        ({}, {}, ok_paths, differing, "graded a binary with SHA-256 cccccccccccc"),
+        ({}, {}, ok_paths, "", "the one built from"),
+        ({}, {}, ok_paths, "C" * 64, "graded a binary with SHA-256"),
+        ({"binary_sha256": None}, {}, ok_paths, digest, "recorded no binary SHA-256"),
+        ({"binary_sha256": ""}, {}, ok_paths, digest, "recorded no binary SHA-256"),
+        ({"binary_sha256": "abc"}, {}, ok_paths, digest, "recorded no binary SHA-256"),
+        ({"binary_sha256": differing}, {}, ok_paths, digest, "graded a binary with SHA-256"),
+        ({}, {"binary_sha256": None}, ok_paths, digest, "release-oracle-island run"),
+        ({}, {"binary_sha256": differing}, ok_paths, digest, "release-oracle-island run"),
+        (None, {}, ok_paths, digest, "no release-oracle-full run"),
+        ({}, None, ok_paths, digest, "no release-oracle-island run"),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        sats = Path(d) / "sats"
+        write_satellites(sats, sha)
+        good = Path(d) / "recall.jsonl"
+        good.write_text(run() + "\n")
+        for i, (full, island, changed, built, want) in enumerate(cases):
+            path = records(Path(d) / f"g{i}.jsonl", full, island)
+            got = graded_refusal(other, sha, changed, built, path, good, None, sats)
+            assert (got is None) if want is None else (got is not None and want in got[0]), (i, full, island, changed, built, got)
+        path = records(Path(d) / "latest.jsonl", extra=(rec(sha=sha, binary_sha256=differing),))
+        got = graded_refusal(other, sha, ok_paths, digest, path, good, None, sats)
+        assert got and "graded a binary with SHA-256" in got[0], "the latest run decides, not an older one that matches"
+        path = records(Path(d) / "older.jsonl", extra=(rec(sha=sha, binary_sha256=digest, verdict="NOT RELEASABLE"),))
+        got = graded_refusal(other, sha, ok_paths, digest, path, good, None, sats)
+        assert got and "says NOT RELEASABLE" in got[0], "a red latest run of the graded commit still refuses"
+        path = records(Path(d) / "chain.jsonl")
+        got = graded_refusal(other, sha, None, digest, path, good, None, sats)
+        assert got and "is not an ancestor" in got[0], "a graded commit that is not an ancestor is refused"
+        bad = Path(d) / "bad.jsonl"
+        bad.write_text(run(complete=False) + "\n")
+        got = graded_refusal(other, sha, ok_paths, digest, path, bad, None, sats)
+        assert got and "seeded recall" in got[1], "the graded commit's recall is still required"
+        got = graded_refusal(other, sha, ok_paths, digest, path, good, None, Path(d) / "no-sats")
+        assert got and "satellite linux verdict" in got[0], "the graded commit's satellite verdicts are still required"
+        assert graded_refusal(other, other, [], "", path, good, None, sats), "no --graded-sha reads the records of the commit itself"
+        assert graded_refusal(sha, sha, [], "", path, good, None, sats) is None, "the graded commit itself needs no binary comparison"
+    print(f"self-test ok: graded-commit reuse — {len(cases)} record cases, git diff paths, ancestry")
+    return 0
 
 
 def self_test() -> int:
@@ -550,6 +726,9 @@ def self_test() -> int:
             got = satellite_refusal(sha, logs)
             assert (got is None) if want is None else (got is not None and want in got), (i, profiles, got)
         assert satellite_refusal(sha, Path(d) / "absent") is not None, "a missing logs directory is a refusal"
+    parsed = parse_args(["--graded-sha", "abc", "--binary", "bin"])
+    assert (parsed.graded_sha, parsed.binary) == ("abc", "bin")
+    reuse_self_test(sha, rec, run, write_satellites)
     declared = set(re.findall(r'Run\("(\w+)", args\.sha', Path(satellite.__file__).read_text()))
     assert declared == set(SATELLITE_PROFILES), f"satellite.py runs profiles {sorted(declared)}, release.py requires {SATELLITE_PROFILES}"
     print(f"self-test ok: release gate record — {len(cases)} cases, only a clean green full-gate run of this commit tags; "
@@ -633,9 +812,15 @@ def main_cli(argv: list[str] | None = None) -> int:
 
     sha = _git("rev-parse", "HEAD").check("git rev-parse HEAD").stdout.strip()
     record = Path(args.gate_record) if args.gate_record else GATE_RECORD
-    refused = tag_refusal(sha, record, Path(args.recall_record) if args.recall_record else None,
-                          Path(args.island_record) if args.island_record else None,
-                          Path(args.satellite_record) if args.satellite_record else None)
+    island = Path(args.island_record) if args.island_record else None
+    graded = sha
+    if args.graded_sha:
+        graded = _git("rev-parse", "--verify", f"{args.graded_sha}^{{commit}}").check(f"git rev-parse {args.graded_sha}").stdout.strip()
+    reused = graded != sha
+    refused = graded_refusal(sha, graded, changed_between(graded, sha) if reused else [],
+                             file_sha256(Path(args.binary) if args.binary else rivet_bin()) if reused else "",
+                             record, Path(args.recall_record) if args.recall_record else None, island,
+                             Path(args.satellite_record) if args.satellite_record else None)
     if refused:
         raise shell.Fail(f"error: {refused[0]}", hint=refused[1])
     head = sha[:8]
@@ -655,7 +840,7 @@ def main_cli(argv: list[str] | None = None) -> int:
   tag:     {tag}
   version: {version}
   commit:  {head} ({branch})
-  gate:    {FULL_GATE} RELEASE-READY ({record})
+  gate:    {FULL_GATE} RELEASE-READY ({record}){f" of {graded[:8]}, binary byte-identical, harness-only diff" if reused else ""}
   recall:  complete green seeded recall of this commit
   island:  {ISLAND_GATE} RELEASE-READY
   satellites: {", ".join(SATELLITE_PROFILES)} verdicts of this commit, nothing blocking

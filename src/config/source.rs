@@ -662,7 +662,11 @@ impl SourceType {
 
 /// `engine://host:port/database` of `url`, credentials, query and fragment dropped; a keyword/value string keeps its pairs with the password masked.
 pub(crate) fn source_state_key(source_type: SourceType, url: &str) -> String {
-    let url = &crate::redact::redact_keyword_passwords(url);
+    let url = &seeded!(
+        "source-key-keyword-password-at",
+        url.to_string(),
+        crate::redact::redact_keyword_passwords(url)
+    );
     let rest = crate::url_text::server_and_path(url);
     let at_host = rest.split(['?', '#']).next().unwrap_or(rest);
     let key = format!("{source_type:?}://{}", at_host.trim_end_matches('/')).to_lowercase();

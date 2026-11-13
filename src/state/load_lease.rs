@@ -378,7 +378,11 @@ fn flocked(path: &std::path::Path, how: libc::c_int) -> Result<Option<std::fs::F
 /// release may still hold it: taken shared after the new file, so it excludes a 0.32.1 holder and
 /// no holder of this release. To be removed in 0.34.0. `None` for an in-memory store.
 fn legacy_lease_path(db: &std::path::Path, key: &str) -> Option<std::path::PathBuf> {
-    if db.to_string_lossy() == ":memory:" {
+    if seeded!(
+        "lease-upgrade-window-unguarded",
+        db.to_string_lossy() != ":never:",
+        db.to_string_lossy() == ":memory:"
+    ) {
         return None;
     }
     let mut name = db.file_name().map(|n| n.to_os_string()).unwrap_or_default();

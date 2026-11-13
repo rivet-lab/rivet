@@ -2826,7 +2826,11 @@ pub(crate) fn statement_frame(in_transaction: bool, raw: &[u8]) -> (bool, bool) 
         b"ROLLBACK" => (false, false),
         _ => (
             in_transaction,
-            !in_transaction && !is_transaction_control(raw),
+            seeded!(
+                "column-grants-statement-in-a-transaction-re-read",
+                !is_transaction_control(raw),
+                !in_transaction && !is_transaction_control(raw)
+            ),
         ),
     }
 }

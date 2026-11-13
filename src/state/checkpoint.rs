@@ -344,7 +344,11 @@ impl StateStore {
         let now = chrono::Utc::now().to_rfc3339();
         match &self.conn {
             StateConn::Sqlite(conn) => {
-                let _turn = self.write_turn();
+                let _turn = seeded!(
+                    "sqlite-chunk-claim-takes-no-turn",
+                    None,
+                    Some(self.write_turn())
+                );
                 let tx =
                     rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
                 let res = Self::claim_next_chunk_in_sqlite_tx(&tx, &now, run_id)?;
@@ -569,7 +573,11 @@ impl StateStore {
 
     /// Remove the chunk runs and tasks of `export_name` that belong to `source` (one that recorded no source belongs to every source) and the chunked resume anchor of `source`, a respelling of it re-keyed onto it first (abandon resume); another source's stay.
     pub fn reset_chunk_checkpoint(&self, export_name: &str, source: &str) -> Result<usize> {
-        self.adopt_respelled_source(export_name, source)?;
+        seeded!(
+            "reset-chunks-respelled-source-kept",
+            (),
+            self.adopt_respelled_source(export_name, source)?
+        );
         let run_ids: Vec<String> = self
             .query(
                 "SELECT run_id, source FROM chunk_run WHERE export_name = ?1",

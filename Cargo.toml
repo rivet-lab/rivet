@@ -223,6 +223,8 @@ oracle = ["dep:oracledb", "dep:rustls"]
 # Builds the dev-only `seed` test-data generator (see `[[bin]] seed`). Off by
 # default so it is never installed by `cargo install rivet-cli`.
 dev-seed = []
+# Seeded-defect switches read from RIVET_SEED; never built for a release.
+seeded = []
 # Exposes `rivet::fuzz` — thin, panic-only entry points into the untrusted-input
 # parsers (config YAML, the PostgreSQL `test_decoding` text decoder, the MongoDB
 # resume-token BSON decoder) for the cargo-fuzz targets in `fuzz/`. Off by

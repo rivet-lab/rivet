@@ -56,6 +56,8 @@ PROBE_UNREACHED = re.compile(r"type report for '[^']*' failed: .*(?:refused|time
 STAND_REFUSALS = ("RIVET_SOURCE_CONNECT_FAILED", "RIVET_SOURCE_RUNTIME_UNAVAILABLE", "RIVET_SOURCE_STATEMENT_TIMEOUT")
 STAND_TRIES = 5
 RECHECKS = 2
+LEASE_REFUSAL = "RIVET_STATE_RUN_IN_PROGRESS"
+CELL_STATE = {"RIVET_STATE_URL": "", "RIVET_GATE_STATE_URL": ""}
 DELIVERED, REFUSED, DECLARED = "delivered", "refused", "declared_lossy"
 HIDDEN, SHAPE = "HIDDEN_COLUMN_DELIVERED", "LEG_SHAPE_DIFFERS"
 BLIND = "INTEGRITY_BLIND"
@@ -178,6 +180,8 @@ TEMPORAL = re.compile(r"(DATE|TIMESTAMPTZ|TIMESTAMP|DATETIME2|DATETIME|SMALLDATE
 
 
 ZERO_DATE_LIT = re.compile(r"'(0000-00-00|\d{4}-00-\d\d|\d{4}-\d\d-00)( [0-9:.]+)?'")
+ALTER_TABLE = re.compile(r"\bALTER\s+TABLE\b", re.I)
+MYSQL_LAX = "SET SESSION sql_mode = ''; "
 
 
 def _zero_dates(engine: str, native: str) -> list[str]:
@@ -309,15 +313,24 @@ def seed_sql(engine: str, cols: list[Col], table: str = TABLE) -> tuple[list[str
     return [f"DROP TABLE IF EXISTS {table}", ddl, *ins], n
 
 
+def mysql_text(statement: str) -> str:
+    """`statement` led by an empty sql_mode when it names a zero date or alters a table, which the stand's strict mode refuses."""
+    return (MYSQL_LAX if ZERO_DATE_LIT.search(statement) or ALTER_TABLE.search(statement) else "") + statement
+
+
+def sql(engine: str, url: str, statement: str) -> core.Proc:
+    """One source statement of this matrix, MySQL under the session mode mysql_text picks."""
+    return engines.sql(engine, url, mysql_text(statement) if engine == "mysql" else statement)
+
+
 def seed(engine: str, url: str) -> tuple[list[Col], int]:
     """Create the seed table on the stand; raises when the server refuses a statement."""
     cols = columns(engine)
     stmts, n = seed_sql(engine, cols)
     for s in ledger_setup(engine):
-        engines.sql(engine, url, s)
+        sql(engine, url, s)
     for st in stmts:
-        zero = ZERO_DATE_LIT.search(st) if engine == "mysql" and st.startswith("INSERT") else None
-        p = engines.sql(engine, url, ("SET SESSION sql_mode = ''; " if zero else "") + st + ";")
+        p = sql(engine, url, st + ";")
         if not p.ok:
             raise RuntimeError(f"{engine} seed refused `{st[:160]}`: exit {p.returncode}: {p.out.strip()[:300]}")
     return cols, n
@@ -658,7 +671,7 @@ def stand_refused(p: core.Proc) -> bool:
 def rivet(args: list[str], env: dict, cwd: Path) -> core.Proc:
     """One rivet process; a stand that refused it is asked again a few times before the refusal is kept."""
     for i in range(STAND_TRIES):
-        p = core.run([_rivet_bin(), *args], env=env, cwd=cwd, timeout=RUN_TIMEOUT)
+        p = core.run([_rivet_bin(), *args], env={**CELL_STATE, **env}, cwd=cwd, timeout=RUN_TIMEOUT)
         if not stand_refused(p):
             break
         time.sleep(1 + 2 * i)
@@ -674,6 +687,8 @@ def grade_stop(cell: str, p: core.Proc, check: core.Proc) -> Result | None:
         return Result(cell, REFUSED, NOT_GRADED, f"the stand refused the process {STAND_TRIES} times: exit {p.returncode} [{code or 'check'}]", code)
     if p.returncode in (101, 124, 127) or p.returncode < 0:
         return Result(cell, REFUSED, CRASH, f"exit {p.returncode}: {core.first_error(p.stderr)[:160]}", code)
+    if code == LEASE_REFUSAL:
+        return Result(cell, REFUSED, UNGRADED, f"another cell of this matrix holds the run lease, so no value was read: exit {p.returncode} [{code}]", code)
     if code.startswith("RIVET_CONFIG_") and code not in TYPE_REFUSALS:
         return Result(cell, REFUSED, UNGRADED, f"the harness's own config was refused before any value was read: exit {p.returncode} [{code}]", code)
     if not code or code.startswith("RIVET_INTERNAL"):
@@ -950,7 +965,7 @@ def cleanup(engine: str, url: str) -> None:
     if engine == "mongo":
         cdc._mongosh(url, f"db.{TABLE}.drop()")
     else:
-        engines.sql(engine, url, f"DROP TABLE IF EXISTS {TABLE};")
+        sql(engine, url, f"DROP TABLE IF EXISTS {TABLE};")
 
 
 def _run_engine(engine: str, tier: str, work: Path, url: str, progress) -> tuple[list[Result], list[str]]:
@@ -1161,6 +1176,26 @@ def self_test() -> None:
     assert stand_refused(probe) and not stand_refused(_proc(0, "WARN type report for 'nsn' failed: column X has no mapping"))
     assert grade_stop("c", _proc(1, "[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] x"), probe).klass == NOT_GRADED, "a check whose type probe never ran is no evidence of a split"
     assert grade_stop("c", _proc(2, "[RIVET_CONFIG_COLUMN_OVERRIDE_CASE] x"), _proc(2)).klass == UNGRADED, "a refusal of the harness's own config is not a graded refusal"
+    assert grade_stop("c", _proc(2, "[RIVET_STATE_RUN_IN_PROGRESS] x"), _proc(0)).klass == UNGRADED, "a lease refusal between two cells is not a graded refusal"
+    seen: dict = {}
+    real_run = core.run
+    core.run = lambda argv, **kw: seen.update(kw["env"]) or _proc(0)
+    try:
+        rivet(["check"], {"RIVET_NSN_URL": "u"}, Path("."))
+    finally:
+        core.run = real_run
+    assert seen == {**CELL_STATE, "RIVET_NSN_URL": "u"}, "a cell runs on the state beside its config, never on the gate's shared state"
+    sent: list[str] = []
+    real_mysql, real_psql = cdc._mysql, cdc._psql
+    cdc._mysql = lambda url, text: sent.append(text) or _proc(0)
+    cdc._psql = lambda url, **kw: sent.append(kw["sql"]) or _proc(0)
+    try:
+        for stmt in ("INSERT INTO t VALUES ('0000-00-00')", "UPDATE t SET c = '2026-00-00 00:00:00'", "ALTER TABLE t MODIFY n BIGINT", "INSERT INTO t VALUES (1)"):
+            sql("mysql", "u", stmt)
+        sql("postgres", "u", "ALTER TABLE t ADD n INT")
+    finally:
+        cdc._mysql, cdc._psql = real_mysql, real_psql
+    assert [s.startswith(MYSQL_LAX) for s in sent] == [True, True, True, False, False], "a zero-date or ALTER statement on MySQL runs under an empty sql_mode, any other as it is"
     assert "C00" in config("oracle", "U", "incremental", "parquet", "c00", "int8", "o") and "cursor_column: ID" in config("oracle", "U", "incremental", "parquet", "c00", "none", "o")
     refused = grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), _proc(2))
     assert refused.klass == "" and refused.verdict == REFUSED and refused.code == "RIVET_SOURCE_VALUE_UNREPRESENTABLE"

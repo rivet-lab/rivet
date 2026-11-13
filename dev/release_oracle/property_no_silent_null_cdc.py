@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from . import cdc, core, engines
+from . import cdc, core
 from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
 from .property_no_silent_null import DELIVERED, EMPTY, IGNORED, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
@@ -127,7 +127,7 @@ def ddl_insert(engine: str, cols: list[Col], t: str, kind: str) -> list[str]:
 def sql(engine: str, url: str, stmt: str) -> core.Proc:
     """One source statement, asked again while the stand drops the connection."""
     for i in range(nsn.STAND_TRIES):
-        p = engines.sql(engine, url, stmt)
+        p = nsn.sql(engine, url, stmt)
         if p.ok or not STAND_DROPPED.search(p.out):
             break
         time.sleep(1 + 2 * i)
@@ -176,7 +176,7 @@ def drop(engine: str, url: str, t: str, slots: list[str]) -> None:
     if engine == "mssql":
         cdc._lc_drop("mssql", url, t)
     else:
-        engines.sql(engine, DML_STAND.get(engine, url), f"DROP TABLE IF EXISTS {t};")
+        nsn.sql(engine, DML_STAND.get(engine, url), f"DROP TABLE IF EXISTS {t};")
 
 
 def cdc_keys(engine: str, d: Path, t: str, slot: str, sid: int) -> dict:
@@ -265,7 +265,7 @@ def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: st
     try:
         stmts, n = nsn.seed_sql(engine, cols, t)
         for s in nsn.ledger_setup(engine):
-            engines.sql(engine, dml_url, s)
+            nsn.sql(engine, dml_url, s)
         mid = {"oracle": f"ALTER TABLE {t} ADD (nsn_mid NUMBER(9))", "mssql": f"ALTER TABLE dbo.{t} ADD nsn_mid INT"}.get(engine, f"ALTER TABLE {t} ADD nsn_mid INT")
         exec_all(engine, dml_url, [stmts[0], stmts[1], mid, *stmts[2:], *capture_on(engine, url, t)])
         wait_capture(engine, url, t)
@@ -325,7 +325,7 @@ def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], st
                 units += [Unit(t, c, "parquet") for t in ax["targets"] if t != "none"]
         out += [(group, units[k:k + cap], "") for k in range(0, len(units), cap)]
     if engine == "mysql":
-        default = engines.sql("mysql", CDC_STAND["mysql"], "SELECT @@global.binlog_row_image;").out
+        default = nsn.sql("mysql", CDC_STAND["mysql"], "SELECT @@global.binlog_row_image;").out
         for image in (i for i in row_images() if i not in default):
             out += [(cols[g:g + GROUP], [Unit("none", None, "parquet")], image) for g in range(0, len(cols), GROUP)]
     return out
