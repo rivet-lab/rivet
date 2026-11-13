@@ -1,6 +1,8 @@
 name: Nightly Recall
 
 on:
+  push:
+    branches: [gate/nightly-recall]
   schedule:
     - cron: "15 1 * * *"
   workflow_dispatch:
@@ -29,7 +31,7 @@ jobs:
           persist-credentials: false
       - id: plan
         env:
-          SEEDS: ${{ inputs.seeds }}
+          SEEDS: ${{ inputs.seeds || (github.event_name == 'push' && 'committed-every-event,cdc-hot-added-column-dropped,io-error-classified-by-its-path-text' || '') }}
         run: python3 .github/scripts/recall_shards.py 4 | tee -a "$GITHUB_OUTPUT"
 
   recall:
