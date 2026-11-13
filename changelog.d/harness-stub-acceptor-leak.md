@@ -1,0 +1,1 @@
+- **A closed loopback stub left its acceptor thread blocked on Linux.** One thread leaked per stub and a hosted runner ran out of threads in the secret-in-output matrix. **Now** the stub shuts the socket down before closing it, so the acceptor ends.

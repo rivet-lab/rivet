@@ -339,11 +339,16 @@ class Stub:
         self.sock.listen(64)
         self.port = self.sock.getsockname()[1]
         self._stop = False
-        threading.Thread(target=self._accept, daemon=True).start()
+        self.acceptor = threading.Thread(target=self._accept, daemon=True)
+        self.acceptor.start()
 
     def close(self) -> None:
-        """Stop accepting."""
+        """Stop accepting and wake the acceptor, which Linux leaves blocked in accept() after close()."""
         self._stop = True
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self.sock.close()
         except OSError:
@@ -1424,6 +1429,10 @@ def _self_test() -> None:
     names, files, _ = ambient_identity("aws")
     assert not signer_source("aws") or (names.get("AWS_ACCESS_KEY_ID") == "secret" and ".aws/credentials" in files), (names, files)
     assert "token" == OWN_STUB["gcp key"] and set(OWN_STUB.values()) <= {"source", "state", "load", "dest", "notify", "token"}
+    stub = Stub("rst")
+    stub.close()
+    stub.acceptor.join(2)
+    assert not stub.acceptor.is_alive(), "a closed stub leaks its acceptor thread"
     print("no_secret_in_output self-test: ok")
 
 

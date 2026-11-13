@@ -1,0 +1,1 @@
+- **The pre-release gate had no nightly run on GitHub.** Its parts ran only by hand on the devbox. **Now** a nightly gate grades the property matrices, open defects, oracle scenarios and previous-release compatibility in separate jobs and prints one table per night; the docker stand steps are one composite action shared with the nightly recall.

@@ -1,0 +1,104 @@
+name: Nightly Gate
+
+on:
+  schedule:
+    - cron: "15 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  NO_COLOR: "1"
+  RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
+
+jobs:
+  part:
+    name: ${{ matrix.part.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        part:
+          - { name: no-silent-null, target: property-no-silent-null, release: true }
+          - { name: no-secret-in-output, target: property-no-secret-in-output, stack: core }
+          - { name: no-debris-after-stop, target: property-no-debris-after-stop }
+          - { name: check-equals-run, target: property-check-equals-run }
+          - { name: refusal-names-true-cause, target: property-refusal-names-true-cause-live }
+          - { name: seek-order, target: seek-order-matrix }
+          - { name: open-defects, target: open-defects }
+          - { name: oracle-scenarios, target: release-oracle-nightly, stack: lean }
+          - { name: prev-release-compat, target: release-oracle-compat }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/live-stack
+        with:
+          stack: ${{ matrix.part.stack || 'full' }}
+
+      - name: Release binary
+        if: ${{ matrix.part.release }}
+        run: cargo build --release --bin rivet
+
+      - name: Grade the part
+        env:
+          TARGET: ${{ matrix.part.target }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+        run: |
+          mkdir -p out
+          set +e
+          (while sleep 180; do date -u +%T; free -m | sed -n 2p; docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | sort -k2 -h | tail -4; done) &
+          make "$TARGET" 2>&1 | tee out/part.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### ${{ matrix.part.name }} (make $TARGET, exit $rc)"; echo '```'; grep -E "PASS|FAIL|SKIP|RED|GREEN|NOT_GRADED|NOT GRADED|verdict|passed|failed|RELEASE" out/part.txt | tail -60; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "$rc" > out/exit-code.txt
+          grep -E "PASS[=: ]" out/part.txt | tail -1 > out/summary.txt
+          exit "$rc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gate-part-${{ matrix.part.name }}
+          path: out/
+          if-no-files-found: warn
+
+      - name: Disk after the part
+        if: always()
+        run: df -h / && free -m
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
+
+  verdict:
+    name: Gate parts verdict
+    needs: part
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gate-part-*
+          path: parts
+        continue-on-error: true
+      - name: One table for the night
+        env:
+          RESULT: ${{ needs.part.result }}
+        run: |
+          {
+            echo "### Nightly gate parts: $RESULT"
+            echo '| part | exit | matrix line |'
+            echo '|---|---|---|'
+            for d in parts/gate-part-*; do
+              echo "| ${d#parts/gate-part-} | $(cat "$d/exit-code.txt" 2>/dev/null || echo not-evaluated) | $(head -c 200 "$d/summary.txt" 2>/dev/null | tr -d '|') |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$RESULT" = success ]
