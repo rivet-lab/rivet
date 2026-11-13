@@ -1,0 +1,13 @@
+diff --git a/src/source/oracle/mod.rs b/src/source/oracle/mod.rs
+index 5dcc8e9f..a829e7cd 100644
+--- a/src/source/oracle/mod.rs
++++ b/src/source/oracle/mod.rs
+@@ -151,7 +151,7 @@ pub(crate) fn parse_oracle_url(url: &str) -> Result<OracleUrl> {
+             "oracle: URL has no service name — {FORM}"
+         )
+     }
+-    let service = crate::url_text::pct_decode(service);
++    let service = service.to_string();
+     if service.contains('/') {
+         crate::rivet_bail!(
+             crate::error::codes::CONFIG_SOURCE_URL_INVALID,
