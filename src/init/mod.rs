@@ -1373,7 +1373,9 @@ fn init_yaml(
             probes_mineability(mode_override),
         )?;
         let mut infos = vec![info];
-        read_source_keys(&mut infos, source_url, tls, dest, mode_override);
+        read_source_keys(&mut infos, source_url, dest, mode_override, |kind| {
+            crate::source::connect(kind, source_url, tls, None)
+        });
         let info = &infos[0];
         let snaps = vec![snapshot_of(info, mode_override, source_url)];
         let scaffold =
@@ -1390,7 +1392,9 @@ fn init_yaml(
     if infos.is_empty() {
         return Err(no_tables_error(filter));
     }
-    read_source_keys(&mut infos, source_url, tls, dest, mode_override);
+    read_source_keys(&mut infos, source_url, dest, mode_override, |kind| {
+        crate::source::connect(kind, source_url, tls, None)
+    });
     let label = schema_scope_label(source_url, schema, infos.len())?;
     let scaffold = yaml_scaffold::scaffold_schema(
         &infos,
@@ -1992,13 +1996,24 @@ fn record_source_keys(
     unread
 }
 
+/// The warning that names the tables whose key could not be read, `None` when every read worked.
+fn unread_keys_notice(unread: &[String]) -> Option<String> {
+    (!unread.is_empty()).then(|| {
+        format!(
+            "init: source primary key not read for {} table(s) — their incremental exports carry no `load: pk:`; declare `pk: [..]` in the export's `load:` block before `rivet load`: {}",
+            unread.len(),
+            unread.join(", ")
+        )
+    })
+}
+
 /// Read the source primary key, in key order, of every table whose export will be an incremental `query:` loaded into a warehouse.
 fn read_source_keys(
     infos: &mut [TableInfo],
     source_url: &str,
-    tls: Option<&crate::config::TlsConfig>,
     dest: &InitYamlDestination,
     mode_override: Option<&str>,
+    connect: impl FnOnce(crate::config::SourceType) -> Result<Box<dyn crate::source::Source>>,
 ) {
     if !source_keys_wanted(infos, dest, mode_override) {
         return;
@@ -2010,7 +2025,7 @@ fn read_source_keys(
             return;
         }
     };
-    let mut src = match crate::source::connect(kind, source_url, tls, None) {
+    let mut src = match connect(kind) {
         Ok(s) => s,
         Err(e) => {
             log::warn!("init: source primary keys not read (source unreachable): {e:#}");
@@ -2021,12 +2036,8 @@ fn read_source_keys(
         let schema = (!info.schema.is_empty()).then_some(info.schema.as_str());
         src.primary_key(&relation_for_key(&kind, schema, &info.table))
     });
-    if !unread.is_empty() {
-        log::warn!(
-            "init: source primary key not read for {} table(s) — their incremental exports carry no `load: pk:`; declare `pk: [..]` in the export's `load:` block before `rivet load`: {}",
-            unread.len(),
-            unread.join(", ")
-        );
+    if let Some(notice) = unread_keys_notice(&unread) {
+        log::warn!("{notice}");
     }
 }
 
@@ -2049,6 +2060,96 @@ fn relation_for_key(
 
 #[cfg(test)]
 mod tests {
+    /// A source that answers `primary_key` from a fixed map and records the relations it was asked about.
+    struct KeySource {
+        asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::source::Source for KeySource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unreachable!()
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _column_overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            unreachable!()
+        }
+
+        fn primary_key(&mut self, table: &str) -> Result<Option<Vec<String>>> {
+            self.asked.lock().unwrap().push(table.to_string());
+            Ok(Some(vec!["b".into()]))
+        }
+    }
+
+    #[test]
+    fn the_key_read_goes_through_the_engines_quoted_relation_and_stamps_the_table() {
+        let wh = InitYamlDestination {
+            bigquery_project: Some("p".into()),
+            bigquery_dataset: Some("d".into()),
+            ..Default::default()
+        };
+        let table = |schema: &str| TableInfo {
+            schema: schema.into(),
+            table: "t".into(),
+            ..make_table(1, vec![col("a", "int", false), col("b", "int", false)])
+        };
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut infos = vec![table("s"), table("")];
+        let log = asked.clone();
+        read_source_keys(
+            &mut infos,
+            "mysql://u:p@h/db",
+            &wh,
+            Some("incremental"),
+            move |_| Ok(Box::new(KeySource { asked: log })),
+        );
+        assert_eq!(*asked.lock().unwrap(), vec!["`s`.`t`", "`t`"]);
+        assert_eq!(infos[0].columns[1].key_position, Some(1));
+        assert_eq!(infos[1].columns[1].key_position, Some(1));
+    }
+
+    #[test]
+    fn nothing_is_connected_when_no_key_is_wanted_and_a_dead_source_stamps_nothing() {
+        let wh = InitYamlDestination {
+            bigquery_project: Some("p".into()),
+            bigquery_dataset: Some("d".into()),
+            ..Default::default()
+        };
+        let mut infos = vec![make_table(1, vec![col("b", "int", false)])];
+        read_source_keys(&mut infos, "mysql://u:p@h/db", &wh, Some("full"), |_| {
+            panic!("no connection for a table that is not incremental")
+        });
+        read_source_keys(
+            &mut infos,
+            "mysql://u:p@h/db",
+            &wh,
+            Some("incremental"),
+            |_| Err(anyhow::anyhow!("unreachable")),
+        );
+        read_source_keys(&mut infos, "not a url", &wh, Some("incremental"), |_| {
+            panic!("an unreadable url never connects")
+        });
+        assert_eq!(infos[0].columns[0].key_position, None);
+    }
+
+    #[test]
+    fn the_unread_key_notice_names_the_tables_and_is_silent_when_all_were_read() {
+        assert_eq!(unread_keys_notice(&[]), None);
+        let n = unread_keys_notice(&["a".into(), "b".into()]).unwrap();
+        assert!(n.contains("2 table(s)") && n.ends_with(": a, b"), "{n}");
+    }
+
     #[test]
     fn source_keys_are_read_for_incremental_tables_into_a_warehouse_only() {
         let wh = InitYamlDestination {
