@@ -8,6 +8,10 @@ rules:
       - ci.yml
       - nightly-live.yml
       - release.yml:146
+      # 2026-11-13: same actionlint limit as above for the nightly workflows and the live-stack action; closes with the entries above.
+      - nightly-recall.yml
+      - nightly-gate.yml
+      - live-stack/action.yml
   cache-poisoning:
     ignore:
       # 2026-11-04: tag-scoped runs restore only default-branch caches (PR caches are ref-isolated); closes if release builds go cache-free.
