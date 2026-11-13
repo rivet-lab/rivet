@@ -5400,6 +5400,23 @@ mod init_baseline_tests {
         }
     }
 
+    /// A one-table schema scaffold in CDC mode pages its baseline, a two-table one does not take the sole-table shape.
+    #[test]
+    fn a_schema_scaffold_of_one_table_takes_the_sole_table_baseline() {
+        let one = scaffold_schema(
+            &[keyed_table("public", "orders", 5_000_000)],
+            "postgresql://u:p@h/db",
+            &crate::init::SourceProvenance::Inline,
+            "s",
+            &InitYamlDestination::default(),
+            Some("cdc"),
+            None,
+        )
+        .unwrap();
+        assert!(one.text.contains("backfill: auto"), "{}", one.text);
+        assert!(!one.text.contains("initial: snapshot"), "{}", one.text);
+    }
+
     /// A one-table CDC scaffold that cannot be paged, or sits on another engine, keeps its single `initial: snapshot` export.
     #[test]
     fn a_one_table_cdc_scaffold_keeps_its_snapshot_where_no_recipe_applies() {
