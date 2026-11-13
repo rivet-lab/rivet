@@ -6110,3 +6110,21 @@ seeds:
           - "lib:a_load_keys_a_table_by_default_by_columns_and_not_under_none"
           - "lib:a_per_table_pk_decides_for_its_table_only"
           - "lib:a_mongo_cdc_load_is_keyed_exactly_where_the_id_type_guards_see_a_key"
+
+  - name: url-part-read-raw
+    class: "a hand-parsed connection URL part used as written: the Oracle service name and the SQL Server database kept their %XX bytes (`ORCL%2Edomain`, `Sales%20DB`) and a bracketed IPv6 host with no port was split at its last `:` into host `[:` and port `1]`, so the driver got a name that does not exist or the run was refused"
+    history: "issues #705 and #706, found 2026-11-06 by the airflow-provider hostile-input hunt; RED on pre-0.34.0 2026-11-13 (`mssql url port not a number: 1]`, service `ORCL%2Edomain`); closed by url_text::pct_decode and url_text::split_host_port used by both parsers"
+    scope: source
+    engines:
+      postgres:
+        na: "the driver parses the URL: it reads a portless bracketed host and percent-decodes the database itself (lib:the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database)"
+      mysql:
+        na: "the driver parses the URL: it reads a portless bracketed host and percent-decodes the database itself (lib:the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database)"
+      mssql:
+        patch: url-part-read-raw/mssql.patch
+        cells: [lib:mssql_url_reads_a_portless_bracketed_host_and_decodes_the_database]
+      mongo:
+        na: "the driver parses the URL: it reads a portless bracketed host and percent-decodes the database itself (lib:the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database)"
+      oracle:
+        patch: url-part-read-raw/oracle.patch
+        cells: [lib:an_oracle_service_name_is_percent_decoded]

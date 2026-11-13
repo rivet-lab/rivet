@@ -1,0 +1,26 @@
+diff --git a/src/source/mssql/mod.rs b/src/source/mssql/mod.rs
+index c890a901..75ab026d 100644
+--- a/src/source/mssql/mod.rs
++++ b/src/source/mssql/mod.rs
+@@ -284,7 +284,7 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
+     };
+     let hostport = authority.hosts;
+     let database =
+-        crate::url_text::pct_decode(authority.rest.strip_prefix('/').unwrap_or_default());
++        authority.rest.strip_prefix('/').unwrap_or_default().to_string();
+     let (host, port) = crate::url_text::split_host_port(hostport, 1433).map_err(|p| {
+         crate::error::coded(
+             crate::error::codes::CONFIG_SOURCE_URL_INVALID,
+diff --git a/src/url_text.rs b/src/url_text.rs
+index fc4be739..baa26a7e 100644
+--- a/src/url_text.rs
++++ b/src/url_text.rs
+@@ -44,7 +44,7 @@ pub(crate) fn pct_decode(s: &str) -> String {
+ 
+ /// `host[:port]` or `[v6][:port]` split into the host (brackets kept) and its port, `default_port` when none is named; `Err` holds the port text that is no port.
+ pub(crate) fn split_host_port(hosts: &str, default_port: u16) -> Result<(&str, u16), &str> {
+-    let (host, port) = match hosts.strip_prefix('[').and_then(|r| r.split_once(']')) {
++    let (host, port) = match hosts.strip_prefix('[').and_then(|r| r.split_once(']')).filter(|_| false) {
+         Some((v6, tail)) => (&hosts[..v6.len() + 2], tail.strip_prefix(':')),
+         None => match hosts.rsplit_once(':') {
+             Some((h, p)) => (h, Some(p)),
