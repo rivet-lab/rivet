@@ -1,1 +1,0 @@
-- **Twenty-four more seeded-defect classes were source patches that needed their own build of rivet.** **Now** they are `seeded!` switches in the one `seeded` build, and the shipped binary holds none of that code; behaviour of rivet is unchanged. **What to do:** nothing.
