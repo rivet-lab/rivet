@@ -1,23 +1,4 @@
 //! **Layer: Execution** (with bounded persistence writes)
-//!
-//! Implements chunked extraction in three variants: sequential (no
-//! checkpoint), parallel-simple (no checkpoint), and the two checkpoint
-//! runners that drive the resumable `chunk_checkpoint: true` flow. The
-//! module is split into focused siblings:
-//!
-//! - `math` — pure functions: date parsing, range generation, SQL building, fingerprinting.
-//! - `detect` — chunk-boundary detection via source queries.
-//! - `exec` — stateless sequential and parallel execution (no checkpoint).
-//! - `sequential_checkpoint` — single-threaded chunk-checkpoint runner.
-//! - `parallel_checkpoint` — multi-worker chunk-checkpoint runner.
-//! - `mod` (this file) — shared orchestration helpers (`chunked_plan`,
-//!   `config_hint`, `ensure_chunk_checkpoint_plan`, `record_chunked_commit`),
-//!   the [`ChunkSource`] enum, public re-exports for callers in
-//!   `pipeline::*`, and unit tests for the checkpoint state-machine helpers.
-//!
-//! The split keeps each checkpoint runner in a focused ~150–350 LoC file
-//! and concentrates the helpers they share in one place rather than
-//! duplicating them.
 
 mod attempt;
 mod detect;
@@ -30,16 +11,13 @@ mod resume_m8;
 pub(crate) use resume_m8::tests::m8_plan;
 mod sequential_checkpoint;
 
-/// One checkpointed chunk's result: rows, part records, the chunk's Form-B
-/// checksums and its shape bytes.
+/// One checkpointed chunk's result: rows, part records, the chunk's Form-B checksums and its shape bytes.
 type ChunkOutcome = (
     usize,
     Vec<super::commit::PartRecord>,
     super::commit::UnitChecksums,
     super::commit::Observations,
 );
-
-// ─── Re-exports for callers in pipeline:: ────────────────────────────────────
 
 pub(crate) use detect::detect_and_generate_chunks;
 pub(in crate::pipeline) use exec::run_chunked_parallel;
@@ -48,31 +26,15 @@ pub use math::generate_chunks;
 pub(crate) use math::{build_chunk_query_sql, chunk_plan_fingerprint, strip_select_star_from};
 pub(in crate::pipeline) use parallel_checkpoint::run_chunked_parallel_checkpoint;
 pub(crate) use resume_m8::Listed;
-pub(crate) use resume_m8::apply_m8_resume_decisions;
-use resume_m8::prune_superseded_attempts;
-pub(crate) use resume_m8::rehydrate_manifest_parts_probed;
-// `M8Stats` is intentionally not re-exported yet — Phase C-γ keeps it
-// internal until Phase C-δ surfaces it via summary.json.  Listed here
-// in a `#[cfg(test)]` re-export so unit tests in `tests/*` can pin
-// the wire shape without growing the public API prematurely.
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use resume_m8::M8Stats;
+pub(crate) use resume_m8::apply_m8_resume_decisions;
+use resume_m8::prune_superseded_attempts;
+pub(crate) use resume_m8::rehydrate_manifest_parts_probed;
 pub(crate) use sequential_checkpoint::run_chunked_sequential_checkpoint;
 
-// ─── Chunk part file naming ──────────────────────────────────────────────────
-
 /// Build a chunk output filename that is **collision-proof**.
-///
-/// A 64-bit random nonce guarantees that two writes of the same
-/// `(export, chunk_index)` never produce the same name — e.g. a `repair
-/// --execute` re-export landing in the same wall-clock second as the original
-/// run (the second-granularity timestamp alone would collide and silently
-/// overwrite), or two runs of one export within the same second to a flat
-/// prefix. The new file therefore always lands *alongside* the original and can
-/// never overwrite it — the hard guarantee behind ADR-0009 RR5 ("additive") and
-/// ADR-0012 additive parts. The UTC timestamp is kept purely for human-readable
-/// recency; uniqueness comes from the nonce, not the clock.
 pub(crate) fn chunk_part_filename(
     export_name: &str,
     chunk_index: impl std::fmt::Display,
@@ -90,41 +52,8 @@ pub(crate) fn chunk_part_filename(
 }
 
 /// The chunk index encoded in a part produced by [`chunk_part_filename`].
-///
-/// Lives BESIDE the formatter on purpose: the two are one contract, and a reader
-/// that parses what a distant writer formats is how a name silently stops meaning
-/// what it used to. Returns `None` for anything not shaped like a chunk part
-/// (a single-mode part, a CDC part, an operator's stray file), so a caller can
-/// treat "not a chunk part" as its own case rather than guessing.
 pub(crate) fn chunk_index_of(file_name: &str) -> Option<&str> {
-    // Parse from the END. The writer appends `_chunk{idx}_{nonce}` last, so the
-    // FINAL `_chunk` is always its own — while the FIRST one might belong to the
-    // export's NAME. An export called `orders_chunk1_daily` made this read the
-    // name's digit instead of the writer's index, and the caller that filters
-    // rehydrated parts by completed-chunk status
-    // (`resume_m8::rehydrate_manifest_parts_from_file_log`) then dropped parts it
-    // could not account for. On a KEYSET export that is total: keyset writes no
-    // `chunk_task` rows at all, so the completed set is empty and every part whose
-    // name yielded an index was discarded from the reconstructed manifest —
-    // durable pages, silently absent, on the recovery path.
-    // Match the writer's SHAPE at the tail, not the first occurrence of a
-    // substring: the stem's last two fields must be `chunk{digits}` and the
-    // 16-hex nonce. Splitting on the first `_chunk` let an export NAMED
-    // `orders_chunk1_daily` answer for the writer — and a KEYSET page of that
-    // export, which carries no chunk token at all, was classified as chunk 1.
-    // `rehydrate_manifest_parts_from_file_log` then dropped it against a
-    // completed-chunk set that keyset never populates: durable pages silently
-    // missing from the manifest a resumed run declares.
     let stem = file_name.rsplit_once('.').map_or(file_name, |(s, _)| s);
-    // Strip the ROTATION suffix first. `part_indexed_name` appends `_p{n}` AFTER
-    // the nonce whenever a chunk rotates past `max_file_size`, so the last field
-    // of a rotated part is `p0`, not the 16-hex nonce. Requiring the nonce last
-    // made every rotated part unclassified — and the caller
-    // (`resume_m8::rehydrate_manifest_parts_from_file_log`) treats "not a chunk
-    // part" as KEEP, so an interrupted chunk's abandoned siblings were resurrected
-    // into the manifest a resumed run declares, beside the replacements. The
-    // same normalization `attempt_key` performs, applied before the shape check
-    // rather than after it.
     let stem = match stem.rsplit_once("_p") {
         Some((h, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => h,
         _ => stem,
@@ -140,17 +69,7 @@ pub(crate) fn chunk_index_of(file_name: &str) -> Option<&str> {
     (!idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit())).then_some(idx)
 }
 
-// ─── Chunk source selection ───────────────────────────────────────────────────
-
 /// Determines how chunk ranges are obtained at execution time.
-///
-/// `rivet run` always uses `Detect` — runs `SELECT min/max` against the source
-/// to compute boundaries live.  `rivet apply` passes `Precomputed` ranges from
-/// a previously-generated `PlanArtifact`, skipping the detection queries
-/// entirely and replaying the same boundaries that were fixed at plan time.
-// `Clone` so a retrying caller can hand a fresh value to each attempt:
-// `run_with_reconnect` re-enters `run_export` per retry, and the sequential
-// chunked runners take the source BY VALUE.
 #[derive(Clone)]
 pub(crate) enum ChunkSource {
     /// Query the source for min/max and compute boundaries at execution time.
@@ -159,24 +78,12 @@ pub(crate) enum ChunkSource {
     Precomputed(Vec<(i64, i64)>),
 }
 
-// ─── Shared checkpoint-orchestration helpers ─────────────────────────────────
-
 use super::RunSummary;
 use crate::error::Result;
 use crate::plan::{ChunkedPlan, ExtractionStrategy, ResolvedRunPlan};
 use crate::state::StateStore;
 
-/// The shared `Detect`-path preamble for all four chunked runners: compute the
-/// chunk ranges, then run the pre-chunk schema-drift check (ADR-0021) once,
-/// before any chunk executes — so `on_schema_drift: fail` aborts before a single
-/// chunk is written. The runners' durability-divergent *execution*
-/// (ADR-0010/0017) stays per-runner; only this identical preamble is shared, the
-/// way `commit::record_part` shares the per-part tail (ADR-0018).
-///
-/// `Precomputed`/resume chunk sources never call this — drift was evaluated on
-/// the original planning run that produced the ranges — a claim that was FALSE
-/// (see [`check_drift_only`], which the precomputed arms now call instead).
-/// Drift runs only when the runner is stateful (`state.is_some()`).
+/// The shared `Detect`-path preamble for all four chunked runners.
 pub(super) fn prepare_chunk_plan(
     src: &mut dyn crate::source::Source,
     plan: &ResolvedRunPlan,
@@ -201,28 +108,6 @@ pub(super) fn prepare_chunk_plan(
 }
 
 /// Run the pre-chunk drift gate WITHOUT computing ranges.
-///
-/// The gate compares the source's current column types against the stored ones;
-/// it has nothing to do with chunk boundaries. That is why a run whose ranges
-/// come from a plan artifact can — and must — still take it.
-///
-/// It used to be reachable only through [`prepare_chunk_plan`], which only the
-/// `ChunkSource::Detect` arm calls, so `rivet apply` of any chunked plan skipped
-/// `on_schema_drift` entirely. Four runners recorded that as
-/// `chunks_precomputed = true; // drift gate skipped by contract`, citing a
-/// contract that said drift "was evaluated on the original planning run that
-/// produced the ranges". It was not: `src/plan/` performs no drift evaluation —
-/// `plan/build.rs` only COPIES `on_schema_drift` into the artifact. And a
-/// planning-time check could not have helped anyway, because the drift this
-/// guards against happens BETWEEN plan and apply, which is the whole reason the
-/// plan → review → apply workflow exists.
-///
-/// Measured: one config, `on_schema_drift: fail`, a column dropped after the
-/// plan was sealed — `rivet run` aborted ("schema drift detected — removed:
-/// dropme") while `rivet apply` of the same policy exported 500 rows and exited
-/// 0. The non-chunked half of `apply` applied the gate throughout
-/// (`single.rs`), so the split was never "apply skips it" but "apply skips it
-/// for chunked exports" — the ones moving the most data.
 pub(super) fn check_drift_only(
     src: &mut dyn crate::source::Source,
     plan: &ResolvedRunPlan,
@@ -233,7 +118,7 @@ pub(super) fn check_drift_only(
     super::schema_drift::check_from_type_mappings(src, st, plan, summary)
 }
 
-/// The ranges a resumed run plans again: the source's key span as it is now under `Detect`, none for a sealed plan; the drift gate runs either way.
+/// The ranges a resumed run plans again: the source's key span as it is now under `Detect`, none for a sealed plan.
 pub(super) fn resumed_chunk_plan(
     src: &mut dyn crate::source::Source,
     plan: &ResolvedRunPlan,
@@ -250,7 +135,7 @@ pub(super) fn resumed_chunk_plan(
     }
 }
 
-/// What the stored tasks of a resumed run need to cover `ranges`, the source's key span now: whether to drop them, and the tasks to plan. A run that committed no part is planned again whole; any other gains the pieces of `ranges` outside its stored span.
+/// What the stored tasks of a resumed run need to cover `ranges`, the source's key span now.
 fn replan(
     tasks: &[crate::state::ChunkTaskInfo],
     ranges: &[(i64, i64)],
@@ -267,7 +152,7 @@ fn replan(
     Ok((false, math::ranges_uncovered(ranges, &windows)))
 }
 
-/// The stored windows of a chunk run, ordered by their first key; `Err` says why they cannot be read as windows: a bound that is not an integer, a window that ends before it starts, or keys that two windows hold.
+/// The stored windows of a chunk run, ordered by their first key.
 pub(crate) fn stored_windows(
     tasks: &[crate::state::ChunkTaskInfo],
 ) -> std::result::Result<Vec<(i64, i64)>, String> {
@@ -298,7 +183,7 @@ pub(crate) fn stored_windows(
     }
 }
 
-/// Bring the stored plan of the resumed run `run_id` up to `ranges`, the source's key span now; a sealed plan passes none and keeps its tasks.
+/// Bring the stored plan of the resumed run `run_id` up to `ranges`, the source's key span now.
 fn replan_resumed_run(
     state: &StateStore,
     export: &str,
@@ -332,7 +217,7 @@ pub(super) fn precomputed_ranges_need_the_drift_gate(ranges: &[(i64, i64)]) -> b
     !ranges.is_empty()
 }
 
-/// Idle source connections shared by one parallel chunked run: a chunk reuses one instead of reconnecting per chunk.
+/// Idle source connections shared by one parallel chunked run.
 #[derive(Default)]
 pub(super) struct IdleSources(std::sync::Mutex<Vec<Box<dyn crate::source::Source>>>);
 
@@ -355,8 +240,7 @@ impl IdleSources {
     }
 }
 
-/// Extract the `ChunkedPlan` from a `ResolvedRunPlan`. Panics if the strategy
-/// is not `Chunked` — all callers in this module only run for chunked plans.
+/// Extract the `ChunkedPlan` from a `ResolvedRunPlan`.
 pub(super) fn chunked_plan(plan: &ResolvedRunPlan) -> &ChunkedPlan {
     match &plan.strategy {
         ExtractionStrategy::Chunked(cp) => cp,
@@ -388,7 +272,7 @@ pub(crate) fn crashed_chunk_run_action(
     }
 }
 
-/// The refusal a run gives when a LIVE process holds the export's run lease: `run_id` names the live run when the state records one, and a checkpointed plan says what the next run does with what it left.
+/// The refusal a run gives when a LIVE process holds the export's run lease.
 pub(crate) fn live_run_refusal(export: &str, run_id: Option<&str>, resumable: bool) -> String {
     let (kind, then) = match resumable {
         true => ("chunk checkpoint run", "the next run resumes it"),
@@ -404,7 +288,7 @@ pub(crate) fn live_run_refusal(export: &str, run_id: Option<&str>, resumable: bo
     )
 }
 
-/// The key of an export's run lease on one source: held by every run of the export that reads `source`, taken by every command that rewrites its stored progress or its destination. The source enters as a hash, so a lease file name stays short and names no host.
+/// The key of an export's run lease on one source.
 pub fn run_lease_key(export: &str, source: &str) -> String {
     format!(
         "chunk-run:{export}@{:016x}",
@@ -442,7 +326,7 @@ pub(crate) fn live_run_label(state: &StateStore, export: &str, source: &str) -> 
     })
 }
 
-/// Take `export`'s run lease on `source` to rewrite its stored progress (`what`); refuse while a live run holds it.
+/// Take `export`'s run lease on `source` to rewrite its stored progress (`what`).
 pub(crate) fn claim_export_progress<'s>(
     state: &'s StateStore,
     export: &str,
@@ -452,7 +336,7 @@ pub(crate) fn claim_export_progress<'s>(
     claim_export_progress_saying(state, export, source, what, None)
 }
 
-/// [`claim_export_progress`] for a command that already changed state: its refusal then says `done` of that, where a timeout of the plain claim says nothing was done.
+/// [`claim_export_progress`] for a command that already changed state.
 pub(crate) fn claim_export_progress_saying<'s>(
     state: &'s StateStore,
     export: &str,
@@ -474,7 +358,7 @@ pub(crate) fn claim_export_progress_saying<'s>(
     )
 }
 
-/// Hold the export's run lease for the whole run, whatever its mode: refused by code while a live process holds it (released by the OS or the keeper when that process dies, no clock).
+/// Hold the export's run lease for the whole run, whatever its mode.
 pub(crate) fn claim_run<'s>(
     state: &'s StateStore,
     plan: &ResolvedRunPlan,
@@ -495,7 +379,7 @@ pub(crate) fn claim_run<'s>(
     )
 }
 
-/// Under the run lease, recover a chunk run whose process died: the plan to run in its place, if any; `force` is the run's `--force`.
+/// Under the run lease, recover a chunk run whose process died.
 pub(crate) fn recover_checkpoint_run(
     plan: &ResolvedRunPlan,
     progress: &crate::state::ProgressClaim<'_>,
@@ -535,10 +419,7 @@ pub(crate) fn recover_checkpoint_run(
     }
 }
 
-/// Render the `--config <path>` argument used in user-facing recovery hints,
-/// or a `<CONFIG>` placeholder when the config path is not available (e.g.
-/// the `rivet apply` path which only knows the plan file).
-/// The refusal of a plain run that met chunk checkpoint run `rid` of `export` still in progress; `raced` when a concurrent run opened it under this one.
+/// Render the `--config <path>` argument used in user-facing recovery hints, or a `<CONFIG>` placeholder when the config path is not available (e.g.
 fn chunk_run_unfinished(export: &str, rid: &str, config_path: &str, raced: bool) -> anyhow::Error {
     let raced = if raced {
         " (a concurrent run won the race)"
@@ -562,7 +443,7 @@ pub(super) fn config_hint(config_path: &str) -> String {
     }
 }
 
-/// `RIVET_RUN_UNITS_FAILED` over every failed unit's `chunk N: cause` line of `runner`, the shape the summary compacts.
+/// `RIVET_RUN_UNITS_FAILED` over every failed unit's `chunk N.
 pub(super) fn chunk_failures(export: &str, runner: &str, lines: &[String]) -> anyhow::Error {
     crate::error::coded(
         crate::error::codes::RUN_UNITS_FAILED,
@@ -570,7 +451,7 @@ pub(super) fn chunk_failures(export: &str, runner: &str, lines: &[String]) -> an
     )
 }
 
-/// The end of a checkpointed run once no chunk is claimable: `met` (this run's unit failures, raised through `fan_in::unit_failures`) when every chunk completed, else `met` or the stored causes when it met none, under the resume remedy.
+/// The end of a checkpointed run once no chunk is claimable.
 pub(super) fn incomplete_run_check(
     export: &str,
     runner: &str,
@@ -614,7 +495,7 @@ pub(crate) fn chunk_plan_hash(plan: &ResolvedRunPlan, cp: &ChunkedPlan) -> Strin
     )
 }
 
-/// Refuse to `action` stored chunk run `run_id` planned under `stored_hash` when `plan` is not that plan or writes other bytes than that run did: the one check `run --resume`, `reconcile` and `repair` share.
+/// Refuse to `action` stored chunk run `run_id` planned under `stored_hash` when `plan` is not that plan or writes other bytes than that run did.
 pub(crate) fn refuse_changed_chunk_plan(
     state: &StateStore,
     plan: &ResolvedRunPlan,
@@ -649,12 +530,6 @@ pub(super) fn ensure_chunk_checkpoint_plan(
     let plan_hash = chunk_plan_hash(plan, cp);
     let max_att = cp.max_attempts;
 
-    // A CDC baseline leg is rivet's OWN export: the operator never named it, so the
-    // "use `--export <leg> --resume`" remediation below is one they cannot follow —
-    // both commands reject a name absent from the config. An interrupted leg
-    // resumes on the next plain run instead.
-    // ponytail: leg-ness via the legacy name fold; a flag on the plan if a user
-    // export ever legitimately carries the infix.
     let is_leg = crate::manifest::snapshot_family(&plan.export_name) != plan.export_name;
     let crashed = progress.chunk_run()?;
     let resume = plan.resume || (is_leg && crashed.is_some());
@@ -694,12 +569,6 @@ pub(super) fn ensure_chunk_checkpoint_plan(
                         n
                     );
                 }
-                // Un-pin chunks a prior run gave up on (retryable budget
-                // exhausted OR permanent `retryable=false`): `--resume` is the
-                // operator's deliberate retry after fixing the cause, so the
-                // permanently-failed pin — which `claim_next_chunk_task` would
-                // otherwise skip forever — must be lifted here or the run's own
-                // "fix and --resume" remediation is a false promise (#200-4).
                 let f = state.reset_failed_chunk_tasks_for_resume(&rid)?;
                 if f > 0 {
                     log::warn!(
@@ -730,12 +599,6 @@ pub(super) fn ensure_chunk_checkpoint_plan(
         ));
     }
 
-    // Round-2 audit #13: the v15 partial-unique index (`idx_chunk_run_one_inprogress`,
-    // one in_progress run per export) is the REAL guard against a concurrent
-    // second run — the check-then-act above has a TOCTOU window two overlapping
-    // scheduler ticks can slip through. When the index rejects this create, another
-    // run won the race: map it to the same 'still in progress' bail, not a raw DB
-    // constraint error.
     if let Err(e) =
         state.open_chunk_run(progress.key(), &summary.run_id, &plan_hash, max_att, chunks)
     {
@@ -758,14 +621,7 @@ pub(super) fn ensure_chunk_checkpoint_plan(
     Ok(summary.run_id.clone())
 }
 
-/// Epic G: record the highest completed `chunk_index` for this run as the new
-/// committed boundary. Failures are logged — progression is observational and
-/// must not fail the pipeline.
-///
-/// Visibility `pub(crate)` so [`super::run_store::RunStore`] can dispatch
-/// the chunked variant of `Progression` through this helper. The walk of
-/// `chunk_task` is chunked-mode-specific, so the logic stays in this
-/// module rather than moving to `state::progression`.
+/// Epic G: record the highest completed `chunk_index` for this run as the new committed boundary.
 pub(crate) fn record_chunked_commit(state: &StateStore, export_name: &str, run_id: &str) {
     let tasks = match state.list_chunk_tasks_for_run(run_id) {
         Ok(t) => t,
@@ -797,12 +653,6 @@ pub(crate) fn record_chunked_commit(state: &StateStore, export_name: &str, run_i
 #[cfg(test)]
 mod tests {
     //! Unit coverage for the checkpoint state machine in this module.
-    //!
-    //! These tests use `StateStore::open_in_memory()` so they exercise the
-    //! real SQLite schema and the real `state::checkpoint::*` methods —
-    //! no mocks, no docker. They are *intentionally* the only unit cover
-    //! for this file's recovery logic; everything that touches a live
-    //! `Source` is exercised by `tests/live_*.rs` instead.
 
     #[test]
     fn only_precomputed_ranges_that_read_rows_need_the_drift_gate() {
@@ -822,7 +672,7 @@ mod tests {
         assert_eq!(crashed_chunk_run_action(true, false, true), ExportAgain);
     }
 
-    /// `--resume --force` with no chunk run in progress runs as a plain run; without `--force` the plan stays a resume, which the runner refuses.
+    /// `--resume --force` with no chunk run in progress runs as a plain run.
     #[test]
     fn a_forced_resume_with_nothing_to_continue_exports_again() {
         let state = StateStore::open_in_memory().unwrap();
@@ -853,7 +703,7 @@ mod tests {
         );
     }
 
-    /// Every run takes its export's lease, whatever its mode: a second run of the export is refused by code while the first is alive, another export is not, and the lease is free once the run ends.
+    /// Every run takes its export's lease, whatever its mode.
     #[test]
     fn a_run_of_any_mode_holds_its_exports_lease_until_it_ends() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -889,20 +739,9 @@ mod tests {
         }
     }
 
-    /// An export whose NAME contains `_chunk<digits>_` must not fool the index
-    /// parser — and the fixture must cross that threshold, or the two ends of the
-    /// name are indistinguishable.
-    ///
-    /// The parser split on the FIRST `_chunk`, so `orders_chunk1_daily` fed it the
-    /// name's digit instead of the writer's index. On a KEYSET export that is
-    /// total loss on the recovery path: keyset writes no `chunk_task` rows, so
-    /// `rehydrate_manifest_parts_from_file_log`'s completed set is EMPTY and every
-    /// part whose name yielded an index was dropped from the reconstructed
-    /// manifest — durable pages silently absent from what the run declares.
+    /// An export whose NAME contains `_chunk<digits>_` must not fool the index parser.
     #[test]
     fn the_chunk_index_comes_from_the_writers_suffix_not_the_export_name() {
-        // Round-trip through the real formatter, so the reader is graded against
-        // what the writer actually emits rather than a hand-typed shape.
         let name = chunk_part_filename("orders_chunk1_daily", 7, "parquet");
         assert_eq!(
             chunk_index_of(&name),
@@ -910,16 +749,9 @@ mod tests {
             "the writer wrote chunk 7; the export NAME's `_chunk1_` must not win: {name}"
         );
 
-        // A plain name still works — the fix must not lose the ordinary case.
         let plain = chunk_part_filename("orders", 12, "parquet");
         assert_eq!(chunk_index_of(&plain), Some("12"), "{plain}");
 
-        // A ROTATED part — the shape `part_indexed_name` produces when a chunk
-        // exceeds `max_file_size`. Its last field is `p0`, not the nonce, and an
-        // earlier version of this parser therefore returned None for every one of
-        // them. The caller treats "not a chunk part" as KEEP, so an interrupted
-        // chunk's abandoned siblings were resurrected into a resumed run's
-        // manifest. Built through BOTH real writers, never typed by hand.
         for i in 0..2 {
             let rotated = crate::pipeline::commit::part_indexed_name(&name, i, 2);
             assert_eq!(
@@ -929,16 +761,12 @@ mod tests {
             );
         }
 
-        // A keyset part carries no chunk token and must stay unclassified, even
-        // when the export name contains one: classifying it makes the rehydration
-        // filter discard it against an empty completed set.
         assert_eq!(
             chunk_index_of("orders_chunk1_daily_20260101_000000_123_keyset3.parquet"),
             None,
             "a keyset page is not a chunk part — treating it as chunk 1 drops it on resume"
         );
 
-        // Non-numeric and absent tokens stay `None`.
         assert_eq!(chunk_index_of("orders_20260101_000000.parquet"), None);
         assert_eq!(chunk_index_of("orders_20260101_chunkzz_aabb.parquet"), None);
     }
@@ -964,8 +792,6 @@ mod tests {
             }
         }
 
-        // Only `_p<digits>` at the very end is the rotation suffix: an export
-        // whose NAME holds `_p` still has its parts classified.
         for export in ["user_profiles", "orders_p", "metrics_p95"] {
             let name = chunk_part_filename(export, 7, "parquet");
             assert_eq!(chunk_index_of(&name), Some("7"), "{name}");
@@ -978,10 +804,6 @@ mod tests {
 
     #[test]
     fn chunk_part_filename_is_collision_proof_for_same_chunk() {
-        // The hard guarantee behind RR5: two writes of the same (export, chunk)
-        // — e.g. a repair re-export in the same wall-clock second as the
-        // original — must NEVER produce the same name, or the new file would
-        // overwrite the original. The nonce, not the clock, guarantees this.
         let a = chunk_part_filename("orders", 0usize, "parquet");
         let b = chunk_part_filename("orders", 0usize, "parquet");
         assert_ne!(a, b, "same (export, chunk) must yield distinct filenames");
@@ -1020,8 +842,6 @@ mod tests {
         s
     }
 
-    // ── config_hint ────────────────────────────────────────────────────────
-
     #[test]
     fn config_hint_uses_explicit_path_when_set() {
         assert_eq!(config_hint("rivet.yaml"), "--config rivet.yaml");
@@ -1032,10 +852,7 @@ mod tests {
         assert_eq!(config_hint(""), "--config <CONFIG>");
     }
 
-    // ── ensure_chunk_checkpoint_plan: 5 state-machine transitions ──────────
-
-    /// Fresh run (no resume, no prior checkpoint): must create chunk_run +
-    /// insert tasks, and the returned run_id matches summary.run_id.
+    /// Fresh run (no resume, no prior checkpoint).
     #[test]
     fn ensure_chunk_checkpoint_fresh_run_creates_state() {
         let state = StateStore::open_in_memory().unwrap();
@@ -1096,8 +913,7 @@ mod tests {
         );
     }
 
-    /// `--resume` with a prior run that has a *different* plan fingerprint
-    /// (e.g. chunk_size changed) → bail with fingerprint-mismatch error.
+    /// `--resume` with a prior run that has a *different* plan fingerprint (e.g.
     #[test]
     fn ensure_chunk_checkpoint_resume_with_hash_mismatch_bails() {
         let state = StateStore::open_in_memory().unwrap();
@@ -1129,8 +945,7 @@ mod tests {
         assert!(msg.contains("cannot resume"), "got: {msg}");
     }
 
-    /// `--resume` with a prior run whose fingerprint matches: must adopt the
-    /// existing run_id, *not* create a new one.
+    /// `--resume` with a prior run whose fingerprint matches: must adopt the existing run_id, *not* create a new one.
     #[test]
     fn ensure_chunk_checkpoint_resume_matching_hash_adopts_old_run_id() {
         let state = StateStore::open_in_memory().unwrap();
@@ -1228,8 +1043,7 @@ mod tests {
         );
     }
 
-    /// Keys a stored window was cut away from are planned again, whether the hole is between two windows or the source moved away from the stored span; windows that share keys are never planned over.
-    /// A window of one key is a window; one that ends before it starts is refused.
+    /// Keys a stored window was cut away from are planned again, whether the hole is between two windows or the source moved away from the stored span.
     #[test]
     fn a_window_of_one_key_is_stored_and_an_inverted_one_is_refused() {
         let one = [
@@ -1367,8 +1181,7 @@ mod tests {
         assert_eq!(spans(&state), grown, "the same span adds nothing");
     }
 
-    /// Existing in-progress run *without* `--resume` → bail with a message
-    /// that tells the operator exactly which recovery command to run.
+    /// Existing in-progress run *without* `--resume` → bail with a message that tells the operator exactly which recovery command to run.
     #[test]
     fn ensure_chunk_checkpoint_existing_run_without_resume_bails() {
         let state = StateStore::open_in_memory().unwrap();
@@ -1469,7 +1282,7 @@ mod tests {
         );
     }
 
-    /// A plain run that finds a chunk run left in progress (its process gone) runs as its resume; a run that already is a resume, and a plan of another mode, are left as they are.
+    /// A plain run that finds a chunk run left in progress (its process gone) runs as its resume.
     #[test]
     fn a_plain_run_over_a_chunk_run_left_in_progress_becomes_its_resume() {
         let dir = tempfile::tempdir().unwrap();
@@ -1550,9 +1363,7 @@ mod tests {
         );
     }
 
-    /// A command that rewrites an export's progress is refused while a checkpointed run of that
-    /// export holds its lease (naming the run and the way out), another export is unaffected,
-    /// and the same command is admitted once the run lets go.
+    /// A command that rewrites an export's progress is refused while a checkpointed run of that export holds its lease (naming the run and the way out), another export is unaffected, and the same command is admitted once the run lets go.
     #[test]
     fn a_progress_rewrite_is_refused_while_a_run_holds_the_exports_lease() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1617,10 +1428,7 @@ mod tests {
         );
     }
 
-    // ── record_chunked_commit ─────────────────────────────────────────────
-
-    /// Picks the highest `chunk_index` among completed tasks and persists it
-    /// as the committed boundary.
+    /// Picks the highest `chunk_index` among completed tasks and persists it as the committed boundary.
     #[test]
     fn record_chunked_commit_picks_highest_completed_chunk() {
         let state = StateStore::open_in_memory().unwrap();
@@ -1647,8 +1455,7 @@ mod tests {
         );
     }
 
-    /// No completed tasks at all: function must be a silent no-op
-    /// (must NOT crash, must NOT write a bogus -1 sentinel).
+    /// No completed tasks at all: function must be a silent no-op (must NOT crash, must NOT write a bogus -1 sentinel).
     #[test]
     fn record_chunked_commit_with_no_completed_tasks_is_noop() {
         let state = StateStore::open_in_memory().unwrap();
@@ -1666,7 +1473,7 @@ mod tests {
         );
     }
 
-    /// A connection given back is the one the next chunk takes, so no new one is dialled; with none idle the take dials.
+    /// A connection given back is the one the next chunk takes, so no new one is dialled.
     #[test]
     fn a_connection_given_back_is_taken_again_without_a_new_dial() {
         let mut cfg = make_plan("orders").source;
@@ -1734,7 +1541,7 @@ mod incomplete_run_tests {
         ))
     }
 
-    /// A refusal met by one chunk beside an untyped failure in another: the run exits by the refusal's code and class, under the resume remedy, every cause listed.
+    /// A refusal met by one chunk beside an untyped failure in another.
     #[test]
     fn a_coded_chunk_failure_decides_the_runs_exit_under_the_resume_remedy() {
         let err = incomplete_run_check(

@@ -1,21 +1,4 @@
 //! Value-based output partitioning expansion (`partition_by`).
-//!
-//! Every entry point that runs exports in-process (`run`, `apply <config>`,
-//! `--pool`) goes through `run_set::RunSet::in_process`, the one caller of this
-//! expansion. Right after the
-//! export selection, [`expand_partitioned_exports`] rewrites the borrowed
-//! `&ExportConfig` list into an **owned** list where every export with
-//! `partition_by` set has been replaced by one concrete child export per
-//! bucket — each carrying its bucket as `partition_window` (the planner wraps
-//! it around the base query, so `table:` survives) and the `{partition}` token
-//! resolved to a Hive `col=value` segment in its destination. Everything
-//! downstream (`run`'s loop, parallelism, manifest, `validate`) then sees
-//! ordinary exports and needs no partition awareness —
-//! which is why each partition gets its own manifest + `_SUCCESS` for free.
-//!
-//! The bucketing math and SQL builders are pure (`crate::plan::partition`);
-//! this module owns the source round-trip (min/max + NULL probe) and the
-//! `ExportConfig` synthesis.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -25,13 +8,7 @@ use crate::destination::placeholder;
 use crate::error::Result;
 use crate::plan::partition::{self, HIVE_NULL_PARTITION};
 
-/// Replace every `partition_by` export in `selected` with its per-bucket child
-/// exports; pass non-partitioned exports through unchanged (cloned).
-///
-/// Connects to the source once per partitioned export to read the partition
-/// column's `[min, max]` span and whether any NULLs exist. An empty source
-/// (no value rows and no NULLs) yields zero children for that export and logs
-/// a warning rather than failing the whole run.
+/// Replace every `partition_by` export in `selected` with its per-bucket child exports.
 pub fn expand_partitioned_exports(
     selected: &[&ExportConfig],
     source: &SourceConfig,
@@ -48,9 +25,7 @@ pub fn expand_partitioned_exports(
     Ok(out)
 }
 
-/// True when any export in the slice requests partitioning — used by `run` to
-/// disable process-mode parallelism (child processes re-load the config from
-/// disk and would not see the synthesised child names).
+/// True when any export in the slice requests partitioning.
 pub fn any_partitioned(selected: &[&ExportConfig]) -> bool {
     selected.iter().any(|e| e.partition_by.is_some())
 }
@@ -72,9 +47,6 @@ fn expand_one(
         .resolve_query(config_dir, params)?;
     let st = source.source_type;
 
-    // I/O: the value span (SQL aggregates skip NULLs) + whether any NULLs exist.
-    // The pure child-building below is split out so it is unit-testable without
-    // a live source.
     let bounds = fetch_value_span(src.as_mut(), export, col, &base_query, st)?;
     let has_nulls = src
         .query_scalar(&partition::build_null_count_query(&base_query, col, st))?
@@ -101,9 +73,7 @@ fn expand_one(
     Ok(())
 }
 
-/// Fetch the `[min, max]` day span of the partition column over `base_query`,
-/// or `None` when there are no non-NULL rows. The NULL bucket is probed
-/// separately by the caller.
+/// Fetch the `[min, max]` day span of the partition column over `base_query`, or `None` when there are no non-NULL rows.
 fn fetch_value_span(
     src: &mut dyn crate::source::Source,
     export: &ExportConfig,
@@ -130,9 +100,7 @@ fn fetch_value_span(
     Ok(Some((parse(min_s, "min")?, parse(max_s, "max")?)))
 }
 
-/// Pure: build the concrete per-bucket child exports from an already-fetched
-/// value span and NULL flag. No I/O — this is the unit-tested heart of the
-/// expansion (range generation, child synthesis, the NULL bucket).
+/// Pure: build the concrete per-bucket child exports from an already-fetched value span and NULL flag.
 fn build_partition_children(
     parent: &ExportConfig,
     col: &str,
@@ -151,9 +119,6 @@ fn build_partition_children(
             ));
         }
     }
-    // NULL bucket: a range predicate can never match NULL, so any NULL rows
-    // would be lost without this. `__HIVE_DEFAULT_PARTITION__` keeps them
-    // queryable by Hive/Spark/duckdb partition discovery.
     if has_nulls {
         children.push(make_child(
             parent,
@@ -167,12 +132,6 @@ fn build_partition_children(
 }
 
 /// Build one concrete child export for a single bucket.
-///
-/// - `path_value` is the value side of the Hive segment (`2023-01-01` or
-///   `__HIVE_DEFAULT_PARTITION__`); the segment is `col=path_value`.
-/// - `name_value` is a filename-safe suffix for the child export name (used in
-///   state keys and output filenames).
-/// - `range` is the bucket's `[lo, hi)` day bounds; `None` is the NULL bucket.
 fn make_child(
     parent: &ExportConfig,
     col: &str,
@@ -219,8 +178,6 @@ mod tests {
         e
     }
 
-    // Minimal export built via the YAML path so we don't duplicate the full
-    // field list (see the `sample_export` consolidation note).
     fn base_export() -> ExportConfig {
         serde_yaml_ng::from_str(
             "name: x\nquery: \"SELECT 1\"\nformat: parquet\ndestination:\n  type: local\n  path: /tmp\n",
@@ -339,8 +296,6 @@ exports:
         assert!(!any_partitioned(&[&np]));
     }
 
-    // ── build_partition_children (pure expansion core, offline) ──────────────
-
     fn day(s: &str) -> chrono::NaiveDate {
         chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
     }
@@ -367,7 +322,6 @@ exports:
                 "events__null",
             ]
         );
-        // last is the NULL bucket → Hive default partition path.
         assert_eq!(
             children.last().unwrap().destination.path.as_deref(),
             Some("./out/events/created_at=__HIVE_DEFAULT_PARTITION__")

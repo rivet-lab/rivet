@@ -1,8 +1,4 @@
 //! **Layer: Execution**
-//!
-//! `ExportSink` manages the local temp-file write path: buffers Arrow batches,
-//! rotates files at `max_file_size_bytes`, and runs inline quality checks.
-//! All decisions (format, compression, quality rules) come from `ResolvedRunPlan`.
 
 mod cursor;
 mod pipelined;
@@ -40,17 +36,13 @@ pub(crate) struct ExportSink {
     pub(in crate::pipeline) compression_level: Option<u32>,
     tmp: tempfile::NamedTempFile,
     pub(in crate::pipeline) total_rows: usize,
-    /// The RUN-wide bytes-read counter, shared from `plan.bytes_read` (every
-    /// sink this run creates — per chunk, per worker — increments the same
-    /// `Arc`, so accumulation is runner-agnostic by construction; see #175).
+    /// The RUN-wide bytes-read counter, shared from `plan.bytes_read` (every sink this run creates.
     pub(in crate::pipeline) bytes_read: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The RUN-wide count of parts at the destination, shared from `plan.parts_landed`.
     pub(in crate::pipeline) parts_landed: std::sync::Arc<std::sync::atomic::AtomicU64>,
     nulled_cells: std::sync::Arc<crate::plan::NulledCells>,
     part_rows: usize,
     /// Cursor column name (with internal columns), set from plan at construction.
-    /// When `Some`, `on_batch` extracts the last cursor value inline so we never
-    /// hold a full batch in memory just for post-run cursor commit.
     pub(in crate::pipeline) cursor_column: Option<String>,
     /// The composite key's columns after `cursor_column`; when non-empty the cursor is a JSON tuple.
     pub(in crate::pipeline) cursor_rest: Vec<String>,
@@ -60,17 +52,13 @@ pub(crate) struct ExportSink {
     pub(in crate::pipeline) settle_columns: Vec<String>,
     /// Last extracted cursor value — set by `on_batch`, consumed by `run_single_export`.
     pub(in crate::pipeline) last_cursor_value: Option<String>,
-    /// First observed cursor value of the RUN (first non-null of the first
-    /// batch carrying one) — the floor for cursor_min metrics (#151).
+    /// First observed cursor value of the RUN (first non-null of the first batch carrying one).
     pub(in crate::pipeline) first_cursor_value: Option<String>,
-    /// A lossless keyset token the SOURCE reported via `set_source_cursor`
-    /// (MongoDB's BSON `_id`), overriding the type-ambiguous string extracted
-    /// from the output column. `effective_cursor()` prefers it. `None` for SQL.
+    /// A lossless keyset token the SOURCE reported via `set_source_cursor` (MongoDB's BSON `_id`), overriding the type-ambiguous string extracted from the output column.
     pub(in crate::pipeline) source_cursor: Option<String>,
     /// Schema WITH internal columns — used in `on_batch` for inline cursor extraction.
     pub(in crate::pipeline) schema: Option<SchemaRef>,
-    /// Destination-facing schema (stripped of internal columns). Used for schema-change
-    /// detection against the stored snapshot.
+    /// Destination-facing schema (stripped of internal columns).
     pub(in crate::pipeline) dest_schema: Option<SchemaRef>,
     pub(in crate::pipeline) meta: MetaColumns,
     pub(in crate::pipeline) enriched_schema: Option<SchemaRef>,
@@ -83,47 +71,33 @@ pub(crate) struct ExportSink {
     pub(in crate::pipeline) strip_internal_column: Option<String>,
     /// Running per-column max byte length for string/binary columns (Epic 8).
     pub(in crate::pipeline) column_max_bytes: std::collections::HashMap<String, u64>,
-    /// Hard cap on a single Arrow batch in bytes (`max_batch_memory_mb * 1024²`). `None` = no cap.
+    /// Hard cap on a single Arrow batch in bytes (`max_batch_memory_mb * 1024²`).
     pub(in crate::pipeline) max_batch_memory_bytes: Option<usize>,
     /// Hard ceiling on a single cell/value in bytes (`max_value_mb * 1024²`).
-    /// `None` = no guard. Unlike `max_batch_memory_bytes` (an average-based
-    /// batch cap), this bounds one giant text/JSON/blob value that would
-    /// otherwise OOM the process (OPT-1).
     pub(in crate::pipeline) max_value_bytes: Option<usize>,
     pub(in crate::pipeline) batch_memory_policy: crate::tuning::BatchMemoryPolicy,
     /// Count of batches that exceeded `max_batch_memory_bytes` (for run summary / logging).
     pub(in crate::pipeline) oversized_batch_count: u64,
-    /// Parquet row group config from plan. `None` = CSV or no row group tuning.
+    /// Parquet row group config from plan.
     pub(in crate::pipeline) parquet_config: Option<crate::config::ParquetConfig>,
-    /// Resolved rows-per-row-group, computed from schema in `on_schema`. `None` = library default.
+    /// Resolved rows-per-row-group, computed from schema in `on_schema`.
     pub(in crate::pipeline) parquet_row_group_rows: Option<usize>,
-    /// Form B value-checksum accumulator: per-column xxh3 (keyed to the cursor
-    /// column when present — `xxh3(key ‖ value)`), XOR-combined over the export,
-    /// keyed by column NAME. Surfaced into the manifest by `finalize`; `rivet
-    /// validate` re-reads to catch an Arrow→Parquet encode / post-write fault the
-    /// in-process Form A check cannot see. Always tracked (cheap, one pass over
-    /// the batch the sink already holds).
+    /// Form B value-checksum accumulator: per-column xxh3 (keyed to the cursor column when present.
     pub(in crate::pipeline) column_checksums: std::collections::BTreeMap<String, u64>,
-    /// Index of the cursor/key column in the dest batch (the pk for the keyed
-    /// checksum), resolved in `on_schema`. `None` = un-keyed (full export, or a
-    /// stripped/synthetic cursor not present in the dest batch).
+    /// Index of the cursor/key column in the dest batch (the pk for the keyed checksum), resolved in `on_schema`.
     pub(in crate::pipeline) checksum_key_col: Option<usize>,
-    /// Per-batch row-progress feed (chunked exports). `None` for paths that
-    /// don't drive a progress bar.
+    /// Per-batch row-progress feed (chunked exports).
     pub(in crate::pipeline) row_progress: Option<RowProgress>,
-    /// The warehouse partition budget the CURRENT part is kept inside, and what it has
-    /// spent — see [`PartBudget`].
+    /// The warehouse partition budget the CURRENT part is kept inside, and what it has spent — see [`PartBudget`].
     pub(in crate::pipeline) partition: PartBudget,
 }
 
-/// Whether the byte cap closes the current part: a cap is declared, the part has
-/// reached it, and it holds at least one row (an empty part is never shipped).
+/// Whether the byte cap closes the current part.
 fn should_split(written: u64, max_file_size: Option<u64>, part_rows: usize) -> bool {
     max_file_size.is_some_and(|max| written >= max) && part_rows > 0
 }
 
-/// Each row's partition bucket in `batch` under `rollover`; `None` when the batch lacks
-/// the column or it is not a date/timestamp. Shared with the CDC drain.
+/// Each row's partition bucket in `batch` under `rollover`.
 pub(crate) fn batch_partition_buckets(
     batch: &RecordBatch,
     rollover: &crate::plan::rollover::PartitionRollover,
@@ -154,8 +128,7 @@ fn column_buckets(
     )
 }
 
-/// The row-group size under which `max_file_size` can rotate a part: a quarter of the
-/// cap per group, so a part overshoots it by at most one (compressed) group.
+/// The row-group size under which `max_file_size` can rotate a part.
 fn row_group_rows_for_cap(
     rows: Option<usize>,
     max_file_size: Option<u64>,
@@ -214,8 +187,7 @@ fn ignored_row_group_rows_warning(pc: &crate::config::ParquetConfig) -> Option<S
     )
 }
 
-/// The unit an Arrow date/timestamp type stores, or `None` for a type no warehouse
-/// partitions by — the signal `on_schema` turns into a warning rather than silence.
+/// The unit an Arrow date/timestamp type stores, or `None` for a type no warehouse partitions by.
 fn partition_unit_of(data_type: &arrow::datatypes::DataType) -> Option<PartitionUnit> {
     use arrow::datatypes::{DataType, TimeUnit};
     match data_type {
@@ -229,8 +201,7 @@ fn partition_unit_of(data_type: &arrow::datatypes::DataType) -> Option<Partition
     }
 }
 
-/// The partition column's raw stored values, widened to `i64`. `None` when the array is
-/// not one of the date/timestamp arrays `partition_unit_of` admits.
+/// The partition column's raw stored values, widened to `i64`.
 fn partition_values(col: &dyn arrow::array::Array) -> Option<Vec<i64>> {
     use arrow::array::{
         Date32Array, Date64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
@@ -260,15 +231,12 @@ fn partition_values(col: &dyn arrow::array::Array) -> Option<Vec<i64>> {
         })
 }
 
-/// The warehouse partition budget the CURRENT part is kept inside, and what it has
-/// spent. The writer is the only layer that can keep a part within the load job's
-/// partition cap, so the count lives here — per part, hence reset on every rotation.
+/// The warehouse partition budget the CURRENT part is kept inside, and what it has spent.
 #[derive(Default)]
 pub(in crate::pipeline) struct PartBudget {
     /// The declared budget; `None` leaves part sizing to `max_file_size` alone.
     pub(in crate::pipeline) rollover: Option<crate::plan::rollover::PartitionRollover>,
-    /// The partition column's index in the DEST batch and the unit its Arrow type stores,
-    /// resolved by [`Self::resolve`]. `None` when the export does not carry that column.
+    /// The partition column's index in the DEST batch and the unit its Arrow type stores, resolved by [`Self::resolve`].
     pub(in crate::pipeline) col: Option<(usize, PartitionUnit)>,
     /// Distinct partitions the current part already holds — the budget spent so far.
     pub(in crate::pipeline) buckets: std::collections::HashSet<i64>,
@@ -284,12 +252,9 @@ impl PartBudget {
         }
     }
 
-    /// Resolve the partition column against the DEST schema. Both failures WARN rather
-    /// than disable quietly (#6/#29): an uncounted part is one the warehouse may refuse
-    /// to load outright, and that must not first be discovered at load time.
+    /// Resolve the partition column against the DEST schema.
     fn resolve(&mut self, dest_schema: &arrow::datatypes::Schema) {
         self.col = None;
-        // A zero-row run declares an empty schema: there is no part to budget, and nothing is missing.
         if dest_schema.fields().is_empty() {
             return;
         }
@@ -318,9 +283,7 @@ impl PartBudget {
         }
     }
 
-    /// The partition bucket of every row of `batch`, with the budget they are counted
-    /// against. `None` when this export is not budgeted (no column partition, or the
-    /// column is absent / not a date) — the caller then writes the batch unchanged.
+    /// The partition bucket of every row of `batch`, with the budget they are counted against.
     fn buckets_for(&self, batch: &RecordBatch) -> Option<(Vec<i64>, usize)> {
         let (idx, unit) = self.col?;
         let r = self.rollover.as_ref()?;
@@ -328,8 +291,7 @@ impl PartBudget {
         Some((buckets, r.cap))
     }
 
-    /// What the closing part records in its footer — the column, granularity and the
-    /// distinct partitions it holds; `None` when the part is not budgeted.
+    /// What the closing part records in its footer.
     fn footer_note(&self) -> Option<String> {
         self.col?;
         let r = self.rollover.as_ref()?;
@@ -356,11 +318,7 @@ impl PartBudget {
     }
 }
 
-/// Per-batch progress feed for chunked exports: ticks the export's shared
-/// progress bar with the running row count *during* a chunk's read, so a wide
-/// first chunk (e.g. 250k rows / 90 MB) doesn't sit at "0 rows" for seconds and
-/// read as idle. `streamed` is shared across the export's chunk workers (each
-/// batch adds to it); `last_tick` throttles the bar/IPC refresh to ~8/s.
+/// Per-batch progress feed for chunked exports.
 pub(in crate::pipeline) struct RowProgress {
     pub(in crate::pipeline) handle: crate::pipeline::progress::ChunkProgressHandle,
     pub(in crate::pipeline) streamed: Arc<std::sync::atomic::AtomicI64>,
@@ -369,7 +327,6 @@ pub(in crate::pipeline) struct RowProgress {
 
 impl ExportSink {
     /// ADR-0029 — what this sink SAW: its dest schema and per-column max bytes.
-    /// No coverage obligation, so a runner feeds it as soon as the read is done.
     pub(in crate::pipeline) fn take_observations(
         &mut self,
     ) -> crate::pipeline::commit::Observations {
@@ -380,8 +337,7 @@ impl ExportSink {
         }
     }
 
-    /// [`Self::take_observations`] without the schema — for chunked runners, whose
-    /// drift gate runs pre-chunk (ADR-0021) and must not be re-run post-run.
+    /// [`Self::take_observations`] without the schema.
     pub(in crate::pipeline) fn take_shape(&mut self) -> crate::pipeline::commit::Observations {
         crate::pipeline::commit::Observations {
             drift_schema: None,
@@ -390,8 +346,7 @@ impl ExportSink {
         }
     }
 
-    /// ADR-0029 — this sink's Form-B checksums and their key column. Contribute
-    /// them only once the unit's parts are committed.
+    /// ADR-0029 — this sink's Form-B checksums and their key column.
     pub(in crate::pipeline) fn take_checksums(&mut self) -> crate::pipeline::commit::UnitChecksums {
         crate::pipeline::commit::UnitChecksums {
             key: self.checksum_key(),
@@ -407,14 +362,7 @@ impl ExportSink {
         ledger.observe(self.take_observations());
     }
 
-    /// The column this sink's Form-B checksums are keyed to, or `None` when they are
-    /// un-keyed.
-    ///
-    /// Keyed only when the key column survived into the DEST batch — `checksum_key_col` is
-    /// its index there, so its absence means a full export with no cursor, or a
-    /// stripped/synthetic one. Every runner needs this answer when it hands its checksums
-    /// on, and each used to spell it out by reaching into both private fields; one name
-    /// instead of six copies of the rule.
+    /// The column this sink's Form-B checksums are keyed to, or `None` when they are un-keyed.
     pub(in crate::pipeline) fn checksum_key(&self) -> Option<String> {
         self.checksum_key_col.and(self.cursor_column.clone())
     }
@@ -464,7 +412,6 @@ impl ExportSink {
             strip_internal_column,
             column_max_bytes: std::collections::HashMap::new(),
             max_batch_memory_bytes: plan.tuning.max_batch_memory_mb.map(|mb| mb * 1024 * 1024),
-            // `0` (or None) disables the per-value guard; otherwise convert MB→bytes.
             max_value_bytes: plan.tuning.max_value_bytes(),
             batch_memory_policy: plan.tuning.on_batch_memory_exceeded,
             oversized_batch_count: 0,
@@ -477,8 +424,7 @@ impl ExportSink {
         })
     }
 
-    /// Attach a per-batch row-progress feed (see [`RowProgress`]). Returns self
-    /// so a chunk worker can `ExportSink::new(plan)?.with_row_progress(...)`.
+    /// Attach a per-batch row-progress feed (see [`RowProgress`]).
     pub(in crate::pipeline) fn with_row_progress(
         mut self,
         handle: crate::pipeline::progress::ChunkProgressHandle,
@@ -524,12 +470,7 @@ impl ExportSink {
         Ok(())
     }
 
-    /// Close the current part and open the next one, whatever asked for it — the byte
-    /// cap or the partition budget.
-    /// Close the current writer, recording in its footer what the part holds — the ONE
-    /// close path. Every runner ends its last part here as well as every rotation: a
-    /// bare `writer.take()` + `finish()` shipped the final part of every export (and
-    /// every keyset page) without the note the loader bounds it by.
+    /// Close the current part and open the next one, whatever asked for it — the byte cap or the partition budget.
     pub(in crate::pipeline) fn finish_writer(&mut self) -> Result<()> {
         if let Some(mut w) = self.writer.take() {
             if let Some(note) = self.partition.footer_note() {
@@ -562,11 +503,6 @@ impl ExportSink {
             rows: self.part_rows,
         });
         self.part_rows = 0;
-        // The partition budget is per load job, hence per FILE: the new part starts with
-        // its whole budget. Carrying the closed part's partitions over leaves the rows
-        // that forced this rotation still not fitting, which rotates again on the same
-        // rows and never terminates (caught as a stack overflow by
-        // `a_batch_past_the_partition_budget_closes_the_part_mid_batch`).
         self.partition.reset();
 
         if let Some(schema) = &self.enriched_schema {
@@ -592,27 +528,7 @@ impl ExportSink {
         self.quality.track(batch)
     }
 
-    /// Hard per-value guard (OPT-1): abort with `RIVET_VALUE_TOO_LARGE` when a
-    /// single variable-length cell exceeds `max_value_bytes`. Only Utf8 /
-    /// LargeUtf8 / Binary / LargeBinary values can be individually huge; fixed-
-    /// width types (ints, floats, dates) cannot, so they need no check. Runs
-    /// before the batch is split/encoded so the giant cell never reaches the
-    /// row-group writer or the auto-shrink splitter (which can't divide one
-    /// oversized value). `O(rows × var-length-cols)` length reads — no copies.
-    ///
-    /// KNOWN LIMITATION (security audit V22, CWE-770, accepted): this guard runs
-    /// *post-materialization* — the cell has already been decoded by the driver
-    /// and built into the Arrow array before its length is checked here, so a
-    /// single adversarial cell of N bytes costs ~2N RAM (driver copy + Arrow
-    /// copy) before the guard fires. The guard still prevents *further*
-    /// amplification (encode / row-group / split) and aborts the run, and it is
-    /// ON by default (`max_value_mb = Some(256)` in every tuning profile), so
-    /// the realistic blast radius is one ≤256 MB-class over-allocation per
-    /// oversized cell, not an unbounded OOM. A true pre-materialization cap
-    /// would need a source-side length probe (`SUBSTRING(col,1,max+1)` — lossy,
-    /// changes data) or a per-field driver limit (Postgres exposes none;
-    /// MySQL's `max_allowed_packet` is connection- not field-scoped), so it is
-    /// deliberately not attempted here.
+    /// Hard per-value guard (OPT-1): abort with `RIVET_VALUE_TOO_LARGE` when a single variable-length cell exceeds `max_value_bytes`.
     fn check_value_ceiling(&self, batch: &RecordBatch) -> Result<()> {
         use arrow::array::{BinaryArray, LargeBinaryArray, LargeStringArray, StringArray};
         use arrow::datatypes::DataType;
@@ -659,15 +575,8 @@ impl ExportSink {
     }
 
     /// Update the running per-column max byte length for string/binary columns.
-    /// Form B: fold each column's xxh3 (keyed to the cursor column when present —
-    /// `xxh3(key ‖ value)`) into the per-column accumulator, XOR-combined and
-    /// keyed by column NAME. Over the dest batch (data columns), so enrichment /
-    /// meta columns are naturally excluded; `validate` re-reads and recomputes
-    /// this by name to catch an Arrow→Parquet encode / post-write fault.
     pub fn track_checksum(&mut self, batch: &RecordBatch) {
         use crate::source::value_checksum::{arrow_batch_checksums, arrow_batch_checksums_keyed};
-        // Form B re-read verification only works for Parquet (a CSV→Arrow re-read
-        // is not byte-faithful), so only Parquet exports record the checksum.
         if self.format_type != FormatType::Parquet {
             return;
         }
@@ -675,14 +584,6 @@ impl ExportSink {
             Some(k) => arrow_batch_checksums_keyed(batch, k),
             None => arrow_batch_checksums(batch),
         };
-        // wrapping_add, matching `value_checksum::Fold::Sum` — the fold every
-        // other site uses. This one was MISSED when the fold changed, and the
-        // consequence was invisible below 500 rows: with a single batch per part
-        // `0 ^ s == 0 + s`, so the write and read sides agreed exactly as long as
-        // no part spanned more than one read batch (PROBE_BATCH_SIZE = 500). Past
-        // that the recorded checksum diverged from the re-read and `validate
-        // --depth full` reported post-write corruption on healthy data — measured
-        // at the boundary: 500 rows exit 0, 501 rows exit 3.
         for (i, field) in batch.schema().fields().iter().enumerate() {
             let e = self
                 .column_checksums
@@ -736,23 +637,9 @@ impl ExportSink {
         self.quality.issues(self.total_rows)
     }
 
-    /// Core batch processing: keep the part inside the load's partition budget, then
-    /// track quality/shape, enrich and write. Called after the memory check.
-    ///
-    /// Nothing splits one Parquet file at load time, so a part written past the budget
-    /// cannot be loaded at any granularity the operator wants — the writer is the only
-    /// place that can prevent it. The part is closed BEFORE the rows that would overspend
-    /// it, slicing the batch when the boundary falls inside. A bucket the part already
-    /// holds costs nothing, so a wide batch over a narrow range never rotates.
-    ///
-    /// Iterative, not recursive: the number of rotations one batch needs is data-driven
-    /// (its distinct partitions over the budget) and unbounded, so a frame per rotation
-    /// overflows the stack on a batch that is merely wide — measured, as an abort rather
-    /// than a test failure, which is a far worse way to learn it.
+    /// Core batch processing: keep the part inside the load's partition budget, then track quality/shape, enrich and write.
     fn on_batch_inner(&mut self, dest_batch: &RecordBatch) -> Result<()> {
         let n = dest_batch.num_rows();
-        // One row group at a time when a byte cap is set: parquet flushes only when a
-        // group closes, so the cap can rotate only between groups (#307).
         let step = cap_piece_rows(self.max_file_size, self.parquet_row_group_rows, n);
         for (offset, len) in piece_ranges(n, step) {
             self.on_piece(&dest_batch.slice(offset, len))?;
@@ -776,18 +663,12 @@ impl ExportSink {
                 cap,
             );
             if fit == 0 {
-                // The part is full. Closing it frees the whole budget, and `cap` is never
-                // zero here (`rows_that_fit` treats a zero budget as unbudgeted), so the
-                // next pass takes at least one row — the loop cannot spin.
                 self.split_now()?;
                 continue;
             }
             self.partition.spend(&buckets[offset..offset + fit]);
             self.write_batch_part(&dest_batch.slice(offset, fit))?;
             offset += fit;
-            // No rotation here: the `fit == 0` pass above closes a spent part, and the
-            // byte cap may already have rotated inside `write_batch_part` — a second
-            // close would ship an empty file and a 0-row manifest entry.
         }
         Ok(())
     }
@@ -795,8 +676,6 @@ impl ExportSink {
     /// Write one slice that is known to fit the current part's partition budget.
     fn write_batch_part(&mut self, dest_batch: &RecordBatch) -> Result<()> {
         self.total_rows += dest_batch.num_rows();
-        // Feed the running row count to the progress bar *during* the read, not
-        // only when the chunk completes (throttled to ~8/s).
         if let Some(rp) = self.row_progress.as_mut() {
             let n = dest_batch.num_rows() as i64;
             let total = rp
@@ -829,9 +708,6 @@ impl ExportSink {
 
 impl ExportSink {
     /// Apply memory-cap policy and write `dest_batch` (already stripped of internal columns).
-    ///
-    /// Separating this from `on_batch` lets `AutoShrink` recurse through the full memory
-    /// check on every sub-batch, not just the first split level.
     fn process_dest_batch(&mut self, dest_batch: &RecordBatch) -> Result<()> {
         if let Some(limit) = self.max_batch_memory_bytes {
             let batch_bytes = crate::tuning::SourceTuning::batch_memory_bytes(dest_batch);
@@ -870,7 +746,6 @@ impl ExportSink {
                     crate::tuning::BatchMemoryPolicy::AutoShrink => {
                         let mid = dest_batch.num_rows() / 2;
                         if mid == 0 {
-                            // Single-row batch already over limit — warn and write as-is.
                             log::warn!(
                                 "single-row batch is {} MB — cannot shrink further, writing as-is.",
                                 batch_mb
@@ -896,8 +771,6 @@ impl BatchSink for ExportSink {
     }
 
     fn on_schema(&mut self, schema: SchemaRef) -> Result<()> {
-        // Strip the synthetic column only when it's actually present in the schema —
-        // empty-schema fallbacks (zero-row runs) otherwise error on missing field.
         let dest_schema = match &self.strip_internal_column {
             Some(strip) if schema.index_of(strip).is_ok() => {
                 Self::schema_without_internal(schema.as_ref(), strip)?
@@ -928,7 +801,6 @@ impl BatchSink for ExportSink {
             }
         }
         let enriched = enrich::enrich_schema(&dest_schema, &self.meta)?;
-        // Compute row group rows from the actual schema now that it's available.
         if let Some(pc) = &self.parquet_config {
             self.parquet_row_group_rows = pc.effective_row_group_rows(&dest_schema);
             if let Some(rows) = self.parquet_row_group_rows {
@@ -939,9 +811,6 @@ impl BatchSink for ExportSink {
                 );
             }
         }
-        // `maybe_split` compares the writer's FLUSHED bytes with `max_file_size`, and
-        // parquet flushes only when a row group closes — so the group must be small
-        // enough for the cap to be reached between closes (#307).
         if self.format_type == FormatType::Parquet {
             self.parquet_row_group_rows = row_group_rows_for_cap(
                 self.parquet_row_group_rows,
@@ -966,23 +835,12 @@ impl BatchSink for ExportSink {
         let file = self.tmp.as_file().try_clone()?;
         let buf_writer = BufWriter::new(file);
         self.writer = Some(fmt.create_writer(&enriched, Box::new(buf_writer))?);
-        // Build quality field index cache from dest_schema (after stripping internal cols).
         self.quality.resolve_columns(&dest_schema)?;
-        // `schema` keeps internal columns so cursor extraction (e.g. synthetic
-        // `_rivet_coalesced_cursor`) can index by name. `dest_schema` is what
-        // downstream consumers see — used for schema-change detection.
-        // Form B: resolve the cursor/key column index in the dest batch (the pk
-        // for the keyed checksum). `None` when there's no cursor, or it's a
-        // stripped/synthetic column not present in the dest batch (→ un-keyed).
         self.checksum_key_col = self
             .cursor_column
             .as_ref()
             .and_then(|c| dest_schema.index_of(c).ok());
-        // The partition column each part is budgeted against.
         self.partition.resolve(&dest_schema);
-        // Coverage is visible, not silent: warn once per export about any column the
-        // value checksum does NOT cover (UUID / List / Decimal256 / ns-timestamp),
-        // so its 0 contribution can't read as "verified".
         let skips = crate::source::value_checksum::coverage_skips(&dest_schema);
         if !skips.is_empty() {
             log::warn!(
@@ -1003,15 +861,10 @@ impl BatchSink for ExportSink {
     }
 
     fn on_batch(&mut self, batch: &RecordBatch) -> Result<()> {
-        // Bytes READ from the source: the in-memory Arrow size of the batch as
-        // received, BEFORE any internal-column strip. Incremented on the RUN's
-        // shared counter (plan.bytes_read), so every sink — per chunk, per
-        // worker — feeds one total with no per-runner harvest to forget (#175).
         self.bytes_read.fetch_add(
             batch.get_array_memory_size() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
-        // Avoid cloning the batch when no internal column needs to be stripped.
         let stripped: Option<RecordBatch> = match &self.strip_internal_column {
             Some(strip) if batch.schema().index_of(strip).is_ok() => {
                 Some(Self::record_batch_without_internal(batch, strip)?)
@@ -1023,7 +876,6 @@ impl BatchSink for ExportSink {
         self.check_value_ceiling(dest_batch)?;
         crate::source::refuse_decimal_overflow(dest_batch)?;
 
-        // Count original batches that exceed the memory cap (before any splitting).
         if let Some(limit) = self.max_batch_memory_bytes
             && crate::tuning::SourceTuning::batch_memory_bytes(dest_batch) > limit
         {
@@ -1032,8 +884,6 @@ impl BatchSink for ExportSink {
 
         self.process_dest_batch(dest_batch)?;
 
-        // Extract cursor value inline so the batch can be freed immediately after
-        // on_batch returns — avoids holding one full batch in memory for the rest of the run.
         if let (Some(col), Some(schema)) = (&self.cursor_column, &self.schema)
             && !self.cursor_rest.is_empty()
         {
@@ -1047,11 +897,6 @@ impl BatchSink for ExportSink {
                 self.last_cursor_value = Some(v);
             }
         } else if let (Some(col), Some(schema)) = (&self.cursor_column, &self.schema) {
-            // Only ADVANCE the mark, never erase it. A batch with no readable
-            // cursor value (every row NULL) says nothing about progress; the
-            // unconditional assignment let it overwrite the good mark
-            // accumulated from every prior batch with None, after which nothing
-            // was recorded and nothing committed.
             if self.first_cursor_value.is_none() {
                 self.first_cursor_value = extract_first_cursor_value(batch, col, schema);
             }
@@ -1073,9 +918,7 @@ impl ExportSink {
         self.total_rows == 0
     }
 
-    /// The keyset high-water mark to advance/checkpoint from: the source's own
-    /// lossless token when it reported one (MongoDB BSON `_id`), else the string
-    /// extracted from the output column (every SQL engine).
+    /// The keyset high-water mark to advance/checkpoint from.
     pub(in crate::pipeline) fn effective_cursor(&self) -> Option<String> {
         self.source_cursor
             .clone()

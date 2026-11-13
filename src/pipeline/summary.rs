@@ -1,18 +1,4 @@
 //! **Layer: Observability**
-//!
-//! `RunSummary` is the single observability artifact for a pipeline run.
-//! It accumulates operational data during execution and is consumed by:
-//! - the end-of-run terminal output (`print`)
-//! - the metrics store (`state::record_metric`)
-//! - the notification system (`notify::maybe_send`)
-//!
-//! `RunSummary` is written to by execution modules (row counts, byte counts, retries)
-//! but it makes no execution decisions itself — it is a pure data accumulator.
-//!
-//! It embeds a `RunJournal` so that all pipeline modules — which already hold
-//! `&mut RunSummary` — can record structured events via `summary.journal.record()`
-//! without any signature changes.  In a future epic the relationship will invert:
-//! `RunSummary` will be derived from `RunJournal`.
 
 use super::ipc::{self, ChildEvent};
 use super::{format_bytes, multi_export_mode, strip_chunked_recovery_hint};
@@ -21,10 +7,6 @@ use crate::manifest::ManifestPart;
 use crate::plan::ResolvedRunPlan;
 
 /// Build a `PlanSnapshot` from a `ResolvedRunPlan`.
-///
-/// Lives here rather than on `journal` itself so that the journal module
-/// stays free of plan/pipeline dependencies (avoids the state→pipeline cycle
-/// we used to have via `state::journal_store`).
 fn plan_snapshot_from(plan: &ResolvedRunPlan) -> PlanSnapshot {
     PlanSnapshot {
         export_name: plan.export_name.clone(),
@@ -44,31 +26,18 @@ fn plan_snapshot_from(plan: &ResolvedRunPlan) -> PlanSnapshot {
     }
 }
 
-/// Context recorded when a run was launched via `rivet apply` rather than
-/// `rivet run`.  Provides the audit trail for **F5**: which plan artifact
-/// was applied, whether `--force` was passed, and which preflight checks
-/// `--force` actually bypassed.
-///
-/// `None` on `RunSummary` means the run came from `rivet run` (no plan
-/// artifact was applied).
+/// Context recorded when a run was launched via `rivet apply` rather than `rivet run`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ApplyContext {
     /// `plan_id` from the applied `PlanArtifact`.
     pub plan_id: String,
     /// Was `--force` passed to `rivet apply`?
     pub forced: bool,
-    /// Names of preflight checks that `--force` actually overrode for this
-    /// run.  Possible values: `"staleness"`, `"cursor_drift"`.  Empty when
-    /// `forced` is true but no check actually had to be bypassed (the plan
-    /// was fresh and the cursor matched).
+    /// Names of preflight checks that `--force` actually overrode for this run.
     pub force_bypassed: Vec<String>,
 }
 
 /// Accumulates operational data during a pipeline run for summary and metrics.
-///
-/// The embedded `journal` is the structured event log for this run.  Use
-/// `summary.journal.record(event)` at any call site that already holds
-/// `&mut RunSummary`.
 #[derive(Debug, Clone, Default)]
 pub struct RunSummary {
     pub run_id: String,
@@ -77,101 +46,39 @@ pub struct RunSummary {
     pub total_rows: i64,
     pub files_produced: usize,
     pub bytes_written: u64,
-    /// Decoded bytes READ from the source this run (harvested once from the
-    /// plan's shared counter by `run_export_job` after the runner returns; v23).
+    /// Decoded bytes READ from the source this run (harvested once from the plan's shared counter by `run_export_job` after the runner returns.
     pub bytes_read: u64,
     /// Per column, source cells written as NULL because the target type cannot hold them (MySQL zero dates).
     pub nulled_cells: Vec<(String, u64)>,
-    /// Incremented after each successful `dest.write()`. Non-zero means a previous
-    /// attempt already committed data — retrying from the same cursor would duplicate rows.
+    /// Incremented after each successful `dest.write()`.
     pub files_committed: usize,
     /// Parts adopted from a prior run on resume (included in `files_committed`).
     pub files_adopted: usize,
     pub duration_ms: i64,
     pub peak_rss_mb: i64,
     pub retries: u32,
-    /// Of `retries`, how many opened a FRESH source connection (a
-    /// reconnect-class error: network reset, "gone away", tunnel drop). The
-    /// field-signal for a flaky link — N reconnects = N blips survived. Distinct
-    /// from a same-connection retry (a lock wait) that `retries` also counts.
+    /// Of `retries`, how many opened a FRESH source connection (a reconnect-class error.
     pub reconnects: u32,
-    /// True when this run picked up a prior CRASHED run instead of starting fresh
-    /// (keyset via the in-progress run_id, chunked via `--resume`). A resume-hit is
-    /// the tell that the previous run died — visible in the run's own log line.
+    /// True when this run picked up a prior CRASHED run instead of starting fresh (keyset via the in-progress run_id, chunked via `--resume`).
     pub resumed: bool,
-    /// True when this run's chunk boundaries came from a plan artifact
-    /// (`ChunkSource::Precomputed`), i.e. `rivet apply`, rather than being
-    /// detected against the live source.
-    ///
-    /// It exists for the same reason `resumed` does: the pre-chunk schema-drift
-    /// gate lives inside `prepare_chunk_plan`, which only the `Detect` arm calls
-    /// — deliberately, per that function's contract ("drift was evaluated on the
-    /// original planning run that produced the ranges"). So a precomputed run
-    /// legitimately ends with `schema_changed == None`, which
-    /// `check_post_run_invariants` would otherwise read as a runner that skipped
-    /// its facade. Without this flag the exemption would have to be "any apply",
-    /// which is broader than the truth: an apply whose artifact carries no ranges
-    /// falls back to `Detect` and DOES run the gate.
+    /// True when this run's chunk boundaries came from a plan artifact (`ChunkSource::Precomputed`), i.e.
     pub chunks_precomputed: bool,
-    /// True once this run entered `run_export` — the shared batch-runner dispatch
-    /// choke point, which always has a `StateStore`. It marks a run subject to the
-    /// per-runner facade contract (ADR-0018): every batch runner MUST apply the
-    /// schema-drift gate + Form-B harvest. `check_post_run_invariants` asserts those
-    /// facades ran ONLY for such runs, so a CDC run or a direct-`run_single_export`
-    /// unit test (state = None, never through `run_export`) is not held to the
-    /// contract and cannot false-positive. This is the structural half of the
-    /// runner-bypass guard the `runner-coverage-matrix` tracks by hand.
+    /// True once this run entered `run_export` — the shared batch-runner dispatch choke point, which always has a `StateStore`.
     pub state_backed: bool,
     pub validated: Option<bool>,
     pub schema_changed: Option<bool>,
     pub quality_passed: Option<bool>,
-    /// Form B per-column value checksums (name-keyed), harvested from the sink;
-    /// recorded in the manifest so `validate` re-reads + verifies. Empty = none.
+    /// Form B per-column value checksums (name-keyed), harvested from the sink.
     pub column_checksums: Vec<crate::manifest::ColumnChecksum>,
     /// The column the Form B checksum is keyed to (cursor/key column); `None` = un-keyed.
     pub checksum_key_column: Option<String>,
-    /// Set when a checkpoint RESUME hydrated pre-crash parts into
-    /// `manifest_parts` whose per-column checksum contribution is unrecoverable
-    /// (file_log stores no per-column checksums, and the prior manifest keeps
-    /// only the run-wide XOR, not per-part). The run-wide Form B XOR this run
-    /// harvests would then cover only the re-exported parts while the manifest
-    /// lists ALL parts, so `harvest_column_checksums` SUPPRESSES Form B entirely
-    /// rather than record a partial XOR that `validate --depth full` would flag
-    /// as a false mismatch — mirroring how a rehydrated part's empty md5 degrades
-    /// to a size-only check. An incomplete integrity record must be ABSENT, not
-    /// partial-and-lying.
-    ///
-    /// ADR-0029: this is now a COMPUTED result, not a flag the resume paths must
-    /// remember to set. `harvest_column_checksums` compares the manifest's parts
-    /// against the commit units that contributed checksums and sets it when any
-    /// part is uncovered — a rehydrated part has no contribution, so the resume
-    /// case follows from the data.
+    /// Set when a checkpoint RESUME hydrated pre-crash parts into `manifest_parts` whose per-column checksum contribution is unrecoverable (file_log stores no per-column checksums, and the prior manifest keeps only the run-wide XOR, not per-part).
     pub column_checksums_incomplete: bool,
-    /// ADR-0029: WHY the coverage was short, when it was — set only for the half
-    /// that is never legitimate on a successful run: a part this run RECORDED
-    /// (through `commit::record_part`) whose commit unit contributed no
-    /// checksums. The other half — a part the manifest lists but this run never
-    /// recorded (a checkpoint rehydration, an M8 `Skip` clone) — is expected and
-    /// leaves this false.
-    ///
-    /// It exists so "Form B is absent" stops being ambiguous between "nothing
-    /// computed it", "a resume hydrated parts" and "the runner paired its part
-    /// and its checksum under DIFFERENT unit ids". The last one suppresses Form
-    /// B on perfectly healthy data — fail-safe, but silent — which is the risk
-    /// ADR-0029 names against itself; `check_post_run_invariants` turns it into
-    /// a loud failure instead.
+    /// ADR-0029: WHY the coverage was short, when it was.
     pub column_checksums_short_cover: bool,
-    /// ADR-0028: the run-wide tail ledger the runners FEED as they commit
-    /// (schema seen, per-part checksums, shape bytes) and that
-    /// `finalize::finalize_export` — called once by the dispatcher — APPLIES:
-    /// fingerprint pin, drift gate, Form-B harvest, shape warn. Runners no
-    /// longer apply any of those themselves; forgetting to FEED is caught by
-    /// the telltale invariants in `check_post_run_invariants` below.
+    /// ADR-0028: the run-wide tail ledger the runners FEED as they commit (schema seen, per-part checksums, shape bytes) and that `finalize::finalize_export`.
     pub(crate) ledger: super::commit::CommitLedger,
-    /// Cursor range this run covered (incremental strategies) — travels to the
-    /// manifest's extraction section for warehouse-side continuity checks.
-    /// v1 ships column + low + high; cursor_type / source_row_count are
-    /// follow-ups (they need extra source plumbing).
+    /// Cursor range this run covered (incremental strategies).
     pub cursor_column: Option<String>,
     pub cursor_low: Option<String>,
     pub cursor_high: Option<String>,
@@ -182,18 +89,10 @@ pub struct RunSummary {
     /// The columns the source declares finer than a microsecond, read at OPEN with the mappings.
     pub open_finer_than_microsecond: Vec<String>,
     pub error_message: Option<String>,
-    /// v18 failure forensics. `offending_value`: the last key read before an
-    /// unadvanceable keyset row (with `cursor_high` this brackets the value that
-    /// broke advancing — e.g. a u64 above i64::MAX). `server_context_json`: a JSON
-    /// snapshot of the source server's version + limits captured at OPEN (the
-    /// statement-timeout that surfaces as ERROR 3024 is unexplainable without it).
-    /// Both flow onto the failed `export_metrics` row so a post-mortem needs
-    /// neither the source table nor a still-live server.
+    /// v18 failure forensics.
     pub offending_value: Option<String>,
     pub server_context_json: Option<String>,
-    /// The keyset/chunk key's SOURCE native type (`bigint unsigned`, `numeric(11,4)`),
-    /// resolved by the open probe — folded into `key_descriptor_json` so the "was the
-    /// key unsigned" answer travels on the metric row.
+    /// The keyset/chunk key's SOURCE native type (`bigint unsigned`, `numeric(11,4)`), resolved by the open probe.
     pub key_native_type: Option<String>,
     /// `profile` from YAML, or `balanced (default)` if omitted.
     pub tuning_profile: String,
@@ -204,79 +103,34 @@ pub struct RunSummary {
     pub format: String,
     pub mode: String,
     pub compression: String,
-    /// Where the files were written, as an operator would type it to find them
-    /// again (`./output`, `s3://bucket/prefix`, …). `None` for stdout or a
-    /// summary built outside the run path (tests). Surfaced on the success card
-    /// so a newcomer isn't left wondering where their data landed.
+    /// Where the files were written, as an operator would type it to find them again (`./output`, `s3://bucket/prefix`, …).
     pub destination_uri: Option<String>,
-    /// Postgres `pg_stat_database.temp_bytes` delta around the run. `None` for
-    /// non-Postgres sources or when the snapshot probe failed (no admin perms
-    /// not required — the view is readable by any role). When set and large,
-    /// indicates cursor / sort spill to `pgsql_tmp/` — the safe action is to
-    /// shrink `tuning.batch_size` or set `tuning.batch_size_memory_mb` below
-    /// PG's `work_mem`.
-    ///
-    /// SCOPE: the counter is DATABASE-wide, so this is a WINDOW delta, not a
-    /// per-export measurement. Solo it is a fair attribution (rivet is the only
-    /// query stream it knows of); under any concurrent-sibling mode (--pool,
-    /// --parallel-exports, --parallel-export-processes, apply --parallel) every
-    /// concurrent export records the SAME shared window, so the values must not
-    /// be summed across exports nor read as "this export spilled N". The field
-    /// is kept — a window delta is still the only spill-volume signal there is —
-    /// and its warning hedges accordingly (`job::pg_temp_bytes_warning`).
+    /// Postgres `pg_stat_database.temp_bytes` delta around the run.
     pub pg_temp_bytes_delta: Option<i64>,
-    /// Human-readable parenthetical attached to `status: skipped` so the
-    /// operator knows *why* there was nothing to export this run (e.g.
-    /// `"no new rows since cursor 'updated_at'"`). Always `None` when
-    /// `status != "skipped"`. Surfaced in the console summary card as
-    /// `status: skipped (<reason>)`.
+    /// Human-readable parenthetical attached to `status.
     pub skip_reason: Option<String>,
     /// Source COUNT(*) result for reconciliation (None = not requested or not applicable).
     pub source_count: Option<i64>,
     /// Whether reconciliation passed (Some(true) = match, Some(false) = mismatch, None = skipped).
     pub reconciled: Option<bool>,
-    /// Committed parts accumulated during the run, in commit order.  Populated by
-    /// `pipeline::manifest_writer::record_committed_part` at each `dest.write`
-    /// site (ADR-0012 M1 — Parts Before Manifest).  Drained at finalize into a
-    /// `RunManifest` by [`crate::pipeline::manifest_writer::write_manifest`].
+    /// Committed parts accumulated during the run, in commit order.
     pub manifest_parts: Vec<ManifestPart>,
-    /// xxh3 fingerprint of the dest-facing column schema for this run, in the
-    /// canonical `xxh3:<16-hex>` form produced by [`crate::state::schema_fingerprint`].
-    ///
-    /// Recorded by [`crate::pipeline::manifest_writer::record_run_schema_fingerprint`]
-    /// the first time the sink has resolved a schema (i.e. on the first batch
-    /// of any chunk).  Idempotent within a run — the schema is identical across
-    /// chunks, so later writes are no-ops.
-    ///
-    /// `finalize_manifest` reads this directly so the manifest's
-    /// `schema_fingerprint` no longer depends on the per-export schema row
-    /// happening to land in `state` before the manifest write.  The state
-    /// lookup remains a fallback for resume scenarios where the summary was
-    /// reconstructed without ever seeing a live schema.
+    /// xxh3 fingerprint of the dest-facing column schema for this run, in the canonical `xxh3:<16-hex>` form produced by [`crate::state::schema_fingerprint`].
     pub schema_fingerprint: Option<String>,
-    /// Result of the manifest-aware `--validate` pass (ADR-0012 M5/M6,
-    /// ADR-0013).  Populated by `pipeline::job::finalize_validate_manifest`
-    /// after `finalize_manifest` succeeds; `None` when the run targeted a
-    /// streaming destination, when `--validate` was not requested, or when
-    /// the run failed before any manifest could be written.
+    /// Result of the manifest-aware `--validate` pass (ADR-0012 M5/M6, ADR-0013).
     pub manifest_verification: Option<crate::pipeline::validate_manifest::ManifestVerification>,
     /// Apply-time context (plan_id, --force usage, bypassed checks).
-    /// `None` when the run came from `rivet run` rather than `rivet apply`.
-    /// See [`ApplyContext`] and finding **F5** of the 0.7.5 audit.
     pub apply_context: Option<ApplyContext>,
-    /// Structured event log for this run.  Answers the four DoD observability questions.
+    /// Structured event log for this run.
     pub journal: RunJournal,
     /// The `initial: snapshot` legs a CDC run ran in this invocation; folded into its aggregate entry only.
     pub snapshot_legs: Vec<crate::state::RunAggregateEntry>,
 }
 
-/// One `(label, value)` line in the rendered summary block. The label is a
-/// fixed string literal; the value is computed per run.
+/// One `(label, value)` line in the rendered summary block.
 type Row = (&'static str, String);
 
-/// A run id: `<export>_<UTC ms>_<pid>`. The pid keeps two processes that start a
-/// same-named export in one millisecond (two configs on one scheduler tick, one
-/// shared state DB) from writing one `run_status` / per-run spec row.
+/// A run id: `<export>_<UTC ms>_<pid>`.
 pub(crate) fn fresh_run_id(export_name: &str) -> String {
     format!(
         "{}_{}_{}",
@@ -306,7 +160,7 @@ pub(crate) fn run_scoped_tag(run_id: &str, export_name: &str) -> String {
     tag.strip_prefix(&prefix).unwrap_or(&tag).to_string()
 }
 
-/// The run-unique stamp of a single-runner or Mongo-parallel part name, `<YYYYMMDD>_<HHMMSS>_<mmm>_<pid>_<nonce>`: [`run_scoped_tag`] with the run id's `T` folded to `_`, then a random nonce for two runs whose ids coincide.
+/// The run-unique stamp of a single-runner or Mongo-parallel part name, `<YYYYMMDD>_<HHMMSS>_<mmm>_<pid>_<nonce>`.
 pub(crate) fn run_scoped_stamp(run_id: &str, export_name: &str) -> String {
     use rand::RngExt;
     let tag = run_scoped_tag(run_id, export_name);
@@ -399,25 +253,6 @@ impl RunSummary {
     }
 
     /// One canonical builder for tests across the crate + integration suite.
-    ///
-    /// Every field is filled with a sensible default; callers tweak only what
-    /// the test cares about via the chainable setters below.  This replaces
-    /// the seven copies of `stub_summary` / `fresh_summary` / `make_summary`
-    /// / `dummy_summary` / `empty_summary` that used to live in `notify.rs`,
-    /// `report.rs`, `chunked/{exec,mod}.rs`, `manifest_writer.rs`, and the
-    /// two integration-test files.  When `RunSummary` gains a field, it is
-    /// updated here once instead of across nine sites.
-    ///
-    /// Available outside `pipeline` (`pub` not `pub(crate)`) so integration
-    /// tests in `tests/` can use it via `RunSummary::stub_for_testing(...)`.
-    /// The `_for_testing` suffix is the convention from elsewhere in the
-    /// codebase (`destination_for_tests`, etc.) — production code should
-    /// never call it.
-    ///
-    /// `#[allow(dead_code)]` on each helper because the bin target's
-    /// dead-code analysis doesn't see uses from integration tests in `tests/`.
-    /// The lib's unit tests + the integration suite together exercise every
-    /// helper; the attribute is a no-op for them.
     #[doc(hidden)]
     #[allow(dead_code)]
     pub fn stub_for_testing(run_id: impl Into<String>, export_name: impl Into<String>) -> Self {
@@ -481,11 +316,6 @@ impl RunSummary {
     }
 
     /// Test-only chainable setter for the run's status field.
-    ///
-    /// Used to build success/failed/running variants without re-listing every
-    /// field.  Keeps the journal in sync: terminal statuses get a matching
-    /// `RunCompleted` event recorded so consumers reading
-    /// `journal.final_outcome()` see the right shape.
     #[doc(hidden)]
     #[allow(dead_code)]
     pub fn with_status(mut self, status: impl Into<String>) -> Self {
@@ -501,9 +331,7 @@ impl RunSummary {
         self
     }
 
-    /// Test-only setter — replace the recorded manifest parts (and adjust
-    /// `total_rows` / `bytes_written` / `files_produced` to keep them
-    /// consistent with the parts list, the way real production code does).
+    /// Test-only setter — replace the recorded manifest parts (and adjust `total_rows` / `bytes_written` / `files_produced` to keep them consistent with the parts list, the way real production code does).
     #[doc(hidden)]
     #[allow(dead_code)]
     pub fn with_manifest_parts(mut self, parts: Vec<crate::manifest::ManifestPart>) -> Self {
@@ -515,9 +343,7 @@ impl RunSummary {
         self
     }
 
-    /// Test-only setter — error_message + (optionally) status.  Common
-    /// shape for the "failed-run" fixtures that populated 4+ existing
-    /// stubs.
+    /// Test-only setter — error_message + (optionally) status.
     #[doc(hidden)]
     #[allow(dead_code)]
     pub fn with_error(mut self, msg: impl Into<String>) -> Self {
@@ -525,10 +351,7 @@ impl RunSummary {
         self
     }
 
-    /// Test-only setter — record a PlanResolved event in the journal so
-    /// downstream observability paths (`journal.plan_snapshot()`,
-    /// `RunReport::from_summary` plan_origin lookup) see the same shape
-    /// they would on a real run.
+    /// Test-only setter — record a PlanResolved event in the journal so downstream observability paths (`journal.plan_snapshot()`, `RunReport::from_summary` plan_origin lookup) see the same shape they would on a real run.
     #[doc(hidden)]
     #[allow(dead_code)]
     pub fn with_plan_snapshot(mut self, snap: PlanSnapshot) -> Self {
@@ -537,9 +360,6 @@ impl RunSummary {
     }
 
     pub(super) fn print(&self) {
-        // Capturing mode (IPC child or in-process channel): emit a
-        // `Finished` event and let the unified UI thread render the card.
-        // No stderr block here — the renderer owns the screen.
         if ipc::capturing_events() {
             self.emit_finished();
             return;
@@ -567,28 +387,14 @@ impl RunSummary {
     }
 
     /// Write the per-export summary block to stderr, bypassing IPC capture.
-    /// Used after the in-process card UI finishes on single-export sequential
-    /// runs so operators still get the detailed `── name ──` block below the
-    /// live card line.
     pub(super) fn print_stderr_block(&self) {
         let block = if multi_export_mode() {
             self.render_compact()
         } else {
-            // Render the whole block into a single buffer so the call site
-            // emits one `write_all` to stderr.  Without this, parallel
-            // exports could interleave individual lines from different
-            // `RunSummary::print()` calls — visible as garbled blocks in
-            // `--parallel-exports` runs.
             self.render().trim_end_matches('\n').to_string()
         };
 
         use std::io::Write;
-        // V9 (CWE-150): the block embeds error_message, which can carry
-        // attacker-controlled ANSI/OSC escapes from a malicious source DB. The
-        // single-export path reaches the operator terminal here (the parallel
-        // renderer sanitises separately). Funnel the whole block through the
-        // shared sanitiser before write — it preserves the renderer's own
-        // multi-byte glyphs (✓/✗/──) and strips only C0/C1/DEL control bytes.
         let mut buf = super::parent_ui::sanitize_terminal(&block);
         buf.push('\n');
         let stderr = std::io::stderr();
@@ -597,10 +403,7 @@ impl RunSummary {
         let _ = handle.flush();
     }
 
-    /// Compact one-line summary used when several exports run in the same
-    /// invocation.  Mirrors the parent_ui card line so `--parallel-exports`
-    /// (threads), sequential, and `--parallel-export-processes` (processes)
-    /// produce visually consistent per-export rows.
+    /// Compact one-line summary used when several exports run in the same invocation.
     fn render_compact(&self) -> String {
         const NAME_COL: usize = 22;
         const MODE_COL: usize = 8;
@@ -615,9 +418,6 @@ impl RunSummary {
                 .as_deref()
                 .unwrap_or("(no error message recorded)");
             let (cause, _) = strip_chunked_recovery_hint(err);
-            // Collapse multi-line / extremely long errors so the compact
-            // line stays one row tall.  Full payload lives in the stderr
-            // log above the run summary.
             compact_error(cause)
         } else {
             let rss = if self.peak_rss_mb > 0 {
@@ -645,17 +445,7 @@ impl RunSummary {
         )
     }
 
-    /// Build the block as a string.  Module-private so tests can assert
-    /// formatting without capturing stderr.
-    ///
-    /// Adaptive layout: assemble the `(label, value)` rows that apply to this
-    /// run from a flat manifest of per-row providers, then [`format_block`]
-    /// pads labels to the longest so columns line up *within* the block (the
-    /// header is fixed-width so consecutive blocks stay uniform regardless of
-    /// which optional fields are present). Each provider owns one row's gate +
-    /// formatting and is unit-testable in isolation; this method owns only
-    /// their order — completing the pattern begun by [`incremental_position_line`]
-    /// / [`time_window_skip_line`].
+    /// Build the block as a string.
     fn render(&self) -> String {
         let mut rows: Vec<Row> = Vec::with_capacity(16);
         rows.push(("run_id", self.run_id.clone()));
@@ -688,8 +478,7 @@ impl RunSummary {
         ("status", value)
     }
 
-    /// `tuning` — profile + configured batch_size, noting the memory-derived
-    /// FETCH override when `batch_size_memory_mb` is set.
+    /// `tuning` — profile + configured batch_size, noting the memory-derived FETCH override when `batch_size_memory_mb` is set.
     fn tuning_row(&self) -> Row {
         let value = match self.batch_size_memory_mb {
             Some(mem) => format!(
@@ -707,9 +496,7 @@ impl RunSummary {
         ("tuning", value)
     }
 
-    /// `output` — where the files landed, so a newcomer isn't left guessing
-    /// after a successful export. Only when we actually wrote somewhere
-    /// addressable (skips stdout and 0-file skips).
+    /// `output` — where the files landed, so a newcomer isn't left guessing after a successful export.
     fn output_row(&self) -> Option<Row> {
         if self.files_produced > 0 {
             self.destination_uri.clone().map(|uri| ("output", uri))
@@ -718,12 +505,7 @@ impl RunSummary {
         }
     }
 
-    /// `cursor` (incremental) xor `window` (time_window): the position line for
-    /// a 0-row run. On a bare `0 rows  0 files` run this tells the operator the
-    /// incremental boundary held / the rolling window was simply empty, rather
-    /// than leaving an empty run indistinguishable from a misconfigured one.
-    /// `None` for a run that produced rows or whose skip carries no position.
-    /// (Detail lives in the two helpers it wraps.)
+    /// `cursor` (incremental) xor `window` (time_window): the position line for a 0-row run.
     fn position_row(&self) -> Option<Row> {
         if let Some(pos) = incremental_position_line(self.skip_reason.as_deref()) {
             Some(("cursor", pos))
@@ -732,9 +514,7 @@ impl RunSummary {
         }
     }
 
-    /// `bytes read` / `bytes written` — SEPARATE rows (read is the source
-    /// leg's decoded volume, written the parquet leg's; the pair is the
-    /// read-vs-write-bound signal the field 163-min run had neither of).
+    /// `bytes read` / `bytes written` — SEPARATE rows (read is the source leg's decoded volume, written the parquet leg's.
     fn bytes_row(&self) -> Option<Row> {
         if self.bytes_written > 0 {
             Some(("bytes written", format_bytes(self.bytes_written)))
@@ -782,9 +562,7 @@ impl RunSummary {
         }
     }
 
-    /// `pg temp spill` — PostgreSQL temp-file spill around the run. Chatters
-    /// only on actual spill (`> 0`); annotates a tuning hint above 100 MB.
-    /// `None` for non-Postgres sources, a failed probe, or no spill.
+    /// `pg temp spill` — PostgreSQL temp-file spill around the run.
     fn pg_temp_spill_row(&self) -> Option<Row> {
         let temp = self.pg_temp_bytes_delta?;
         if temp <= 0 {
@@ -820,11 +598,7 @@ impl RunSummary {
         }
     }
 
-    /// Post-extraction check outcomes: `--validate`, schema-drift, the quality
-    /// gate, `--reconcile`, plus the advisory verify nudge. Grouped so the
-    /// nudge's "ran neither verification pass" gate sits next to the very
-    /// fields it inspects — when it was added (#4) it landed as a 10-line block
-    /// appended to a flat ladder; here that dependency is local.
+    /// Post-extraction check outcomes: `--validate`, schema-drift, the quality gate, `--reconcile`, plus the advisory verify nudge.
     fn outcome_rows(&self) -> Vec<Row> {
         let mut rows: Vec<Row> = Vec::new();
         if let Some(v) = self.validated {
@@ -856,10 +630,6 @@ impl RunSummary {
             };
             rows.push(("reconcile", value));
         }
-        // Nudge: a successful run that wrote files but ran neither verification
-        // pass leaves completeness unconfirmed. Advisory only — so skipping
-        // verification is a deliberate choice, not an oversight (a pilot loaded
-        // hundreds of millions of rows across 5 runs with 0 verified).
         if self.status == "success"
             && self.files_produced > 0
             && self.validated.is_none()
@@ -874,50 +644,18 @@ impl RunSummary {
         rows
     }
 
-    /// `error` — the failure message, with its own multi-line structure
-    /// preserved (the detailed block indents continuation lines under the
-    /// value column; flattening to `"; "`-joined text is the compact
-    /// one-liner's job, not this one's — a quality failure's multi-line
-    /// `failed:\n  - <check>\n  Fix …` stays readable here).
+    /// `error` — the failure message, with its own multi-line structure preserved (the detailed block indents continuation lines under the value column.
     fn error_row(&self) -> Option<Row> {
         self.error_message
             .as_ref()
             .map(|err| ("error", err.trim_end().to_string()))
     }
 
-    /// Sanity-check the post-run summary ↔ manifest_parts coherence. Used as
-    /// a `debug_assert!`-style runtime gate from `finalize_manifest` so any
-    /// future runner that bumps `bytes_written` / `files_committed` /
-    /// `files_produced` without going through `pipeline::commit::record_part`
-    /// is caught the moment it finishes a real export. Compiled out in
-    /// release builds via the `cfg!(debug_assertions)` guard at the call site.
-    ///
-    /// **Resume-safe inequalities only**: on resume, `manifest_parts` carries
-    /// prior runs' parts via `chunked::resume_m8` while `bytes_written` /
-    /// `files_committed` reflect only the current invocation — so strict
-    /// equality is wrong across resume boundaries. Strict equality on the
-    /// non-resume path is pinned by `pipeline::commit::tests`.
-    ///
-    /// Returns `Ok(())` when the summary satisfies the invariants, else an
-    /// `Err(String)` naming which one was violated and by how much.
-    /// `is_resume_run` is the actual `--resume` invocation (plan.resume), NOT the
-    /// `resumed` diagnosis flag (adopted_prior_work). They differ on a checkpoint
-    /// resume that crashed BEFORE its first chunk committed: no prior manifest exists
-    /// so adopted_prior_work() — and thus `resumed` — is false, yet the drift gate was
-    /// still legitimately skipped (plan.resume bypasses prepare_chunk_plan). Keying the
-    /// exemption on the flag as well as `resumed` stops the guard from panicking such a
-    /// legitimate crash-recovery resume in debug/test builds.
+    /// Sanity-check the post-run summary ↔ manifest_parts coherence.
     pub fn check_post_run_invariants(&self, is_resume_run: bool) -> Result<(), String> {
         let parts_bytes: u64 = self.manifest_parts.iter().map(|p| p.size_bytes).sum();
 
         if self.files_committed > self.manifest_parts.len() {
-            // Subsumes the empty-part-list case: with no parts recorded, ANY
-            // committed file trips this. The dedicated `manifest_parts.is_empty()`
-            // branch that used to sit below was therefore unreachable — it needed
-            // `files_committed > 0` AND `len() == 0`, which this returns on first —
-            // so its message never reached anyone and mutation testing found its
-            // condition unkillable. Its diagnosis is folded in here instead of
-            // deleted, because the ADR reference is the useful half.
             return Err(format!(
                 "summary.files_committed ({}) > manifest_parts.len() ({}) — \
                  a runner bumped files_committed without commit::record_part. \
@@ -943,17 +681,6 @@ impl RunSummary {
                 self.bytes_written, parts_bytes
             ));
         }
-        // Invariant audit gap #1, weak form: a successful run that produced
-        // rows for THIS invocation must have committed at least one file.
-        // The strict form ("rows_written <= rows_read") would require a
-        // separate source-side row counter we do not track, and concurrent
-        // INSERTs on the source (live_oltp_load) make a source_count
-        // comparison brittle. This weak form catches a fabrication shape:
-        // total_rows accumulated but nothing reached the destination — a
-        // runner that fetched and silently dropped rows produces exactly
-        // this signature. Resume-safe: total_rows reflects only this
-        // invocation, so a resume with no work to do legitimately ends at
-        // total_rows=0 / files_committed=0 and the guard does not fire.
         if self.status == "success" && self.total_rows > 0 && self.files_committed == 0 {
             return Err(format!(
                 "summary.total_rows={} but files_committed=0 — rows extracted from \
@@ -961,34 +688,7 @@ impl RunSummary {
                 self.total_rows
             ));
         }
-        // Runner-bypass guard (structural half of runner-coverage-matrix). A
-        // batch run (`state_backed`, i.e. through `run_export`) that committed
-        // parts MUST have applied the per-runner facades (ADR-0018). Each facade
-        // leaves a telltale on the summary; a runner that owns its loop and forgets
-        // to CALL a facade leaves it absent — the exact bypass class that recurs
-        // (this session's parallel-keyset drift-gate miss; earlier, Form-B on the
-        // large-table runners). Gated on `state_backed` so CDC and direct-runner
-        // unit tests (never through `run_export`) are not held to the contract.
         if self.state_backed && self.status == "success" && self.files_committed > 0 {
-            // Schema-drift gate: every batch runner calls check_from_sink_schema /
-            // check_from_type_mappings, which ALWAYS leaves schema_changed = Some(_)
-            // when it runs (Some(false) even on a skip/tracking-error). `None` here
-            // means no runner ever called the gate — EXCEPT on a resume, where the
-            // drift gate is legitimately skipped (the baseline was set on the
-            // original run; chunked's `--resume` bypasses prepare_chunk_plan, the
-            // only caller of check_from_type_mappings). Exempt both the adopted-work
-            // diagnosis (`resumed`) AND the raw `--resume` flag (`is_resume_run`) — a
-            // resume that crashed before its first commit adopts nothing yet still
-            // skipped the gate.
-            //
-            // `chunks_precomputed` is NO LONGER an exemption. It was one because
-            // `rivet apply` of a chunked artifact skipped the gate "by contract",
-            // and the contract was false — `src/plan/` evaluates no drift, it only
-            // copies the policy, and the drift being guarded against happens
-            // BETWEEN plan and apply. The precomputed arms now call
-            // `check_drift_only`, so they leave `schema_changed = Some(_)` like
-            // every other path, and an exemption here would go back to excusing
-            // exactly the bypass this invariant exists to catch.
             if !self.resumed && !is_resume_run && self.schema_changed.is_none() {
                 return Err(
                     "state_backed success committed parts but schema_changed is None — \
@@ -998,10 +698,6 @@ impl RunSummary {
                         .to_string(),
                 );
             }
-            // Form-B harvest — Parquet ONLY: the sink's track_checksum skips
-            // non-Parquet formats by design, so CSV/JSONL legitimately harvest no
-            // checksums (empty, not flagged incomplete). Gate the check on the
-            // Parquet format so a correct CSV/JSONL export is not a false positive.
             if self.format == "parquet"
                 && self.column_checksums.is_empty()
                 && !self.column_checksums_incomplete
@@ -1013,21 +709,6 @@ impl RunSummary {
                         .to_string(),
                 );
             }
-            // ADR-0029 — the telltale the computed coverage makes possible, and
-            // the guard against the risk that ADR names against ITSELF. Before
-            // it, "Form B is absent" was ambiguous (nothing computed it / a
-            // resume hydrated parts / the runner mis-keyed its units) and the
-            // branch above excused all three alike. Now the harvest records WHY,
-            // and exactly one of the three can never be legitimate on a run
-            // whose runner SUCCEEDED: a part this run recorded itself, whose
-            // commit unit contributed no checksums. On a success every commit
-            // unit that recorded a part also completed, so this can only mean
-            // `record_part`'s UnitId and the checksum feed's UnitId disagree —
-            // which suppresses Form B on healthy data, in the fail-safe
-            // direction, in silence. Resume-safe by CONSTRUCTION, with no
-            // exemption to remember: a rehydrated / M8-cloned part never went
-            // through record_part, so it is foreign, not uncovered, and leaves
-            // this flag false.
             if self.column_checksums_short_cover {
                 return Err(
                     "state_backed success committed parts whose commit unit contributed NO \
@@ -1046,17 +727,7 @@ impl RunSummary {
     }
 }
 
-/// Reduce a possibly-multi-line execution error to a single-line, bounded-
-/// length cause suitable for the per-export summary block and the compact
-/// one-liner.  Keeps the user-actionable bit and drops noisy diagnostic
-/// payloads (long URLs, query strings, repeated chunk errors).
-///
-/// Recognised shapes:
-/// - `parallel checkpoint worker errors:\nchunk N: <msg>\nchunk M: <msg>` →
-///   `parallel checkpoint workers failed: K chunk(s) (chunk N: <truncated>)`.
-///   The full per-chunk detail is already in stderr logs.
-/// - Generic multi-line: newlines are replaced with `; ` and the result is
-///   clamped to 240 characters with an ellipsis.
+/// Reduce a possibly-multi-line execution error to a single-line, bounded- length cause suitable for the per-export summary block and the compact one-liner.
 fn compact_error(raw: &str) -> String {
     const MAX_CHARS: usize = 240;
     if let Some(summary) = summarize_parallel_chunk_errors(raw) {
@@ -1072,12 +743,6 @@ fn compact_error(raw: &str) -> String {
 }
 
 /// Derive the summary block's `cursor:` line from a `skip_reason`.
-///
-/// `skip_reason` for an incremental no-op is `"no new rows since cursor
-/// '<col>'"` (set by the runner); we lift the column out and report the
-/// position as held. Returns `None` for the non-cursor `"source returned 0
-/// rows"` skip and for `None` (a run that actually produced rows). The cursor
-/// *value* isn't carried on the summary yet, so this is column-level only.
 fn incremental_position_line(skip_reason: Option<&str>) -> Option<String> {
     let col = skip_reason?
         .strip_prefix("no new rows since cursor '")?
@@ -1085,22 +750,7 @@ fn incremental_position_line(skip_reason: Option<&str>) -> Option<String> {
     Some(format!("'{col}' unchanged (no new rows this run)"))
 }
 
-/// Derive the summary block's `window:` line for a time_window run that
-/// returned nothing.
-///
-/// A `TimeWindow` strategy has no cursor column, so a 0-row run reports the
-/// generic `"source returned 0 rows"` skip — the `incremental_position_line`
-/// branch never fires and, without this line, an empty time window looks
-/// identical to any other empty export. Surfacing it lets the operator tell an
-/// *empty window* (data simply outside the rolling range) from a *misconfigured
-/// window* (wrong `time_column` / `days_window`).
-///
-/// Keyed on `mode == "timewindow"` (set from `ExtractionStrategy::mode_label`)
-/// plus a set skip reason, so it only fires on a skipped time_window run and
-/// never on incremental/snapshot/chunked/keyset. The window column, days, and
-/// computed lower bound are not carried on `RunSummary`, so this reports the
-/// strategy-level fact and where to look — the concrete bound is a follow-up
-/// once the runner records it onto the summary.
+/// Derive the summary block's `window:` line for a time_window run that returned nothing.
 fn time_window_skip_line(mode: &str, skip_reason: Option<&str>) -> Option<String> {
     skip_reason?;
     if mode != "timewindow" {
@@ -1109,20 +759,7 @@ fn time_window_skip_line(mode: &str, skip_reason: Option<&str>) -> Option<String
     Some("rolling time window matched no rows — check `time_column`/`days_window`".to_string())
 }
 
-/// The summary block's `dest retries:` row — transient destination-side retry
-/// attempts the OpenDAL `RetryLayer` scheduled this process, or `None` when
-/// there were none.
-///
-/// Reads the process-wide counter rather than a `RunSummary` field, mirroring
-/// what [`RunSummary::print`] already does when it forwards `dest_retries` on
-/// the child `Finished` event.
-///
-/// It exists because the aggregate block is NOT printed for a single-export
-/// run (`run.rs`: `if exports.len() > 1`), and a `--parallel-export-processes`
-/// child is exactly that shape. Demoting the per-attempt WARNs to DEBUG
-/// without this row left `rivet run -c cfg.yaml` (one export, cloud
-/// destination) printing NOTHING about a flaky destination at any level above
-/// debug — the signal was demoted and never re-surfaced.
+/// The summary block's `dest retries:` row — transient destination-side retry attempts the OpenDAL `RetryLayer` scheduled this process, or `None` when there were none.
 fn dest_retries_row() -> Option<Row> {
     crate::destination::transient_retries_summary(crate::destination::transient_retries_total())
         .map(|v| ("dest retries", v))
@@ -1142,7 +779,6 @@ fn summarize_parallel_chunk_errors(raw: &str) -> Option<String> {
         return None;
     }
     let first_chunk_full = chunk_lines[0];
-    // Truncate the example chunk message; the URL/payload is in stderr logs.
     let first_chunk_short = clamp_chars(first_chunk_full, 140);
     let prefix = if prefix.is_empty() {
         String::new()
@@ -1170,8 +806,7 @@ fn clamp_chars(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// Render a `── name ─────…─` header plus one indented `label:  value` line
-/// per row, all joined into a single string ending with `\n`.
+/// Render a `── name ─────…─` header plus one indented `label.
 fn format_block(name: &str, rows: &[(&str, String)]) -> String {
     const HEADER_WIDTH: usize = 60;
     let label_w = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
@@ -1186,13 +821,8 @@ fn format_block(name: &str, rows: &[(&str, String)]) -> String {
         out.push('─');
     }
     out.push('\n');
-    // Continuation lines of a multi-line value (e.g. the multi-line `error`
-    // row) are indented to align under the value column, so block-shaped
-    // messages stay readable instead of being flattened onto one line.
     let value_indent = " ".repeat(2 + (label_w + 1) + 2);
     for (label, value) in rows {
-        // `label_w + 1` so the colon stays attached to the label and the
-        // value column starts uniformly two spaces after it.
         let mut lines = value.split('\n');
         let first = lines.next().unwrap_or("");
         out.push_str(&format!(
@@ -1227,9 +857,7 @@ fn fmt_duration_ms(ms: i64) -> String {
     }
 }
 
-/// Format integers with a comma every three digits.  Negative values keep
-/// their sign.  Used for rows / files / batch_size so large numbers stay
-/// readable: `39_990_376` → `39,990,376`.
+/// Format integers with a comma every three digits.
 fn fmt_thousands(n: i64) -> String {
     let abs = n.unsigned_abs();
     let s = abs.to_string();
@@ -1353,20 +981,15 @@ mod tests {
         ];
         let out = format_block("orders", &rows);
 
-        // Each value column starts at the same character position.
         let lines: Vec<&str> = out.lines().filter(|l| l.contains(':')).collect();
         assert_eq!(lines.len(), 3);
         let value_starts: Vec<usize> = lines
             .iter()
             .map(|l| l.find(':').unwrap() + l[l.find(':').unwrap()..].find(' ').unwrap())
             .collect();
-        // The value (after `label:` plus padding plus two spaces) starts at the
-        // same column for every row.  We verify by checking all lines have the
-        // value substring at the same byte offset.
         let value_col = lines[0].rfind("abc").unwrap();
         assert_eq!(lines[1].rfind("42").unwrap(), value_col);
         assert_eq!(lines[2].rfind("zstd").unwrap(), value_col);
-        // Sanity: silence unused.
         let _ = value_starts;
     }
 
@@ -1424,11 +1047,8 @@ mod tests {
             block
         );
         assert!(block.contains("1m 08.4s"), "duration formatting: {}", block);
-        // No raw progress-bar bleed: header dashes still present, no carriage
-        // returns or escape sequences.
         assert!(!block.contains('\r'));
 
-        // Compact one-liner used in multi-export runs.
         let line = s.render_compact();
         assert!(line.starts_with("✓ "), "success icon present: {:?}", line);
         assert!(line.contains("orders"), "export name present: {:?}", line);
@@ -1440,40 +1060,9 @@ mod tests {
     }
 
     /// A single-export run must SEE the destination-retry signal.
-    ///
-    /// `aggregate::print` — the only other place the count is reported — runs
-    /// only for `exports.len() > 1` (`run.rs`), and a
-    /// `--parallel-export-processes` child is always a one-export run. With the
-    /// per-attempt WARNs demoted to DEBUG, `rivet run -c cfg.yaml` over a flaky
-    /// cloud destination printed nothing above debug until this row existed.
-    ///
-    /// Producer chain, both halves proven rather than hand-built: the real
-    /// increment site (`RivetRetryNotify::intercept`) feeds this same
-    /// process-wide counter — asserted in
-    /// `destination::cloud::tests::retry_interceptor_counts_every_absorbed_retry`
-    /// (the interceptor is `pub(crate)` to `destination`, so it cannot be
-    /// called from here) — and this test drives the counter through the other
-    /// production writer, `add_transient_retries` (what the parent calls for
-    /// each CHILD PROCESS's `Finished` event, in
-    /// `parallel_children::adopt_child_event`), then reads the row out of the
-    /// real `render()`.
-    ///
-    /// Scope, so the next reader does not mistake this for more than it is:
-    /// it pins the ROW, not the wiring. It cannot see how the counter got its
-    /// value, which is why it stayed green while every in-process run folded
-    /// the counter into itself (finding #4) — that seam is pinned by
-    /// `parent_ui::tests::in_process_finished_event_must_not_refold_this_processs_own_retry_counter`,
-    /// which drives print → emit_event → Renderer for real.
-    ///
-    /// Delta-based, not absolute: the counter is process-wide and other tests
-    /// in this binary may bump it concurrently. The "no row when zero" half
-    /// cannot be asserted here for the same reason — it is covered by
-    /// `transient_retries_summary(0) == None` in the cloud module.
     #[test]
     fn single_export_summary_card_surfaces_destination_retries() {
         let before = crate::destination::transient_retries_total();
-        // Two retries, not one: the row folds a counter, so a single element
-        // would not distinguish the total from "some retry happened".
         crate::destination::add_transient_retries(2);
 
         let s = RunSummary::stub_for_testing("run-dest-retries", "orders");
@@ -1617,9 +1206,6 @@ mod tests {
     #[test]
     fn plan_snapshot_records_chunk_key_and_resumable_for_post_mortem() {
         use crate::plan::{ExtractionStrategy, KeysetPlan};
-        // A keyset export must persist WHICH column paged (`id`) and that
-        // checkpoint-resume was on, so a post-mortem from the state DB alone
-        // explains the strategy decision without re-querying the source schema.
         let mut plan = plan_for("statistic_lifetime");
         plan.strategy = ExtractionStrategy::Keyset(KeysetPlan {
             key_column: "id".into(),
@@ -1637,18 +1223,13 @@ mod tests {
             "chunk_checkpoint on → resumable must be recorded"
         );
 
-        // Full (snapshot) export → no paging column, not resumable.
         let full = RunSummary::new(&plan_for("small"));
         let fsnap = full.journal.plan_snapshot().unwrap();
         assert_eq!(fsnap.chunk_key, None);
         assert!(!fsnap.resumable);
     }
 
-    /// The snapshot is where the row-hash contract enters the trust artifacts:
-    /// the manifest builder copies it verbatim, so the manifest can only ever
-    /// advertise what the RESOLVED PLAN was going to hash. Taking it from
-    /// anywhere else — the raw config, a default — would let the two disagree,
-    /// and a reader has no way to notice.
+    /// The snapshot is where the row-hash contract enters the trust artifacts.
     #[test]
     fn plan_snapshot_records_the_row_hash_contract_the_run_applies() {
         let mut plan = plan_for("orders");
@@ -1671,10 +1252,6 @@ mod tests {
 
     #[test]
     fn plan_snapshot_deserializes_pre_field_journal_as_defaults() {
-        // A journal written before chunk_key/resumable existed (real: the state
-        // DBs already in the field) must still deserialize — the new fields
-        // default to None/false, never a hard error that would break `--resume`
-        // or a post-mortem read of an older run.
         let legacy = r#"{
             "export_name":"orders","base_query":"SELECT 1","strategy":"keyset",
             "format":"parquet","compression":"zstd","destination_type":"gcs",
@@ -1689,9 +1266,6 @@ mod tests {
 
     #[test]
     fn render_preserves_multiline_error_block() {
-        // L19: a multi-line error (a quality failure here) must stay multi-line
-        // in the detailed single-export block — not collapsed to `"; "`-joined
-        // text the way the compact one-liner does.
         let mut s = RunSummary::new(&plan_for("orders"));
         s.status = "failed".into();
         s.error_message = Some(
@@ -1702,8 +1276,6 @@ mod tests {
         );
 
         let block = s.render();
-        // The collapsed form joined lines with `"; "` — assert that flattening
-        // is gone and the original newline structure survives.
         assert!(
             !block.contains("failed:;"),
             "error must not be '; '-flattened in the detailed block: {block}"
@@ -1712,7 +1284,6 @@ mod tests {
             block.contains("- row_count 10 below minimum 999999"),
             "failing check line present: {block}"
         );
-        // Each part of the multi-line error lands on its own line.
         let err_lines: Vec<&str> = block
             .lines()
             .filter(|l| {
@@ -1726,7 +1297,6 @@ mod tests {
             3,
             "all three error lines should render on separate lines: {block}"
         );
-        // Continuation lines are indented under the value column, not at col 0.
         for l in &err_lines {
             assert!(l.starts_with(' '), "error line should be indented: {l:?}");
         }
@@ -1734,20 +1304,16 @@ mod tests {
 
     #[test]
     fn render_nudges_verification_when_unverified_success() {
-        // #4: a successful run that wrote files but ran no verification pass
-        // should surface an advisory `verify:` line — so skipping it is a choice.
         let mut s = RunSummary::new(&plan_for("orders"));
         s.status = "success".into();
         s.files_produced = 3;
         s.total_rows = 1_000;
-        // validated / reconciled left None (no --validate / --reconcile).
         let block = s.render();
         assert!(
             block.lines().any(|l| l.trim_start().starts_with("verify:")),
             "expected a verify nudge on an unverified success: {block}"
         );
 
-        // A run that verified must NOT nudge.
         let mut s2 = RunSummary::new(&plan_for("orders"));
         s2.status = "success".into();
         s2.files_produced = 3;
@@ -1763,8 +1329,6 @@ mod tests {
 
     #[test]
     fn pg_temp_spill_row_only_for_real_spill_and_annotates_large() {
-        // Direct provider test — previously this threshold logic was only
-        // reachable by rendering a whole block (and no test set the field).
         let mut s = RunSummary::stub_for_testing("r", "orders");
         assert_eq!(s.pg_temp_spill_row(), None, "no delta → no row");
         s.pg_temp_bytes_delta = Some(0);
@@ -1806,8 +1370,6 @@ mod tests {
     #[test]
     fn post_run_invariants_flag_a_runner_that_skipped_a_facade() {
         use crate::manifest::{ColumnChecksum, ManifestPart, PartStatus};
-        // A state_backed success that committed one part — the shape every batch
-        // runner produces. base() applied BOTH facades; each variant drops one.
         let base = || {
             let mut s = RunSummary::stub_for_testing("r", "orders");
             s.status = "success".into();
@@ -1832,31 +1394,26 @@ mod tests {
             checksum: "1".into(),
         };
 
-        // Both facades applied → passes.
         let mut ok = base();
         ok.schema_changed = Some(false);
         ok.column_checksums.push(ck());
         assert!(ok.check_post_run_invariants(false).is_ok());
 
-        // Drift gate skipped (schema_changed None) → RED.
         let mut no_drift = base();
         no_drift.column_checksums.push(ck());
         let e = no_drift.check_post_run_invariants(false).unwrap_err();
         assert!(e.contains("on_schema_drift gate was never applied"), "{e}");
 
-        // Form-B harvest skipped (empty + not incomplete) → RED.
         let mut no_formb = base();
         no_formb.schema_changed = Some(false);
         let e = no_formb.check_post_run_invariants(false).unwrap_err();
         assert!(e.contains("Form-B was never harvested"), "{e}");
 
-        // A suppressed Form-B (checkpoint resume) is NOT a bypass.
         let mut suppressed = base();
         suppressed.schema_changed = Some(false);
         suppressed.column_checksums_incomplete = true;
         assert!(suppressed.check_post_run_invariants(false).is_ok());
 
-        // NOT state_backed (CDC / a direct-runner unit test) is exempt from the contract.
         let mut cdc = base();
         cdc.state_backed = false;
         assert!(
@@ -1864,29 +1421,15 @@ mod tests {
             "a non-run_export run must not be held to the facade contract"
         );
 
-        // `rivet apply` with PRECOMPUTED chunk boundaries is NO LONGER exempt.
-        //
-        // It was, on the stated grounds that "drift was evaluated on the original
-        // planning run that produced the ranges" — which was false: `src/plan/`
-        // evaluates no drift, and the drift being guarded against happens BETWEEN
-        // plan and apply. Measured: `rivet run` aborted on a dropped column while
-        // `rivet apply` of the same `on_schema_drift: fail` exported 500 rows and
-        // exited 0. The precomputed arms now call `check_drift_only`, so they
-        // leave `schema_changed = Some(_)` like every other path and need no
-        // exemption — and an exemption would go back to excusing the very bypass
-        // this invariant exists to catch.
         let mut applied = base();
         applied.chunks_precomputed = true;
         applied.column_checksums.push(ck());
-        applied.schema_changed = Some(false); // the gate ran, as it now must
+        applied.schema_changed = Some(false);
         assert!(
             applied.check_post_run_invariants(false).is_ok(),
             "an apply replaying precomputed chunks must not trip the drift-gate branch"
         );
 
-        // …and the exemption is NARROW: it is about the precomputed source, not
-        // about "any apply". A run that did NOT come from an artifact still has to
-        // show the gate ran, or the flag would be a blanket hole in the guard.
         let mut not_applied = base();
         not_applied.chunks_precomputed = false;
         not_applied.column_checksums.push(ck());
@@ -1895,17 +1438,6 @@ mod tests {
             "the precomputed exemption must not weaken the guard for ordinary runs"
         );
 
-        // ── the guard's own BOUNDARIES ────────────────────────────────────────
-        // Every case above varies what the runner DID; none varies the conditions
-        // that decide whether the guard looks at all. Mutation testing found seven
-        // survivors in exactly those conditions (`status == "success"`,
-        // `files_committed > 0`, `total_rows > 0`) — the comparisons could be
-        // inverted or loosened and no test noticed, in the one function whose job
-        // is to notice. These pin each boundary from BOTH sides.
-
-        // `files_committed > 0`: a success that committed NOTHING has no facade
-        // obligation — there is no output to have applied them to. Loosening the
-        // comparison to `>= 0` must not start flagging it.
         let mut nothing_committed = base();
         nothing_committed.files_committed = 0;
         nothing_committed.files_produced = 0;
@@ -1917,8 +1449,6 @@ mod tests {
             "a success that committed no files owes no facades"
         );
 
-        // …and the same shape WITH rows extracted is the fabrication signature the
-        // second branch exists for: rows read, nothing landed.
         let mut rows_but_no_files = base();
         rows_but_no_files.files_committed = 0;
         rows_but_no_files.files_produced = 0;
@@ -1930,8 +1460,6 @@ mod tests {
             .unwrap_err();
         assert!(e.contains("no files committed"), "{e}");
 
-        // `total_rows > 0`: zero rows AND zero files is a legitimate empty run
-        // (a resume with nothing to do), not a fabrication.
         let mut empty_run = base();
         empty_run.files_committed = 0;
         empty_run.files_produced = 0;
@@ -1943,8 +1471,6 @@ mod tests {
             "an empty run must not read as rows-extracted-but-nothing-landed"
         );
 
-        // `status == "success"`: a FAILED run is not held to any of it — the
-        // facades may legitimately not have run, which is why it failed.
         let mut failed = base();
         failed.status = "failed".into();
         failed.schema_changed = Some(false);
@@ -1954,9 +1480,6 @@ mod tests {
             "a failed run must not be graded against the success-only invariants"
         );
 
-        // Committed files with an EMPTY part list — the ADR-0012 M1 gap. It is
-        // reported by the files_committed-vs-len branch, which subsumes it; a
-        // dedicated branch for it was unreachable and has been removed.
         let mut no_parts = base();
         no_parts.schema_changed = Some(false);
         no_parts.column_checksums.push(ck());
@@ -1964,30 +1487,21 @@ mod tests {
         let e = no_parts.check_post_run_invariants(false).unwrap_err();
         assert!(e.contains("ADR-0012 M1"), "{e}");
 
-        // A RESUME legitimately skips the drift gate (schema_changed None) — exempt (H2).
         let mut resumed = base();
         resumed.resumed = true;
         resumed.column_checksums.push(ck());
-        // schema_changed stays None
         assert!(
             resumed.check_post_run_invariants(false).is_ok(),
             "a resume must not trip the drift-gate branch"
         );
 
-        // A --resume run that crashed BEFORE its first chunk committed adopts no prior
-        // work, so `resumed` (adopted_prior_work) is FALSE — but the drift gate was
-        // still legitimately skipped. Passing is_resume_run=true (plan.resume) must
-        // exempt it; keying only off `resumed` would panic a legitimate crash-recovery
-        // resume in debug/test. RED against `if !self.resumed && schema_changed.is_none()`.
         let mut resume_flag_no_adopt = base();
         resume_flag_no_adopt.resumed = false;
         resume_flag_no_adopt.column_checksums.push(ck());
-        // schema_changed stays None (gate skipped on the --resume path)
         assert!(
             resume_flag_no_adopt.check_post_run_invariants(true).is_ok(),
             "a --resume run that adopted no prior work (crash before first commit) must be exempt"
         );
-        // ...and the SAME summary with is_resume_run=false (a fresh run) MUST still trip.
         assert!(
             resume_flag_no_adopt
                 .check_post_run_invariants(false)
@@ -1996,11 +1510,9 @@ mod tests {
             "a fresh (non-resume) run with the gate skipped must still be caught"
         );
 
-        // A CSV/JSONL export harvests NO Form-B by design — exempt (M4).
         let mut csv = base();
         csv.schema_changed = Some(false);
         csv.format = "csv".into();
-        // column_checksums empty, incomplete false
         assert!(
             csv.check_post_run_invariants(false).is_ok(),
             "a non-Parquet export must not trip the Form-B branch"
@@ -2034,8 +1546,6 @@ mod tests {
             recon
         );
 
-        // A set reconcile result suppresses the verify nudge even on a
-        // files-produced success (the nudge's gate lives beside this field).
         s.status = "success".into();
         s.files_produced = 2;
         assert!(
@@ -2046,9 +1556,6 @@ mod tests {
 
     #[test]
     fn render_surfaces_cursor_position_on_zero_new_incremental() {
-        // L27: a 0-new incremental run shows `0 rows  0 files`; without a
-        // cursor line the operator can't tell the boundary held. Assert the
-        // dedicated `cursor:` line appears, derived from `skip_reason`.
         let mut s = RunSummary::new(&plan_for("orders"));
         s.status = "skipped".into();
         s.skip_reason = Some("no new rows since cursor 'updated_at'".into());
@@ -2070,7 +1577,6 @@ mod tests {
 
     #[test]
     fn incremental_position_line_only_for_cursor_skips() {
-        // The non-cursor 0-row skip and the no-skip case produce no cursor line.
         assert_eq!(
             incremental_position_line(Some("no new rows since cursor 'ts'")),
             Some("'ts' unchanged (no new rows this run)".into())
@@ -2084,11 +1590,6 @@ mod tests {
 
     #[test]
     fn render_surfaces_window_position_on_zero_row_time_window() {
-        // L27 (time_window arm): a 0-row time_window run reports the generic
-        // `"source returned 0 rows"` skip (the strategy has no cursor column),
-        // so the `cursor:` branch never fires. Without a `window:` line the
-        // operator can't tell an empty window from a wrong column/window —
-        // assert the dedicated `window:` line appears for this mode.
         let mut s = RunSummary::new(&plan_for("events"));
         s.status = "skipped".into();
         s.mode = "timewindow".into();
@@ -2107,7 +1608,6 @@ mod tests {
             window_line.contains("time_column") && window_line.contains("days_window"),
             "window line points at the window config to check: {window_line:?}"
         );
-        // The generic 0-row skip must not also produce a `cursor:` line.
         assert!(
             !block.lines().any(|l| l.trim_start().starts_with("cursor:")),
             "no cursor line for a non-cursor strategy: {block}"
@@ -2116,12 +1616,10 @@ mod tests {
 
     #[test]
     fn time_window_skip_line_only_for_skipped_time_window() {
-        // Fires only when the run skipped AND the strategy is time_window.
         assert_eq!(
             time_window_skip_line("timewindow", Some("source returned 0 rows")),
             Some("rolling time window matched no rows — check `time_column`/`days_window`".into())
         );
-        // Wrong mode → no window line (incremental/snapshot handle their own).
         assert_eq!(
             time_window_skip_line("incremental", Some("source returned 0 rows")),
             None
@@ -2130,7 +1628,6 @@ mod tests {
             time_window_skip_line("full", Some("source returned 0 rows")),
             None
         );
-        // A time_window run that produced rows (no skip) gets no window line.
         assert_eq!(time_window_skip_line("timewindow", None), None);
     }
 }

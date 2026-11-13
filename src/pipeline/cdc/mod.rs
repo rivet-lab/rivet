@@ -13,13 +13,9 @@ pub(crate) struct CaptureOutput<'a> {
     pub table: String,
     pub dest: &'a dyn crate::destination::Destination,
     pub dest_uri: String,
-    /// The export's `columns:` type overrides for THIS table — already
-    /// narrowed by `types::overrides_for_table` (bare keys apply everywhere;
-    /// `"table.column"` keys target one table and win over bare).
+    /// The export's `columns:` type overrides for THIS table.
     pub overrides: crate::types::ColumnOverrides,
-    /// `exports[].meta_columns.row_hash` — the drain must emit the SAME hash
-    /// column the snapshot leg does, or the warehouse table ends up
-    /// half-populated.
+    /// `exports[].meta_columns.row_hash` — the drain must emit the SAME hash column the snapshot leg does, or the warehouse table ends up half-populated.
     pub row_hash: crate::config::RowHash,
     /// The partition budget this table's change parts keep (changelog layout only).
     pub partition: Option<crate::plan::rollover::PartitionRollover>,
@@ -29,19 +25,11 @@ pub(crate) struct CaptureOutput<'a> {
     pub key: Option<Vec<String>>,
 }
 
-/// Everything needed to capture a change stream to typed files, assembled once —
-/// the source/output differ between the `rivet cdc` CLI and a `mode: cdc` run, but
-/// the capture itself (open the stream, resolve the schemas, drive the file sink)
-/// is identical. Both entry points fill this in and call [`run_capture`].
-/// `outputs` carries one entry per captured table: several tables ride ONE stream
-/// (one slot / one binlog connection) and one checkpoint.
-/// Judges one captured table's resolved columns; an error ends the run before any change is read.
+/// Everything needed to capture a change stream to typed files, assembled once.
 pub(crate) type SchemaGate<'a> = dyn Fn(&str, &[crate::types::TypeMapping]) -> Result<()> + 'a;
 
 pub(crate) struct CdcCapture<'a> {
-    /// `exports[].name` — recorded into each manifest's `export_family` so the
-    /// load's shared-prefix guard groups the drain with its snapshot leg by what
-    /// was WRITTEN, not by re-deriving it from the table string.
+    /// `exports[].name` — recorded into each manifest's `export_family` so the load's shared-prefix guard groups the drain with its snapshot leg by what was WRITTEN, not by re-deriving it from the table string.
     pub export_name: String,
     pub cdc_cfg: CdcConfig,
     pub outputs: Vec<CaptureOutput<'a>>,
@@ -52,9 +40,7 @@ pub(crate) struct CdcCapture<'a> {
     /// RFC3339 stamps the caller owns (`Utc::now()` is theirs to call).
     pub run_id: String,
     pub started_at: String,
-    /// The central ledger. A `mode: cdc` run passes its store so every part is
-    /// recorded in the DATABASE as it becomes durable; the `rivet cdc` CLI has
-    /// no state store and passes `None`.
+    /// The central ledger.
     pub state: Option<&'a crate::state::StateStore>,
     /// Judges each table's resolved columns before any change is read; an error ends the run unacknowledged.
     pub schema_gate: Option<&'a SchemaGate<'a>>,
@@ -71,12 +57,7 @@ type Probe = (
     Option<crate::source::cdc::ReadableColumns>,
 );
 
-/// Open the change stream (with the engine's permission/TLS gate), resolve each
-/// table's typed schema, and drive the commit-seam file sink — the single place
-/// the typed CDC capture is assembled. Returns one `RunManifest` per output, in
-/// `outputs` order — PAIRED with the outcome, so a run that failed after
-/// committing parts still hands the caller what it made durable. Returning a
-/// bare `Result` discarded exactly that, and the caller recorded zeros.
+/// Open the change stream (with the engine's permission/TLS gate), resolve each table's typed schema, and drive the commit-seam file sink.
 pub(crate) fn run_capture(
     cap: CdcCapture<'_>,
     read_bytes: &std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -84,31 +65,17 @@ pub(crate) fn run_capture(
     let url = cap.cdc_cfg.url.clone();
     let tls = cap.cdc_cfg.tls.clone();
     let checkpoint = cap.cdc_cfg.checkpoint.clone();
-    // Derive the peek bound from the ONE rollover the sink also uses — so the
-    // PG peek is always ≥ the part rollover (never starves). The single source
-    // of truth for both is `cap.rollover`.
-    // Setup failures happen BEFORE anything is durable, so an empty manifest
-    // list is the truth here — unlike the drain, where it was a lie.
     let mut stream = match create_change_stream(&cap.cdc_cfg, PeekBound::Sized(cap.rollover)) {
         Ok(s) => s,
         Err(e) => return (Vec::new(), Err(e)),
     };
-    // Fault point: stream (and any server-side anchor) opened, nothing read.
     crate::test_hook::maybe_panic_at("cdc_after_open");
     crate::test_hook::maybe_pause_at("cdc_after_open");
     let engine = cap.cdc_cfg.engine.engine();
     let cap_tables: Vec<String> = cap.outputs.iter().map(|o| o.table.clone()).collect();
     let mut outputs = Vec::with_capacity(cap.outputs.len());
-    // What each table is probed by and which overrides it carries, for a mid-run re-resolve.
     let mut probes: std::collections::HashMap<String, Probe> = std::collections::HashMap::new();
-    // ONE resolver session serves every table (was: 2 fresh connections per
-    // table per run — the multi-table per-cycle cost the roast flagged).
     crate::test_hook::maybe_panic_at("cdc_before_resolve");
-    // ONE place decides what each verdict MEANS. The captured tables are known
-    // here and nowhere earlier, which is why the question is asked at this seam
-    // rather than inside each stream's `open`: scoped to what is actually being
-    // captured, the answer is one line an operator can act on instead of a census
-    // of the database (a first cut counted every table and said "704").
     let image = stream.row_image(&cap_tables);
     match image {
         RowImage::Whole => {}
@@ -136,9 +103,6 @@ pub(crate) fn run_capture(
         },
     };
     for o in cap.outputs {
-        // Probe the relation the STREAM resolved, not the string the config spelled
-        // — the two are the same on every engine that cannot do better, and on SQL
-        // Server the difference was a silently mis-columned export.
         let probe = match stream.resolved_identity(&o.table) {
             Some((schema, table)) => format!("{schema}.{table}"),
             None => o.table.clone(),

@@ -1,41 +1,4 @@
 //! **Layer: Coordinator**
-//!
-//! ADR-0012 M8 — manifest-aware resume preamble for chunked exports.
-//!
-//! Runs once at the start of `--resume` for chunked-checkpoint exports,
-//! BEFORE any worker claims a `chunk_task`.  Reads the prior run's
-//! `manifest.json` at the destination, lists the prefix, and applies
-//! [`crate::pipeline::resume_decisions::build_resume_plan`] to produce
-//! per-part Skip / Rewrite / Quarantine decisions.
-//!
-//! For each `Rewrite` or `Quarantine` decision, the corresponding
-//! `chunk_task` is reset from `completed` back to `pending` so the
-//! existing claim loop re-exports it.  `Skip` decisions are left alone —
-//! that is exactly what the existing chunk_checkpoint resume already
-//! does (skip completed tasks).
-//!
-//! **M9 quarantine (wired):** for each `Quarantine` decision — a manifest
-//! part whose destination object diverged on size/fingerprint, or an
-//! untracked surplus object under the prefix — this layer resets the
-//! `chunk_task` to `pending` AND moves the offending object to
-//! `_quarantine/<run_id>/<original-key>` via `quarantine_move` →
-//! `Destination::r#move` (copy+delete on S3/GCS, `rename` on local).  The
-//! move is **best-effort** (ADR-0012 M9): a failure is counted in
-//! `M8ResumeStats.quarantine_move_failures`, escalated to a WARN, and never
-//! aborts the resume.  Successful moves land in `quarantined_moved`.
-//!
-//! **What this layer does not do:**
-//! - It never *deletes* an unknown object outright (M9 §"never deletes
-//!   unknown objects").  Quarantine is a move; a failed move leaves the
-//!   object in place to re-trip M9 on the next resume.
-//! - For a `Rewrite` decision (manifest part lost at the destination) it
-//!   does NOT pre-clean the slot: the next worker run overwrites it via
-//!   `dest.write` — `Atomic` and `FinalizeOnClose` backends both support
-//!   clean replacement (ADR-0004).
-//!
-//! Behaviour with no manifest at destination (fresh prefix or pre-0.7.0
-//! legacy run): no-op.  The runner falls back to the existing
-//! state-only resume logic.
 
 use std::collections::HashMap;
 
@@ -44,103 +7,35 @@ use crate::error::Result;
 use crate::manifest::{MANIFEST_FILENAME, QUARANTINE_PREFIX, RunManifest};
 use crate::pipeline::RunSummary;
 use crate::pipeline::resume_decisions::{ResumeDecision, build_resume_plan};
-// V21 (CWE-400): cap the manifest body so a planted multi-GB manifest.json
-// cannot OOM the resume preamble.  The shared enforcement point lives with the
-// other two control-artifact readers in `validate_manifest`.
 use crate::pipeline::validate_manifest::{MANIFEST_MAX_BYTES, read_capped};
 use crate::plan::ResolvedRunPlan;
 use crate::state::StateStore;
 
 /// Aggregate counters from one M8 reconciliation pass.
-///
-/// Surfaced into the run report (`summary.json` / `summary.md`) so an
-/// operator can see, at a glance, how much work the manifest saved (or
-/// invalidated).  Shipped opaquely as a struct so adding fields
-/// (`legacy_run`, `manifest_run_id_mismatch`, …) is forward-compatible.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct M8Stats {
-    /// Manifest parts whose state row stays `completed` — work the
-    /// resume run skips entirely.
+    /// Manifest parts whose state row stays `completed` — work the resume run skips entirely.
     pub skipped: usize,
-    /// Manifest parts whose state row was reset to `pending` — chunks
-    /// the resume run will re-export.
+    /// Manifest parts whose state row was reset to `pending` — chunks the resume run will re-export.
     pub reset_for_rewrite: usize,
-    /// Manifest parts the matrix flagged for quarantine (size mismatch,
-    /// fingerprint drift).  After Phase C-δ, the divergent destination
-    /// object is also moved to `_quarantine/<run_id>/` (best-effort —
-    /// see `quarantined_moved` for the count of successful moves).
+    /// Manifest parts the matrix flagged for quarantine (size mismatch, fingerprint drift).
     pub reset_for_quarantine: usize,
-    /// Quarantine-move successes — count of objects relocated to
-    /// `_quarantine/<run_id>/` so the next write doesn't share the
-    /// prefix with stale data.  ADR-0012 M9: best-effort, never
-    /// fatal.  `quarantined_moved <= reset_for_quarantine + untracked
-    /// surplus` — failures stay in `quarantine_move_failures`.
+    /// Quarantine-move successes — count of objects relocated to `_quarantine/<run_id>/` so the next write doesn't share the prefix with stale data.
     pub quarantined_moved: usize,
-    /// Quarantine-move failures.  Logged but the run proceeds — the
-    /// next write may overwrite the original key (atomic backends),
-    /// or the operator can clean up by hand.  Each failure is logged
-    /// at WARN with source/destination/reason.
+    /// Quarantine-move failures.
     pub quarantine_move_failures: usize,
-    /// Manifest parts whose `path` did not match any chunk_task's
-    /// `file_name`.  Means the manifest references a file we don't
-    /// know about (foreign manifest, or chunk_task table missing the
-    /// file_name due to a prior crash).  Logged but not acted on —
-    /// destination side will be re-checked on next M5 run.
+    /// Manifest parts whose `path` did not match any chunk_task's `file_name`.
     pub orphan_parts: usize,
 }
 
 impl M8Stats {
-    /// Whether this resume actually ADOPTED prior-run state — parts it skipped
-    /// (already committed), reset for re-export, or quarantined. True means the
-    /// runner recovered a real crashed run (vs a `--resume` with nothing to
-    /// resume). Feeds `summary.resumed` so the flaky-link / crash-recovery
-    /// DIAGNOSIS line fires on the chunked runners too, not only keyset (#3).
+    /// Whether this resume actually ADOPTED prior-run state.
     pub fn adopted_prior_work(&self) -> bool {
         self.skipped > 0 || self.reset_for_rewrite > 0 || self.reset_for_quarantine > 0
     }
 }
 
 /// Apply ADR-0012 M8's decision matrix to the destination state.
-///
-/// Run order: AFTER `ensure_chunk_checkpoint_plan` (which establishes
-/// the in-progress run_id and resets stale 'running' tasks) and BEFORE
-/// the worker claim loop starts.  The state lock window between this
-/// preamble and the workers is short and SQLite/Postgres handle
-/// concurrent reads fine; once a worker holds a 'running' status, it
-/// is invisible to a second M8 invocation regardless.
-///
-/// Streaming destinations skip silently (no prefix to verify, mirrors
-/// `finalize_validate_manifest`).  I/O failures reading the manifest
-/// or listing the prefix are logged and the function returns
-/// `M8Stats::default()` so resume falls back to the pre-0.7.0
-/// state-only path — never abort a resume because a destination probe
-/// failed.
-///
-/// `run_id` must be the chunk_checkpoint run id (the one
-/// `ensure_chunk_checkpoint_plan` returned for the resume path).
-/// Round-4/5 fix (durability-ordering-matrix `manifest_driven_recovery` chunked): a
-/// chunked-checkpoint crash BEFORE the terminal manifest write leaves the pre-crash
-/// parts durably committed (parquet on the destination + a `file_log` row per part)
-/// but with NO destination manifest. On `--resume`, `claim_next_chunk_task` skips
-/// completed chunks and the M8 preamble finds no manifest to hydrate, so
-/// `finalize_manifest` (built solely from `summary.manifest_parts`) writes a manifest
-/// that OMITS them — the manifest-authoritative `rivet load` then silently drops
-/// their rows. Reconstruct those parts from the state DB's `file_log` (which records
-/// EVERY committed part — including every `max_file_size` rotation sibling — with its
-/// real byte size), so the finalize manifest is COMPLETE. The state DB is the export
-/// machine's own resume record; the reconstructed destination manifest stays the
-/// loader's source of truth (ADR-0001). fingerprint/md5 aren't in file_log, so the
-/// parts are DECLARED + size-verified (an empty md5 degrades validate to a size-only
-/// check) though not content-re-verified — strictly better than a silent orphan.
-/// Returns the number of parts reconstructed.
-/// The part name with any rotation suffix removed — the identity of ONE attempt
-/// at one chunk.
-///
-/// `chunk_part_filename` ends every part with `_chunk{idx}_{nonce}`, and
-/// `part_indexed_name` appends `_p{n}` to each sibling when a chunk rotates past
-/// `max_file_size`. So siblings of one attempt share everything up to `_p{n}`,
-/// while a different attempt at the same chunk carries a different nonce. That
-/// is the discriminator an index-only filter lacks.
 fn attempt_key(file_name: &str) -> &str {
     let stem = file_name.rsplit_once('.').map_or(file_name, |(s, _)| s);
     match stem.rsplit_once("_p") {
@@ -202,7 +97,7 @@ pub(crate) fn prune_superseded_attempts(
     pruned.into_iter().map(|p| p.path).collect()
 }
 
-/// Whether `t` is marked completed with no part and no record of having read zero rows: a state no run writes (an empty chunk completes with a row count of 0).
+/// Whether `t` is marked completed with no part and no record of having read zero rows.
 fn completed_without_a_part(t: &crate::state::ChunkTaskInfo) -> bool {
     t.status == "completed" && t.file_name.is_none() && t.rows_written != Some(0)
 }
@@ -241,21 +136,9 @@ pub(crate) fn rehydrate_manifest_parts_from_file_log(
 }
 
 /// [`rehydrate_manifest_parts_from_file_log`] with a DESTINATION PRESENCE probe.
-///
-/// `present` = the basenames actually at the destination (from one
-/// `list_prefix`). A file_log part MISSING from it is NOT declared — it is
-/// returned in the second slot instead, with its chunk index when the name
-/// carries one. Round-5 lifecycle HIGH: state-DB completion was trusted
-/// against a destination gc has since edited (a between-attempts gc after
-/// `state finish-run`, or a foreign-host pass), so the resume re-declared
-/// deleted parquet sight-unseen — Success + `_SUCCESS` naming files that do
-/// not exist, rows silently absent. `None` = no probe (the caller could not
-/// list; legacy behavior, caller says why).
-/// What one listing of the destination prefix holds: each object's basename and its size in bytes.
 pub(crate) type Listed = std::collections::HashMap<String, u64>;
 
-/// One part the probe found MISSING at the destination: its chunk index (when
-/// the name carries one — re-exportable) and the file name.
+/// One part the probe found MISSING at the destination.
 pub(crate) type MissingPart = (Option<u32>, String);
 
 pub(crate) fn rehydrate_manifest_parts_probed(
@@ -264,48 +147,8 @@ pub(crate) fn rehydrate_manifest_parts_probed(
     summary: &mut RunSummary,
     present: Option<&Listed>,
 ) -> Result<(usize, Vec<MissingPart>)> {
-    // Reconstruct from file_log, NOT chunk_task: file_log records EVERY committed
-    // part — including every max_file_size rotation sibling — with its real byte
-    // size, whereas chunk_task stores only the FIRST sibling's file_name and the
-    // full-chunk row count. Rehydrating from chunk_task orphaned the other siblings
-    // (silent loss / blocked load) and left size_bytes=0 (a lying PartSizeMismatch
-    // in `rivet validate`) — both closed by using file_log (round-5).
     let files = state.list_files_for_run(run_id)?;
 
-    // Only the parts of COMPLETED chunks, which is what the caller's comment has
-    // always said this reconstructs — the implementation had lost the qualifier.
-    //
-    // A chunk-checkpoint resume ADOPTS the crashed run's id, so
-    // `list_files_for_run` returns that attempt's parts too. A chunk interrupted
-    // mid-flight has already written and LOGGED its part, but its task is not
-    // `completed`, so the resume re-runs it and writes a new part under a new
-    // nonce. Taking every logged file therefore rehydrated the abandoned one
-    // alongside the replacement, and deduping by PATH could not see it: different
-    // names, same rows. Measured on a 4000-row table — crash at chunk 0, then
-    // `--resume`, and the manifest declared 5 parts / 5000 rows with `validate`
-    // returning 0, because it is perfectly self-consistent with the files it
-    // lists. Every consumer that SUMS manifests inherits the duplicate.
-    //
-    // Filtering by the chunk's task status keeps rotation siblings (they belong to
-    // a completed chunk) and drops only the superseded attempt. A file with no
-    // chunk token is not a chunked part at all and is left alone.
-    // Keyed by chunk index, the value is the ATTEMPT that survived — identified
-    // by the file name `chunk_task` recorded when the chunk completed.
-    //
-    // Filtering on the index ALONE is not enough once a run has been resumed
-    // twice, because a chunk-checkpoint resume ADOPTS the crashed run's id and
-    // `file_log` therefore accumulates every attempt's parts under one run_id,
-    // pruned by nothing. Attempt 1 crashes mid-chunk-1 (part written and logged,
-    // task still pending); attempt 2 re-runs chunk 1, writes a new part and marks
-    // the chunk completed; attempt 2 then crashes elsewhere. On attempt 3 chunk 1
-    // IS completed, so an index-only filter admits BOTH the abandoned part and
-    // its replacement — the same rows twice, in a manifest that is perfectly
-    // self-consistent with the files it lists, so `validate` returns 0 and every
-    // consumer that sums manifests inherits the duplicate.
-    //
-    // Rotation siblings of the surviving attempt must still be kept: they share
-    // its base (nonce included) and differ only by the `_p{n}` suffix
-    // `part_indexed_name` appends, which `attempt_key` strips.
     let tasks = state.list_chunk_tasks_for_run(run_id)?;
     let mut surviving = surviving_attempts(&tasks);
     let mut missing: Vec<MissingPart> = Vec::new();
@@ -313,8 +156,6 @@ pub(crate) fn rehydrate_manifest_parts_probed(
         surviving.remove(&idx.to_string());
         missing.push((u32::try_from(idx).ok(), name));
     }
-    // A chunk that completed with rows names the part it wrote; `completed` with no part and no
-    // row count of zero was not written by a run, and trusting it leaves its keys out.
     for t in tasks.iter().filter(|t| completed_without_a_part(t)) {
         missing.push((
             u32::try_from(t.chunk_index).ok(),
@@ -333,22 +174,14 @@ pub(crate) fn rehydrate_manifest_parts_probed(
         .unwrap_or(0);
     let mut rehydrated = 0usize;
     for f in files {
-        // Don't duplicate a part a fresh record_part already added this run.
         if summary.manifest_parts.iter().any(|p| p.path == f.file_name) {
             continue;
         }
-        // …nor resurrect the part of a chunk that is NOT completed: it is the
-        // abandoned attempt of a chunk this resume is about to re-run.
-        // …nor resurrect a part that does not belong to the attempt that
-        // COMPLETED its chunk: it is either an interrupted chunk's abandoned
-        // write, or an earlier attempt superseded by the one that finished.
         if !is_surviving_attempt(&f.file_name, &surviving) {
             continue;
         }
         if let Some(present) = present {
             let base = f.file_name.rsplit('/').next().unwrap_or(&f.file_name);
-            // Gone, or not the bytes the run committed: the size the state logged is the size
-            // the part had when its chunk completed.
             if present.get(base).copied() != u64::try_from(f.bytes).ok() {
                 let idx = super::chunk_index_of(&f.file_name).and_then(|i| i.parse::<u32>().ok());
                 surviving.remove(super::chunk_index_of(&f.file_name).unwrap_or_default());
@@ -365,9 +198,6 @@ pub(crate) fn rehydrate_manifest_parts_probed(
                 path: f.file_name,
                 rows,
                 size_bytes: bytes,
-                // fingerprint/md5 aren't in file_log; an EMPTY md5 degrades `rivet
-                // validate` to a size-only check (the real bytes now match), so the
-                // part is DECLARED + size-verified, never a lying mismatch.
                 content_fingerprint: String::new(),
                 content_md5: String::new(),
                 status: crate::manifest::PartStatus::Committed,
@@ -378,15 +208,6 @@ pub(crate) fn rehydrate_manifest_parts_probed(
         }
     }
     if rehydrated > 0 {
-        // ADR-0029: these parts carry NO per-column checksum (file_log stores
-        // none), so the run-wide Form B this run harvests cannot cover them —
-        // and nothing here has to SAY so any more. They enter `manifest_parts`
-        // without going through `commit::record_part`, so the seam's coverage
-        // computation finds no commit unit for them and suppresses Form B by
-        // itself. The manual flag that used to live here was the vigilance
-        // ADR-0029 replaced; setting it now would only pre-empt a verdict the
-        // harvest reaches from the data (and would hide whether the shortfall
-        // was hydration or a runner's unit-id mismatch).
         log::info!(
             "resume: reconstructed {rehydrated} committed part(s) into the manifest from the \
              state DB file_log (no \
@@ -403,7 +224,6 @@ pub(crate) fn apply_m8_resume_decisions(
     plan: &ResolvedRunPlan,
     summary: &mut RunSummary,
 ) -> Result<M8Stats> {
-    // ── 1. Open destination + early-exit on streaming ──────────────────
     let dest = match crate::destination::create_destination(&plan.destination) {
         Ok(d) => d,
         Err(e) => {
@@ -424,7 +244,6 @@ pub(crate) fn apply_m8_resume_decisions(
         return Ok(M8Stats::default());
     }
 
-    // ── 2. Read manifest body (absent → fresh / legacy prefix, no-op) ──
     let manifest_bytes = match dest.head(MANIFEST_FILENAME) {
         Ok(Some(_)) => match read_capped(&*dest, MANIFEST_FILENAME, MANIFEST_MAX_BYTES) {
             Ok(b) => b,
@@ -444,20 +263,6 @@ pub(crate) fn apply_m8_resume_decisions(
                  falling back to state-only resume (legacy / fresh prefix)",
                 plan.export_name
             );
-            // Round-4 fix: with NO destination manifest to hydrate from (a first-run
-            // crash before the terminal write), reconstruct the already-committed
-            // parts from the state DB's COMPLETED chunk_tasks — otherwise finalize
-            // writes a manifest containing ONLY the resume-processed chunks, orphaning
-            // the pre-crash chunks' durable parts from the manifest-authoritative
-            // loader (silent row loss). A "fresh prefix" (no completed chunks) rehydr-
-            // ates nothing, so this is safe for the legacy/fresh case too.
-            //
-            // Round-5: PROBED against the destination. State-DB completion can lie
-            // about a destination gc has since edited (a between-attempts gc after
-            // `state finish-run` deleted committed no-manifest parts) — declaring
-            // them sight-unseen shipped Success + `_SUCCESS` naming deleted files.
-            // A part missing at the destination gets its CHUNK reset to pending
-            // (the M8 Rewrite semantics): this same run re-exports it.
             let mut stats = M8Stats::default();
             let present = present_basenames(&*dest);
             let content = super::part_keys::ContentCheck::of(plan, &*dest);
@@ -495,13 +300,6 @@ pub(crate) fn apply_m8_resume_decisions(
         }
     };
 
-    // ── 3. Refuse to act on a foreign manifest (different run_id) ──────
-    //
-    // chunk_checkpoint reuses the same run_id across resumes, so a
-    // mismatch here means: someone restored a backup, copy-pasted a
-    // prefix, or two exports collided at the same destination.  We do
-    // NOT reset chunk_tasks based on a manifest that wasn't produced
-    // by *this* run — the file_name match could be coincidental.
     if manifest.run_id != run_id {
         log::info!(
             "M8 resume preamble: destination manifest run_id '{}' differs from current resume \
@@ -510,14 +308,6 @@ pub(crate) fn apply_m8_resume_decisions(
             run_id,
             plan.export_name
         );
-        // A --split unit's canonical manifest.json is last-writer-wins → usually a SIBLING
-        // unit's (foreign run_id), so this branch is the norm for split resume, not a rare
-        // restore/collision. We still must NOT reset chunk_tasks off a foreign manifest — but
-        // we MUST rehydrate THIS run's OWN committed parts from file_log (run_id-scoped, so
-        // the foreign manifest is irrelevant to it), exactly as the no-manifest branch does.
-        // Without this, a resuming unit's pre-crash completed-chunk parts sit on disk but are
-        // dropped from the finalize manifest — silent, manifest-authoritative row loss that
-        // `rivet load` inherits (RED-proven: 225000/300000 declared after a crash+resume).
         let mut stats = M8Stats::default();
         let present = present_basenames(&*dest);
         let content = super::part_keys::ContentCheck::of(plan, &*dest);
@@ -533,7 +323,6 @@ pub(crate) fn apply_m8_resume_decisions(
         return Ok(stats);
     }
 
-    // ── 4. List the prefix ─────────────────────────────────────────────
     let listing = match dest.list_prefix("") {
         Ok(l) => l,
         Err(e) => {
@@ -546,15 +335,10 @@ pub(crate) fn apply_m8_resume_decisions(
         }
     };
 
-    // ── 5. Apply the matrix + reset misaligned chunk_tasks ─────────────
     let resume_plan = build_resume_plan(&manifest, &listing);
     let tasks = state.list_chunk_tasks_for_run(run_id)?;
     let surviving = surviving_attempts(&tasks);
 
-    // Index by file_name so we can find the chunk_task for a manifest
-    // part in O(1).  Missing file_name (chunk that crashed before
-    // recording it) is filtered out — those are claimed by the
-    // existing `--resume` mechanism via their `pending`/`failed` status.
     let by_file: HashMap<&str, &crate::state::ChunkTaskInfo> = tasks
         .iter()
         .filter_map(|t| t.file_name.as_deref().map(|n| (n, t)))
@@ -562,14 +346,6 @@ pub(crate) fn apply_m8_resume_decisions(
 
     let mut stats = M8Stats::default();
 
-    // Index manifest parts by path so we can hydrate `summary.manifest_parts`
-    // for `Skip`-decided rows.  Without this hydration the manifest written
-    // at end-of-resume would carry only THIS run's freshly-committed parts,
-    // erasing the prior manifest's record of the parts we successfully
-    // skipped.  The next `rivet validate` would then flag every skipped
-    // part as `UntrackedObject`.  ADR-0012 M4 requires the manifest to be
-    // the cumulative record of the run, including parts inherited from
-    // prior resume attempts.
     let manifest_part_by_path: HashMap<&str, &crate::manifest::ManifestPart> = manifest
         .parts
         .iter()
@@ -577,14 +353,6 @@ pub(crate) fn apply_m8_resume_decisions(
         .map(|p| (p.path.as_str(), p))
         .collect();
 
-    // Hydrate the run-wide schema fingerprint from the prior manifest.
-    // If THIS resume happens to do no write at all (e.g. just confirms an
-    // unchanged destination), the sink in `chunked/exec.rs` never resolves
-    // a schema and `summary.schema_fingerprint` stays None.  Without this
-    // hydration `finalize_manifest` would then emit the placeholder
-    // `xxh3:0000000000000000` — losing the M3 evidence the prior run
-    // already produced.  Since this resume reuses the same run_id we just
-    // verified, the prior fingerprint is the authoritative one.
     if summary.schema_fingerprint.is_none()
         && manifest.schema_fingerprint != crate::manifest::SCHEMA_FINGERPRINT_UNAVAILABLE
     {
@@ -593,40 +361,15 @@ pub(crate) fn apply_m8_resume_decisions(
 
     for (path, decision) in &resume_plan.per_part {
         match decision.decision {
-            // A failed chunk's durable debris is declared in the FAILED manifest this
-            // resume reads; its chunk re-exports, so adopting it would duplicate rows.
-            // Move it aside like any other surplus object (M9), never delete it.
             ResumeDecision::Skip if !is_surviving_attempt(path, &surviving) => {
                 quarantine_move(&*dest, path, run_id, &plan.export_name, &mut stats);
             }
             ResumeDecision::Skip => {
                 stats.skipped += 1;
-                // Hydrate the summary so the end-of-resume manifest carries
-                // this committed part too.  Clone the prior manifest's part
-                // verbatim — the part_id, content_fingerprint, rows, and
-                // size_bytes are all from the previous successful write and
-                // remain valid for the destination object that's still there.
-                //
-                // A Skip needs NO chunk_task: it copies a durable, matching
-                // manifest part. Requiring one here silently dropped every
-                // max_file_size ROTATION SIBLING — chunk_task records only the
-                // FIRST sibling's file_name, so `chunk-N-p1…` missed the lookup,
-                // was counted an orphan, and never hydrated. The finalize
-                // manifest (built solely from `manifest_parts`) then omitted it
-                // and the manifest-authoritative `rivet load` lost its rows.
                 if let Some(p) = manifest_part_by_path.get(path.as_str()) {
                     super::super::commit::adopt_part(summary, (*p).clone());
-                    // ADR-0029: a skipped part's per-column checksum contribution
-                    // is gone (the prior manifest kept only the run-wide sum, not
-                    // per-part) — and, like the file_log rehydration above, this
-                    // clone never goes through `commit::record_part`, so the seam
-                    // sees a manifest part with no commit unit and suppresses Form
-                    // B itself. No flag to remember here any more.
                 }
             }
-            // Rewrite / Quarantine RE-EXPORT the owning chunk, so they DO need
-            // its chunk_task. A part with no task is a genuine orphan (a foreign
-            // or stale manifest entry) — logged, not acted on, as before.
             ResumeDecision::Rewrite => {
                 let Some(task) = by_file.get(path.as_str()) else {
                     stats.orphan_parts += 1;
@@ -654,79 +397,32 @@ pub(crate) fn apply_m8_resume_decisions(
                 if n > 0 {
                     stats.reset_for_quarantine += 1;
                 }
-                // M9: move the divergent destination object out of the way.
-                // Best-effort — see `quarantine_move` below.
                 quarantine_move(&*dest, path, run_id, &plan.export_name, &mut stats);
             }
         }
     }
 
-    // ── 6. M9: move untracked surplus objects ──────────────────────────
-    //
-    // Surplus = objects under the destination prefix that don't belong
-    // to any committed part in the manifest.  Most likely leftovers from
-    // a prior resume that wrote with a different timestamp.  Best-effort
-    // move to `_quarantine/<run_id>/<original-name>` — never fatal,
-    // never deletes (M9 §"never deletes unknown objects").
-    //
-    // BUT the destination manifest can LAG the state DB: a resume that
-    // committed parts (a `file_log` row + a `completed` chunk_task each) then
-    // crashed before re-finalizing leaves those parts ABSENT from the stale
-    // manifest yet DURABLY committed. The manifest-vs-listing reconcile flags
-    // them as untracked surplus — quarantining (MOVING) them would drop the exact
-    // rows finalize is about to rehydrate from file_log (silent loss AND destroyed
-    // at-least-once recoverability, since a move is not a delete but the part is
-    // gone from its recorded path). The state DB is the export's source of truth
-    // (ADR-0001), so exclude any object file_log records as a committed part for
-    // this run before quarantining. This only ever PREVENTS an erroneous move; a
-    // truly-surplus object has no file_log row and is still quarantined.
     let committed_parts: std::collections::HashSet<String> = state
         .list_files_for_run(run_id)?
         .into_iter()
         .map(|f| f.file_name)
         .collect();
     let mut untracked_surplus = 0usize;
-    // #167: a `--split` unit SHARES its destination prefix with its N-1 siblings.
-    // A sibling's parts are untracked FROM THIS UNIT'S manifest and absent from
-    // THIS UNIT'S file_log, so the surplus scan would quarantine-MOVE them out of
-    // the prefix — silently dropping the sibling's committed rows (measured:
-    // 225k/300k, unit #0's resume moved unit #1's completed chunk to `_quarantine/`).
-    // A split unit owns only the objects named with ITS OWN part prefix
-    // (`<export_name>_…`); everything else under the prefix belongs to a sibling
-    // (or the pool) and is never this unit's surplus to move.
     let own_part_prefix = plan.is_split_unit.then(|| format!("{}_", plan.export_name));
     for key in resume_plan.untracked.keys() {
         if committed_parts.contains(key.as_str()) {
-            continue; // durably committed per file_log — not surplus, do not move
+            continue;
         }
         if let Some(prefix) = &own_part_prefix {
             let base = key.rsplit('/').next().unwrap_or(key);
             if !base.starts_with(prefix) {
-                continue; // a sibling split unit's part (shared prefix) — not ours
+                continue;
             }
         }
         untracked_surplus += 1;
         quarantine_move(&*dest, key, run_id, &plan.export_name, &mut stats);
     }
 
-    // The manifest-EXISTS path needs the same reconstruction as the no-manifest
-    // one above, and used to be the only caller that skipped it.
-    //
-    // A chunk-checkpoint resume ADOPTS the crashed run's id, so `file_log`
-    // accumulates every attempt's parts. When attempt 1 wrote `manifest.json` and
-    // attempt 2 crashed AFTER committing more chunks, the manifest this preamble
-    // hydrates from is attempt 1's — stale — and attempt 2's durable parts appear
-    // nowhere in `summary.manifest_parts`. Finalize then writes a manifest that
-    // omits them: the rows are on the destination but invisible to every
-    // manifest-authoritative reader, which is the same silent loss the round-4 fix
-    // closed for the no-manifest case.
-    //
-    // The quarantine loop just above already consults `file_log` to avoid MOVING
-    // those parts — it knew they were durable and still left them undeclared.
-    //
-    // Safe to call unconditionally: the rehydrator skips any path already present
-    // in `summary.manifest_parts`, so parts hydrated from the manifest are not
-    // duplicated, and it admits only the SURVIVING attempt of each completed chunk.
     let rehydrated = rehydrate_and_reset(
         state,
         run_id,
@@ -782,7 +478,6 @@ fn present_basenames(dest: &dyn Destination) -> Option<Listed> {
 }
 
 /// Rehydrate this run's committed parts (probed when `present` is known, read back under `content`) and re-export every chunk whose part is gone, unlogged or not its chunk's.
-/// The refusal of a resume whose committed part `name` is gone from the destination and carries no chunk index to re-export.
 fn committed_part_gone(name: &str) -> anyhow::Error {
     crate::error::coded(
         crate::error::codes::DEST_COMMITTED_PART_GONE,
@@ -842,12 +537,7 @@ fn rehydrate_and_reset(
     Ok(rehydrated)
 }
 
-/// ADR-0012 M9 — best-effort move of a destination object to the
-/// quarantine prefix.  Layout: `_quarantine/<run_id>/<original-key>`.
-/// On failure: log at WARN, increment counter, continue.  Never fatal,
-/// never deletes the source on a partial failure (the underlying
-/// `Destination::move` is allowed to be non-atomic for object stores —
-/// see ADR-0012 M9 §"copy + delete").
+/// ADR-0012 M9 — best-effort move of a destination object to the quarantine prefix.
 fn quarantine_move(
     dest: &dyn Destination,
     src_key: &str,
@@ -917,13 +607,6 @@ pub(crate) mod tests {
         );
     }
 
-    // ── mutation-tier2 gap closure ───────────────────────────────────────────
-    // `apply_m8_resume_decisions` — the resume-decision CORE (skip / rewrite /
-    // quarantine per part) — had 38 missed mutants: even stubbing the whole
-    // function to `Ok(Default::default())` survived, because no test drove the
-    // full flow (real local destination + state + manifest). A wrong skip is a
-    // silently missing part; a wrong rewrite is duplicates.
-
     fn m8_manifest(run_id: &str, parts: Vec<crate::manifest::ManifestPart>) -> RunManifest {
         use crate::manifest::{ManifestDestination, ManifestSource, ManifestStatus};
         let row_count = parts.iter().map(|p| p.rows).sum();
@@ -963,7 +646,7 @@ pub(crate) mod tests {
 
     fn m8_part(path: &str, rows: i64, size: u64) -> crate::manifest::ManifestPart {
         crate::manifest::ManifestPart {
-            part_id: 0, // ids are irrelevant to the M8 path match; keep distinct below
+            part_id: 0,
             path: path.into(),
             rows,
             size_bytes: size,
@@ -986,7 +669,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A part the destination holds at another size than the run committed is not declared and its chunk is read again; a chunk marked completed with no part and no zero row count is read again too, and an empty chunk is left alone.
+    /// A part the destination holds at another size than the run committed is not declared and its chunk is read again.
     #[test]
     fn a_part_of_another_size_and_a_completion_without_a_part_are_read_again() {
         let state_dir = tempfile::tempdir().unwrap();
@@ -1085,25 +768,14 @@ pub(crate) mod tests {
 
     #[test]
     fn rehydration_recovers_all_rotation_siblings_from_file_log() {
-        // Round-5: chunk_task stores ONE file_name per chunk (only the FIRST
-        // max_file_size rotation sibling), so rehydrating from it orphaned the other
-        // siblings (silent loss) and left size_bytes=0 (a lying validate mismatch).
-        // file_log records EVERY committed part with its real bytes. RED against the
-        // chunk_task-based rehydration (which recovered 1 of 2 siblings, size 0).
         let state_dir = tempfile::tempdir().unwrap();
         let state =
             crate::state::StateStore::open_at_path(&state_dir.path().join("state.db")).unwrap();
         let run_id = "r_rot";
-        // The chunk's TASK, as a real checkpoint run always has one — the fixture
-        // omitted it, which made this test silently exercise a state no run can be
-        // in. Rehydration now asks whether the chunk COMPLETED (an interrupted
-        // chunk's part is the superseded attempt, not committed data), so without
-        // the task there is nothing to ask.
         state.insert_chunk_tasks(run_id, &[(1, 100)]).unwrap();
         state
             .complete_chunk_task(run_id, 0, 50, Some("orders_chunk0_p0.parquet"))
             .unwrap();
-        // Two rotation siblings of ONE chunk, as record_part logs them per-part.
         state
             .record_file(FilePart {
                 run_id,
@@ -1169,24 +841,11 @@ pub(crate) mod tests {
             50,
             "row aggregate bumped by the union"
         );
-        // Both FILE counters, in delta form, because the manifest this resume hands
-        // downstream is graded on them: `files_committed` feeds the reconcile gate
-        // and the run card, `files_produced` the coherence invariant. Asserting the
-        // parts alone left `files_produced += rehydrated` unguarded — a surviving
-        // `*=` mutant, and over a 0 base with 2 siblings that is a REAL divergence
-        // (0*2=0 vs 0+2=2): a manifest whose declared parts and whose own
-        // aggregates disagree. Delta form so a non-zero base cannot hide it.
         assert_eq!(
             summary.files_committed - committed_before,
             2,
             "both reconstructed siblings count as committed files"
         );
-        // BYTES, the third aggregate this function folds and the one the first
-        // pass at these assertions MISSED — I read the surviving mutant's
-        // column as `files_produced` without opening the line, closed a real
-        // but different gap, and `+= -> *=` on THIS statement survived a second
-        // 73-minute run. 4096 + 2048 over a zero base, so the mutant computes 0
-        // and cannot hide behind the fold.
         assert_eq!(
             summary.bytes_written - bytes_before,
             6144,
@@ -1200,17 +859,6 @@ pub(crate) mod tests {
             "…and as produced files — the two counters move together, or the \
              manifest disagrees with its own aggregates"
         );
-        // Finding #10 / ADR-0029: rehydrated parts carry no per-column checksum,
-        // so the run-wide Form B cannot cover the manifest. Pre-ADR-0029 this
-        // function SET `column_checksums_incomplete` and the assertion here read
-        // that flag back — a test of the flag, not of the outcome. Now the verdict
-        // is COMPUTED at the harvest from these parts having no commit unit, so
-        // assert the OUTCOME through the real seam: even with a full run-wide
-        // checksum accumulator in hand, Form B must come out suppressed.
-        //
-        // RED against restoring a coverage rule that trusts the feed (Form B is
-        // then recorded over a manifest whose two rehydrated parts it does not
-        // cover — the partial record `validate --depth full` false-flags).
         let mut integrity = crate::pipeline::commit::Integrity::default();
         integrity
             .column_checksums
@@ -1233,14 +881,6 @@ pub(crate) mod tests {
         );
     }
 
-    // Finding #9: a parallel-checkpoint RESUME must ACCUMULATE this invocation's
-    // rows onto the rehydrated pre-crash base, never clobber it. rehydrate bumps
-    // total_rows + manifest_parts cumulatively; the parallel runner then lands its
-    // workers' new parts via
-    // record_part. The coherence invariant total_rows == sum(manifest_parts.rows)
-    // must survive the whole sequence. RED against a `summary.total_rows = agg`
-    // clobber, which drops the 50-row base and leaves total_rows == 30 while the
-    // manifest lists 80 rows.
     #[test]
     fn parallel_resume_accumulates_rows_onto_rehydrated_base_not_clobbers() {
         use crate::pipeline::commit::{PartKind, PartRecord, UnitId, record_part};
@@ -1251,7 +891,6 @@ pub(crate) mod tests {
         let dest_dir = tempfile::tempdir().unwrap();
         let plan = m8_plan(dest_dir.path());
         let run_id = "r_par_resume";
-        // Two pre-crash parts (50 rows) durably committed to file_log, no manifest.
         state
             .record_file(FilePart {
                 run_id,
@@ -1279,15 +918,12 @@ pub(crate) mod tests {
         let mut summary =
             crate::pipeline::summary::RunSummary::stub_for_testing(run_id, String::from("orders"));
 
-        // ── Resume preamble: rehydrate the 50-row base from file_log.
         rehydrate_manifest_parts_from_file_log(&state, run_id, &mut summary).unwrap();
         assert_eq!(
             summary.total_rows, 50,
             "rehydrated base is the 50 pre-crash rows"
         );
 
-        // ── This invocation re-exports one 30-row chunk: the runner lands the
-        // new part through record_part, which counts its rows.
         record_part(
             &plan,
             &mut summary,
@@ -1315,35 +951,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A chunk re-run after a crash must contribute ONE part, not its abandoned
-    /// attempt as well — which only shows up on the SECOND resume.
-    ///
-    /// A chunk-checkpoint resume adopts the crashed run's id, so `file_log`
-    /// accumulates every attempt's parts under one run_id and nothing prunes it.
-    /// Attempt 1 crashes mid-chunk-1: the part is written and logged, the task
-    /// stays pending. Attempt 2 re-runs chunk 1, writes a replacement and marks
-    /// the chunk completed — then crashes elsewhere. On attempt 3 chunk 1 IS
-    /// completed, so a filter keyed on the chunk INDEX admits both parts: the
-    /// same rows twice, in a manifest perfectly self-consistent with the files it
-    /// lists, so `validate` returns 0 and every consumer that sums manifests
-    /// inherits the duplicate.
-    ///
-    /// At one resume the abandoned part's chunk is simply not completed, so the
-    /// index filter is enough — which is why every existing test passed.
-    /// An INTERRUPTED chunk whose parts ROTATED must contribute nothing — the
-    /// case where "keep" and "drop" actually differ.
-    ///
-    /// `part_indexed_name` appends `_p{n}` AFTER the nonce, so a rotated part's
-    /// last field is `p0`. A parser that required the nonce last returned None
-    /// for every one of them, and this filter treats "not a chunk part" as KEEP:
-    /// the abandoned siblings of a chunk the resume is about to RE-RUN were
-    /// declared in the manifest beside their replacements. Duplicate rows, in a
-    /// manifest self-consistent with the files it lists, so `validate` returns 0.
-    ///
-    /// The chunk must be INTERRUPTED. Rotating a COMPLETED chunk cannot go RED,
-    /// because keeping its siblings is the right answer under both the broken and
-    /// the fixed parser — which is why the existing rotation test passed either
-    /// way. Names come from both real writers, never typed by hand.
+    /// A chunk re-run after a crash must contribute ONE part, not its abandoned attempt as well.
     #[test]
     fn an_interrupted_chunks_rotated_parts_are_not_declared_by_the_resume() {
         let state_dir = tempfile::tempdir().unwrap();
@@ -1354,8 +962,6 @@ pub(crate) mod tests {
             .insert_chunk_tasks(run_id, &[(1, 100), (101, 200)])
             .unwrap();
 
-        // Chunk 0 completed, rotated into two siblings. Chunk 1 was interrupted
-        // mid-write, also rotated — its task stays pending.
         let done_base = super::super::chunk_part_filename("orders", 0, "parquet");
         let lost_base = super::super::chunk_part_filename("orders", 1, "parquet");
         let done: Vec<String> = (0..2)
@@ -1419,9 +1025,7 @@ pub(crate) mod tests {
         let run_id = "r_twice";
         state.insert_chunk_tasks(run_id, &[(1, 100)]).unwrap();
 
-        // Attempt 1's part for chunk 0: written, logged, then abandoned.
         let abandoned = super::super::chunk_part_filename("orders", 0, "parquet");
-        // Attempt 2's replacement, which is the one that completed the chunk.
         let survivor = super::super::chunk_part_filename("orders", 0, "parquet");
         assert_ne!(
             abandoned, survivor,
@@ -1474,28 +1078,15 @@ pub(crate) mod tests {
 
     #[test]
     fn rehydration_skips_the_part_of_a_chunk_that_did_not_complete() {
-        // The duplicate this filter exists for. A chunk-checkpoint resume ADOPTS the
-        // crashed run's id, so `list_files_for_run` returns the abandoned attempt's
-        // part too — under a DIFFERENT name, because the re-run picks a new nonce, so
-        // deduping by path cannot see it. Measured before the fix on a 4000-row table:
-        // crash at chunk 0, `--resume`, and the manifest declared 5 parts / 5000 rows
-        // while `validate` returned 0, being perfectly self-consistent with the files
-        // it listed. Every consumer that SUMS manifests inherited the duplicate.
         let state_dir = tempfile::tempdir().unwrap();
         let state =
             crate::state::StateStore::open_at_path(&state_dir.path().join("state.db")).unwrap();
         let run_id = "r_partial";
-        // Names from the REAL formatter. Hand-typed stand-ins like
-        // `orders_chunk0_a.parquet` are not what the writer emits (no nonce), so
-        // the reader that classifies them was being graded on an input the
-        // product never produces — and stayed green when the classification
-        // itself was wrong.
         let done_part = super::super::chunk_part_filename("orders", 0, "parquet");
         let abandoned_part = super::super::chunk_part_filename("orders", 1, "parquet");
         state
             .insert_chunk_tasks(run_id, &[(1, 100), (101, 200)])
             .unwrap();
-        // Chunk 0 completed; chunk 1 was interrupted mid-write and stays claimed.
         state
             .complete_chunk_task(run_id, 0, 50, Some(&done_part))
             .unwrap();
@@ -1511,8 +1102,6 @@ pub(crate) mod tests {
                 cursor_high: None,
             })
             .unwrap();
-        // …and its part IS on record, which is exactly the trap: written, logged,
-        // and about to be replaced.
         state
             .record_file(FilePart {
                 run_id,
@@ -1544,23 +1133,19 @@ pub(crate) mod tests {
         );
     }
 
-    /// Full-matrix flow: part A intact → Skip (+ summary hydration), part B
-    /// missing → Rewrite (task reset), part C size-diverged → Quarantine
-    /// (task reset + object moved), part D with no task → orphan. Also
-    /// hydrates the schema fingerprint from the prior manifest.
+    /// Full-matrix flow: part A intact → Skip (+ summary hydration), part B missing → Rewrite (task reset), part C size-diverged → Quarantine (task reset + object moved), part D with no task → orphan.
     #[test]
     fn apply_m8_full_matrix_skip_rewrite_quarantine_orphan() {
         let run_id = "m8run";
         let dir = tempfile::tempdir().unwrap();
 
-        // Destination objects: A matches its manifest size, C diverges, B absent.
-        std::fs::write(dir.path().join("part-a.parquet"), b"AAAAA").unwrap(); // 5
-        std::fs::write(dir.path().join("part-c.parquet"), b"CCC").unwrap(); // 3 != 9
+        std::fs::write(dir.path().join("part-a.parquet"), b"AAAAA").unwrap();
+        std::fs::write(dir.path().join("part-c.parquet"), b"CCC").unwrap();
         let mut parts = vec![
             m8_part("part-a.parquet", 10, 5),
             m8_part("part-b.parquet", 10, 7),
             m8_part("part-c.parquet", 10, 9),
-            m8_part("part-d.parquet", 10, 1), // no chunk_task → orphan
+            m8_part("part-d.parquet", 10, 1),
         ];
         for (i, p) in parts.iter_mut().enumerate() {
             p.part_id = (i + 1) as u32;
@@ -1572,7 +1157,6 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        // State: tasks 0..2 completed with file names a/b/c.
         let state_dir = tempfile::tempdir().unwrap();
         let state =
             crate::state::StateStore::open_at_path(&state_dir.path().join("state.db")).unwrap();
@@ -1584,7 +1168,6 @@ pub(crate) mod tests {
             (1, "part-b.parquet"),
             (2, "part-c.parquet"),
         ] {
-            // claim → completed so file_name is recorded like a real run.
             state.claim_next_chunk_task(run_id).unwrap();
             state
                 .complete_chunk_task(run_id, idx, 10, Some(name))
@@ -1620,7 +1203,6 @@ pub(crate) mod tests {
             "quarantined object relocated"
         );
 
-        // Skip hydration: the summary carries the prior manifest's part A.
         assert_eq!(
             summary
                 .manifest_parts
@@ -1636,7 +1218,6 @@ pub(crate) mod tests {
             "schema fingerprint hydrates from the prior manifest"
         );
 
-        // State-side effects: A stays completed; B and C are pending again.
         let tasks = state.list_chunk_tasks_for_run(run_id).unwrap();
         let status_of = |i: i64| {
             tasks
@@ -1651,25 +1232,13 @@ pub(crate) mod tests {
         assert_eq!(status_of(2), "pending", "quarantine resets the task");
     }
 
-    // RED for the Path-B rotation-sibling silent loss (graph-surfaced). When a
-    // prior-run manifest EXISTS (resume with manifest, not the Path-A "no
-    // manifest" reconstruct), the Skip hydration looked up a chunk_task by the
-    // part's file_name FIRST and `continue`d on a miss. A max_file_size chunk
-    // rotates into siblings but chunk_task records only the FIRST sibling's name,
-    // so every OTHER sibling missed the lookup, was counted an orphan, and was
-    // NOT hydrated into `summary.manifest_parts` — the finalize manifest (built
-    // solely from that vec) then omitted it and the manifest-authoritative
-    // `rivet load` silently dropped its rows. A Skip needs NO chunk_task (it
-    // clones the prior manifest's part verbatim), so it must hydrate regardless.
     #[test]
     fn apply_m8_skip_hydrates_rotation_siblings_without_a_chunk_task() {
         let run_id = "m8rot";
         let dir = tempfile::tempdir().unwrap();
 
-        // One chunk rotated into two siblings; BOTH still present at the dest
-        // (matching their manifest size) → both are Skip decisions.
-        std::fs::write(dir.path().join("chunk0-p0.parquet"), b"AAAAA").unwrap(); // 5
-        std::fs::write(dir.path().join("chunk0-p1.parquet"), b"BBBBBBB").unwrap(); // 7
+        std::fs::write(dir.path().join("chunk0-p0.parquet"), b"AAAAA").unwrap();
+        std::fs::write(dir.path().join("chunk0-p1.parquet"), b"BBBBBBB").unwrap();
         let mut parts = vec![
             m8_part("chunk0-p0.parquet", 30, 5),
             m8_part("chunk0-p1.parquet", 20, 7),
@@ -1684,8 +1253,6 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        // ONE chunk_task for chunk 0, recording only the FIRST sibling's name —
-        // exactly how a real rotated chunk is logged.
         let state_dir = tempfile::tempdir().unwrap();
         let state =
             crate::state::StateStore::open_at_path(&state_dir.path().join("state.db")).unwrap();
@@ -1722,8 +1289,6 @@ pub(crate) mod tests {
             50,
             "all 50 rows across both siblings are carried into the finalize manifest"
         );
-        // The run's counters say what the manifest says: skipped parts were adopted,
-        // not dropped from export_metrics / the run card / the row-count gate.
         assert_eq!(
             (
                 summary.total_rows,
@@ -1735,28 +1300,7 @@ pub(crate) mod tests {
         );
     }
 
-    // RED before the file_log guard in step 6: a part durably committed by a
-    // prior resume (a file_log row) but ABSENT from the stale destination
-    // manifest was classified untracked surplus and quarantine-MOVED — dropping
-    // the exact rows finalize rehydrates from file_log (silent loss). The guard
-    // must skip any untracked object file_log records for the run.
     /// A STALE destination manifest must not hide a later attempt's durable parts.
-    ///
-    /// A chunk-checkpoint resume ADOPTS the crashed run's id, so `file_log`
-    /// accumulates every attempt. Attempt 1 finalizes a manifest listing chunk 0;
-    /// attempt 2 completes chunk 1, commits its part, and crashes before
-    /// re-finalizing. The preamble hydrated `summary.manifest_parts` from attempt
-    /// 1's manifest and rehydrated from `file_log` ONLY on the no-manifest branch,
-    /// so chunk 1's part was never declared — on the destination, invisible to
-    /// every manifest-authoritative reader. The same silent loss round-4 closed for
-    /// the no-manifest case, left open for the case a manifest exists.
-    ///
-    /// The sibling test above proves the quarantine loop already CONSULTS file_log
-    /// for these parts (it declines to move them). Knowing they are durable and
-    /// still not declaring them is the whole defect, which is why not-quarantined
-    /// is not a sufficient assertion.
-    ///
-    /// Part names come from the real writer, never typed by hand.
     #[test]
     fn a_stale_manifest_must_not_hide_a_later_attempts_committed_part() {
         let run_id = "m8stale";
@@ -1767,7 +1311,6 @@ pub(crate) mod tests {
         std::fs::write(dir.path().join(&p0), b"AAAAA").unwrap();
         std::fs::write(dir.path().join(&p1), b"BBBBBBB").unwrap();
 
-        // Attempt 1's manifest — it knows about chunk 0 only.
         let mut parts = vec![m8_part(&p0, 10, 5)];
         parts[0].part_id = 1;
         std::fs::write(
@@ -1829,10 +1372,8 @@ pub(crate) mod tests {
         let run_id = "m8run";
         let dir = tempfile::tempdir().unwrap();
 
-        // Manifest tracks only part-a. part-x is on disk + in file_log but NOT in
-        // the manifest — a resume committed it, then crashed before re-finalize.
-        std::fs::write(dir.path().join("part-a.parquet"), b"AAAAA").unwrap(); // 5
-        std::fs::write(dir.path().join("part-x.parquet"), b"XXXXXXX").unwrap(); // 7
+        std::fs::write(dir.path().join("part-a.parquet"), b"AAAAA").unwrap();
+        std::fs::write(dir.path().join("part-x.parquet"), b"XXXXXXX").unwrap();
         let mut parts = vec![m8_part("part-a.parquet", 10, 5)];
         parts[0].part_id = 1;
         let manifest = m8_manifest(run_id, parts);
@@ -1850,8 +1391,6 @@ pub(crate) mod tests {
         state
             .complete_chunk_task(run_id, 0, 10, Some("part-a.parquet"))
             .unwrap();
-        // file_log records BOTH committed parts — including part-x, which the
-        // stale manifest omits (the crash-before-finalize case).
         state
             .record_file(FilePart {
                 run_id,
@@ -1882,7 +1421,6 @@ pub(crate) mod tests {
             crate::pipeline::summary::RunSummary::stub_for_testing(run_id, String::from("orders"));
         apply_m8_resume_decisions(&state, run_id, &plan, &mut summary).unwrap();
 
-        // part-x is committed per file_log → left in place, NOT quarantined.
         assert!(
             dir.path().join("part-x.parquet").exists(),
             "a file_log-committed part must stay at its path"
@@ -1895,10 +1433,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The fingerprint hydration guard is `summary is None AND manifest is not
-    /// the placeholder` — an `&& -> ||` mutant overwrites a LIVE summary's
-    /// fingerprint with the prior manifest's, silently rewriting this run's
-    /// schema evidence.
+    /// The fingerprint hydration guard is `summary is None AND manifest is not the placeholder`.
     #[test]
     fn apply_m8_never_overwrites_a_live_schema_fingerprint() {
         let run_id = "m8run";
@@ -1906,7 +1441,7 @@ pub(crate) mod tests {
         std::fs::write(dir.path().join("part-a.parquet"), b"AAAAA").unwrap();
         let mut parts = vec![m8_part("part-a.parquet", 10, 5)];
         parts[0].part_id = 1;
-        let manifest = m8_manifest(run_id, parts); // fingerprint xxh3:00000000deadbeef
+        let manifest = m8_manifest(run_id, parts);
         std::fs::write(
             dir.path().join(MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -1925,7 +1460,7 @@ pub(crate) mod tests {
         let plan = m8_plan(dir.path());
         let mut summary =
             crate::pipeline::summary::RunSummary::stub_for_testing(run_id, String::from("orders"));
-        summary.schema_fingerprint = Some("xxh3:1111111111111111".into()); // LIVE evidence
+        summary.schema_fingerprint = Some("xxh3:1111111111111111".into());
         apply_m8_resume_decisions(&state, run_id, &plan, &mut summary).unwrap();
         assert_eq!(
             summary.schema_fingerprint.as_deref(),
@@ -1934,8 +1469,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A manifest from a DIFFERENT run_id must be ignored wholesale — resetting
-    /// chunk_tasks off a foreign manifest could destroy a healthy resume.
+    /// A manifest from a DIFFERENT run_id must be ignored wholesale.
     #[test]
     fn apply_m8_ignores_foreign_manifest() {
         let run_id = "m8run";
@@ -1992,7 +1526,7 @@ pub(crate) mod tests {
         out
     }
 
-    /// Under `verify: content` a committed part at its logged size whose keys are another chunk's is not declared and its chunk is read again, while its sibling is declared; without `verify: content`, or outside range chunking, nothing is read back.
+    /// Under `verify: content` a committed part at its logged size whose keys are another chunk's is not declared and its chunk is read again, while its sibling is declared.
     #[test]
     fn under_verify_content_a_part_with_another_chunks_keys_is_read_again() {
         use crate::destination::local::LocalDestination;
@@ -2120,10 +1654,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Resume against a FOREIGN canonical manifest (a reused prefix after a hard crash)
-    /// and against this run's own stale manifest must probe file_log parts like the
-    /// no-manifest branch: a completed chunk whose part is gone is re-exported, never
-    /// declared sight-unseen.
+    /// Resume against a FOREIGN canonical manifest (a reused prefix after a hard crash) and against this run's own stale manifest must probe file_log parts like the no-manifest branch.
     #[test]
     fn a_resume_with_any_manifest_re_exports_a_chunk_whose_part_is_gone() {
         for manifest_run in ["SOMEONE_ELSES_RUN", "m8run"] {
@@ -2162,9 +1693,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A completed chunk whose file_log write was swallowed (warn-only, ADR-0001 I7) has
-    /// its part at the destination but no file_log row, or fewer rows than the chunk
-    /// recorded: the resume must re-export it, never finalize without its rows.
+    /// A completed chunk whose file_log write was swallowed (warn-only, ADR-0001 I7) has its part at the destination but no file_log row, or fewer rows than the chunk recorded.
     #[test]
     fn a_completed_chunk_missing_from_file_log_is_re_exported_not_dropped() {
         let state_dir = tempfile::tempdir().unwrap();
@@ -2212,7 +1741,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A resume over this run's own manifest that declares a completed chunk whose `file_log` row was never written, or is short of the chunk's rows, re-exports that chunk and drops the adopted part; a declared chunk with its full rows logged, rotation siblings included, stays declared.
+    /// A resume over this run's own manifest that declares a completed chunk whose `file_log` row was never written, or is short of the chunk's rows, re-exports that chunk and drops the adopted part.
     #[test]
     fn a_declared_chunk_missing_from_file_log_is_re_exported_by_a_resume_over_its_manifest() {
         let run_id = "m8run";
@@ -2304,7 +1833,7 @@ pub(crate) mod tests {
         names
     }
 
-    /// A chunk a `repair` re-exported has its `file_log` row under the repair's own run id, so a resume over the repaired run reads that chunk again: the data is whole, and the repaired part is moved aside rather than left beside its re-export.
+    /// A chunk a `repair` re-exported has its `file_log` row under the repair's own run id, so a resume over the repaired run reads that chunk again.
     #[test]
     fn a_chunk_repaired_under_another_run_id_is_re_exported_and_its_part_moved_aside() {
         let run_id = "m8run";
@@ -2398,10 +1927,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A chunk that failed after writing parts, was re-claimed and completed in the SAME
-    /// run leaves its failed attempt's parts in `manifest_parts`: the completing run must
-    /// declare only the attempt that completed each chunk (rotation siblings and non-chunk
-    /// parts kept), with the counters taken down to match — never the rows twice.
+    /// A chunk that failed after writing parts, was re-claimed and completed in the SAME run leaves its failed attempt's parts in `manifest_parts`.
     #[test]
     fn a_completing_run_declares_only_the_attempt_that_completed_each_chunk() {
         let won = "orders_chunk0_00000000000000bb_p0.parquet";
@@ -2448,8 +1974,6 @@ pub(crate) mod tests {
 
     #[test]
     fn m8stats_aggregates_default_to_zero() {
-        // Pinning the wire shape — adding fields must not change the
-        // existing zero-valued meaning of each counter.
         let s = M8Stats::default();
         assert_eq!(s.skipped, 0);
         assert_eq!(s.reset_for_rewrite, 0);
@@ -2457,13 +1981,7 @@ pub(crate) mod tests {
         assert_eq!(s.orphan_parts, 0);
     }
 
-    /// ADR-0012 M9 — `quarantine_move` is best-effort at the executor
-    /// site: a successful `Destination::move` lands the object under
-    /// `_quarantine/<run_id>/` and bumps `quarantined_moved`; a failing
-    /// move is swallowed into `quarantine_move_failures` and never panics
-    /// or bails ("never bail on a quarantine failure").  The decision
-    /// matrix that *produces* the Quarantine verdict is covered in
-    /// `trust_artifacts_integration` §27; this pins the move half.
+    /// ADR-0012 M9 — `quarantine_move` is best-effort at the executor site.
     #[test]
     fn quarantine_move_is_best_effort_on_success_and_failure() {
         use crate::destination::{
@@ -2500,7 +2018,6 @@ pub(crate) mod tests {
             }
         }
 
-        // Success: moved under `_quarantine/<run_id>/`, credited as moved.
         let ok = MoveMock {
             fail: false,
             calls: Mutex::new(Vec::new()),
@@ -2524,7 +2041,6 @@ pub(crate) mod tests {
             "successful move targets _quarantine/<run_id>/<original-key>"
         );
 
-        // Failure: swallowed into the failure counter — no panic, no credit.
         let bad = MoveMock {
             fail: true,
             calls: Mutex::new(Vec::new()),
@@ -2541,32 +2057,11 @@ pub(crate) mod tests {
         assert_eq!(stats.quarantine_move_failures, 1);
     }
 
-    // ── SEC-RED V21: uncapped manifest read can OOM resume/validate ──────
-    //
-    // resume_m8.rs:136-137 does `head()` then `read()` for `manifest.json`,
-    // discarding the `size_bytes` the `head()` already returned, and reads
-    // the whole body into a `Vec<u8>` with no upper bound.  An attacker who
-    // can write the destination prefix (a shared bucket prefix, a
-    // world-writable export dir) can plant a multi-GB `manifest.json`; the
-    // next `rivet --resume` / `rivet validate` / `rivet repair` slurps it
-    // into memory and OOMs the process.  The same uncapped pattern appears
-    // in `repair_cmd.rs:323-324` and `validate_manifest.rs:355-357` — three
-    // readers, one missing bound.
-    //
-    // SECURE behaviour: the capped reader consults the size `head()` reports
-    // and BAILS (Err) once the object exceeds the manifest cap, instead of
-    // materialising an unbounded body.  Enforced once in
-    // `validate_manifest::read_capped` (cap `MANIFEST_MAX_BYTES`) and called by
-    // all three readers: resume_m8 here, `repair_cmd`, and `validate_manifest`.
     #[test]
     fn sec_manifest_read_rejects_oversized() {
-        // SEC-RED V21: a destination manifest larger than the cap must be
-        // refused by the read path, not loaded whole into memory.
         use crate::config::{DestinationConfig, DestinationType};
         use crate::destination::local::LocalDestination;
 
-        // A manifest cap well under the planted body.  64 MiB is the figure
-        // the audit cites; the planted object is comfortably above it.
         const MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2577,9 +2072,6 @@ pub(crate) mod tests {
         })
         .unwrap();
 
-        // Plant a > cap `manifest.json` at the prefix root.  Use a sparse
-        // write (seek + single byte) so the test stays fast and doesn't
-        // itself allocate the multi-MB body it is guarding against.
         {
             use std::io::{Seek, SeekFrom, Write};
             let mut f = std::fs::File::create(dir.path().join(MANIFEST_FILENAME)).unwrap();
@@ -2588,15 +2080,12 @@ pub(crate) mod tests {
             f.flush().unwrap();
         }
 
-        // head() reports the oversized length — proving the size was knowable
-        // before the read (the discarded `size_bytes` at line 136).
         let meta = dest.head(MANIFEST_FILENAME).unwrap().unwrap();
         assert!(
             meta.size_bytes > MANIFEST_MAX_BYTES,
             "precondition: planted manifest must exceed the cap"
         );
 
-        // SECURE: the capped reader must BAIL rather than read the whole body.
         let result = read_capped(&dest, MANIFEST_FILENAME, MANIFEST_MAX_BYTES);
         assert!(
             result.is_err(),
@@ -2605,9 +2094,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Cross-check: the in-memory `by_file` index this module builds is
-    /// what makes the matrix → chunk_task lookup O(1).  Smoke-test the
-    /// two corner cases (missing file_name; multiple chunks).
+    /// Cross-check: the in-memory `by_file` index this module builds is what makes the matrix → chunk_task lookup O(1).
     #[test]
     fn by_file_index_skips_chunks_without_file_name() {
         let tasks = [
@@ -2629,7 +2116,7 @@ pub(crate) mod tests {
                 attempts: 0,
                 last_error: None,
                 rows_written: None,
-                file_name: None, // never wrote a file
+                file_name: None,
             },
             ChunkTaskInfo {
                 chunk_index: 2,

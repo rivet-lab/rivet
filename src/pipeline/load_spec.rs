@@ -6,11 +6,7 @@ use crate::error::Result;
 use crate::pipeline::summary::RunSummary;
 use crate::state::{LoadSpecColumn, StateStore};
 
-/// Record what `rivet load` plans from after a successful run of an export in a
-/// any run: the columns it resolved at open and the key it
-/// read then; a run whose open probe failed (or a CDC multiplex export, which has
-/// no single probe) is captured from the source. A failed capture warns and keeps
-/// the previous record.
+/// Record what `rivet load` plans from after a successful run of an export in a any run.
 pub(super) fn record_after_run(
     config: &Config,
     export: &ExportConfig,
@@ -32,7 +28,6 @@ pub(super) fn record_after_run(
             &summary.open_finer_than_microsecond,
             &summary.run_id,
         ),
-        // Capturing costs a second source connection, so pay it only for a configured load.
         None if config.load.is_none() => return,
         None => capture_and_record(config, export, state, config_dir, params, &summary.run_id),
     };
@@ -77,8 +72,6 @@ fn capture_and_record(
     params: Option<&HashMap<String, String>>,
     run_id: &str,
 ) -> Result<()> {
-    // The recipes' `columns:` too: the baseline leg wrote its Parquet with them, and
-    // the DDL this spec becomes must describe that log, not the CDC export alone.
     let columns = crate::config::effective_columns(export, &config.exports);
     let overrides = crate::plan::parse_column_overrides_pub(&columns, &export.name)?;
     let units = crate::preflight::type_report::capture_load_units(
@@ -107,8 +100,7 @@ mod tests {
     use super::*;
     use crate::types::{RivetType, SourceColumn, TypeMapping};
 
-    /// A finished run records the columns and key it resolved as the load spec of (export,
-    /// table, source); a run of the same export from another source records its own beside it.
+    /// A finished run records the columns and key it resolved as the load spec of (export, table, source).
     #[test]
     fn a_finished_run_records_the_spec_a_load_reads_back_by_export_table_and_source() {
         let yaml = |url: &str| {

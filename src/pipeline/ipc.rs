@@ -1,20 +1,4 @@
-//! IPC protocol between a parent `rivet run --parallel-export-processes` and
-//! its child processes.
-//!
-//! When the parent spawns a child, it sets `RIVET_IPC_EVENTS=1` in the child's
-//! environment.  A child that sees this flag:
-//!
-//! - emits one [`ChildEvent`] per significant event as a single JSON line on
-//!   **stdout** (stdout is otherwise unused by `rivet run`),
-//! - hides its own `indicatif` progress bar (the parent draws progress for
-//!   every child in its own `MultiProgress`),
-//! - skips the per-export stderr summary block (the parent renders the final
-//!   metrics in-place inside the progress card on `Finished`).
-//!
-//! The parent reads each child's stdout line-by-line in a dedicated thread,
-//! parses events, and forwards them through an `mpsc::Sender` to a single UI
-//! thread that owns the `MultiProgress`.  Stderr (env-logger output) is left
-//! inherited so log messages still flow normally.
+//! IPC protocol between a parent `rivet run --parallel-export-processes` and its child processes.
 
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
@@ -23,17 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use super::parent_ui::UiMessage;
 
-/// Env var that toggles emitter mode in children.  Set by the parent in
-/// `run_exports_as_child_processes`; absent for stand-alone CLI invocations.
+/// Env var that toggles emitter mode in children.
 pub const ENV_IPC_EVENTS: &str = "RIVET_IPC_EVENTS";
 
-/// In-process event channel.  When the orchestrator runs exports
-/// concurrently in threads (`--parallel-exports`), it installs a sender
-/// here and spawns `parent_ui::run_ui` on the receiver side.  Every
-/// `RunSummary::new`, `ChunkProgress::new`, and chunk completion then
-/// goes through [`emit_event`], which routes the event via this channel
-/// instead of indicatif redraws — same renderer as
-/// `--parallel-export-processes`, no scrollback artefacts.
+/// In-process event channel.
 pub(crate) static IN_PROCESS_TX: Mutex<Option<Sender<UiMessage>>> = Mutex::new(None);
 
 pub(crate) fn install_in_process_tx(tx: Sender<UiMessage>) {
@@ -41,16 +18,10 @@ pub(crate) fn install_in_process_tx(tx: Sender<UiMessage>) {
 }
 
 pub(crate) fn clear_in_process_tx() {
-    // Poison-tolerant: this is called from a Drop guard during unwinding
-    // (run_pool panic-safety) — a sender that panicked while holding the lock
-    // must not turn cleanup into a double-panic abort. Clearing a poisoned
-    // slot is exactly the right recovery.
     *IN_PROCESS_TX.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
-/// Hand a formatted `log` line to the in-process renderer while one owns the
-/// screen; `false` when none is installed (or it has already gone), and the
-/// caller writes the line to stderr itself.
+/// Hand a formatted `log` line to the in-process renderer while one owns the screen.
 pub(crate) fn route_log_line(line: String) -> bool {
     let guard = IN_PROCESS_TX.lock().unwrap_or_else(|p| p.into_inner());
     guard
@@ -65,17 +36,12 @@ pub(crate) fn in_process_events_enabled() -> bool {
         .is_some()
 }
 
-/// True if the current process is publishing events somewhere (stdout IPC
-/// for the `--parallel-export-processes` child path or the in-process
-/// channel for `--parallel-exports`).  Renderers consult this to decide
-/// whether to draw their own indicatif bar / per-export summary block, or
-/// stay quiet and let the unified UI take over.
+/// True if the current process is publishing events somewhere (stdout IPC for the `--parallel-export-processes` child path or the in-process channel for `--parallel-exports`).
 pub(crate) fn capturing_events() -> bool {
     ipc_events_enabled() || in_process_events_enabled()
 }
 
-/// One observable event from a child.  The order is always:
-/// `Started → ProgressInit → Progress* → Finished` per export.
+/// One observable event from a child.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChildEvent {
@@ -88,7 +54,6 @@ pub enum ChildEvent {
         batch_size: usize,
     },
     /// A `ChunkProgress` was created — total chunk count is now known.
-    /// Skipped for non-chunked strategies.
     ProgressInit {
         export_name: String,
         total_chunks: u64,
@@ -99,8 +64,7 @@ pub enum ChildEvent {
         chunks_done: u64,
         rows: i64,
     },
-    /// Terminal verdict reached.  Carries final metrics that the parent
-    /// renders in place of the progress bar.
+    /// Terminal verdict reached.
     Finished {
         export_name: String,
         run_id: String,
@@ -111,11 +75,7 @@ pub enum ChildEvent {
         duration_ms: i64,
         peak_rss_mb: i64,
         error_message: Option<String>,
-        /// Transient destination retries the child's RetryLayer absorbed —
-        /// process-local in the child, so it must ride the event stream or the
-        /// parent's "dest retries" summary line silently reads 0 in exactly
-        /// the modes with the most upload concurrency (bughunt 2026-08-13).
-        /// `#[serde(default)]` so an older child's event still parses.
+        /// Transient destination retries the child's RetryLayer absorbed.
         #[serde(default)]
         dest_retries: u64,
         /// Decoded bytes read from the source; `#[serde(default)]` so an older child's event still parses.
@@ -128,9 +88,8 @@ pub enum ChildEvent {
 }
 
 impl ChildEvent {
-    /// Name of the export this event refers to (used by the parent to route
-    /// the event to the right card).
-    #[allow(dead_code)] // wired up by the parent UI in a follow-up commit
+    /// Name of the export this event refers to (used by the parent to route the event to the right card).
+    #[allow(dead_code)]
     pub fn export_name(&self) -> &str {
         match self {
             ChildEvent::Started { export_name, .. }
@@ -141,31 +100,17 @@ impl ChildEvent {
     }
 }
 
-/// `true` iff `RIVET_IPC_EVENTS` is set to a non-empty value (i.e., this
-/// process is a child spawned by a parent that wants events).
+/// `true` iff `RIVET_IPC_EVENTS` is set to a non-empty value (i.e., this process is a child spawned by a parent that wants events).
 pub fn ipc_events_enabled() -> bool {
     ipc_events_enabled_from(std::env::var(ENV_IPC_EVENTS).ok().as_deref())
 }
 
 /// The decision itself, split from the env read so it can be tested.
-///
-/// `ipc_events_enabled()` reads process-global state, which a parallel test
-/// cannot mutate safely — so its only guard used to be `let _ =
-/// ipc_events_enabled();`, an assertion-free call that proved nothing about the
-/// default and could not fail if the polarity were inverted. The env lookup is
-/// the untestable half; the rule is not.
 pub(crate) fn ipc_events_enabled_from(raw: Option<&str>) -> bool {
     matches!(raw, Some(v) if !v.is_empty())
 }
 
-/// Emit one event to stdout as a single JSON line.  Errors are logged at
-/// `debug` and otherwise swallowed — IPC failures must not abort an export.
-///
-/// Module-private: the only legal caller is [`emit_event`] below, which
-/// dispatches between this stdout path and the in-process channel. Direct
-/// stdout emission from anywhere else would bypass the in-process renderer
-/// when `--parallel-exports` is in effect — a footgun this visibility
-/// closes.
+/// Emit one event to stdout as a single JSON line.
 fn emit(event: &ChildEvent) {
     use std::io::Write;
     let line = match serde_json::to_string(event) {
@@ -185,13 +130,6 @@ fn emit(event: &ChildEvent) {
 }
 
 /// Route an event to whichever sink is active in this process.
-///
-/// - `RIVET_IPC_EVENTS=1` (we are a child of `--parallel-export-processes`):
-///   serialise to stdout for the parent to consume.
-/// - `IN_PROCESS_TX` installed (`--parallel-exports`, threads): forward
-///   through the in-process channel; `parent_ui::run_ui` renders.
-/// - Neither: nothing to do (non-tty stderr / CI pipes — those paths fall
-///   back to the per-export summary block + standalone indicatif bar).
 pub(crate) fn emit_event(event: &ChildEvent) {
     if ipc_events_enabled() {
         emit(event);
@@ -200,9 +138,6 @@ pub(crate) fn emit_event(event: &ChildEvent) {
     if let Ok(guard) = IN_PROCESS_TX.lock()
         && let Some(tx) = guard.as_ref()
     {
-        // Best-effort send: if the UI thread has already exited (channel
-        // disconnected) the export's render cycle is already done — fall
-        // through silently rather than aborting the export.
         let _ = tx.send(UiMessage::Event(event.clone()));
     }
 }
@@ -223,7 +158,6 @@ mod tests {
         let json = serde_json::to_string(&ev).unwrap();
         let back: ChildEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(ev, back);
-        // Tag is `started` (snake_case).
         assert!(json.contains("\"type\":\"started\""));
     }
 
@@ -269,16 +203,7 @@ mod tests {
         assert_eq!(ev.export_name(), "orders");
     }
 
-    /// An UNSET or EMPTY variable means the in-process UI channel, not the
-    /// child-event JSON stream — so `emit_ui` must not start writing JSON lines
-    /// to stdout of its own accord.
-    ///
-    /// The previous guard was `let _ = ipc_events_enabled();` with no assertion:
-    /// it proved the function does not panic and nothing else. Inverting the
-    /// polarity — making an unset variable mean ENABLED, which would put JSON on
-    /// the stdout of every ordinary run — left it green. The env read is what a
-    /// parallel test cannot touch; the RULE is not, so the rule is what this
-    /// pins, through the same function production calls.
+    /// An UNSET or EMPTY variable means the in-process UI channel, not the child-event JSON stream.
     #[test]
     fn ipc_events_are_off_unless_the_variable_is_set_and_non_empty() {
         assert!(!ipc_events_enabled_from(None), "unset ⇒ off");

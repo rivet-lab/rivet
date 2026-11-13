@@ -1,9 +1,4 @@
 //! **Layer: Execution** (with bounded persistence writes)
-//!
-//! Runs a single-query export for Snapshot, Incremental, and TimeWindow strategies.
-//! After the write completes, this module performs three bounded persistence writes
-//! that are invariant-ordered (see ADR-0001): manifest entry, cursor advance,
-//! schema snapshot.  These are post-execution state updates, not runtime decisions.
 
 use std::time::Duration;
 
@@ -29,12 +24,6 @@ pub(crate) fn run_with_reconnect(
     let before_first_attempt = summary.clone();
 
     for attempt in 0..=plan.tuning.max_retries {
-        // ADR-0028: the tail ledger accumulates ACROSS a runner invocation, and a
-        // retried attempt re-reads from scratch — carrying a failed attempt's
-        // partial checksums into the retry would double-merge them (the old
-        // runner-local accumulators got this for free by being re-declared per
-        // call). Reset at every attempt boundary; the successful attempt's feed
-        // is the only one the seam applies.
         summary.ledger = Default::default();
         if attempt > 0 {
             reset_for_retry(summary, &before_first_attempt);
@@ -43,9 +32,6 @@ pub(crate) fn run_with_reconnect(
                 .as_ref()
                 .map(classify_error)
                 .unwrap_or(RetryClass::Permanent);
-            // Count reconnect-class retries separately: N reconnects = N flaky-link
-            // blips this run survived (the field-diagnosis signal). A same-conn
-            // retry (a lock wait) advances `retries` but not `reconnects`.
             if class.needs_reconnect() {
                 summary.reconnects = summary.reconnects.saturating_add(1);
             }
@@ -92,11 +78,6 @@ pub(crate) fn run_with_reconnect(
                 s
             }
             Err(e) => {
-                // A closed port / unroutable host / DNS failure will never come
-                // up on its own — retrying just spams ~14s of escalating backoff
-                // before the same error. Fail fast with a doctor pointer on the
-                // first attempt. (Connection RESET / EOF / cold-start "starting
-                // up" can recover, so those still flow into the retry below.)
                 if should_fail_fast_on_connect(attempt, &e) {
                     return Err(e.context(format!(
                         "cannot reach the source — run `rivet doctor -c {config_path}` to diagnose (is the host/port right and the server up?)"
@@ -115,11 +96,6 @@ pub(crate) fn run_with_reconnect(
                     last_err = Some(e);
                     continue;
                 }
-                // Final, non-transient connect failure (e.g. auth): bridge the
-                // same category + remediation hint `rivet doctor` already gives,
-                // so a run-time failure isn't a dead end. `.context()` (not
-                // message replacement) keeps the typed cause + the substrings
-                // classify_exit / retry classification depend on.
                 return Err(attach_connect_hint(e, &plan.source));
             }
         };
@@ -159,9 +135,7 @@ pub(crate) fn run_with_reconnect(
     }))
 }
 
-/// Roll `summary` back to its state before the first attempt, keeping what spans
-/// attempts (the journal and the reconnect count): a retry re-reads from scratch and
-/// re-adopts resumed parts, so the failed attempt's totals and parts must not stay.
+/// Roll `summary` back to its state before the first attempt, keeping what spans attempts (the journal and the reconnect count).
 fn reset_for_retry(summary: &mut RunSummary, before_first_attempt: &RunSummary) {
     let journal = std::mem::take(&mut summary.journal);
     let reconnects = summary.reconnects;
@@ -171,34 +145,17 @@ fn reset_for_retry(summary: &mut RunSummary, before_first_attempt: &RunSummary) 
 }
 
 /// Outcome of the retry decision in `run_with_reconnect`.
-///
-/// Lifted out of the loop body so the invariant — "do not retry after a file
-/// was committed; that would duplicate rows" — is independently unit-testable.
 #[derive(Debug)]
 enum ExportRetry {
     /// Caller should consume the error, sleep the backoff, and retry.
     Retry,
-    /// Caller must propagate this synthesised error: the original failure was
-    /// transient, but at least one file was already committed to the destination
-    /// so retrying from the same cursor would re-read those rows.
+    /// Caller must propagate this synthesised error.
     BailDuplicateGuard(anyhow::Error),
-    /// Caller must propagate the *original* error (either permanent, or we have
-    /// exhausted the retry budget).
+    /// Caller must propagate the *original* error (either permanent, or we have exhausted the retry budget).
     BailOriginal,
 }
 
 /// Should a CONNECT failure end the run immediately, before any backoff?
-///
-/// Only on the very first attempt, and only for an endpoint that will never come
-/// up on its own (nothing listening, unroutable host, DNS). Everything else —
-/// including a connection RESET or EOF mid-handshake, which does recover — flows
-/// into the retry below.
-///
-/// `attempt == 0` is load-bearing in BOTH directions, which is why it is here
-/// rather than inline: relaxing it makes a dead endpoint bail on a later attempt
-/// (pointless — the backoff was already paid), and `&&`→`||` makes EVERY
-/// first-attempt connect error fatal, so a transient blip that would have
-/// recovered on retry kills the run instead.
 fn should_fail_fast_on_connect(attempt: u32, e: &anyhow::Error) -> bool {
     attempt == 0 && is_port_closed(e)
 }
@@ -214,9 +171,6 @@ fn decide_export_retry(
         return ExportRetry::BailOriginal;
     }
     if files_committed > 0 {
-        // Data-integrity stop (exit 3): rows already landed and a same-cursor
-        // retry would duplicate them. Typed marker so a scheduler does not treat
-        // the underlying *transient* cause as safe-to-retry. Message verbatim.
         return ExportRetry::BailDuplicateGuard(
             DataIntegrityError::new(format!(
                 "export '{}': transient error after {} file(s) written to destination \
@@ -239,25 +193,15 @@ pub(crate) fn run_export(
     config_path: &str,
     chunk_source: super::chunked::ChunkSource,
 ) -> Result<()> {
-    // Mark this a batch run subject to the per-runner facade contract (ADR-0018):
-    // every runner reachable below MUST apply the schema-drift gate + Form-B harvest.
-    // `check_post_run_invariants` asserts they ran for `state_backed` runs — the
-    // structural half of the runner-bypass guard (this session's parallel-keyset
-    // drift-gate bypass would have tripped it).
     summary.state_backed = true;
 
-    // Keyset (seek) pagination owns its own sequential paging loop (OPT-4).
     if let ExtractionStrategy::Keyset(kp) = &plan.strategy {
-        // A MongoDB keyset export with `parallel: N` fans N disjoint `_id`-range
-        // workers (each keyset-paging its slice); every other keyset stays the
-        // single sequential seek loop.
         if plan.source.source_type == crate::config::SourceType::Mongo && kp.parallel.max(1) > 1 {
             return super::mongo_parallel::run_mongo_parallel(plan, summary, state, kp);
         }
         return super::keyset::run_keyset(src, plan, summary, Some(state), progress);
     }
 
-    // Chunked strategies own their own execution path.
     if matches!(plan.strategy, ExtractionStrategy::Chunked(_)) {
         if plan.strategy.is_resumable() {
             return run_chunked_sequential_checkpoint(
@@ -274,7 +218,6 @@ pub(crate) fn run_export(
         }
     }
 
-    // All non-chunked strategies: ask the strategy for its query and cursor needs.
     let cursor_state = if plan.strategy.needs_cursor_state() {
         Some(progress.cursor()?)
     } else {
@@ -295,7 +238,7 @@ pub(crate) fn run_export(
     )
 }
 
-/// `err` as `RIVET_CONFIG_CURSOR_COLUMN_CASE` when the base query names the cursor column only in another case; any other error unchanged.
+/// `err` as `RIVET_CONFIG_CURSOR_COLUMN_CASE` when the base query names the cursor column only in another case.
 fn refuse_a_cursor_case_miss(
     err: anyhow::Error,
     src: &mut dyn Source,
@@ -314,7 +257,7 @@ fn refuse_a_cursor_case_miss(
     }
 }
 
-/// `err` as `RIVET_STATE_CURSOR_INCOMPARABLE` when the source refused to convert a value while a stored cursor was compared; any other error unchanged.
+/// `err` as `RIVET_STATE_CURSOR_INCOMPARABLE` when the source refused to convert a value while a stored cursor was compared.
 fn refuse_an_incomparable_cursor(
     err: anyhow::Error,
     cursor: Option<&crate::types::CursorState>,
@@ -345,7 +288,7 @@ fn refuse_an_incomparable_cursor(
     ))
 }
 
-/// Refuse a stored cursor past the `cursor_high` of the destination's last success manifest: the rows between were never delivered there.
+/// Refuse a stored cursor past the `cursor_high` of the destination's last success manifest.
 pub(super) fn refuse_a_cursor_past_the_manifest(
     plan: &ResolvedRunPlan,
     progress: &crate::state::ProgressClaim<'_>,
@@ -374,7 +317,7 @@ pub(super) fn refuse_a_cursor_past_the_manifest(
     )
 }
 
-/// Whether `stored` orders after `high`: as numbers when both are, else as text of one length; `None` when they cannot be ordered.
+/// Whether `stored` orders after `high`: as numbers when both are, else as text of one length.
 pub(crate) fn cursor_is_past(stored: &str, high: &str) -> Option<bool> {
     if let (Ok(a), Ok(b)) = (stored.parse::<i128>(), high.parse::<i128>()) {
         return Some(a > b);
@@ -408,12 +351,6 @@ pub(super) fn run_single_export(
     state: Option<&StateStore>,
     summary: &mut RunSummary,
 ) -> Result<()> {
-    // Resolve catalog hints from the unwrapped base. For Snapshot/Incremental
-    // `query == base_query` (the incremental predicate is applied inside the
-    // driver); for TimeWindow `resolve_query` wraps the base in a
-    // `SELECT * FROM (base) WHERE <ts> BETWEEN …` subquery that hides the source
-    // table, so the base is needed to resolve PG NUMERIC. Passing it through
-    // `wrapped` is correct for both (no-op when query == base).
     let request = source::ExportRequest::wrapped(
         query,
         &plan.base_query,
@@ -424,11 +361,6 @@ pub(super) fn run_single_export(
     .with_incremental(plan.strategy.incremental_plan())
     .with_cursor(cursor);
 
-    // Pipelined path (on by default; disable with `RIVET_PIPELINE_WRITES=0`):
-    // the source thread only fetches + converts; a worker thread owns the
-    // ExportSink and does the parquet encode/compress so DB I/O overlaps with
-    // compression CPU. The worker error (if any) is recovered by `finish()` and
-    // takes precedence over the source-side error.
     let refuse = |e| refuse_an_incomparable_cursor(e, cursor, plan);
     let mut sink = if super::sink::PipelinedSink::enabled() {
         let mut psink = super::sink::PipelinedSink::spawn(plan)?;
@@ -443,22 +375,11 @@ pub(super) fn run_single_export(
         sink
     };
 
-    // Test fault-point #1: after the source stream was fully read but
-    // before the writer is finalised.  Exercised by QA backlog Task 1.1.
     crate::test_hook::maybe_panic_at("after_source_read");
-    // Deterministic "alive mid-export" window for the OPT-6 signal-reaping test.
     crate::test_hook::maybe_block_at("after_source_read");
 
     sink.finish_writer()?;
 
-    // ADR-0029: feed the OBSERVATION half of the ledger the moment the read is
-    // done — the dest schema this run SAW and the shape bytes it measured carry
-    // no coverage obligation, so recording them early can never be wrong. Every
-    // `?` below (`RunnerFrame::open`, and above all the
-    // per-part `write_part_file` inside the commit loop) used to escape ABOVE
-    // the single tail drain, so a run that failed mid-write pinned the STALE
-    // open-time fingerprint onto a Failed manifest describing parts written
-    // under the observed schema. The INTEGRITY half stays below the loop.
     sink.drain_observations_into(&mut summary.ledger);
 
     log::info!(
@@ -484,9 +405,6 @@ pub(super) fn run_single_export(
         plan.validate.then_some(plan.format),
         |idx, count| part_file_name(&plan.export_name, &stamp, idx, count, ext),
     );
-    // ADR-0029: single's commit unit is the whole invocation — ONE sink accumulated
-    // the checksums of every part, so they cover all of them or (on a mid-write
-    // failure) none. Observations were fed above, at read end.
     let checksums = wrote.map(|()| sink.take_checksums());
     super::fan_in::commit_unit(
         plan,
@@ -500,19 +418,7 @@ pub(super) fn run_single_export(
         |_| Ok(()),
     )?;
 
-    // Round-2 audit #12: record the incremental cursor RANGE on the summary but do
-    // NOT advance the state cursor here. Under ADR-0001 the DESTINATION is the
-    // loader's source of truth, so the cursor advance must happen AFTER the
-    // destination manifest is durable (`finalize_manifest`) — otherwise a crash in
-    // the advance→manifest window leaves the cursor past parts the manifest never
-    // recorded, which the manifest-authoritative `rivet load` then silently drops
-    // (an export→load at-least-once break). The caller commits the cursor via
-    // `commit_incremental_cursor` once the manifest is written; the
-    // `after_cursor_commit` fault hook fires there.
     if let (Some(last_val), Some(st)) = (&sink.last_cursor_value, state) {
-        // Capture the value this run resumed FROM (the low) — the deferred commit
-        // overwrites the stored cursor with the new high; the RANGE (low..high)
-        // ships to the manifest for warehouse-side continuity.
         let prior_low = st
             .get(&plan.export_name, &plan.source.state_key())
             .ok()
@@ -525,21 +431,11 @@ pub(super) fn run_single_export(
         summary.cursor_high = Some(last_val.clone());
     }
 
-    // "data phase complete", not "completed successfully": the post-run gates
-    // (drift policy, quality) run at the dispatcher AFTER this returns — a run
-    // they abort must not have already logged itself successful (seam bughunt
-    // 2026-08-21, LOW).
     log::info!("export '{}': data phase complete", plan.export_name);
     Ok(())
 }
 
-/// Round-2 audit #12: advance the incremental cursor AFTER the destination
-/// manifest is durable. `run_single_export` records the cursor range on the
-/// summary but leaves the state cursor untouched; the caller invokes this once
-/// `finalize_manifest` has written the manifest, so a crash never leaves the
-/// cursor advanced past parts the loader-authoritative manifest doesn't record.
-/// No-op unless an incremental cursor is pending (`summary.cursor_high`). The
-/// `after_cursor_commit` fault hook fires inside `RunStore::commit()` here.
+/// Round-2 audit #12: advance the incremental cursor AFTER the destination manifest is durable.
 pub(super) fn commit_incremental_cursor(
     state: &StateStore,
     plan: &ResolvedRunPlan,
@@ -554,20 +450,7 @@ pub(super) fn commit_incremental_cursor(
     Ok(())
 }
 
-/// True for connect errors that will NEVER recover on their own — nothing is
-/// listening, the host is unroutable, or DNS can't resolve it. Deliberately
-/// EXCLUDES connection-reset / broken-pipe / EOF (a transient mid-handshake
-/// blip that does retry) and is never hit by cold-start "starting up", which is
-/// a post-connect SQLSTATE, not a connect failure.
-/// Bridge `rivet doctor`'s source-error categorizer + remediation hint to the
-/// run-time connect seam, so a failed `rivet run` (auth, TLS, …) carries the same
-/// guidance instead of a bare driver error. `.context()` (not message
-/// replacement) keeps the original error — and the substrings classify_exit /
-/// retry classification rely on — intact underneath.
-// pub(crate) so the chunked/parallel runners attach the same actionable connect
-// hint (doctor pointer + auth/TLS category) their first `create_source` — the
-// single-export path had it, the parallel-chunked path (the default for large
-// tables) leaked the raw driver error. Audit finding.
+/// True for connect errors that will NEVER recover on their own.
 pub(crate) fn attach_connect_hint(
     e: anyhow::Error,
     source: &crate::config::SourceConfig,
@@ -584,10 +467,10 @@ fn is_port_closed(e: &anyhow::Error) -> bool {
     m.contains("connection refused")
         || m.contains("no route to host")
         || m.contains("network unreachable")
-        || m.contains("name or service not known") // Linux DNS failure
-        || m.contains("nodename nor servname") // macOS DNS failure
-        || m.contains("failed to lookup address") // hickory/reqwest DNS failure
-        || m.contains("could not translate host name") // libpq DNS failure
+        || m.contains("name or service not known")
+        || m.contains("nodename nor servname")
+        || m.contains("failed to lookup address")
+        || m.contains("could not translate host name")
 }
 
 #[cfg(test)]
@@ -613,8 +496,6 @@ mod tests {
             "t_ts_part2.parquet"
         );
     }
-
-    // ── mock sources ─────────────────────────────────────────────────────────
 
     /// Source that emits no schema and no batches → sink sees 0 rows.
     struct EmptySource;
@@ -701,8 +582,6 @@ mod tests {
         assert_eq!(code(&first_run), None);
     }
 
-    // ── minimal plan builder ─────────────────────────────────────────────────
-
     fn minimal_plan() -> ResolvedRunPlan {
         ResolvedRunPlan {
             export_name: "test_export".into(),
@@ -722,8 +601,6 @@ mod tests {
         let result = run_single_export(src, "SELECT 1", None, plan, None, &mut summary);
         (result, summary)
     }
-
-    // ── zero-rows paths ───────────────────────────────────────────────────────
 
     /// 0 rows: the runner succeeds and leaves the status to the dispatcher.
     #[test]
@@ -783,8 +660,7 @@ mod tests {
         assert_ne!(summary.status, "skipped");
     }
 
-    /// single grades nothing itself: it writes its part and hands what its sink measured
-    /// to the ledger, whose seam grades every runner.
+    /// single grades nothing itself: it writes its part and hands what its sink measured to the ledger, whose seam grades every runner.
     #[test]
     fn single_feeds_its_quality_measurements_to_the_ledger_and_grades_nothing() {
         let out = tempfile::tempdir().unwrap();
@@ -811,27 +687,15 @@ mod tests {
         assert_eq!(q.unique_sets.get("id").map(|s| s.len()), Some(3));
     }
 
-    // ── decide_export_retry: retry/reconnect decision matrix ────────────────
-    //
-    // These tests exhaustively cover the four-way decision that gates the
-    // retry loop in `run_with_reconnect`. The function is pure (no I/O, no
-    // state) which lets every combination of (attempt, max, files_committed,
-    // error class) be enumerated without touching docker.
-
     fn transient_err() -> anyhow::Error {
-        // String form matches the network branch in classify_error.
         anyhow::anyhow!("connection reset by peer")
     }
 
     fn permanent_err() -> anyhow::Error {
-        // String form matches the auth branch in classify_error.
         anyhow::anyhow!("permission denied for table users")
     }
 
-    /// The CONNECT decisions, which `is_port_closed`'s own test does not reach:
-    /// it grades the classifier, not what the loop does with it. Ten mutants
-    /// survived on these two lines — every comparison and both `&&`s — because
-    /// nothing observed the composed answer.
+    /// The CONNECT decisions, which `is_port_closed`'s own test does not reach.
     #[test]
     fn a_dead_endpoint_bails_on_the_first_attempt_and_a_blip_still_retries() {
         let dead = anyhow::anyhow!("connection refused");
@@ -858,10 +722,6 @@ mod tests {
 
     #[test]
     fn decide_retry_transient_after_files_committed_is_duplicate_guard() {
-        // After a file has been written, retrying from the same cursor would
-        // re-export those rows. The guard is the highest-value invariant in
-        // the retry loop — losing it would silently corrupt a downstream
-        // warehouse. Test it explicitly.
         let err = transient_err();
         let d = decide_export_retry(1, 3, 2, "orders", &err);
         match d {
@@ -887,10 +747,6 @@ mod tests {
 
     #[test]
     fn duplicate_guard_is_typed_data_integrity_exit_3() {
-        // The duplicate-guard bail must carry the DataIntegrityError marker so
-        // `classify_exit` returns 3 (STOP, do not blindly retry) — even though
-        // the *underlying* cause was transient. A scheduler must not treat a
-        // possibly-duplicated dataset as safe-to-retry.
         let err = transient_err();
         let d = decide_export_retry(1, 3, 2, "orders", &err);
         let synth = match d {
@@ -917,38 +773,30 @@ mod tests {
 
     #[test]
     fn decide_retry_transient_after_budget_exhausted_bails_original() {
-        // attempt == max_retries → no more attempts allowed.
         let d = decide_export_retry(3, 3, 0, "orders", &transient_err());
         assert!(matches!(d, ExportRetry::BailOriginal), "got: {d:?}");
     }
 
     #[test]
     fn decide_retry_permanent_error_bails_immediately_regardless_of_budget() {
-        // Permanent errors short-circuit even when retry budget remains.
         let d = decide_export_retry(0, 3, 0, "orders", &permanent_err());
         assert!(matches!(d, ExportRetry::BailOriginal), "got: {d:?}");
     }
 
     #[test]
     fn decide_retry_permanent_error_after_files_does_not_synthesise_duplicate_guard() {
-        // The duplicate-guard message is reserved for *transient* errors —
-        // a permanent failure should propagate as-is so the operator sees the
-        // real cause, not a wrapped recovery hint.
         let d = decide_export_retry(0, 3, 5, "orders", &permanent_err());
         assert!(matches!(d, ExportRetry::BailOriginal), "got: {d:?}");
     }
 
     #[test]
     fn decide_retry_zero_max_retries_never_retries() {
-        // `max_retries = 0` is the "fail fast" config. attempt(0) >= max(0)
-        // must bail immediately even on a transient error.
         let d = decide_export_retry(0, 0, 0, "orders", &transient_err());
         assert!(matches!(d, ExportRetry::BailOriginal), "got: {d:?}");
     }
 
     #[test]
     fn is_port_closed_fast_bails_dead_endpoints_not_transient_blips() {
-        // Hard "nothing will ever answer here" signals → fast-bail.
         assert!(is_port_closed(&anyhow::anyhow!(
             "error connecting to server: Connection refused (os error 61)"
         )));
@@ -958,12 +806,10 @@ mod tests {
         assert!(is_port_closed(&anyhow::anyhow!(
             "dns error: failed to lookup address information: Name or service not known"
         )));
-        // Transient / recoverable signals → must NOT fast-bail (they retry).
         assert!(!is_port_closed(&anyhow::anyhow!(
             "connection reset by peer (os error 54)"
         )));
         assert!(!is_port_closed(&anyhow::anyhow!("broken pipe")));
-        // Cold-start: a post-connect SQLSTATE, must keep retrying.
         assert!(!is_port_closed(&anyhow::anyhow!(
             "db error: FATAL: the database system is starting up"
         )));
@@ -971,7 +817,6 @@ mod tests {
 
     #[test]
     fn a_stored_cursor_is_past_the_manifest_only_when_it_orders_after_cursor_high() {
-        // below / equal / above, as numbers (a text order would put "9" past "10")
         assert_eq!(cursor_is_past("9", "10"), Some(false));
         assert_eq!(cursor_is_past("40", "40"), Some(false));
         assert_eq!(cursor_is_past("040", "40"), Some(false));
@@ -979,7 +824,6 @@ mod tests {
         assert_eq!(cursor_is_past("42", "40"), Some(true));
         assert_eq!(cursor_is_past("18446744073709551615", "40"), Some(true));
         assert_eq!(cursor_is_past("12.5", "12.75"), Some(false));
-        // timestamps of one rendering order as text
         assert_eq!(
             cursor_is_past("2026-02-01T00:00:00Z", "2026-01-31T23:59:59Z"),
             Some(true)
@@ -992,7 +836,6 @@ mod tests {
             cursor_is_past("2026-01-31T23:59:59Z", "2026-01-31T23:59:59Z"),
             Some(false)
         );
-        // two renderings cannot be ordered: the run proceeds
         assert_eq!(
             cursor_is_past("2026-02-01 00:00:00.5", "2026-02-01 00:00:00"),
             None

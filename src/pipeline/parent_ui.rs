@@ -64,20 +64,13 @@ use super::{clamp_line, format_bytes, strip_chunked_recovery_hint};
 
 pub(crate) use crate::redact::sanitize_terminal;
 
-/// One unit of work for the UI thread.  Children emit raw `ChildEvent`s; the
-/// reader thread for each child wraps them in [`UiMessage::Event`].  When a
-/// child's stdout closes (process exited) the reader sends [`UiMessage::ChildClosed`]
-/// so the UI can mark a card whose `Finished` event was lost (e.g. crash).
+/// One unit of work for the UI thread.
 #[derive(Debug)]
 pub(crate) enum UiMessage {
     Event(ChildEvent),
-    /// A formatted `log` line from this process while the renderer owns the
-    /// screen: printed ABOVE the card block, which is then repainted below it.
-    /// Written straight to stderr it lands between two frames, the cursor-up
-    /// count is off by one, and the block is duplicated into scrollback.
+    /// A formatted `log` line from this process while the renderer owns the screen.
     Log(String),
-    /// Child's stdout closed without a `Finished` event.  Carries the export
-    /// name and an optional terminal verdict from `wait()`.
+    /// Child's stdout closed without a `Finished` event.
     ChildClosed {
         export_name: String,
         wait_status: ChildWaitStatus,
@@ -90,42 +83,19 @@ pub(crate) enum ChildWaitStatus {
     Failed(String),
 }
 
-/// How often the UI redraws when no event arrives (so elapsed-time and ETA
-/// keep ticking on idle children).
+/// How often the UI redraws when no event arrives (so elapsed-time and ETA keep ticking on idle children).
 const IDLE_REDRAW_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Minimum padding for the name column so names stay aligned even when only
-/// short ones have been observed so far.
+/// Minimum padding for the name column so names stay aligned even when only short ones have been observed so far.
 const MIN_NAME_COL: usize = 12;
 
-/// Minimum padding for the mode column.  Modes are short (`full`, `chunked`,
-/// `incremental`, `timewindow`) so a fixed minimum is fine.
+/// Minimum padding for the mode column.
 const MIN_MODE_COL: usize = 7;
 
-/// Drain `rx` until the channel closes, rendering events as multi-line
-/// "cards" on stderr.
-///
-/// Width is recomputed once at startup from the terminal size and clamped to
-/// `[60, 100]`.  Terminal resize during a run is not handled (rare, and
-/// `indicatif` didn't handle it either inside our pty stack); the next run
-/// picks up the new width.
-///
-/// Two rendering modes:
-///
-/// - **Interactive (stderr is a tty)**: hand-rolled ANSI cursor protocol
-///   that repaints all cards in place every 200 ms, so progress / ETA tick
-///   forward and finished cards swap their progress bar for a final-metrics
-///   line without scrolling the screen.
-/// - **Linear (stderr is piped/redirected, OR the card block is taller than
-///   the terminal viewport)**: cursor-up sequences would be no-ops or, worse,
-///   line-wrap around long error messages and corrupt the anchor — so we
-///   instead print each card exactly once when it transitions to its terminal
-///   state. The viewport check ([`should_render_interactive`]) is what keeps a
-///   many-table `apply` from scrolling stale redraw frames into scrollback.
+/// Drain `rx` until the channel closes, rendering events as multi-line "cards" on stderr.
 pub(crate) fn run_ui(rx: Receiver<UiMessage>, name_floor: usize, n_cards: usize) {
     let width = pick_width();
     let term = console::Term::stderr();
-    // `Term::size()` returns `(rows, cols)` on a tty, `(0, _)` otherwise.
     let (rows, _) = term.size();
     if should_render_interactive(term.features().is_attended(), rows as usize, n_cards) {
         run_ui_interactive(rx, width, name_floor);
@@ -134,19 +104,10 @@ pub(crate) fn run_ui(rx: Receiver<UiMessage>, name_floor: usize, n_cards: usize)
     }
 }
 
-/// Lines the in-place renderer needs BESIDES the one-line-per-card block: the
-/// single trailing newline `commit()` writes to push the block into scrollback.
+/// Lines the in-place renderer needs BESIDES the one-line-per-card block.
 const RESERVED_LINES: usize = 1;
 
-/// Decide the render mode. The interactive renderer is only safe when stderr is
-/// a tty AND the whole card block fits the viewport. `redraw()` walks the cursor
-/// UP `n_cards` lines (`\x1b[{n}A`) to repaint in place — each card is exactly
-/// one line (`live_lines`), so the block is `n_cards` rows. If the block is
-/// taller than the terminal the cursor cannot reach the true top: old frames
-/// scroll into scrollback and a capture shows the block DUPLICATED (field-
-/// observed on a ~30-table `apply`). When it can't fit, fall back to the append-
-/// only linear renderer, which is capture-safe by construction. `term_rows == 0`
-/// (size unknown / not a tty) is treated as "doesn't fit" → linear.
+/// Decide the render mode.
 fn should_render_interactive(attended: bool, term_rows: usize, n_cards: usize) -> bool {
     attended && term_rows > n_cards + RESERVED_LINES
 }
@@ -158,20 +119,12 @@ fn run_ui_interactive(rx: Receiver<UiMessage>, width: usize, name_floor: usize) 
     loop {
         match rx.recv_timeout(IDLE_REDRAW_INTERVAL) {
             Ok(msg) => renderer.process_message(msg),
-            Err(RecvTimeoutError::Timeout) => {
-                // No event in the last interval — redraw anyway so the
-                // running cards' elapsed-time / ETA fields advance.
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
         renderer.redraw();
     }
 
-    // Channel closed → all readers + producers gone.  Mark any cards still
-    // running as failed (synthetic), do one last redraw at the same screen
-    // position, then commit the cards to scrollback by emitting one
-    // trailing newline (so the next stderr write — typically the aggregate
-    // run summary — starts on a fresh line below the cards).
     for card in renderer.cards.values_mut() {
         if !card.finished {
             card.finalize_synthetic("failed", Some("child exited without a final summary"));
@@ -181,9 +134,7 @@ fn run_ui_interactive(rx: Receiver<UiMessage>, width: usize, name_floor: usize) 
     renderer.commit();
 }
 
-/// Linear renderer for non-tty stderr.  Each card is printed once when it
-/// reaches its terminal state — there is no in-place redraw, so output is
-/// safe to `tee` / capture without phantom duplicates.
+/// Linear renderer for non-tty stderr.
 fn run_ui_linear(rx: Receiver<UiMessage>, width: usize, name_floor: usize) {
     let mut renderer = Renderer::new(width, name_floor);
     let mut printed: HashSet<String> = HashSet::new();
@@ -193,8 +144,6 @@ fn run_ui_linear(rx: Receiver<UiMessage>, width: usize, name_floor: usize) {
         flush_finished_cards(&renderer, &mut printed, width);
     }
 
-    // Channel closed: synthesize failures for anything still pending and
-    // emit them too.
     let pending: Vec<String> = renderer
         .order
         .iter()
@@ -211,8 +160,7 @@ fn run_ui_linear(rx: Receiver<UiMessage>, width: usize, name_floor: usize) {
     flush_finished_cards(&renderer, &mut printed, width);
 }
 
-/// Append every card that has reached its terminal state but hasn't been
-/// printed yet to stderr, preserving the `Started`-event observation order.
+/// Append every card that has reached its terminal state but hasn't been printed yet to stderr, preserving the `Started`-event observation order.
 fn flush_finished_cards(renderer: &Renderer, printed: &mut HashSet<String>, width: usize) {
     let (name_col, mode_col) = column_widths(&renderer.cards, renderer.name_floor);
     let mut out = String::new();
@@ -240,9 +188,7 @@ fn flush_finished_cards(renderer: &Renderer, printed: &mut HashSet<String>, widt
     let _ = handle.flush();
 }
 
-/// Pick stable column widths for the name and mode columns by combining the
-/// observed maxima with `MIN_NAME_COL` / `MIN_MODE_COL` floors so the layout
-/// stays aligned even when only short names / modes have been observed yet.
+/// Pick stable column widths for the name and mode columns by combining the observed maxima with `MIN_NAME_COL` / `MIN_MODE_COL` floors so the layout stays aligned even when only short names / modes have been observed yet.
 fn column_widths(cards: &HashMap<String, CardState>, name_floor: usize) -> (usize, usize) {
     let mut name = name_floor;
     let mut mode = 0usize;
@@ -253,32 +199,14 @@ fn column_widths(cards: &HashMap<String, CardState>, name_floor: usize) -> (usiz
     (name.max(MIN_NAME_COL), mode.max(MIN_MODE_COL))
 }
 
-/// Owns the on-screen state and knows how to repaint it.  `cards` is
-/// addressed by export name; `order` is the insertion order in which we
-/// observed each `Started` event so the card layout is deterministic across
-/// runs even when the underlying `HashMap` iterates in a different order.
-///
-/// **The renderer never mutates process-global state.** It is fed by TWO
-/// transports — the cross-process child-stdout reader
-/// ([`super::parallel_children::adopt_child_event`], where a counter carried
-/// on an event is genuinely FOREIGN) and the in-process `mpsc` channel
-/// ([`super::ipc::emit_event`], installed for `--parallel-exports`, `--pool`
-/// AND the plain sequential path, where the very same process both wrote and
-/// reads the counter). A fold placed here therefore runs on both, and on the
-/// in-process transport it adds a counter to itself: one export with 3 real
-/// retries reported 6, and N exports doubled per export (2^N). Folding
-/// belongs at the process boundary, which is the only place provenance is
-/// knowable — see `adopt_child_event` (bughunt 2026-08-14, finding #4).
+/// Owns the on-screen state and knows how to repaint it.
 struct Renderer {
     cards: HashMap<String, CardState>,
     order: Vec<String>,
-    /// Number of lines printed to stderr by the last `redraw()`.  Used so
-    /// the next `redraw()` can move the cursor back to the same anchor and
-    /// repaint in place rather than appending a fresh card stack each time.
+    /// Number of lines printed to stderr by the last `redraw()`.
     last_drawn_lines: usize,
     width: usize,
-    /// Lower bound on the name column, seeded from the known export names so the
-    /// table is aligned from the first redraw (not widening as long names arrive).
+    /// Lower bound on the name column, seeded from the known export names so the table is aligned from the first redraw (not widening as long names arrive).
     name_floor: usize,
 }
 
@@ -301,8 +229,6 @@ impl Renderer {
                 let mut handle = std::io::stderr().lock();
                 let _ = handle.write_all(out.as_bytes());
                 let _ = handle.flush();
-                // The block below the line is stale now; the next redraw
-                // repaints it from the fresh anchor instead of walking up.
                 self.last_drawn_lines = 0;
             }
             UiMessage::ChildClosed {
@@ -375,10 +301,6 @@ impl Renderer {
                 duration_ms,
                 peak_rss_mb,
                 error_message,
-                // NOT folded here — see the note above `Renderer` and
-                // `parallel_children::adopt_child_event`. The renderer is
-                // shared by an in-process transport, where this number IS
-                // this process's own counter.
                 dest_retries: _,
                 bytes_read: _,
                 mode: _,
@@ -398,19 +320,11 @@ impl Renderer {
         }
     }
 
-    /// Repaint the card stack on stderr.  If a previous draw left
-    /// `last_drawn_lines` lines on screen, move the cursor up that many
-    /// lines first, then write each line, clearing it first so a shorter
-    /// new line doesn't leave stale tail characters from the previous draw.
+    /// Repaint the card stack on stderr.
     fn redraw(&mut self) {
         let mut out = String::new();
         if self.last_drawn_lines > 0 {
-            // CSI <n> A — move cursor up `n` lines (column unchanged).  We
-            // assume the previous redraw left the cursor *below* the last
-            // card line (after the trailing `\n`), which is the cursor
-            // position the terminal naturally has after `writeln!`.
             out.push_str(&format!("\x1b[{}A", self.last_drawn_lines));
-            // Move cursor to column 1 of that line.
             out.push('\r');
         }
 
@@ -419,8 +333,6 @@ impl Renderer {
         for name in &self.order {
             if let Some(card) = self.cards.get(name) {
                 for line in card.live_lines(self.width, name_col, mode_col) {
-                    // CSI 2K — erase entire line so a shorter new line
-                    // overwrites the longer previous line cleanly.
                     out.push_str("\x1b[2K");
                     out.push_str(&line);
                     out.push('\n');
@@ -429,14 +341,11 @@ impl Renderer {
             }
         }
 
-        // If the new layout is shorter than the previous one, blank out the
-        // extra lines below so they don't linger from the last draw.
         if self.last_drawn_lines > new_lines {
             let extra = self.last_drawn_lines - new_lines;
             for _ in 0..extra {
                 out.push_str("\x1b[2K\n");
             }
-            // Move cursor back up so the next redraw's anchor is correct.
             out.push_str(&format!("\x1b[{extra}A"));
         }
 
@@ -447,18 +356,13 @@ impl Renderer {
         self.last_drawn_lines = new_lines;
     }
 
-    /// Lock the rendered cards into scrollback.  After the last `redraw()`,
-    /// cursor sits at the line *below* the last card (`writeln!` semantics).
-    /// Future stderr writes (e.g. the aggregate run summary) will start
-    /// there.  This is exactly what we want — no extra writing required.
+    /// Lock the rendered cards into scrollback.
     fn commit(&mut self) {
-        // Reset to 0 so any later `redraw()` would print a fresh stack
-        // beneath, but we don't expect any.
         self.last_drawn_lines = 0;
     }
 }
 
-/// Pure data for one export's card.  All formatting lives in `live_lines`.
+/// Pure data for one export's card.
 struct CardState {
     export_name: String,
     mode: String,
@@ -499,27 +403,18 @@ impl CardState {
     fn finalize_synthetic(&mut self, status: &str, error_message: Option<&str>) {
         self.finished = true;
         self.status = format!("synthetic-{}", status);
-        // `error_message` here can carry a forwarded child/`wait()` failure
-        // string, so it is sanitised on the same terminal-injection grounds
-        // as `render_final_line` (CWE-150).
         self.final_line = match error_message {
             Some(msg) => sanitize_terminal(msg),
             None => "child exited without a final summary".to_string(),
         };
     }
 
-    /// Lines this card contributes to the current frame.  Compact mode
-    /// emits exactly one line per export so 15 parallel exports take 15
-    /// stderr rows instead of 105.  The line is clamped to `width`
-    /// characters: a wrapped line would corrupt the cursor-up math in the
-    /// in-place renderer and cause cards to drift down the screen across
-    /// redraws.
+    /// Lines this card contributes to the current frame.
     fn live_lines(&self, width: usize, name_col: usize, mode_col: usize) -> Vec<String> {
         vec![clamp_line(&self.compact_line(name_col, mode_col), width)]
     }
 
-    /// Render the single per-export status line.  Layout:
-    /// `<icon> <name pad> <mode pad>  <body>`
+    /// Render the single per-export status line.
     fn compact_line(&self, name_col: usize, mode_col: usize) -> String {
         let icon = self.status_icon();
         let body = if self.finished {
@@ -545,18 +440,12 @@ impl CardState {
         match self.status.as_str() {
             "success" => "✓",
             "failed" => "✗",
-            // `finalize_synthetic` rewrites status to `synthetic-<status>`
-            // so we can distinguish a real failure (where the child sent a
-            // `Finished` event) from a child whose stdout closed without
-            // one.  Both still mean "did not succeed", but the glyph
-            // hints at the difference for triage.
             s if s.starts_with("synthetic-") => "⚠",
             _ => "•",
         }
     }
 
-    /// Body used while the export is still running.  Shape depends on
-    /// whether chunk progress is known yet.
+    /// Body used while the export is still running.
     fn running_body(&self) -> String {
         let elapsed_ms = self.started_at.elapsed().as_millis() as i64;
         let chunks_label = if self.total_chunks > 0 {
@@ -600,14 +489,7 @@ fn render_final_line(
     error_message: Option<&str>,
 ) -> String {
     if let Some(err) = error_message {
-        // Drop the inline `rivet …` recovery hint — the run aggregator
-        // prints one consolidated recovery block at the end, and the
-        // long inline command would otherwise wrap and corrupt the
-        // in-place card layout.
         let (cause, _) = strip_chunked_recovery_hint(err);
-        // The error text is attacker-influenced (source-DB error strings),
-        // so neutralise any embedded terminal-control bytes before it is
-        // rendered to the operator's terminal (CWE-150).
         return sanitize_terminal(cause);
     }
     let rss = if peak_rss_mb > 0 {
@@ -615,8 +497,6 @@ fn render_final_line(
     } else {
         String::new()
     };
-    // Fixed-width columns so values line up into a table regardless of magnitude:
-    // rows/files/bytes/duration are right-aligned (numbers read down a column).
     format!(
         "{:>11} rows  {:>3} files  {:>9}  {:>8}{}",
         fmt_thousands(total_rows),
@@ -627,13 +507,9 @@ fn render_final_line(
     )
 }
 
-/// The bytes that put one log line ABOVE a card block of `last_drawn_lines`
-/// lines: walk up to the block's anchor, print the line there, and leave the
-/// cursor where the next `redraw()` (from a zero anchor) repaints the block.
+/// The bytes that put one log line ABOVE a card block of `last_drawn_lines` lines.
 fn log_frame(last_drawn_lines: usize, line: &str) -> String {
     let mut out = String::new();
-    // Cursor control only when there IS a block to walk over: the linear renderer
-    // (piped stderr) must stay free of escape bytes — a capture grades that.
     if last_drawn_lines > 0 {
         out.push_str(&format!("\x1b[{last_drawn_lines}A\r\x1b[2K"));
     }
@@ -643,8 +519,6 @@ fn log_frame(last_drawn_lines: usize, line: &str) -> String {
 }
 
 fn pick_width() -> usize {
-    // `console::Term::stderr().size()` returns `(rows, cols)` if attached to a
-    // tty, otherwise falls back to `(24, 80)` — that fallback is fine.
     let (_, cols) = console::Term::stderr().size();
     (cols as usize).clamp(60, 100)
 }
@@ -703,14 +577,7 @@ fn fmt_duration_ms(ms: i64) -> String {
     }
 }
 
-/// Serialises the tests that assert on the process-wide
-/// `destination::TRANSIENT_RETRIES` counter by DELTA. The counter is global
-/// and the lib test binary runs its tests on threads, so two such tests
-/// overlapping would let one's bump satisfy the other's assertion — which is
-/// exactly how a mutant survives. Lives here (rather than beside the counter)
-/// because the invariant it protects is this module's: only a foreign counter
-/// is folded. `destination::cloud`'s own interceptor test still adds 2 outside
-/// this lock, so the assertions stay delta-based with room for that.
+/// Serialises the tests that assert on the process-wide `destination::TRANSIENT_RETRIES` counter by DELTA.
 #[cfg(test)]
 pub(crate) fn retry_counter_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -721,10 +588,7 @@ pub(crate) fn retry_counter_test_lock() -> &'static std::sync::Mutex<()> {
 mod tests {
     use super::*;
 
-    /// A `log` line during an interactive run lands ABOVE the block (cursor up
-    /// to the anchor, print, newline) and resets the anchor, so the next redraw
-    /// repaints below it instead of walking up past a line it did not draw —
-    /// the off-by-one that duplicated a partner's card into scrollback.
+    /// A `log` line during an interactive run lands ABOVE the block (cursor up to the anchor, print, newline) and resets the anchor, so the next redraw repaints below it instead of walking up past a line it did not draw.
     #[test]
     fn a_log_line_is_printed_above_the_block_and_resets_the_anchor() {
         assert_eq!(
@@ -754,36 +618,13 @@ mod tests {
         );
     }
 
-    /// The renderer must NOT fold a retry counter that arrived over the
-    /// IN-PROCESS channel — that counter is this process's own.
-    ///
-    /// Drives the real path end to end: install the in-process tx exactly as
-    /// `run.rs` does for `--parallel-exports` / `--pool` / the plain
-    /// sequential run, bump the process counter, call the production
-    /// `RunSummary::print()` (which takes its `ipc::capturing_events()`
-    /// branch and emits `Finished { dest_retries: transient_retries_total() }`),
-    /// then drain the channel through the real `Renderer::process_message`.
-    /// The pre-existing guard
-    /// (`summary::tests::single_export_summary_card_surfaces_destination_retries`)
-    /// calls `add_transient_retries` directly on a stub, so it never touches
-    /// print → emit_event → Renderer and could not see this feedback loop.
-    ///
-    /// TWO exports, not one: the defect is a fold, and a single event would
-    /// only show a doubling, not the per-export compounding (2^N) that made
-    /// the 154-export field pool report garbage.
-    ///
-    /// Mutant: restore `add_transient_retries(dest_retries)` in
-    /// `Renderer::handle_event`'s `Finished` arm → RED, measured
-    /// `grew by 2000000` (two events, each carrying the whole process total).
+    /// The renderer must NOT fold a retry counter that arrived over the IN-PROCESS channel.
     #[test]
     fn in_process_finished_event_must_not_refold_this_processs_own_retry_counter() {
         let _serial = super::retry_counter_test_lock()
             .lock()
             .unwrap_or_else(|p| p.into_inner());
 
-        // Large enough that the mutant's growth (>= this, twice over) can
-        // never be confused with the handful of counts a concurrent
-        // `destination::cloud` interceptor test adds.
         const SEED: u64 = 1_000_000;
         crate::destination::add_transient_retries(SEED);
 
@@ -793,7 +634,6 @@ mod tests {
             let s = crate::pipeline::summary::RunSummary::stub_for_testing("run-refold", name);
             s.print();
         }
-        // Drop the global sender so the drain below terminates.
         super::super::ipc::clear_in_process_tx();
 
         let before_drain = crate::destination::transient_retries_total();
@@ -801,9 +641,6 @@ mod tests {
         let mut finished = 0usize;
         while let Ok(msg) = rx.recv() {
             if let UiMessage::Event(ChildEvent::Finished { dest_retries, .. }) = &msg {
-                // Fixture is not inert: print() really did emit, and the
-                // event really does carry this process's whole counter —
-                // the value the mutant would re-add.
                 assert!(
                     *dest_retries >= SEED,
                     "in-process Finished must carry the process total, got {dest_retries}"
@@ -876,7 +713,6 @@ mod tests {
         assert!(s.contains("123,456 rows"));
         assert!(s.contains("5 files"));
         assert!(s.contains("9.4s"));
-        // Columns are right-padded for table alignment, so check parts.
         assert!(s.contains("RSS") && s.contains("30 MB"));
     }
 
@@ -888,22 +724,11 @@ mod tests {
 
     #[test]
     fn interactive_only_when_the_card_block_fits_the_viewport() {
-        // Fits: tall terminal, few cards → in-place redraw is safe.
         assert!(should_render_interactive(true, 50, 10));
-        // Field bug: a ~30-table `apply` on a short viewport. The block is
-        // taller than the terminal, so the cursor-up redraw scrolls stale
-        // frames into scrollback and a capture shows the block DUPLICATED —
-        // fall back to the append-only linear renderer. RED against the old
-        // `attended`-only gate (which returned interactive here).
         assert!(!should_render_interactive(true, 24, 30));
-        // Exact boundary: block (10) + the trailing commit line (1) == rows,
-        // so it does NOT fit (need strictly more rows than the block).
         assert!(!should_render_interactive(true, 11, 10));
-        // One more row clears it.
         assert!(should_render_interactive(true, 12, 10));
-        // Never interactive when stderr isn't a tty, whatever the reported size.
         assert!(!should_render_interactive(false, 100, 1));
-        // `Term::size()` returns 0 rows off a tty → treat as "doesn't fit".
         assert!(!should_render_interactive(true, 0, 1));
     }
 
@@ -970,9 +795,6 @@ mod tests {
         card.total_chunks = 10;
         card.chunks_done = 5;
         card.rows = 50_000;
-        // started_at is Instant::now() — elapsed is effectively 0 ms, so rate
-        // is suppressed (< 500 ms guard).  We just verify no panic and no
-        // stale rate label appears in the very-first tick.
         let line = card.running_body();
         assert!(line.contains("50K rows"));
         assert!(!line.contains("r/s"), "rate shown too early: {line}");
@@ -1027,7 +849,6 @@ mod tests {
         let line = card.compact_line(MIN_NAME_COL, MIN_MODE_COL);
         assert!(line.starts_with("✗ "), "failed uses ✗: {}", line);
         assert!(line.contains("still in progress"));
-        // The recovery hint must NOT survive into the per-card line.
         assert!(!line.contains("`rivet "), "hint must be stripped: {}", line);
     }
 
@@ -1051,18 +872,12 @@ mod tests {
         let mode_col = "incremental".chars().count();
         let la = a.compact_line(name_col, mode_col);
         let lb = b.compact_line(name_col, mode_col);
-        // The body separator (`{N} rows`) should start at the same column
-        // for both since both name and mode are padded.
         let pa = la.find(" rows").expect("body present in a");
         let pb = lb.find(" rows").expect("body present in b");
         assert_eq!(pa, pb, "alignment broken: a={la:?} b={lb:?}");
     }
 
-    /// Dangerous terminal control characters that must not survive
-    /// sanitisation, mirroring `sanitize_terminal`'s contract: C0 except TAB/LF,
-    /// DEL, and the C1 block. This scans decoded `char`s (NOT raw bytes) — a
-    /// byte scan would false-flag the UTF-8 continuation bytes (0x80..=0xBF) of
-    /// legitimate multi-byte display glyphs the renderer uses (`──`, `✗`, `—`).
+    /// Dangerous terminal control characters that must not survive sanitisation, mirroring `sanitize_terminal`'s contract.
     fn dangerous_control_bytes(s: &str) -> Vec<char> {
         s.chars()
             .filter(|&c| {
@@ -1074,29 +889,24 @@ mod tests {
 
     #[test]
     fn sanitize_terminal_escapes_ansi_and_osc_payload() {
-        // OSC 0 window-title rewrite + CSI 2J screen clear + BEL.
         let payload = "\u{1b}]0;pwned\u{07}\u{1b}[2Jboom";
         let clean = sanitize_terminal(payload);
         assert!(
             dangerous_control_bytes(&clean).is_empty(),
             "escape bytes survived: {clean:?}"
         );
-        // The visible, printable remainder is preserved.
         assert!(clean.contains("pwned"));
         assert!(clean.contains("boom"));
     }
 
     #[test]
     fn sanitize_terminal_preserves_printable_and_layout_whitespace() {
-        // ASCII text, TAB and LF must pass through untouched; multi-byte
-        // display glyphs the renderer uses must survive intact.
         let s = "ok\tline1\nline2 ✓ … ──";
         assert_eq!(sanitize_terminal(s), s);
     }
 
     #[test]
     fn sanitize_terminal_strips_del_c1_and_cr() {
-        // DEL (0x7f), a C1 control (U+0085 NEL) and CR are all removed/escaped.
         let s = "a\u{7f}b\u{85}c\rd";
         let clean = sanitize_terminal(s);
         assert!(dangerous_control_bytes(&clean).is_empty());
@@ -1105,8 +915,6 @@ mod tests {
 
     #[test]
     fn render_final_line_sanitises_db_error_escapes() {
-        // The whole V9 leak path through `render_final_line` must emit no raw
-        // terminal-control bytes from an attacker-influenced DB error string.
         let err = "db error: invalid input: \u{1b}]0;pwned\u{07}\u{1b}[2Jboom";
         let line = render_final_line(0, 0, 0, 0, 0, Some(err));
         assert!(

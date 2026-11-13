@@ -881,7 +881,7 @@ fn anchor_holds_a_part(state: &StateStore, progress: &ProgressClaim<'_>) -> bool
     }
 }
 
-/// Open the run-status row of a run at its START, refused by code when the state does not take it; returns the start time.
+/// Open the run-status row of a run at its START, refused by code when the state does not take it.
 pub(super) fn ledger_begin_run(
     state: &StateStore,
     export_name: &str,
@@ -2000,7 +2000,7 @@ mod tests {
         .0
     }
 
-    /// A pending baseline snapshot over a mixed `_id` checkpoint is refused by code before any write; a changes-only run is not asked.
+    /// A pending baseline snapshot over a mixed `_id` checkpoint is refused by code before any write.
     #[test]
     fn a_pending_snapshot_over_mixed_id_types_is_refused_and_a_changes_only_run_is_not() {
         let dir = tempfile::tempdir().unwrap();
@@ -2017,7 +2017,7 @@ mod tests {
         );
     }
 
-    /// A resume that ADOPTS a prior run's id must still close the row the ledger was opened under — both wrappers, through one seam.
+    /// A resume that ADOPTS a prior run's id must still close the row the ledger was opened under.
     #[test]
     fn an_adopted_run_id_does_not_strand_the_row_the_ledger_opened() {
         let state = crate::state::StateStore::open_in_memory().expect("in-memory state");
@@ -3785,7 +3785,7 @@ mod tests {
         assert_eq!(spill.unit, "disk spills (tmp-disk tables + temp files)");
     }
 
-    /// Closing the bracket credits the temp spill to the summary and records every other counter's growth; with a snapshot missing it records nothing.
+    /// Closing the bracket credits the temp spill to the summary and records every other counter's growth.
     #[test]
     fn closing_the_harm_bracket_records_the_windows_growth_and_credits_the_temp_spill() {
         let snapshot = |files: i64, returned: i64, temp_bytes: i64| {

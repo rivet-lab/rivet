@@ -1,42 +1,4 @@
 //! `rivet repair` — targeted re-export of reconcile mismatches (Epic H).
-//!
-//! ## Flow
-//!
-//! 1. Build a `ReconcileReport` (either freshly, or load a previous JSON via
-//!    `--report`).
-//! 2. Derive a [`RepairPlan`](crate::plan::RepairPlan) — the set of chunk
-//!    ranges that need re-export.
-//! 3. Without `--execute` (default): emit the plan and exit.
-//! 4. With `--execute`: re-run just those chunks via
-//!    [`chunked::run_chunked_sequential`] using a `Precomputed` chunk source.
-//!    Output files are written with collision-proof naming — they are new
-//!    files alongside the originals; Rivet does not delete or overwrite the
-//!    old files.
-//!
-//! ## Closing the trust loop
-//!
-//! A re-export that lands a fresh file but leaves the recorded state stale
-//! breaks the operator's trust loop: `reconcile` still recounts the source
-//! against the *old* `chunk_task.rows_written` and reports the same mismatch
-//! (the loop never converges), and `rivet validate` lists the prefix and flags
-//! the un-recorded repair file as an `untracked_object`. So after a successful
-//! per-chunk re-export this path:
-//!
-//! 1. updates that chunk's `chunk_task` row — `rows_written` is set to the
-//!    freshly-exported count and the task is re-marked `completed` — so the
-//!    next `reconcile` compares the live source count against the repaired
-//!    count and converges to a match; and
-//! 2. appends the repair-written part(s) to the destination `manifest.json`
-//!    (read → append → rewrite) so the new file is tracked and `validate` no
-//!    longer reports it as untracked, and marks the chunk's original part(s)
-//!    `superseded` so a manifest reader sees each row once. The original FILES
-//!    stay on disk until opt-in `gc_orphans` (ADR-0009 RR5); when the mapping of
-//!    an original to its chunk is ambiguous the chunk stays additive, with a warning.
-//!
-//! Progression semantics (ADR-0008): repair does **not** advance
-//! `last_committed_*` — the committed boundary already covers the chunk index.
-//! The reconcile the operator runs (or that the repaired state now passes)
-//! advances `last_verified_*`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -99,7 +61,6 @@ pub fn run_repair_command(
     let state_path = config_dir.join(".rivet_state.db");
     let state = StateStore::open(state_path.to_str().unwrap_or(".rivet_state.db"))?;
 
-    // Before any report is read: a report or stored windows planned under another chunk plan would be repaired on the wrong column.
     reconcile_cmd::latest_chunk_run_under_this_plan(&plan, &state, "repair", config_path)?;
     let reconcile_report = load_or_build_reconcile(&plan, &state, report_source, config_path)?;
     let repair_plan = RepairPlan::from_reconcile(&reconcile_report);
@@ -166,11 +127,6 @@ fn execute_repair(
     let mut results: Vec<(RepairAction, RepairOutcome)> =
         Vec::with_capacity(repair_plan.actions.len());
 
-    // The chunk run whose `chunk_task` rows reconcile reads. Repair re-exports
-    // against the latest run for this export — the same run reconcile counted.
-    // Without it we can re-export the data but cannot point the recorded state
-    // at the fresh count, so `reconcile → repair → reconcile` could never
-    // converge (audit finding #7).
     let _run_lease = super::chunked::claim_export_progress(
         state,
         &plan.export_name,
@@ -179,24 +135,11 @@ fn execute_repair(
     )?;
     let run_id = state.claim(plan.progress_key())?.latest_chunk_run()?;
 
-    // One summary across the whole repair (matches the original single
-    // `RunSummary::new`): `record_part` appends every freshly-written part to
-    // `summary.manifest_parts`. We snapshot its length and `total_rows` around
-    // each single-chunk re-export to attribute the exact rows and the exact
-    // new file(s) to that chunk — no even-split lie.
     let mut src = source::create_source(&plan.source)?;
     let mut summary = RunSummary::new(plan);
 
-    // One destination handle for the whole repair: used to rename each
-    // repair-written part so its filename carries the ORIGINAL chunk index
-    // (audit L15). The single-chunk `Precomputed` source restarts enumeration
-    // at 0, so the writer always names the file `..._chunk0_...`; without this
-    // the file repairing chunk 2 would land as `chunk0`, no longer reflecting
-    // the logical chunk it repairs. Built once here (re-`create_destination`d
-    // again only in the manifest-rewrite step, which runs at most once).
     let dest = crate::destination::create_destination(&plan.destination)?;
 
-    // Each executed chunk with the repair-written parts that replace it, in order.
     let mut repaired: Vec<(i64, Vec<ManifestPart>)> = Vec::new();
 
     for a in &repair_plan.actions {
@@ -225,22 +168,9 @@ fn execute_repair(
         match outcome {
             Ok(()) => {
                 let rows = summary.total_rows - rows_before;
-                // Every part `record_part` appended for this single chunk — its
-                // path, rows, bytes, fingerprint, md5. One chunk yields one part
-                // unless max_file_size rotated it; either way these are exactly
-                // the new files the manifest must learn about.
                 let mut chunk_parts: Vec<ManifestPart> =
                     summary.manifest_parts[parts_before..].to_vec();
 
-                // L15: the writer named each part `..._chunk0_...` (the
-                // single-chunk `Precomputed` source enumerates from 0), but this
-                // part repairs the logical chunk `a.chunk_index`. Rename the file
-                // and rewrite the recorded `path` so the name carries the real
-                // index — both `complete_chunk_task` (file_name) and the manifest
-                // append below then reference the corrected name. Best-effort
-                // (ADR-0012 M9 `move` semantics): the bytes are already durable,
-                // so a failed rename keeps the original name and warns rather than
-                // failing the repair. A no-op when the chunk index is already 0.
                 for p in &mut chunk_parts {
                     if let Some(renamed) = relabel_repair_chunk_index(&p.path, a.chunk_index) {
                         match dest.r#move(&p.path, &renamed) {
@@ -258,19 +188,9 @@ fn execute_repair(
                     }
                 }
 
-                // (1) Close finding #7: point `chunk_task.rows_written` at the
-                //     freshly-exported count (and re-mark the task completed,
-                //     clearing any stale error) so the next reconcile compares
-                //     the live source count against the repaired count. The
-                //     `file_name` records the newest part for this chunk; if the
-                //     chunk rotated into several parts the latest is recorded
-                //     (reconcile keys on rows_written, not file_name).
                 if let Some(rid) = &run_id {
                     let file_name = chunk_parts.last().map(|p| p.path.as_str());
                     if let Err(e) = state.complete_chunk_task(rid, a.chunk_index, rows, file_name) {
-                        // Non-fatal to the data (the file is durable) but fatal
-                        // to trust — surface it loudly rather than report a
-                        // false "executed" that leaves reconcile stuck.
                         log::warn!(
                             "repair: chunk {} re-exported but chunk_task update failed — \
                              reconcile will still report the old mismatch: {:#}",
@@ -297,12 +217,6 @@ fn execute_repair(
         }
     }
 
-    // (2) Close finding #8: record the repair-written parts in the destination
-    //     manifest so `rivet validate` no longer flags them as untracked. Best
-    //     effort and warn-on-fail (ADR-0001 I7 / ADR-0012): the parts are
-    //     already durable at the destination, so a manifest-rewrite failure
-    //     must not change the repair's exit code — but it is logged loudly so
-    //     the operator knows validate may still flag the files.
     if !repaired.is_empty()
         && let Err(e) = record_repair_parts_in_manifest(
             &plan.destination,
@@ -326,12 +240,7 @@ fn execute_repair(
     ))
 }
 
-/// Read the destination `manifest.json`, mark each repaired chunk's original parts
-/// `Superseded`, append the repair-written parts as committed, and rewrite it.
-///
-/// Returns `Err` if no manifest exists at the prefix (a repair against a prefix
-/// that was never finalized has nothing to amend) or if the read/write fails;
-/// the caller logs and continues since the data itself is already durable.
+/// Read the destination `manifest.json`, mark each repaired chunk's original parts `Superseded`, append the repair-written parts as committed, and rewrite it.
 fn record_repair_parts_in_manifest(
     destination: &crate::config::DestinationConfig,
     repaired: &[(i64, Vec<ManifestPart>)],
@@ -341,9 +250,6 @@ fn record_repair_parts_in_manifest(
 ) -> Result<()> {
     let dest = crate::destination::create_destination(destination)?;
 
-    // Manifests live at the prefix root (manifest_dir == "" for the local/path
-    // and bucket-prefix destinations repair supports); parts are recorded with
-    // prefix-relative paths, which is exactly what `record_part` stored.
     let raw = match dest.head(MANIFEST_FILENAME)? {
         Some(_) => crate::pipeline::validate_manifest::read_capped(
             &*dest,
@@ -369,7 +275,6 @@ fn record_repair_parts_in_manifest(
         manifest.parts[i].status = PartStatus::Superseded;
     }
 
-    // Unique, monotonic part_ids (ADR-0012 M4): max existing + 1, incrementing.
     let mut next_id = manifest.parts.iter().map(|p| p.part_id).max().unwrap_or(0) + 1;
     for p in repaired.iter().flat_map(|(_, parts)| parts) {
         manifest.parts.push(ManifestPart {
@@ -384,8 +289,6 @@ fn record_repair_parts_in_manifest(
         next_id += 1;
     }
 
-    // Keep the manifest self-consistent (validate's step 2 checks this): the
-    // declared aggregates must match the committed parts after the append.
     manifest.row_count = manifest.committed_rows();
     manifest.part_count = manifest.committed_part_count() as u32;
     manifest.finished_at = chrono::Utc::now().to_rfc3339();
@@ -396,21 +299,11 @@ fn record_repair_parts_in_manifest(
         removed.as_ref(),
     );
 
-    // Route through the shared writer so the canonical `manifest.json`, the
-    // immutable run-unique `manifest-<run_id>.json` copy, and the `_SUCCESS`
-    // fingerprint all update TOGETHER. The old hand-rolled write touched ONLY
-    // the canonical file, leaving the run-unique sidecar stale — and `rivet load`
-    // is manifest-authoritative and reads the run-unique copies preferentially
-    // (`list_manifest_keys`), so it saw the PRE-repair part list and SILENTLY
-    // dropped the repaired parts with every count/gate green. `write_manifest`
-    // re-emits `_SUCCESS` only for a `Success` manifest, so a repaired clean run
-    // keeps its marker (re-fingerprinted to the new bytes) and a repaired failed
-    // run stays marker-less — the terminal status is preserved.
     crate::pipeline::manifest_writer::write_manifest(&*dest, &manifest)?;
     Ok(())
 }
 
-/// Indexes of the committed manifest parts the repaired chunks replace; an ambiguous mapping supersedes nothing for that chunk.
+/// Indexes of the committed manifest parts the repaired chunks replace.
 fn superseded_parts(
     manifest: &RunManifest,
     repaired: &[(i64, Vec<ManifestPart>)],
@@ -467,7 +360,7 @@ fn superseded_parts(
         .collect()
 }
 
-/// The superseded parts' Form-B contribution, re-read with the manifest's own render and key; `None` when it cannot be recomputed.
+/// The superseded parts' Form-B contribution, re-read with the manifest's own render and key.
 fn superseded_checksums(
     dest: &dyn crate::destination::Destination,
     manifest: &RunManifest,
@@ -562,20 +455,7 @@ fn fold_repair_checksums(
     }
 }
 
-/// Rewrite a repair-written part filename so it carries the ORIGINAL chunk
-/// index (L15). The single-chunk `Precomputed` source the repair runner uses
-/// enumerates from 0, so the writer always emits `..._chunk0_<nonce>.<ext>`
-/// (or a rotated `..._chunk0_<nonce>_p<n>.<ext>`); this replaces that `_chunk0_`
-/// token with `_chunk{original_chunk_index}_` so the name reflects the logical
-/// chunk it repairs.
-///
-/// Returns `None` when there is nothing to do: the chunk index is already 0
-/// (the name is already correct), or the path carries no `_chunk0_` token
-/// (defensive — an unexpected name shape is left untouched rather than mangled).
-///
-/// Targets the **rightmost** `_chunk0_`: everything after the chunk token is a
-/// 16-hex nonce, an optional `_p<n>` rotation suffix, and the extension — none
-/// of which can contain `_chunk0_`, so the rightmost match is the chunk token.
+/// Rewrite a repair-written part filename so it carries the ORIGINAL chunk index (L15).
 fn relabel_repair_chunk_index(path: &str, original_chunk_index: i64) -> Option<String> {
     if original_chunk_index == 0 {
         return None;
@@ -704,7 +584,7 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_CLI_EXPORT_UNKNOWN", 1);
     }
 
-    /// A repair is refused by code while a live run holds the export's lease, before it opens a source or reads the state; with the lease free it goes on (and fails on the source this plan does not have).
+    /// A repair is refused by code while a live run holds the export's lease, before it opens a source or reads the state.
     #[test]
     fn a_repair_beside_a_live_run_is_refused_before_it_touches_anything() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -747,7 +627,6 @@ mod tests {
 
     #[test]
     fn plan_from_auto_would_derive_actions_from_reconcile() {
-        // Smoke-test the public derivation path without hitting the DB.
         let partitions = vec![
             PartitionResult::classify(
                 PartitionKind::Chunk,
@@ -773,12 +652,8 @@ mod tests {
         assert_eq!(plan.actions[0].chunk_index, 1);
     }
 
-    // ── L15: repair-written filename carries the ORIGINAL chunk index ─────────
-
     #[test]
     fn relabel_repair_chunk_index_rewrites_chunk0_to_original() {
-        // The writer always emits `_chunk0_` for a single-chunk Precomputed
-        // source; repairing logical chunk 2 must rename it to `_chunk2_`.
         let written = "orders_20260611_120000_chunk0_a1b2c3d4e5f6a7b8.parquet";
         let renamed = relabel_repair_chunk_index(written, 2)
             .expect("a non-zero chunk index must produce a renamed path");
@@ -791,8 +666,6 @@ mod tests {
 
     #[test]
     fn relabel_repair_chunk_index_handles_rotated_part_suffix() {
-        // A max_file_size rotation suffixes `_p<n>` after the nonce; the chunk
-        // token still rewrites and the rotation suffix is preserved.
         let written = "orders_20260611_120000_chunk0_a1b2c3d4e5f6a7b8_p1.parquet";
         let renamed = relabel_repair_chunk_index(written, 3).unwrap();
         assert_eq!(
@@ -803,26 +676,15 @@ mod tests {
 
     #[test]
     fn relabel_repair_chunk_index_is_noop_for_chunk_zero() {
-        // Chunk 0's name is already correct — nothing to rename, so no move.
         let written = "orders_20260611_120000_chunk0_a1b2c3d4e5f6a7b8.parquet";
         assert!(relabel_repair_chunk_index(written, 0).is_none());
     }
 
     #[test]
     fn relabel_repair_chunk_index_leaves_unexpected_shapes_untouched() {
-        // A name without the chunk0 token (e.g. an unexpected writer shape) is
-        // left alone rather than mangled.
         assert!(relabel_repair_chunk_index("orders_no_chunk_token.parquet", 5).is_none());
     }
 
-    // ── repair must update the run-unique manifest copy the loader reads ──────
-    //
-    // RED before the fix: repair wrote ONLY the canonical manifest.json, leaving
-    // the immutable `manifest-<run_id>.json` sidecar stale. `rivet load` is
-    // manifest-authoritative and prefers the run-unique copy, so the repaired
-    // parts were silently dropped at load while every count/gate passed. Assert
-    // on the manifest COPY (not a data re-read — a re-read can't see a sidecar
-    // clobber; the process rules sidecar rule).
     fn formb_manifest(render: Option<&str>, key: Option<&str>) -> RunManifest {
         serde_json::from_value(serde_json::json!({
             "manifest_version": crate::manifest::MANIFEST_VERSION,
@@ -897,7 +759,6 @@ mod tests {
             content_md5: String::new(),
             status: PartStatus::Committed,
         };
-        // A finalized run: 2 committed parts, 20 rows.
         let manifest = RunManifest {
             split_window: None,
             checksum_render: None,
@@ -930,8 +791,6 @@ mod tests {
             checksum_key_column: None,
         };
         let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
-        // Both files as a real finalize would leave them; the run-unique copy is
-        // the one the loader reads and the one that went stale after repair.
         std::fs::write(dir.path().join(MANIFEST_FILENAME), &bytes).unwrap();
         std::fs::write(dir.path().join(run_unique_manifest_name(run_id)), &bytes).unwrap();
 
@@ -940,7 +799,6 @@ mod tests {
             path: Some(dpath),
             ..Default::default()
         };
-        // Repair recovers one more part: id 3, 7 rows.
         record_repair_parts_in_manifest(
             &dest_cfg,
             &[(3, vec![part(3, 7)])],
@@ -963,11 +821,8 @@ mod tests {
             run_unique.row_count, 27,
             "run-unique row_count must reflect the recovered rows (20 + 7)"
         );
-        // The canonical stays consistent with it.
         assert_eq!(read(MANIFEST_FILENAME.to_string()).parts.len(), 3);
     }
-
-    // ── option B: the manifest declares the replacement, the files stay ──────
 
     use crate::pipeline::chunked::chunk_part_filename;
 
@@ -1140,7 +995,6 @@ mod tests {
             sum(&[&f.sums0, &repair_sums]),
             "the manifest must attest exactly the committed parts, written-side"
         );
-        // Form B over the committed parts agrees with it.
         let dest = crate::destination::create_destination(&dest_cfg(&f.exp())).unwrap();
         assert!(
             crate::source::value_checksum::validate_manifest_checksums(&*dest, "")
@@ -1160,20 +1014,17 @@ mod tests {
 
     #[test]
     fn repair_stays_additive_when_the_mapping_is_ambiguous() {
-        // A manifest from another run.
         let f = fixture();
         let (repair, _) = f.repair("r-other", None);
         assert_eq!(f.status_of(&f.chunk1), PartStatus::Committed);
         assert_eq!(f.status_of(&repair), PartStatus::Committed);
         assert_eq!(f.manifest().row_count, 8);
 
-        // A repair part the rename could not relabel (still `_chunk0_`).
         let f = fixture();
         f.repair("r1", Some(chunk_part_filename("orders", 0, "parquet")));
         assert_eq!(f.status_of(&f.chunk1), PartStatus::Committed);
         assert_eq!(f.status_of(&f.chunk0), PartStatus::Committed);
 
-        // A committed part whose name carries no chunk index.
         let m = RunManifest {
             export_name: "orders".into(),
             ..RunManifest::for_test(
@@ -1190,7 +1041,6 @@ mod tests {
         )];
         assert!(superseded_parts(&m, &repaired, Some("r1")).is_empty());
 
-        // Another export's part named like a chunk part.
         let m = RunManifest {
             export_name: "orders".into(),
             ..RunManifest::for_test("r1", &[(&chunk_part_filename("items", 1, "parquet"), 2)])
@@ -1219,10 +1069,8 @@ mod tests {
             "the load reads each row once"
         );
 
-        // A run is active on the prefix: gc spares the superseded file.
         gc_orphans(&store, "gs://bucket/exp", &keyed, true, &Default::default()).unwrap();
         assert!(f.exp().join(&f.chunk1).exists());
-        // No run is active: gc collects it, and only it.
         let (removed, _) = gc_orphans(
             &store,
             "gs://bucket/exp",

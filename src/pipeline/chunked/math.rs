@@ -1,26 +1,11 @@
 //! Pure chunk math — no I/O, no database access.
-//!
-//! Range generation, chunk-query SQL building, plan fingerprinting. All
-//! functions in this module are deterministic and side-effect-free. Parsing the
-//! DB scalars the planner turns into bounds (`min`/`max` strings) lives in the
-//! shared `crate::scalar` leaf, not here.
 
-// `strip_select_star_from` lives in the `sql` leaf (shared with preflight and
-// plan::partition); re-exported here so `chunked`'s call sites and the
-// `chunked::strip_select_star_from` re-export are unchanged.
 pub(crate) use crate::sql::{strip_select_star_from, strip_simple_projection_from};
 
-/// Hard ceiling on range-window count. Above this the window `Vec` alone would
-/// exhaust memory (16 bytes/tuple → 50M ≈ 800 MB) *before* the sparse-plan guard
-/// — which inspects the already-built `chunks.len()` — could bail. So the ceiling
-/// is checked on the span SCALAR before `generate_chunks` allocates. A legitimate
-/// plan never approaches it (the sparse guard bails at a few thousand windows);
-/// this only catches the pathological extreme-key-span OOM (round-2 audit #7:
-/// one row with a maximal bigint PK → ~9e13 windows → instant OOM of `rivet
-/// plan`/`run`).
+/// Hard ceiling on range-window count.
 pub const MAX_CHUNK_WINDOWS: u128 = 50_000_000;
 
-/// The number of inclusive windows of `window` keys that cover `min..=max`, with no allocation; 0 for an empty range or a zero window.
+/// The number of inclusive windows of `window` keys that cover `min..=max`, with no allocation.
 pub fn expected_chunk_count(min: i64, max: i64, window: u128) -> u128 {
     if max < min || window == 0 {
         return 0;
@@ -74,7 +59,7 @@ pub fn generate_chunks(min: i64, max: i64, chunk_size: i64) -> Vec<(i64, i64)> {
     generate_windows(min, max, chunk_size as u128)
 }
 
-/// The pieces of the inclusive `ranges` that no window of `windows` covers, in order; `windows` are inclusive, ordered by their first key and do not overlap.
+/// The pieces of the inclusive `ranges` that no window of `windows` covers, in order.
 pub(crate) fn ranges_uncovered(ranges: &[(i64, i64)], windows: &[(i64, i64)]) -> Vec<(i64, i64)> {
     let mut out = Vec::new();
     for &(start, end) in ranges {
@@ -105,25 +90,8 @@ pub(crate) fn build_chunk_query_sql(
     source_type: crate::config::SourceType,
 ) -> String {
     let quoted_col = crate::sql::quote_ident(source_type, order_column);
-    // SQL Server parses a SEPARATED date literal per the session DATEFORMAT, so a
-    // non-us_english server reads every window bound wrong (or rejects it). The
-    // unseparated form is ISO in every language. Same reason as
-    // `plan::partition::build_range_query`, which owns the helper.
     let date_fmt = crate::plan::partition::date_literal_format(source_type);
 
-    // Fast path: when base_query is the `SELECT * FROM <simple-ident>` form
-    // (typically produced by the `table:` YAML shortcut), append the WHERE
-    // directly instead of wrapping it in a subquery. Three reasons:
-    //
-    // 1. The PG numeric catalog-hint parser only recognises the simple form,
-    //    so declared `numeric(p,s)` types resolve automatically — wrapping
-    //    in `SELECT * FROM (...) AS _rivet` would force every NUMERIC column
-    //    to need a manual `columns:` override.
-    // 2. PG's planner inlines the trivial subquery anyway, but skipping it
-    //    keeps the EXPLAIN output (and chunk_plan_fingerprint) cleaner.
-    // 3. The `table:` form is the only one we can reason about syntactically;
-    //    arbitrary `query:` payloads still go through the subquery wrap so
-    //    we don't accidentally rewrite the user's SQL.
     if let Some(table_ident) = strip_select_star_from(base_query) {
         if chunk_by_days {
             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
@@ -147,7 +115,6 @@ pub(crate) fn build_chunk_query_sql(
     }
 
     if chunk_by_days {
-        // start/end are days since epoch; end is inclusive so the exclusive upper bound is end+1.
         let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
         let start_date = epoch + chrono::Duration::days(start);
         let end_date = epoch + chrono::Duration::days(end + 1);
@@ -179,20 +146,6 @@ pub(crate) fn chunk_plan_fingerprint(
     chunk_by_days: Option<u32>,
 ) -> String {
     use xxhash_rust::xxh3::xxh3_64;
-    // LENGTH-PREFIXED, not `\x1f`-separated. `base_query` is arbitrary operator
-    // SQL and may contain any byte including the separator, so separator-only
-    // framing lets one plan's text imitate another's field boundaries. A
-    // collision is not cosmetic: `ensure_chunk_checkpoint_plan` ADOPTS a prior
-    // run's chunk table when the fingerprints match, so two plans reading
-    // DIFFERENT windows would silently share a checkpoint and export the wrong
-    // rows. (A mismatch is the safe direction — it refuses to resume, loudly —
-    // which is also why re-framing is safe: fingerprints from before this change
-    // no longer match, so an in-flight resume asks for a reset instead of
-    // adopting the wrong plan.)
-    //
-    // `chunk_size` rides inside the range plan's own token because it is
-    // meaningless for the other plan kinds, which derive their windows
-    // differently — see `fingerprint_chunk_count_ignores_chunk_size`.
     let kind = match chunk_by_days {
         Some(d) => format!("date_{d}d"),
         None if chunk_count.is_some() => format!("count_{}", chunk_count.unwrap()),
@@ -211,9 +164,6 @@ pub(crate) fn chunk_plan_fingerprint(
 mod tests {
     use super::*;
 
-    // ── round-2 audit #7: gate the allocation, don't inspect it ──────────────
-    // `expected_chunk_count` must equal the length the eager builder would
-    // produce (else the pre-alloc ceiling gates the wrong number).
     #[test]
     fn expected_chunk_count_matches_generated_len() {
         for (min, max, cs) in [(0, 100, 25), (1, 100, 25), (42, 42, 100), (10, 20, 10_000)] {
@@ -223,15 +173,10 @@ mod tests {
                 "span {min}..={max} / {cs}"
             );
         }
-        // Empty/invalid ranges → 0, matching the empty-Vec case.
         assert_eq!(expected_chunk_count(10, 5, 10), 0);
         assert_eq!(expected_chunk_count(1, 100, 0), 0);
     }
 
-    // The extreme-span plan must be REFUSED before the Vec is materialised — a
-    // single maximal-bigint PK over the default chunk_size is ~9e13 windows.
-    // RED against calling the eager `generate_chunks` (which OOMs before any
-    // len-based guard can fire).
     #[test]
     fn generate_chunks_checked_bails_before_allocating_on_extreme_span() {
         let err = generate_chunks_checked(0, i64::MAX, 100_000)
@@ -243,13 +188,10 @@ mod tests {
             "names an escape hatch: {msg}"
         );
         crate::error::assert_coded(&err, "RIVET_PLAN_CHUNK_KEY_SPARSE", 1);
-        // The ceiling is exceeded by exactly one window past MAX_CHUNK_WINDOWS.
         let just_over = (MAX_CHUNK_WINDOWS as i64).saturating_mul(2);
         assert!(generate_chunks_checked(0, just_over, 1).is_err());
     }
 
-    // A legitimate plan (even a large one, well under the ceiling) still passes
-    // through unchanged — the guard must not reject normal chunking.
     #[test]
     fn a_full_i64_range_is_planned_in_windows_without_overflow() {
         let full = generate_windows(i64::MIN, i64::MAX, 1u128 << 64);
@@ -272,25 +214,14 @@ mod tests {
         assert_eq!(ok.len(), 100);
     }
 
-    // ── mutation-W4 gap closure ──────────────────────────────────────────────
-    // The chunk_by_days date arithmetic had NO test (the BETWEEN branch did):
-    // `end + 1 -> end - 1` on the exclusive upper bound silently DROPS the
-    // last day of every window — the off-by-one row-loss class. Golden dates
-    // pin both the fast (table-ident) and the subquery-wrap branches.
     #[test]
     fn chunk_by_days_windows_use_exclusive_upper_bound() {
         use crate::config::SourceType;
-        // Fast path: `SELECT * FROM t` keeps the bare-table form. A single-day
-        // window (start == end == day 0) must span exactly [1970-01-01,
-        // 1970-01-02) — an `end - 1` mutant produces an EMPTY window.
         let q = build_chunk_query_sql("SELECT * FROM t", "d", 0, 0, true, SourceType::Postgres);
         assert!(
             q.contains(">= '1970-01-01'") && q.contains("< '1970-01-02'"),
             "single-day window must be [day, day+1): {q}"
         );
-        // Subquery-wrap path (arbitrary query), non-zero offsets: day 19000 =
-        // 2022-01-08 (start arithmetic), end 19001 -> upper bound 19002 =
-        // 2022-01-10.
         let q = build_chunk_query_sql(
             "SELECT a, d FROM t WHERE a > 0",
             "d",
@@ -338,11 +269,8 @@ mod tests {
             false,
             crate::config::SourceType::Postgres,
         );
-        // Column name is quoted; numeric bounds are not
         assert!(q.contains("WHERE \"id\" BETWEEN 1 AND 100"), "got: {}", q);
     }
-
-    // ── Fast-path: `SELECT * FROM <ident>` is rewritten in place ──────────
 
     #[test]
     fn chunk_query_fast_path_select_star_from_simple_table() {
@@ -354,8 +282,6 @@ mod tests {
             false,
             crate::config::SourceType::Postgres,
         );
-        // Fast path: no subquery wrapper — the catalog-hint parser can see
-        // `FROM public.users` and resolve declared numeric(p,s) types.
         assert_eq!(
             q,
             "SELECT * FROM public.users WHERE \"id\" BETWEEN 1 AND 100"
@@ -377,8 +303,6 @@ mod tests {
 
     #[test]
     fn chunk_query_wraps_when_query_is_not_select_star() {
-        // Anything that's not the exact `SELECT * FROM <ident>` form falls
-        // back to the subquery wrap.
         for not_fast in [
             "SELECT id, name FROM users",
             "SELECT * FROM users u",
@@ -406,7 +330,7 @@ mod tests {
         let q = build_chunk_query_sql(
             "SELECT * FROM public.events",
             "created_at",
-            18000, // 2019-04-14
+            18000,
             18001,
             true,
             crate::config::SourceType::Postgres,
@@ -434,13 +358,8 @@ mod tests {
         assert!(q.contains("WHERE `id` BETWEEN 1 AND 100"), "got: {}", q);
     }
 
-    // `parse_date_flexible` and `parse_scalar_i64` now live in the shared
-    // `crate::scalar` leaf; their tests moved there too.
-
     #[test]
     fn test_build_chunk_query_date_mode() {
-        // days since epoch: 2023-01-01 = 19358, 2023-01-07 = 19364
-        // chunk start=19358, end=19364 → >= '2023-01-01' AND < '2023-01-08'
         let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         let start = (chrono::NaiveDate::from_ymd_opt(2023, 1, 1).unwrap() - epoch).num_days();
         let end = (chrono::NaiveDate::from_ymd_opt(2023, 1, 7).unwrap() - epoch).num_days();
@@ -453,7 +372,7 @@ mod tests {
             crate::config::SourceType::Postgres,
         );
         assert!(q.contains(">= '2023-01-01'"), "got: {q}");
-        assert!(q.contains("< '2023-01-08'"), "got: {q}"); // end+1 day exclusive
+        assert!(q.contains("< '2023-01-08'"), "got: {q}");
         assert!(!q.contains("BETWEEN"), "should use >= AND <, got: {q}");
     }
 
@@ -472,12 +391,6 @@ mod tests {
         assert!(q.contains(">= '2024-03-15'"), "got: {q}");
         assert!(q.contains("< '2024-03-16'"), "got: {q}");
     }
-
-    // ─── Property-style invariants (QA backlog Task 3.2) ────────────────────
-    //
-    // Core invariants checked on every non-empty `generate_chunks` output.
-    // Encoded as a helper + wide grid sweep so every boundary condition
-    // the planner encounters in practice is exercised deterministically.
 
     fn assert_chunk_invariants(min: i64, max: i64, size: i64, chunks: &[(i64, i64)]) {
         if max < min || size <= 0 {
@@ -513,12 +426,10 @@ mod tests {
         assert_eq!(total, max - min + 1, "sum of chunks equals total range");
     }
 
-    /// Any span anywhere in i64 — the edges where the arithmetic saturates included — is
-    /// tiled with no gap, no overlap and no window past the size.
+    /// Any span anywhere in i64 — the edges where the arithmetic saturates included.
     #[test]
     fn generate_chunks_tiles_any_span_of_i64() {
         use proptest::prelude::*;
-        // Weighted to the edges: a uniform i64 almost never lands where saturation matters.
         let edge = 1_000_000_000_000_000i64;
         let min = prop_oneof![
             any::<i64>(),
@@ -570,7 +481,6 @@ mod tests {
         assert_eq!(cut(&[(40, 50)]), ranges.to_vec());
         assert_eq!(cut(&[(-9, 0)]), ranges.to_vec());
         assert_eq!(cut(&[]), ranges.to_vec());
-        // A hole between two stored windows is planned again; nothing else is.
         assert_eq!(cut(&[(1, 10), (11, 13), (18, 30)]), vec![(14, 17)]);
         assert_eq!(
             cut(&[(1, 4), (8, 12), (25, 30)]),
@@ -591,7 +501,7 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Whatever a run stored and whatever the source holds now, the stored windows and the pieces planned beside them cover every key of the new plan once: none twice, none left out.
+        /// Whatever a run stored and whatever the source holds now, the stored windows and the pieces planned beside them cover every key of the new plan once.
         #[test]
         fn stored_windows_and_the_uncovered_pieces_cover_the_new_plan_once(
             min0 in -500i64..500,
@@ -646,8 +556,7 @@ mod tests {
         assert_chunk_invariants(1, 101, 25, &chunks);
     }
 
-    /// Regression for the i64::MAX overflow that crashed `start + chunk_size - 1`
-    /// before the saturating fix. See QA backlog Task 3.2 / 4A.2.
+    /// Regression for the i64::MAX overflow that crashed `start + chunk_size - 1` before the saturating fix.
     #[test]
     fn generate_chunks_does_not_overflow_on_near_i64_max() {
         let min = i64::MAX - 10;
@@ -656,13 +565,9 @@ mod tests {
         assert_chunk_invariants(min, max, 3, &chunks);
     }
 
-    /// Extreme boundary combinations: each triple must either succeed or
-    /// terminate immediately (empty).  Never panic.  QA backlog Task 4A.2.
+    /// Extreme boundary combinations: each triple must either succeed or terminate immediately (empty).
     #[test]
     fn generate_chunks_does_not_panic_on_extreme_boundaries() {
-        // Every entry generates at most a small bounded number of chunks,
-        // otherwise this test would hang.  "Wide range × tiny chunk_size" is
-        // out of scope for a fuzz smoke — it needs a planner-level cap.
         let triples: &[(i64, i64, i64)] = &[
             (0, 0, 1),
             (i64::MIN, i64::MIN + 1, 1),
@@ -681,8 +586,6 @@ mod tests {
         }
     }
 
-    // ── chunk_plan_fingerprint ────────────────────────────────────────────────
-
     fn fp(
         query: &str,
         col: &str,
@@ -693,22 +596,15 @@ mod tests {
         chunk_plan_fingerprint(query, col, size, count, by_days)
     }
 
-    /// A plan's TEXT must not be able to imitate another plan's field
-    /// boundaries. `base_query` is arbitrary operator SQL, so it can contain the
-    /// old `\x1f` separator; with separator-only framing the two plans below
-    /// built identical bytes, and a fingerprint match makes
-    /// `ensure_chunk_checkpoint_plan` adopt a chunk table planned for DIFFERENT
-    /// windows. RED against the `\x1f` framing.
+    /// A plan's TEXT must not be able to imitate another plan's field boundaries.
     #[test]
     fn fingerprint_cannot_be_forged_by_a_query_containing_the_old_separator() {
-        // ("Q\x1fid", "x") vs ("Q", "id\x1fx") — same concatenation, different plans.
         let a = fp("Q\u{1f}id", "x", 10, None, None);
         let b = fp("Q", "id\u{1f}x", 10, None, None);
         assert_ne!(
             a, b,
             "a query carrying the separator must not forge the chunk_column boundary"
         );
-        // And the boundary POSITION matters even with no separator involved.
         assert_ne!(
             fp("ab", "c", 10, None, None),
             fp("a", "bc", 10, None, None),
@@ -732,9 +628,6 @@ mod tests {
 
     #[test]
     fn fingerprint_chunk_count_ignores_chunk_size() {
-        // When chunk_count is set, chunk_size is not encoded in the fingerprint
-        // (it's computed dynamically from min/max). Two configs with different
-        // chunk_size but same chunk_count must produce the same fingerprint.
         let a = fp("SELECT * FROM t", "id", 1_000, Some(5), None);
         let b = fp("SELECT * FROM t", "id", 50_000, Some(5), None);
         assert_eq!(

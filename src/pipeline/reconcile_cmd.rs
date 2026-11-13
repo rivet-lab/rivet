@@ -1,13 +1,4 @@
 //! `rivet reconcile` — partition/window reconciliation (Epic F).
-//!
-//! Re-runs per-partition `COUNT(*)` against the source for a chunked export and
-//! compares the result with the stored per-chunk row counts. Produces a
-//! [`ReconcileReport`] — matches, mismatches, and repair candidates.
-//!
-//! v1 supports **chunked exports with `chunk_checkpoint: true`** (so per-chunk
-//! row counts and ranges are persisted). Other modes return a clear
-//! "not supported in v1" error — reconcile semantics for snapshot / incremental
-//! / time-window differ (see roadmap: Epic F & Epic G).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -75,20 +66,6 @@ pub fn run_reconcile_command(
 }
 
 /// Exit-code contract for `rivet reconcile`.
-///
-/// A detected **mismatch** fails the command (non-zero exit) so an operator can
-/// gate on it — `rivet reconcile && <next step>` must not proceed when the
-/// export disagrees with the source. This mirrors `rivet validate`, which
-/// already exits non-zero on a failed verdict; before this, `reconcile` printed
-/// the mismatch but returned `Ok`, so the gate silently passed.
-///
-/// **Unknown** partitions are *not* a failure: they mean reconcile could not
-/// obtain one of the two counts — an incomplete chunk (never recorded
-/// `rows_written`) or a non-integer keyset key it cannot re-count in the source.
-/// That is "could not verify", not "verified wrong"; a keyset export is
-/// structurally all-unknown and must not read as a hard failure. They are
-/// surfaced as a warning so "0 mismatches, N unknown" is not mistaken for a
-/// clean audit.
 fn enforce_reconcile_exit(summary: &ReconcileSummary) -> Result<()> {
     if summary.unknown > 0 {
         log::warn!(
@@ -99,10 +76,6 @@ fn enforce_reconcile_exit(summary: &ReconcileSummary) -> Result<()> {
         );
     }
     if summary.mismatches > 0 {
-        // A partition disagreeing with the source is a verified-wrong result, not
-        // a "could not verify" — it is the data-integrity class (exit 3) named in
-        // the `error::ExitClass` table. Typed marker so a scheduler branches on
-        // the code; `unknown` partitions (handled above) stay a warning, not 3.
         return Err(crate::error::DataIntegrityError::new(format!(
             "reconcile: {} of {} partition(s) disagree with the source — see the report above",
             summary.mismatches, summary.total_partitions
@@ -113,8 +86,6 @@ fn enforce_reconcile_exit(summary: &ReconcileSummary) -> Result<()> {
 }
 
 /// Run a reconcile pass against the latest chunk run and return the report.
-/// Exposed so `rivet repair` can build a repair plan from a fresh reconcile
-/// without duplicating the logic.
 pub(crate) fn reconcile_chunked_fresh(
     plan: &ResolvedRunPlan,
     state: &StateStore,
@@ -132,7 +103,7 @@ fn reconcile_chunked(
     reconcile_chunked_inner(plan, state, config_path)
 }
 
-/// The latest chunk run of `plan`, `None` when none is recorded; refused (`RIVET_STATE_CHUNK_PLAN_CHANGED`) when the config's chunk plan is not the one that run was planned under, so `reconcile` and `repair` never read stored windows on another column.
+/// The latest chunk run of `plan`, `None` when none is recorded.
 pub(crate) fn latest_chunk_run_under_this_plan(
     plan: &ResolvedRunPlan,
     state: &StateStore,
@@ -201,7 +172,6 @@ fn reconcile_chunked_inner(
         partitions,
     );
 
-    // Epic G: a reconcile with no mismatches and no unknowns is a fresh verified boundary.
     if report.summary.mismatches == 0 && report.summary.unknown == 0 {
         let highest = tasks
             .iter()
@@ -223,9 +193,6 @@ fn reconcile_chunked_inner(
 }
 
 /// Pure classification of `ChunkTaskInfo`s into `PartitionResult`s.
-///
-/// Abstracts the source round-trip via `count_source` so the logic can be
-/// exercised in unit tests without a live database.
 pub(crate) fn reconcile_chunked_tasks<F>(
     plan: &ResolvedRunPlan,
     tasks: &[ChunkTaskInfo],
@@ -253,7 +220,6 @@ where
         let (start, end) = match (t.start_key.parse::<i64>(), t.end_key.parse::<i64>()) {
             (Ok(s), Ok(e)) => (s, e),
             _ => {
-                // Unparseable chunk keys: keep exported count but cannot re-count source.
                 out.push(PartitionResult::classify(
                     PartitionKind::Chunk,
                     format!("chunk {} [{}..{}]", t.chunk_index, t.start_key, t.end_key),
@@ -307,14 +273,6 @@ fn emit_report(report: &ReconcileReport, format: &ReconcileOutputFormat) -> Resu
 }
 
 /// Render the human report to `w`.
-///
-/// Takes a writer rather than calling `println!` so a unit test can read what an
-/// operator would see. It used to print directly, and `replace
-/// print_report_pretty with ()` — the whole report silently gone — survived the
-/// lib suite: its only coverage was a live test, which the `--lib` mutation run
-/// cannot execute. The per-diff gate does not consult
-/// `docs/mutants-baseline.txt` either, so "live-guarded" is not an answer it
-/// accepts (2026-08-17).
 fn write_report_pretty(w: &mut impl std::io::Write, report: &ReconcileReport) {
     let _ = writeln!(w);
     let _ = writeln!(w, "  Export    : {}", report.export_name);
@@ -334,13 +292,6 @@ fn write_report_pretty(w: &mut impl std::io::Write, report: &ReconcileReport) {
         report.summary.total_source_rows, report.summary.total_exported_rows,
     );
 
-    // Say what the right-hand number IS. `exported` is `chunk_task.rows_written`
-    // — the count rivet RECORDED for each window, not a re-read of the parts. So
-    // "all partitions match" means the source agrees with rivet's own ledger; a
-    // part that was recorded at 500 rows and holds 400 reconciles clean. Naming
-    // the evidence is the difference between a report and a reassurance, and it
-    // is the same rule the preflight already follows: a diagnostic must not
-    // claim more than it checked (audit 2026-08-17).
     let _ = writeln!(
         w,
         "  Evidence  : source COUNT(*) per window vs the per-chunk counts rivet \
@@ -457,7 +408,6 @@ mod tests {
             task(0, "1", "100", "completed", Some(42)),
             task(1, "101", "200", "completed", Some(30)),
         ];
-        // Stub source: chunk 0 matches, chunk 1 undercounts on export side.
         let mut n = 0;
         let parts = reconcile_chunked_tasks(&plan, &tasks, |_q| {
             n += 1;
@@ -510,15 +460,12 @@ mod tests {
             Ok(Some(5))
         })
         .unwrap();
-        // Must reuse the same WHERE predicate used during extraction (ADR-0001 shape).
         assert!(captured.contains("BETWEEN 10 AND 20"), "got: {captured}");
         assert!(
             captured.contains("\"id\""),
             "identifier must be quoted: {captured}"
         );
     }
-
-    // ─── Exit-code contract (regression: reconcile gated silently passed) ──────
 
     fn summary(matches: usize, mismatches: usize, unknown: usize) -> ReconcileSummary {
         ReconcileSummary {
@@ -533,16 +480,11 @@ mod tests {
 
     #[test]
     fn reconcile_exit_fails_on_mismatch() {
-        // The gate: a detected mismatch must be a non-zero exit so
-        // `rivet reconcile && <next>` does not proceed on disagreeing data.
-        // Before the fix this returned Ok and the audit silently passed.
         let err = enforce_reconcile_exit(&summary(3, 1, 0)).unwrap_err();
         assert!(
             err.to_string().contains("disagree with the source"),
             "got: {err}"
         );
-        // And it carries the data-integrity class so a scheduler exits 3, not 1 —
-        // the `error::ExitClass` table lists "reconcile mismatch" as exit 3.
         assert_eq!(
             crate::error::classify_exit(&err),
             3,
@@ -557,30 +499,15 @@ mod tests {
 
     #[test]
     fn reconcile_exit_does_not_fail_on_unknown_only() {
-        // Unknown = "could not verify" (incomplete chunk / non-integer keyset
-        // key), not "verified wrong" — must NOT fail, else every keyset export
-        // (structurally all-unknown) would error.
         assert!(enforce_reconcile_exit(&summary(2, 0, 3)).is_ok());
     }
 
     #[test]
     fn reconcile_exit_fails_when_mismatch_and_unknown_coexist() {
-        // A real mismatch still gates even when other partitions are unverifiable.
         assert!(enforce_reconcile_exit(&summary(0, 1, 2)).is_err());
     }
 
     /// `emit_report` must actually EMIT — the dispatcher, not just the writer.
-    ///
-    /// `replace emit_report -> Result<()> with Ok(())` survived even after
-    /// `write_report_pretty` got its own unit test: stubbing the CALLER makes
-    /// every format silently produce nothing while the command still exits 0.
-    /// That is the layer-boundary shape this repo keeps paying for — a correct
-    /// test of correct logic, one layer below the thing that decides whether the
-    /// logic runs at all.
-    ///
-    /// Driven through the `Json(Some(path))` arm because its effect is a FILE,
-    /// readable without capturing stdout; the pretty arm is covered by the test
-    /// below and by the live reconcile suites.
     #[test]
     fn emit_report_actually_writes_the_json_report() {
         let report = ReconcileReport::new(
@@ -608,18 +535,6 @@ mod tests {
     }
 
     /// The report must reach the operator, and must NAME its evidence.
-    ///
-    /// `replace print_report_pretty with ()` — the whole report silently gone —
-    /// survived the lib suite: the only coverage was a live test, which the
-    /// `--lib` mutation run cannot execute, and the per-diff gate does not read
-    /// `docs/mutants-baseline.txt`. Taking a writer is what makes the operator's
-    /// view readable from a unit test at all.
-    ///
-    /// The evidence line is load-bearing, not decoration: `exported` is
-    /// `chunk_task.rows_written`, the count rivet RECORDED per window, never a
-    /// re-read of the parts — so "all partitions match" means the source agrees
-    /// with rivet's own ledger, and a chunk recorded at 500 rows whose file holds
-    /// 400 reconciles clean.
     #[test]
     fn the_pretty_report_names_what_it_compared() {
         let report = ReconcileReport::new(
@@ -658,7 +573,7 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_STATE_CHUNK_RUN_MISSING", 1);
     }
 
-    /// The stored run was planned under another chunk plan (another `chunk_column`, here): reconcile is refused by the code `run --resume` uses, naming the remedy, before any window is read.
+    /// The stored run was planned under another chunk plan (another `chunk_column`, here).
     #[test]
     fn reconcile_under_a_changed_chunk_plan_is_refused_by_code() {
         let state = StateStore::open_in_memory().unwrap();
@@ -693,7 +608,7 @@ mod tests {
         );
     }
 
-    /// The stored run was opened under another byte-shaping setting (`compression`, here): reconcile and repair are refused by `RIVET_STATE_RUN_SHAPE_CHANGED`, and the plan the run had is not.
+    /// The stored run was opened under another byte-shaping setting (`compression`, here).
     #[test]
     fn reconcile_under_a_changed_run_shape_is_refused_by_code() {
         let plan = chunked_plan();

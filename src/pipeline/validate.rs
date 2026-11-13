@@ -1,7 +1,4 @@
 //! **Layer: Execution**
-//!
-//! Post-write output validation.  Opens the written file and counts rows to
-//! verify the expected count.  Triggered only when `plan.validate = true`.
 
 use std::path::Path;
 
@@ -12,11 +9,6 @@ use crate::plan::FormatType;
 pub fn validate_output(path: &Path, format: FormatType, expected_rows: usize) -> Result<()> {
     let actual = match format {
         FormatType::Parquet => {
-            // The footer carries the authoritative row count — the ArrowWriter
-            // wrote it from the same batches we just encoded. Read it instead
-            // of decoding+decompressing every page a second time (the part was
-            // already streamed once for its checksum). `try_new` parses and
-            // validates the footer; a corrupt footer fails loudly here.
             let file = std::fs::File::open(path)?;
             let builder =
                 parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -55,8 +47,6 @@ mod tests {
         f
     }
 
-    // ── CSV ─────────────────────────────────────────────────────────────────
-
     #[test]
     fn csv_exact_row_count_passes() {
         let f = write_temp(b"id,name\n1,alice\n2,bob\n3,carol\n", ".csv");
@@ -72,34 +62,24 @@ mod tests {
 
     #[test]
     fn csv_empty_body_zero_rows_passes() {
-        // Header only — zero data rows.
         let f = write_temp(b"id,name\n", ".csv");
         validate_output(f.path(), FormatType::Csv, 0).unwrap();
     }
 
     #[test]
     fn csv_empty_file_zero_rows_passes() {
-        // Completely empty file: lines().count() == 0, saturating_sub(1) == 0.
         let f = write_temp(b"", ".csv");
         validate_output(f.path(), FormatType::Csv, 0).unwrap();
     }
 
     #[test]
     fn csv_trailing_newline_does_not_count_as_row() {
-        // "header\nrow1\n" → 2 lines → 2 - 1 = 1 data row
         let f = write_temp(b"id\n42\n", ".csv");
         validate_output(f.path(), FormatType::Csv, 1).unwrap();
     }
 
-    // ROAST-RED validate-csv-newline: validate_output counts physical lines,
-    // not RFC-4180 records, so a correct CSV part with a quoted embedded "\n"
-    // (exactly what src/format/csv.rs emits — see its test
-    // `string_with_newline_is_quoted`) fails validation and aborts the export.
-    // Asserts CORRECT behavior; expected to FAIL until the fix lands.
     #[test]
     fn roast_csv_quoted_embedded_newline_is_one_record() {
-        // Header + exactly 2 RFC-4180 data records; record 1's second field
-        // contains an embedded newline inside quotes (4 physical lines total).
         let f = write_temp(b"id,note\n1,\"line1\nline2\"\n2,plain\n", ".csv");
         let result = validate_output(f.path(), FormatType::Csv, 2);
         assert!(
@@ -119,8 +99,6 @@ mod tests {
 
     #[test]
     fn csv_doubled_quotes_inside_quoted_field_with_newline() {
-        // Escaped quotes ("") must not flip the in-quote state, so the
-        // embedded newline after them is still inside the quoted field.
         let f = write_temp(b"id,note\n1,\"say \"\"hi\"\"\nbye\"\n2,plain\n", ".csv");
         validate_output(f.path(), FormatType::Csv, 2).unwrap();
     }
@@ -142,8 +120,6 @@ mod tests {
         let f = write_temp(b"id,note\r\n1,\"line1\r\nline2\"\r\n", ".csv");
         validate_output(f.path(), FormatType::Csv, 1).unwrap();
     }
-
-    // ── Parquet ──────────────────────────────────────────────────────────────
 
     fn write_parquet_rows(n_rows: usize) -> NamedTempFile {
         use arrow::array::{Int64Array, StringArray};
@@ -201,7 +177,6 @@ mod tests {
     fn parquet_corrupt_file_returns_error() {
         let f = write_temp(b"not a parquet file at all", ".parquet");
         let err = validate_output(f.path(), FormatType::Parquet, 1).unwrap_err();
-        // Should fail with a parquet parse error, not a panic.
         let msg = err.to_string();
         assert!(
             !msg.contains("expected"),
@@ -211,7 +186,6 @@ mod tests {
 
     #[test]
     fn parquet_multi_batch_row_count_passes() {
-        // Write two separate batches so the reader sees multiple batches.
         use arrow::array::Int64Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
