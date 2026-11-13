@@ -162,6 +162,23 @@ link remain after the first run; the built binary must still name the sha.
 published to another machine) has an empty `blocking` list and ran a `pilot-*` or `release-notes-*` check. Publish both
 with `--publish`.
 
+## 9. Which reds block the tag
+
+Only a silent loss or a silent substitution at exit 0 blocks the tag: data that is missing, altered or
+replaced while rivet reports success. A red that is a harness, stand or stale-cell defect does not. It gets
+a dated entry in `dev/release_oracle/known_red.py` (or `open_defects.py`) saying why it is accepted and what
+closes it, and ships as a known issue in the release notes.
+
+## 10. Tagging a later commit on an earlier gate
+
+After a green full gate for commit A, a later commit B may be tagged without a new full gate only when the
+release binary built from B is byte-identical to the one the gate graded at A and the diff A..B touches only
+`dev/`, `docs/`, `tests/`, `changelog.d/`, `.githooks/`, `CHANGELOG.md` and `.cargo/mutants.toml`.
+Build B with `RIVET_GIT_SHA` set to the stamp A's binary prints (`rivet --version`), then run
+`python3 dev/pytools/release.py --graded-sha A [--binary FILE]`: it compares the SHA-256 of that binary with the
+`binary_sha256` the full-gate and island runs of A recorded, and reads every other record (seeded recall,
+satellites) for A. A record without the hash, another path or a different hash keeps the refusal.
+
 ---
 
 ## What this checklist does *not* enforce

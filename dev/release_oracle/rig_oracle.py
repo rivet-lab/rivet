@@ -401,7 +401,7 @@ def _bound(c: str, op: str, bound: object, native: object) -> str:
     return f"{c} {op} {_lit(str(bound))}"
 
 
-def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()) -> dict:
+def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset(), zoned: frozenset = frozenset()) -> dict:
     """Rows of an Oracle SELECT (read by python-oracledb) registered as `ora_src`; NUMBER as exact text, INTERVAL YEAR TO MONTH as ISO text, VECTOR as a list, a JSON column as JSON text. Returns `{column: "NUMBER"}` for the NUMBER columns."""
     import array
     import decimal
@@ -422,6 +422,8 @@ def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()
             return oracle_ds_iso(v)
         if isinstance(v, array.array):
             return list(v)
+        if name in zoned and isinstance(v, dt.datetime):
+            return v.replace(tzinfo=dt.timezone.utc)
         as_json = v is not None and (name in json_cols or isinstance(v, dict))
         return json_text(v) if as_json else v
 
@@ -467,15 +469,23 @@ def _mysql_zero_dated(ora, db: str, leaf: str, native: dict) -> list[str]:
     return [c for c, n in zip(temporal, row) if int(n) > 0]
 
 
+def plain_projection(query: str) -> tuple[str, list[str]] | None:
+    """`(table, columns)` of a query that only names columns of one table, `None` for any other query: the table path then supplies the catalog types."""
+    m = re.fullmatch(r"\s*select\s+((?:`?\w+`?\s*,\s*)*`?\w+`?)\s+from\s+`?(\w+)`?\s*;?\s*", query, re.I)
+    return (m.group(2), [c.strip().strip("`") for c in m.group(1).split(",")]) if m else None
+
+
 def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     """(source relation, primary key columns, declared type per column in the ledger's spelling) for the spec's engine."""
     from .value_diff import oracle_rows
 
     engine, table, query = spec["engine"], spec.get("table") or "", spec.get("query")
     whole = re.fullmatch(r"\s*select\s+\*\s+from\s+([\w.]+)(\s+order\s+by\s+[\w\s,.]+)?\s*;?\s*", query or "", re.I)
+    only: list[str] = []
     if whole and engine in ("postgres", "mysql", "mssql", "oracle"):
-        # The same rows as the table: read through the table path, so its catalog types and key apply.
         table, query = whole.group(1), None
+    elif engine == "mysql" and (proj := plain_projection(query or "")):
+        table, query, only = proj[0], None, proj[1]
     schema, leaf = table.split(".", 1) if "." in table and engine != "mongo" else (None, table)
     native: dict = {}
     if engine == "oracle":
@@ -495,13 +505,20 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         exact_ns = {c.upper() for c, t in (spec.get("overrides") or {}).items() if (t or "").lower() in ("timestamp_ns", "timestamp_tz_ns")}
         by_col = {c: None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
         sql = query.rstrip().rstrip(";") if query else oracle_table_select(spec["url"], table, {c: e for c, e in by_col.items() if e})
-        if query and exact_ns:
-            from .value_diff import oracle_result
+        zoned: frozenset = frozenset()
+        if query:
+            from .value_diff import oracle_describe
 
-            names = oracle_result(spec["url"], f"SELECT * FROM ({sql}) WHERE 1 = 0")[0]
-            proj = [f"TO_CHAR(\"{n}\", 'SYYYY-MM-DD HH24:MI:SS.FF9') AS \"{n}\"" if n.upper() in exact_ns else f'"{n}"' for n in names]
-            sql = f"SELECT {', '.join(proj)} FROM ({sql})"
-        native = {c: "NUMBER (by value)" for c in _oracle_register(ora, spec["url"], sql, frozenset(c for c, t in declared.items() if t == "JSON"))}
+            cols = oracle_describe(spec["url"], sql)
+            zoned = frozenset(n for n, z in cols if z and n.upper() not in exact_ns)
+            if exact_ns or zoned:
+                proj = [
+                    f"TO_CHAR(\"{n}\", 'SYYYY-MM-DD HH24:MI:SS.FF9') AS \"{n}\"" if n.upper() in exact_ns
+                    else f"\"{n}\" AT TIME ZONE '+00:00' AS \"{n}\"" if n in zoned else f'"{n}"'
+                    for n, _ in cols
+                ]
+                sql = f"SELECT {', '.join(proj)} FROM ({sql})"
+        native = {c: "NUMBER (by value)" for c in _oracle_register(ora, spec["url"], sql, frozenset(c for c, t in declared.items() if t == "JSON"), zoned)}
         native.update(declared)
         rel = "ora_src"
         key = [r["COLUMN_NAME"] for r in oracle_rows(
@@ -556,8 +573,12 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
                 f"AND TABLE_NAME = {_lit(leaf)} AND EXTRA LIKE '%INVISIBLE%'"
             ) + ")"
         )
+        if only:
+            by_lower = {c.lower(): c for c in native}
+            native = {by_lower[c.lower()]: native[by_lower[c.lower()]] for c in only if c.lower() in by_lower}
+            key = key if set(key) <= set(native) else []
         zero = _mysql_zero_dated(ora, schema or db, leaf, native)
-        if not wide and not invisible and not partial and not zero:
+        if not wide and not invisible and not partial and not zero and not only:
             return f"my.{schema or db}.{leaf}", key, native
         cols = ", ".join(
             f"CAST(`{c}` AS CHAR) AS `{c}`" if c in wide
@@ -2113,6 +2134,20 @@ def _self_test() -> None:
     assert not one("VARCHAR", "VARCHAR", "NUMERIC(40,20)") and not one("VARCHAR", "VARCHAR", "DECIMAL(65,0)"), "a decimal past 38 digits is read as exact text"
     assert one("VARCHAR", "VARCHAR", "NUMERIC(12,2)") and one("DECIMAL(12,2)", "VARCHAR", "NUMERIC(12,2)"), "a decimal DuckDB holds is not delivered as text"
     assert not one("DOUBLE[]", "VARCHAR", "VECTOR"), "an Oracle VECTOR is delivered as text"
+    assert plain_projection("SELECT `id`, `created_at` FROM `t`\n") == ("t", ["id", "created_at"]), "an init-generated column query reads through its table"
+    assert plain_projection("SELECT id FROM t;") == ("t", ["id"])
+    assert not any(plain_projection(q) for q in ("SELECT id + 1 FROM t", "SELECT id FROM t WHERE id > 1", "SELECT a.id FROM t a", "SELECT id FROM t JOIN u ON 1", "SELECT * FROM t")), "any other query keeps no catalog types"
+    from . import value_diff
+
+    seen: dict = {}
+    ora_fake = type("O", (), {"db": type("D", (), {"register": staticmethod(lambda n, t: seen.update({n: t}))})()})()
+    real_result, value_diff.oracle_result = value_diff.oracle_result, lambda url, sql: (["Z", "N"], [(dt.datetime(2024, 2, 29, 1), dt.datetime(2024, 2, 29, 1))])
+    try:
+        _oracle_register(ora_fake, "", "", zoned=frozenset({"Z"}))
+    finally:
+        value_diff.oracle_result = real_result
+    tys = {f.name: str(f.type) for f in seen["ora_src"].schema}
+    assert tys == {"Z": "timestamp[us, tz=UTC]", "N": "timestamp[us]"}, f"a zoned Oracle query column is registered as an instant: {tys}"
     assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
     class Described:
         """A DuckDB stand-in whose DESCRIBE answers the scanner's engine-labelled type names."""

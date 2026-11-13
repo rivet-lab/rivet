@@ -170,7 +170,11 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
     };
 
     let mut all_ok = true;
+    let mut source_ok = false;
     let mut transient: Option<Transient> = None;
+    let config_dir = std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
 
     // The state every run of this config opens: a run that cannot open it fails before
     // reading a row, so a doctor that skipped it was green over a config no run could use.
@@ -203,6 +207,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
 
     match check_source_auth(&config) {
         Ok(()) => {
+            source_ok = true;
             emit_check(
                 &mut checks,
                 json,
@@ -234,6 +239,34 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
                     ok: false,
                     detail: Some(trim_probe_error(&e)),
                     hint,
+                },
+            );
+        }
+    }
+
+    let mut cursor_refusal: Option<anyhow::Error> = None;
+    if source_ok {
+        let declared = crate::config::declared_exports(&config, None)?;
+        for a in crate::plan::cursor_admission::admit_exports(&config, &declared, config_dir) {
+            let (ok, detail) = match &a.verdict {
+                Ok(crate::plan::cursor_admission::Admission::Admitted) => (true, None),
+                Ok(crate::plan::cursor_admission::Admission::Unverified(w)) => {
+                    (true, Some(w.clone()))
+                }
+                Err(e) => (false, Some(trim_probe_error(e))),
+            };
+            if let Err(e) = a.verdict {
+                all_ok = false;
+                cursor_refusal.get_or_insert(e);
+            }
+            emit_check(
+                &mut checks,
+                json,
+                DoctorCheck {
+                    name: format!("Incremental cursor {}.{}", a.export, a.column),
+                    ok,
+                    detail,
+                    hint: None,
                 },
             );
         }
@@ -319,17 +352,6 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
         }
     }
 
-    // CDC health — only when the config has `mode: cdc` exports. Automates the
-    // slot / binlog-retention / capture-job monitoring the CDC reference asks
-    // operators to do by hand.
-    // The SAME directory the run resolves `cdc.checkpoint:` against. Passing
-    // nothing here meant the preflight read the raw path against the process
-    // working directory, so `rivet doctor -c /etc/rivet/app.yaml` run from
-    // anywhere but /etc/rivet graded a file that was not there — and absent is
-    // this check's GREEN answer.
-    let config_dir = std::path::Path::new(config_path)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
     let (cdc_checks, cdc_probe) = super::cdc_health::collect(&config, config_dir);
     if let Some((detail, class)) = cdc_probe
         && class.is_transient()
@@ -356,6 +378,9 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
             // CI / cron can tell a healthy environment from a broken one.
             println!("Some checks failed. Fix the issues above before running exports.");
         }
+    }
+    if let Some(refusal) = cursor_refusal {
+        return Err(refusal);
     }
     if all_ok {
         Ok(())

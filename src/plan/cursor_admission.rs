@@ -2,7 +2,9 @@
 
 use arrow::datatypes::{DataType, TimeUnit};
 
-use crate::config::{Config, ExportConfig, IncrementalCursorMode, SourceType};
+use std::path::Path;
+
+use crate::config::{Config, ExportConfig, ExportMode, IncrementalCursorMode, SourceType};
 use crate::error::Result;
 use crate::source::Source;
 use crate::types::{TypeMapping, parse_column_overrides};
@@ -135,6 +137,43 @@ pub(crate) fn admission(
             export.name
         ),
     }
+}
+
+/// One incremental export's cursor column and the verdict on it.
+pub(crate) struct ExportAdmission {
+    pub(crate) export: String,
+    pub(crate) column: String,
+    pub(crate) verdict: Result<Admission>,
+}
+
+/// The verdict on the cursor of each incremental export in `exports`, over one source connection and the query `run` reads.
+pub(crate) fn admit_exports(
+    config: &Config,
+    exports: &[ExportConfig],
+    config_dir: &Path,
+) -> Vec<ExportAdmission> {
+    let mut conn: Option<Result<Box<dyn Source>>> = None;
+    let mut out = Vec::new();
+    for export in exports.iter().filter(|e| e.mode == ExportMode::Incremental) {
+        let Some(column) = export.cursor_column.clone() else {
+            continue;
+        };
+        let verdict = match export.resolve_query_and_template(config_dir, None) {
+            Err(e) => Ok(unverified(export, &column, &e)),
+            Ok((query, _)) => {
+                match conn.get_or_insert_with(|| super::build::connect_source(&config.source)) {
+                    Ok(src) => admission(Some(src.as_mut()), config, export, &query, &column),
+                    Err(e) => Ok(unverified(export, &column, e)),
+                }
+            }
+        };
+        out.push(ExportAdmission {
+            export: export.name.clone(),
+            column,
+            verdict,
+        });
+    }
+    out
 }
 
 /// The verdict for a cursor column the source could not be asked about.
@@ -375,5 +414,48 @@ mod tests {
         let mut probe = ProbeSource::describing(RivetType::Int64, None);
         probe.nullable = Err("no describe".to_string());
         assert_eq!(verdict(&mut probe, &config, single, "k").unwrap(), want);
+    }
+
+    fn exports_config(source: &str, exports: &str) -> Config {
+        Config::from_yaml(&format!("source:\n{source}\nexports:\n{exports}")).unwrap()
+    }
+
+    const UNREACHABLE: &str = "  type: postgres\n  url: \"postgresql://u:p@127.0.0.1:1/db\"";
+    const FULL_EXPORT: &str = "  - name: whole\n    query: SELECT k FROM t\n    mode: full\n    format: parquet\n    destination: { type: local, path: ./out }\n";
+    const INCREMENTAL_EXPORT: &str = "  - name: orders\n    query: SELECT k FROM t\n    mode: incremental\n    cursor_column: k\n    format: parquet\n    destination: { type: local, path: ./out }\n";
+
+    /// Only the incremental exports get a verdict, each named by export and cursor column.
+    #[test]
+    fn admit_exports_names_only_the_incremental_exports() {
+        let config = exports_config(UNREACHABLE, &format!("{FULL_EXPORT}{INCREMENTAL_EXPORT}"));
+        let got = admit_exports(&config, &config.exports, Path::new("."));
+        let names: Vec<_> = got
+            .iter()
+            .map(|a| (a.export.as_str(), a.column.as_str()))
+            .collect();
+        assert_eq!(names, vec![("orders", "k")]);
+    }
+
+    /// A source that cannot be connected to leaves the cursor unverified with the cause, never refused.
+    #[test]
+    fn admit_exports_leaves_an_unreachable_source_unverified() {
+        let config = exports_config(UNREACHABLE, INCREMENTAL_EXPORT);
+        let got = admit_exports(&config, &config.exports, Path::new("."));
+        match &got[0].verdict {
+            Ok(Admission::Unverified(w)) => assert!(
+                w.starts_with("export 'orders': cursor_column 'k' was not checked for NULLs or a renderable type: "),
+                "{w}"
+            ),
+            other => panic!("expected unverified, got {other:?}"),
+        }
+    }
+
+    /// A query file that cannot be read leaves the cursor unverified with the cause, before any connection.
+    #[test]
+    fn admit_exports_leaves_an_unreadable_query_unverified() {
+        let export = "  - name: orders\n    query_file: absent/orders.sql\n    mode: incremental\n    cursor_column: k\n    format: parquet\n    destination: { type: local, path: ./out }\n";
+        let config = exports_config(UNREACHABLE, export);
+        let got = admit_exports(&config, &config.exports, Path::new("/nonexistent-dir"));
+        assert!(matches!(got[0].verdict, Ok(Admission::Unverified(_))));
     }
 }
