@@ -607,7 +607,7 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
                    gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None, config: dict | None = None,
                    splits: list[tuple[str, float]] | None = None, skipped: int = 0,
                    skipped_env: list[tuple[str, str, str]] | None = None) -> dict:
-    """Append this run's verdict (full commit, the graded binary's stamp, gate kind, the configuration it ran under, dirty tree, the skip count and every env-skipped cell), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
+    """Append this run's verdict (full commit, the graded binary's stamp and SHA-256, gate kind, the configuration it ran under, dirty tree, the skip count and every env-skipped cell), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
     import datetime as _dt
     import json as _json
 
@@ -617,6 +617,7 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
         "commit": sha[:8],
         "sha": sha,
         "binary": binary_stamp(),
+        "binary_sha256": file_sha256(rivet_bin()),
         "gate": gate,
         "config": config,
         "dirty": dirty,
@@ -996,6 +997,16 @@ def binary_stamp() -> str:
     """The commit `rivet --version` prints for the gate's binary, or "" when it prints none (an `unknown` build)."""
     m = _VERSION_STAMP.search(rivet("--version").stdout)
     return m.group(1) if m else ""
+
+
+def file_sha256(path: Path) -> str:
+    """The SHA-256 hex of the file's bytes, or "" when it is not a readable file."""
+    import hashlib
+
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
 def release_bin_env() -> dict[str, str]:
