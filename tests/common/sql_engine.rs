@@ -13,6 +13,10 @@ use ::mysql::prelude::Queryable;
 use arrow::array::{Array, Int32Array, Int64Array};
 use std::path::Path;
 
+/// `(SqlEngine variant, compose service, URL accessor)` of each engine whose second database is a service no CI stack starts; the skip-policy guard reads it.
+pub const SECOND_DATABASE_SERVICES: &[(&str, &str, &str)] =
+    &[("Oracle", "oracle-latin1", "oracle_latin1_url")];
+
 #[derive(Clone, Copy, Debug)]
 pub enum SqlEngine {
     Mysql,
@@ -245,10 +249,16 @@ impl SqlEngine {
         ));
     }
 
-    /// A second database of this engine (another source key): a scratch one on the stand server, or the stand's second Oracle instance (`oracle-latin1`).
+    /// A second database of this engine (another source key): a scratch one on the stand server, or the compose service named in [`SECOND_DATABASE_SERVICES`].
     pub fn second_database(self, tag: &str) -> SecondDatabase {
         #[cfg(feature = "oracle")]
         if let SqlEngine::Oracle = self {
+            let service = SECOND_DATABASE_SERVICES
+                .iter()
+                .find(|r| r.0 == "Oracle")
+                .unwrap()
+                .1;
+            super::require_url_reachable(&super::oracle_latin1_url(), service);
             return SecondDatabase {
                 engine: self,
                 name: String::new(),

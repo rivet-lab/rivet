@@ -8,8 +8,12 @@
 //! these tests grade them against the markers, in both directions: a gate-only test that a
 //! CI filter still selects (the `*_failover_to_the_standby` red run), and a filter term that
 //! drops a test CI could run (`--skip mongo` took 14 live_suite tests from every CI job,
-//! `--skip validates` took two Postgres audit tests by a name collision).
+//! `--skip validates` took two Postgres audit tests by a name collision). The topology a test needs
+//! is read from the code, not the label: `SECOND_DATABASE_SERVICES` in tests/common/sql_engine.rs
+//! names the compose service behind a second database, and a test that reaches it is graded
+//! against the services each CI stack starts.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const NIGHTLY: &str = ".github/workflows/nightly-live.yml";
@@ -119,8 +123,8 @@ fn step_run(workflow: &str, job: &str, step: &str) -> String {
         .to_string()
 }
 
-/// True when any `docker compose ... up -d` line of the job's run texts names a `mongo*` service.
-fn job_starts_mongo(workflow: &str, job: &str) -> bool {
+/// True when any `docker compose ... up -d` line of the job's run texts names a service `is_service` accepts.
+fn job_starts(workflow: &str, job: &str, is_service: impl Fn(&str) -> bool) -> bool {
     let text = std::fs::read_to_string(root().join(workflow)).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).unwrap();
     doc["jobs"][job]["steps"]
@@ -130,7 +134,7 @@ fn job_starts_mongo(workflow: &str, job: &str) -> bool {
         .filter_map(|s| s["run"].as_str())
         .flat_map(|r| r.lines())
         .filter(|l| l.contains("docker compose") && l.contains("up -d"))
-        .any(|l| l.split_whitespace().any(|w| w.starts_with("mongo")))
+        .any(|l| l.split_whitespace().any(&is_service))
 }
 
 /// The substrings after every `--skip` in a libtest command.
@@ -312,7 +316,7 @@ fn a_stack_without_mongo_skips_every_mongo_test() {
         (NIGHTLY, "e2e", &r.e2e_skips),
         (NIGHTLY, "live-full", &r.nightly_excludes),
     ] {
-        if job_starts_mongo(workflow, job) {
+        if job_starts(workflow, job, |w| w.starts_with("mongo")) {
             continue;
         }
         let leaks: Vec<&str> = tests
@@ -396,6 +400,132 @@ fn an_open_defect_cell_is_gate_only_and_named_in_the_known_red_ledger() {
     );
 }
 
+/// `(SqlEngine variant, compose service, URL accessor)` rows of `SECOND_DATABASE_SERVICES`, read from the seam's source text.
+fn second_database_services(src: &str) -> Vec<(String, String, String)> {
+    let table = src
+        .split_once("pub const SECOND_DATABASE_SERVICES")
+        .and_then(|(_, rest)| rest.split_once('='))
+        .and_then(|(_, rest)| rest.split_once("&["))
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .map(|(rows, _)| rows)
+        .unwrap_or_else(|| {
+            panic!("tests/common/sql_engine.rs lost its SECOND_DATABASE_SERVICES table")
+        });
+    let quoted: Vec<&str> = table.split('"').skip(1).step_by(2).collect();
+    assert!(
+        !quoted.is_empty() && quoted.len().is_multiple_of(3),
+        "SECOND_DATABASE_SERVICES rows are (variant, service, accessor) string triples: {quoted:?}"
+    );
+    quoted
+        .chunks(3)
+        .map(|c| (c[0].to_string(), c[1].to_string(), c[2].to_string()))
+        .collect()
+}
+
+/// Every top-level `fn` of a source text: name -> its text up to the next top-level `fn`.
+fn fn_bodies(src: &str) -> HashMap<String, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in src.lines() {
+        let head = line.strip_prefix("pub ").unwrap_or(line);
+        if let Some(rest) = head.strip_prefix("fn ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            out.push((name, String::new()));
+        }
+        if let Some((_, body)) = out.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// True when `body` calls the fn `name` (a whole identifier followed by `(`).
+fn calls(body: &str, name: &str) -> bool {
+    body.match_indices(name).any(|(i, _)| {
+        let before = body[..i].chars().next_back();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && body[i + name.len()..].starts_with('(')
+    })
+}
+
+/// True when fn `from`, or a fn it calls in the same file, contains `needle`.
+fn reaches(
+    bodies: &HashMap<String, String>,
+    from: &str,
+    needle: &str,
+    seen: &mut HashSet<String>,
+) -> bool {
+    let Some(body) = bodies.get(from).filter(|_| seen.insert(from.to_string())) else {
+        return false;
+    };
+    body.contains(needle)
+        || bodies
+            .keys()
+            .any(|n| calls(body, n) && reaches(bodies, n, needle, seen))
+}
+
+/// The compose services a test of `src` named `test` needs beyond the base stack, read from the seam table.
+fn services_needed(src: &str, test: &str, table: &[(String, String, String)]) -> Vec<String> {
+    let bodies = fn_bodies(src);
+    let Some(body) = bodies.get(test) else {
+        return Vec::new();
+    };
+    table
+        .iter()
+        .filter(|(variant, _, accessor)| {
+            let second = body.contains(&format!("SqlEngine::{variant}"))
+                && reaches(&bodies, test, ".second_database(", &mut HashSet::new());
+            second || reaches(&bodies, test, &format!("{accessor}("), &mut HashSet::new())
+        })
+        .map(|(_, service, _)| service.clone())
+        .collect()
+}
+
+/// A test that reaches a second compose service (`second_database`, or its URL accessor) runs only on a CI stack that starts the service.
+#[test]
+fn a_live_test_needing_a_second_service_runs_only_on_a_stack_that_starts_it() {
+    let r = Runners::load();
+    let table = second_database_services(
+        &std::fs::read_to_string(root().join("tests/common/sql_engine.rs")).unwrap(),
+    );
+    let mut sources: HashMap<String, String> = HashMap::new();
+    let mut found = 0;
+    let mut bad = Vec::new();
+    for t in live_tests_checked() {
+        let (module, name) = t.path.split_once("::").unwrap();
+        let src = sources.entry(module.to_string()).or_insert_with(|| {
+            std::fs::read_to_string(root().join("tests/live").join(format!("{module}.rs"))).unwrap()
+        });
+        for service in services_needed(src, name, &table) {
+            found += 1;
+            for (job, selected) in [
+                ("e2e", r.e2e(&t)),
+                ("live-full", r.nightly(&t)),
+                ("mongo-versions", r.mongo(&t)),
+            ] {
+                if selected && !job_starts(NIGHTLY, job, |w| w == service) {
+                    bad.push(format!(
+                        "{} (reason: {}) needs the `{service}` service, the nightly `{job}` stack does not start it",
+                        t.path, t.reason
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        found >= 1,
+        "no live test reaches a second compose service; the seam scan reads too little"
+    );
+    assert!(
+        bad.is_empty(),
+        "a live test whose topology the CI stacks lack must be marked `live+gate-only` and named in every CI filter:\n{}",
+        bad.join("\n")
+    );
+}
+
 /// The parsers against planted text, so a passing policy is a graded one.
 #[test]
 fn the_filter_parsers_read_what_the_workflows_write() {
@@ -418,4 +548,32 @@ fn the_filter_parsers_read_what_the_workflows_write() {
         .map(|t| (t.path.as_str(), t.gate_only()))
         .collect();
     assert_eq!(seen, [("m::a", true), ("m::b", false)]);
+    let table = second_database_services(
+        "pub const SECOND_DATABASE_SERVICES: &[(&str, &str, &str)] =\n    &[(\"Oracle\", \"svc-two\", \"two_url\")];\nfn z() {}",
+    );
+    assert_eq!(
+        table,
+        [("Oracle".into(), "svc-two".into(), "two_url".into())]
+    );
+    let template = "fn generic(engine: SqlEngine) {\n    let other = engine.second_database(\"t\");\n}\n\
+        #[test]\nfn generic_pg() {\n    generic(SqlEngine::Pg);\n}\n\
+        #[test]\nfn generic_oracle() {\n    generic(SqlEngine::Oracle);\n}\n\
+        #[test]\nfn direct() {\n    let u = two_url();\n}\n\
+        #[test]\nfn generic_oracle_twin() {\n    not_generic(SqlEngine::Oracle);\n}\n";
+    let need = |t: &str| services_needed(template, t, &table);
+    assert_eq!(
+        need("generic_oracle"),
+        ["svc-two"],
+        "the Oracle wrapper of a second-database template needs the second service"
+    );
+    assert!(
+        need("generic_pg").is_empty(),
+        "a scratch database on the stand server needs no service"
+    );
+    assert_eq!(
+        need("direct"),
+        ["svc-two"],
+        "the URL accessor alone needs the service"
+    );
+    assert!(need("generic_oracle_twin").is_empty() && need("missing").is_empty());
 }

@@ -224,6 +224,7 @@ jobs:
                  or test(doctor_is_not_green_where_the_cdc_run_refuses_a_replica)
                  or test(loads_into_bigquery_or_refuses_by_column) or test(cleanup_source_never_deletes_parts)
                  or test(compact_after_a_source_alter) or test(a_non_unicode_database_round_trips) or test(range_chunk_shared_name_another_source_oracle)
+                 or test(url_file_resolved_as_before_oracle) or test(url_file_follows_the_config_oracle)
                  or test(a_read_blocked_longer_than_thirty_seconds_still_completes) or test(open_defect_))'
 
       # Which live cells were green tonight: recorded from nextest's junit into the evidence
@@ -773,6 +774,8 @@ jobs:
           --skip cleanup_source_never_deletes_parts --skip compact_after_a_source_alter \
           --skip a_non_unicode_database_round_trips \
           --skip range_chunk_shared_name_another_source_oracle \
+          --skip url_file_resolved_as_before_oracle \
+          --skip url_file_follows_the_config_oracle \
           --skip a_read_blocked_longer_than_thirty_seconds_still_completes \
           --skip open_defect_
 
