@@ -1,0 +1,1 @@
+- **The seeded-defect recall ran only on the stand machines, so a harness break showed up days later.** **Now** a nightly workflow runs it on GitHub in four shards and publishes one table per night. **What to do:** nothing.

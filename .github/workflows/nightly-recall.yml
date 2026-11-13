@@ -1,0 +1,100 @@
+name: Nightly Recall
+
+on:
+  schedule:
+    - cron: "15 1 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Comma-separated seed names (empty = every seed, sharded)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: Plan the shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          SEEDS: ${{ inputs.seeds }}
+        run: python3 .github/scripts/recall_shards.py 4 | tee -a "$GITHUB_OUTPUT"
+
+  recall:
+    name: Recall shard ${{ matrix.shard.index }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/live-stack
+
+      - name: Seeded recall for this shard
+        env:
+          SEEDS: ${{ matrix.shard.seeds }}
+          CARGO_TERM_COLOR: never
+          NO_COLOR: "1"
+          RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
+        run: |
+          mkdir -p out
+          set +e
+          make seeded-recall SEEDED_ARGS="--seeds $SEEDS" 2>&1 | tee out/recall.txt
+          rc=${PIPESTATUS[0]}
+          grep -E "^[a-z0-9-]+ +\|" out/recall.txt > out/table.txt
+          { echo "### Recall shard ${{ matrix.shard.index }} (exit $rc)"; echo '```'; cat out/table.txt; echo '```'; grep -E "took|MISSED|NOT GRADED|STALE" out/recall.txt | head -40; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: recall-shard-${{ matrix.shard.index }}
+          path: |
+            out/
+            target/seeded/logs/
+          if-no-files-found: warn
+
+      - name: Disk after the recall
+        if: always()
+        run: df -h / && free -m
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
+
+  verdict:
+    name: Recall verdict
+    needs: [plan, recall]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: recall-shard-*
+          path: shards
+        continue-on-error: true
+      - name: One table for the night
+        env:
+          RESULT: ${{ needs.recall.result }}
+        run: |
+          { echo "### Nightly recall: $RESULT"; echo '```'; cat shards/*/table.txt 2>/dev/null; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$RESULT" = success ]
