@@ -1,0 +1,1 @@
+Harness: a closed loopback stub wakes its acceptor thread (shutdown before close), so the secret-in-output matrix no longer leaks one thread per stub on Linux and runs out of threads on a hosted runner.
