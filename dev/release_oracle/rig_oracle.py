@@ -475,6 +475,17 @@ def plain_projection(query: str) -> tuple[str, list[str]] | None:
     return (m.group(2), [c.strip().strip("`") for c in m.group(1).split(",")]) if m else None
 
 
+#: MySQL result field type codes the DuckDB scanner reads as one naive TIMESTAMP, whichever the column is: code -> catalog name.
+MYSQL_TEMPORAL = {7: "TIMESTAMP", 12: "DATETIME"}
+
+
+def mysql_query_native(url: str, query: str) -> dict:
+    """`{column: declared type in the ledger's spelling}` of a MySQL query's TIMESTAMP and DATETIME columns, from the query's result metadata; the scanner cannot tell the two apart."""
+    from .value_diff import mysql_describe
+
+    return {n: MYSQL_TEMPORAL[code] + (f"({fsp})" if fsp else "") for n, code, fsp in mysql_describe(url, query) if code in MYSQL_TEMPORAL}
+
+
 def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     """(source relation, primary key columns, declared type per column in the ledger's spelling) for the spec's engine."""
     from .value_diff import oracle_rows
@@ -549,7 +560,7 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     if engine == "mysql":
         db = spec["database"]
         if query:
-            return f"mysql_query('my', {_lit(query)})", [], native
+            return f"mysql_query('my', {_lit(query)})", [], mysql_query_native(spec["url"], query)
         key = [r[0] for r in ora.rows(
             "SELECT * FROM mysql_query('my', " + _lit(
                 "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = "
@@ -906,7 +917,8 @@ def grade_findings(
         if want is not None and want != dt:
             bad.append(f"TYPE: `{col}` ({nat}): the type ledger delivers {row['delivery']} ({want}), delivered {dt}")
         elif want is None and src_t and (why := (unpinned_loss if unpinned_strict else type_loss)(src_t, dt)) is not None:
-            bad.append(f"TYPE: `{col}` source {src_t} delivered as {dt}: {why}")
+            unknown = "" if nat else "; the column has no declared source type, the oracle graded the scanner's reading of the query result"
+            bad.append(f"TYPE: `{col}` source {src_t} delivered as {dt}: {why}{unknown}")
     if "src_count" in f:
         if f["src_count"] != f["dst_count"]:
             bad.append(f"COUNT(*): source {f['src_count']}, delivered {f['dst_count']}")
@@ -2139,6 +2151,20 @@ def _self_test() -> None:
     assert not any(plain_projection(q) for q in ("SELECT id + 1 FROM t", "SELECT id FROM t WHERE id > 1", "SELECT a.id FROM t a", "SELECT id FROM t JOIN u ON 1", "SELECT * FROM t")), "any other query keeps no catalog types"
     from . import value_diff
 
+    q_spec = {"engine": "mysql", "url": "mysql://u:p@h:3306/db", "database": "db", "table": "", "query": "SELECT id, created_at_dt AS created_at, created_at_ts AS created_at_tz FROM t ORDER BY id"}
+    assert plain_projection(q_spec["query"]) is None, "an aliased query is not a plain projection"
+    real_describe = getattr(value_diff, "mysql_describe", None)
+    value_diff.mysql_describe = lambda url, sql: [("id", 8, 0), ("created_at", 12, 6), ("created_at_tz", 7, 6)]
+    try:
+        q_native = _source(None, q_spec, {})[2]
+    finally:
+        value_diff.mysql_describe = real_describe
+    assert q_native == {"created_at": "DATETIME(6)", "created_at_tz": "TIMESTAMP(6)"}, f"a MySQL query's temporal columns carry the type of its result metadata: {q_native}"
+    my_batch = globals()["ledger"]("mysql", "batch")[0]
+    pin = lambda nat: grade_findings({**clean, "pairs": [["c", "TIMESTAMP", "c", "TIMESTAMP WITH TIME ZONE"]]}, my_batch, set(), {"c": nat} if nat else {}, True)  # noqa: E731
+    assert not pin(q_native["created_at_tz"]), "a query's TIMESTAMP column is graded by its ledger row, not as the scanner's naive reading"
+    assert pin(None) and "no declared source type" in pin(None)[0], "a column with no declared type says the oracle graded the scanner's reading"
+    assert pin("DATETIME(6)"), "a DATETIME delivered as an instant is still a finding"
     seen: dict = {}
     ora_fake = type("O", (), {"db": type("D", (), {"register": staticmethod(lambda n, t: seen.update({n: t}))})()})()
     real_result, value_diff.oracle_result = value_diff.oracle_result, lambda url, sql: (["Z", "N"], [(dt.datetime(2024, 2, 29, 1), dt.datetime(2024, 2, 29, 1))])
