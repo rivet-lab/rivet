@@ -153,8 +153,14 @@ jobs:
         if: always()
         with:
           name: recall-shard-${{ matrix.shard.index }}
-          path: out/
+          path: |
+            out/
+            target/seeded/logs/
           if-no-files-found: warn
+
+      - name: Disk after the recall
+        if: always()
+        run: df -h / && free -m
 
       - name: Stop services
         if: always()
