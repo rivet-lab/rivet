@@ -346,11 +346,11 @@ class Ledger:
         except Exception as e:  # noqa: BLE001 — evidence must not fail the gate it describes
             print(f"  evidence: NOT recorded ({e})")
 
-    def close_known_red(self) -> None:
-        """After a FULL run: a known-red entry no failure matched is fixed — it must be removed."""
+    def close_known_red(self, lane: str = "gate") -> None:
+        """After a FULL run of `lane`: a known-red entry that lane owes and no failure matched is fixed, so it must be removed."""
         from . import known_red
         for k in known_red.KNOWN_RED:
-            if k.match not in self.known_seen:
+            if known_red.owed_by(k, lane) and k.match not in self.known_seen:
                 # Straight to FAIL: the message quotes the entry, so `failed` would match it.
                 passed = k.match in self.known_passed
                 why = ("its cell PASSED this run — it is fixed; remove it from dev/release_oracle/known_red.py"
