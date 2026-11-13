@@ -540,6 +540,7 @@
   the image Homebrew on Linux runs (0.32.2 and earlier; the published 0.32.2 formula is already
   fixed). The release pushes the formula as a GitHub App with a one-hour token instead of a personal
   token, and a failed push now fails the release job instead of being skipped.
+- **The seeded-defect recall ran only on the stand machines, so a harness break showed up days later.** **Now** a nightly workflow runs it on GitHub in four shards and publishes one table per night. **What to do:** nothing.
 
 ## 0.32.2 — 2026-10-22
 
