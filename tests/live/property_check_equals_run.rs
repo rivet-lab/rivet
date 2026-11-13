@@ -26,6 +26,7 @@ const R_PRIOR: &str = "2026-11-10: check, doctor and plan pass over stored state
 const R_UNCODED: &str = "2026-11-10: run or a pre-run command refuses without a RIVET_ code, so the pair cannot agree on the stop; closes when each refusal is raised through its coded seam";
 const R_URL: &str = "2026-11-10: check passes a mongodb URL without a database that run refuses as invalid; closes when check parses the source URL through run's parser";
 const R_STRICT_TYPE: &str = "2026-11-10: check --strict refuses an unsafe type mapping run delivers; closes when run and check --strict read one type-safety verdict";
+const R_ORDER: &str = "2026-11-13: the pre-run commands and run stop on different admission checks first (cursor nullability, source probe, override wire), not a silent loss; accepted for 0.33, closes in 0.34 when every command takes the admission checks in one shared order";
 
 /// RED signatures accepted on main: `<pair> pre[..]` or `<pair> pre[..] run[..]` and a dated reason with what closes it; the list only shrinks.
 const ACCEPTED_RED: &[(&str, &str)] = &[
@@ -331,6 +332,30 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     (
         "plan-apply pre[exit=1 code=RIVET_PLAN_SOURCE_UNREADABLE] run[exit=1 code=RIVET_CONFIG_TLS_CA_INVALID]",
         R_WRAP,
+    ),
+    (
+        "check-run pre[exit=1 code=RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] run[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE]",
+        R_ORDER,
+    ),
+    (
+        "check-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
+        R_ORDER,
+    ),
+    (
+        "check-strict-run pre[exit=1 code=RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] run[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE]",
+        R_ORDER,
+    ),
+    (
+        "check-strict-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
+        R_ORDER,
+    ),
+    (
+        "doctor-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
+        R_ORDER,
+    ),
+    (
+        "plan-apply pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
+        R_ORDER,
     ),
 ];
 
