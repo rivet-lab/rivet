@@ -61,7 +61,7 @@ jobs:
           rc=${PIPESTATUS[0]}
           grep -E "^[a-z0-9-]+ +\|" out/recall.txt > out/table.txt
           { echo "### Recall shard ${{ matrix.shard.index }} (exit $rc)"; echo '```'; cat out/table.txt; echo '```'; grep -E "took|MISSED|NOT GRADED|STALE" out/recall.txt | head -40; } >> "$GITHUB_STEP_SUMMARY"
-          exit $rc
+          exit "$rc"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

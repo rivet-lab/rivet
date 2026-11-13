@@ -62,7 +62,7 @@ jobs:
           { echo "### ${{ matrix.part.name }} (make $TARGET, exit $rc)"; echo '```'; grep -E "PASS|FAIL|SKIP|RED|GREEN|NOT_GRADED|NOT GRADED|verdict|passed|failed|RELEASE" out/part.txt | tail -60; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "$rc" > out/exit-code.txt
           grep -E "PASS[=: ]" out/part.txt | tail -1 > out/summary.txt
-          exit $rc
+          exit "$rc"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
