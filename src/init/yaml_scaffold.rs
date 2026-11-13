@@ -142,6 +142,7 @@ pub(super) fn scaffold_table(
         dest,
         mode_override,
         false,
+        true,
         0,
         None,
         &mut d,
@@ -191,9 +192,8 @@ pub(super) fn scaffold_schema(
     // (capture instances are per-table; `tables:` is unsupported there), and so
     // does non-`public` PostgreSQL (its table names are schema-qualified, which
     // would make the `table.column` override keys ambiguous).
-    let consolidate_cdc = mode_override == Some("cdc")
-        && infos.len() > 1
-        && (st == "mysql" || (st == "postgres" && infos.iter().all(|i| i.schema == "public")));
+    let consolidate_cdc =
+        mode_override == Some("cdc") && infos.len() > 1 && recipe_baseline_engine(infos, st);
     // A table that cannot be read by `table:` cannot be a recipe, and a stream
     // whose `backfill: auto` finds no recipe for a captured table is refused at
     // config load — so such a table is left OUT of the stream, said so, rather
@@ -236,6 +236,7 @@ pub(super) fn scaffold_schema(
                 dest,
                 Some(recipe_mode(info)),
                 true,
+                false,
                 0,
                 None,
                 &mut d,
@@ -266,6 +267,7 @@ pub(super) fn scaffold_schema(
             dest,
             mode_override,
             false,
+            infos.len() == 1,
             ordinal,
             Some(&idents[ordinal]),
             &mut d,
@@ -811,6 +813,20 @@ fn recipe_readable(info: &TableInfo, source_type: &str) -> bool {
     table_shortcut_shape_ok(name) && unquoted_addresses_itself(name, source_type)
 }
 
+/// Does a CDC stream over `infos` on `source_type` take its baseline from batch recipes (`backfill: auto`)?
+fn recipe_baseline_engine(infos: &[TableInfo], source_type: &str) -> bool {
+    source_type == "mysql"
+        || (source_type == "postgres" && infos.iter().all(|i| i.schema == "public"))
+}
+
+/// Does a CDC export of the only table `info` read its baseline through a paged recipe?
+fn sole_table_recipe_baseline(info: &TableInfo, source_type: &str, qualified_table: &str) -> bool {
+    recipe_baseline_engine(std::slice::from_ref(info), source_type)
+        && recipe_readable(info, source_type)
+        && recipe_mode(info) == "chunked"
+        && qualified_table.rsplit('.').next() != Some("snapshot")
+}
+
 /// The read strategy a table's backfill RECIPE gets: paged when it can be, `full` otherwise.
 fn recipe_mode(info: &TableInfo) -> &'static str {
     if info.keysettable_pk_column().is_some() || info.best_chunk_column().is_some() {
@@ -1039,6 +1055,7 @@ fn export_block_lines(
     dest: &InitYamlDestination,
     mode_override: Option<&str>,
     recipe: bool,
+    sole_table: bool,
     ordinal: usize,
     ident: Option<&str>,
     d: &mut ScaffoldDecisions,
@@ -1069,15 +1086,33 @@ fn export_block_lines(
             return vec![skip_ungated_name(d, info, source_type)];
         }
         let ident = ident.map_or_else(|| cdc_ident(&info.table), str::to_string);
-        return cdc_export_lines(
+        let backfill =
+            sole_table && sole_table_recipe_baseline(info, source_type, &qualified_table);
+        let mut lines = if backfill {
+            export_block_lines(
+                info,
+                source_type,
+                dest,
+                Some(recipe_mode(info)),
+                true,
+                false,
+                0,
+                None,
+                d,
+            )
+        } else {
+            Vec::new()
+        };
+        lines.extend(cdc_export_lines(
             info,
             source_type,
             dest,
             &qualified_table,
-            ordinal,
-            &ident,
+            (ordinal, &ident),
+            backfill,
             d,
-        );
+        ));
+        return lines;
     }
 
     // For `mode: full` on a plain table, emit the `table:` shortcut: it produces
@@ -1115,12 +1150,12 @@ fn export_block_lines(
         // is a form Mongo refuses — the circular pair round-9 live-proved).
         return vec![skip_ungated_name(d, info, source_type)];
     }
-    if recipe
+    let table_form = recipe
         || table_form_safe
             && (is_keyset
                 || (mode == "full" && (source_type == "postgres" || source_type == "mongo")))
-        || source_type == "mongo"
-    {
+        || source_type == "mongo";
+    if table_form {
         // MongoDB has no SQL: the `table:` shortcut (→ collection scan) is the
         // ONLY export form it accepts, and it is schemaless so there is no
         // column list to spell out. Always emit `table:` for a Mongo source.
@@ -1335,11 +1370,26 @@ fn export_block_lines(
     // guess, said as one: the operator reviews it before the first load. Not on a
     // recipe — the load never reads one; its table's guess rides the stream's
     // `load.tables.<name>` instead.
-    if let Some((granularity, why)) = dest.partition_guess()
-        && !recipe
-        && let Some(col) = info.best_partition_column()
-    {
+    let key: Vec<String> = info
+        .source_key()
+        .into_iter()
+        .filter(|_| mode == "incremental" && !table_form && dest.partition_guess().is_some())
+        .map(yaml_quote_if_needed)
+        .collect();
+    let partition = dest
+        .partition_guess()
+        .filter(|_| !recipe)
+        .zip(info.best_partition_column());
+    if !key.is_empty() || partition.is_some() {
         lines.push("    load:".to_string());
+    }
+    if !key.is_empty() {
+        lines.push(format!(
+            "      pk: [{}]  # the source primary key init read; `rivet run` records none for a `query:` export",
+            key.join(", ")
+        ));
+    }
+    if let Some(((granularity, why), col)) = partition {
         lines.push(format!(
             "      partition: {{ column: {}, granularity: {granularity} }}  # {why}",
             yaml_quote_if_needed(col)
@@ -1357,8 +1407,8 @@ fn cdc_export_lines(
     source_type: &str,
     dest: &InitYamlDestination,
     qualified_table: &str,
-    ordinal: usize,
-    ident: &str,
+    (ordinal, ident): (usize, &str),
+    backfill: bool,
     d: &mut ScaffoldDecisions,
 ) -> Vec<String> {
     d.has_delta = true;
@@ -1385,7 +1435,10 @@ omitting differ per engine — see cdc.md)",
         BOUNDED_DRAIN_LINE.to_string(),
     ];
     lines.push(
-        if qualified_table.rsplit('.').next() == Some("snapshot") {
+        if backfill {
+            d.has_baseline = true;
+            "      backfill: auto  # baseline through the batch export above (paged by its key), after the anchor — no gap"
+        } else if qualified_table.rsplit('.').next() == Some("snapshot") {
             d.cdc_without_baseline = true;
             "      # no baseline: a table named `snapshot` collides with the baseline's `snapshot/` sub-prefix — capture-only"
         } else {
@@ -2079,6 +2132,7 @@ mod tests {
                 &dest,
                 Some(mode),
                 false,
+                false,
                 0,
                 None,
                 &mut ScaffoldDecisions::default(),
@@ -2447,8 +2501,8 @@ mod tests {
                 st,
                 &InitYamlDestination::default(),
                 "dbo.payments",
-                0,
-                "payments",
+                (0, "payments"),
+                false,
                 &mut d,
             )
             .join("\n")
@@ -2565,8 +2619,11 @@ mod tests {
             &Default::default(),
             vec![pk("id", "bigint"), col("updated_at", "timestamp")],
         );
-        let e = &cfg.exports[0];
-        assert_eq!(e.mode, crate::config::ExportMode::Cdc);
+        let e = cfg
+            .exports
+            .iter()
+            .find(|e| e.mode == crate::config::ExportMode::Cdc)
+            .expect("the cdc export");
         let cdc = e
             .cdc
             .as_ref()
@@ -2615,7 +2672,12 @@ mod tests {
             "{standby}"
         );
         let cfg = crate::config::Config::from_yaml(&standby).expect("the standby scaffold loads");
-        assert!(!cfg.exports[0].cdc.as_ref().unwrap().until_current);
+        let stream = cfg
+            .exports
+            .iter()
+            .find(|e| e.mode == crate::config::ExportMode::Cdc)
+            .expect("the cdc export");
+        assert!(!stream.cdc.as_ref().unwrap().until_current);
     }
 
     /// `--bigquery-project/--dataset` is what scaffolds the `load:` block, and a
@@ -4609,8 +4671,12 @@ mod tests {
                         assert!(exports.is_empty(), "{at}");
                         continue;
                     }
-                    assert_eq!(exports.len(), 1, "{at}");
-                    let e = &exports[0];
+                    let e = exports
+                        .iter()
+                        .find(|e| e["mode"].as_str() == Some("cdc"))
+                        .unwrap_or(&exports[0]);
+                    let backfill = e["cdc"]["backfill"].is_string();
+                    assert_eq!(exports.len(), 1 + usize::from(backfill), "{at}");
                     if mode != Some("cdc") {
                         assert_eq!(e["name"].as_str(), Some(*table), "{at}");
                     }
@@ -5074,7 +5140,11 @@ mod load_block_tests {
             );
             assert!(load.cleanup_source, "{mode}");
             assert!(load.target.compacts(), "{mode}");
-            let export = &cfg.exports[0];
+            let export = cfg
+                .exports
+                .iter()
+                .find(|e| e.mode == crate::config::ExportMode::Cdc)
+                .unwrap_or(&cfg.exports[0]);
             // No key is written: the default gives a delta mode its base and buffer.
             assert_eq!(
                 crate::plan::load_settings::resolved_layout(&cfg, export, None)
@@ -5168,5 +5238,210 @@ mod load_block_tests {
             lines.iter().any(|l| l.starts_with(NO_LOAD_BLOCK)),
             "{lines:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod init_baseline_tests {
+    use super::tests::{col, make_table, pk};
+    use super::*;
+    use crate::init::ColumnInfo;
+
+    /// The table every case below varies: one key column and an update stamp.
+    fn keyed_table(schema: &str, table: &str, rows: i64) -> TableInfo {
+        TableInfo {
+            schema: schema.into(),
+            table: table.into(),
+            row_estimate: rows,
+            ..make_table(vec![
+                ColumnInfo {
+                    key_position: Some(1),
+                    ..pk("id", "bigint")
+                },
+                col("updated_at", "timestamp"),
+            ])
+        }
+    }
+
+    /// A BigQuery load target, so the scaffold carries a top-level `load:` block.
+    fn warehouse() -> InitYamlDestination {
+        InitYamlDestination {
+            bigquery_project: Some("p".into()),
+            bigquery_dataset: Some("d".into()),
+            ..Default::default()
+        }
+    }
+
+    /// The scaffold of one table in `mode` against `url`, loaded through the config loader.
+    fn one_table(
+        url: &str,
+        info: &TableInfo,
+        mode: &str,
+        dest: &InitYamlDestination,
+    ) -> (String, crate::config::Config) {
+        let yaml = generate_config(
+            info,
+            url,
+            &crate::init::SourceProvenance::Inline,
+            dest,
+            Some(mode),
+            None,
+        )
+        .unwrap();
+        let cfg = crate::config::Config::from_yaml(&yaml)
+            .unwrap_or_else(|e| panic!("the scaffold must load: {e:#}\n{yaml}"));
+        (yaml, cfg)
+    }
+
+    /// An incremental `query:` export loaded into a warehouse names its key in its own `load:` block, so a load against any state resolves it.
+    #[test]
+    fn an_incremental_query_export_declares_the_key_init_read() {
+        for url in [
+            "postgresql://u:p@h/db",
+            "mysql://u:p@h/db",
+            "sqlserver://u:p@h/db",
+            "oracle://u:p@h/db",
+        ] {
+            let (yaml, cfg) = one_table(
+                url,
+                &keyed_table("public", "orders", 1000),
+                "incremental",
+                &warehouse(),
+            );
+            let export = &cfg.exports[0];
+            assert!(export.query.is_some(), "{url}: a query: export\n{yaml}");
+            let declared = export.load.as_ref().and_then(|l| l.pk.clone());
+            assert_eq!(
+                declared,
+                Some(crate::config::load::KeyColumns::Columns(vec!["id".into()])),
+                "{url}: the export carries its key\n{yaml}"
+            );
+        }
+    }
+
+    /// The declared key is the source key in key order, not the order the columns sit in the table.
+    #[test]
+    fn the_declared_key_follows_the_source_key_order() {
+        let at = |name: &str, place| ColumnInfo {
+            key_position: Some(place),
+            ..pk(name, "bigint")
+        };
+        let info = TableInfo {
+            table: "orders".into(),
+            row_estimate: 1000,
+            ..make_table(vec![at("a", 2), at("b", 1), col("updated_at", "timestamp")])
+        };
+        let (yaml, cfg) = one_table("postgresql://u:p@h/db", &info, "incremental", &warehouse());
+        let declared = cfg.exports[0].load.as_ref().and_then(|l| l.pk.clone());
+        assert_eq!(
+            declared,
+            Some(crate::config::load::KeyColumns::Columns(vec![
+                "b".into(),
+                "a".into()
+            ])),
+            "{yaml}"
+        );
+    }
+
+    /// Where no key was read, or no warehouse is loaded, or the mode takes no delta load, the export carries no `load:` block of its own.
+    #[test]
+    fn an_export_without_a_read_key_or_a_delta_load_declares_none() {
+        let keyed = keyed_table("public", "orders", 1000);
+        let unread = TableInfo {
+            columns: keyed
+                .columns
+                .iter()
+                .map(|c| ColumnInfo {
+                    key_position: None,
+                    ..c.clone()
+                })
+                .collect(),
+            ..keyed.clone()
+        };
+        let cases: [(&TableInfo, &str, InitYamlDestination); 5] = [
+            (&unread, "incremental", warehouse()),
+            (&keyed, "incremental", InitYamlDestination::default()),
+            (&keyed, "full", warehouse()),
+            (&keyed, "chunked", warehouse()),
+            (&keyed, "time_window", warehouse()),
+        ];
+        for (info, mode, dest) in cases {
+            let (yaml, cfg) = one_table("postgresql://u:p@h/db", info, mode, &dest);
+            let own = cfg.exports[0].load.as_ref().and_then(|l| l.pk.clone());
+            assert_eq!(own, None, "{mode}:\n{yaml}");
+        }
+    }
+
+    /// One MySQL or PostgreSQL table that can be paged gets the recipe-and-stream shape a pair of tables gets.
+    #[test]
+    fn a_one_table_cdc_scaffold_reads_its_baseline_through_a_paged_recipe() {
+        for (url, schema) in [
+            ("mysql://u:p@h/db", "db"),
+            ("postgresql://u:p@h/db", "public"),
+        ] {
+            let (yaml, cfg) = one_table(
+                url,
+                &keyed_table(schema, "orders", 5_000_000),
+                "cdc",
+                &InitYamlDestination::default(),
+            );
+            assert!(!yaml.contains("initial: snapshot"), "{url}:\n{yaml}");
+            assert!(yaml.contains("backfill: auto"), "{url}:\n{yaml}");
+            let stream = cfg
+                .exports
+                .iter()
+                .find(|e| e.mode == crate::config::ExportMode::Cdc)
+                .expect("the cdc export");
+            let pairs = crate::config::resolve_backfill(stream, &cfg.exports)
+                .unwrap_or_else(|e| panic!("{url}: the recipe pairs: {e}\n{yaml}"));
+            let recipe = crate::config::backfill_recipe_for(&pairs, "orders").expect("paired");
+            assert_eq!(recipe.chunk_key_lead(), Some("id"), "{url}:\n{yaml}");
+            assert!(recipe.table.is_some() && recipe.query.is_none(), "{yaml}");
+        }
+    }
+
+    /// A one-table schema scaffold in CDC mode pages its baseline, a two-table one does not take the sole-table shape.
+    #[test]
+    fn a_schema_scaffold_of_one_table_takes_the_sole_table_baseline() {
+        let one = scaffold_schema(
+            &[keyed_table("public", "orders", 5_000_000)],
+            "postgresql://u:p@h/db",
+            &crate::init::SourceProvenance::Inline,
+            "s",
+            &InitYamlDestination::default(),
+            Some("cdc"),
+            None,
+        )
+        .unwrap();
+        assert!(one.text.contains("backfill: auto"), "{}", one.text);
+        assert!(!one.text.contains("initial: snapshot"), "{}", one.text);
+    }
+
+    /// A one-table CDC scaffold that cannot be paged, or sits on another engine, keeps its single `initial: snapshot` export.
+    #[test]
+    fn a_one_table_cdc_scaffold_keeps_its_snapshot_where_no_recipe_applies() {
+        let unpageable = TableInfo {
+            table: "audit".into(),
+            ..make_table(vec![col("note", "text")])
+        };
+        let keyed = keyed_table("public", "orders", 5_000_000);
+        let other_schema = TableInfo {
+            schema: "sales".into(),
+            ..keyed.clone()
+        };
+        let cases: [(&str, &TableInfo); 6] = [
+            ("mysql://u:p@h/db", &unpageable),
+            ("postgresql://u:p@h/db", &unpageable),
+            ("sqlserver://u:p@h/db", &keyed),
+            ("oracle://u:p@h/db", &keyed),
+            ("mongodb://u:p@h/db", &keyed),
+            ("postgresql://u:p@h/db", &other_schema),
+        ];
+        for (url, info) in cases {
+            let (yaml, cfg) = one_table(url, info, "cdc", &InitYamlDestination::default());
+            assert!(yaml.contains("initial: snapshot"), "{url}:\n{yaml}");
+            assert!(!yaml.contains("backfill:"), "{url}:\n{yaml}");
+            assert_eq!(cfg.exports.len(), 1, "{url}:\n{yaml}");
+        }
     }
 }
