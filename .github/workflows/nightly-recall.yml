@@ -1,0 +1,178 @@
+name: Nightly Recall
+
+on:
+  schedule:
+    - cron: "15 1 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Comma-separated seed names (empty = every seed, sharded)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: Plan the shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          SEEDS: ${{ inputs.seeds }}
+        run: python3 .github/scripts/recall_shards.py 4 | tee -a "$GITHUB_OUTPUT"
+
+  recall:
+    name: Recall shard ${{ matrix.shard.index }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/free-disk
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-nextest,uv
+
+      - name: Build the seed tool before the stack starts
+        run: cargo build --release --bin seed --features dev-seed
+
+      - name: Start services
+        run: |
+          mkdir -p tests/.live-tmp
+          docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo
+          sudo chmod -R 0777 tests/.live-tmp
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for Postgres..."
+          for i in $(seq 1 30); do docker compose exec -T postgres pg_isready -U rivet && break || sleep 2; done
+          echo "Waiting for the Postgres state server, then its per-run database (RIVET_TEST_STATE_URL)..."
+          for i in $(seq 1 30); do docker compose exec -T postgres-state pg_isready -U rivet && break || sleep 2; done
+          docker compose exec -T postgres-state psql -U rivet -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE rivet_state_ci"
+          echo "Waiting for MySQL..."
+          for i in $(seq 1 30); do docker compose exec -T mysql mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
+          echo "Waiting for pgBouncer..."
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6432) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for pgBouncer in front of the state server..."
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6433) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for ProxySQL..."
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6033) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for ProxySQL in front of the +03:00 MySQL (mysql-tz, D5)..."
+          for i in $(seq 1 60); do (exec 3<>/dev/tcp/127.0.0.1/6097) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for Azurite..."
+          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/10000) 2>/dev/null && break || sleep 1; done
+          echo "Waiting for ClickHouse..."
+          for i in $(seq 1 30); do curl -sf localhost:8123/ping >/dev/null 2>&1 && break || sleep 2; done
+          echo "Waiting for duckdb loader..."
+          for i in $(seq 1 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' rivet-duckdb 2>/dev/null)" = "healthy" ] && break || sleep 2; done
+          echo "Waiting for SQL Server..."
+          for i in $(seq 1 40); do [ "$(docker inspect -f '{{.State.Health.Status}}' rivet-mssql 2>/dev/null)" = "healthy" ] && break || sleep 2; done
+          echo "Waiting for Oracle..."
+          for i in $(seq 1 90); do docker compose exec -T oracle healthcheck.sh >/dev/null 2>&1 && break || sleep 2; done
+          echo "Waiting for Mongo..."
+          for i in $(seq 1 30); do docker compose exec -T mongo sh -c "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'" >/dev/null 2>&1 && break || sleep 2; done
+          echo "Waiting for CDC services (cdc profile)..."
+          for i in $(seq 1 30); do docker compose exec -T postgres-cdc pg_isready -U rivet && break || sleep 2; done
+          for i in $(seq 1 30); do docker compose exec -T mysql-cdc mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
+          for i in $(seq 1 40); do docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
+          docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
+          echo "Waiting for SQL Server (governor instance)..."
+          for i in $(seq 1 40); do docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
+          docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
+
+      - name: Seed light fixtures (orders, etc.)
+        run: |
+          PGPASSWORD=rivet psql -h localhost -U rivet -d rivet -f dev/e2e/seed_pg.sql
+          mysql -h 127.0.0.1 -u rivet -privet rivet < dev/e2e/seed_mysql.sql
+
+      - name: Seed Oracle database
+        run: docker compose exec -T oracle sqlplus -s rivet/rivet@localhost/FREEPDB1 < seeds/common/oracle.sql > /dev/null
+
+      - name: Seed MSSQL database
+        run: |
+          docker compose cp dev/mssql/init.sql mssql:/tmp/init.sql
+          docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P 'Rivet_Passw0rd!' -C -i /tmp/init.sql
+
+      - name: Seed heavy fixture (content_items)
+        run: |
+          RIVET_SEED_I_KNOW=1 ./target/release/seed \
+            --target postgres \
+            --users 1000 \
+            --orders-per-user 5 \
+            --events-per-user 5 \
+            --page-views 5000 \
+            --content-items 60000
+          PGPASSWORD=rivet psql -h localhost -U rivet -d rivet -c ANALYZE
+
+      - name: Independent row-hash oracle deps
+        run: python3 -m pip install --break-system-packages xxhash
+
+      - name: Python environment
+        run: uv sync --frozen
+
+      - name: Seeded recall for this shard
+        env:
+          SEEDS: ${{ matrix.shard.seeds }}
+          RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
+        run: |
+          mkdir -p out
+          set +e
+          make seeded-recall SEEDED_ARGS="--seeds $SEEDS" 2>&1 | tee out/recall.txt
+          rc=${PIPESTATUS[0]}
+          grep -E "^[a-z0-9-]+ +\|" out/recall.txt > out/table.txt
+          { echo "### Recall shard ${{ matrix.shard.index }} (exit $rc)"; echo '```'; cat out/table.txt; echo '```'; grep -E "took|MISSED|NOT GRADED|STALE" out/recall.txt | head -40; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: recall-shard-${{ matrix.shard.index }}
+          path: out/
+          if-no-files-found: warn
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
+
+  verdict:
+    name: Recall verdict
+    needs: [plan, recall]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: recall-shard-*
+          path: shards
+        continue-on-error: true
+      - name: One table for the night
+        env:
+          RESULT: ${{ needs.recall.result }}
+        run: |
+          { echo "### Nightly recall: $RESULT"; echo '```'; cat shards/*/table.txt 2>/dev/null; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$RESULT" = success ]
