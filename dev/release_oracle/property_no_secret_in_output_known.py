@@ -41,16 +41,6 @@ KNOWN_LEAKS: tuple[KnownLeak, ...] = (
         sinks=("request",),
     ),
     KnownLeak(
-        reason="2026-11-10 PR-HOSTILE-TEXT (VP-3): an endpoint `http://LAN:P\\@127.0.0.1:Q` passes the loopback check "
-               "while the HTTP client dials LAN:P, which receives the signed S3 request; closes when the endpoint is "
-               "judged by the parsed URL the client dials",
-        expires="2026-12-10",
-        commands=("run", "validate", "doctor"),
-        slots=("dest",),
-        spellings=("s3:access_key_env@backslash-at",),
-        sinks=("request",),
-    ),
-    KnownLeak(
         reason="2026-11-10 PR-CRED: the Azure SAS token rides the request URI that the OpenDAL error context carries into "
                "the retry WARN and the error text; closes when destination error text masks the SAS query",
         expires="2026-12-10",

@@ -82,6 +82,10 @@ GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-re
         "2026-11-02: #755 control: a pinned --prefix verified that one directory on 0.32.2 as well; it guards the run-set validate from widening it; closes when the baseline moves past 0.32.2",
     "check_still_accepts_overrides_the_run_accepts_postgres":
         "2026-11-04: #805 control: an override the run accepts passes check on 0.32.2 as well; it guards the new wire-mismatch refusal from widening onto it; the check_refuses_ cells are the ones that fail there; closes when the baseline moves past 0.32.2",
+    "an_oracle_integer_cursor_is_admitted_into_clickhouse":
+        "2026-11-12: #938 control: an Oracle integer cursor the load admits was admitted on 0.32.2 as well; it guards the admission from refusing the neighbours of the refused NUMBER cursor, whose an_oracle_number_cursor_is_refused_ cell fails there; closes when the baseline moves past 0.32.2",
+    "an_oracle_text_cursor_is_admitted_into_clickhouse":
+        "2026-11-12: #938 control: an Oracle text cursor the load admits was admitted on 0.32.2 as well; it guards the admission from refusing the neighbours of the refused NUMBER cursor, whose an_oracle_number_cursor_is_refused_ cell fails there; closes when the baseline moves past 0.32.2",
 }  # ratchet-pin: end
 #: Fix commit (short sha) → pattern of the only cells it is the fix for, with its reason. Shrink-only.
 FIX_SCOPE: dict[str, tuple[str, str]] = {
@@ -132,6 +136,11 @@ NO_LIVE_CELL: dict[str, tuple[str, str]] = {
     "208823de": ("mysql_system_store_is_not_a_second_anchor", "2026-11-10: offline test, seed ca-file-second-trust-anchor; not run on the previous binary; closes when the baseline moves past 0.32.2"),
     "3bd8620c": ("a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints", "2026-11-10: lib test, seed token-endpoint-transient-final; not run on the previous binary; closes when the baseline moves past 0.32.2"),
     "8679e73f": ("a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn", "2026-11-10: lib test, seed sqlite-chunk-claim-takes-no-turn; not run on the previous binary; closes when the baseline moves past 0.32.2"),
+    "7d9b3e91": ("a_source_path_with_a_uri_character_is_read_as_the_file_it_names", "2026-11-12: lib test; the live state-copy cells use plain scratch paths, none holds `#`, `?` or `%`, so no live cell tells 0.32.2 from the fix; closes when a live copy cell reads a path with a URI character or the baseline moves past 0.32.2"),
+    "69327ffc": ("a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names", "2026-11-12: lib test over the engine x hostile-name x mode matrix; no live cell creates a table or column named with a line break or a YAML indicator; closes when a live init cell scaffolds such a catalog name or the baseline moves past 0.32.2"),
+    "a434e250": ("a_remote_plaintext_clickhouse_url_is_refused_unless_allowed", "2026-11-12: lib test and the refusal_names_true_cause injector; 0.32.2 has no RIVET_CONFIG_REMOTE_PLAINTEXT gate and the stand ClickHouse is loopback, so no live cell sends a secret to a remote http:// sink; closes when a live cell reaches a non-loopback plaintext sink or the baseline moves past 0.32.2"),
+    "f9988462": ("a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused", "2026-11-12: lib test; the gate it hardens is absent from 0.32.2 and no live cell uses a remote plaintext URL in any spelling; closes when a live cell reaches a non-loopback plaintext sink or the baseline moves past 0.32.2"),
+    "4ef290bb": ("a_query_key_decoding_to_a_multibyte_character_is_read_without_a_panic", "2026-11-12: lib test; 0.32.2 does not percent-decode query keys, so the panic is absent there and the no_secret_in_output matrix has no multibyte key; closes when the baseline moves past 0.32.2"),
 }
 
 

@@ -76,7 +76,11 @@ fn turns_of(db: &Path) -> Arc<Turns> {
 /// on to SQLite's own busy wait and its verdict, holding its place (no later writer of this
 /// process is served before it); `None` only for an in-memory store.
 pub(super) fn take(db: &Path, patience: Duration) -> Option<Turn> {
-    if db.as_os_str() == ":memory:" {
+    if seeded!(
+        "sqlite-writer-starved-by-a-sibling",
+        db.as_os_str() == ":memory:" || !db.as_os_str().is_empty(),
+        db.as_os_str() == ":memory:"
+    ) {
         return None;
     }
     let turns = turns_of(db);

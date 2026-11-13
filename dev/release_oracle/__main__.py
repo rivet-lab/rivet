@@ -1513,6 +1513,7 @@ def _self_test() -> int:
     import json as _json
     import tempfile as _tf
 
+    from . import core
     from .core import record_timings
 
     with _tf.TemporaryDirectory() as d:
@@ -1521,6 +1522,16 @@ def _self_test() -> int:
                                {"A — detail": (1.26, 30.04)}, config=CANONICAL_CONFIG)
         assert first["phases_load1"] == {"A": [1.3, 30.0]} and first["cores"], first
         assert _json.loads(hist.read_text().splitlines()[0])["config"] == CANONICAL_CONFIG, "the record carries its configuration"
+        stand_in = Path(d) / "rivet"
+        stand_in.write_text('#!/usr/bin/env python3\nprint("rivet 0.0.0 (abcdef123)")\n')
+        stand_in.chmod(0o755)
+        kept_bin, core.rivet_bin = core.rivet_bin, lambda: stand_in
+        try:
+            stamped = record_timings(Path(d) / "stamped.jsonl", [("A", 60.0)], [], "RELEASE-READY", 1, 0)
+        finally:
+            core.rivet_bin = kept_bin
+        assert stamped["binary"] == "abcdef123" and stamped["binary_sha256"] == core.file_sha256(stand_in) != "", "the record carries the SHA-256 of the binary it graded"
+        assert core.file_sha256(Path(d) / "absent") == "", "an absent binary has no hash"
         timed = Ledger(colour=False)
         timed._buf = []
         timed.phase("one")

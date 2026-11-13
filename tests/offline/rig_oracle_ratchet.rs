@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 // 33 -> 34 (2026-11-11): the datetime2(7) key-admission cell holds rows that differ below a microsecond, which the oracle reads the source at; the view is read back by the second client; closes when the oracle reads datetime2(7) at full scale.
 // 34 -> 35 (2026-11-11): the Oracle TIMESTAMP(9) key-admission cell holds rows that differ below a microsecond and reads the view through the second client; closes when the oracle reads a timestamp_ns column at full scale.
 // 35 -> 36 (2026-11-11): the unkeyed Mongo CDC cell of mixed `_id` types delivers the flat `_id` text the warning documents, so int 1 and string "1" collapse in the oracle's grade; closes when a keyed load of mixed `_id` is typed (#926).
+// 36 -> 37 (2026-11-12): a_missing_base_refuses_the_compaction_and_keeps_the_buffer drops its base table on purpose and the warehouse grade fails an absent table under source rows; closes when the grade reads a declared drop.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
@@ -44,6 +45,7 @@ use std::path::{Path, PathBuf};
 // 52 -> 53 (2026-11-02): a BigQuery first load whose lease is lost mid-write (a_first_load_whose_lease_is_taken_during_the_write_*): the unowned table and its failed load_run row stay for the refusal the cell then asserts.
 // 53 -> 52 (2026-11-04): the datetime2(7) keyset cell now asserts the refusal before any read (fix/seam-keyset-key-type); one leftover declaration left.
 // 52 -> 56 (2026-11-06): the first-CDC-run-refused-after-its-anchor cells on PostgreSQL, MySQL, SQL Server and Oracle (a_first_cdc_run_refused_after_its_anchor_releases_it_*): the observed schema of the refused baseline leg stays; the slot, the checkpoint and the captured-tables record are asserted gone.
+// 56 -> 58 (2026-11-12): the two Mongo resume cells that meet the heterogeneous `_id` refusal (roast_resume_must_not_bypass_heterogeneous_id_guard, removing_page_size_runs_after_the_heterogeneous_id_refusal_mongo): the refused fresh run records its shape with its anchor before the guard refuses, and the next run continues it.
 // ratchet-pin: failed-run-leftover-declarations (review 2027-02-01) count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).

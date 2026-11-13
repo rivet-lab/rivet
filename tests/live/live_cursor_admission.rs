@@ -10,7 +10,7 @@ use arrow::datatypes::{DataType, Decimal128Type, Int32Type, Int64Type};
 
 const NULLABLE: Refused = Refused::by_code("RIVET_PLAN_CURSOR_NULLABLE", 5);
 const UNSUPPORTED: Refused = Refused::by_code("RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED", 5);
-const COMMANDS: [&str; 3] = ["check", "plan", "run"];
+const COMMANDS: [&str; 4] = ["check", "doctor", "plan", "run"];
 
 /// The cursor column and the fallback column, spelt as the engine folds them.
 fn names(engine: SqlEngine) -> (&'static str, &'static str) {
@@ -137,6 +137,18 @@ fn incremental(engine: SqlEngine, table: &str, lines: &[&str]) -> Rig {
     engine.rig(table).restage("incremental", lines)
 }
 
+/// `doctor` exits 0 on a config whose cursor the admission lets through.
+fn assert_doctor_passes(rig: &Rig) {
+    let out = rig.cli(&["doctor"]);
+    assert!(
+        out.status.success(),
+        "doctor refused an admitted cursor: exit {:?}\n{}{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Every command refuses by `want`, and the run writes no part.
 fn refused_on_every_command(rig: &Rig, want: Refused, what: &str) {
     let mut gaps = Vec::new();
@@ -207,6 +219,7 @@ fn not_null_cursor_delivers_once(engine: SqlEngine) {
     let (table, _guard) = seeded(engine, timestamp(engine), "NOT NULL", false);
     let (c, _) = names(engine);
     let rig = incremental(engine, &table, &[&format!("cursor_column: {c}")]);
+    assert_doctor_passes(&rig);
     rig.run_ok();
     assert_eq!(delivered_ids(&rig.out_dir()), vec![1, 2, 3]);
     let parts = files_with_extension(&rig.out_dir(), "parquet").len();
@@ -231,6 +244,7 @@ fn coalesce_over_a_nullable_cursor_delivers(engine: SqlEngine) {
             "incremental_cursor_mode: coalesce",
         ],
     );
+    assert_doctor_passes(&rig);
     rig.run_ok();
     assert_eq!(delivered_ids(&rig.out_dir()), vec![1, 2, 3]);
 }

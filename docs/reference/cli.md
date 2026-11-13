@@ -596,6 +596,8 @@ Output includes: table existence, estimated row count, index analysis, tuning re
 
 Verify source, state and destination connectivity/auth before running exports. The State check opens the state the config uses without creating or migrating it, and names the backend.
 
+For each `mode: incremental` export, once the source answers, it asks the source about the `cursor_column:` over the export's query and prints an `Incremental cursor <export>.<column>` line: a column that can hold NULL ends `RIVET_PLAN_CURSOR_NULLABLE` and one of a type the cursor cannot render ends `RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED` (both exit 5, the same message `check` and `run` print); a source that cannot be asked about the column is shown as a pass that names the cause, as `run` warns about it.
+
 ```bash
 rivet doctor --config <PATH>
 ```
@@ -618,6 +620,7 @@ rivet doctor: verifying auth for config 'my_export.yaml'
 [OK]  Config parsed successfully
 [OK]  State (sqlite /etc/rivet/.rivet_state.db)
 [OK]  Source auth (Postgres)
+[OK]  Incremental cursor orders.id
 [OK]  Destination Local(./output)
 
 All checks passed.

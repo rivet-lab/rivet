@@ -958,7 +958,11 @@ fn mongo_heterogeneous_resume_remedy() {
     m.seed_int_id("t", 100);
     let mut rig = Rig::mongo_batch("t")
         .source_url(&MongoTest::url(MONGO_PORT, &db))
-        .mongo("page_size: 40, resume: true");
+        .mongo("page_size: 40, resume: true")
+        .a_failed_run_may_leave(
+            &[Leftover::ChunkCheckpoint],
+            "the refused resume run records the shape of the run it opens, with its anchor, before the guard refuses; the next run continues it",
+        );
     rig.run_ok();
     m.insert_many("t", vec![mongodb::bson::doc! { "_id": "zzz", "v": "s" }]);
     rig.refuses_twice_then(

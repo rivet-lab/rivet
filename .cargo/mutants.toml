@@ -41,6 +41,8 @@ exclude_globs = [
     # crash-injection suite: a hook that stops firing leaves those tests unable
     # to construct their crash and they fail on "the run succeeded".
     "src/test_hook.rs",
+    # 2026-11-12: src/seeded.rs is compiled only with feature `seeded`; dev/seeded/recall.py grades it (switches off gives 0 CAUGHT).
+    "src/seeded.rs",
     "src/bin/seed/main.rs",
     "src/bin/seed/args.rs",
     "src/bin/seed/insert.rs",

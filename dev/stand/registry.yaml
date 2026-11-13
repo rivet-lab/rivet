@@ -16,6 +16,7 @@ sources:
   mysql_cdc:    {container: rivet-mysql-cdc-1,    url: "mysql://rivet:rivet@127.0.0.1:3307/rivet"}
   mssql:        {container: rivet-mssql-1,        url: "sqlserver://sa:Rivet_Passw0rd!@127.0.0.1:1433/rivet"}
   mssql_cdc:    {container: rivet-mssql-cdc-1,    url: "sqlserver://sa:Rivet_Passw0rd!@127.0.0.1:1434/rivet"}
+  oracle:       {container: rivet-oracle-1,       url: "oracle://rivet:rivet@127.0.0.1:1521/FREEPDB1"}
   mongo:        {container: rivet-mongo-1,        url: "mongodb://127.0.0.1:27017"}
   mongo_rs:     {container: rivet-mongo-rs-1,     url: "mongodb://127.0.0.1:27018/?directConnection=true"}
   mongo_shard:  {container: rivet-mongos-1,       url: &mongo_shard_url "mongodb://127.0.0.1:27991/?directConnection=true"}

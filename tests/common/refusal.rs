@@ -32,29 +32,51 @@ const OWN_RECORD: &[Leftover] = &[
     Leftover::FirstFailedManifest,
 ];
 
-/// State tables whose rows record an outcome in a `status` column.
-const JOURNAL: &[&str] = &["export_metrics", "run_status", "load_run"];
+/// How the default oracle reads the rows of one state table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// Measurements or bookkeeping, never a resume point: not compared.
+    Telemetry,
+    /// Rows that record an outcome in a `status` column.
+    Journal,
+    /// Rows whose change is a leftover of this kind.
+    Rows(Leftover),
+}
 
-/// State tables that hold measurements or bookkeeping, never a resume point.
-const TELEMETRY: &[&str] = &[
-    "run_journal",
-    "run_aggregate",
-    "export_harm",
-    "export_shape",
-    "strategy_snapshot",
-    "state_lease",
-    "schema_version",
-    "rivet_schema_version",
+/// Every table the state schema creates and how its rows are read; a table not named here is a resume point (pinned complete by `every_state_table_is_named_here`).
+const STATE_TABLES: &[(&str, Role)] = &[
+    ("export_metrics", Role::Journal),
+    ("run_status", Role::Journal),
+    ("load_run", Role::Journal),
+    ("run_journal", Role::Telemetry),
+    ("run_aggregate", Role::Telemetry),
+    ("export_harm", Role::Telemetry),
+    ("export_shape", Role::Telemetry),
+    ("strategy_snapshot", Role::Telemetry),
+    ("state_lease", Role::Telemetry),
+    ("schema_version", Role::Telemetry),
+    ("rivet_schema_version", Role::Telemetry),
+    ("file_log", Role::Rows(Leftover::FileLog)),
+    ("export_schema", Role::Rows(Leftover::ObservedSchema)),
+    ("chunk_run", Role::Rows(Leftover::ChunkCheckpoint)),
+    ("chunk_task", Role::Rows(Leftover::ChunkCheckpoint)),
+    ("keyset_range", Role::Rows(Leftover::ChunkCheckpoint)),
+    ("run_shape", Role::Rows(Leftover::ChunkCheckpoint)),
+    ("export_state", Role::Rows(Leftover::ResumePoint)),
+    ("export_progression", Role::Rows(Leftover::ResumePoint)),
+    ("loaded_source_run", Role::Rows(Leftover::ResumePoint)),
+    ("cdc_snapshot", Role::Rows(Leftover::ResumePoint)),
+    ("export_load_spec", Role::Rows(Leftover::ResumePoint)),
+    ("export_load_spec_run", Role::Rows(Leftover::ResumePoint)),
+    ("load_spec_version", Role::Rows(Leftover::ResumePoint)),
 ];
 
-/// The kind a changed row of a non-journal state table is; a table not named here is a resume point.
-fn kind_of_table(table: &str) -> Leftover {
-    match table {
-        "file_log" => Leftover::FileLog,
-        "export_schema" => Leftover::ObservedSchema,
-        "chunk_run" | "chunk_task" | "keyset_range" => Leftover::ChunkCheckpoint,
-        _ => Leftover::ResumePoint,
-    }
+/// How the oracle reads `table`; a table `STATE_TABLES` does not name is a resume point.
+fn role_of(table: &str) -> Role {
+    STATE_TABLES
+        .iter()
+        .find(|(name, _)| *name == table)
+        .map_or(Role::Rows(Leftover::ResumePoint), |(_, role)| *role)
 }
 
 /// The statuses a journal row may record for a run that did not succeed.
@@ -89,7 +111,7 @@ pub enum Leftover {
     FileLog,
     /// An `export_schema` row for an export that had none: the schema the run observed.
     ObservedSchema,
-    /// A chunk or range checkpoint row (`chunk_run`, `chunk_task`, `keyset_range`).
+    /// A chunk or range checkpoint row (`chunk_run`, `chunk_task`, `keyset_range`) or the shape its run was opened with (`run_shape`).
     ChunkCheckpoint,
     /// Any other state row added, and any existing one changed or removed: the cursor, the committed boundary, a stored schema or load spec, a table the oracle does not know.
     ResumePoint,
@@ -412,7 +434,7 @@ fn postgres_rows(
     let (mut out, mut unscoped) = (BTreeMap::new(), Vec::new());
     for row in tables {
         let (t, scoped): (String, bool) = (row.get(0), row.get(1));
-        if TELEMETRY.contains(&t.as_str()) {
+        if role_of(&t) == Role::Telemetry {
             continue;
         }
         if !scoped {
@@ -606,7 +628,7 @@ fn state_changes(
     let mut out = Vec::new();
     let tables: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
     for t in tables {
-        if TELEMETRY.contains(&t.as_str()) {
+        if role_of(t) == Role::Telemetry {
             continue;
         }
         let (b, a) = (
@@ -618,12 +640,16 @@ fn state_changes(
                 .ok()
                 .and_then(|v| v.get(k).and_then(|s| s.as_str()).map(str::to_string))
         };
-        let journal = JOURNAL.contains(&t.as_str());
+        let journal = role_of(t) == Role::Journal;
         let gone: BTreeSet<Option<String>> = b
             .difference(a)
             .map(|row| field(row, "export_name"))
             .collect();
-        let table_kind = |row: &str| match kind_of_table(t) {
+        let row_kind = match role_of(t) {
+            Role::Rows(kind) => kind,
+            Role::Telemetry | Role::Journal => Leftover::ResumePoint,
+        };
+        let table_kind = |row: &str| match row_kind {
             Leftover::ChunkCheckpoint => Leftover::ChunkCheckpoint,
             _ if gone.contains(&field(row, "export_name")) => Leftover::ResumePoint,
             _ if owner_pointer(t, row) => Leftover::ChunkCheckpoint,
@@ -819,6 +845,7 @@ mod tests {
              CREATE TABLE export_schema (export_name TEXT PRIMARY KEY, columns_json TEXT);
              CREATE TABLE file_log (id INTEGER PRIMARY KEY, export_name TEXT, file_name TEXT);
              CREATE TABLE chunk_task (id INTEGER PRIMARY KEY, run_id TEXT, status TEXT);
+             CREATE TABLE run_shape (run_id TEXT PRIMARY KEY, shape_json TEXT);
              CREATE TABLE export_metrics (id INTEGER PRIMARY KEY, export_name TEXT, status TEXT);
              CREATE TABLE load_run (load_id TEXT, export_name TEXT, status TEXT);
              CREATE TABLE run_journal (run_id TEXT, export_name TEXT);
@@ -1018,6 +1045,44 @@ mod tests {
         let (kinds, _) =
             kinds_after(|d| std::fs::remove_file(d.join("out/part-0.parquet")).unwrap());
         assert_eq!(kinds, vec![Leftover::ChangedFile]);
+    }
+
+    #[test]
+    fn the_shape_a_failed_checkpointed_run_was_opened_with_is_a_chunk_checkpoint() {
+        let (dir, scope) = fixture();
+        let before = Snapshot::take(&scope);
+        sql(dir.path(), "INSERT INTO run_shape VALUES ('r', '{}')");
+        let (found, blind) = diff(&scope, &before, &Snapshot::take(&scope));
+        assert!(blind.is_empty(), "{blind:?}");
+        assert_eq!(
+            found.iter().map(|f| f.kind).collect::<Vec<_>>(),
+            [Leftover::ChunkCheckpoint]
+        );
+        assert!(
+            matches!(judge(&found, &[], None), Verdict::Fail(l) if l[0].starts_with("chunk-checkpoint: run_shape + ")),
+            "an undeclared run_shape row is a leftover"
+        );
+        assert_eq!(
+            judge(&found, &[Leftover::ChunkCheckpoint], None),
+            clean("left only chunk-checkpoint x1")
+        );
+    }
+
+    #[test]
+    fn every_state_table_is_named_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join(".rivet_state.db");
+        rivet::state::StateStore::open_at_path(&db).expect("open a fresh state");
+        let unnamed: Vec<String> = sqlite_rows(&db)
+            .unwrap()
+            .into_keys()
+            .filter(|t| !STATE_TABLES.iter().any(|(name, _)| name == t))
+            .collect();
+        assert_eq!(
+            unnamed,
+            Vec::<String>::new(),
+            "state tables the default oracle has no role for (add them to STATE_TABLES)"
+        );
     }
 
     #[test]

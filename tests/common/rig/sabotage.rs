@@ -206,8 +206,8 @@ pub(crate) fn not_a_failed_validation(
                 n + 1
             ));
         }
-        if !s.text.contains(&format!("[{finding}")) {
-            return Some(format!("report {} does not name [{finding}", n + 1));
+        if !s.text.contains(&format!("[{finding}]")) {
+            return Some(format!("report {} does not name [{finding}]", n + 1));
         }
     }
     None
@@ -297,7 +297,7 @@ impl Rig {
         }
     }
 
-    /// `rivet validate` on this rig's export fails twice with exit 3 and names the `RIVET_VERIFY_*` `finding` in its report.
+    /// `rivet validate` on this rig's export fails twice with exit 3 and names exactly `[finding]`, a full `RIVET_VERIFY_*` code, in its report.
     pub fn validate_fails(&self, finding: &str) {
         let first = said(&self.cli(&["validate"]));
         let second = said(&self.cli(&["validate"]));
@@ -454,7 +454,7 @@ mod tests {
     fn a_validation_fails_only_with_exit_3_and_the_finding_twice() {
         let report = "failure:   [RIVET_VERIFY_PART_MISSING] part 1\nError: rivet validate: 1 export(s) failed verification\n";
         let (bad, passed) = (ended(3, report), ended(0, "status: PASSED\n"));
-        let part = "RIVET_VERIFY_PART_";
+        let part = "RIVET_VERIFY_PART_MISSING";
         assert_eq!(not_a_failed_validation(&bad, &bad, part), None);
         assert_eq!(
             not_a_failed_validation(&passed, &passed, part).as_deref(),
@@ -465,8 +465,12 @@ mod tests {
             Some("report 2 ended with exit 0, expected exit 3 (integrity)")
         );
         assert_eq!(
-            not_a_failed_validation(&bad, &bad, "RIVET_VERIFY_MANIFEST").as_deref(),
-            Some("report 1 does not name [RIVET_VERIFY_MANIFEST")
+            not_a_failed_validation(&bad, &bad, "RIVET_VERIFY_MANIFEST_MISSING").as_deref(),
+            Some("report 1 does not name [RIVET_VERIFY_MANIFEST_MISSING]")
+        );
+        assert_eq!(
+            not_a_failed_validation(&bad, &bad, "RIVET_VERIFY_PART_").as_deref(),
+            Some("report 1 does not name [RIVET_VERIFY_PART_]")
         );
         assert!(not_a_failed_validation(&ended(1, report), &bad, part).is_some());
     }

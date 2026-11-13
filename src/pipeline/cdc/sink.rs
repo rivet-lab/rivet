@@ -223,7 +223,7 @@ impl TableSink<'_> {
     /// Closes this table's `running` marker of a failed run: removed when no part reached the store, rewritten `Failed` over the parts that did.
     fn close_marker(&self, run: &SinkRun<'_>) -> Result<()> {
         let marker = self.running_marker(run);
-        if !self.parts.is_empty() {
+        if seeded!("cdc-run-close-marker", true, !self.parts.is_empty()) {
             let failed = RunManifest {
                 status: ManifestStatus::Failed,
                 ..marker

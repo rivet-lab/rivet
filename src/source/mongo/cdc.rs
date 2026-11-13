@@ -252,7 +252,15 @@ fn idle_poll_stops(
 ) -> bool {
     match (advanced, target) {
         (Some(cur), Some(tgt)) => {
-            cur > tgt && (token_reached_bound(cur, bound) || waited >= BOUND_WAIT_CEILING)
+            cur > tgt
+                && (token_reached_bound(
+                    cur,
+                    seeded!("mongo-cdc-stops-before-the-open-time-bound", None, bound),
+                ) || seeded!(
+                    "mongo-cdc-bound-wait-has-no-ceiling",
+                    waited > std::time::Duration::MAX,
+                    waited >= BOUND_WAIT_CEILING
+                ))
         }
         (_, None) => true,
         _ => false,
@@ -280,16 +288,25 @@ fn token_floor(
     bound: Option<mongodb::bson::Timestamp>,
     sharded: bool,
 ) -> Option<mongodb::bson::Timestamp> {
-    bound.map(|b| match (sharded, b.increment.checked_add(1)) {
-        (true, Some(increment)) => mongodb::bson::Timestamp {
-            time: b.time,
-            increment,
-        },
-        (true, None) => mongodb::bson::Timestamp {
-            time: b.time.saturating_add(1),
-            increment: 0,
-        },
-        (false, _) => b,
+    bound.map(|b| {
+        match (
+            seeded!(
+                "mongo-cdc-sharded-drain-stops-at-the-bound-tick",
+                false,
+                sharded
+            ),
+            b.increment.checked_add(1),
+        ) {
+            (true, Some(increment)) => mongodb::bson::Timestamp {
+                time: b.time,
+                increment,
+            },
+            (true, None) => mongodb::bson::Timestamp {
+                time: b.time.saturating_add(1),
+                increment: 0,
+            },
+            (false, _) => b,
+        }
     })
 }
 

@@ -534,7 +534,12 @@ fn roast_resume_must_not_bypass_heterogeneous_id_guard() {
     m.seed_int_id("t", 100); // uniform int _id — run 1 passes the guard
 
     // SAME rig across runs: the keyset checkpoint persists in export_state.
-    let rig = batch(&db, "t").mongo("page_size: 40, resume: true");
+    let rig = batch(&db, "t")
+        .mongo("page_size: 40, resume: true")
+        .a_failed_run_may_leave(
+            &[Leftover::ChunkCheckpoint],
+            "the refused resume run records the shape of the run it opens, with its anchor, before the guard refuses; the next run continues it",
+        );
     rig.run_ok();
     assert_eq!(
         duckdb_dir_parquet_distinct_strings(&rig.out_dir(), "_id").len(),

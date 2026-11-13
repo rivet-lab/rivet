@@ -67,7 +67,7 @@ pub fn write_config(tmpdir: &tempfile::TempDir, yaml: &str) -> PathBuf {
     path
 }
 
-/// A `rivet` command with every inherited `RIVET_*` stripped; the child sees only the state backend under test and `envs`.
+/// A `rivet` command with every inherited `RIVET_*` but `RIVET_SEED` stripped; the child sees only the state backend under test and `envs`.
 pub fn rivet_command(args: &[impl AsRef<std::ffi::OsStr>], envs: &[(&str, &str)]) -> Command {
     rivet_command_as(rivet_bin(), args, envs)
 }
@@ -81,7 +81,7 @@ pub fn rivet_command_as(
     let mut cmd = Command::new(bin);
     cmd.args(args);
     for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with("RIVET_") {
+        if k != "RIVET_SEED" && k.to_string_lossy().starts_with("RIVET_") {
             cmd.env_remove(&k);
         }
     }

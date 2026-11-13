@@ -238,7 +238,9 @@ impl StateStore {
         }
         let _turn = self.write_turn();
         self.batch(match &self.conn {
-            StateConn::Sqlite(_) => "BEGIN IMMEDIATE",
+            StateConn::Sqlite(_) => {
+                seeded!("unit-of-work-begins-deferred", "BEGIN", "BEGIN IMMEDIATE")
+            }
             StateConn::Postgres(_) => "BEGIN",
         })?;
         self.in_tx.set(true);

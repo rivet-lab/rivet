@@ -910,6 +910,7 @@ fn a_missing_base_refuses_the_compaction_and_keeps_the_buffer() {
     assert_eq!(base_profile(&bq, &table).0, 2, "the base landed");
 
     bq.exec(&format!("DROP TABLE `{fqtn}`"));
+    scn.rig = scn.rig.no_oracle("the base is dropped on purpose; the warehouse grade fails an absent table under source rows");
     scn.insert(3);
     scn.update(1);
     scn.settle();

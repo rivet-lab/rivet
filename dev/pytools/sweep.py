@@ -381,6 +381,25 @@ def _my_cruft(source: str, container: str, db: str) -> None:
     _report(f"{source}/{db}", "tables", dropped, failed)
 
 
+def _ora_cruft(source: str, container: str) -> None:
+    """Orphaned tables in the Oracle stand's app schema, dropped with PURGE."""
+    from urllib.parse import urlparse
+
+    u = urlparse(registry.source(source)["url"])
+    login = f"{u.username}/{u.password}@localhost/{u.path.lstrip('/')}"
+    head = "set heading off feedback off pagesize 0 linesize 4000 trimspool on\nwhenever sqlerror exit failure\n"
+    q = lambda sql: shell.docker_exec(container, "sqlplus", "-s", "-L", login, stdin=f"{head}{sql}\nexit\n", timeout=300)  # noqa: E731
+    listed = q("SELECT table_name FROM user_tables;")
+    if not listed.ok:
+        return
+    dropped, failed = [], []
+    for name in _lines(listed):
+        if registry.orphaned(name):
+            ident = '"' + name.replace('"', '""') + '"'
+            (dropped if q(f"DROP TABLE {ident} PURGE;").ok else failed).append(name)
+    _report(source, "tables", dropped, failed)
+
+
 def _ms_cruft(source: str, container: str, db: str) -> None:
     """Orphaned tables on one SQL Server database — CDC disabled BEFORE the drop, or the change table is orphaned."""
     q = lambda sql: shell.docker_exec(container, *cdc_stand.sqlcmd_argv(sql, db=db, wide=True, nocount=True), timeout=300)  # noqa: E731
@@ -547,6 +566,9 @@ def test_cruft(cloud: bool = False) -> int:
         if source.startswith("mongo"):
             _mongo_cruft(source, container)
             continue
+        if source == "oracle":
+            _ora_cruft(source, container)
+            continue
         for db in registry.load()["databases"]:
             arms[source.split("_")[0]](source, container, db)
     for container in registry.load().get("slot_hosts", []):
@@ -620,10 +642,17 @@ def _live_self_test() -> int:
 
 
 _FAKE_DOCKER = """#!/usr/bin/env python3
-import pathlib, sys
+import os, pathlib, sys
 argv = sys.argv[1:]
 query = argv[-1]
-if query == "SHOW TABLES":
+if "sqlplus" in argv:
+    body = sys.stdin.read()
+    if "FROM user_tables" in body:
+        print(os.environ["FAKE_ORA_TABLES"])
+    elif "DROP TABLE" in body:
+        with open(pathlib.Path(__file__).with_name("ora_drops.txt"), "a") as f:
+            f.write(body.splitlines()[2] + "\\n")
+elif query == "SHOW TABLES":
     raw = "sweep_selftest_\\u00e8_4217305_1\\n".encode("utf-8" if "--default-character-set=utf8mb4" in argv else "latin-1")
     sys.stdout.buffer.write(raw)
 elif query.startswith("DROP TABLE"):
@@ -647,14 +676,19 @@ def _self_test() -> int:
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         old_path = os.environ["PATH"]
         os.environ["PATH"] = f"{tmp}{os.pathsep}{old_path}"
+        os.environ["FAKE_ORA_TABLES"] = f"SAB_STATEFUL_4217305_0\nNSN_T\nUSERS\nLIVE_{os.getpid()}_1"
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 _my_cruft("mysql_cdc", "fake-container", "rivet")
+                _ora_cruft("oracle", "fake-container")
         finally:
             os.environ["PATH"] = old_path
+            del os.environ["FAKE_ORA_TABLES"]
         drops = (Path(tmp) / "drops.bin").read_bytes().decode("utf-8").splitlines()
+        ora_drops = (Path(tmp) / "ora_drops.txt").read_text().splitlines()
     assert drops == [want], f"the sweep dropped {drops}, expected [{want!r}]"
-    print("sweep self-test ok: a table named with a non-ASCII character is dropped as itself, read through the real shell decode")
+    assert ora_drops == ['DROP TABLE "SAB_STATEFUL_4217305_0" PURGE;'], f"the Oracle sweep dropped {ora_drops}"
+    print("sweep self-test ok: a non-ASCII table is dropped as itself, and the Oracle arm drops only the dead pid's table")
     return 0
 
 

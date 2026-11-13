@@ -16,7 +16,7 @@ pub(crate) fn authority(url: &str) -> Option<Authority<'_>> {
 /// [`authority`] of the text after the scheme.
 fn split_authority(after: &str) -> Authority<'_> {
     let (authority, rest) = after.split_at(after.find(['/', '?', '#']).unwrap_or(after.len()));
-    match authority.rsplit_once('@') {
+    match seeded!("url-authority-at-in-query", after, authority).rsplit_once('@') {
         Some((userinfo, hosts)) => Authority {
             userinfo: Some(userinfo),
             hosts,

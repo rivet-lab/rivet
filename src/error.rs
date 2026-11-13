@@ -540,8 +540,13 @@ pub(crate) fn code_of(err: &anyhow::Error) -> Option<Code> {
 
 /// The [`CodedError`] in the anyhow context layers, else the first one nested in a std `source()` link (an `opendal::Error` carrying the loader's refusal).
 fn coded_error(err: &anyhow::Error) -> Option<&CodedError> {
-    err.downcast_ref::<CodedError>()
-        .or_else(|| err.chain().find_map(|e| e.downcast_ref::<CodedError>()))
+    err.downcast_ref::<CodedError>().or_else(|| {
+        seeded!(
+            "token-loader-stop-lost-in-opendal",
+            None,
+            err.chain().find_map(|e| e.downcast_ref::<CodedError>())
+        )
+    })
 }
 
 /// Map an error to its process exit code per the [`ExitClass`] taxonomy.
