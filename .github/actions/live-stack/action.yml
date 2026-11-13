@@ -1,5 +1,9 @@
 name: Live stack
 description: Rust toolchain, the seed tool, the docker stand of nightly-live started, waited for and seeded.
+inputs:
+  stack:
+    description: full, lean (no MySQL replica trio) or core (the engines, loaders and object stores only).
+    default: full
 runs:
   using: composite
   steps:
@@ -19,14 +23,22 @@ runs:
 
     - name: Start services
       shell: bash
+      env:
+        STACK: ${{ inputs.stack }}
       run: |
         mkdir -p tests/.live-tmp
-        docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo mongo-rs
+        case "$STACK" in
+          core) services="postgres postgres-state mysql mssql minio fake-gcs azurite clickhouse duckdb oracle mongo" ;;
+          lean) services="postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc oracle mysql-stmt-84-lctn1 mongo mongo-rs" ;;
+          *) services="postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo mongo-rs" ;;
+        esac
+        docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d $services
         sudo chmod -R 0777 tests/.live-tmp
 
     - name: Wait for services
       shell: bash
       run: |
+        has() { [ -n "$(docker compose ps -q "$1")" ]; }
         echo "Waiting for Postgres..."
         for i in $(seq 1 30); do docker compose exec -T postgres pg_isready -U rivet && break || sleep 2; done
         echo "Waiting for the Postgres state server, then its per-run database (RIVET_TEST_STATE_URL)..."
@@ -35,34 +47,34 @@ runs:
         echo "Waiting for MySQL..."
         for i in $(seq 1 30); do docker compose exec -T mysql mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
         echo "Waiting for pgBouncer..."
-        for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6432) 2>/dev/null && break || sleep 1; done
+        has pgbouncer && for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6432) 2>/dev/null && break || sleep 1; done
         echo "Waiting for pgBouncer in front of the state server..."
-        for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6433) 2>/dev/null && break || sleep 1; done
+        has pgbouncer-state && for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6433) 2>/dev/null && break || sleep 1; done
         echo "Waiting for ProxySQL..."
-        for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6033) 2>/dev/null && break || sleep 1; done
+        has proxysql && for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6033) 2>/dev/null && break || sleep 1; done
         echo "Waiting for ProxySQL in front of the +03:00 MySQL (mysql-tz, D5)..."
-        for i in $(seq 1 60); do (exec 3<>/dev/tcp/127.0.0.1/6097) 2>/dev/null && break || sleep 1; done
+        has proxysql-tz && for i in $(seq 1 60); do (exec 3<>/dev/tcp/127.0.0.1/6097) 2>/dev/null && break || sleep 1; done
         echo "Waiting for Azurite..."
         for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/10000) 2>/dev/null && break || sleep 1; done
         echo "Waiting for ClickHouse..."
         for i in $(seq 1 30); do curl -sf localhost:8123/ping >/dev/null 2>&1 && break || sleep 2; done
         echo "Waiting for duckdb loader..."
-        for i in $(seq 1 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' rivet-duckdb 2>/dev/null)" = "healthy" ] && break || sleep 2; done
+        has duckdb && for i in $(seq 1 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' rivet-duckdb 2>/dev/null)" = "healthy" ] && break || sleep 2; done
         echo "Waiting for SQL Server..."
         for i in $(seq 1 40); do [ "$(docker inspect -f '{{.State.Health.Status}}' rivet-mssql 2>/dev/null)" = "healthy" ] && break || sleep 2; done
         echo "Waiting for Oracle..."
         for i in $(seq 1 90); do docker compose exec -T oracle healthcheck.sh >/dev/null 2>&1 && break || sleep 2; done
         echo "Waiting for Mongo..."
         for i in $(seq 1 30); do docker compose exec -T mongo sh -c "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'" >/dev/null 2>&1 && break || sleep 2; done
-        for i in $(seq 1 60); do [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q mongo-rs)" 2>/dev/null)" = healthy ] && break || sleep 3; done
+        has mongo-rs && for i in $(seq 1 60); do [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q mongo-rs)" 2>/dev/null)" = healthy ] && break || sleep 3; done
         echo "Waiting for CDC services (cdc profile)..."
-        for i in $(seq 1 30); do docker compose exec -T postgres-cdc pg_isready -U rivet && break || sleep 2; done
-        for i in $(seq 1 30); do docker compose exec -T mysql-cdc mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
-        for i in $(seq 1 40); do docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
-        docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
+        has postgres-cdc && for i in $(seq 1 30); do docker compose exec -T postgres-cdc pg_isready -U rivet && break || sleep 2; done
+        has mysql-cdc && for i in $(seq 1 30); do docker compose exec -T mysql-cdc mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
+        has mssql-cdc && for i in $(seq 1 40); do docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
+        has mssql-cdc && docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
         echo "Waiting for SQL Server (governor instance)..."
-        for i in $(seq 1 40); do docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
-        docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
+        has mssql-governor && for i in $(seq 1 40); do docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
+        has mssql-governor && docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
 
     - name: Seed light fixtures (orders, etc.)
       shell: bash
