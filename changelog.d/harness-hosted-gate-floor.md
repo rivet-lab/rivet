@@ -1,1 +1,0 @@
-- **The release oracle could not start on a hosted CI runner.** The start floor was the devbox one (150 GiB free). **Now** `--hosted` sets it to 40 GiB; the full gate keeps 150 GiB, the island 60 GiB, and the mid-run watchdog floor is unchanged.

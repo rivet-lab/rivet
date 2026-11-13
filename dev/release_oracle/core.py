@@ -969,6 +969,9 @@ SKIP_ALLOWED: dict[str, str] = {
     "live_clickhouse_load::a_cdc_stream_staged_on_real_gcs_is_pulled_by_clickhouse":
         "2026-11-02: needs a GCS HMAC key pair (RIVET_TEST_GCS_HMAC_ID / _SECRET) that no gate host holds, "
         "and minting one is an owner action; closes when the keys are provisioned and the gate env exports them (review 2027-02-01)",
+    "live_load_key_admission::an_oracle_number_cursor_is_refused_into_clickhouse":
+        "2026-11-13: the refuse-then-remedy copy-back (tests/common/rig/remedy.rs) cannot restore a cloud destination to the refused state; "
+        "0.33 ships it ungraded, 0.34 closes it (review 2027-02-01)",
 }
 
 
