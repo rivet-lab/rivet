@@ -1,1 +1,0 @@
-- **ClickHouse `load.ca_file` is proven against a live `https://` server.** The stand ClickHouse now also serves HTTPS on port 8443 with a certificate signed by a test CA (`dev/clickhouse/tls_certs.py`); a load without `ca_file` is refused by its TLS cause and lands nothing, and the same load with `ca_file` lands rows equal to the source.

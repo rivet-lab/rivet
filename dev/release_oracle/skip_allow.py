@@ -43,6 +43,21 @@ BY_DESIGN_SKIPS = (
        "the stand grants a stub the link-local address or reqsign reads an override") for m in ("aws", "azure", "google")),
 )
 
+STAND_SKIPS = (
+    ("no_secret_in_output/success-path", "-", "the stand holds no provisioned canary users, so the right-password success path of the source engines is not graded",
+     "the seed provisions a canary user per source engine"),
+    ("no_secret_in_output/state-tls-success", "-", "the stand postgres runs ssl=off, so state over TLS success is not graded; the sslmode=require error path is",
+     "the stand postgres serves TLS"),
+    ("no_secret_in_output/wrong-password-live", "oracle", "no Oracle stand answers on the gate host, so a wrong password against a real Oracle server is not graded",
+     "the stand brings up Oracle on the gate host"),
+    ("no_secret_in_output/oracle-cdc-events", "-", "no Oracle stand answers, so Oracle CDC with events is not graded",
+     "the stand brings up Oracle on the gate host"),
+    *((f"no_secret_in_output/slot-reach/{sl}", "-", f"no command connects to the {sl} credential slot on the stand, so its cells are clean but ungraded",
+       f"a stub or cloud account answers the {sl} slot") for sl in ("ambient", "bigquery", "load", "snowflake")),
+    ("cloud_legs", "-", "the gate host has no cloud credentials or bucket, so the cloud tier (no_silent_null_cloud, no_secret_in_output_cloud, no_debris_after_stop_cloud) is not graded",
+     "the gate host is given a test project and bucket"),
+)
+
 EXCUSES: tuple[Excuse, ...] = (
     Excuse("coverage", "infra", "-",
            "2026-11-03: cargo-llvm-cov is not installed on the gate host (b0446717 gate log: `no llvm-cov`), so the live-only coverage adjudication does not run. "
@@ -58,6 +73,8 @@ EXCUSES: tuple[Excuse, ...] = (
              "2026-11-22") for cell in PG_STATE_CELLS),
     *(Excuse(f"no_secret_in_output/{name}", "-", "-", f"2026-11-12: {why}. Closes when {closes}", "2026-11-22")
       for name, why, closes in BY_DESIGN_SKIPS),
+    *(Excuse(scenario, engine, "-", f"2026-11-13: {why}. Closes when {closes}; 0.33 ships it ungraded, 0.34 closes it", "2026-11-22")
+      for scenario, engine, why, closes in STAND_SKIPS),
 )
 
 
