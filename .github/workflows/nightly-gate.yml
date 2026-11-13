@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         part:
-          - { name: no-silent-null, target: property-no-silent-null }
+          - { name: no-silent-null, target: property-no-silent-null, release: true }
           - { name: no-secret-in-output, target: property-no-secret-in-output }
           - { name: no-debris-after-stop, target: property-no-debris-after-stop }
           - { name: check-equals-run, target: property-check-equals-run }
@@ -40,11 +40,17 @@ jobs:
 
       - uses: ./.github/actions/live-stack
 
+      - name: Release binary
+        if: ${{ matrix.part.release }}
+        run: cargo build --release --bin rivet
+
       - name: Grade the part
         env:
           TARGET: ${{ matrix.part.target }}
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
         run: |
           mkdir -p out
           set +e

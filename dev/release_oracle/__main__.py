@@ -1082,7 +1082,7 @@ def _self_test() -> int:
     stand_memory.self_test()
     stand_profiles.self_test()
     import inspect
-    assert "stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island)" in inspect.getsource(main), \
+    assert "stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island, hosted=ns.hosted)" in inspect.getsource(main), \
         "the start floor follows the run's mode"
     assert "stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))" in inspect.getsource(main), \
         "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
@@ -1647,6 +1647,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--images-file", default="",
                     help="JSON file the gate records every running container's image and RepoDigest into "
                          "(default: release-oracle-images.json in the cargo target directory)")
+    ap.add_argument("--hosted", action="store_true", help="a hosted CI runner: the start floor is the hosted one (40 GiB), the watchdog floor is unchanged")
     ap.add_argument("--no-cloud", action="store_true", help="local stage only (skip BigQuery)")
     ap.add_argument("--keep", action="store_true", help="leave engine containers up (debug)")
     ap.add_argument(
@@ -2369,7 +2370,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     config = gate_config(ns)
     from . import stand_disk
-    refused = stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island)
+    refused = stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island, hosted=ns.hosted)
     if refused:
         print(refused, file=sys.stderr)
         return 3

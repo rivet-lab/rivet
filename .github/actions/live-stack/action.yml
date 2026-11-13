@@ -21,7 +21,7 @@ runs:
       shell: bash
       run: |
         mkdir -p tests/.live-tmp
-        docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo
+        docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo mongo-rs
         sudo chmod -R 0777 tests/.live-tmp
 
     - name: Wait for services
@@ -54,6 +54,7 @@ runs:
         for i in $(seq 1 90); do docker compose exec -T oracle healthcheck.sh >/dev/null 2>&1 && break || sleep 2; done
         echo "Waiting for Mongo..."
         for i in $(seq 1 30); do docker compose exec -T mongo sh -c "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'" >/dev/null 2>&1 && break || sleep 2; done
+        for i in $(seq 1 60); do [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q mongo-rs)" 2>/dev/null)" = healthy ] && break || sleep 3; done
         echo "Waiting for CDC services (cdc profile)..."
         for i in $(seq 1 30); do docker compose exec -T postgres-cdc pg_isready -U rivet && break || sleep 2; done
         for i in $(seq 1 30); do docker compose exec -T mysql-cdc mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
