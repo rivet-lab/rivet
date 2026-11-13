@@ -444,10 +444,10 @@ fn long_functions_in_src_never_grow_and_new_ones_stay_short() {
             ));
         }
     }
-    assert!(
-        problems.is_empty(),
-        "long-function ledger:\n{}",
-        problems.join("\n")
+    assert_eq!(
+        problems,
+        Vec::<String>::new(),
+        "long-function ledger: split, lower or delete the rows"
     );
 }
 
