@@ -815,7 +815,13 @@ impl MysqlChangeStream {
         resolved: &HashMap<String, crate::source::cdc::ReadableColumns>,
         now: &HashMap<String, crate::source::cdc::ReadableColumns>,
     ) -> Result<()> {
-        for table in configured {
+        for table in configured.iter().filter(|_| {
+            seeded!(
+                "column-grants-moved-between-reads-mixed-in-one-run",
+                false,
+                true
+            )
+        }) {
             let (before, after) = (resolved.get(table), now.get(table));
             if before.map(|c| &c.columns) == after.map(|c| &c.columns) {
                 continue;
@@ -1431,7 +1437,11 @@ impl MysqlChangeStream {
                         .and_then(|cfg| readable.get(cfg))
                         .map(|r| super::column_grants::kept_positions(&image_names, &r.columns))
                 });
-                let captured = matches!(captured_keep, Some(Some(_)));
+                let captured = seeded!(
+                    "cdc-partial-image-projected",
+                    false,
+                    matches!(captured_keep, Some(Some(_)))
+                );
                 let keep = captured_keep.map(Option::unwrap_or_default);
                 let full_arity = image_names.len();
                 let image_names: std::sync::Arc<[String]> = match &keep {
@@ -2014,7 +2024,11 @@ pub(crate) fn classify_mysql_routing(
 
 /// The `sql_mode` a QUERY event was logged under; the default lexing when the event carries none.
 fn event_mode(qe: &QueryEvent<'_>) -> SqlMode {
-    mode_of(qe.status_vars_raw())
+    mode_of(seeded!(
+        "cdc-sql-mode-not-read",
+        &qe.status_vars_raw()[..0],
+        qe.status_vars_raw()
+    ))
 }
 
 /// The `sql_mode` among the raw status variables of a QUERY event; the default lexing when there is none.
@@ -2166,7 +2180,14 @@ pub(crate) fn column_rename_target(
     event_db: &str,
     mode: SqlMode,
 ) -> Option<(String, String)> {
-    let tokens = alter_tokens(sql, mode)?;
+    let tokens = alter_tokens(
+        seeded!(
+            "column-rename-in-an-executable-comment-missed",
+            sql.split("/*").next().unwrap_or(""),
+            sql
+        ),
+        mode,
+    )?;
     let (table, at) = alter_header(&tokens, event_db)?;
     alter_spec_starts(&tokens, at)
         .into_iter()
@@ -2430,7 +2451,12 @@ pub(crate) fn query_refusal(
     let spelling = Spelling::of_collation(text.collation);
     let (sql, byte_per_char) = lossless_text(text.raw, spelling);
     let (db, db_bytes) = lossless_text(text.db, Spelling::Utf8);
-    let fold = fold.then_some(NameFold {
+    let fold = seeded!(
+        "cdc-no-policy-name-compare-ignores-the-fold",
+        policy && fold,
+        fold
+    )
+    .then_some(NameFold {
         byte_per_char,
         spelling,
     });
@@ -2459,12 +2485,13 @@ pub(crate) fn query_refusal(
         return Some(QueryRefusal::Drop(t));
     }
     if let Some(db) = drop_database_target(sql, mode)
+        .filter(|_| seeded!("cdc-drop-database-not-refused", false, true))
         .and_then(|name| captured_database(name.as_deref(), configured, databases, fold))
     {
         return Some(QueryRefusal::DropDatabase(db));
     }
     if let Some(t) = partition_rows_targets(sql, event_db, mode)
-        .filter(|_| by_text)
+        .filter(|_| seeded!("cdc-partition-data-change-not-refused", false, by_text))
         .and_then(|ts| ts.into_iter().find_map(|t| ours(t.as_ref())))
     {
         return Some(QueryRefusal::PartitionRows(t));
@@ -2805,7 +2832,11 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
 /// Whether a pending grants re-read may wait past this event.
 fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     match data {
-        Some(EventData::QueryEvent(qe)) => !is_transaction_control(qe.query_raw()),
+        Some(EventData::QueryEvent(qe)) => seeded!(
+            "column-grants-privilege-statement-reconnects",
+            false,
+            !is_transaction_control(qe.query_raw())
+        ),
         Some(
             EventData::GtidEvent(_)
             | EventData::AnonymousGtidEvent(_)
@@ -2848,7 +2879,13 @@ fn mention_under_policy<'a>(
     configured: &'a [String],
 ) -> Option<&'a str> {
     policy
-        .then(|| statement_mentions(fold, raw, configured))
+        .then(|| {
+            statement_mentions(
+                seeded!("cdc-policy-name-arm-ignores-the-case-fold", false, fold),
+                raw,
+                configured,
+            )
+        })
         .flatten()
 }
 

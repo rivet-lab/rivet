@@ -323,7 +323,11 @@ fn refuse_an_incomparable_cursor(
     let Some(value) = cursor.and_then(|c| c.last_cursor_value.as_deref()) else {
         return err;
     };
-    if !crate::error::retry::is_value_conversion(&err) {
+    if seeded!(
+        "cursor-of-another-type-uncoded",
+        true,
+        !crate::error::retry::is_value_conversion(&err)
+    ) {
         return err;
     }
     let column = plan

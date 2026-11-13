@@ -10,6 +10,7 @@ slow-timeout = { period = "300s", terminate-after = 4 }
 
 [[profile.default.overrides]]
 filter = 'test(/^live_init_delta::a_0_30_cdc_state_copied_to_postgres_/)'
+slow-timeout = { period = "300s", terminate-after = 4 }
 
 [[profile.default.overrides]]
 filter = 'test(/^live_init_delta::a_generated_config_drives_run_load_compact_into_the_warehouse_/) or test(/^live_init_delta::a_generated_cdc_config_drives_run_load_compact_/)'

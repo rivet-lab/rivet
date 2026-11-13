@@ -1563,7 +1563,11 @@ fn run_export_job_inner(
         export
     };
     let mut meta = MetaConn::open(&config.source);
-    let probe = if config.source.columns_from_grants() {
+    let probe = if seeded!(
+        "column-grants-connect-hint-lost",
+        false,
+        config.source.columns_from_grants()
+    ) {
         match meta.require() {
             Ok(src) => Some(src),
             Err(e) => {
@@ -1647,7 +1651,11 @@ fn run_export_job_inner(
             plan_warnings,
             strict: opts.strict,
             force: opts.force,
-            cdc_leg: export.snapshot_parent.is_some(),
+            cdc_leg: seeded!(
+                "column-grants-snapshot-leg-denial-read-as-a-stale-plan",
+                false,
+                export.snapshot_parent.is_some()
+            ),
         },
         meta,
     )

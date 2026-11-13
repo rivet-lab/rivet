@@ -115,7 +115,9 @@ pub(crate) fn admission(
         Ok(n) => n,
         Err(e) => return Ok(unverified(export, column, &e)),
     };
-    match cursor_cause(mapping, nullable, export.incremental_cursor_mode) {
+    match cursor_cause(mapping, nullable, export.incremental_cursor_mode)
+        .filter(|_| seeded!("cursor-column-admitted-at-plan", false, true))
+    {
         None => Ok(Admission::Admitted),
         Some(CursorCause::Nullable) => crate::rivet_bail!(
             crate::error::codes::PLAN_CURSOR_NULLABLE,

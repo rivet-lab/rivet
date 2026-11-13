@@ -62,6 +62,7 @@ from . import (
     gifs,
     guarantees,
     init_delta,
+    known_red,
     live_modules,
     property_no_silent_null,
     property_no_silent_null_grants,
@@ -1084,6 +1085,8 @@ def _self_test() -> int:
     import inspect
     assert "stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island, hosted=ns.hosted)" in inspect.getsource(main), \
         "the start floor follows the run's mode"
+    assert "led.close_known_red(known_red.ISLAND if ns.island else known_red.GATE)" in inspect.getsource(main), \
+        "a full run closes the known reds its own lane owes, the island its own tier included"
     assert "stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))" in inspect.getsource(main), \
         "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
     assert inspect.getsource(main).count("stand_images.record_to_target()") == 2 and "stand_images.record_to_target()" in inspect.getsource(bring_up), \
@@ -1440,6 +1443,24 @@ def _self_test() -> int:
     assert any(other.match in d and "PASSED" in d for d in said), said
     assert any(k.match in d and "no cell" in d and "run that leg again" in d and "remove it from" not in d for d in said), said
     assert any(other.match in d and "remove it from dev/release_oracle/known_red.py" in d for d in said), said
+    kr.KNOWN_RED = real_reds
+    full_red = property_no_silent_null.failure_message("mysql", "WRONG_VALUE", [], tier="full")
+    smoke_red = property_no_silent_null.failure_message("mysql", "WRONG_VALUE", [], tier="smoke")
+    offline_red = cloud_legs.ledger_message("check_equals_run_cloud", "offline", "CHECK_RUN_SPLIT", [])
+    cloud_red = cloud_legs.ledger_message("check_equals_run_cloud", "cloud", "CHECK_RUN_SPLIT", [])
+    assert [kr.lane_of(m) for m in (smoke_red, full_red, offline_red, cloud_red, "no_silent_null_cdc[mysql]: X")] == \
+        [kr.GATE, kr.ISLAND, kr.OFFLINE, kr.GATE, kr.GATE], "a tier tag names the run that grades it"
+    kr.KNOWN_RED = (kr.KnownRed(full_red, "self-test", "2099-01-01"), kr.KnownRed(smoke_red, "self-test", "2099-01-01"),
+                    kr.KnownRed(offline_red, "self-test", "2099-01-01", alt=(cloud_red,)))
+    gate_run, island_run = Ledger(colour=False), Ledger(colour=False)
+    gate_run.failed("-", "-", "s", "-", cloud_red)
+    gate_run.failed("-", "-", "s", "-", smoke_red)
+    gate_run.close_known_red(kr.GATE)
+    assert not gate_run.red and gate_run.cells[0].status is Status.KNOWN, "the gate owes smoke and cloud, never full or offline"
+    island_run.close_known_red(kr.ISLAND)
+    assert [c.detail for c in island_run.cells if c.scenario == "known_red"] == [
+        f"known-red entry `{full_red}` matched no failure: no cell this run exercised it, so it excuses nothing; its engine leg or stage may not have run: "
+        "run that leg again, and remove the entry only after a run in which its cell passed"], "the island owes exactly the full tier"
     kr.KNOWN_RED = real_reds
     from . import core as _c
     saved_env, saved_bless = dict(os.environ), dict(_c._BLESSING)
@@ -2522,8 +2543,7 @@ def main(argv: list[str] | None = None) -> int:
         full = not (ns.engines or ns.versions or ns.no_cloud or ns.latest_only)
         island = island_functions(table)
         if full:
-            if not ns.island:
-                led.close_known_red()
+            led.close_known_red(known_red.ISLAND if ns.island else known_red.GATE)
             # A bless run returns before most stages on purpose (run_scenarios), so it cannot grade the matrix.
             if not (ns.bless_local or ns.bless_cdc):
                 led.close_matrix_rows(owned=(lambda fn: fn in island) if ns.island else (lambda fn: fn not in island))

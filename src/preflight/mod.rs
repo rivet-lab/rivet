@@ -352,7 +352,11 @@ fn exports_as_planned(
     exports
         .iter()
         .map(|e| match strategies.get(&e.name) {
-            Some(strategy) => crate::plan::build::export_as_planned(e, strategy),
+            Some(strategy) => seeded!(
+                "check-describes-the-config-not-the-plan",
+                (*e).clone(),
+                crate::plan::build::export_as_planned(e, strategy)
+            ),
             None => (*e).clone(),
         })
         .collect()

@@ -523,7 +523,11 @@ pub(super) fn initial_snapshot_pending(
             url.expose(),
             tls,
             &tables,
-            DrainMode::from_until_current(cdc.until_current),
+            seeded!(
+                "bounded-standby-refused-after-the-baseline",
+                DrainMode::Continuous,
+                DrainMode::from_until_current(cdc.until_current)
+            ),
             config.source.columns_from_grants(),
         )?;
     }

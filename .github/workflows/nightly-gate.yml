@@ -4,8 +4,6 @@ on:
   schedule:
     - cron: "15 2 * * *"
   workflow_dispatch:
-  push:
-    branches: [gate/nightly-gate]
 
 permissions:
   contents: read
