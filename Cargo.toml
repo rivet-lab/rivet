@@ -193,7 +193,7 @@ proptest = "1"
 # directly to seed fixtures — same crates the lib uses, exposed to the
 # integration-test crate.
 tiberius = { version = "0.13", default-features = false, features = ["tds73", "chrono", "vendored-openssl"] }
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "net", "time"] }
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "net", "time", "test-util"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 # MongoDB live-test helper (tests/common/mongo.rs) seeds fixtures + drives
 # transactions through the async driver directly — same crate the lib uses.
