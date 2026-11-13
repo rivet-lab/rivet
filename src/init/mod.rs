@@ -48,6 +48,9 @@ pub(crate) struct ColumnInfo {
     /// Set by an engine whose run refuses this column as an incremental cursor although its type name reads as one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_cursor: bool,
+    /// 1-based place in the source primary key, read from the source the way `rivet run` records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_position: Option<u32>,
 }
 
 /// Table metadata used to generate the config scaffold and discovery artifact.
@@ -81,6 +84,17 @@ pub(crate) struct TableInfo {
 }
 
 impl TableInfo {
+    /// The primary key columns in key order; empty when the source key was not read.
+    pub(crate) fn source_key(&self) -> Vec<&str> {
+        let mut key: Vec<(u32, &str)> = self
+            .columns
+            .iter()
+            .filter_map(|c| c.key_position.map(|p| (p, c.name.as_str())))
+            .collect();
+        key.sort_unstable();
+        key.into_iter().map(|(_, n)| n).collect()
+    }
+
     /// The range-chunk key: the integer PK, else the first INDEXED integer column (an unindexed one makes every window a full scan).
     pub(crate) fn best_chunk_column(&self) -> Option<&str> {
         self.columns
@@ -1358,12 +1372,15 @@ fn init_yaml(
             schema,
             probes_mineability(mode_override),
         )?;
-        let snaps = vec![snapshot_of(&info, mode_override, source_url)];
+        let mut infos = vec![info];
+        read_source_keys(&mut infos, source_url, tls, dest, mode_override);
+        let info = &infos[0];
+        let snaps = vec![snapshot_of(info, mode_override, source_url)];
         let scaffold =
-            yaml_scaffold::scaffold_table(&info, source_url, provenance, dest, mode_override, tls)?;
+            yaml_scaffold::scaffold_table(info, source_url, provenance, dest, mode_override, tls)?;
         return Ok((scaffold, snaps));
     }
-    let infos = introspect_all(
+    let mut infos = introspect_all(
         tls,
         source_url,
         schema,
@@ -1373,6 +1390,7 @@ fn init_yaml(
     if infos.is_empty() {
         return Err(no_tables_error(filter));
     }
+    read_source_keys(&mut infos, source_url, tls, dest, mode_override);
     let label = schema_scope_label(source_url, schema, infos.len())?;
     let scaffold = yaml_scaffold::scaffold_schema(
         &infos,
@@ -1930,6 +1948,60 @@ fn record_primary_keys(
             failed.len(),
             snapshots.len(),
             failed.join(", ")
+        );
+    }
+}
+
+/// Read the source primary key, in key order, of every table whose export will be an incremental `query:` loaded into a warehouse.
+fn read_source_keys(
+    infos: &mut [TableInfo],
+    source_url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    dest: &InitYamlDestination,
+    mode_override: Option<&str>,
+) {
+    let wanted = |i: &TableInfo| mode_override.unwrap_or_else(|| i.suggest_mode()) == "incremental";
+    if dest.partition_guess().is_none() || !infos.iter().any(wanted) {
+        return;
+    }
+    let kind = match source_type_of(source_url) {
+        Ok(k) => k,
+        Err(e) => {
+            log::debug!("init: primary keys not read (unreadable source url): {e:#}");
+            return;
+        }
+    };
+    let mut src = match crate::source::connect(kind, source_url, tls, None) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("init: source primary keys not read (source unreachable): {e:#}");
+            return;
+        }
+    };
+    let mut unread: Vec<String> = Vec::new();
+    for info in infos.iter_mut().filter(|i| wanted(i)) {
+        let schema = (!info.schema.is_empty()).then_some(info.schema.as_str());
+        let relation = relation_for_key(&kind, schema, &info.table);
+        match src.primary_key(&relation) {
+            Ok(Some(key)) => {
+                for (place, name) in key.iter().enumerate() {
+                    if let Some(c) = info.columns.iter_mut().find(|c| &c.name == name) {
+                        c.key_position = u32::try_from(place + 1).ok();
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::debug!("init: primary key for '{}' unreadable: {e:#}", info.table);
+                unread.push(info.table.clone());
+            }
+        }
+    }
+    if !unread.is_empty() {
+        log::warn!(
+            "init: source primary key not read for {} table(s) — their incremental exports carry no `load: pk:`; declare `pk: [..]` in the export's `load:` block before `rivet load`: {}",
+            unread.len(),
+            unread.join(", ")
         );
     }
 }
