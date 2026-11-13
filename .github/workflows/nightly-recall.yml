@@ -139,6 +139,8 @@ jobs:
       - name: Seeded recall for this shard
         env:
           SEEDS: ${{ matrix.shard.seeds }}
+          CARGO_TERM_COLOR: never
+          NO_COLOR: "1"
           RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
         run: |
           mkdir -p out
