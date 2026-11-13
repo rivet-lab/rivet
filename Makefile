@@ -371,6 +371,15 @@ release-oracle-prev-bin:  ## Download the PREVIOUS release binary (the regressio
 	fi
 	@echo "  state-copy source release: $$($(STATE_COPY_FROM_BIN) --version)"
 
+
+.PHONY: release-oracle-nightly release-oracle-compat
+release-oracle-nightly:  ## The per-run gate with the whole GATE_ENV and no prev-release comparison: the part of the gate a hosted runner can grade.
+	$(LIVE_ALL) env $(GATE_ENV) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies --no-cloud $(ARGS)
+
+release-oracle-compat: release-oracle-prev-bin  ## The measured stages (previous-release differential, field replay, regression) against the downloaded previous release.
+	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --island --no-cloud $(ARGS)
+
 release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## Release gate with the WHOLE environment against the local dev stand, seeded-defect recall included. This is the one a release is judged by: its green verdict for HEAD is what dev/pytools/release.py requires.
 	@# The gate grades `target/release/rivet`. A stale one grades yesterday's
 	@# code, and `cargo package` poisons the fingerprints so cargo reports

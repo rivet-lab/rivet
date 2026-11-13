@@ -1,0 +1,1 @@
+Harness: a nightly gate on GitHub grades the parts of the pre-release gate separately (property matrices, open defects, oracle scenarios, previous-release compatibility) and prints one table per night; the docker stand steps are one composite action shared with the nightly recall.
