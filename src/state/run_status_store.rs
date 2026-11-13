@@ -205,7 +205,11 @@ impl StateStore {
         started_at: &str,
     ) -> Result<()> {
         self.transaction(|| {
-            self.interrupt_dead_runs(export_name, source, started_at)?;
+            seeded!(
+                "dead-runs-stay-running",
+                0,
+                self.interrupt_dead_runs(export_name, source, started_at)?
+            );
             self.begin_run(run_id, export_name, prefix, started_at)?;
             self.record_run_source(run_id, source)
         })

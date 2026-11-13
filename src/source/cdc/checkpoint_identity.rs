@@ -182,6 +182,9 @@ fn shared(ckpt: &std::path::Path, held: &CheckpointOwner, me: &CheckpointOwner) 
 /// Claim the checkpoint `ckpt` for the stream `me`: refuse one another stream still reads, record `me` beside it otherwise.
 pub(crate) fn claim_checkpoint(ckpt: &std::path::Path, me: &CheckpointOwner) -> Result<()> {
     let record = owner_path(ckpt);
+    if seeded!("cdc-checkpoint-read-by-two-configs", true, false) {
+        let _ = std::fs::remove_file(&record);
+    }
     if let Some(held) = owner_of(ckpt) {
         if &held == me {
             return Ok(());

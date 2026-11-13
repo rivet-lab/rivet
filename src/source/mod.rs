@@ -582,7 +582,11 @@ pub(crate) fn code_a_revoked_column(
     grants_on: bool,
     cdc_leg: bool,
 ) -> anyhow::Error {
-    if !grants_on || crate::error::code_of(&err).is_some() {
+    if seeded!(
+        "column-grants-revoked-column-uncoded",
+        true,
+        !grants_on || crate::error::code_of(&err).is_some()
+    ) {
         return err;
     }
     let Some(said) = mysql::column_grants::denied_by_server(&err) else {
@@ -758,8 +762,13 @@ pub(crate) fn refuse_override_wire_mismatch(
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
-    let refused = crate::error::code_of(&err)
-        .is_some_and(|c| c.id == crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id);
+    let refused = crate::error::code_of(&err).is_some_and(|c| {
+        c.id == seeded!(
+            "check-override-wire-not-refused",
+            crate::error::codes::SOURCE_QUERY_FAILED.id,
+            crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id
+        )
+    });
     if refused {
         return Err(err);
     }

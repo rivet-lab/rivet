@@ -138,9 +138,13 @@ fn is_plain_column_list(s: &str) -> bool {
     s.split(',').all(|item| {
         let item = item.trim();
         !item.is_empty()
-            && item
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*'))
+            && item.chars().all(|c| {
+                seeded!(
+                    "aliased-projection-read-as-table",
+                    c == ' ' || c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*'),
+                    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*')
+                )
+            })
     })
 }
 

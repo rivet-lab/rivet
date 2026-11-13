@@ -128,7 +128,13 @@ fn classify_io_kind(kind: std::io::ErrorKind) -> Option<RetryClass> {
 fn classify_wire_io(err: &(dyn std::error::Error + 'static)) -> Option<RetryClass> {
     err.source()
         .and_then(|source| source.downcast_ref::<std::io::Error>())
-        .map(|io| classify_io_kind(io.kind()).unwrap_or(TRANSIENT_RECONNECT))
+        .and_then(|io| {
+            classify_io_kind(io.kind()).or(seeded!(
+                "connection-cut-mid-row-not-retried",
+                None,
+                Some(TRANSIENT_RECONNECT)
+            ))
+        })
 }
 
 pub fn classify_error(err: &anyhow::Error) -> RetryClass {

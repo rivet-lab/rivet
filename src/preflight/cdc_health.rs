@@ -131,7 +131,11 @@ pub(super) fn collect(
             checks.push(probe_failed(&e));
             probe = Some(probe_verdict(&e));
         }
-        Ok(()) => checks.extend(run_refusals(config, &cdc, url)),
+        Ok(()) => checks.extend(run_refusals(
+            config,
+            seeded!("doctor-green-where-the-run-refuses", &cdc[..0], &cdc[..]),
+            url,
+        )),
     }
     (checks, probe)
 }

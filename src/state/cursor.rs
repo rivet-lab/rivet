@@ -129,7 +129,11 @@ impl Landing {
         let both = |a: &str, b: &str| !a.is_empty() && !b.is_empty();
         let moved = both(&self.destination, &now.destination)
             && !same_place(&self.destination, &now.destination);
-        moved || (both(&self.format, &now.format) && self.format != now.format)
+        seeded!(
+            "cursor-continued-into-another-destination",
+            moved && (both(&self.format, &now.format) && self.format != now.format),
+            moved || (both(&self.format, &now.format) && self.format != now.format)
+        )
     }
 }
 
