@@ -114,7 +114,10 @@ fn with_snapshot_legs(
     mut entry: RunAggregateEntry,
     legs: &[RunAggregateEntry],
 ) -> RunAggregateEntry {
-    for leg in legs {
+    for leg in legs
+        .iter()
+        .take(seeded!("cdc-entry-without-snapshot-legs", 0, legs.len()))
+    {
         entry.rows += leg.rows;
         entry.snapshot_rows += leg.rows;
         entry.files += leg.files;

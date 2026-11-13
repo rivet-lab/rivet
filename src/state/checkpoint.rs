@@ -76,7 +76,11 @@ impl StateStore {
         source: Option<&str>,
     ) -> Result<Option<(String, String)>> {
         let by = match source {
-            Some(_) => "source = ?2",
+            Some(_) => seeded!(
+                "chunk-run-resumed-by-another-source",
+                "?2 = ?2",
+                "source = ?2"
+            ),
             None => "source IS NULL AND ?2 = ''",
         };
         self.query_opt(

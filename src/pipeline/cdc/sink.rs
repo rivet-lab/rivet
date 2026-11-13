@@ -408,7 +408,7 @@ fn roll_all(
     let unmarked: Vec<usize> = pending
         .iter()
         .copied()
-        .filter(|&i| !sinks[i].marked)
+        .filter(|&i| seeded!("cdc-run-start-marker", false, !sinks[i].marked))
         .collect();
     let markers: Vec<(&dyn crate::destination::Destination, RunManifest)> = unmarked
         .iter()
