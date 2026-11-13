@@ -35,6 +35,28 @@ pub(crate) fn host_port_span(url: &str) -> &str {
     authority(url).unwrap_or_else(|| split_authority(url)).hosts
 }
 
+/// Percent-decode URL text; invalid UTF-8 decodes lossily.
+pub(crate) fn pct_decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// `host[:port]` or `[v6][:port]` split into the host (brackets kept) and its port, `default_port` when none is named; `Err` holds the port text that is no port.
+pub(crate) fn split_host_port(hosts: &str, default_port: u16) -> Result<(&str, u16), &str> {
+    let (host, port) = match hosts.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        Some((v6, tail)) => (&hosts[..v6.len() + 2], tail.strip_prefix(':')),
+        None => match hosts.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (hosts, None),
+        },
+    };
+    match port {
+        Some(p) => p.parse::<u16>().map(|port| (host, port)).map_err(|_| p),
+        None => Ok((host, default_port)),
+    }
+}
+
 /// Whether `hosts` reads as a host list: every entry is a name or a bracketed address with an optional numeric port.
 fn is_host_list(hosts: &str) -> bool {
     hosts.split(',').all(|entry| {
@@ -322,5 +344,31 @@ mod authority_tests {
         assert_eq!(server_and_path("pg://u:pa/ss@h/db"), "h/db");
         assert_eq!(server_and_path("pg://u:pa/ss/db"), "u:pa/ss/db");
         assert_eq!(server_and_path("no scheme"), "no scheme");
+    }
+
+    /// The engines whose driver parses the URL read a portless bracketed host and a percent-encoded database as the hand-rolled readers now do.
+    #[test]
+    fn the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database() {
+        use std::str::FromStr;
+        let pg = postgres::Config::from_str("postgresql://u:p@[::1]/Sales%20DB").unwrap();
+        assert_eq!(pg.get_dbname(), Some("Sales DB"));
+        assert_eq!(pg.get_ports(), &[5432]);
+        assert_eq!(format!("{:?}", pg.get_hosts()), "[Tcp(\"::1\")]");
+
+        let my = mysql::Opts::from_url("mysql://u:p@[::1]/Sales%20DB").unwrap();
+        assert_eq!(my.get_db_name(), Some("Sales DB"));
+        assert_eq!(
+            (my.get_ip_or_hostname().as_ref(), my.get_tcp_port()),
+            ("[::1]", 3306)
+        );
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mongo = rt
+            .block_on(async {
+                mongodb::options::ClientOptions::parse("mongodb://u:p@[::1]/sales%5Fdb").await
+            })
+            .unwrap();
+        assert_eq!(mongo.default_database.as_deref(), Some("sales_db"));
+        assert_eq!(mongo.hosts[0].to_string(), "::1:27017");
     }
 }
