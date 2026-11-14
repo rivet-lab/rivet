@@ -13,15 +13,18 @@ from dev.seeded import run_record
 from dev.seeded.recall import gate_ceiling
 from dev.seeded.shards import coverage_problems
 
+WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "nightly-recall.yml"
+SHARD_FILES = ("exit-code.txt", "record.jsonl", "table.txt")
+
 
 def shard_line(shard: Path, sha: str) -> tuple[dict | None, str]:
     """The last record line of `sha` a shard wrote, or why it has none."""
-    code = shard / "exit-code.txt"
+    code = shard / SHARD_FILES[0]
     if not shard.is_dir():
         return None, "no artifact (the shard never ran or never uploaded)"
     if not code.is_file() or code.read_text().strip() != "0":
         return None, f"exit code {code.read_text().strip() if code.is_file() else 'unknown'}"
-    record = shard / "record.jsonl"
+    record = shard / SHARD_FILES[1]
     last = None
     for line in record.read_text().splitlines() if record.is_file() else []:
         try:
@@ -84,8 +87,8 @@ def self_test() -> int:
             d.mkdir(parents=True)
             line = {"sha": sha, "complete": False, "green": True, "dirty": False, "seeds": seeds, "not_graded_here": 0}
             line.update(kw.get(f"line{i}", {}))
-            (d / "record.jsonl").write_text(json.dumps(line) + "\n")
-            (d / "exit-code.txt").write_text(kw.get(f"exit{i}", "0"))
+            (d / SHARD_FILES[1]).write_text(json.dumps(line) + "\n")
+            (d / SHARD_FILES[0]).write_text(kw.get(f"exit{i}", "0"))
         if kw.get("drop"):
             for f in (root / "recall-shard-1").iterdir():
                 f.unlink()
@@ -113,6 +116,10 @@ def self_test() -> int:
             assert line["green"] is (want is None) and line["sha"] == sha and line["seeds"] == expected, (i, line)
             ok = run_record.refusal(sha, record, expected)
             assert (ok is None) if want is None else (ok is not None), (i, "the tag rule must read the verdict", ok)
+    flow = WORKFLOW.read_text()
+    for name in SHARD_FILES:
+        assert f"out/verdict/{name}" in flow, f"the workflow does not write {name} where the verdict reads it"
+    assert "name: recall-shard-${{ matrix.shard.index }}\n          path: out/verdict/\n" in flow, "the shard artifact must hold exactly the verdict folder"
     print(f"self-test ok: recall verdict — {len(cases)} cases, a missing, red, dirty, lost, doubled or foreign shard never reads as green")
     return 0
 
