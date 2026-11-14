@@ -105,7 +105,11 @@ impl TypeMapping {
             refusal: None,
         };
         if interval {
-            mapping.with_text(TextForm::Iso8601Duration)
+            seeded!(
+                "interval-text-without-its-label",
+                mapping,
+                mapping.with_text(TextForm::Iso8601Duration)
+            )
         } else {
             mapping
         }

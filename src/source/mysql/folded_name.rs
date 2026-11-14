@@ -202,8 +202,17 @@ pub(crate) fn mentions_name(fold: bool, name: &str, raw: &[u8]) -> bool {
     if fold && !raw.is_ascii() && name.len() < 128 && name.bytes().any(folded_from_non_ascii) {
         folds_inside(name, raw)
     } else {
-        raw.windows(name.len())
-            .any(|w| w.eq_ignore_ascii_case(name.as_bytes()))
+        raw.windows(name.len()).any(|w| {
+            seeded!(
+                "column-grants-statement-name-match-case-sensitive",
+                w == name.as_bytes(),
+                seeded!(
+                    "column-grants-statement-name-match-dropped",
+                    false,
+                    w.eq_ignore_ascii_case(name.as_bytes())
+                )
+            )
+        })
     }
 }
 

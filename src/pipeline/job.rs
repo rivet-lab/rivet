@@ -877,9 +877,13 @@ fn finalize_keyset_anchor(
 /// Whether the stored keyset anchor names a run that recorded a part.
 fn anchor_holds_a_part(state: &StateStore, progress: &ProgressClaim<'_>) -> bool {
     match progress.resume_run_id() {
-        Ok(Some(anchor)) => !state
-            .list_files_for_run(&anchor)
-            .is_ok_and(|parts| parts.is_empty()),
+        Ok(Some(anchor)) => seeded!(
+            "keyset-anchor-kept-without-a-part",
+            state.list_files_for_run(&anchor).is_ok(),
+            !state
+                .list_files_for_run(&anchor)
+                .is_ok_and(|parts| parts.is_empty())
+        ),
         Ok(None) => false,
         Err(_) => true,
     }
@@ -1119,7 +1123,9 @@ fn execute_resolved_plan(
     tail: TailPolicy<'_>,
     mut meta: MetaConn<'_>,
 ) -> (Result<()>, RunSummary) {
-    if let Some(e) = unexpanded_partition_error(plan) {
+    if let Some(e) = unexpanded_partition_error(plan)
+        .filter(|_| seeded!("apply-skips-partition-expansion", false, true))
+    {
         let summary = synthetic_failed_summary(&plan.export_name, &e);
         return (Err(e), summary);
     }
@@ -1361,7 +1367,18 @@ fn execute_resolved_plan(
     finalize_run_report(tail.config_path, &summary, tail.kind);
     crate::notify::maybe_send(tail.notifications, &summary);
 
-    let gates = [validate_run_gate(&summary), reconcile_gate, cursor_gate];
+    let gates = [
+        seeded!(
+            "failed-validation-exits-zero",
+            {
+                let _ = validate_run_gate(&summary);
+                Ok(())
+            },
+            validate_run_gate(&summary)
+        ),
+        reconcile_gate,
+        cursor_gate,
+    ];
     let final_result = resolve_final_result(failed, result, manifest_gap, gates);
     (final_result, summary)
 }
@@ -1461,12 +1478,18 @@ fn run_export_job_inner(
         ) {
             log::warn!("{msg}");
         }
-        let _run_lease = match cdc_run_lease(state, &export.name, &config.source.state_key()) {
-            Ok(lease) => lease,
-            Err(e) => {
-                let summary = synthetic_failed_summary(&export.name, &e);
-                return (Err(e), summary);
-            }
+        let _run_lease = if seeded!("cdc-run-without-lease", true, false) {
+            None
+        } else {
+            Some(
+                match cdc_run_lease(state, &export.name, &config.source.state_key()) {
+                    Ok(lease) => lease,
+                    Err(e) => {
+                        let summary = synthetic_failed_summary(&export.name, &e);
+                        return (Err(e), summary);
+                    }
+                },
+            )
         };
         if let Err(e) = super::cdc_job::claim_checkpoint(config_path, export) {
             let summary = synthetic_failed_summary(&export.name, &e);

@@ -326,7 +326,7 @@ fn holder_is_dead_here(holder: &str, host: &str) -> bool {
     ) else {
         return false;
     };
-    h == host
+    seeded!("foreign-lease-taken-before-expiry", true, h == host)
         && pid > 0
         && unsafe { libc::kill(pid, 0) } != 0
         && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
