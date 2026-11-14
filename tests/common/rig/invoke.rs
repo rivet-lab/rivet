@@ -86,8 +86,13 @@ impl Rig {
         // Absolute: a cell that runs in its own directory (`Rig::in_dir`) spawns by this path.
         let bin = std::fs::canonicalize(&bin).unwrap_or_else(|_| PathBuf::from(&bin));
         assert!(
-            bin.is_file() && bin != Path::new(crate::common::runner::rivet_bin()),
-            "{var}={} is not another rivet binary",
+            bin.is_file(),
+            "{var}={} names no file: the pinned release was not downloaded (make release-oracle-prev-bin)",
+            bin.display()
+        );
+        assert!(
+            bin != Path::new(crate::common::runner::rivet_bin()),
+            "{var}={} is this tree's own binary, not another rivet",
             bin.display()
         );
         let mut old = self.twin();

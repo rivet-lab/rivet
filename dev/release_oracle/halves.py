@@ -64,16 +64,32 @@ STAGE_HALF: dict[str, str] = {
 SEED_SHARD_HALF: tuple[str, ...] = (DEVBOX, DEVBOX, DEVBOX, DEVBOX)
 
 
-#: A live test whose `#[ignore = "..."]` reason names what the hosted stack does not hold (cloud credentials, a gate-only stand, a replica topology) runs in the devbox half.
-DEVBOX_ONLY_REASON = re.compile(r"creds|gate-only|--profile replica|replica-profile|replica profile|mongo-rs2|mssql-ag|cdc-standby|oracle-latin1", re.I)
+#: The half each `Need` variant of tests/common/mod.rs places a live test in: a test whose call graph names a need runs where the need is held; a variant missing here fails `needs_problems`.
+NEED_HALF: dict[str, str] = {
+    "Credential": DEVBOX,
+    "MacOs": DEVBOX,
+    "Stand": DEVBOX,
+    "Timing": DEVBOX,
+}
+
+#: The topology a live test's `#[ignore = "..."]` reason names that no call in the test says (a gate-only stand, a replica or availability-group pair, a standby, a latin1 server).
+DEVBOX_TOPOLOGY = re.compile(r"gate-only|--profile replica|replica-profile|replica profile|mongo-rs2|mssql-ag|cdc-standby|oracle-latin1", re.I)
 
 #: The stage that runs the live tests the hosted stack can run, and the stage that runs the rest.
 LIVE_HOSTED_STAGE, LIVE_DEVBOX_STAGE = "live modules", "live modules devbox"
 
 
-def devbox_only(reason: str) -> bool:
-    """Whether a live test with this `#[ignore]` reason needs what only the devbox half holds."""
-    return DEVBOX_ONLY_REASON.search(reason) is not None
+def devbox_only(reason: str, needs: Iterable[str] = ()) -> bool:
+    """Whether a live test runs in the devbox half: its `#[ignore]` reason names a topology only the devbox holds, or its call graph carries a need `NEED_HALF` places there."""
+    return DEVBOX_TOPOLOGY.search(reason) is not None or any(NEED_HALF[n] == DEVBOX for n in needs)
+
+
+def needs_problems(variants: Iterable[str]) -> list[str]:
+    """The `Need` variants of the Rust side that `NEED_HALF` does not place, and the placements naming a variant that no longer exists."""
+    variants = set(variants)
+    return [f"Need::{v} is declared in tests/common/mod.rs and placed in no half" for v in sorted(variants - set(NEED_HALF))] + [
+        f"NEED_HALF places Need::{v}, which tests/common/mod.rs does not declare" for v in sorted(set(NEED_HALF) - variants)
+    ] + [f"NEED_HALF places Need::{v} in {h!r}, not a half" for v, h in NEED_HALF.items() if h not in HALVES]
 
 
 def parse_live_shard(spec: str) -> tuple[int, int]:
