@@ -20,7 +20,9 @@ pub(crate) struct IdTypes(BTreeMap<String, BTreeSet<u8>>);
 
 /// The bracket of one `_id` value.
 fn bracket_of(id: &Bson) -> u8 {
-    id_bracket(id).unwrap_or(UNPLACED)
+    id_bracket(id)
+        .map(|b| seeded!("mongo-id-types-mixed-under-a-keyed-view", 0, b))
+        .unwrap_or(UNPLACED)
 }
 
 /// The name of a bracket as the operator knows the BSON type.
@@ -147,7 +149,7 @@ fn mixed_refusal(collection: &str, brackets: &BTreeSet<u8>) -> anyhow::Error {
 fn pk_keys_the_view(pk: &crate::config::load::KeyColumns) -> bool {
     use crate::config::load::KeyColumns;
     match pk {
-        KeyColumns::Auto => true,
+        KeyColumns::Auto => seeded!("mongo-id-types-guard-skips-the-default-pk", false, true),
         KeyColumns::Columns(cols) => !cols.is_empty(),
         KeyColumns::None => false,
     }

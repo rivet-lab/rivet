@@ -59,13 +59,17 @@ fn record_from_run(
         .iter()
         .map(|m| LoadSpecColumn::from_mapping(m).marked_finer(finer_than_microsecond))
         .collect();
-    state.record_load_spec(
-        &export.name,
-        None,
-        config_source_key,
-        &columns,
-        primary_key,
-        run_id,
+    seeded!(
+        "load-spec-not-recorded-from-the-run",
+        Ok(()),
+        state.record_load_spec(
+            &export.name,
+            None,
+            config_source_key,
+            &columns,
+            primary_key,
+            run_id,
+        )
     )
 }
 

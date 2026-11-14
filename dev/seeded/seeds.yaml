@@ -401,7 +401,7 @@ seeds:
     class: a state schema migration that runs with no copy of the state as the previous release left it, so an upgrade cannot be rolled back
     history: "0.32.0 release blocker: the first run of a newer rivet migrated the state in place and 0.31.0 then refused it (RIVET_STATE_SCHEMA_NEWER, exit 5) with no copy and no restore path"
     scope: state
-    patch: migration-without-a-way-back/shared.patch
+    switch: migration-without-a-way-back
     engines:
       postgres-state:
         cells: ["lib:pg_a_migration_copies_every_state_table_into_a_backup_schema_before_the_first_ddl"]
@@ -412,7 +412,7 @@ seeds:
     class: "a rivet with a newer state schema migrates a state that a live run of the older release holds a lease on, even when it is then refused as busy, so the older release is refused RIVET_STATE_SCHEMA_NEWER on its next run"
     history: "0.32.2 pre-release gate on main 7fba31c4 after v38 (#650): the two previous-release cells of live_load_lease_keeper red at the rig oracle (`resume-point: export_load_spec` gained `source`) after this tree was refused `is writing` beside a 0.32.1 load holding the lease"
     scope: state
-    patch: migration-beside-a-live-lease/shared.patch
+    switch: migration-beside-a-live-lease
     engines:
       postgres-state:
         cells:
@@ -595,12 +595,12 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: load-spec-last-writer-of-one-name/postgres-state.patch
+        switch: load-spec-last-writer-of-one-name
         cells:
           - five_configs_with_one_table_name_on_one_state_each_load_by_their_own_key
           - "lib:two_sources_of_one_export_name_keep_a_spec_each"
       sqlite-state:
-        patch: load-spec-last-writer-of-one-name/postgres-state.patch
+        switch: load-spec-last-writer-of-one-name
         cells: ["lib:two_sources_of_one_export_name_keep_a_spec_each", "lib:two_inits_of_one_export_name_keep_a_key_each"]
 
   - name: pg-migration-not-idempotent
@@ -609,7 +609,7 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: pg-migration-not-idempotent/postgres-state.patch
+        switch: pg-migration-not-idempotent
         cells: ["lib:pg_v32_replays_over_a_load_spec_table_already_in_its_v32_shape"]
       sqlite-state:
         na: the SQLite ladder never replays over leftovers - its version row lives in the same file and the ladder runs under BEGIN IMMEDIATE, so a migration there is not required to be idempotent
@@ -790,7 +790,7 @@ seeds:
     class: "a verifier that reads the absence of its evidence as an older format: `rivet validate` took a prefix with no manifest for a pre-manifest export and exited 0, although `_SUCCESS`, which is written only after the manifest, was there"
     history: "2026-10-09 - sabotage matrix, part 1 (#486) - manifest.json removed from a complete export: `validate` printed `status: legacy_run`, exit 0, on PostgreSQL, MySQL, SQL Server and MongoDB"
     scope: source
-    patch: marker-without-manifest-read-as-legacy/shared.patch
+    switch: marker-without-manifest-read-as-legacy
     engines:
       postgres:
         cells:
@@ -1837,7 +1837,7 @@ seeds:
     class: "a MySQL read whose session is still at the server's time zone after rivet's `SET time_zone = '+00:00'` (a proxy dropped or rerouted the SET) writes every TIMESTAMP shifted by the offset, exit 0"
     history: "0.32.1 D5, 2026-10-18: a pilot's ProxySQL in front of a Europe/Moscow MySQL; measured on main 51a1b69c through proxysql-tz (a rule answering `SET time_zone` with OK): `2026-01-01T12:00:00Z` exported for `09:00:00Z`, exit 0. ProxySQL 2.5.5 with no rule forwards the SET and logs `Unable to parse unknown SET query ... Setting lock_hostgroup` for rivet's reset `SET time_zone = @@global.time_zone`"
     scope: source
-    patch: mysql-session-off-utc-read/mysql.patch
+    switch: mysql-session-off-utc-read
     engines:
       mysql:
         cells:
@@ -1855,7 +1855,7 @@ seeds:
     class: "a MySQL `columns:` override whose declared type has no arm for the value the server sent (an integer under float4/float8, a double under int8) writes NULL for every row instead of the value or a coded refusal, exit 0"
     history: "hunt-3 F1, 2026-11-08: RED on main 2026-11-08 (the rig, delivered parquet read back: `INT` as float8 gave [None, None, None, None] against the inserted 1..4, MySQL only; PostgreSQL refused at check, Oracle delivered 7.0)"
     scope: source
-    patch: mysql-override-unread-value-nulled/mysql.patch
+    switch: mysql-override-unread-value-nulled
     engines:
       mysql:
         cells:
@@ -1911,7 +1911,7 @@ seeds:
     class: "a schema-wide SQL Server `rivet init` scaffolds the system tables SQL Server ships (`dbo.systranschemas` of a CDC database) as exports"
     history: "0.32.1 item 2, 2026-10-18: measured on main 935064e8 against the mssql-cdc stand: `- name: systranschemas` in the scaffold"
     scope: source
-    patch: mssql-shipped-tables-scaffolded/mssql.patch
+    switch: mssql-shipped-tables-scaffolded
     engines:
       mssql:
         cells: [init_mssql_schema_wide_leaves_out_the_tables_sql_server_ships]
@@ -1928,7 +1928,7 @@ seeds:
     class: "a SQL Server run as a login without `VIEW SERVER PERFORMANCE STATE` / `VIEW SERVER STATE` queries the server counters anyway, and the driver logs the denial at ERROR on every sample"
     history: "0.32.1 item 2, 2026-10-18: measured on main 935064e8 with a db_datareader login on the mssql-cdc stand: two `VIEW SERVER PERFORMANCE STATE permission was denied` ERROR lines per `rivet run`"
     scope: source
-    patch: mssql-denied-counters-queried/mssql.patch
+    switch: mssql-denied-counters-queried
     engines:
       mssql:
         cells: [a_sql_server_reader_without_server_grants_runs_without_permission_errors]
@@ -2236,7 +2236,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: message-only-window-ends-the-drain/postgres.patch
+        switch: message-only-window-ends-the-drain
         cells:
           - pg_cdc_cli_rollover_1_delivers_the_pending_changes
           - pg_cdc_rollover_1_delivers_the_commits_behind_an_idle_runs_barrier
@@ -2484,7 +2484,7 @@ seeds:
     class: "a base-and-buffer load meets a VIEW under the base name and goes on, appending to the buffer or failing in the warehouse instead of stopping with the coded conflict"
     history: "2026-10-28 - with base-and-buffer the default on Snowflake, a table left as a log+view view must stop every load leg and compact; BigQuery shared the silent append"
     scope: source
-    patch: load-view-as-base-guard-removed/shared.patch
+    switch: load-view-as-base-guard-removed
     engines:
       postgres:
         cells: [snowflake_view_under_the_base_name_stops_load_and_compact_postgres, "lib:a_view_under_the_base_name_stops_every_load_leg_with_the_coded_conflict"]
@@ -2841,7 +2841,7 @@ seeds:
     class: "a store's \"not found\" on a write is passed up raw, so a bucket that does not exist reads as a failed upload with no code"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6, row 582): `rivet run` into a missing fake-gcs bucket exited 1 with opendal's `NotFound (persistent) at write` dump, while `head` already refused RIVET_DEST_CONTAINER_NOT_FOUND, through 0.31.0; fixed by `absent_container_or` on every write"
     scope: destination
-    patch: missing-bucket-uncoded-on-write/shared.patch
+    switch: missing-bucket-uncoded-on-write
     engines:
       local:
         na: "the seed edits src/destination/cloud.rs, which only the s3, gcs and azure stores run; a local directory has no bucket to be missing"
@@ -2877,7 +2877,7 @@ seeds:
     class: "a read of a source that was dropped, or dropped and created again, after the existence check returns no rows and no error (or the new collection's rows), and the run ends exit 0 with a marker over what it had"
     history: "found 2026-11-03 by gate cell collection_dropped_under_it going red under load (a MongoDB `find` on a collection dropped after `listCollections` returns 0 documents); RED on main 904b8f21 3/3; reworked 2026-11-04: the collection is confirmed by its listing and UUID after every read, not only an empty one (RED on main f0f5207c, 7 of 7 cells); this seed removes the check after the read"
     scope: source
-    patch: mongo-empty-read-after-drop/shared.patch
+    switch: mongo-empty-read-after-drop
     engines:
       postgres:
         na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
@@ -2909,7 +2909,7 @@ seeds:
     class: "a parallel worker pins the collection it finds when it starts instead of the one its run planned the ranges on, so a collection created again between the plan and a worker's first read is read as the planned one"
     history: "2026-11-04 - a worker opened its own source and pinned the UUID at its first listing, after the run's range sample; the run now hands its pin to every worker; this seed drops the hand-over"
     scope: source
-    patch: mongo-parallel-worker-pins-its-own-uuid/shared.patch
+    switch: mongo-parallel-worker-pins-its-own-uuid
     engines:
       postgres:
         na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
@@ -2941,7 +2941,7 @@ seeds:
     class: "the resume anchor or incremental cursor of a MongoDB export is not bound to the collection incarnation it was written against, so after the collection is dropped and created again with other ids the next run reads 0 rows and ends exit 0 with a marker over the old data"
     history: "2026-11-05 - found by verify-808: a refused run left the keyset anchor, and the next run over the collection created again with other ids exited 0 with 0 rows; the incarnation (UUID) is now part of the stored population and a different one is a different stream; this seed binds nothing"
     scope: source
-    patch: mongo-progress-not-bound-to-incarnation/shared.patch
+    switch: mongo-progress-not-bound-to-incarnation
     engines:
       postgres:
         na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
@@ -3103,7 +3103,7 @@ seeds:
     class: "a server error that names a missing deployment prerequisite is passed up as the driver's raw dump instead of the coded prerequisite refusal"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6, row 808): `mode: cdc` on a standalone MongoDB exited 1 with `Error code 40573 … RawDocumentBuf { data: … }`, while `doctor` named it plainly, through 0.31.0; fixed by `names_standalone` in diagnose_stream_error"
     scope: source
-    patch: mongo-standalone-uncoded/shared.patch
+    switch: mongo-standalone-uncoded
     engines:
       postgres:
         na: "change streams on a standalone are MongoDB's; the SQL engines' CDC prerequisites have their own seeds"
@@ -3247,7 +3247,7 @@ seeds:
     class: the sink never asks whether the open part reached max_file_size, so one part holds the whole export
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: max-file-size-never-checked/shared.patch
+    switch: max-file-size-never-checked
     engines:
       postgres:
         cells:
@@ -3349,7 +3349,7 @@ seeds:
     class: a run records no load spec from the columns it resolved, so `rivet load` plans from nothing
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: load-spec-not-recorded-from-the-run/shared.patch
+    switch: load-spec-not-recorded-from-the-run
     engines:
       postgres:
         cells:
@@ -3613,7 +3613,7 @@ seeds:
     class: "a refusal on the CDC path prints the batch path's remedy (a cast in the export's query), which a stream has no seam for, and the check runs by the column's native type, so the override remedy the stream does have is blocked"
     history: "2026-10-15 - found by the first walk of the MySQL TIME-past-a-day cell on a stream: `RIVET_SOURCE_VALUE_UNREPRESENTABLE` named `Cast it in a query, e.g. TIME_TO_SEC(col)` and a `columns: { t: string }` override was still refused, through 0.31.0; fixed by the CDC wording of the TimeOfDay fix and `MysqlCellFix::applies_to`"
     scope: source
-    patch: mysql-cdc-time-remedy-names-the-batch-cast/shared.patch
+    switch: mysql-cdc-time-remedy-names-the-batch-cast
     engines:
       postgres:
         na: "a PostgreSQL `time` is a time of day, never a duration past it, and the MySQL cell fix does not run"
@@ -3704,7 +3704,7 @@ seeds:
     class: a `rivet load` stop raised before any warehouse write but outside the typed refusal seam reaches the ledger as something other than `refused` (no row, or `failed`), and a state-DB fault wears the missing-spec refusal code
     history: "found 2026-10-15 while coding the last error sites (#594): a split prefix holding two generations stopped with RIVET_LOAD_SPLIT_GENERATIONS_MIXED and left no load_run row; load_type_reports folded a failed state read into RIVET_LOAD_SPEC_MISSING"
     scope: state
-    patch: load-refusal-not-journaled/shared.patch
+    switch: load-refusal-not-journaled
     engines:
       sqlite-state:
         cells: ["lib:a_mixed_split_generation_is_journaled_refused_and_refuses_again", "lib:a_missing_spec_and_an_unreadable_spec_store_are_two_codes"]
@@ -3730,7 +3730,7 @@ seeds:
     class: "a store's final answer is classified by the words in its text, so a header such as `keep-alive: timeout=5` on a 404 reads as a timeout and the chunk is retried for minutes"
     history: "2026-10-08 - the gate's Azure removed-container cell (live_sabotage) ran past its 180 s ceiling: each chunk's upload into the removed container was retried 16 times, 9 min 21 s to exit 1 by hand (Azurite answers its 404 with `keep-alive: timeout=5`, and the classifier's text scan matched `timeout`), through 0.31.0; fixed by classifying an opendal error by its own verdict before any text scan"
     scope: source
-    patch: missing-container-retried-as-timeout/shared.patch
+    switch: missing-container-retried-as-timeout
     engines:
       postgres:
         cells:
@@ -3964,7 +3964,7 @@ seeds:
     class: "`rivet load` reads the source-keyed load spec under the key the config resolves on the load host, so a host without the source variable finds no spec and refuses every table"
     history: "2026-10-20, a regression of #650 (state v38) caught on main f5ba44a3 by the generated CDC chains: `rivet load` without DATABASE_URL refused with RIVET_LOAD_SPEC_MISSING; fixed by `StateStore::spec_source`"
     scope: source
-    patch: load-spec-read-under-an-unresolved-source/shared.patch
+    switch: load-spec-read-under-an-unresolved-source
     engines:
       lib:
         cells: ["lib:a_load_without_the_source_variable_reads_the_only_spec_and_refuses_two"]
@@ -4021,7 +4021,7 @@ seeds:
     class: "a bare MySQL CDC table name is refused (or resolved to another database) when the connection's database holds it and another database holds a table of the same name, so a config `rivet init --mode cdc` generated stops on every run"
     history: "2026-10-21 #675 - found by the Airflow provider's live gate (MySQL CDC beside a second database with same-named tables): RIVET_SOURCE_CDC_TABLE_UNRESOLVED on every run of the init config"
     scope: source
-    patch: mysql-cdc-bare-name-refused-beside-a-twin/mysql.patch
+    switch: mysql-cdc-bare-name-refused-beside-a-twin
     engines:
       mysql:
         cells:
@@ -4043,7 +4043,7 @@ seeds:
     class: "every MySQL run dials a connection of its own to detect a proxy, so a batch run opens 4 source connections instead of 2 and a CDC run 3 instead of 2"
     history: "2026-10-22 - found by the 0.32.2 gate (perf[mysql/cdc-conns], perf[mysql/batch-conns-*]) after #661 moved the probe off the pool"
     scope: source
-    patch: mysql-proxy-probe-dials-its-own-connection/mysql.patch
+    switch: mysql-proxy-probe-dials-its-own-connection
     engines:
       mysql:
         cells:
@@ -4908,7 +4908,7 @@ seeds:
       oracle:
         na: "the position is an SCN with a row sequence the log supplies; there is no ordinal to restore"
       mongo:
-        patch: mongo-cdc-ordinal-restarts-on-resume/mongo.patch
+        switch: mongo-cdc-ordinal-restarts-on-resume
         cells: [a_mongo_transaction_cut_mid_tie_loads_in_source_order, a_mongo_run_killed_mid_tie_resumes_in_source_order]
 
   - name: mongo-cdc-stops-before-the-open-time-bound
@@ -4983,7 +4983,7 @@ seeds:
     class: a BigQuery or Snowflake view or compaction ranks a MongoDB change by its resume token alone instead of by clusterTime then ordinal, so a log whose token order runs against its stamps keeps the older image of a key and a deleted key comes back
     history: 2026-10-31 - the Mongo order moved from the resume token (an internal MongoDB format) to the numeric clusterTime and ordinal ClickHouse already used; a token-only order is the one the view and the compaction had before
     scope: source
-    patch: mongo-warehouse-order-by-token/shared.patch
+    switch: mongo-warehouse-order-by-token
     engines:
       postgres:
         na: "the Mongo row of the order table is the only one patched; a Postgres position keeps its own row, pinned by each_row_renders_its_order_for_both_dialects"
@@ -5113,7 +5113,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: mysql-enum-label-escapes-unread/mysql.patch
+        switch: mysql-enum-label-escapes-unread
         cells: [mysql_cdc_enum_set_labels_match_the_snapshot, "lib:every_append_unescaped_escape_is_reversed_in_an_enum_label", "lib:every_append_unescaped_escape_is_reversed_in_a_set_member"]
       postgres:
         na: "an enum label arrives in the logical stream as stored text, with no catalog escaping to reverse: this path is never reached"
@@ -5128,7 +5128,7 @@ seeds:
     class: "a reader of the run manifests under one prefix counts a Failed attempt or a foreign export's unit, so validate --depth full fails a healthy prefix on parts gc collected, and a foreign unit tiles a gap a split export still has"
     history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: a Failed unit manifest whose parts gc had collected made validate --depth full exit 1 (could not verify), and completed_units_tile counted a foreign family's unit; closed 2026-11-01 by routing the readers through ManifestCensus::succeeded / completed / completed_split_units"
     scope: source
-    patch: manifest-census-reads-unfiltered/shared.patch
+    switch: manifest-census-reads-unfiltered
     engines:
       postgres:
         cells: [stand_pool_split_resume_grows_postgres, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
@@ -5445,10 +5445,10 @@ seeds:
     scope: source
     engines:
       mssql:
-        patch: mssql-ns-override-out-of-range-null/mssql.patch
+        switch: mssql-ns-override-out-of-range-null
         cells: [a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null]
       oracle:
-        patch: mssql-ns-override-out-of-range-null/oracle.patch
+        switch: mssql-ns-override-out-of-range-null
         cells: [a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code]
       postgres:
         na: "PostgreSQL refuses a nanosecond override with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (live check_override_wire cells a_nanosecond_timestamp_override_is_refused_by_the_wire_check_postgres), so no value reaches a nanosecond builder"
@@ -5741,7 +5741,7 @@ seeds:
       oracle:
         na: "an Oracle LogMiner stream has no pre-image request whose acceptance depends on the server version"
       mongo:
-        patch: mongo-sharded-cdc-requests-pre-images-below-6-0/mongo.patch
+        switch: mongo-sharded-cdc-requests-pre-images-below-6-0
         cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, "lib:the_pre_image_request_follows_the_server_version"]
 
   - name: state-url-query-password-unmasked
@@ -5849,7 +5849,7 @@ seeds:
     class: "the keyed load admits its order and key columns by name alone, so an incremental cursor that lands as text (an Oracle bare NUMBER) is ranked as a string by the current-state view (99 stays after 100), and a primary-key column the source declares finer than a microsecond (an MSSQL datetime2(7)) lands at microseconds and collapses rows into one, both with exit 0"
     history: "hunt axis 1 claims 1 and 2, RED on main 2026-11-10: Oracle (2,99) to (2,100) left 99 in the view with exit 0; MSSQL rows at .1234561 and .1234569 gave one view row"
     scope: source
-    patch: load-key-landed-type-not-admitted/shared.patch
+    switch: load-key-landed-type-not-admitted
     engines:
       postgres:
         na: "a PostgreSQL numeric lands as a decimal and a timestamp is at most a microsecond, so no key column lands as text or finer-collapsed"
@@ -6052,7 +6052,7 @@ seeds:
     class: a MongoDB CDC export whose keyed `load:` block merges on the flat `_id` column is accepted over `_id` values of more than one BSON type, so the current-state view merges distinct documents and a delete of one removes the other
     history: "H5-F7 (2026-11-10): RED on main c13bc29c on Mongo 4.4, 5.0 and 8.0 into ClickHouse (8 source documents, 4 view rows; a delete of string `1` tombstoned key `1` and removed the live int 1; exit 0 with only a WARN)"
     scope: source
-    patch: mongo-id-types-mixed-under-a-keyed-view/mongo.patch
+    switch: mongo-id-types-mixed-under-a-keyed-view
     engines:
       postgres:
         na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
@@ -6091,7 +6091,7 @@ seeds:
     class: the `_id` type guard of a MongoDB CDC export runs only for a `load:` that spells its key columns, while a `load:` that leaves `pk` at its default `auto` resolves to the source key `_id` at load, so a collection holding int 1 and string "1" collapses to one view row at exit 0
     history: "found 2026-11-11 by a verifier reading #939: `keyed_tables` kept a table only when `pk.declared()` was non-empty and `auto` declares nothing; every live cell wrote an explicit `pk: [_id]`; RED on main 2c4ae204 (the guard never ran, the idt record was never written)"
     scope: source
-    patch: mongo-id-types-guard-skips-the-default-pk/mongo.patch
+    switch: mongo-id-types-guard-skips-the-default-pk
     engines:
       postgres:
         na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"

@@ -432,7 +432,10 @@ pub(crate) fn refuse_view_as_base(
 }
 
 fn view_as_base_check(loader: &dyn TargetLoader, table: &str, base_and_buffer: bool) -> Result<()> {
-    if !base_and_buffer || loader.object_kind(table)? != ObjectKind::View {
+    if seeded!("load-view-as-base-guard-removed", true, false)
+        || !base_and_buffer
+        || loader.object_kind(table)? != ObjectKind::View
+    {
         return Ok(());
     }
     let (base, buffer) = (

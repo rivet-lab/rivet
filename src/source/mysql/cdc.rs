@@ -348,7 +348,10 @@ impl MysqlChangeStream {
         own_db: &str,
         matches: &[crate::source::cdc::identity::CatalogMatch],
     ) -> Option<String> {
-        if !own_db.is_empty() && matches.iter().any(|m| m.schema == own_db) {
+        if !own_db.is_empty()
+            && matches.iter().any(|m| m.schema == own_db)
+            && seeded!("mysql-cdc-bare-name-refused-beside-a-twin", false, true)
+        {
             return Some(own_db.to_string());
         }
         let mut base: Vec<&str> = matches

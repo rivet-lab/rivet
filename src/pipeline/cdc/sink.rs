@@ -1116,7 +1116,13 @@ fn flush(
         // computed once per column, applied per cell.
         // The planned type, as `ensure_schema` declared it (after the three meta columns).
         let dt = schema.field(arrays.len()).data_type();
-        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| f.applies_to(dt));
+        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
+            seeded!(
+                "mysql-cdc-time-remedy-names-the-batch-cast",
+                true,
+                f.applies_to(dt)
+            )
+        });
         // after-image for insert/update; before-image (the key) for delete.
         // Finding #41: a NAMED key-only image (PG DELETE) maps by COLUMN NAME
         // into the resolved schema — positional mapping put a non-first PK's
