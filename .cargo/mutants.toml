@@ -380,6 +380,9 @@ exclude_re = [
     # heavies; a stubbed drop / deleted `!` deadlocks the second heavy).
     "replace run_pool -> Result",
     "replace pool_worker with ()",
+    "replace advise_or_realize_split -> Result",
+    "replace predict_and_announce_pool -> ",
+    "replace select_pool_exports -> Result",
     "impl Drop for HeavyGuard",
     "delete ! in pool_worker",
     # `check` (preflight/mod.rs) connects to the source and diagnoses every
