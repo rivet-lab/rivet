@@ -545,8 +545,11 @@ class Ledger:
         if known:
             print(self._c("1;33", f"  {len(known)} KNOWN RED cell(s), each recorded in known_red.py with a reason and an expiry."))
         if ungraded:
-            print(self._c("1;35", f"  {ungraded} cell(s) NOT GRADED: the oracle's own read failed (see ⚠ above). "
+            print(self._c("1;35", f"  {ungraded} cell(s) NOT GRADED: the oracle's own read failed, or an env skip no skip_allow entry excuses. "
                                   "Not a product verdict; re-run them."))
+            for c in self.graded(gate):
+                if c.status is Status.INFRA:
+                    print(self._c("1;35", f"    - {c.engine}/{c.version}/{c.scenario}/{c.store}: {c.detail.splitlines()[0][:160]}"))
         if moved:
             print(self._c("1;31", f"  {TREE_MOVED} — the tree was {tree} when the run began and {end_tree} when it ended; the stages "
                                   "graded more than one tree. Run the gate again on a tree nobody touches."))

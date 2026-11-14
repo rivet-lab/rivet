@@ -1,7 +1,8 @@
 """The lib tests that grade the Postgres state backend: ONE selection, run by the release gate's
 state-migration parity stage and by CI's E2E job. The selection is DERIVED: every `src/` module
-whose source reads RIVET_TEST_STATE_URL is a libtest filter, so a reader in any module is selected
-(load::orchestrate's PG ledger test self-skipped ungraded for a cycle under a fixed `state::`).
+whose source reads RIVET_TEST_STATE_URL, directly or through `StateStore::postgres_for_test`, is a libtest
+filter, so a reader in any module is selected (load::orchestrate's PG ledger test self-skipped ungraded
+for a cycle under a fixed `state::`; pipeline::cli's reset test did the same through the helper).
 
     RIVET_TEST_STATE_URL=postgresql://… python3 -m dev.release_oracle.state_lib
 """
@@ -20,7 +21,7 @@ except ImportError:  # pragma: no cover - depends on how the driver is invoked
     from core import ROOT, self_skipped  # type: ignore
 
 #: The source expression a lib test reads the state URL through.
-READER = re.compile(r'var\(\s*"RIVET_TEST_STATE_URL"\s*\)')
+READER = re.compile(r'var\(\s*"RIVET_TEST_STATE_URL"\s*\)|\bpostgres_for_test\(')
 
 
 def filters(src: Path = ROOT / "src") -> list[str]:
