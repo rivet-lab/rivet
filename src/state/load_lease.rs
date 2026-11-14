@@ -363,7 +363,11 @@ fn lease_path(db: &std::path::Path, key: &str) -> std::path::PathBuf {
 /// descriptor holds a lock that excludes it.
 fn flocked(path: &std::path::Path, how: libc::c_int) -> Result<Option<std::fs::File>> {
     use std::os::unix::io::AsRawFd;
-    let file = std::fs::File::create(path)?;
+    let file = if seeded!("unwritable-state-run-exports", true, false) {
+        std::fs::File::create(path).or_else(|_| std::fs::File::open(path))?
+    } else {
+        std::fs::File::create(path)?
+    };
     if unsafe { libc::flock(file.as_raw_fd(), how | libc::LOCK_NB) } == 0 {
         return Ok(Some(file));
     }

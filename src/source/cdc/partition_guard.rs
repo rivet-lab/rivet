@@ -150,7 +150,19 @@ pub(crate) fn split_move(
     if ev.op != ChangeOp::Update {
         return Ok(None);
     }
-    let moved = key_moves(ev, key)
+    let moved = (seeded!(
+        "pk-move-without-delete-mysql",
+        engine != CdcEngine::Mysql,
+        true
+    ) && seeded!(
+        "pk-move-without-delete-oracle",
+        engine != CdcEngine::Oracle,
+        true
+    ) && seeded!(
+        "pk-move-without-delete-postgres",
+        engine != CdcEngine::Postgres,
+        true
+    ) && key_moves(ev, key))
         || match guard {
             Some(g) => partition_moves(ev, g, columns, engine)?,
             None => false,

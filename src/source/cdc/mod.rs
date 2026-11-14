@@ -67,10 +67,21 @@ pub(crate) fn partial_image_refusal(
              fabricating the missing cells as NULL. On MySQL this is \
              `binlog_row_image` set to something other than FULL when the \
              change was WRITTEN (a session override counts, and the open-time \
-             probe reads only the global). Setting `binlog_row_image = FULL` fixes only the \
-             changes written after it: this one stays in the binlog, and every run that \
-             resumes before it meets it again. Set FULL for every writer, then re-baseline: {}",
-            checkpoint_identity::RECOVER
+             probe reads only the global). {}{}",
+            seeded!(
+                "partial-image-refusal-names-a-remedy-that-loops",
+                "Set `binlog_row_image = FULL` and \
+                 re-capture from before the affected DDL/DML; the changes are \
+                 still in the binlog, so this is a delay rather than a loss.",
+                "Setting `binlog_row_image = FULL` fixes only the \
+                 changes written after it: this one stays in the binlog, and every run that \
+                 resumes before it meets it again. Set FULL for every writer, then re-baseline: "
+            ),
+            seeded!(
+                "partial-image-refusal-names-a-remedy-that-loops",
+                "",
+                checkpoint_identity::RECOVER
+            )
         ),
     )
 }
@@ -707,7 +718,9 @@ pub(crate) fn run(
     let mut last_commit: Option<Position> = None;
     let drained = emit_ndjson(stream, &checkpoint, &tables, max_events, &mut last_commit);
     // Every line up to `last_commit` is on stdout: release it at the source (PostgreSQL advances the slot).
-    let acked = last_commit.map_or(Ok(()), |p| stream.ack(&p));
+    let acked = last_commit.map_or(Ok(()), |p| {
+        seeded!("stdout-drain-never-acks", Ok(()), stream.ack(&p))
+    });
     drained.and(acked)
 }
 

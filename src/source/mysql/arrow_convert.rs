@@ -274,12 +274,15 @@ pub(super) fn mysql_schema_and_arrow_types(
         match (build_arrow_field(&mapping), mapping.arrow_type) {
             (Some(field), Some(dt)) => {
                 if column_overrides.contains_key(col.name_str().as_ref()) {
-                    crate::source::refuse_unbuildable_override(
-                        "mysql",
-                        col.name_str().as_ref(),
-                        &mapping.rivet_type,
-                        build_array(&dt, 0, &[], false, col.name_str().as_ref(), None),
-                    )?;
+                    let built = build_array(&dt, 0, &[], false, col.name_str().as_ref(), None);
+                    if seeded!("override-without-builder-internal-stop", false, true) {
+                        crate::source::refuse_unbuildable_override(
+                            "mysql",
+                            col.name_str().as_ref(),
+                            &mapping.rivet_type,
+                            built,
+                        )?;
+                    }
                 }
                 fields.push(field);
                 arrow_types.push(dt);
@@ -349,7 +352,11 @@ pub(super) fn nulled_dates(
             .iter()
             .filter(|r| match r.as_ref(col_idx) {
                 Some(Value::Date(y, mo, d, h, mi, s, us)) => {
-                    datetime_of(*y, *mo, *d, *h, *mi, *s, *us).is_none()
+                    seeded!(
+                        "mysql-zero-date-count-misses-a-class",
+                        *y == 0 && *mo == 0 && *d == 0,
+                        datetime_of(*y, *mo, *d, *h, *mi, *s, *us).is_none()
+                    )
                 }
                 _ => false,
             })

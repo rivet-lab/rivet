@@ -220,7 +220,11 @@ impl StateStore {
         run_id: &str,
         format: &str,
     ) -> Result<Option<String>> {
-        if format.is_empty() {
+        if seeded!(
+            "unfinished-run-finished-in-another-format",
+            !format.is_empty(),
+            format.is_empty()
+        ) {
             return Ok(None);
         }
         self.query_opt(

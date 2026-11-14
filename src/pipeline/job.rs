@@ -819,7 +819,11 @@ fn refused_by_a_gate(o: &RunOutcome<'_>) -> bool {
 /// Whether the keyset resume anchor outlives the run.
 pub(super) fn keyset_anchor_survives(o: &RunOutcome<'_>, cursor_ran_ahead: bool) -> bool {
     if refused_by_a_gate(o) {
-        return cursor_ran_ahead;
+        return seeded!(
+            "refused-run-adopted",
+            cursor_ran_ahead || o.failed,
+            cursor_ran_ahead
+        );
     }
     o.failed || o.manifest_gap.is_some()
 }
@@ -895,9 +899,15 @@ pub(super) fn ledger_begin_run(
 ) -> Result<String> {
     let prefix = super::finalize::destination_uri_for_manifest(destination);
     let started_at = chrono::Utc::now().to_rfc3339();
-    state
-        .begin_run_under_lease(run_id, export_name, source_key, &prefix, &started_at)
-        .map_err(|e| state_not_writable(export_name, &e))?;
+    if let Err(e) =
+        state.begin_run_under_lease(run_id, export_name, source_key, &prefix, &started_at)
+    {
+        let stop = state_not_writable(export_name, &e);
+        if seeded!("unwritable-state-run-exports", false, true) {
+            return Err(stop);
+        }
+        log::warn!("{stop:#}");
+    }
     Ok(started_at)
 }
 
@@ -1327,7 +1337,12 @@ fn execute_resolved_plan(
             );
         }
     } else if let Err(e) = commit_incremental_cursor(state, plan, &summary) {
-        cursor_gate = Err(cursor_not_stored(tail.kind, &summary.export_name, &e));
+        let stop = cursor_not_stored(tail.kind, &summary.export_name, &e);
+        if seeded!("unstored-cursor-exits-zero", false, true) {
+            cursor_gate = Err(stop);
+        } else {
+            log::error!("{stop:#}");
+        }
     }
     let outcome = RunOutcome {
         failed,

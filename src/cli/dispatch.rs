@@ -332,7 +332,10 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
     );
     let (url, _prov) = resolve_init_source(a.source, a.source_env, a.source_file)?;
     let ckpt = a.checkpoint.map(std::path::PathBuf::from);
-    if let Some(c) = &ckpt {
+    if let Some(c) = ckpt
+        .as_ref()
+        .filter(|_| seeded!("rivet-cdc-skips-the-checkpoint-claim", false, true))
+    {
         let me = crate::source::cdc::checkpoint_identity::CheckpointOwner::command();
         crate::source::cdc::checkpoint_identity::claim_checkpoint(c, &me)?;
     }
@@ -573,7 +576,13 @@ fn dispatch_check(
 
 /// `check`'s refusal to call a config ready after it logged `errors` ERROR lines.
 fn refuse_after_errors(errors: usize) -> Result<()> {
-    if errors > 0 {
+    if errors > 0
+        && seeded!(
+            "setup-green-over-dead-state-postgres",
+            errors == usize::MAX,
+            true
+        )
+    {
         crate::rivet_bail!(
             crate::error::codes::CLI_CHECK_REPORTED_ERRORS,
             "`rivet check` logged {errors} ERROR line(s) above; the config is not ready to run"

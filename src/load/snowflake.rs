@@ -89,7 +89,9 @@ impl SnowflakeLoader {
             .iter()
             .map(|s| {
                 let path = format!("$1:{}", s.column_name);
-                if s.column_name == crate::load::cdc::DELETE_FLAG_COLUMN {
+                if seeded!("snowflake-baseline-flag-left-null", false, true)
+                    && s.column_name == crate::load::cdc::DELETE_FLAG_COLUMN
+                {
                     format!("COALESCE({path}::BOOLEAN, FALSE)")
                 } else if needs_parse_json(s) {
                     format!("PARSE_JSON({path})")
@@ -209,7 +211,9 @@ impl TargetLoader for SnowflakeLoader {
             let rows = extract_count(&result)
                 .context("COPY ran but the row count could not be read from the answer")?;
             super::check_loaded_rows(&self.fqtn(table), rows, expected_rows)?;
-            self.run_sql(&self.build_clone_in_sql(table, &staging))?;
+            if seeded!("snowflake-full-load-empties-before-copy", false, true) {
+                self.run_sql(&self.build_clone_in_sql(table, &staging))?;
+            }
             Ok(rows)
         });
         if landed.is_err() {
@@ -401,7 +405,16 @@ impl SnowflakeLoader {
         specs: &[TargetColumnSpec],
         uris: &[String],
     ) -> Result<String> {
-        let staging = self.fqtn(staging);
+        let staging = self.fqtn(seeded!(
+            "snowflake-full-load-empties-before-copy",
+            table,
+            staging
+        ));
+        let create_table = seeded!(
+            "snowflake-full-load-empties-before-copy",
+            "CREATE OR REPLACE TABLE",
+            "CREATE TABLE"
+        );
         let ddl = Self::build_schema_ddl(specs);
         let select = Self::build_copy_select(specs);
         let columns = Self::build_column_list(specs);
@@ -412,6 +425,7 @@ impl SnowflakeLoader {
         let stage = format!("rivet_stage_{}", sanitize_tag(table));
         let files = copy_files_clause(&self.gcs_url, uris)?;
         let cluster = Self::cluster_clause(&self.cluster_keys());
+        let pf = parquet_format();
 
         // Pin the session to UTC before the COPY — Snowflake otherwise stamps a
         // Parquet timestamp with the session offset, shifting a `timestamptz`.
@@ -420,11 +434,11 @@ impl SnowflakeLoader {
              ALTER SESSION SET TIMEZONE = 'UTC';\n\
              USE WAREHOUSE {wh};\n\
              USE SCHEMA {db}.{sc};\n\
-             CREATE OR REPLACE STAGE {stage} URL='{url}' STORAGE_INTEGRATION={si} FILE_FORMAT={PARQUET_FORMAT};\n\
-             CREATE TABLE {staging} (\n{ddl}\n){cluster};\n\
+             CREATE OR REPLACE STAGE {stage} URL='{url}' STORAGE_INTEGRATION={si} FILE_FORMAT={pf};\n\
+             {create_table} {staging} (\n{ddl}\n){cluster};\n\
              COPY INTO {staging} ({columns})\n\
              \x20 FROM (SELECT {select} FROM @{stage})\n\
-             \x20 FILE_FORMAT={PARQUET_FORMAT} {files};\n\
+             \x20 FILE_FORMAT={pf} {files};\n\
              SELECT COUNT(*) AS ROWS_ FROM {staging};",
             tag = self.query_tag(table),
             wh = self.warehouse,
@@ -483,15 +497,30 @@ impl SnowflakeLoader {
         format!(
             "ALTER SESSION SET QUERY_TAG = '{tag}';\n\
              USE WAREHOUSE {wh};\n\
-             SELECT COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 1 END) \
-             + 2 * COUNT(CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 END) \
-             + 4 * COUNT(CASE WHEN TABLE_TYPE NOT IN ('BASE TABLE', 'VIEW') THEN 1 END) AS KIND_ \
+             SELECT {count_table} \
+             + 2 * {count_view} \
+             + 4 * {count_other} AS KIND_ \
              FROM {db}.INFORMATION_SCHEMA.TABLES \
              WHERE TABLE_SCHEMA = UPPER('{sc}') AND TABLE_NAME = UPPER('{table}');",
             tag = self.query_tag(table),
             wh = self.warehouse,
             db = self.database,
             sc = self.schema,
+            count_table = seeded!(
+                "snowflake-probe-counts-by-count-if",
+                "COUNT_IF(TABLE_TYPE = 'BASE TABLE')",
+                "COUNT(CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 1 END)"
+            ),
+            count_view = seeded!(
+                "snowflake-probe-counts-by-count-if",
+                "COUNT_IF(TABLE_TYPE = 'VIEW')",
+                "COUNT(CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 END)"
+            ),
+            count_other = seeded!(
+                "snowflake-probe-counts-by-count-if",
+                "COUNT_IF(TABLE_TYPE NOT IN ('BASE TABLE', 'VIEW'))",
+                "COUNT(CASE WHEN TABLE_TYPE NOT IN ('BASE TABLE', 'VIEW') THEN 1 END)"
+            ),
         )
     }
 
@@ -681,6 +710,7 @@ impl SnowflakeLoader {
         let create = self.build_create_changes_sql(&changes_fqtn, &ddl);
         let stage = format!("rivet_stage_{}", sanitize_tag(&changes));
         let files = copy_files_clause(&self.gcs_url, uris)?;
+        let pf = parquet_format();
 
         // Ensure the log exists (clustered on PK), COUNT before, append via COPY,
         // COUNT after — the delta is what THIS load added; the driver gates it.
@@ -689,12 +719,12 @@ impl SnowflakeLoader {
              ALTER SESSION SET TIMEZONE = 'UTC';\n\
              USE WAREHOUSE {wh};\n\
              USE SCHEMA {db}.{sc};\n\
-             CREATE OR REPLACE STAGE {stage} URL='{url}' STORAGE_INTEGRATION={si} FILE_FORMAT={PARQUET_FORMAT};\n\
+             CREATE OR REPLACE STAGE {stage} URL='{url}' STORAGE_INTEGRATION={si} FILE_FORMAT={pf};\n\
              {create}{alter}\
              SELECT COUNT(*) AS BEFORE_ FROM {changes_fqtn};\n\
              COPY INTO {changes_fqtn} ({columns})\n\
              \x20 FROM (SELECT {select} FROM @{stage})\n\
-             \x20 FILE_FORMAT={PARQUET_FORMAT} FORCE=TRUE {files};\n\
+             \x20 FILE_FORMAT={pf} FORCE=TRUE {files};\n\
              SELECT COUNT(*) AS AFTER_ FROM {changes_fqtn};",
             tag = self.query_tag(&changes),
             wh = self.warehouse,
@@ -789,10 +819,20 @@ fn build_alter_add_columns_sql(fqtn: &str, specs: &[TargetColumnSpec]) -> String
         // instead of matching the one the COPY names.
         // Snowflake takes `ADD COLUMN` once per statement and `IF NOT EXISTS` per column:
         // `ADD COLUMN IF NOT EXISTS a T, ADD COLUMN IF NOT EXISTS b T` is a syntax error there.
-        .map(|s| format!("IF NOT EXISTS {} {}", s.column_name, s.target_type))
+        .map(|s| {
+            format!(
+                "{}IF NOT EXISTS {} {}",
+                seeded!("snowflake-add-column-per-column-keyword", "ADD COLUMN ", ""),
+                s.column_name,
+                s.target_type
+            )
+        })
         .collect::<Vec<_>>()
         .join(",\n  ");
-    format!("ALTER TABLE {fqtn} ADD COLUMN\n  {adds};\n")
+    format!(
+        "ALTER TABLE {fqtn}{}\n  {adds};\n",
+        seeded!("snowflake-add-column-per-column-keyword", "", " ADD COLUMN")
+    )
 }
 
 /// The stage URL: the export prefix closed with one `/`. Snowflake joins a stage URL and a `FILES` entry as text, so a prefix written without the slash named `…/orderspart-0.parquet`.
@@ -805,7 +845,13 @@ fn stage_url(gcs_url: &str) -> String {
 }
 
 /// How every stage and `COPY` reads a part, spelled inline: a named format made by `CREATE … IF NOT EXISTS` is whatever object already has that name. Logical types on, so a Parquet timestamp or time is read as one and not as its raw integer; binary kept as bytes.
-const PARQUET_FORMAT: &str = "(TYPE=PARQUET BINARY_AS_TEXT=FALSE USE_LOGICAL_TYPE=TRUE)";
+fn parquet_format() -> &'static str {
+    seeded!(
+        "snowflake-parquet-read-without-logical-types",
+        "(TYPE=PARQUET BINARY_AS_TEXT=FALSE)",
+        "(TYPE=PARQUET BINARY_AS_TEXT=FALSE USE_LOGICAL_TYPE=TRUE)"
+    )
+}
 
 /// A column is loaded through `PARSE_JSON` iff its native type is `VARIANT`
 /// (Rivet's Snowflake resolver maps JSON → `VARIANT`); a plain `COPY` would

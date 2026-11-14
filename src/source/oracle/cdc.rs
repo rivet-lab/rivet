@@ -325,7 +325,13 @@ pub(crate) fn plan_logs(
             threads.entry(thread).or_default().push(f);
         }
     }
-    let log_gap = crate::source::cdc::checkpoint_identity::log_gap;
+    let log_gap = |why: String| {
+        if seeded!("oracle-cdc-log-gap-uncoded", true, false) {
+            anyhow::Error::msg(why)
+        } else {
+            crate::source::cdc::checkpoint_identity::log_gap(why)
+        }
+    };
     if threads.is_empty() {
         return Err(log_gap(format!(
             "oracle cdc: no redo log covers SCN {start}..{end} — the archived logs the checkpoint \
@@ -1269,7 +1275,7 @@ impl OracleChangeStream {
                 image_names: Some(Arc::clone(&t.names)),
                 seq: 0,
                 poison: None,
-                row_id,
+                row_id: seeded!("renumber-equal-images", row_id.filter(|_| false), row_id),
                 before_names: None,
                 before_poison: None,
             },

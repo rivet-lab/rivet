@@ -1932,7 +1932,7 @@ pub(crate) fn run_pool(
     let predicted_secs = super::pool::predicted_makespan_secs(&items, m);
     let floor_secs = super::pool::makespan_floor_secs(&items, m);
     let (measured_n, attempt_n, placeholder_n) = super::pool::classification_counts(&classified);
-    eprintln!(
+    let pool_line = format!(
         "  Pool: {} export(s) × {} slot(s) — predicted makespan ~{:.1} min (floor {:.1}; {} measured, {} estimated)",
         effective.len(),
         m,
@@ -1941,6 +1941,11 @@ pub(crate) fn run_pool(
         measured_n,
         attempt_n + placeholder_n,
     );
+    if seeded!("pool-lines-on-stdout", true, false) {
+        println!("{pool_line}");
+    } else {
+        eprintln!("{pool_line}");
+    }
     // The ONE honesty claim about the wall, from the RECONCILED classification.
     if let Some(hedge) = super::pool::lower_bound_hedge(attempt_n, placeholder_n) {
         eprintln!("        {hedge}");

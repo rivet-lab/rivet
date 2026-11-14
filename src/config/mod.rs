@@ -139,8 +139,12 @@ impl Config {
         let mut config =
             Self::from_yaml(&resolved).map_err(|e| e.context(format!("config file '{}'", path)))?;
         config.record_queries_as_written(&contents);
-        config.anchor_paths(path, std::env::current_dir().ok())?;
-        config.anchor_files(path, std::env::current_dir().ok())?;
+        if seeded!("relative-destination-path-follows-the-cwd", false, true) {
+            config.anchor_paths(path, std::env::current_dir().ok())?;
+        }
+        if seeded!("named-credential-falls-back", false, true) {
+            config.anchor_files(path, std::env::current_dir().ok())?;
+        }
         Ok(config)
     }
 
@@ -153,28 +157,31 @@ impl Config {
         let Some(anchor) = anchor::Anchor::of(config_path, cwd) else {
             return Ok(());
         };
-        if let Some(written) = self.source.url_file.clone() {
-            self.source.url_file = Some(anchor.file("source: url_file", &written)?);
-        }
-        if let Some(tls) = &mut self.source.tls
-            && let Some(written) = tls.ca_file.clone()
-        {
-            tls.ca_file = Some(anchor.file("source: tls.ca_file", &written)?);
-        }
-        if let Some(load) = &mut self.load {
-            match &mut load.target {
-                load::LoadTarget::Snowflake {
-                    private_key_path, ..
-                } => {
-                    *private_key_path = anchor.file("load: private_key_path", private_key_path)?;
+        if seeded!("url-file-follows-the-cwd", false, true) {
+            if let Some(written) = self.source.url_file.clone() {
+                self.source.url_file = Some(anchor.file("source: url_file", &written)?);
+            }
+            if let Some(tls) = &mut self.source.tls
+                && let Some(written) = tls.ca_file.clone()
+            {
+                tls.ca_file = Some(anchor.file("source: tls.ca_file", &written)?);
+            }
+            if let Some(load) = &mut self.load {
+                match &mut load.target {
+                    load::LoadTarget::Snowflake {
+                        private_key_path, ..
+                    } => {
+                        *private_key_path =
+                            anchor.file("load: private_key_path", private_key_path)?;
+                    }
+                    load::LoadTarget::Clickhouse {
+                        ca_file: Some(ca_file),
+                        ..
+                    } => {
+                        *ca_file = anchor.file("load: ca_file", ca_file)?;
+                    }
+                    _ => {}
                 }
-                load::LoadTarget::Clickhouse {
-                    ca_file: Some(ca_file),
-                    ..
-                } => {
-                    *ca_file = anchor.file("load: ca_file", ca_file)?;
-                }
-                _ => {}
             }
         }
         for export in &mut self.exports {

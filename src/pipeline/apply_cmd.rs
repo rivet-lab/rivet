@@ -242,11 +242,15 @@ pub fn run_apply_command(
         let source = artifact.resolved_plan.source.state_key();
         let current = state.get(&artifact.export_name, &source)?.last_cursor_value;
         if !artifact.cursor_matches(current.as_deref())
-            && !state.cursor_last_moved_by_plan(
-                &artifact.export_name,
-                &source,
-                &artifact.plan_id,
-            )?
+            && seeded!(
+                "own-apply-cursor-read-as-drift",
+                true,
+                !state.cursor_last_moved_by_plan(
+                    &artifact.export_name,
+                    &source,
+                    &artifact.plan_id
+                )?
+            )
         {
             if !force {
                 crate::rivet_bail!(
