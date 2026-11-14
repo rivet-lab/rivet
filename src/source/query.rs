@@ -573,6 +573,9 @@ fn mssql_cursor_literal(value: &str, of: KeyOf) -> String {
 
 /// A text key literal: plain `'…'` when ASCII, else `N'…'` read through `ISNULL` against the key itself so it takes the key's own type, code page and collation.
 fn mssql_text_literal(value: &str, of: KeyOf) -> String {
+    if seeded!("seek-literal-typed-by-value", true, false) {
+        return escape_mssql_literal(value);
+    }
     let lit = escape_mssql_literal(value);
     if value.is_ascii() {
         return lit;

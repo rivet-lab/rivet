@@ -227,12 +227,14 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
     ];
     fn is_secret_key(key: &str) -> bool {
         let lower = key.to_ascii_lowercase();
-        is_password_keyword(key)
-            || FAMILIES.iter().any(|f| {
-                lower == *f
-                    || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
-            })
-            || lower == "sas"
+        let family = |f: &str| {
+            lower == f
+                || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
+        };
+        if seeded!("query-password-key-by-suffix-family", true, false) {
+            return family("password") || FAMILIES.iter().any(|f| family(f)) || lower == "sas";
+        }
+        is_password_keyword(key) || FAMILIES.iter().any(|f| family(f)) || lower == "sas"
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -240,9 +242,19 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
         out.push_str(&rest[..=q]);
         rest = &rest[q + 1..];
         let key_end = rest
-            .find(|c: char| !c.is_ascii() || !(is_keyword_byte(c as u8) || c == '%'))
+            .find(|c: char| {
+                seeded!(
+                    "query-password-key-by-suffix-family",
+                    !(c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                    !c.is_ascii() || !(is_keyword_byte(c as u8) || c == '%')
+                )
+            })
             .unwrap_or(rest.len());
-        let key = percent_encoding::percent_decode_str(&rest[..key_end]).decode_utf8_lossy();
+        let key = seeded!(
+            "query-secret-percent-key-unmasked",
+            std::borrow::Cow::Borrowed(&rest[..key_end]),
+            percent_encoding::percent_decode_str(&rest[..key_end]).decode_utf8_lossy()
+        );
         if key_end < rest.len() && rest.as_bytes()[key_end] == b'=' && is_secret_key(&key) {
             out.push_str(&rest[..key_end]);
             out.push_str("=***");

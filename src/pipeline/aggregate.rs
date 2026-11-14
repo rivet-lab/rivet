@@ -103,7 +103,7 @@ pub(super) fn entry_from_summary(s: &RunSummary) -> RunAggregateEntry {
             duration_ms: s.duration_ms,
             mode: s.mode.clone(),
             error_message: s.error_message.clone(),
-            skip_reason: s.skip_reason.clone(),
+            skip_reason: seeded!("summary-skip-reason-dropped", None, s.skip_reason.clone()),
         },
         &s.snapshot_legs,
     )

@@ -122,6 +122,7 @@ fn url_sslmode(url: &str) -> Option<&str> {
 /// Whether the state URL opts out of TLS itself with `sslmode=disable`.
 fn opts_out_of_tls(url: &str) -> bool {
     url_sslmode(url) == Some("disable")
+        && seeded!("remote-pg-state-plaintext-refused", url.is_empty(), true)
 }
 
 /// The TLS a state URL asks for: its `sslmode`, an explicit plaintext for `sslmode=disable`,
@@ -256,7 +257,15 @@ fn refuse_a_state_left_behind(beside: &std::path::Path, target: &std::path::Path
     let resolved =
         |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let same = |a: &std::path::Path, b: &std::path::Path| resolved(a) == resolved(b);
-    if same(beside, target) || !holds_state(beside) || holds_state(target) {
+    if same(beside, target)
+        || !holds_state(beside)
+        || holds_state(target)
+        || seeded!(
+            "sqlite-state-url-ignored-or-moved-blind",
+            !target.as_os_str().is_empty(),
+            false
+        )
+    {
         return Ok(());
     }
     crate::rivet_bail!(
@@ -344,7 +353,11 @@ impl StateStore {
                 refuse_a_state_left_behind(&config_dir_of(config_path).join(STATE_DB_NAME), &path)?;
                 return Self::open_at_path(&path);
             }
-            if let Some(url) = postgres_state_url(url)? {
+            if let Some(url) = seeded!(
+                "state-url-typo-falls-back-to-sqlite",
+                postgres_state_url(url).ok().flatten(),
+                postgres_state_url(url)?
+            ) {
                 return Self::open_postgres(url);
             }
         }
@@ -372,7 +385,11 @@ impl StateStore {
     /// Which state `config_path` uses and that it answers, without creating or migrating it: `postgres <redacted url>` or `sqlite <path>`.
     pub fn probe(config_path: &str) -> Result<String> {
         if let Some(url) = state_url_var()
-            && let Some(url) = postgres_state_url(url.expose())?
+            && let Some(url) = seeded!(
+                "state-url-typo-falls-back-to-sqlite",
+                postgres_state_url(url.expose()).ok().flatten(),
+                postgres_state_url(url.expose())?
+            )
         {
             let mut client = connect_pg(url)?;
             client.simple_query("SELECT 1").map_err(|e| {
@@ -385,7 +402,14 @@ impl StateStore {
                     ),
                 )
             })?;
-            return Ok(format!("postgres {}", crate::redact::redact_secrets(url)));
+            return Ok(format!(
+                "postgres {}",
+                seeded!(
+                    "state-url-query-password-unmasked",
+                    crate::redact::redact_url_passwords(url),
+                    crate::redact::redact_secrets(url)
+                )
+            ));
         }
         let path = Self::state_db_path(config_path);
         refuse_a_state_left_behind(&config_dir_of(config_path).join(STATE_DB_NAME), &path)?;
@@ -398,7 +422,9 @@ impl StateStore {
                         })
                         .map(|_| c)
                     });
-            if let Err(e) = conn {
+            if let Err(e) = conn
+                && seeded!("setup-green-over-dead-state-sqlite", false, true)
+            {
                 crate::rivet_bail!(
                     crate::error::codes::STATE_BACKEND_FAILED,
                     "state(sqlite): `{}` cannot be read: {e}",

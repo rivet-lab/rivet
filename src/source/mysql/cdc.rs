@@ -1475,11 +1475,17 @@ impl MysqlChangeStream {
                         before.as_ref(),
                         after.as_ref(),
                     ) {
-                        self.tx.push(
-                            boundary_marker(op, &position),
-                            crate::source::cdc::spill::encode_event,
-                            &format_args!("{}:{log_pos}", self.file),
-                        )?;
+                        if seeded!(
+                            "update-delivering-nothing-leaves-the-checkpoint-behind",
+                            false,
+                            true
+                        ) {
+                            self.tx.push(
+                                boundary_marker(op, &position),
+                                crate::source::cdc::spill::encode_event,
+                                &format_args!("{}:{log_pos}", self.file),
+                            )?;
+                        }
                         continue;
                     }
                     // A cell with no faithful representation is a DEFERRED refusal,

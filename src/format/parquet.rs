@@ -83,9 +83,14 @@ impl super::Format for ParquetFormat {
                 field.data_type()
             );
         }
-        let mut builder = WriterProperties::builder()
+        let builder = WriterProperties::builder()
             .set_compression(self.build_compression())
             .set_created_by("rivet".to_string());
+        let mut builder = seeded!(
+            "parquet-writer-bytes-move-from-release",
+            builder.set_data_page_row_count_limit(10_000),
+            builder
+        );
         if self.row_group_rows.is_some() {
             builder = builder.set_max_row_group_row_count(self.row_group_rows);
         }
@@ -120,7 +125,11 @@ impl super::FormatWriter for ParquetFormatWriter {
     }
 
     fn bytes_written(&self) -> u64 {
-        self.inner.bytes_written() as u64
+        seeded!(
+            "parquet-writer-reports-no-bytes",
+            0,
+            self.inner.bytes_written() as u64
+        )
     }
 }
 

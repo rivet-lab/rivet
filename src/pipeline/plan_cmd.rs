@@ -449,7 +449,28 @@ fn build_plan_artifact(
             };
             (computed, plan_diagnostics, hints)
         }
-        Err(e) => return Err(source_unreadable(&export.name, e)),
+        Err(e) if seeded!("plan-sealed-over-unreadable-source", false, true) => {
+            return Err(source_unreadable(&export.name, e));
+        }
+        Err(e) => {
+            log::warn!(
+                "plan '{}': preflight diagnostics failed (continuing without them): {:#}",
+                export.name,
+                e
+            );
+            let computed = compute_plan_data(&plan, None, false, state)?;
+            let mut warnings = vec!["preflight diagnostics unavailable".into()];
+            warnings.extend(validate_warnings);
+            let plan_diagnostics = PlanDiagnostics {
+                verdict: "unknown (preflight failed)".into(),
+                warnings,
+                recommended_profile: "balanced".into(),
+                strategy_rationale: "Strategy rationale unavailable — preflight diagnostics could \
+                     not be collected for this export."
+                    .into(),
+            };
+            (computed, plan_diagnostics, PrioritizationHints::default())
+        }
     };
 
     let fingerprint = match &plan.strategy {
