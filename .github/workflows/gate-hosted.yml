@@ -119,4 +119,12 @@ jobs:
           SHA: ${{ needs.plan.outputs.sha }}
         run: |
           set -o pipefail
-          python3 .github/scripts/hosted_gate_verdict.py --artifacts slices --sha "$SHA" --slices "$LIVE_SLICES" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/hosted_gate_verdict.py --artifacts slices --sha "$SHA" --slices "$LIVE_SLICES" --json hosted-verdict.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: hosted-verdict
+          path: hosted-verdict.json
+          overwrite: true
+          if-no-files-found: warn
