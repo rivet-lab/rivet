@@ -581,7 +581,7 @@ def _skip_cause_self_test() -> None:
     rc, said, line, refusal = run_gate(stage_down(), core.FULL_GATE)
     assert rc == 1 and line["verdict"] == "NOT GRADED" and "NOT GRADED" in said and "RELEASE-READY" not in said, (rc, said)
     assert "INFRA" in said and "ENV 3" in said and line["skipped"] == 3, (said, line)
-    assert "    - postgres/-/verify_failed_run_tail/-: " in said and said.count("    - mongo/-/verify_failed_run_tail/-: ") == 2, \
+    assert "    postgres/verify_failed_run_tail/-: " in said and said.count("    mongo/verify_failed_run_tail/-: ") == 2, \
         "the NOT GRADED line names every cell it counts, whatever made it INFRA"
     assert line["skipped_env"] == [["verify_failed_run_tail", "mongo", "-"], ["verify_failed_run_tail", "postgres", "-"]], line
     assert refusal is not None and "NOT GRADED" in refusal, refusal
