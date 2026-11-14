@@ -626,6 +626,16 @@ pub(crate) fn run_to_files(
                 // forever, and duplicate the captured rows on every scheduler cycle.
                 let committed = ev.committed;
                 let commit_at = committed.then(|| ev.position.clone());
+                seeded!(
+                    "cdc-roll-checkpoints-its-trigger",
+                    {
+                        if committed {
+                            last_commit = Some(ev.position.clone());
+                            unacked_commit = true;
+                        }
+                    },
+                    ()
+                );
                 let mut buffered = false;
                 // Routing is a BLOCK, not a `continue`: the soft cap below must run
                 // for every event, because a commit boundary is a STREAM property
@@ -1106,7 +1116,13 @@ fn flush(
         // computed once per column, applied per cell.
         // The planned type, as `ensure_schema` declared it (after the three meta columns).
         let dt = schema.field(arrays.len()).data_type();
-        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| f.applies_to(dt));
+        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
+            seeded!(
+                "mysql-cdc-time-remedy-names-the-batch-cast",
+                true,
+                f.applies_to(dt)
+            )
+        });
         // after-image for insert/update; before-image (the key) for delete.
         // Finding #41: a NAMED key-only image (PG DELETE) maps by COLUMN NAME
         // into the resolved schema — positional mapping put a non-first PK's

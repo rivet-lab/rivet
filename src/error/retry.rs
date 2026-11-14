@@ -211,7 +211,9 @@ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
     // --- Object store: opendal's own verdict, before any text scan ---
     // The store's answer is final by TYPE: a 404 whose response headers happen to
     // carry `keep-alive: timeout=5` (Azurite) must not read as a timeout.
-    if let Some(class) = err.chain().find_map(opendal_error).map(classify_opendal) {
+    if let Some(class) = err.chain().find_map(opendal_error).map(classify_opendal)
+        && seeded!("missing-container-retried-as-timeout", false, true)
+    {
         return class;
     }
 

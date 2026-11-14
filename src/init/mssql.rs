@@ -52,11 +52,12 @@ pub(super) fn list_tables(
     conn: &mut dyn crate::source::Source,
     schema: &str,
 ) -> Result<Vec<String>> {
+    let shipped = seeded!("mssql-shipped-tables-scaffolded", ">= 0", "= 0");
     let sql = format!(
         "SELECT STRING_AGG(CONVERT(nvarchar(max), TABLE_NAME), CHAR(30)) WITHIN GROUP (ORDER BY TABLE_NAME) \
          FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = N'{}' AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
-         AND OBJECTPROPERTY(OBJECT_ID(QUOTENAME(TABLE_SCHEMA) + '.' + QUOTENAME(TABLE_NAME)), 'IsMSShipped') = 0",
+         AND OBJECTPROPERTY(OBJECT_ID(QUOTENAME(TABLE_SCHEMA) + '.' + QUOTENAME(TABLE_NAME)), 'IsMSShipped') {shipped}",
         schema.replace('\'', "''"),
     );
     let names = conn

@@ -165,9 +165,13 @@ fn range_worker_pages(
     fan: &super::fan_in::FanIn,
 ) -> Result<()> {
     let unit = commit::UnitId::Chunk(worker as i64);
-    let mut src = MongoSource::connect(url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?
-        .with_id_range(lo, hi)
-        .with_pinned(pinned);
+    let src = MongoSource::connect(url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?
+        .with_id_range(lo, hi);
+    let mut src = seeded!(
+        "mongo-parallel-worker-pins-its-own-uuid",
+        src,
+        src.with_pinned(pinned)
+    );
 
     let mut last: Option<String> = None;
     let mut page = 0usize;

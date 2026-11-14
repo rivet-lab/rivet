@@ -871,6 +871,16 @@ impl PgChangeStream {
                         // #158: commit LSN on all, committed on the transaction's LAST
                         // event — on disk when it spilled (`TxBuffer::close_transaction`).
                         let (head, tail) = tx.close_transaction(&commit, &lsn)?;
+                        let head = seeded!(
+                            "committed-every-event",
+                            head.into_iter()
+                                .map(|mut e| {
+                                    e.committed = true;
+                                    e
+                                })
+                                .collect::<Vec<_>>(),
+                            head
+                        );
                         self.owed_through = owed_after_yield(
                             self.owed_through,
                             commit_lsn,
@@ -931,7 +941,11 @@ impl PgChangeStream {
                     self.exhausted = true;
                     break;
                 }
-                self.frontier_text = Some(lsn);
+                self.frontier_text = seeded!(
+                    "message-only-window-ends-the-drain",
+                    self.frontier_text.take(),
+                    Some(lsn)
+                );
             } else if data.starts_with("BEGIN") {
                 // Dropping any spill too — a transaction that never reached its
                 // COMMIT in this window is re-read from the slot next time.
@@ -1775,6 +1789,22 @@ pub(crate) fn parse_test_decoding(
         ChangeOp::Delete => (Some(cols), None, Some(names), None),
         ChangeOp::Update => {
             let (before, before_names) = old.unzip();
+            let (before, before_names) = seeded!(
+                "absent-old-cell-read-as-moved-key",
+                (
+                    before.zip(before_names).map(|(v, bn)| {
+                        names
+                            .iter()
+                            .map(|n| match bn.iter().position(|b| b == n) {
+                                Some(i) => v[i].clone(),
+                                None => RivetValue::Null,
+                            })
+                            .collect::<Vec<RivetValue>>()
+                    }),
+                    None
+                ),
+                (before, before_names)
+            );
             (before, Some(cols), Some(names), before_names)
         }
         ChangeOp::Insert => (None, Some(cols), Some(names), None),

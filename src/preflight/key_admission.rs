@@ -18,13 +18,21 @@ impl KeyLanding {
     /// The landing of one resolved mapping; `finer` is the catalog fact that the source declares the column finer than a microsecond.
     pub fn of(m: &TypeMapping, finer: bool) -> Self {
         match &m.rivet_type {
-            RivetType::String | RivetType::Text if orders_as_number(&m.source_native_type) => {
+            RivetType::String | RivetType::Text
+                if seeded!(
+                    "load-key-landed-type-not-admitted",
+                    false,
+                    orders_as_number(&m.source_native_type)
+                ) =>
+            {
                 Self::NumberAsText
             }
             RivetType::Timestamp {
                 unit: TimeUnit::Microsecond,
                 ..
-            } if finer => Self::FinerThanMicrosecond,
+            } if seeded!("load-key-landed-type-not-admitted", false, finer) => {
+                Self::FinerThanMicrosecond
+            }
             _ => Self::Exact,
         }
     }
